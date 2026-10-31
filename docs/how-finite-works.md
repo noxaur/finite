@@ -114,9 +114,9 @@ The expected results come from the Rust rules. To change a rule, you change `doc
 FINITE_UPDATE_FIXTURES=1 cargo test -p finite-design --test conformance
 ```
 
-The formatter skips `crates/*/fixtures`, so a regenerated file only changes where the results did.
-
 Then `vp test` tells you whether `Replica` agrees. On its first run, it caught three ways it didn't: the browser cleared `x` when an op set it to the string `"10"` (Rust rejects it), and it accepted invalid indexes like `"V0"` and moves to where a node already was.
+
+The formatter skips `crates/*/fixtures`, so a regenerated file only changes where the results did.
 
 ## Edit commands: from a tool call to ops
 
@@ -179,7 +179,7 @@ When a browser opens a design's socket, the server takes the lock first. Under t
 
 Say an agent makes a button orange:
 
-```json
+```
 update_styles({ "designId": "k7jo11y14e",
   "updates": [{ "nodeIds": ["4biyjm26"], "styles": { "backgroundColor": "#ff5a1f" } }] })
 ```
