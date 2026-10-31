@@ -495,3 +495,71 @@ async fn long_results_are_cut_with_directions() {
         "{small}"
     );
 }
+
+/// Many long comments come in parts that fit the result budget.
+#[tokio::test]
+async fn long_comment_lists_come_in_parts() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Alice").await;
+    let created = agent.ok("create_design", json!({ "name": "Busy" })).await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .unwrap()
+        .to_owned();
+    let board = agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Home", "width": 400, "height": 300 }),
+        )
+        .await;
+    let board = id_after(&board, "Created artboard");
+    // 40 comments of 4,000 characters: 160,000 characters in all.
+    for i in 0..40 {
+        let body = format!("{i:02} {}", "x".repeat(3_990));
+        let req = Request::post(format!("/api/designs/{design}/comments"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "author": { "id": "u1", "name": "Guest" }, "body": body,
+                        "artboardId": board, "nodeId": board, "x": 10, "y": 10 })
+                .to_string(),
+            ))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(req).await.unwrap().status(), 201);
+    }
+
+    let mut offset = 0;
+    let mut seen = Vec::new();
+    loop {
+        let text = agent
+            .ok(
+                "get_comments",
+                json!({ "designId": design, "offset": offset }),
+            )
+            .await;
+        assert!(text.len() < 60_000 + 200, "{} chars", text.len());
+        let json_end = text.rfind(']').unwrap() + 1;
+        let page: Vec<Value> = serde_json::from_str(&text[..json_end]).unwrap();
+        seen.extend(
+            page.iter()
+                .map(|c| c["thread"][0]["message"].as_str().unwrap()[..2].to_owned()),
+        );
+        offset += page.len();
+        let Some(next) = text.split("Pass offset ").nth(1) else {
+            break;
+        };
+        assert_eq!(next.split(' ').next().unwrap(), offset.to_string());
+    }
+    let expected: Vec<String> = (0..40).map(|i| format!("{i:02}")).collect();
+    assert_eq!(seen, expected, "every comment once, oldest first");
+
+    let waiting = agent
+        .ok("wait_for_comments", json!({ "designId": design }))
+        .await;
+    assert!(waiting.len() < 60_000 + 200, "{} chars", waiting.len());
+    assert!(
+        waiting.contains("of 40 waiting comments. Reply to these"),
+        "{}",
+        tail(&waiting)
+    );
+}

@@ -265,6 +265,9 @@ pub struct CommentsParams {
     /// Include resolved comments too. Defaults to false.
     #[serde(default)]
     pub(super) include_resolved: bool,
+    /// How many comments to skip, to page through a long list.
+    #[serde(default)]
+    pub(super) offset: usize,
 }
 
 #[derive(Deserialize, JsonSchema)]

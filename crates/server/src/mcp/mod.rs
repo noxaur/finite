@@ -99,6 +99,31 @@ fn fail(text: impl Into<String>) -> ToolResult {
     Ok(CallToolResult::error(vec![ContentBlock::text(text)]))
 }
 
+/// As many of `items` as fit in [`OUTPUT_LIMIT`] as a JSON array, and how
+/// many that is. Always at least one, so a long list still makes progress.
+fn fit(items: impl Iterator<Item = serde_json::Value>) -> (ContentBlock, usize) {
+    let mut kept = Vec::new();
+    let mut size = 0;
+    for item in items {
+        let text = serde_json::to_string_pretty(&item).expect("json values serialize");
+        if !kept.is_empty() && size + text.len() > OUTPUT_LIMIT {
+            break;
+        }
+        size += text.len() + 4;
+        kept.push(item);
+    }
+    let shown = kept.len();
+    let text = serde_json::to_string_pretty(&kept).expect("json values serialize");
+    (ContentBlock::text(text), shown)
+}
+
+/// `content`, followed by `note` if there is one.
+fn with_note(content: ContentBlock, note: Option<String>) -> Vec<ContentBlock> {
+    std::iter::once(content)
+        .chain(note.map(ContentBlock::text))
+        .collect()
+}
+
 fn json(value: serde_json::Value) -> ToolResult {
     ok(serde_json::to_string_pretty(&value).expect("json values serialize"))
 }
@@ -784,7 +809,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Comments users pinned to a design, oldest first: what they asked for, which artboard and element it's about, and the thread so far. Open comments only, unless includeResolved is set.",
+        description = "Comments users pinned to a design, oldest first: what they asked for, which artboard and element it's about, and the thread so far. Open comments only, unless includeResolved is set. A long list comes in parts; the note at the end says which offset to pass next.",
         annotations(read_only_hint = true)
     )]
     async fn get_comments(&self, Parameters(p): Parameters<CommentsParams>) -> ToolResult {
@@ -796,14 +821,25 @@ impl FiniteMcp {
                 .filter(|c| p.include_resolved || !c.resolved);
             comments_json(design, shown)
         });
-        if comments.is_empty() {
-            return ok(if p.include_resolved {
-                "This design has no comments."
-            } else {
-                "No open comments."
+        if comments.len() <= p.offset {
+            return ok(match (comments.is_empty(), p.include_resolved) {
+                (false, _) => "No more comments.",
+                (true, true) => "This design has no comments.",
+                (true, false) => "No open comments.",
             });
         }
-        json(comments.into())
+        let total = comments.len();
+        let (content, shown) = fit(comments.into_iter().skip(p.offset));
+        let to = p.offset + shown;
+        Ok(CallToolResult::success(with_note(
+            content,
+            (to < total).then(|| {
+                format!(
+                    "Showing comments {} to {to} of {total}, oldest first. Pass offset {to} for the rest.",
+                    p.offset + 1
+                )
+            }),
+        )))
     }
 
     #[tool(
@@ -826,7 +862,16 @@ impl FiniteMcp {
                 )
             });
             if !waiting.is_empty() {
-                return json(waiting.into());
+                let total = waiting.len();
+                let (content, shown) = fit(waiting.into_iter());
+                return Ok(CallToolResult::success(with_note(
+                    content,
+                    (shown < total).then(|| {
+                        format!(
+                            "Showing the oldest {shown} of {total} waiting comments. Reply to these, then call again for the rest."
+                        )
+                    }),
+                )));
             }
             if tokio::time::timeout_at(deadline, changed).await.is_err() {
                 return ok(format!(
