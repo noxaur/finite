@@ -262,6 +262,19 @@ async fn owner(State(front): State<Arc<Front>>, Path(id): Path<String>) -> Json<
     Json(json!({ "owner": front.cluster.owner_url(&id) }))
 }
 
+/// Opens a server's WebSocket. A server sends a design's snapshot as one
+/// frame, and tungstenite refuses frames over 16 MB by default, which would
+/// leave a large design unable to open through the router. Browsers have no
+/// such limit, and servers are trusted, so the router takes any size too.
+async fn connect_ws(
+    url: String,
+) -> tungstenite::Result<(Upstream, tungstenite::handshake::client::Response)> {
+    let config = tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(None)
+        .max_frame_size(None);
+    tokio_tungstenite::connect_async_with_config(url, Some(config), false).await
+}
+
 /// Relays a design's WebSocket to its owner, both ways, until either side closes.
 async fn design_socket(
     State(front): State<Arc<Front>>,
@@ -273,12 +286,12 @@ async fn design_socket(
     let query = query.map(|q| format!("?{q}")).unwrap_or_default();
     let path = format!("/api/designs/{id}/ws{query}");
     let base = front.cluster.owner_url(&id);
-    let mut connected = tokio_tungstenite::connect_async(Front::ws_url(base, &path)).await;
+    let mut connected = connect_ws(Front::ws_url(base, &path)).await;
     // As in `relay`: follow a server that says another one owns the design.
     if let Err(tungstenite::Error::Http(res)) = &connected
         && let Some(owner) = Front::redirect(res.status(), res.headers(), base)
     {
-        connected = tokio_tungstenite::connect_async(Front::ws_url(&owner, &path)).await;
+        connected = connect_ws(Front::ws_url(&owner, &path)).await;
     }
     let upstream = match connected {
         Ok((upstream, _)) => upstream,
@@ -345,7 +358,7 @@ type Upstream =
 async fn lobby(State(front): State<Arc<Front>>, upgrade: WebSocketUpgrade) -> Response {
     let connects = front.cluster.nodes().iter().map(|base| async move {
         let url = Front::ws_url(base, "/api/designs/ws");
-        (base, tokio_tungstenite::connect_async(url).await)
+        (base, connect_ws(url).await)
     });
     let mut upstreams = Vec::new();
     for (base, connected) in futures::future::join_all(connects).await {

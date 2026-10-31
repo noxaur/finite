@@ -673,3 +673,67 @@ mod failover {
         assert_eq!(status, 404);
     }
 }
+
+/// A server sends a design's snapshot as one WebSocket frame, and the router
+/// passes on designs larger than tungstenite's default 16 MB frame limit.
+#[tokio::test]
+async fn the_router_relays_large_designs() {
+    use finite_design::edit::{self, NewArtboard, WriteMode};
+    use finite_server::hub::Actor;
+
+    let (server, server_url) = listen().await;
+    let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
+    let id = hub.create("Big").meta.id;
+    let design = hub.get(&id).unwrap();
+    let agent = Actor {
+        id: "agent:big".into(),
+        name: "Big".into(),
+    };
+    let artboard = NewArtboard {
+        name: "Page".into(),
+        width: 800.0,
+        height: 600.0,
+        position: None,
+        styles: Default::default(),
+    };
+    design
+        .edit(&agent, "Add page", |doc| {
+            Ok((edit::create_artboard(doc, "page".into(), artboard)?, ()))
+        })
+        .unwrap();
+    for i in 0..18 {
+        let html = format!("<p>{}</p>", "x".repeat(1 << 20));
+        let mut n = 0;
+        let mut new_id = || {
+            n += 1;
+            format!("p{i}-{n}")
+        };
+        design
+            .edit(&agent, "Write", |doc| {
+                let (ops, _) =
+                    edit::write_html(doc, "page", &html, WriteMode::Append, None, &mut new_id)?;
+                Ok((ops, ()))
+            })
+            .unwrap();
+    }
+    tokio::spawn(async move { axum::serve(server, app(hub, None)).await });
+    let (front, front_url) = listen().await;
+    let routes = router::app(vec![server_url], None);
+    tokio::spawn(async move { axum::serve(front, routes).await });
+
+    // Like a browser, the test's client takes a frame of any size.
+    let url = format!("{front_url}/api/designs/{id}/ws").replacen("http://", "ws://", 1);
+    let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(None)
+        .max_frame_size(None);
+    let (mut socket, _) = tokio_tungstenite::connect_async_with_config(url, Some(config), false)
+        .await
+        .unwrap();
+    let Message::Text(text) = socket.next().await.unwrap().unwrap() else {
+        panic!("expected a snapshot");
+    };
+    assert!(text.len() > 18 << 20);
+    let snapshot: Value = serde_json::from_str(text.as_str()).unwrap();
+    assert_eq!(snapshot["type"], "snapshot");
+    assert_eq!(snapshot["snapshot"]["nodes"].as_array().unwrap().len(), 37);
+}
