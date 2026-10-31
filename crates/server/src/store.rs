@@ -244,6 +244,7 @@ pub mod contract {
             seq,
             nodes: Vec::new(),
             comments: Vec::new(),
+            histories: None,
         }
     }
 
@@ -333,6 +334,7 @@ mod tests {
             seq: 0,
             nodes: Vec::new(),
             comments: Vec::new(),
+            histories: None,
         }
     }
 

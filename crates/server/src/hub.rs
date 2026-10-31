@@ -189,7 +189,14 @@ impl DesignState {
         for record in stored.journal {
             design.replay(record);
         }
-        Self::new(design, needs_snapshot)
+        let mut state = Self::new(design, needs_snapshot);
+        // Restored histories expire like live ones, counting from now.
+        let now = now_ms();
+        let actors: Vec<ActorId> = state.design.actors().map(String::from).collect();
+        for actor in actors {
+            state.last_seen.insert(actor, now);
+        }
+        state
     }
 
     /// Whether the design can leave memory: nothing unsaved, and nobody with
@@ -382,7 +389,7 @@ impl DesignHandle {
         if state.needs_snapshot || state.journaled > COMPACT_AFTER {
             state.needs_snapshot = false;
             state.journaled = 0;
-            return Some(Save::Snapshot(state.design.snapshot()));
+            return Some(Save::Snapshot(state.design.snapshot_to_save()));
         }
         Some(Save::Append(state.design.meta.id.clone(), records))
     }
@@ -402,7 +409,7 @@ impl DesignHandle {
         state.pending.clear();
         state.journaled = 0;
         state.needs_snapshot = false;
-        Some(state.design.snapshot())
+        Some(state.design.snapshot_to_save())
     }
 
     /// Builds ops from the current document with `build`, then commits them as
@@ -629,7 +636,7 @@ impl Hub {
             };
             let state = DesignState::restore(stored);
             if state.needs_snapshot {
-                hub.store.save(&state.design.snapshot())?;
+                hub.store.save(&state.design.snapshot_to_save())?;
             }
             hub.insert(DesignSummary::of(&state.design), None);
         }
@@ -797,7 +804,7 @@ impl Hub {
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
         let Some(stored) = stored else { return Ok(()) };
-        let snapshot = DesignState::restore(stored).design.snapshot();
+        let snapshot = DesignState::restore(stored).design.snapshot_to_save();
         let res = http
             .put(format!("{owner}/api/designs/{id}/handoff"))
             .json(&snapshot)
@@ -1062,5 +1069,38 @@ mod tests {
         let after = hub.open(&id).await.unwrap().read(Design::snapshot);
         assert_eq!(hub.loaded(), 1);
         assert_eq!((after.seq, after.nodes), (before.seq, before.nodes));
+    }
+
+    #[tokio::test]
+    async fn a_named_agent_can_undo_after_a_clean_restart() {
+        use finite_design::edit::{self, NewArtboard};
+
+        let store = Arc::new(MemoryStore::default());
+        let hub = Hub::new(store.clone()).unwrap();
+        let id = hub.create("Test").meta.id;
+        let agent = Actor {
+            id: "agent:Claude".into(),
+            name: "Claude".into(),
+        };
+        hub.get(&id)
+            .unwrap()
+            .edit(&agent, "Create artboard", |doc| {
+                let spec = NewArtboard {
+                    name: "Home".into(),
+                    width: 100.0,
+                    height: 100.0,
+                    position: None,
+                    styles: BTreeMap::new(),
+                };
+                Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
+            })
+            .unwrap();
+        hub.flush();
+
+        let restarted = Hub::new(store.clone()).unwrap();
+        let handle = restarted.open(&id).await.unwrap();
+        assert_eq!(handle.history(&agent).0, ["Create artboard"]);
+        assert!(handle.undo(&agent).is_some());
+        assert_eq!(handle.read(|d| d.doc().len()), 0);
     }
 }

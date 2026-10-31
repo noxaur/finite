@@ -210,7 +210,11 @@ Only one server can use a data folder at a time. The file store takes an exclusi
 
 On Ctrl-C or SIGTERM, the server stops accepting connections and writes every loaded design as a full snapshot before it exits. SIGTERM is how Docker, systemd and the desktop app stop it. Until this was handled, the desktop app could lose the last moment of edits when it quit.
 
-The hub only calls five methods on the `Store` trait in `store.rs`: `ids`, `load`, `save`, `append` and `remove`. A database could replace the files behind them. To check a new store, run `store::contract::check` on it. It's a **contract test**: the same suite of rules every store must follow, such as "the journal keeps append order" and "save clears the journal". The file store and the memory store both run it in `cargo test`. Undo histories aren't saved, so a restart clears them.
+The hub only calls five methods on the `Store` trait in `store.rs`: `ids`, `load`, `save`, `append` and `remove`. A database could replace the files behind them. To check a new store, run `store::contract::check` on it. It's a **contract test**: the same suite of rules every store must follow, such as "the journal keeps append order" and "save clears the journal". The file store and the memory store both run it in `cargo test`.
+
+### Undo across restarts
+
+Undo histories are saved, but only in full snapshots, which the server writes when it shuts down, compacts or hands a design off. So an agent that connects with an `X-Finite-Agent` header can undo after a normal restart. (An agent without one is identified by its MCP session, which ends with the restart.) The journal never holds histories. An undo step is an inverse op recorded against the document at one moment, so it only fits a document that hasn't changed since. If the journal replays changes on top of the snapshot after a crash, `Design::replay` drops the saved histories rather than undo the wrong thing. Viewers never receive histories: `Design::snapshot` leaves them out, and only `Design::snapshot_to_save` includes them.
 
 ## Following one edit end to end
 

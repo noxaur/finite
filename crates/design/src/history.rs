@@ -1,9 +1,9 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::document::Op;
 
 /// One undoable step: the ops that reverse it, plus a label for display.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     pub label: String,
     pub ops: Vec<Op>,
@@ -15,11 +15,18 @@ pub struct Entry {
 /// so undo only ever reverses that actor's changes. While a batch is open
 /// (Liveblocks calls this pausing history), commits merge into one entry, so a
 /// drag or a multi-step tool call undoes in one step.
-#[derive(Clone, Debug, Default)]
+///
+/// Histories are saved with full snapshots (see [`crate::Design::snapshot_to_save`]),
+/// so a named agent can still undo after a clean restart. An open batch isn't saved.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct History {
+    #[serde(default)]
     undo: Vec<Entry>,
+    #[serde(default)]
     redo: Vec<Entry>,
+    #[serde(skip)]
     batch_depth: usize,
+    #[serde(skip)]
     batch_open: bool,
 }
 

@@ -33,6 +33,10 @@ pub struct Snapshot {
     pub nodes: Vec<Node>,
     #[serde(default)]
     pub comments: Vec<Comment>,
+    /// Each actor's undo and redo stacks. Only in saved snapshots: the ones
+    /// sent to viewers leave them out. See [`Design::snapshot_to_save`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub histories: Option<HashMap<ActorId, History>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,8 +118,8 @@ impl Design {
             meta: snapshot.meta,
             doc: Document::from_nodes(snapshot.nodes),
             seq: snapshot.seq,
-            histories: HashMap::new(),
             comments: snapshot.comments,
+            histories: snapshot.histories.unwrap_or_default(),
             log: ChangeLog::default(),
         }
     }
@@ -128,6 +132,16 @@ impl Design {
             seq: self.seq,
             nodes,
             comments: self.comments.clone(),
+            histories: None,
+        }
+    }
+
+    /// A snapshot for the store: [`Design::snapshot`] plus every actor's
+    /// history, so undo survives a clean restart.
+    pub fn snapshot_to_save(&self) -> Snapshot {
+        Snapshot {
+            histories: (!self.histories.is_empty()).then(|| self.histories.clone()),
+            ..self.snapshot()
         }
     }
 
@@ -145,6 +159,11 @@ impl Design {
 
     pub fn history_mut(&mut self, actor: &str) -> &mut History {
         self.histories.entry(actor.to_owned()).or_default()
+    }
+
+    /// Every actor with undo or redo history here.
+    pub fn actors(&self) -> impl Iterator<Item = &str> {
+        self.histories.keys().map(String::as_str)
     }
 
     /// Whether any actor still has undo or redo history here.
@@ -235,6 +254,10 @@ impl Design {
                 if change.seq > self.seq {
                     self.doc.apply_all(&change.ops);
                     self.seq = change.seq;
+                    // Saved undo steps were recorded against the snapshot's
+                    // document. Once later changes replay on top, they no
+                    // longer match it, so drop them rather than undo the wrong thing.
+                    self.histories.clear();
                 }
             }
             Record::Comment { comment } => {
@@ -573,5 +596,31 @@ mod tests {
             (b.seq, &b.nodes, &b.comments)
         );
         assert_eq!(b.meta.name, "Renamed");
+    }
+
+    #[test]
+    fn histories_survive_a_saved_snapshot_but_not_a_replayed_journal() {
+        let mut live = design();
+        live.commit("alice", "board", &[create("a", None)], 1);
+        live.commit("alice", "red", &[color("a", "red")], 2);
+        assert!(
+            live.snapshot().histories.is_none(),
+            "viewers never get histories"
+        );
+
+        // A clean restart: alice can still undo.
+        let mut restored = Design::from_snapshot(live.snapshot_to_save());
+        assert_eq!(restored.undo("alice", 3).unwrap().label, "red");
+        assert_eq!(color_of(&restored, "a"), None);
+
+        // After a crash, the journal replays changes the saved history never saw.
+        let saved = live.snapshot_to_save();
+        let change = live
+            .commit("bob", "blue", &[color("a", "blue")], 4)
+            .unwrap();
+        let mut crashed = Design::from_snapshot(saved);
+        crashed.replay(Record::Change { change });
+        assert!(crashed.undo("alice", 5).is_none());
+        assert_eq!(color_of(&crashed, "a").as_deref(), Some("blue"));
     }
 }
