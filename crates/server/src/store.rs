@@ -8,6 +8,8 @@ use std::{
 
 use finite_design::{Record, Snapshot};
 
+use crate::hub::is_design_id;
+
 /// A design as stored: its last snapshot, plus the journal of records since.
 /// Replay the journal onto the snapshot with `Design::replay`.
 pub struct Stored {
@@ -100,12 +102,25 @@ impl FileStore {
         Ok(())
     }
 
-    fn journal_path(&self, id: &str) -> PathBuf {
-        self.dir.join(format!("{id}.log"))
+    /// The file `id` keeps with this extension. Ids come from requests, so
+    /// one that isn't a design id is refused here: `../x` would name a file
+    /// outside the store.
+    fn path(&self, id: &str, extension: &str) -> io::Result<PathBuf> {
+        if !is_design_id(id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{id:?} isn't a design id"),
+            ));
+        }
+        Ok(self.dir.join(format!("{id}.{extension}")))
+    }
+
+    fn journal_path(&self, id: &str) -> io::Result<PathBuf> {
+        self.path(id, "log")
     }
 
     fn read_journal(&self, id: &str) -> io::Result<Vec<Record>> {
-        let file = match fs::File::open(self.journal_path(id)) {
+        let file = match fs::File::open(self.journal_path(id)?) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error),
@@ -139,7 +154,7 @@ impl Store for FileStore {
     }
 
     fn load(&self, id: &str) -> io::Result<Option<Stored>> {
-        let path = self.dir.join(format!("{id}.json"));
+        let path = self.path(id, "json")?;
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -161,7 +176,7 @@ impl Store for FileStore {
     /// old journal is deleted. Otherwise the disk could end up with an empty
     /// snapshot and no journal.
     fn save(&self, snapshot: &Snapshot) -> io::Result<()> {
-        let path = self.dir.join(format!("{}.json", snapshot.meta.id));
+        let path = self.path(&snapshot.meta.id, "json")?;
         let tmp = path.with_extension("json.tmp");
         let mut file = fs::File::create(&tmp)?;
         file.write_all(&serde_json::to_vec(snapshot)?)?;
@@ -170,7 +185,7 @@ impl Store for FileStore {
         self.sync_dir()?;
         // If this fails or we crash first, the old journal replays harmlessly:
         // see `Record`.
-        match fs::remove_file(self.journal_path(&snapshot.meta.id)) {
+        match fs::remove_file(self.journal_path(&snapshot.meta.id)?) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
             _ => Ok(()),
         }
@@ -182,13 +197,13 @@ impl Store for FileStore {
             serde_json::to_writer(&mut out, record)?;
             out.push(b'\n');
         }
-        if !self.dir.join(format!("{id}.json")).exists() {
+        if !self.path(id, "json")?.exists() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "design was never saved",
             ));
         }
-        let path = self.journal_path(id);
+        let path = self.journal_path(id)?;
         let new = !path.exists();
         let mut file = fs::OpenOptions::new()
             .create(true)
@@ -205,9 +220,9 @@ impl Store for FileStore {
 
     fn remove(&self, id: &str) -> io::Result<()> {
         for path in [
-            self.dir.join(format!("{id}.json")),
-            self.journal_path(id),
-            self.dir.join(format!("{id}.json.tmp")),
+            self.path(id, "json")?,
+            self.journal_path(id)?,
+            self.path(id, "json.tmp")?,
         ] {
             match fs::remove_file(path) {
                 Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
@@ -405,6 +420,25 @@ mod tests {
     fn file_store_meets_the_contract() {
         let dir = temp_dir();
         contract::check(&FileStore::new(&dir).unwrap());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn ids_cant_name_files_outside_the_store() {
+        let dir = temp_dir();
+        let store = FileStore::new(dir.join("data")).unwrap();
+        let mut escaping = snapshot();
+        escaping.meta.id = "../../escaped".into();
+        let error = store.save(&escaping).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        for result in [
+            store.load("../x").map(|_| ()),
+            store.append("../x", &[meta("x")]),
+            store.remove("../x"),
+        ] {
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        }
+        assert!(!dir.join("escaped.json").exists());
         fs::remove_dir_all(dir).unwrap();
     }
 

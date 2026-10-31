@@ -20,7 +20,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::{self, error::RecvError};
 
 use crate::heartbeat::{self, Heartbeat};
-use crate::hub::{AdoptError, DesignHandle, DesignSummary, Hub, LOBBY_LIMIT, Outgoing, Since};
+use crate::hub::{
+    AdoptError, DesignHandle, DesignSummary, Hub, LOBBY_LIMIT, Outgoing, Since, is_design_id,
+};
 
 /// The largest design another server can hand off. axum's default of 2 MB
 /// suits API calls, but a handoff carries a whole design with its undo
@@ -156,6 +158,9 @@ async fn adopt(
     if snapshot.meta.id != id {
         return ApiError::Unprocessable("the snapshot is for another design".into())
             .into_response();
+    }
+    if !is_design_id(&id) {
+        return ApiError::Unprocessable("that isn't a design id".into()).into_response();
     }
     let adopted = match tokio::task::spawn_blocking(move || hub.adopt(snapshot)).await {
         Ok(adopted) => adopted,

@@ -57,6 +57,16 @@ pub fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
+/// Whether `id` could be a design's id: 1 to 64 ASCII letters, digits, `-`
+/// or `_`. New designs get [`random_id`]s, which always are. Ids arrive in
+/// URLs and become file names, so anything else is refused.
+pub fn is_design_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// A short random id: lowercase letters and digits.
 pub fn random_id(len: usize) -> String {
     const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";

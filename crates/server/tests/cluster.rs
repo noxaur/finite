@@ -206,3 +206,30 @@ async fn large_designs_move_too() {
     let (status, _, _) = call(&node(1), req).await;
     assert_eq!(status, StatusCode::CREATED);
 }
+
+/// A design id becomes a file name, so a handoff can't name a file outside
+/// the data folder.
+#[tokio::test]
+async fn a_handoff_cant_write_outside_the_data_folder() {
+    use finite_server::store::FileStore;
+
+    let root = std::env::temp_dir().join(format!("finite-escape-{}", uuid::Uuid::new_v4()));
+    let data = root.join("data");
+    let hub = Hub::new(Arc::new(FileStore::new(&data).unwrap())).unwrap();
+    let app = app(hub, None);
+
+    let id = "../../escaped";
+    let snapshot = json!({
+        "meta": { "id": id, "name": "x", "createdAt": 0, "updatedAt": 0 },
+        "seq": 0,
+        "nodes": [],
+    });
+    let req = Request::put("/api/designs/..%2F..%2Fescaped/handoff")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(snapshot.to_string()))
+        .unwrap();
+    let (status, _, _) = call(&app, req).await;
+    assert!(status.is_client_error(), "got {status}");
+    assert!(!root.join("escaped.json").exists());
+    std::fs::remove_dir_all(&root).unwrap();
+}
