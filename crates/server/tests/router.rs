@@ -142,48 +142,42 @@ async fn the_router_makes_two_servers_look_like_one() {
     }
 }
 
-/// While servers are being added or removed, the router can think a design
-/// lives on a server that says it's elsewhere. The router follows the
-/// server's `421` to the real owner, for requests and the design's socket.
+/// Two servers that know about each other, and a router that only knows the
+/// first, as while a server is being added. Returns the router's URL and a
+/// design that lives on the second server.
+async fn lagging_router() -> (String, String) {
+    let (a, a_url) = listen().await;
+    let (b, b_url) = listen().await;
+    let nodes = vec![a_url.clone(), b_url];
+    let hub_a = Hub::with_cluster(
+        Arc::new(MemoryStore::default()),
+        Cluster::new(nodes.clone(), 0).unwrap(),
+    )
+    .unwrap();
+    let hub_b = Hub::with_cluster(
+        Arc::new(MemoryStore::default()),
+        Cluster::new(nodes, 1).unwrap(),
+    )
+    .unwrap();
+    let id = hub_b.create("On B").meta.id;
+    tokio::spawn(async move { axum::serve(a, app(hub_a, None)).await });
+    tokio::spawn(async move { axum::serve(b, app(hub_b, None)).await });
+    let (front, front_url) = listen().await;
+    let routes = router::app(vec![a_url], None);
+    tokio::spawn(async move { axum::serve(front, routes).await });
+    (front_url, id)
+}
+
+/// The router sends B's design to A, the only server it knows. A answers
+/// `421` with B's URL, and the router follows it, for requests and sockets.
 #[tokio::test]
 async fn the_router_follows_a_misdirected_answer_to_the_owner() {
-    let (b, b_url) = listen().await;
-    // B runs alone, so it owns every design it creates.
-    let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
-    let ids: Vec<String> = (0..12)
-        .map(|i| hub.create(&format!("D{i}")).meta.id)
-        .collect();
-    tokio::spawn(async move { axum::serve(b, app(hub, None)).await });
-
-    // A stale server that sends every design request to B.
-    let (stale, stale_url) = listen().await;
-    let owner = b_url.clone();
-    let misdirect = axum::Router::new().fallback(move || {
-        let owner = owner.clone();
-        async move {
-            (
-                axum::http::StatusCode::MISDIRECTED_REQUEST,
-                [("finite-owner", owner)],
-            )
-        }
-    });
-    tokio::spawn(async move { axum::serve(stale, misdirect).await });
-
-    let nodes = vec![stale_url, b_url];
-    let (front, front_url) = listen().await;
-    let routes = router::app(nodes.clone(), None);
-    tokio::spawn(async move { axum::serve(front, routes).await });
-
-    let cluster = Cluster::new(nodes, 0).unwrap();
-    let id = ids
-        .iter()
-        .find(|id| cluster.owner(id) == 0)
-        .expect("some design hashes to the stale server");
-    let res = reqwest::get(format!("{front_url}/api/designs/{id}"))
+    let (front, id) = lagging_router().await;
+    let res = reqwest::get(format!("{front}/api/designs/{id}"))
         .await
         .unwrap();
     assert_eq!(res.status(), 200);
-    let first = first_text(&format!("{front_url}/api/designs/{id}/ws")).await;
+    let first = first_text(&format!("{front}/api/designs/{id}/ws")).await;
     assert_eq!(first["type"], "snapshot");
 }
 
@@ -285,6 +279,18 @@ mod relay {
         for id in &ids {
             assert!(listed.contains(id.as_str()), "{listed}");
         }
+        client.cancel().await.unwrap();
+    }
+
+    /// The relay follows a tool error that names the design's owner, as the
+    /// HTTP router follows a `421`.
+    #[tokio::test]
+    async fn the_relay_follows_a_server_that_says_its_elsewhere() {
+        let (front, id) = lagging_router().await;
+        let config = StreamableHttpClientTransportConfig::with_uri(format!("{front}/mcp"));
+        let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
+        let info = call(&client, "get_basic_info", json!({ "designId": id })).await;
+        assert!(info.contains("On B"), "{info}");
         client.cancel().await.unwrap();
     }
 

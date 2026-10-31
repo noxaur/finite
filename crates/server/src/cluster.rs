@@ -142,9 +142,48 @@ fn score(node: &str, design_id: &str) -> u64 {
     hash ^ (hash >> 31)
 }
 
+/// Whether `url` is a plain server base URL like `FINITE_NODES` holds:
+/// `http://` or `https://`, a host and maybe a port, and nothing after.
+pub fn is_base_url(url: &str) -> bool {
+    let Ok(uri) = url.parse::<http::Uri>() else {
+        return false;
+    };
+    matches!(uri.scheme_str(), Some("http" | "https"))
+        && uri
+            .authority()
+            .is_some_and(|a| !a.host().is_empty() && !a.as_str().contains('@'))
+        && uri
+            .path_and_query()
+            .is_none_or(|p| p.as_str().is_empty() || p.as_str() == "/")
+        && !url.ends_with('/')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base_urls_are_a_scheme_a_host_and_maybe_a_port() {
+        for ok in [
+            "http://10.0.0.2:4100",
+            "https://finite.example.com",
+            "http://[::1]:4100",
+        ] {
+            assert!(is_base_url(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "10.0.0.2:4100",
+            "file:///etc/passwd",
+            "http://a:4100/",
+            "http://a:4100/api",
+            "http://a:4100?x=1",
+            "http://user@a:4100",
+            "javascript:alert(1)",
+        ] {
+            assert!(!is_base_url(bad), "{bad}");
+        }
+    }
 
     /// Matches an independent Python implementation of `score`.
     const PINNED: u64 = 2_931_733_081_812_993_517;

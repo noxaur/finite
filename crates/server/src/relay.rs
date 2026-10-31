@@ -54,7 +54,10 @@ use rmcp::{
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::{cluster::Cluster, mcp::INSTRUCTIONS};
+use crate::{
+    cluster::Cluster,
+    mcp::{INSTRUCTIONS, OWNER_META},
+};
 
 type Backend = Arc<RunningService<RoleClient, ()>>;
 
@@ -63,9 +66,11 @@ pub struct Relay {
     cluster: Arc<Cluster>,
     /// Shared by every session, so creation takes turns across all agents.
     next: Arc<AtomicUsize>,
-    /// Each server's backend session, by position, opened on first use. Each
-    /// has its own lock, so a slow server doesn't hold up calls to the others.
-    backends: Vec<Mutex<Option<Backend>>>,
+    /// A backend session per server, by base URL, opened on first use. That
+    /// includes servers a `designId`'s owner points to that aren't in the
+    /// router's list yet. Each has its own lock, so a slow server doesn't
+    /// hold up calls to the others.
+    backends: std::sync::Mutex<HashMap<String, Arc<Mutex<Option<Backend>>>>>,
 }
 
 /// The router's MCP endpoint, to mount at `/mcp`. With `sessions`, routers
@@ -84,7 +89,7 @@ pub fn service(
             Ok(Relay {
                 cluster: cluster.clone(),
                 next: next.clone(),
-                backends: (0..cluster.len()).map(|_| Mutex::new(None)).collect(),
+                backends: Default::default(),
             })
         },
         Arc::new(LocalSessionManager::default()),
@@ -137,21 +142,27 @@ fn unreachable(base: &str, error: impl std::fmt::Display) -> McpError {
 }
 
 impl Relay {
-    /// The session on server `node`, opening one if there's none or the last
-    /// one closed.
+    /// The session on the server at `base`, opening one if there's none or
+    /// the last one closed.
     async fn backend(
         &self,
-        node: usize,
+        base: &str,
         ctx: &RequestContext<RoleServer>,
     ) -> Result<Backend, McpError> {
-        let mut slot = self.backends[node].lock().await;
+        let slot = self
+            .backends
+            .lock()
+            .unwrap()
+            .entry(base.to_owned())
+            .or_default()
+            .clone();
+        let mut slot = slot.lock().await;
         if let Some(backend) = slot.as_ref()
             && !backend.is_closed()
             && !backend.is_transport_closed()
         {
             return Ok(backend.clone());
         }
-        let base = &self.cluster.nodes()[node];
         let config = StreamableHttpClientTransportConfig::with_uri(format!("{base}/mcp"))
             .custom_headers(identity(ctx));
         let backend =
@@ -161,20 +172,45 @@ impl Relay {
         Ok(slot.insert(Arc::new(backend)).clone())
     }
 
-    /// Calls a tool on server `node`. A call that fails to get through isn't
-    /// retried, because it may have run before the connection broke.
+    /// Calls a tool on the server at `base`. If it says another server owns
+    /// the design, the call goes there once: it didn't run, so that's safe.
+    /// That happens while a server is being added, if the servers already
+    /// know about it and the router doesn't yet.
     async fn call(
         &self,
-        node: usize,
+        base: &str,
         params: CallToolRequestParams,
         ctx: &RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let backend = self.backend(node, ctx).await?;
+        let result = self.call_once(base, params.clone(), ctx).await?;
+        let owner = result
+            .meta
+            .as_ref()
+            .filter(|_| result.is_error == Some(true))
+            .and_then(|meta| meta.0.get(OWNER_META))
+            .and_then(Value::as_str)
+            .filter(|owner| *owner != base && crate::cluster::is_base_url(owner))
+            .map(str::to_owned);
+        match owner {
+            Some(owner) => self.call_once(&owner, params, ctx).await,
+            None => Ok(result),
+        }
+    }
+
+    /// Calls a tool on the server at `base`. A call that fails to get through
+    /// isn't retried, because it may have run before the connection broke.
+    async fn call_once(
+        &self,
+        base: &str,
+        params: CallToolRequestParams,
+        ctx: &RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let backend = self.backend(base, ctx).await?;
         match backend.call_tool_once(params).await {
             Ok(CallToolResponse::Complete(result)) => Ok(result),
             Ok(_) => Err(McpError::internal_error("unexpected tool response", None)),
             Err(ServiceError::McpError(error)) => Err(error),
-            Err(error) => Err(unreachable(&self.cluster.nodes()[node], error)),
+            Err(error) => Err(unreachable(base, error)),
         }
     }
 
@@ -185,7 +221,11 @@ impl Relay {
         params: CallToolRequestParams,
         ctx: &RequestContext<RoleServer>,
     ) -> CallToolResult {
-        let calls = (0..self.cluster.len()).map(|node| self.call(node, params.clone(), ctx));
+        let calls = self
+            .cluster
+            .nodes()
+            .iter()
+            .map(|base| self.call(base, params.clone(), ctx));
         let mut designs: Vec<Value> = Vec::new();
         let mut missing = Vec::new();
         for (base, result) in self.cluster.nodes().iter().zip(join_all(calls).await) {
@@ -230,11 +270,12 @@ impl ServerHandler for Relay {
         _request: Option<PaginatedRequestParams>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let backend = self.backend(0, &ctx).await?;
+        let base = &self.cluster.nodes()[0];
+        let backend = self.backend(base, &ctx).await?;
         let tools = backend
             .list_all_tools()
             .await
-            .map_err(|e| unreachable(&self.cluster.nodes()[0], e))?;
+            .map_err(|e| unreachable(base, e))?;
         Ok(ListToolsResult::with_all_items(tools))
     }
 
@@ -249,15 +290,19 @@ impl ServerHandler for Relay {
             .and_then(|args| args.get("designId"))
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let nodes = self.cluster.nodes();
         let result = match (request.name.as_ref(), design_id) {
             ("list_designs", _) => self.list_designs(request, &ctx).await,
             ("create_design", _) => {
-                let node = self.next.fetch_add(1, Ordering::Relaxed) % self.cluster.len();
-                self.call(node, request, &ctx).await?
+                let node = self.next.fetch_add(1, Ordering::Relaxed) % nodes.len();
+                self.call(&nodes[node], request, &ctx).await?
             }
-            (_, Some(id)) => self.call(self.cluster.owner(&id), request, &ctx).await?,
+            (_, Some(id)) => {
+                self.call(self.cluster.owner_url(&id), request, &ctx)
+                    .await?
+            }
             // No designId: let a server report the missing argument.
-            (_, None) => self.call(0, request, &ctx).await?,
+            (_, None) => self.call(&nodes[0], request, &ctx).await?,
         };
         Ok(result.into())
     }

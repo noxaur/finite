@@ -113,15 +113,16 @@ fn bad_gateway(error: impl std::fmt::Display) -> Response {
 
 impl Front {
     /// Where a `421 Misdirected Request` says to go instead: its
-    /// `Finite-Owner`, if that's another server in this router's list. While
-    /// servers are being added or removed, the router's list and a server's
-    /// can briefly disagree about who owns a design.
-    fn redirect(&self, status: StatusCode, headers: &HeaderMap, base: &str) -> Option<String> {
+    /// `Finite-Owner`. That happens while a server is being added, if the
+    /// servers already know about it and the router doesn't yet. The owner
+    /// comes from a server in the router's own list, so it's trusted, but it
+    /// must at least be a plain base URL.
+    fn redirect(status: StatusCode, headers: &HeaderMap, base: &str) -> Option<String> {
         if status != StatusCode::MISDIRECTED_REQUEST {
             return None;
         }
         let owner = headers.get("finite-owner")?.to_str().ok()?;
-        (owner != base && self.cluster.nodes().iter().any(|n| n == owner)).then(|| owner.to_owned())
+        (owner != base && crate::cluster::is_base_url(owner)).then(|| owner.to_owned())
     }
 }
 
@@ -149,7 +150,7 @@ async fn relay(
         Ok(res) => res,
         Err(error) => return bad_gateway(error),
     };
-    if let Some(owner) = front.redirect(res.status(), res.headers(), base) {
+    if let Some(owner) = Front::redirect(res.status(), res.headers(), base) {
         res = match send(&owner).await {
             Ok(res) => res,
             Err(error) => return bad_gateway(error),
@@ -236,7 +237,7 @@ async fn design_socket(
     let mut connected = tokio_tungstenite::connect_async(Front::ws_url(base, &path)).await;
     // As in `relay`: follow a server that says another one owns the design.
     if let Err(tungstenite::Error::Http(res)) = &connected
-        && let Some(owner) = front.redirect(res.status(), res.headers(), base)
+        && let Some(owner) = Front::redirect(res.status(), res.headers(), base)
     {
         connected = tokio_tungstenite::connect_async(Front::ws_url(&owner, &path)).await;
     }

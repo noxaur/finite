@@ -21,7 +21,9 @@ use finite_design::{
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig},
+    model::{
+        CallToolResult, ContentBlock, Implementation, MetaObject, ServerCapabilities, ServerConfig,
+    },
     service::RequestContext,
     tool, tool_handler, tool_router,
     transport::streamable_http_server::{
@@ -41,6 +43,11 @@ use format::{comments_json, node_json, outline};
 use params::*;
 
 /// What agents see when they connect: the workflow, the HTML rules, comments and undo.
+/// The `_meta` key on a tool error that names the server owning the design,
+/// so the router's relay can send the call there instead (see `relay.rs`).
+/// The call didn't run, so sending it again is safe.
+pub const OWNER_META: &str = "finite/owner";
+
 pub(crate) const INSTRUCTIONS: &str = include_str!("instructions.md");
 
 #[derive(Clone)]
@@ -160,9 +167,12 @@ impl FiniteMcp {
 
     async fn design(&self, id: &str) -> Result<Arc<DesignHandle>, CallToolResult> {
         if let Some(owner) = self.hub.elsewhere(id) {
+            let mut meta = MetaObject::new();
+            meta.0.insert(OWNER_META.into(), owner.into());
             return Err(CallToolResult::error(vec![ContentBlock::text(format!(
                 "design {id:?} lives on another Finite server. Connect to {owner}/mcp to work on it."
-            ))]));
+            ))])
+            .with_meta(Some(meta)));
         }
         self.hub.open(id).await.ok_or_else(|| {
             CallToolResult::error(vec![ContentBlock::text(format!(
