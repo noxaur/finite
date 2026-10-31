@@ -10,8 +10,8 @@ If you remember two ideas, make it these. The rest of this guide builds on them.
 How far you read depends on what you want:
 
 - **To understand Finite,** read through "Following one edit end to end". That covers the document, undo, the server and one edit's whole trip.
-- **To change the browser side,** read "The viewer" and "Comments".
-- **To run it for real,** read "Storage" and "Undo across restarts". They cover what's saved, when, and what survives a crash, undo included.
+- **To change the browser side,** read "The viewer" and "Comments". "The viewer" ends with how a browser reconnects without starting over.
+- **To run it for real,** read "Saving and recovering". It covers what's saved, when, and what survives a crash, undo included.
 - **To test a change the way a person sees it,** read "The end-to-end test".
 - **To run more than one server,** read "Running more than one server" at the end. One server is the default, and you can skip that section until you need it.
 
@@ -216,49 +216,6 @@ The messages on these sockets are Rust types on the server and Effect schemas in
 
 When a browser opens a design's socket, the server takes the lock first. Under that lock, it subscribes the socket to the broadcast channel and builds a snapshot. That way no change can land between the snapshot and the stream. If a slow browser falls more than 1024 messages behind, it gets a fresh snapshot instead of the missed changes.
 
-#### Reconnecting without starting over
-
-Connections drop: a laptop sleeps, Wi-Fi blinks, a proxy times out. The browser reconnects with backoff (`socket.ts`). A fresh snapshot after every drop would be wasteful. It would also rebuild every artboard and reload every sandboxed one, so the canvas would flicker and animations would restart. So the socket supports **resume**, the way chat and multiplayer protocols do: the browser says where it left off, and the server sends only what it missed.
-
-1. Every snapshot message carries an `epoch`. The epoch is a random id the server picks each time it loads the design into memory.
-2. Each loaded design keeps its latest changes, with their actors' names (`Recent` in `hub/design.rs`). It keeps up to 256, and drops the oldest sooner if together they pass 4 MB of JSON, so a few huge `write_html` calls can't hold on to much memory.
-3. On reconnect, `DesignSession` opens `…/ws?epoch=<epoch>&since=<seq>`, where `seq` is the last change it applied.
-4. If the epoch matches and every change after `since` is still kept, the server answers with a `resume` message. It holds those changes, plus the current comments, presence and name, which are small enough to send whole. The browser applies the changes as if they had arrived live.
-5. Otherwise the server sends a snapshot, as for a new viewer.
-
-The epoch is what makes this safe. A server that crashed may have lost its last few unsaved changes, so after the restart it can hand out the same `seq` again for a different change. And after any reload, the kept changes are gone. A new epoch means the browser's `seq` no longer names the same state, so it gets a snapshot. The router passes the query on to the owner, so resuming works there too.
-
-### Storage
-
-Saving is a **write-ahead journal with compaction**, the same idea databases use. Each design has two files in `FINITE_DATA_DIR/designs/` (`crates/server/data` in dev):
-
-- `<id>.json` is the last full snapshot.
-- `<id>.log` is the journal: one JSON record per line for everything since that snapshot. A record is a change, the new state of a comment, or the design's name and timestamps (`Record` in `crates/design/src/design.rs`).
-
-After a burst of edits, the save task appends the new records to the log. That costs the same for a ten-node design as for a ten-thousand-node one. In the demo, one style change appended 305 bytes instead of rewriting the 11 KB snapshot. Every 1000 records, the task writes a fresh snapshot instead and deletes the log. That step is **compaction**.
-
-On startup, the server loads each snapshot, replays its log with `Design::replay`, and compacts right away. Replaying is safe to repeat: changes at or below the snapshot's `seq` are skipped, and comments and meta just overwrite. So a crash at any point loses at most the last 250 ms of edits:
-
-- **Mid-append:** the log ends in a torn line. Loading stops at it, and the startup compaction drops it for good.
-- **Mid-compaction:** the new snapshot is written to a temporary file and renamed into place, so it's either all there or not at all. If the old log survives next to the new snapshot, replaying it changes nothing.
-
-Only one server can use a data folder at a time. The file store takes an exclusive lock on `FINITE_DATA_DIR/lock` when it opens, and a second server on the same folder exits with `another Finite server is using …`. Without the lock, two servers would each load a design and overwrite the other's edits. The operating system releases the lock when the process exits, even after a crash.
-
-On Ctrl-C or SIGTERM, the server stops accepting connections and writes every loaded design as a full snapshot before it exits. SIGTERM is how Docker, systemd and the desktop app stop it. Until this was handled, the desktop app could lose the last moment of edits when it quit. The app now also waits for the server to exit, up to 5 seconds, before it quits itself.
-
-The hub only calls five methods on the `Store` trait in `store.rs`: `ids`, `load`, `save`, `append` and `remove`. A database could replace the files behind them. To check a new store, run `store::contract::check` on it. It's a **contract test**: the same suite of rules every store must follow, such as "the journal keeps append order" and "save clears the journal". The file store and the memory store both run it in `cargo test`.
-
-### Undo across restarts
-
-Undo histories are saved, but only in full snapshots, which the server writes when it shuts down, compacts or hands a design off. So an agent that connects with an `X-Finite-Agent` header can undo after a normal restart. (An agent without one is identified by its MCP session, which ends with the restart. So when a design is restored, histories of `mcp:` actors are dropped. Nobody could use them, and a design with history stays in memory until the history expires, six hours later.) The journal doesn't hold histories, but it doesn't need to. After a crash, `Design::replay` rebuilds them from the journaled changes, because each change says who made it and whether it was an edit, an undo or a redo:
-
-- **An edit** is applied, and its inverse goes on its actor's undo stack, as `Design::commit` does.
-- **An undo or redo** takes the entry the live call took: the first one from the top of the stack that still applies. That entry must produce exactly the ops in the journal. Then its reverse goes on the other stack.
-
-This works because undo is **deterministic**. The same document and the same stacks always pick the same entry and produce the same ops. A `Design` test replays a journal of edits, undos and redos by two actors, and checks that every later undo matches the live design's. If an entry ever produces other ops, say a saved history from a different timeline, replay puts it back, applies the journaled ops as they are, and drops the histories. An undo step that doesn't fit the document could undo the wrong thing, so dropping them is safer.
-
-Viewers never receive histories: `Design::snapshot` leaves them out, and only `Design::snapshot_to_save` includes them.
-
 ## Following one edit end to end
 
 Say an agent makes a button orange:
@@ -296,7 +253,7 @@ update_styles({ "designId": "k7jo11y14e",
 
 The browser side lives in `apps/web/src/design`. It's plain TypeScript classes, and React only hosts them. Here they are in the order a message flows through them:
 
-- **`socket.ts`** opens the WebSocket, decodes each message with the Effect schemas in `schema.ts`, and reconnects with backoff. Every connection starts with a snapshot, so a reconnect needs no special catch-up logic.
+- **`socket.ts`** opens the WebSocket, decodes each message with the Effect schemas in `schema.ts`, and reconnects with backoff. A new connection starts with a snapshot. A reconnect asks to resume and usually gets only what it missed (see "Reconnecting without starting over" below).
 - **`DesignSession`** (`session.ts`) owns one open design. It feeds each socket message to the replica, hands every applied op to the renderer, and keeps what the page shows around the canvas: the design's name, presence badges, comments, the activity list and the connection status. It holds all of that in one immutable state object, and `DesignCanvas` re-renders when it changes. The renderer plugs in through a three-method interface (`DesignView`), so `session.test.ts` runs it in Node with a fake renderer.
 - **`Replica`** (`replica.ts`) is the browser's copy of the document. Its `apply` follows the same rules as the Rust `Document::apply`, op for op. It returns what it touched, for the renderer.
 - **`Renderer`** (`renderer.ts`) draws each artboard and patches only the DOM nodes an op touched. An artboard normally renders inside a **shadow root**, which scopes its `<style>` blocks to it and keeps the app's CSS out. An artboard that contains a `<script>` renders in a **sandboxed iframe** instead (`sandbox="allow-scripts"`), with a content security policy that blocks network requests. Iframes can't be patched from outside, so they reload 150 ms after a burst of edits.
@@ -305,6 +262,18 @@ The browser side lives in `apps/web/src/design`. It's plain TypeScript classes, 
 `components/DesignCanvas.tsx` wires these together and adds what's specific to the page: the comment tool, hover outlines, the zoom controls and keyboard shortcuts.
 
 The design list page (`DesignGrid.tsx`) uses the lobby socket, and each card's `Thumbnail` renders a static copy of the design with scripts off.
+
+### Reconnecting without starting over
+
+Connections drop: a laptop sleeps, Wi-Fi blinks, a proxy times out. The browser reconnects with backoff (`socket.ts`). A fresh snapshot after every drop would be wasteful. It would also rebuild every artboard and reload every sandboxed one, so the canvas would flicker and animations would restart. So the socket supports **resume**, the way chat and multiplayer protocols do: the browser says where it left off, and the server sends only what it missed.
+
+1. Every snapshot message carries an `epoch`. The epoch is a random id the server picks each time it loads the design into memory.
+2. Each loaded design keeps its latest changes, with their actors' names (`Recent` in `hub/design.rs`). It keeps up to 256, and drops the oldest sooner if together they pass 4 MB of JSON, so a few huge `write_html` calls can't hold on to much memory.
+3. On reconnect, `DesignSession` opens `…/ws?epoch=<epoch>&since=<seq>`, where `seq` is the last change it applied.
+4. If the epoch matches and every change after `since` is still kept, the server answers with a `resume` message. It holds those changes, plus the current comments, presence and name, which are small enough to send whole. The browser applies the changes as if they had arrived live.
+5. Otherwise the server sends a snapshot, as for a new viewer.
+
+The epoch is what makes this safe. A server that crashed may have lost its last few unsaved changes, so after the restart it can hand out the same `seq` again for a different change. And after any reload, the kept changes are gone. A new epoch means the browser's `seq` no longer names the same state, so it gets a snapshot. The router passes the query on to the owner, so resuming works there too.
 
 ## Comments
 
@@ -334,6 +303,41 @@ Comments live beside the document, not inside it, so undo never touches them. Th
 Each comment carries a **revision number**, `rev`. It starts at 0 and goes up by one with every change: a reply, a resolve, or a pin moving because its artboard went or came back. A browser can get the same comment twice. The server broadcasts it on the socket, and the REST call that changed it also returns it. The two can arrive in either order, and another change can land in between. Say you reply, and an agent answers at once. The agent's reply can reach your socket before the REST answer to your own reply. So `DesignSession.upsertComment` keeps whichever copy has the higher `rev`, and drops an older copy that arrives late.
 
 All the thread rules live in `crates/design`: `comment.rs` defines the types and checks, and `Design::add_comment`, `reply` and `set_resolved` apply them. The hub only takes the lock, calls one of those, and broadcasts the updated comment. That means you can test a comment rule with a plain function call, like the tests at the bottom of `design.rs`.
+
+## Saving and recovering
+
+Everything above happens in memory. This section covers what reaches the disk, when, and what comes back after a restart or a crash.
+
+### Storage
+
+Saving is a **write-ahead journal with compaction**, the same idea databases use. Each design has two files in `FINITE_DATA_DIR/designs/` (`crates/server/data` in dev):
+
+- `<id>.json` is the last full snapshot.
+- `<id>.log` is the journal: one JSON record per line for everything since that snapshot. A record is a change, the new state of a comment, or the design's name and timestamps (`Record` in `crates/design/src/design.rs`).
+
+After a burst of edits, the save task appends the new records to the log. That costs the same for a ten-node design as for a ten-thousand-node one. In the demo, one style change appended 305 bytes instead of rewriting the 11 KB snapshot. Every 1000 records, the task writes a fresh snapshot instead and deletes the log. That step is **compaction**.
+
+On startup, the server loads each snapshot, replays its log with `Design::replay`, and compacts right away. Replaying is safe to repeat: changes at or below the snapshot's `seq` are skipped, and comments and meta just overwrite. So a crash at any point loses at most the last 250 ms of edits:
+
+- **Mid-append:** the log ends in a torn line. Loading stops at it, and the startup compaction drops it for good.
+- **Mid-compaction:** the new snapshot is written to a temporary file and renamed into place, so it's either all there or not at all. If the old log survives next to the new snapshot, replaying it changes nothing.
+
+Only one server can use a data folder at a time. The file store takes an exclusive lock on `FINITE_DATA_DIR/lock` when it opens, and a second server on the same folder exits with `another Finite server is using …`. Without the lock, two servers would each load a design and overwrite the other's edits. The operating system releases the lock when the process exits, even after a crash.
+
+On Ctrl-C or SIGTERM, the server stops accepting connections and writes every loaded design as a full snapshot before it exits. SIGTERM is how Docker, systemd and the desktop app stop it. Until this was handled, the desktop app could lose the last moment of edits when it quit. The app now also waits for the server to exit, up to 5 seconds, before it quits itself.
+
+The hub only calls five methods on the `Store` trait in `store.rs`: `ids`, `load`, `save`, `append` and `remove`. A database could replace the files behind them. To check a new store, run `store::contract::check` on it. It's a **contract test**: the same suite of rules every store must follow, such as "the journal keeps append order" and "save clears the journal". The file store and the memory store both run it in `cargo test`.
+
+### Undo across restarts
+
+Undo histories are saved, but only in full snapshots, which the server writes when it shuts down, compacts or hands a design off. So an agent that connects with an `X-Finite-Agent` header can undo after a normal restart. (An agent without one is identified by its MCP session, which ends with the restart. So when a design is restored, histories of `mcp:` actors are dropped. Nobody could use them, and a design with history stays in memory until the history expires, six hours later.) The journal doesn't hold histories, but it doesn't need to. After a crash, `Design::replay` rebuilds them from the journaled changes, because each change says who made it and whether it was an edit, an undo or a redo:
+
+- **An edit** is applied, and its inverse goes on its actor's undo stack, as `Design::commit` does.
+- **An undo or redo** takes the entry the live call took: the first one from the top of the stack that still applies. That entry must produce exactly the ops in the journal. Then its reverse goes on the other stack.
+
+This works because undo is **deterministic**. The same document and the same stacks always pick the same entry and produce the same ops. A `Design` test replays a journal of edits, undos and redos by two actors, and checks that every later undo matches the live design's. If an entry ever produces other ops, say a saved history from a different timeline, replay puts it back, applies the journaled ops as they are, and drops the histories. An undo step that doesn't fit the document could undo the wrong thing, so dropping them is safer.
+
+Viewers never receive histories: `Design::snapshot` leaves them out, and only `Design::snapshot_to_save` includes them.
 
 ## The end-to-end test
 
