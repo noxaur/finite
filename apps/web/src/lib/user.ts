@@ -1,11 +1,10 @@
 import { useState } from "react";
 import type { Author } from "@/design/schema";
 import type { CommentAuthor } from "@/api/Api";
+import { NAME_LIMIT } from "./limits";
 
 const ID_KEY = "finite.user";
 const NAME_KEY = "finite.user.name";
-/** The server keeps at most this many characters of a name. */
-export const NAME_LIMIT = 48;
 
 /**
  * This browser's commenting identity. Users have no accounts yet, so each

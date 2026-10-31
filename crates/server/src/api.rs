@@ -14,7 +14,7 @@ use axum::{
 };
 use finite_design::{
     Snapshot,
-    comment::{Anchor, Author, AuthorKind, Comment, CommentError},
+    comment::{self, Anchor, Author, AuthorKind, Comment, CommentError},
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::{self, error::RecvError};
@@ -180,14 +180,14 @@ struct UserAuthor {
 
 impl UserAuthor {
     fn into_author(self) -> Author {
-        let id: String = self.id.chars().take(64).collect();
+        let id: String = self.id.chars().take(comment::MAX_USER_ID).collect();
         let name = self.name.trim();
         Author {
             id: format!("user:{id}"),
             name: if name.is_empty() {
                 "Guest".into()
             } else {
-                name.chars().take(48).collect()
+                name.chars().take(comment::MAX_NAME).collect()
             },
             kind: AuthorKind::User,
         }

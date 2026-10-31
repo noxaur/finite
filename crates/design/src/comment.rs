@@ -21,6 +21,10 @@ use crate::{ActorId, Change, Document, NodeId, NodeKind, Op};
 
 /// The longest comment or reply accepted, in characters.
 pub const MAX_BODY: usize = 4000;
+/// The longest name a person can comment under, in characters.
+pub const MAX_NAME: usize = 48;
+/// The longest id a browser can pick for a person, in characters.
+pub const MAX_USER_ID: usize = 64;
 /// How many recent changes [`ChangeLog`] remembers.
 const LOG_LIMIT: usize = 512;
 /// How many nodes a [`ChangeRef`] lists.

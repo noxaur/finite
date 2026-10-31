@@ -4,7 +4,8 @@ import * as stylex from "@stylexjs/stylex";
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Replica } from "@/design/replica";
 import type { Comment, CommentMessage } from "@/design/schema";
-import { isLocalUser, NAME_LIMIT, useLocalName } from "@/lib/user";
+import { COMMENT_LIMIT, NAME_LIMIT } from "@/lib/limits";
+import { isLocalUser, useLocalName } from "@/lib/user";
 import { timeAgo } from "@/lib/time";
 
 /** How far right of its pin a popover starts, in pixels. */
@@ -353,6 +354,7 @@ function Composer({
         ref={ref}
         value={body}
         rows={2}
+        maxLength={COMMENT_LIMIT}
         placeholder={placeholder}
         onChange={(e) => setBody(e.target.value)}
         onKeyDown={(e) => {

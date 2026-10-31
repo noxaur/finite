@@ -134,6 +134,8 @@ The formatter skips `crates/*/fixtures`, so a regenerated file only changes wher
 
 The same goes for how an artboard becomes HTML. Screenshots render `html::export_compact` from the Rust side, and sandboxed artboards in the browser render `exportHtml` from `html.ts`. They also share the base CSS and the content policy, which now live in `crates/design/src/html.rs`. `crates/design/fixtures/export.json` holds export cases and both constants, and both test suites check against it. Writing it found a real difference. Screenshots used the indented export that `get_html` shows agents, and the indentation became whitespace between elements. So `<b>Bold</b><i>Italic</i>` showed as "Bold Italic" in a screenshot but "BoldItalic" in the browser. Screenshots now use the compact export.
 
+Another, smaller golden file holds the comment limits: 4,000 characters for a comment or reply, and 48 for a person's name. `crates/design/tests/limits.rs` records the Rust constants in `crates/design/fixtures/limits.json`, and `apps/web/src/lib/limits.test.ts` checks the web app's copies against it. The comment box stops at the same length the server accepts. Before, a longer comment just failed to post.
+
 ## Edit commands: from a tool call to ops
 
 Agents don't send ops. They call tools with friendlier arguments, and `crates/design/src/edit.rs` translates them. If you want to add a tool, you start here. Each command reads the current document, checks the request, and returns ops. It never changes the document itself.
@@ -210,7 +212,7 @@ Read tools (`get_tree_summary`, `get_node_info`, `get_html`, `get_screenshot`) l
 | `GET /api/designs/{id}/ws?epoch=…&since=…`               | The same socket, resuming after a reconnect         |
 | `POST …/comments`, `…/replies`, `PATCH …/comments/{cid}` | Comment, reply, resolve                             |
 
-The messages on these sockets are Rust types on the server and Effect schemas in `apps/web/src/design/schema.ts`. A second golden file keeps those in step. `crates/server/tests/wire.rs` drives a real hub through an edit, an undo, presence, a comment, an agent reply and a rename, and records every message it broadcasts in `crates/server/fixtures/messages.json`. Then `apps/web/src/design/wire.test.ts` decodes each one with the web schemas. If you rename a field on the Rust side, `cargo test` fails until you regenerate the file, and then `vp test` fails until you update the schema.
+The messages on these sockets are Rust types on the server and Effect schemas in `apps/web/src/design/schema.ts`. Another golden file keeps those in step. `crates/server/tests/wire.rs` drives a real hub through an edit, an undo, presence, a comment, an agent reply and a rename, and records every message it broadcasts in `crates/server/fixtures/messages.json`. Then `apps/web/src/design/wire.test.ts` decodes each one with the web schemas. If you rename a field on the Rust side, `cargo test` fails until you regenerate the file, and then `vp test` fails until you update the schema.
 
 When a browser opens a design's socket, the server takes the lock first. Under that lock, it subscribes the socket to the broadcast channel and builds a snapshot. That way no change can land between the snapshot and the stream. If a slow browser falls more than 1024 messages behind, it gets a fresh snapshot instead of the missed changes.
 
