@@ -327,3 +327,44 @@ async fn an_agent_waits_for_the_next_comment() {
         .await;
     assert!(now.contains("Add a footer"), "{now}");
 }
+
+/// Viewers show an agent's name, so a long one is cut like a person's.
+#[tokio::test]
+async fn long_agent_names_are_cut() {
+    let app = test_app();
+    let long: &'static str = "A".repeat(200).leak();
+    let mut agent = Agent::connect(&app, long).await;
+    let created = agent.ok("create_design", json!({ "name": "Names" })).await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .expect("a design id")
+        .to_owned();
+    let post = Request::post(format!("/api/designs/{design}/comments"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({ "author": { "id": "u1", "name": "Guest" }, "body": "Hi", "x": 1, "y": 2 })
+                .to_string(),
+        ))
+        .unwrap();
+    let res = app.clone().oneshot(post).await.unwrap();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let comment: Value = serde_json::from_slice(&bytes).unwrap();
+    agent
+        .ok(
+            "reply_to_comment",
+            json!({ "designId": design, "commentId": comment["id"], "message": "Hello" }),
+        )
+        .await;
+
+    let get = Request::get(format!("/api/designs/{design}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(get).await.unwrap();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let snapshot: Value = serde_json::from_slice(&bytes).unwrap();
+    let name = snapshot["comments"][0]["messages"][1]["author"]["name"]
+        .as_str()
+        .unwrap();
+    assert_eq!(name.chars().count(), finite_design::comment::MAX_NAME);
+}
