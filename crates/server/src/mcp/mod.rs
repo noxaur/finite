@@ -482,12 +482,22 @@ impl FiniteMcp {
         let Some((page, width, height)) = page else {
             return fail(format!("node {:?} not found", p.node_id));
         };
-        let scale = p.scale.unwrap_or(1.0).clamp(0.25, 2.0);
+        let requested = p.scale.unwrap_or(1.0).clamp(0.25, 2.0);
+        let scale = screenshot::output_scale(width, height, requested);
         match screenshot::capture(&page, width, height, scale).await {
-            Ok(png) => Ok(CallToolResult::success(vec![ContentBlock::image(
-                base64::engine::general_purpose::STANDARD.encode(png),
-                "image/png",
-            )])),
+            Ok(png) => {
+                let mut content = vec![ContentBlock::image(
+                    base64::engine::general_purpose::STANDARD.encode(png),
+                    "image/png",
+                )];
+                if scale < requested {
+                    content.push(ContentBlock::text(format!(
+                        "Captured at {scale:.2}× instead of {requested}×, so the {width}×{height} artboard's longer side fits in {} pixels, the most a screenshot returns.",
+                        screenshot::MAX_OUTPUT_SIDE
+                    )));
+                }
+                Ok(CallToolResult::success(content))
+            }
             Err(error) => fail(error),
         }
     }

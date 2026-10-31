@@ -15,6 +15,18 @@ use crate::hub::random_id;
 /// Artboards without a pixel height are captured at this height.
 const FALLBACK_HEIGHT: f64 = 900.0;
 const MAX_SIDE: f64 = 8000.0;
+/// The longest side of a screenshot, in image pixels. The Claude API refuses
+/// images over 8,000 pixels on a side, and once a request holds more than 20
+/// images, a stricter limit applies to all of them. An agent checking its work
+/// passes 20 screenshots quickly, and Anthropic's docs suggest at most 3,000
+/// pixels a side to stay under that limit everywhere.
+pub const MAX_OUTPUT_SIDE: f64 = 3000.0;
+
+/// The device scale to capture `width` × `height` CSS pixels at: `requested`,
+/// lowered if needed so the image's longer side fits in [`MAX_OUTPUT_SIDE`].
+pub fn output_scale(width: f64, height: f64, requested: f64) -> f64 {
+    requested.min(MAX_OUTPUT_SIDE / width.max(height))
+}
 
 /// How many browsers may render at once. Each capture starts its own Chrome,
 /// so without a limit, many agents checking their work together would start
@@ -59,6 +71,22 @@ pub fn page(doc: &Document, artboard: &str) -> Option<(String, f64, f64)> {
     Some((page, width, height))
 }
 
+/// The smallest device scale Chrome renders at.
+const MIN_DEVICE_SCALE: f64 = 0.5;
+
+/// `page` with `html { zoom: scale }` added right after its doctype, so the
+/// page stays in standards mode.
+fn zoom(page: &str, scale: f64) -> String {
+    let style = format!("<style>html {{ zoom: {scale}; }}</style>");
+    let doctype = "<!doctype html>";
+    match page.get(..doctype.len()) {
+        Some(start) if start.eq_ignore_ascii_case(doctype) => {
+            format!("{doctype}{style}{}", &page[doctype.len()..])
+        }
+        _ => format!("{style}{page}"),
+    }
+}
+
 /// Captures `page` at `width` × `height` CSS pixels, scaled by `scale`.
 pub async fn capture(page: &str, width: f64, height: f64, scale: f64) -> Result<Vec<u8>, String> {
     let chrome = chrome().ok_or(
@@ -72,7 +100,15 @@ pub async fn capture(page: &str, width: f64, height: f64, scale: f64) -> Result<
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| e.to_string())?;
-    let result = run(&chrome, &dir, page, width, height, scale).await;
+    // Chrome doesn't go below 0.5 for --force-device-scale-factor: asked
+    // for 0.375, it rendered at 0.5. So below that, render at 1 and shrink
+    // the page itself with CSS zoom, in a window of the scaled size.
+    let result = if scale < MIN_DEVICE_SCALE {
+        let zoomed = zoom(page, scale);
+        run(&chrome, &dir, &zoomed, width * scale, height * scale, 1.0).await
+    } else {
+        run(&chrome, &dir, page, width, height, scale).await
+    };
     let _ = tokio::fs::remove_dir_all(&dir).await;
     result
 }
@@ -115,4 +151,19 @@ async fn run(
     tokio::fs::read(&png_path)
         .await
         .map_err(|_| "the browser didn't produce a screenshot".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screenshots_fit_the_api_image_limit() {
+        // A desktop artboard at 2× fits.
+        assert_eq!(output_scale(1440.0, 900.0, 2.0), 2.0);
+        // A tall page doesn't, so it's captured smaller.
+        let scale = output_scale(1440.0, 8000.0, 2.0);
+        assert_eq!((8000.0 * scale).round(), MAX_OUTPUT_SIDE);
+        assert_eq!((1440.0 * scale).round(), 540.0);
+    }
 }
