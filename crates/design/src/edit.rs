@@ -461,11 +461,23 @@ pub fn set_position(doc: &Document, id: &str, x: f64, y: f64) -> Result<Vec<Op>>
 }
 
 /// Drops ids nested inside other ids in the list, so a subtree is handled once.
+/// The ids in `ids` with none of their ancestors in `ids`, in order, each
+/// once. Each node walks up its ancestors (at most `MAX_DEPTH`) instead of
+/// being compared with every other id, which was quadratic.
 fn top_level<'a>(doc: &Document, ids: &'a [NodeId]) -> Vec<&'a NodeId> {
+    let given: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+    let mut seen = std::collections::HashSet::new();
     ids.iter()
+        .filter(|id| seen.insert(id.as_str()))
         .filter(|id| {
-            !ids.iter()
-                .any(|other| other != *id && doc.is_ancestor(other, id))
+            let mut parent = doc.get(id).and_then(|n| n.parent.as_deref());
+            while let Some(p) = parent {
+                if given.contains(p) {
+                    return false;
+                }
+                parent = doc.get(p).and_then(|n| n.parent.as_deref());
+            }
+            true
         })
         .collect()
 }
@@ -766,6 +778,39 @@ mod tests {
         .unwrap();
         doc.apply_all(&ops);
         assert_eq!(doc.len(), 3);
+    }
+
+    #[test]
+    fn many_nodes_delete_at_once() {
+        let mut doc = Document::default();
+        let board = board(&mut doc);
+        let card = "<div><p>Card</p></div>";
+        let (ops, _) = write_html(
+            &doc,
+            &board,
+            &card.repeat(10_000),
+            WriteMode::Append,
+            None,
+            &mut ids(),
+        )
+        .unwrap();
+        doc.apply_all(&ops);
+        // Every card and every paragraph, some twice: only the cards are deleted.
+        let mut all: Vec<NodeId> = doc
+            .subtree(&board)
+            .iter()
+            .filter(|n| n.id != board && n.kind != NodeKind::Text)
+            .map(|n| n.id.clone())
+            .collect();
+        all.extend(all[..100].to_vec());
+        let started = std::time::Instant::now();
+        let ops = delete(&doc, &all).unwrap();
+        assert_eq!(ops.len(), 10_000);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

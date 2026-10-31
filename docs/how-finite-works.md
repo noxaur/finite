@@ -150,6 +150,7 @@ A script URL is refused anywhere in a value, not just at its start. SVG animatio
 
 - `update_styles` accepts `backgroundColor` or `background-color`. When you set a shorthand like `padding`, it also clears `padding-top` and friends. Styles are stored as a map, not as ordered CSS, so a leftover longhand would otherwise win.
 - `move_nodes` and `duplicate` pick free canvas space for anything that becomes a new artboard.
+- `delete_nodes`, `move_nodes` and `duplicate` first drop ids that are inside another id in the same call, and repeats (`top_level`). Each node walks up its ancestors instead of being compared with every other id. The comparison was quadratic, and it kept repeats, so deleting 10,000 cards with 100 of them listed twice made 10,050 deletes.
 
 Nodes can nest at most 256 levels deep (`MAX_DEPTH` in `document.rs`). An artboard is at depth 0, its children at 1, and so on. `write_html` and `move_nodes`, the only commands that can make a tree deeper, refuse anything that would pass the limit and say why. The limit exists because exports, the outline and the browser's renderer walk the tree recursively. Before it, `write_html` with 5,000 nested `<div>`s, about 50 KB, overflowed the stack and aborted the whole server, taking every design and viewer with it. Chrome's HTML parser has a similar limit and stops nesting at 512 levels.
 
