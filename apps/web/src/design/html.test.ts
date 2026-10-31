@@ -1,5 +1,6 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vite-plus/test";
-import { artboardDocument, exportHtml, pixelSize } from "./html";
+import { artboardDocument, BASE_CSS, CSP, exportHtml, pixelSize } from "./html";
 import { Replica } from "./replica";
 import type { Node } from "./schema";
 
@@ -24,7 +25,7 @@ const text = (id: string, parent: string, value: string): Node => ({
   text: value,
 });
 
-const replica = (nodes: Node[]) => {
+const replica = (nodes: ReadonlyArray<Node>) => {
   const r = new Replica();
   r.load({ meta: { id: "d", name: "D", createdAt: 0, updatedAt: 0 }, seq: 0, nodes, comments: [] });
   return r;
@@ -71,5 +72,35 @@ describe("pixelSize", () => {
         height: null,
       },
     );
+  });
+});
+
+// The cases in crates/design/fixtures/export.json, generated from the Rust
+// export that screenshots use. The viewer must produce the same HTML and use
+// the same base CSS and content policy, or screenshots won't match what people see.
+describe("the viewer renders artboards like screenshots do", () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL("../../../../crates/design/fixtures/export.json", import.meta.url),
+      "utf8",
+    ),
+  ) as {
+    readonly baseCss: string;
+    readonly csp: string;
+    readonly cases: ReadonlyArray<{
+      readonly name: string;
+      readonly root: string;
+      readonly nodes: ReadonlyArray<Node>;
+      readonly expect: string;
+    }>;
+  };
+
+  it("uses the same base CSS and content policy", () => {
+    expect(BASE_CSS).toBe(fixture.baseCss);
+    expect(CSP).toBe(fixture.csp);
+  });
+
+  it.each(fixture.cases.map((c) => [c.name, c] as const))("%s", (_, c) => {
+    expect(exportHtml(replica(c.nodes), c.root)).toBe(c.expect);
   });
 });

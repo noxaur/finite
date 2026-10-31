@@ -3,19 +3,14 @@
 
 use std::{path::PathBuf, process::Stdio, time::Duration};
 
-use finite_design::{Document, edit::pixel_size, html};
+use finite_design::{
+    Document,
+    edit::pixel_size,
+    html::{self, BASE_CSS, CSP},
+};
 use tokio::process::Command;
 
 use crate::hub::random_id;
-
-/// Base styles shared with the web viewer (`apps/web/src/design/html.ts`),
-/// so screenshots match what users see.
-pub const BASE_CSS: &str = "*, *::before, *::after { box-sizing: border-box; }";
-
-/// The content policy for artboards that run scripts, shared with the web
-/// viewer's sandboxed iframes: inline code, remote images, fonts and
-/// stylesheets, and no network access from scripts.
-pub const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https:; img-src https: http: data: blob:; font-src https: data:; media-src https: data: blob:";
 
 /// Artboards without a pixel height are captured at this height.
 const FALLBACK_HEIGHT: f64 = 900.0;
@@ -42,7 +37,8 @@ fn chrome() -> Option<PathBuf> {
 /// A standalone HTML page showing just the artboard, and its pixel size.
 pub fn page(doc: &Document, artboard: &str) -> Option<(String, f64, f64)> {
     let node = doc.get(artboard)?;
-    let body = html::export(doc, artboard, false)?;
+    // Compact, so no whitespace is added between elements: it renders like the viewer.
+    let body = html::export_compact(doc, artboard)?;
     let (width, height) = pixel_size(node);
     let width = width.unwrap_or(1440.0).clamp(1.0, MAX_SIDE);
     let height = height.unwrap_or(FALLBACK_HEIGHT).clamp(1.0, MAX_SIDE);

@@ -1,0 +1,308 @@
+{
+  "about": "HTML export shared by crates/design (html::export_compact, used for screenshots) and apps/web (exportHtml, used for sandboxed artboards), plus the base CSS and content policy both apply. Regenerate with `FINITE_UPDATE_FIXTURES=1 cargo test -p finite-design --test export`.",
+  "baseCss": "*, *::before, *::after { box-sizing: border-box; }",
+  "csp": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https:; img-src https: http: data: blob:; font-src https: data:; media-src https: data: blob:",
+  "cases": [
+    {
+      "name": "inline siblings get no whitespace between them",
+      "root": "p",
+      "nodes": [
+        {
+          "id": "p",
+          "parent": null,
+          "index": "V",
+          "type": "element",
+          "tag": "p",
+          "name": null,
+          "text": null,
+          "x": 0.0,
+          "y": 0.0,
+          "styles": {},
+          "attrs": {}
+        },
+        {
+          "id": "b",
+          "parent": "p",
+          "index": "F",
+          "type": "element",
+          "tag": "b",
+          "name": null,
+          "text": null,
+          "x": null,
+          "y": null,
+          "styles": {},
+          "attrs": {}
+        },
+        {
+          "id": "t1",
+          "parent": "b",
+          "index": "V",
+          "type": "text",
+          "name": null,
+          "text": "Bold",
+          "x": null,
+          "y": null,
+          "styles": {},
+          "attrs": {}
+        },
+        {
+          "id": "i",
+          "parent": "p",
+          "index": "V",
+          "type": "element",
+          "tag": "i",
+          "name": null,
+          "text": null,
+          "x": null,
+          "y": null,
+          "styles": {},
+          "attrs": {}
+        },
+        {
+          "id": "t2",
+          "parent": "i",
+          "index": "V",
+          "type": "text",
+          "name": null,
+          "text": "Italic",
+          "x": null,
+          "y": null,
+          "styles": {},
+          "attrs": {}
+        }
+      ],
+      "expect": "<p><b>Bold</b><i>Italic</i></p>"
+    },
+    {
+      "name": "text and attributes are escaped",
+      "root": "a",
+      "nodes": [
+        {
+          "id": "a",
+          "parent": null,
+          "index": "V",
+          "type": "element",
+          "tag": "a",
+          "name": null,
+          "text": null,
+          "x": 0.0,
+          "y": 0.0,
+          "styles": {},
+          "attrs": {
+            "href": "https://x.test/?a=1&b=\"2\"",
+            "title": "<hi>"
+          }
+        },
+        {
+          "id": "t",
+          "parent": "a",
+          "index": "V",
+          "type": "text",
+          "name": null,
+          "text": "Tom & Jerry <3",
+          "x": null,
+          "y": null,
+          "styles": {},
+          "attrs": {}
+        }
+      ],
+      "expect": "<a href=\"https://x.test/?a=1&amp;b=&quot;2&quot;\" title=\"&lt;hi&gt;\">Tom &amp; Jerry &lt;3</a>"
+    },
+    {
+      "name": "styles are sorted and layer names don't render",
+      "root": "card",
+      "nodes": [
+        {
+          "id": "card",
+          "parent": null,
+          "index": "V",
+          "type": "element",
+          "tag": "div",
+          "name": "Card",
+          "text": null,
+          "x": 0.0,
+          "y": 0.0,
+          "styles": {
+            "background-color": "#fff",
+            "color": "#111",
+            "padding": "12px"
+          },
+          "attrs": {}
+        },
+        {
+          "id": "t",
+          "parent": "card",
+          "index": "V",
+          "type": "text",
+          "name": null,
+          "text": "Hi",
+          "x": null,
+          "y": null,
+          "styles": {},
+          "attrs": {}
+        }
+      ],
+      "expect": "<div style=\"background-color: #fff; color: #111; padding: 12px\">Hi</div>"
+    },
+    {
+      "name": "void elements close themselves",
+      "root": "box",
+      "nodes": [
+        {
+          "id": "box",
+          "parent": null,
+          "index": "V",
+          "type": "element",
+          "tag": "div",
+          "name": null,
+          "text": null,
+          "x": 0.0,
+          "y": 0.0,
+          "styles": {},
+          "attrs": {}
+        },
+        {
+          "id": "img",
+          "parent": "box",
+          "index": "V",
+          "type": "element",
+          "tag": "img",
+          "name": null,
+          "text": null,
+          "x": null,
+          "y": null,
+          "styles": {
+            "width": "40px"
+          },
+          "attrs": {
+            "alt": "A",
+            "src": "https://x.test/a.png"
+          }
+        },
+        {
+          "id": "br",
+          "parent": "box",
+          "index": "k",
+          "type": "element",
+          "tag": "br",
+          "name": null,
+          "text": null,
+          "x": null,
+          "y": null,
+          "styles": {},
+          "attrs": {}
+        }
+      ],
+      "expect": "<div><img alt=\"A\" src=\"https://x.test/a.png\" style=\"width: 40px\" /><br /></div>"
+    },
+    {
+      "name": "script and style text can't close their tag early",
+      "root": "box",
+      "nodes": [
+        {
+          "id": "box",
+          "parent": null,
+          "index": "V",
+          "type": "element",
+          "tag": "div",
+          "name": null,
+          "text": null,
+          "x": 0.0,
+          "y": 0.0,
+          "styles": {},
+          "attrs": {}
+        },
+        {
+          "id": "st",
+          "parent": "box",
+          "index": "F",
+          "type": "element",
+          "tag": "style",
+          "name": null,
+          "text": null,
+          "x": null,
+          "y": null,
+          "styles": {},
+          "attrs": {}
+        },
+        {
+          "id": "css",
+          "parent": "st",
+          "index": "V",
+          "type": "text",
+          "name": null,
+          "text": ".a::after{content:\"</STYLE>\"}",
+          "x": null,
+          "y": null,
+          "styles": {},
+          "attrs": {}
+        },
+        {
+          "id": "sc",
+          "parent": "box",
+          "index": "V",
+          "type": "element",
+          "tag": "script",
+          "name": null,
+          "text": null,
+          "x": null,
+          "y": null,
+          "styles": {},
+          "attrs": {}
+        },
+        {
+          "id": "js",
+          "parent": "sc",
+          "index": "V",
+          "type": "text",
+          "name": null,
+          "text": "console.log('</script>')",
+          "x": null,
+          "y": null,
+          "styles": {},
+          "attrs": {}
+        }
+      ],
+      "expect": "<div><style>.a::after{content:\"<\\/STYLE>\"}</style><script>console.log('<\\/script>')</script></div>"
+    },
+    {
+      "name": "svg keeps its tags and attributes",
+      "root": "svg",
+      "nodes": [
+        {
+          "id": "svg",
+          "parent": null,
+          "index": "V",
+          "type": "element",
+          "tag": "svg",
+          "name": null,
+          "text": null,
+          "x": 0.0,
+          "y": 0.0,
+          "styles": {},
+          "attrs": {
+            "viewBox": "0 0 10 10",
+            "width": "10"
+          }
+        },
+        {
+          "id": "path",
+          "parent": "svg",
+          "index": "V",
+          "type": "element",
+          "tag": "path",
+          "name": null,
+          "text": null,
+          "x": null,
+          "y": null,
+          "styles": {},
+          "attrs": {
+            "d": "M0 0L10 10",
+            "stroke": "red"
+          }
+        }
+      ],
+      "expect": "<svg viewBox=\"0 0 10 10\" width=\"10\"><path d=\"M0 0L10 10\" stroke=\"red\"></path></svg>"
+    }
+  ]
+}

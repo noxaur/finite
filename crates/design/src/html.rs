@@ -40,6 +40,15 @@ const VOID_TAGS: &[&str] = &[
 ];
 
 /// Names a node when written as an attribute (`<div data-name="Header">`).
+/// Base styles for rendering an artboard. Screenshots and the web viewer both
+/// use them (the viewer's copy is checked against `fixtures/export.json`).
+pub const BASE_CSS: &str = "*, *::before, *::after { box-sizing: border-box; }";
+
+/// The content policy for artboards that run scripts: inline code, remote
+/// images, fonts and stylesheets, and no network access from scripts.
+/// Shared by screenshots and the viewer's sandboxed iframes.
+pub const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https:; img-src https: http: data: blob:; font-src https: data:; media-src https: data: blob:";
+
 pub const NAME_ATTR: &str = "data-name";
 /// Identifies a node in exported HTML.
 pub const ID_ATTR: &str = "data-id";
@@ -279,6 +288,52 @@ fn write_node(doc: &Document, node: &Node, ids: bool, depth: usize, out: &mut St
             let _ = writeln!(out, "{pad}</{tag}>");
         }
     }
+}
+
+/// The subtree at `id` exactly as the document holds it: no added whitespace,
+/// no layer names. This is what renders, so screenshots use it. The indented
+/// [`export`] would add whitespace text between siblings, which shows up as a
+/// space between inline elements. The web viewer's `exportHtml` matches this.
+pub fn export_compact(doc: &Document, id: &str) -> Option<String> {
+    let mut out = String::new();
+    write_compact(doc, doc.get(id)?, &mut out);
+    Some(out)
+}
+
+fn write_compact(doc: &Document, node: &Node, out: &mut String) {
+    let tag = match &node.kind {
+        NodeKind::Text => {
+            out.push_str(&escape(node.text.as_deref().unwrap_or(""), false));
+            return;
+        }
+        NodeKind::Element { tag } => tag,
+    };
+    let _ = write!(out, "<{tag}");
+    for (name, value) in &node.attrs {
+        let _ = write!(out, " {name}=\"{}\"", escape(value, true));
+    }
+    if !node.styles.is_empty() {
+        let _ = write!(
+            out,
+            " style=\"{}\"",
+            escape(&style_string(&node.styles), true)
+        );
+    }
+    if VOID_TAGS.contains(&tag.as_str()) {
+        out.push_str(" />");
+        return;
+    }
+    out.push('>');
+    let children = doc.children(Some(&node.id));
+    if RAW_TEXT_TAGS.contains(&tag.to_ascii_lowercase().as_str()) {
+        let code: String = children.iter().filter_map(|c| c.text.as_deref()).collect();
+        out.push_str(&raw_text(&code, tag));
+    } else {
+        for child in children {
+            write_compact(doc, child, out);
+        }
+    }
+    let _ = write!(out, "</{tag}>");
 }
 
 pub fn style_string(styles: &BTreeMap<String, String>) -> String {

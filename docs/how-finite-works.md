@@ -131,6 +131,8 @@ Then `vp test` tells you whether `Replica` agrees. On its first run, it caught t
 
 The formatter skips `crates/*/fixtures`, so a regenerated file only changes where the results did.
 
+The same goes for how an artboard becomes HTML. Screenshots render `html::export_compact` from the Rust side, and sandboxed artboards in the browser render `exportHtml` from `html.ts`. They also share the base CSS and the content policy, which now live in `crates/design/src/html.rs`. `crates/design/fixtures/export.json` holds export cases and both constants, and both test suites check against it. Writing it found a real difference. Screenshots used the indented export that `get_html` shows agents, and the indentation became whitespace between elements. So `<b>Bold</b><i>Italic</i>` showed as "Bold Italic" in a screenshot but "BoldItalic" in the browser. Screenshots now use the compact export.
+
 ## Edit commands: from a tool call to ops
 
 Agents don't send ops. They call tools with friendlier arguments, and `crates/design/src/edit.rs` translates them. If you want to add a tool, you start here. Each command reads the current document, checks the request, and returns ops. It never changes the document itself.
