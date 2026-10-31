@@ -289,6 +289,8 @@ Here's what happened in the demo you saw:
 4. `Design` keeps a **change log**: the last 512 changes, each with its actor, the artboards it touched, and the elements it changed. Every commit, undo and redo goes through one function (`Design::finish`) that writes to the log, so no path can skip it. When an agent replies, `Design::reply` attaches that agent's changes to the comment's artboard since the thread's previous message. Those become the "Show what changed" buttons.
 5. Your reply reopens a resolved comment, so you can keep steering in one thread.
 
+A thread opens up and to the right of its pin. Near the window's right edge it opens to the left, and near the top bar it hangs below the pin instead (`Popover` in `components/Comments.tsx`).
+
 An agent doesn't have to check for comments on a timer. `wait_for_comments` is a **long poll**: the tool call stays open until a comment is waiting for an agent, then returns it. A comment is waiting when it's open and a person wrote the last message (`Comment::awaits_agent`). Each design has a `Notify`, a Tokio primitive that wakes every task waiting on it, and every comment update fires it. On the demo server, a waiting agent woke 30 ms after a comment was posted. The call gives up after `timeoutSeconds` (60 by default, 300 at most), so an agent can call it in a loop.
 
 Comments live beside the document, not inside it, so undo never touches them. They're saved in the same JSON file as the design.

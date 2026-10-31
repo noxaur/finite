@@ -1,11 +1,14 @@
 "use client";
 
 import * as stylex from "@stylexjs/stylex";
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Replica } from "@/design/replica";
 import type { Comment, CommentMessage } from "@/design/schema";
 import { isLocalUser } from "@/lib/user";
 import { timeAgo } from "@/lib/time";
+
+/** How far right of its pin a popover starts, in pixels. */
+const POPOVER_GAP = 36;
 import { colors, radii, space } from "@/styles/tokens.stylex";
 
 export type Mode = "pointer" | "comment";
@@ -138,14 +141,53 @@ function DraftPin({ replica, draft, onPost, onCancelDraft }: LayerProps & { draf
   return (
     <div data-camera-ignore {...stylex.props(styles.anchor(at.x, at.y), styles.raised)}>
       <div {...stylex.props(styles.pin, styles.pinOpen)} />
-      <div {...stylex.props(styles.popover)}>
+      <Popover>
         <Composer
           placeholder="Add a comment"
           autoFocus
           onSubmit={onPost}
           onCancel={onCancelDraft}
         />
-      </div>
+      </Popover>
+    </div>
+  );
+}
+
+/** Room kept between a popover and the window's edge, in pixels. */
+const EDGE = 8;
+/** The top bar's height: popovers flip below their pin rather than slide under it. */
+const TOP_BAR = 56;
+
+/**
+ * The box beside a pin. It opens up and to the right of the pin, and flips
+ * left or below when that would leave the window. It decides from the pin's
+ * screen position, which flipping doesn't change, so it can't flip back and forth.
+ */
+function Popover({ label, children }: { label?: string; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [flip, setFlip] = useState({ left: false, below: false });
+  useLayoutEffect(() => {
+    const box = ref.current;
+    const pin = box?.parentElement?.getBoundingClientRect();
+    if (!box || !pin) return;
+    // The anchor undoes the canvas zoom, so these sizes are screen pixels.
+    const left = pin.left + POPOVER_GAP + box.offsetWidth > window.innerWidth - EDGE;
+    const below =
+      pin.top - box.offsetHeight < TOP_BAR &&
+      pin.top + box.offsetHeight < window.innerHeight - EDGE;
+    setFlip((prev) => (prev.left === left && prev.below === below ? prev : { left, below }));
+  });
+  return (
+    <div
+      ref={ref}
+      {...(label ? { role: "dialog", "aria-label": label } : {})}
+      {...stylex.props(
+        styles.popover,
+        flip.left && styles.popoverLeft,
+        flip.below && styles.popoverBelow,
+      )}
+    >
+      {children}
     </div>
   );
 }
@@ -166,7 +208,7 @@ function Thread({
   onShowChange: (nodeIds: ReadonlyArray<string>) => void;
 }) {
   return (
-    <div {...stylex.props(styles.popover)} role="dialog" aria-label="Comment thread">
+    <Popover label="Comment thread">
       <div {...stylex.props(styles.threadHead)}>
         <span {...stylex.props(styles.muted)}>{comment.resolved ? "Resolved" : "Open"}</span>
         <span {...stylex.props(styles.spacer)} />
@@ -220,7 +262,7 @@ function Thread({
         </p>
       )}
       <Composer placeholder="Reply" onSubmit={onReply} onCancel={onClose} />
-    </div>
+    </Popover>
   );
 }
 
@@ -370,7 +412,7 @@ const styles = stylex.create({
   pinBusy: { animationName: pulse, animationDuration: "1.2s", animationIterationCount: "infinite" },
   popover: {
     position: "absolute",
-    left: 36,
+    left: POPOVER_GAP,
     bottom: -4,
     width: 280,
     display: "flex",
@@ -386,6 +428,9 @@ const styles = stylex.create({
     cursor: "auto",
     userSelect: "text",
   },
+  // Mirror the default placement: to the pin's left, or hanging below it.
+  popoverLeft: { left: "auto", right: 8 },
+  popoverBelow: { bottom: "auto", top: 4 },
   threadHead: { display: "flex", alignItems: "center", gap: space.xs },
   spacer: { flexGrow: 1 },
   muted: { color: colors.muted, fontSize: 12 },
