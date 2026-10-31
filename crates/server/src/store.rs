@@ -125,6 +125,12 @@ impl Store for FileStore {
             serde_json::to_writer(&mut out, record)?;
             out.push(b'\n');
         }
+        if !self.dir.join(format!("{id}.json")).exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "design was never saved",
+            ));
+        }
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -180,6 +186,88 @@ impl Store for MemoryStore {
     }
 }
 
+/// The behavior every [`Store`] must have. Run [`contract::check`] against a
+/// new implementation, such as a database store, before the hub uses it.
+pub mod contract {
+    use finite_design::{DesignMeta, Record, Snapshot};
+
+    use super::Store;
+
+    fn snapshot(id: &str, seq: u64) -> Snapshot {
+        Snapshot {
+            meta: DesignMeta {
+                id: id.into(),
+                name: format!("Design {id}"),
+                created_at: 1,
+                updated_at: 2,
+            },
+            seq,
+            nodes: Vec::new(),
+            comments: Vec::new(),
+        }
+    }
+
+    fn rename(id: &str, name: &str) -> Record {
+        Record::Meta {
+            meta: DesignMeta {
+                name: name.into(),
+                ..snapshot(id, 0).meta
+            },
+        }
+    }
+
+    fn names(records: &[Record]) -> Vec<String> {
+        records
+            .iter()
+            .map(|r| match r {
+                Record::Meta { meta } => meta.name.clone(),
+                _ => panic!("unexpected record"),
+            })
+            .collect()
+    }
+
+    /// Panics with a description of the first rule `store` breaks. The store
+    /// must start empty.
+    pub fn check(store: &dyn Store) {
+        assert!(store.ids().unwrap().is_empty(), "a new store is empty");
+        assert!(
+            store.load("a").unwrap().is_none(),
+            "a missing design loads as None"
+        );
+        assert!(
+            store.append("a", &[rename("a", "x")]).is_err(),
+            "appending to a design that was never saved fails"
+        );
+
+        store.save(&snapshot("a", 3)).unwrap();
+        store.save(&snapshot("b", 0)).unwrap();
+        let mut ids = store.ids().unwrap();
+        ids.sort();
+        assert_eq!(ids, ["a", "b"], "ids lists every saved design");
+        let a = store.load("a").unwrap().expect("a saved design loads");
+        assert_eq!(a.snapshot.seq, 3, "load returns the saved snapshot");
+        assert!(a.journal.is_empty(), "a fresh snapshot has no journal");
+
+        store.append("a", &[rename("a", "One")]).unwrap();
+        store
+            .append("a", &[rename("a", "Two"), rename("a", "Three")])
+            .unwrap();
+        let journal = store.load("a").unwrap().unwrap().journal;
+        assert_eq!(
+            names(&journal),
+            ["One", "Two", "Three"],
+            "the journal keeps append order"
+        );
+        let b = store.load("b").unwrap().unwrap();
+        assert!(b.journal.is_empty(), "journals are per design");
+
+        store.save(&snapshot("a", 9)).unwrap();
+        let a = store.load("a").unwrap().unwrap();
+        assert_eq!(a.snapshot.seq, 9, "save replaces the snapshot");
+        assert!(a.journal.is_empty(), "save clears the journal");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,16 +296,29 @@ mod tests {
         }
     }
 
+    fn temp_dir() -> PathBuf {
+        std::env::temp_dir().join(format!("finite-store-{}", uuid::Uuid::new_v4()))
+    }
+
     #[test]
-    fn file_store_appends_and_compacts() {
-        let dir = std::env::temp_dir().join(format!("finite-store-{}", uuid::Uuid::new_v4()));
+    fn memory_store_meets_the_contract() {
+        contract::check(&MemoryStore::default());
+    }
+
+    #[test]
+    fn file_store_meets_the_contract() {
+        let dir = temp_dir();
+        contract::check(&FileStore::new(&dir).unwrap());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn file_store_ignores_a_torn_journal_line() {
+        let dir = temp_dir();
         let store = FileStore::new(&dir).unwrap();
         store.save(&snapshot()).unwrap();
-        store.append("d", &[meta("One")]).unwrap();
-        store.append("d", &[meta("Two")]).unwrap();
+        store.append("d", &[meta("One"), meta("Two")]).unwrap();
         let load = || store.load("d").unwrap().unwrap();
-        assert_eq!(store.ids().unwrap(), ["d"]);
-        assert_eq!(load().journal.len(), 2);
 
         // A torn last line, as after a crash mid-append, is ignored.
         let mut log = fs::OpenOptions::new()
@@ -226,11 +327,6 @@ mod tests {
             .unwrap();
         log.write_all(br#"{"type":"me"#).unwrap();
         assert_eq!(load().journal.len(), 2);
-
-        // Saving a snapshot clears the journal.
-        store.save(&snapshot()).unwrap();
-        assert!(load().journal.is_empty());
-        assert!(store.load("missing").unwrap().is_none());
         fs::remove_dir_all(dir).unwrap();
     }
 }

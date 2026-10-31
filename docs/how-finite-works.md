@@ -199,7 +199,7 @@ On startup, the server loads each snapshot, replays its log with `Design::replay
 - **Mid-append:** the log ends in a torn line. Loading stops at it, and the startup compaction drops it for good.
 - **Mid-compaction:** the new snapshot is written to a temporary file and renamed into place, so it's either all there or not at all. If the old log survives next to the new snapshot, replaying it changes nothing.
 
-The hub only calls four methods on the `Store` trait in `store.rs`: `ids`, `load`, `save` and `append`. A database could replace the files behind them. Undo histories aren't saved, so a restart clears them.
+The hub only calls four methods on the `Store` trait in `store.rs`: `ids`, `load`, `save` and `append`. A database could replace the files behind them. To check a new store, run `store::contract::check` on it. It's a **contract test**: the same suite of rules every store must follow, such as "the journal keeps append order" and "save clears the journal". The file store and the memory store both run it in `cargo test`. Undo histories aren't saved, so a restart clears them.
 
 ## Following one edit end to end
 
