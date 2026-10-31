@@ -356,6 +356,33 @@ try {
     thumbnailFetches >= 1 && thumbnailFetches <= 3,
     `${thumbnailFetches} fetches for 6 edits over 2.4 s`,
   );
+  // With more designs than the list starts with, a search finds the rest.
+  for (let i = 0; i < 200; i++) {
+    await fetch(`${base}/api/designs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: `Filler ${i}` }),
+    });
+  }
+  await page.goto(`${base}/`);
+  check(
+    "a long design list says how much it shows",
+    Boolean(
+      await page.until(`document.body.textContent.includes("most recently edited of 201 designs")`),
+    ),
+  );
+  const search = await rectOf(`document.querySelector('input[type="search"]')`);
+  await page.click(search.x + 10, search.y + 5);
+  await page.type("E2E");
+  check(
+    "and searching by name finds an older one",
+    Boolean(
+      await page.until(
+        `document.querySelectorAll("main li").length === 1 && document.querySelector("main li").textContent.includes("E2E")`,
+      ),
+    ),
+  );
+
   await page.send("Network.setBlockedURLs", { urls: ["*/api/designs"] });
   const newButton = await rectOf(
     `[...document.querySelectorAll("button")].find((b) => b.textContent === "New design")`,
@@ -374,7 +401,11 @@ try {
   check("the run finished", false, error.stack ?? String(error));
   if (page) await page.screenshot(path.join(os.tmpdir(), "finite-e2e-failure.png")).catch(() => {});
 } finally {
+  // SIGTERM makes the server save every open design, so let it finish
+  // before its data folder goes.
+  const exited = server.exitCode === null ? new Promise((r) => server.once("exit", r)) : null;
   server.kill();
+  await exited;
   await page?.close().catch(() => {});
   fs.rmSync(data, { recursive: true, force: true, maxRetries: 5 });
 }

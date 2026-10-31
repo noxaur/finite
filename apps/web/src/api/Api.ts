@@ -35,7 +35,8 @@ export class Api extends Context.Service<
   Api,
   {
     readonly health: Effect.Effect<Health, ApiError>;
-    readonly listDesigns: Effect.Effect<ReadonlyArray<DesignSummary>, ApiError>;
+    /** Designs whose name contains `query`, most recently edited first. */
+    searchDesigns(query: string): Effect.Effect<ReadonlyArray<DesignSummary>, ApiError>;
     createDesign(name: string): Effect.Effect<DesignSummary, ApiError>;
     getDesign(id: string): Effect.Effect<Snapshot, ApiError>;
     createComment(designId: string, comment: NewComment): Effect.Effect<Comment, ApiError>;
@@ -74,13 +75,14 @@ export class Api extends Context.Service<
           Effect.withSpan("Api.health"),
         );
 
-      const listDesigns = client
-        .get("/designs")
-        .pipe(
-          Effect.flatMap(HttpClientResponse.schemaBodyJson(Schema.Array(DesignSummary))),
-          toApiError,
-          Effect.withSpan("Api.listDesigns"),
-        );
+      const searchDesigns = (query: string) =>
+        client
+          .get(`/designs?q=${encodeURIComponent(query)}`)
+          .pipe(
+            Effect.flatMap(HttpClientResponse.schemaBodyJson(Schema.Array(DesignSummary))),
+            toApiError,
+            Effect.withSpan("Api.searchDesigns"),
+          );
 
       const createDesign = Effect.fn("Api.createDesign")(function* (name: string) {
         const request = HttpClientRequest.post("/designs").pipe(
@@ -131,7 +133,7 @@ export class Api extends Context.Service<
 
       return Api.of({
         health,
-        listDesigns,
+        searchDesigns,
         createDesign,
         getDesign,
         createComment,

@@ -102,8 +102,15 @@ pub struct Missed<'a> {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum LobbyMessage<'a> {
-    Designs { designs: &'a [DesignSummary] },
-    Design { design: &'a DesignSummary },
+    /// The most recently edited designs, at most `LOBBY_LIMIT`, and how
+    /// many there are in all. Search finds the rest (`GET /api/designs?q=`).
+    Designs {
+        designs: &'a [DesignSummary],
+        total: usize,
+    },
+    Design {
+        design: &'a DesignSummary,
+    },
 }
 
 /// A serialized message. `seq` is set for changes, so a subscriber can drop

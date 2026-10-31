@@ -491,6 +491,7 @@
   "lobby": [
     {
       "designs": [],
+      "total": 0,
       "type": "designs"
     },
     {

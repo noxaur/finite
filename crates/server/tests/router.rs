@@ -119,6 +119,26 @@ async fn the_router_makes_two_servers_look_like_one() {
         assert_eq!(first_text(&url).await["type"], "resume");
     }
 
+    // A search reaches every server, and the merged list keeps its limit.
+    let found: Vec<Value> = http
+        .get(format!("{front}/api/designs?q=design%203"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1, "{found:?}");
+    let two: Vec<Value> = http
+        .get(format!("{front}/api/designs?limit=2"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(two.len(), 2);
+
     // The design list's WebSocket starts with every server's designs, then
     // relays new ones from whichever server creates them.
     let ws = format!("{front}/api/designs/ws").replacen("http://", "ws://", 1);
@@ -129,6 +149,7 @@ async fn the_router_makes_two_servers_look_like_one() {
     };
     let first = next().await;
     assert_eq!(first["type"], "designs");
+    assert_eq!(first["total"], 6, "the total adds up every server's");
     assert_eq!(first["designs"].as_array().unwrap().len(), 6);
     for name in ["Seventh", "Eighth"] {
         http.post(format!("{front}/api/designs"))

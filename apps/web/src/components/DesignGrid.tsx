@@ -1,6 +1,7 @@
 "use client";
 
 import * as stylex from "@stylexjs/stylex";
+import { Exit } from "effect";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -13,13 +14,24 @@ import { runtime } from "@/runtime";
 import { colors, radii, space } from "@/styles/tokens.stylex";
 import { Thumbnail } from "./Thumbnail";
 
-/** Every design, newest edit first, updated live as agents create and edit them. */
+/** How long the search waits after the last keystroke. */
+const SEARCH_DELAY_MS = 250;
+
+/**
+ * The most recently edited designs, newest first, updated live as agents
+ * create and edit them. The socket starts with at most 200; with more, a
+ * search box finds the rest by name.
+ */
 export function DesignGrid() {
   const router = useRouter();
   const [designs, setDesigns] = useState<ReadonlyArray<DesignSummary> | null>(null);
   const [creating, setCreating] = useState(false);
   const [createFailed, setCreateFailed] = useState(false);
   const [status, setStatus] = useState<SocketStatus>("connecting");
+  /** How many designs there are in all, from the socket's first message. */
+  const [total, setTotal] = useState(0);
+  const [query, setQuery] = useState("");
+  const [found, setFound] = useState<ReadonlyArray<DesignSummary> | null>(null);
   const [mcp, setMcp] = useState("");
 
   useEffect(() => setMcp(mcpUrl()), []);
@@ -31,6 +43,7 @@ export function DesignGrid() {
         onMessage: (message) => {
           if (message.type === "designs") {
             setDesigns(message.designs);
+            setTotal(message.total);
             return;
           }
           setDesigns((current) => [
@@ -42,7 +55,31 @@ export function DesignGrid() {
     [],
   );
 
-  const sorted = [...(designs ?? [])].sort((a, b) => b.updatedAt - a.updatedAt);
+  useEffect(() => {
+    const search = query.trim();
+    if (!search) {
+      setFound(null);
+      return;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      void runtime
+        .runPromiseExit(
+          Api.use((api) => api.searchDesigns(search)),
+          { signal: controller.signal },
+        )
+        .then((exit) => {
+          if (Exit.isSuccess(exit)) setFound(exit.value);
+        });
+    }, SEARCH_DELAY_MS);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [query]);
+
+  const sorted = [...(found ?? designs ?? [])].sort((a, b) => b.updatedAt - a.updatedAt);
+  const more = designs !== null && total > designs.length;
 
   const create = () => {
     setCreating(true);
@@ -75,7 +112,29 @@ export function DesignGrid() {
         <p {...stylex.props(styles.muted)}>Can’t reach the Finite server. Retrying…</p>
       )}
 
-      {designs !== null && sorted.length === 0 && (
+      {(more || query) && (
+        <div {...stylex.props(styles.search)}>
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search designs by name"
+            aria-label="Search designs by name"
+            {...stylex.props(styles.searchInput)}
+          />
+          {!query && (
+            <p {...stylex.props(styles.muted)}>
+              Showing the {designs?.length} most recently edited of {total} designs.
+            </p>
+          )}
+        </div>
+      )}
+
+      {query && found !== null && found.length === 0 && (
+        <p {...stylex.props(styles.muted)}>No designs match “{query.trim()}”.</p>
+      )}
+
+      {!query && designs !== null && sorted.length === 0 && (
         <p {...stylex.props(styles.muted)}>No designs yet. Create one, or ask an agent to.</p>
       )}
 
@@ -135,6 +194,20 @@ const styles = stylex.create({
     fontSize: 14,
     cursor: "pointer",
     opacity: { default: 1, ":hover": 0.85, ":disabled": 0.5 },
+  },
+  search: { display: "flex", flexDirection: "column", gap: space.xs, marginBottom: space.md },
+  searchInput: {
+    maxWidth: 360,
+    padding: space.xs,
+    paddingInline: space.sm,
+    borderWidth: 1,
+    borderStyle: "solid",
+    borderColor: colors.border,
+    borderRadius: radii.sm,
+    backgroundColor: colors.surface,
+    color: "inherit",
+    font: "inherit",
+    fontSize: 14,
   },
   grid: {
     display: "grid",

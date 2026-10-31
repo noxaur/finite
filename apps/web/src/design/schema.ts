@@ -156,7 +156,12 @@ export type DesignMessage = typeof DesignMessage.Type;
 
 /** Sent on `/api/designs/ws`. */
 export const LobbyMessage = Schema.Union([
-  Schema.Struct({ type: Schema.Literal("designs"), designs: Schema.Array(DesignSummary) }),
+  /** The most recently edited designs, and how many there are in all. */
+  Schema.Struct({
+    type: Schema.Literal("designs"),
+    designs: Schema.Array(DesignSummary),
+    total: Schema.Number,
+  }),
   Schema.Struct({ type: Schema.Literal("design"), design: DesignSummary }),
 ]);
 export type LobbyMessage = typeof LobbyMessage.Type;

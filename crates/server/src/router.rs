@@ -41,7 +41,7 @@ use tower_http::{
 
 use rmcp::transport::streamable_http_server::session::store::SessionStore;
 
-use crate::cluster::Cluster;
+use crate::{cluster::Cluster, hub::LOBBY_LIMIT};
 
 /// Bodies larger than this aren't forwarded.
 const MAX_BODY: usize = 8 << 20;
@@ -206,12 +206,20 @@ async fn create(State(front): State<Arc<Front>>, headers: HeaderMap, body: Bytes
     unreachable!("the last server's answer is passed on")
 }
 
-/// Every server's designs, most recently edited first. Servers that don't
-/// answer are left out rather than failing the whole list.
-async fn list(State(front): State<Arc<Front>>) -> Response {
+/// Every server's designs, most recently edited first. Each server applies
+/// `q` and `limit`, so the merged list is cut to the limit again. Servers that
+/// don't answer are left out rather than failing the whole list.
+async fn list(State(front): State<Arc<Front>>, RawQuery(query): RawQuery) -> Response {
+    let limit = query
+        .as_deref()
+        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("limit=")))
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or(LOBBY_LIMIT)
+        .clamp(1, 1000);
+    let query = query.map(|q| format!("?{q}")).unwrap_or_default();
     let requests = front.cluster.nodes().iter().map(|base| {
         let http = front.http.clone();
-        let url = format!("{base}/api/designs");
+        let url = format!("{base}/api/designs{query}");
         async move { http.get(&url).send().await?.json::<Vec<Value>>().await }
     });
     let mut designs = Vec::new();
@@ -227,6 +235,7 @@ async fn list(State(front): State<Arc<Front>>) -> Response {
         }
     }
     sort_newest_first(&mut designs);
+    designs.truncate(limit);
     Json(designs).into_response()
 }
 
@@ -341,16 +350,19 @@ async fn relay_lobby(mut client: WebSocket, upstreams: Vec<Upstream>, mut comple
     // Every server starts with its full list; merge those into one.
     let mut streams: SelectAll<_> = SelectAll::new();
     let mut designs = Vec::new();
+    let mut total = 0;
     for mut upstream in upstreams {
         let Some(first) = text(upstream.next().await) else {
             complete = false;
             continue;
         };
         designs.extend(first["designs"].as_array().cloned().unwrap_or_default());
+        total += first["total"].as_u64().unwrap_or(0);
         streams.push(upstream);
     }
     sort_newest_first(&mut designs);
-    let first = json!({ "type": "designs", "designs": designs }).to_string();
+    designs.truncate(LOBBY_LIMIT);
+    let first = json!({ "type": "designs", "designs": designs, "total": total }).to_string();
     if client.send(ws::Message::text(first)).await.is_err() {
         return;
     }

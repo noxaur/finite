@@ -19,7 +19,7 @@ use finite_design::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::{self, error::RecvError};
 
-use crate::hub::{AdoptError, DesignHandle, DesignSummary, Hub, Outgoing, Since};
+use crate::hub::{AdoptError, DesignHandle, DesignSummary, Hub, LOBBY_LIMIT, Outgoing, Since};
 
 pub fn routes() -> Router<Arc<Hub>> {
     Router::new()
@@ -37,8 +37,21 @@ pub fn routes() -> Router<Arc<Hub>> {
         )
 }
 
-async fn list_designs(State(hub): State<Arc<Hub>>) -> Json<Vec<DesignSummary>> {
-    Json(hub.list())
+/// `?q=…&limit=…` on the design list: a name to search for, and how many.
+#[derive(Deserialize)]
+struct ListQuery {
+    q: Option<String>,
+    limit: Option<usize>,
+}
+
+/// The most recently edited designs, at most `limit` (200 by default, 1,000
+/// at most), whose name contains `q` if it's given.
+async fn list_designs(
+    State(hub): State<Arc<Hub>>,
+    Query(query): Query<ListQuery>,
+) -> Json<Vec<DesignSummary>> {
+    let limit = query.limit.unwrap_or(LOBBY_LIMIT).clamp(1, 1000);
+    Json(hub.find(query.q.as_deref(), limit))
 }
 
 #[derive(Deserialize)]

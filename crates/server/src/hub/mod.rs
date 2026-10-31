@@ -41,6 +41,9 @@ const RETRY_MAX: Duration = Duration::from_secs(60);
 const COMPACT_AFTER: usize = 1000;
 /// How long an unused design stays in memory before it's unloaded.
 const UNLOAD_AFTER: Duration = Duration::from_secs(5 * 60);
+/// How many designs the design list's socket starts with. With more, the
+/// page offers a search.
+pub const LOBBY_LIMIT: usize = 200;
 /// How many messages a slow viewer can fall behind before it gets a fresh snapshot.
 const EVENT_BUFFER: usize = 1024;
 /// How many recent changes a design keeps for viewers that reconnect...
@@ -257,13 +260,30 @@ impl Hub {
         summary
     }
 
+    /// The design list's socket: the newest `LOBBY_LIMIT` designs and the
+    /// total, then each design's updates.
     pub fn subscribe_lobby(&self) -> (Outgoing, broadcast::Receiver<Outgoing>) {
         let rx = self.lobby.subscribe();
-        let designs = self.list();
-        (
-            Outgoing::new(None, &LobbyMessage::Designs { designs: &designs }),
-            rx,
-        )
+        let mut designs = self.list();
+        let total = designs.len();
+        designs.truncate(LOBBY_LIMIT);
+        let message = LobbyMessage::Designs {
+            designs: &designs,
+            total,
+        };
+        (Outgoing::new(None, &message), rx)
+    }
+
+    /// Designs whose name contains `query` (ignoring case), newest first, at
+    /// most `limit` of them. The design list's search and `list_designs` use it.
+    pub fn find(&self, query: Option<&str>, limit: usize) -> Vec<DesignSummary> {
+        let query = query.map(str::to_lowercase);
+        let mut designs = self.list();
+        if let Some(query) = query.filter(|q| !q.is_empty()) {
+            designs.retain(|d| d.meta.name.to_lowercase().contains(&query));
+        }
+        designs.truncate(limit);
+        designs
     }
 
     /// Takes over a design another server handed off, after the cluster
@@ -514,6 +534,27 @@ mod tests {
         handle.set_presence(&agent, Vec::new(), Some(long));
         let status = handle.presence()[0].status.clone().unwrap();
         assert_eq!(status.len(), finite_design::label::STATUS);
+    }
+
+    /// The design list's socket starts with the newest designs and the
+    /// total; a search finds the others by name.
+    #[tokio::test]
+    async fn the_design_list_starts_with_the_newest_and_searches_the_rest() {
+        let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
+        for i in 0..LOBBY_LIMIT + 5 {
+            hub.create(&format!("Design {i}"));
+        }
+        hub.create("Checkout flow");
+        let (first, _) = hub.subscribe_lobby();
+        let first: serde_json::Value = serde_json::from_str(&first.json).unwrap();
+        assert_eq!(first["designs"].as_array().unwrap().len(), LOBBY_LIMIT);
+        assert_eq!(first["total"], LOBBY_LIMIT + 6);
+
+        let found = hub.find(Some("CHECKOUT"), 10);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].meta.name, "Checkout flow");
+        assert_eq!(hub.find(None, 3).len(), 3);
+        assert_eq!(hub.find(Some(""), 1000).len(), LOBBY_LIMIT + 6);
     }
 
     #[tokio::test]

@@ -208,9 +208,9 @@ Every viewer shows the names and notes agents write, so they're cut to a fixed l
 
 | Route                                                    | What it's for                                       |
 | -------------------------------------------------------- | --------------------------------------------------- |
-| `GET /api/designs`, `POST /api/designs`                  | List designs, create an empty one                   |
+| `GET /api/designs?q=…&limit=…`, `POST /api/designs`      | Search designs by name, create an empty one         |
 | `GET /api/designs/{id}`                                  | One snapshot (used by thumbnails)                   |
-| `GET /api/designs/ws`                                    | WebSocket: the design list, then updates            |
+| `GET /api/designs/ws`                                    | WebSocket: the 200 newest designs, then updates     |
 | `GET /api/designs/{id}/ws`                               | WebSocket: one design's snapshot, then every change |
 | `GET /api/designs/{id}/ws?epoch=…&since=…`               | The same socket, resuming after a reconnect         |
 | `POST …/comments`, `…/replies`, `PATCH …/comments/{cid}` | Comment, reply, resolve                             |
@@ -264,7 +264,7 @@ The browser side lives in `apps/web/src/design`. It's plain TypeScript classes, 
 
 `components/DesignCanvas.tsx` wires these together and adds what's specific to the page: the comment tool, hover outlines, the zoom controls and keyboard shortcuts.
 
-The design list page (`DesignGrid.tsx`) uses the lobby socket, and each card's `Thumbnail` renders a static copy of the design with scripts off. A thumbnail refetches after an agent's edit, once the edits pause for 300 ms, and at most every 2 seconds while they keep coming. In the end-to-end test, six edits 400 ms apart cause two fetches instead of six. Until the first list arrives, a dropped socket shows "Can't reach the Finite server. Retrying…", and a design that can't be created says so instead of silently re-enabling the button.
+The design list page (`DesignGrid.tsx`) uses the lobby socket. It starts with the 200 most recently edited designs and the total, because every design at about 200 bytes each would be 20 MB for 100,000 of them. When there are more, the page says how many it shows and offers a search box, which calls `GET /api/designs?q=`. Through the router, both the search and the lobby's total cover every server. Each card's `Thumbnail` renders a static copy of the design with scripts off. A thumbnail refetches after an agent's edit, once the edits pause for 300 ms, and at most every 2 seconds while they keep coming. In the end-to-end test, six edits 400 ms apart cause two fetches instead of six. Until the first list arrives, a dropped socket shows "Can't reach the Finite server. Retrying…", and a design that can't be created says so instead of silently re-enabling the button.
 
 ### Reconnecting without starting over
 
