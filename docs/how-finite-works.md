@@ -281,6 +281,9 @@ You can't edit a design yourself, but you can pin comments, and agents act on th
 Here's what happened in the demo you saw:
 
 1. In comment mode, the canvas asks `Renderer.hitTest` what's under the pointer. It finds the deepest element with `elementFromPoint` inside the artboard's shadow root, and outlines it.
+
+   An artboard with a script is a sandboxed iframe, and the page can't look inside it. So the renderer asks instead. The iframe's document tags every element with its node id (`data-finite-id`), and the small runtime inside answers two questions by `postMessage`: what's at this point, and where is this node. Answers arrive a moment later, so `hitTest` returns the latest one and the renderer's `onLayout` callback tells the canvas to look again. The artboard's own scripts can post messages too, so the renderer only accepts ids of nodes in that same artboard.
+
 2. A click posts the comment over REST. It sends the artboard id, the node id, and the click's offset from the artboard's corner, so the pin moves with the artboard.
 3. The agent sees `openComments: 1` in `get_basic_info`, reads the thread with `get_comments`, edits, and answers with `reply_to_comment`.
 4. `Design` keeps a **change log**: the last 512 changes, each with its actor, the artboards it touched, and the elements it changed. Every commit, undo and redo goes through one function (`Design::finish`) that writes to the log, so no path can skip it. When an agent replies, `Design::reply` attaches that agent's changes to the comment's artboard since the thread's previous message. Those become the "Show what changed" buttons.

@@ -57,7 +57,9 @@ describe("exportHtml", () => {
     const page = artboardDocument(r, "a");
     expect(page).toContain("Content-Security-Policy");
     expect(page).toContain("default-src 'none'");
-    expect(page).toMatch(/<body><div><\/div><\/body>/);
+    // Each element carries its node id, so comments can point inside the sandbox.
+    expect(page).toMatch(/<body><div data-finite-id="a"><\/div><\/body>/);
+    expect(exportHtml(r, "a")).toBe("<div></div>");
   });
 });
 

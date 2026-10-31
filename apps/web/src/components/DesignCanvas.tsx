@@ -36,6 +36,8 @@ export function DesignCanvas({ id }: { id: string }) {
   const framesRef = useRef<HTMLDivElement>(null);
   const pressRef = useRef<{ x: number; y: number } | null>(null);
   const hoverFrame = useRef(0);
+  const pointerRef = useRef<{ x: number; y: number } | null>(null);
+  const refreshHover = useRef(() => {});
   const cameraRef = useRef<Camera | null>(null);
   const rendererRef = useRef<Renderer | null>(null);
   const sessionRef = useRef<DesignSession | null>(null);
@@ -67,6 +69,11 @@ export function DesignCanvas({ id }: { id: string }) {
     const renderer = new Renderer(frames, replica, {
       live: true,
       onWheel: (event) => camera.wheel(event),
+      // A sandboxed artboard answered: redo the hover test and redraw outlines.
+      onLayout: () => {
+        refreshHover.current();
+        setTick((t) => t + 1);
+      },
     });
     const session = new DesignSession(renderer, replica);
     sessionRef.current = session;
@@ -156,16 +163,24 @@ export function DesignCanvas({ id }: { id: string }) {
     return () => clearTimeout(timer);
   }, [flash]);
 
+  const hoverAt = (clientX: number, clientY: number) => {
+    const hit = rendererRef.current?.hitTest(clientX, clientY) ?? null;
+    setHover((prev) =>
+      prev?.nodeId === hit?.nodeId && prev?.artboardId === hit?.artboardId ? prev : hit,
+    );
+  };
+  // Read by the renderer's onLayout callback, which outlives this render.
+  refreshHover.current = () => {
+    const pointer = pointerRef.current;
+    if (mode === "comment" && !draft && pointer) hoverAt(pointer.x, pointer.y);
+  };
+
   const onCanvasPointerMove = (e: React.PointerEvent) => {
     if (mode !== "comment" || draft) return;
     const { clientX, clientY } = e;
+    pointerRef.current = { x: clientX, y: clientY };
     cancelAnimationFrame(hoverFrame.current);
-    hoverFrame.current = requestAnimationFrame(() => {
-      const hit = rendererRef.current?.hitTest(clientX, clientY) ?? null;
-      setHover((prev) =>
-        prev?.nodeId === hit?.nodeId && prev?.artboardId === hit?.artboardId ? prev : hit,
-      );
-    });
+    hoverFrame.current = requestAnimationFrame(() => hoverAt(clientX, clientY));
   };
 
   const onCanvasClick = (e: React.MouseEvent) => {

@@ -34,6 +34,24 @@ const RUNTIME = `(() => {
     const root = document.body.firstElementChild;
     if (root) new ResizeObserver(report).observe(root);
   });
+  // The canvas asks what's under a point, or where a node is, for comments.
+  // Elements carry their node id in data-finite-id.
+  const place = (el) => {
+    const r = el.getBoundingClientRect();
+    return { x: r.left, y: r.top, width: r.width, height: r.height };
+  };
+  addEventListener("message", (e) => {
+    const m = e.source === parent && e.data && e.data.finite;
+    if (!m) return;
+    if (m.type === "hit") {
+      let el = document.elementFromPoint(m.x, m.y);
+      while (el && !el.getAttribute("data-finite-id")) el = el.parentElement;
+      post({ type: "hit", x: m.x, y: m.y, id: el ? el.getAttribute("data-finite-id") : null, rect: el ? place(el) : null });
+    } else if (m.type === "rect" && typeof m.id === "string") {
+      const el = document.querySelector('[data-finite-id="' + CSS.escape(m.id) + '"]');
+      post({ type: "rect", id: m.id, rect: el ? place(el) : null });
+    }
+  });
   addEventListener("wheel", (e) => {
     e.preventDefault();
     post({ type: "wheel", deltaX: e.deltaX, deltaY: e.deltaY, deltaMode: e.deltaMode,
@@ -49,16 +67,20 @@ const escapeAttr = (s: string) => escapeText(s).replace(/"/g, "&quot;");
 const rawText = (code: string, tag: string) =>
   code.replace(new RegExp(`</(?=${tag})`, "gi"), "<\\/");
 
-/** The subtree at `id` as HTML, like the server's `html::export`. */
-export function exportHtml(replica: Replica, id: string): string {
+/**
+ * The subtree at `id` as HTML, like the server's `html::export`. With `ids`,
+ * each element carries its node id in `data-finite-id`.
+ */
+export function exportHtml(replica: Replica, id: string, ids = false): string {
   const node = replica.get(id);
-  return node ? write(replica, node) : "";
+  return node ? write(replica, node, ids) : "";
 }
 
-function write(replica: Replica, node: Node): string {
+function write(replica: Replica, node: Node, ids: boolean): string {
   if (node.type === "text") return escapeText(node.text ?? "");
   const tag = node.tag ?? "div";
   let out = `<${tag}`;
+  if (ids) out += ` data-finite-id="${escapeAttr(node.id)}"`;
   for (const [name, value] of Object.entries(node.attrs)) out += ` ${name}="${escapeAttr(value)}"`;
   const style = Object.entries(node.styles)
     .map(([k, v]) => `${k}: ${v}`)
@@ -69,13 +91,13 @@ function write(replica: Replica, node: Node): string {
   const lower = tag.toLowerCase();
   const inner = RAW_TEXT_TAGS.has(lower)
     ? rawText(children.map((c) => c.text ?? "").join(""), lower)
-    : children.map((c) => write(replica, c)).join("");
+    : children.map((c) => write(replica, c, ids)).join("");
   return `${out}>${inner}</${tag}>`;
 }
 
 /** A standalone page that shows one artboard, for a sandboxed iframe's `srcdoc`. */
 export function artboardDocument(replica: Replica, id: string): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${CSP}"><style>${BASE_CSS} html, body { margin: 0; }</style><script>${RUNTIME}</script></head><body>${exportHtml(replica, id)}</body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${CSP}"><style>${BASE_CSS} html, body { margin: 0; }</style><script>${RUNTIME}</script></head><body>${exportHtml(replica, id, true)}</body></html>`;
 }
 
 /** An element's `width` and `height` styles, when they're plain pixels. */

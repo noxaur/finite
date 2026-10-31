@@ -60,7 +60,17 @@ interface Frame {
   /** Set for artboards with scripts, rendered in a sandboxed iframe. */
   readonly iframe: HTMLIFrameElement | null;
   reload?: ReturnType<typeof setTimeout>;
+  /** The iframe's latest answer to "what's under this point?", in its own coordinates. */
+  hit?: { readonly x: number; readonly y: number; readonly id: string | null };
+  /** The point last asked about, so the same question isn't sent twice. */
+  asked?: { readonly x: number; readonly y: number };
+  /** Where the iframe last said its nodes are, in its own coordinates. */
+  readonly rects: Map<string, { readonly rect: Bounds; readonly at: number }>;
+  readonly pendingRects: Set<string>;
 }
+
+/** How long a sandboxed node's reported position is trusted before it's asked again. */
+const RECT_TTL_MS = 250;
 
 export interface Bounds {
   readonly x: number;
@@ -84,7 +94,7 @@ export interface ForwardedWheel {
 /** The artboard, and the deepest element in it, under a point. */
 export interface Hit {
   readonly artboardId: string;
-  /** The artboard itself for sandboxed artboards, whose content can't be inspected. */
+  /** For a sandboxed artboard, the artboard itself until its iframe answers. */
   readonly nodeId: string;
 }
 
@@ -93,6 +103,11 @@ export interface RendererOptions {
   readonly live?: boolean;
   /** Receives wheel events from sandboxed artboards, so the canvas can pan over them. */
   readonly onWheel?: (event: ForwardedWheel) => void;
+  /**
+   * Called when a sandboxed artboard answers a `hitTest` or `nodeRect`
+   * question, which arrives a moment later. Call them again to read the answer.
+   */
+  readonly onLayout?: () => void;
 }
 
 /**
@@ -198,6 +213,8 @@ export class Renderer {
       ) {
         continue;
       }
+      if (frame.iframe)
+        return { artboardId, nodeId: this.askHit(frame, clientX, clientY) ?? artboardId };
       let el = frame.shadow?.elementFromPoint(clientX, clientY) ?? null;
       while (el && !this.ids.has(el)) el = el.parentElement;
       return { artboardId, nodeId: (el && this.ids.get(el)) ?? artboardId };
@@ -205,7 +222,26 @@ export class Renderer {
     return null;
   }
 
-  /** Where a node is drawn, in page coordinates. Nodes in sandboxed artboards report the artboard. */
+  /**
+   * Asks a sandboxed artboard what's under a page point. The answer arrives
+   * by message, so this returns the latest one for that point, if any.
+   */
+  private askHit(frame: Frame, clientX: number, clientY: number): string | null {
+    const iframe = frame.iframe!;
+    const { left, top, scale } = iframeBox(iframe);
+    const x = Math.round((clientX - left) / scale);
+    const y = Math.round((clientY - top) / scale);
+    if (frame.asked?.x !== x || frame.asked?.y !== y) {
+      frame.asked = { x, y };
+      iframe.contentWindow?.postMessage({ finite: { type: "hit", x, y } }, "*");
+    }
+    return frame.hit?.x === x && frame.hit.y === y ? frame.hit.id : (frame.hit?.id ?? null);
+  }
+
+  /**
+   * Where a node is drawn, in page coordinates. For a node in a sandboxed
+   * artboard, this is the artboard until the iframe reports the node's position.
+   */
   nodeRect(id: string): DOMRect | null {
     const el = this.elements.get(id);
     if (el?.isConnected) {
@@ -216,7 +252,25 @@ export class Renderer {
     }
     const board = this.replica.artboardOf(id);
     const frame = board && this.frames.get(board.id);
-    return frame ? frame.content.getBoundingClientRect() : null;
+    if (!frame) return null;
+    if (frame.iframe && id !== board.id) {
+      const known = frame.rects.get(id);
+      if ((!known || performance.now() - known.at > RECT_TTL_MS) && !frame.pendingRects.has(id)) {
+        frame.pendingRects.add(id);
+        frame.iframe.contentWindow?.postMessage({ finite: { type: "rect", id } }, "*");
+      }
+      if (known) {
+        const { left, top, scale } = iframeBox(frame.iframe);
+        const r = known.rect;
+        return new DOMRect(
+          left + r.x * scale,
+          top + r.y * scale,
+          r.width * scale,
+          r.height * scale,
+        );
+      }
+    }
+    return frame.content.getBoundingClientRect();
   }
 
   /** In comment mode, clicks over sandboxed artboards go to the canvas instead of the artboard. */
@@ -405,7 +459,17 @@ export class Renderer {
       iframe.style.height = `${size.height ?? 900}px`;
       iframe.srcdoc = artboardDocument(this.replica, node.id);
       content.append(iframe);
-      return { root, label, badge, content, shadow: null, commentStyle: null, iframe };
+      return {
+        root,
+        label,
+        badge,
+        content,
+        shadow: null,
+        commentStyle: null,
+        iframe,
+        rects: new Map(),
+        pendingRects: new Set(),
+      };
     }
 
     const host = document.createElement("div");
@@ -416,7 +480,17 @@ export class Renderer {
     const commentStyle = document.createElement("style");
     shadow.append(base, commentStyle);
     content.append(host);
-    return { root, label, badge, content, shadow, commentStyle, iframe: null };
+    return {
+      root,
+      label,
+      badge,
+      content,
+      shadow,
+      commentStyle,
+      iframe: null,
+      rects: new Map(),
+      pendingRects: new Set(),
+    };
   }
 
   private scheduleReload(id: string, frame: Frame) {
@@ -424,22 +498,66 @@ export class Renderer {
     frame.reload = setTimeout(() => {
       if (this.frames.get(id) === frame && frame.iframe) {
         frame.iframe.srcdoc = artboardDocument(this.replica, id);
+        // A new document: earlier answers about its layout no longer hold.
+        delete frame.hit;
+        delete frame.asked;
+        frame.rects.clear();
+        frame.pendingRects.clear();
       }
     }, RELOAD_DELAY_MS);
   }
 
   /** Handles messages from the runtime in sandboxed artboards (see `./html`). */
   private onMessage(event: MessageEvent) {
-    let iframe: HTMLIFrameElement | null = null;
-    for (const frame of this.frames.values()) {
-      if (frame.iframe && frame.iframe.contentWindow === event.source) iframe = frame.iframe;
+    let found: [string, Frame] | undefined;
+    for (const entry of this.frames) {
+      if (entry[1].iframe && entry[1].iframe.contentWindow === event.source) found = entry;
     }
     const message: unknown = (event.data as { finite?: unknown } | null)?.finite;
-    if (!iframe || typeof message !== "object" || message === null) return;
+    if (!found || typeof message !== "object" || message === null) return;
+    const [boardId, frame] = found;
+    const iframe = frame.iframe!;
     const m = message as Record<string, unknown>;
     const num = (key: string) =>
       typeof m[key] === "number" && Number.isFinite(m[key]) ? (m[key] as number) : 0;
-    if (m.type === "size") {
+    // The artboard's own scripts can post too, so only trust ids of nodes in this artboard.
+    const nodeInBoard = (value: unknown) =>
+      typeof value === "string" && this.replica.artboardOf(value)?.id === boardId ? value : null;
+    const bounds = (value: unknown): Bounds | null => {
+      const r = value as Record<string, unknown> | null;
+      const ok = (k: string) => typeof r?.[k] === "number" && Number.isFinite(r[k]);
+      return r && ok("x") && ok("y") && ok("width") && ok("height")
+        ? {
+            x: r.x as number,
+            y: r.y as number,
+            width: r.width as number,
+            height: r.height as number,
+          }
+        : null;
+    };
+    if (m.type === "hit") {
+      const id = nodeInBoard(m.id);
+      const rect = bounds(m.rect);
+      if (id && rect) frame.rects.set(id, { rect, at: performance.now() });
+      const changed = frame.hit?.id !== id;
+      frame.hit = { x: num("x"), y: num("y"), id };
+      if (changed) this.options.onLayout?.();
+    } else if (m.type === "rect") {
+      const id = nodeInBoard(m.id);
+      if (!id) return;
+      frame.pendingRects.delete(id);
+      const rect = bounds(m.rect);
+      if (!rect) return;
+      const before = frame.rects.get(id)?.rect;
+      frame.rects.set(id, { rect, at: performance.now() });
+      const moved =
+        !before ||
+        before.x !== rect.x ||
+        before.y !== rect.y ||
+        before.width !== rect.width ||
+        before.height !== rect.height;
+      if (moved) this.options.onLayout?.();
+    } else if (m.type === "size") {
       const fit = (n: number) => `${Math.min(MAX_SIDE, Math.max(1, n))}px`;
       iframe.style.width = fit(num("width"));
       iframe.style.height = fit(num("height"));
@@ -459,6 +577,13 @@ export class Renderer {
       });
     }
   }
+}
+
+/** Where an iframe's content sits on the page, and how much the canvas zoom scales it. */
+function iframeBox(iframe: HTMLIFrameElement) {
+  const rect = iframe.getBoundingClientRect();
+  const scale = iframe.offsetWidth > 0 ? rect.width / iframe.offsetWidth : 1;
+  return { left: rect.left, top: rect.top, scale };
 }
 
 function labelOf(node: Node) {

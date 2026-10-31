@@ -30,7 +30,7 @@ Thumbnails never run scripts. Screenshots run them under the same content policy
 
 The pill at the bottom of the canvas switches between the pointer tool (`V`) and the comment tool (`C`). In comment mode, you see an outline around the element under the cursor, and a click pins a comment to it. The left button no longer drags the canvas in comment mode; the wheel and the middle button still pan.
 
-A comment stores its artboard, the element you clicked, and the pin's offset from the artboard's corner, so the pin follows the artboard when an agent moves it. Inside a sandboxed artboard, the iframe can't be inspected, so the comment points at the artboard itself.
+A comment stores its artboard, the element you clicked, and the pin's offset from the artboard's corner, so the pin follows the artboard when an agent moves it. This works inside sandboxed (script) artboards too: the canvas asks the iframe which element is under the pointer.
 
 Agents read comments with `get_comments` and answer with `reply_to_comment`, usually with `resolve: true`. `get_basic_info` counts open comments, and the MCP instructions tell agents to check them. When an agent replies, the server links that agent's changes to the comment's artboard since the thread's previous message. The thread shows them as buttons, and clicking one outlines the elements it changed. A reply from you reopens a resolved comment, so you can keep steering in the same thread. An agent can also call `wait_for_comments`, which returns as soon as a comment or reply is waiting for it, so you can leave feedback for an agent that's already running.
 
