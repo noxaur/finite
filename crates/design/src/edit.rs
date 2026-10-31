@@ -814,6 +814,48 @@ mod tests {
     }
 
     #[test]
+    fn many_siblings_duplicate_at_once() {
+        let mut doc = Document::default();
+        let board = board(&mut doc);
+        let (ops, cards) = write_html(
+            &doc,
+            &board,
+            &"<div><p>Card</p></div>".repeat(10_000),
+            WriteMode::Append,
+            None,
+            &mut ids(),
+        )
+        .unwrap();
+        doc.apply_all(&ops);
+        let mut n = 0;
+        let mut copy_id = || {
+            n += 1;
+            format!("copy{n}")
+        };
+        let started = std::time::Instant::now();
+        let (ops, copies) = duplicate(&doc, &cards, &mut copy_id).unwrap();
+        let took = started.elapsed();
+        doc.apply_all(&ops);
+        assert_eq!(copies.len(), 10_000);
+        // Each copy sits right after its original.
+        let order: Vec<String> = doc
+            .children(Some(&board))
+            .iter()
+            .map(|n| n.id.clone())
+            .collect();
+        assert_eq!(
+            order[..4],
+            [
+                cards[0].clone(),
+                copies[0].clone(),
+                cards[1].clone(),
+                copies[1].clone()
+            ]
+        );
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    }
+
+    #[test]
     fn artboard_styles_are_normalized() {
         let mut doc = Document::default();
         let id = board(&mut doc);

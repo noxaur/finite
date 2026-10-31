@@ -210,11 +210,18 @@ impl Document {
     }
 
     /// The sibling index right after `id`, before its next sibling.
+    /// A range lookup in the child index, so duplicating many siblings
+    /// doesn't scan the sibling list once per node.
     pub fn index_after(&self, id: &str) -> Option<String> {
+        use std::ops::Bound::{Excluded, Unbounded};
         let node = self.nodes.get(id)?;
-        let siblings = self.children(node.parent.as_deref());
-        let pos = siblings.iter().position(|n| n.id == id)?;
-        let next = siblings.get(pos + 1).map(|n| n.index.as_str());
+        let me = (node.index.clone(), node.id.clone());
+        let next = self
+            .child_index
+            .get(&node.parent)?
+            .range((Excluded(me), Unbounded))
+            .next()
+            .map(|(index, _)| index.as_str());
         Some(crate::fractional::key_between(Some(&node.index), next))
     }
 
