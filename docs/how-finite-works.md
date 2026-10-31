@@ -25,7 +25,7 @@ How far you read depends on what you want:
         ▼                                          │
  ┌─────────────── finite-server (Rust, axum) ──────┴──────────┐
  │  mcp/     tool → edit command → ops                        │
- │  hub.rs   lock the design, commit, broadcast, save later   │
+ │  hub/     lock the design, commit, broadcast, save later   │
  │  api.rs   REST + WebSockets for the web app                │
  │  store.rs snapshot + append-only journal per design        │
  └────────────────────────────────────────────────────────────┘
@@ -148,7 +148,13 @@ Some of the work these commands do:
 
 ### The hub
 
-`crates/server/src/hub.rs` holds a `DesignHandle` for every design. Each handle has:
+The hub lives in `crates/server/src/hub/`, in three files:
+
+- `mod.rs` has `Hub`, the registry of designs. It finds, creates, loads, unloads, saves and hands off designs.
+- `design.rs` has `DesignHandle`, one design and every way to change it.
+- `messages.rs` has what goes out on the WebSockets: `Actor`, `Presence`, `DesignSummary` and the message types.
+
+The hub holds a `DesignHandle` for every design. Each handle has:
 
 - a **mutex** around the design's state, so edits to one design run one at a time and edits to different designs never wait on each other;
 - a **broadcast channel**, which fans each change out to every open WebSocket;
@@ -298,7 +304,7 @@ An agent doesn't have to check for comments on a timer. `wait_for_comments` is a
 
 If an agent deletes an artboard that has comments, the pins don't vanish. Before the change applies, `Design` notes where the artboard is. Afterwards, every comment on it gets a `detachedAt` canvas position, and viewers pin it there. If an undo brings the artboard back, `detachedAt` is cleared and the pin follows the artboard again. `get_comments` marks such comments with `artboardDeleted`.
 
-The order of the messages matters here. A viewer draws a pin at its artboard if the artboard exists, and at `detachedAt` if not. If the delete arrived first, there'd be a moment with neither, and the pin would blink out. So the hub sends a pin that lost its artboard before the change that deletes it, and a pin that got it back after the change that restores it (`publish_with_comments` in `hub.rs`). The end-to-end test found this blink.
+The order of the messages matters here. A viewer draws a pin at its artboard if the artboard exists, and at `detachedAt` if not. If the delete arrived first, there'd be a moment with neither, and the pin would blink out. So the hub sends a pin that lost its artboard before the change that deletes it, and a pin that got it back after the change that restores it (`publish_with_comments` in `hub/design.rs`). The end-to-end test found this blink.
 
 Comments live beside the document, not inside it, so undo never touches them. They're saved in the same JSON file as the design.
 

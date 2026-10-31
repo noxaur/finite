@@ -1,7 +1,7 @@
 //! Which server owns which design, when several run side by side.
 //!
 //! Every design lives on exactly one server, which holds it in memory and
-//! saves it to its own store (see the rooms model in `hub.rs`). The owner is
+//! saves it to its own store (see the rooms model in `hub/mod.rs`). The owner is
 //! a pure function of the design id and the list of servers, computed with
 //! rendezvous hashing (highest random weight): each server scores the id, and
 //! the highest score wins. Any server, proxy or load balancer that knows the

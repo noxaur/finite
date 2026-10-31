@@ -1,7 +1,7 @@
 import { Schema } from "effect";
 
 // Mirrors the Rust types in crates/design (Node, Op, Change, Snapshot, Comment) and
-// crates/server/src/hub.rs (Presence, DesignSummary, the socket messages).
+// crates/server/src/hub/messages.rs (Presence, DesignSummary, the socket messages).
 // Keep both sides in sync.
 
 export const Node = Schema.Struct({
