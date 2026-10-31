@@ -16,7 +16,7 @@ use finite_design::{
     Design, Snapshot,
     comment::{Anchor, Author, AuthorKind, Comment, CommentError},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::{self, error::RecvError};
 
 use crate::hub::{DesignHandle, DesignSummary, Hub, Outgoing};
@@ -26,6 +26,7 @@ pub fn routes() -> Router<Arc<Hub>> {
         .route("/designs", get(list_designs).post(create_design))
         .route("/designs/ws", get(lobby_socket))
         .route("/designs/{id}", get(get_design))
+        .route("/owner/{id}", get(owner_of))
         .route("/designs/{id}/ws", get(design_socket))
         .route("/designs/{id}/comments", post(create_comment))
         .route("/designs/{id}/comments/{comment}", patch(update_comment))
@@ -52,12 +53,76 @@ async fn create_design(
     (StatusCode::CREATED, Json(hub.create(&body.name)))
 }
 
+/// Why a request failed, as an HTTP response.
+enum ApiError {
+    NotFound(String),
+    /// Another server owns the design. The `Finite-Owner` header says which,
+    /// so a proxy can retry there.
+    Misdirected {
+        id: String,
+        owner: String,
+    },
+    Unprocessable(String),
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::NotFound(message) => (StatusCode::NOT_FOUND, message).into_response(),
+            Self::Misdirected { id, owner } => (
+                StatusCode::MISDIRECTED_REQUEST,
+                [("finite-owner", owner.clone())],
+                format!("design {id:?} lives on {owner}"),
+            )
+                .into_response(),
+            Self::Unprocessable(message) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, message).into_response()
+            }
+        }
+    }
+}
+
+impl From<CommentError> for ApiError {
+    fn from(error: CommentError) -> Self {
+        match error {
+            CommentError::NotFound(_) => Self::NotFound(error.to_string()),
+            _ => Self::Unprocessable(error.to_string()),
+        }
+    }
+}
+
+/// Opens a design this server owns.
+fn open(hub: &Hub, id: &str) -> Result<Arc<DesignHandle>, ApiError> {
+    if let Some(owner) = hub.elsewhere(id) {
+        return Err(ApiError::Misdirected {
+            id: id.into(),
+            owner: owner.into(),
+        });
+    }
+    hub.get(id)
+        .ok_or_else(|| ApiError::NotFound(format!("design {id:?} not found")))
+}
+
 async fn get_design(
     State(hub): State<Arc<Hub>>,
     Path(id): Path<String>,
-) -> Result<Json<Snapshot>, StatusCode> {
-    let handle = hub.get(&id).ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(handle.read(Design::snapshot)))
+) -> Result<Json<Snapshot>, ApiError> {
+    Ok(Json(open(&hub, &id)?.read(Design::snapshot)))
+}
+
+#[derive(Serialize)]
+struct Owner<'a> {
+    /// The owner's base URL, or `null` when it's this server.
+    owner: Option<&'a str>,
+}
+
+/// Which server owns a design. Any id works, even one not created yet, so a
+/// proxy can ask any server where to send a request.
+async fn owner_of(State(hub): State<Arc<Hub>>, Path(id): Path<String>) -> Response {
+    Json(Owner {
+        owner: hub.elsewhere(&id),
+    })
+    .into_response()
 }
 
 /// Who is commenting. Users have no accounts yet, so the browser picks an id
@@ -108,20 +173,7 @@ struct UpdateComment {
     resolved: bool,
 }
 
-type CommentResult = Result<(StatusCode, Json<Comment>), (StatusCode, String)>;
-
-fn design_of(hub: &Hub, id: &str) -> Result<Arc<DesignHandle>, (StatusCode, String)> {
-    hub.get(id)
-        .ok_or((StatusCode::NOT_FOUND, format!("design {id:?} not found")))
-}
-
-fn comment_error(error: CommentError) -> (StatusCode, String) {
-    let status = match error {
-        CommentError::NotFound(_) => StatusCode::NOT_FOUND,
-        _ => StatusCode::UNPROCESSABLE_ENTITY,
-    };
-    (status, error.to_string())
-}
+type CommentResult = Result<(StatusCode, Json<Comment>), ApiError>;
 
 async fn create_comment(
     State(hub): State<Arc<Hub>>,
@@ -134,9 +186,7 @@ async fn create_comment(
         x: body.x,
         y: body.y,
     };
-    let comment = design_of(&hub, &id)?
-        .add_comment(body.author.into_author(), anchor, &body.body)
-        .map_err(comment_error)?;
+    let comment = open(&hub, &id)?.add_comment(body.author.into_author(), anchor, &body.body)?;
     Ok((StatusCode::CREATED, Json(comment)))
 }
 
@@ -145,9 +195,7 @@ async fn reply_to_comment(
     Path((id, comment)): Path<(String, String)>,
     Json(body): Json<Reply>,
 ) -> CommentResult {
-    let comment = design_of(&hub, &id)?
-        .reply(&comment, body.author.into_author(), &body.body, None)
-        .map_err(comment_error)?;
+    let comment = open(&hub, &id)?.reply(&comment, body.author.into_author(), &body.body, None)?;
     Ok((StatusCode::CREATED, Json(comment)))
 }
 
@@ -156,9 +204,7 @@ async fn update_comment(
     Path((id, comment)): Path<(String, String)>,
     Json(body): Json<UpdateComment>,
 ) -> CommentResult {
-    let comment = design_of(&hub, &id)?
-        .set_resolved(&comment, body.resolved)
-        .map_err(comment_error)?;
+    let comment = open(&hub, &id)?.set_resolved(&comment, body.resolved)?;
     Ok((StatusCode::OK, Json(comment)))
 }
 
@@ -186,8 +232,9 @@ async fn design_socket(
     Path(id): Path<String>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let Some(handle) = hub.get(&id) else {
-        return StatusCode::NOT_FOUND.into_response();
+    let handle = match open(&hub, &id) {
+        Ok(handle) => handle,
+        Err(error) => return error.into_response(),
     };
     ws.on_upgrade(move |socket| async move {
         let (first, seq, rx) = handle.subscribe();

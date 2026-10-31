@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use finite_server::{Hub, store::FileStore};
+use finite_server::{Hub, cluster::Cluster, store::FileStore};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -27,7 +27,14 @@ async fn main() -> std::io::Result<()> {
             std::process::exit(1);
         }
     };
-    let hub = Hub::new(Arc::new(store))?;
+    let cluster = match Cluster::from_env() {
+        Ok(cluster) => cluster,
+        Err(error) => {
+            eprintln!("finite-server: {error}");
+            std::process::exit(1);
+        }
+    };
+    let hub = Hub::with_cluster(Arc::new(store), cluster)?;
     tracing::info!(data_dir, designs = hub.list().len(), "loaded designs");
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -39,10 +46,32 @@ async fn main() -> std::io::Result<()> {
         listener,
         finite_server::app(hub.clone(), static_dir.as_deref()),
     )
-    .with_graceful_shutdown(async {
-        let _ = tokio::signal::ctrl_c().await;
-    })
+    .with_graceful_shutdown(shutdown())
     .await?;
     hub.flush();
+    tracing::info!("saved every open design; bye");
     Ok(())
+}
+
+/// Resolves on Ctrl-C, or on SIGTERM, which is how process managers, Docker
+/// and the desktop app stop the server. Either way, open designs are saved.
+async fn shutdown() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = ctrl_c => {}
+        () = terminate => {}
+    }
 }

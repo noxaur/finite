@@ -18,7 +18,10 @@ use finite_design::{
 use serde::Serialize;
 use tokio::sync::{broadcast, watch};
 
-use crate::store::{Store, Stored};
+use crate::{
+    cluster::Cluster,
+    store::{Store, Stored},
+};
 
 /// How long an agent's "working on" indicator lasts without activity.
 const PRESENCE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -588,6 +591,8 @@ pub struct Hub {
     designs: RwLock<HashMap<String, Arc<DesignHandle>>>,
     store: Arc<dyn Store>,
     lobby: broadcast::Sender<Outgoing>,
+    /// Which designs this server owns, when several run side by side.
+    cluster: Cluster,
 }
 
 impl Hub {
@@ -596,12 +601,27 @@ impl Hub {
     /// snapshot. Must run inside a Tokio runtime: each design gets a
     /// background task that saves it after edits.
     pub fn new(store: Arc<dyn Store>) -> io::Result<Arc<Self>> {
+        Self::with_cluster(store, Cluster::default())
+    }
+
+    /// Like [`Hub::new`], for one server among several. This server only
+    /// creates and serves the designs `cluster` says it owns.
+    pub fn with_cluster(store: Arc<dyn Store>, cluster: Cluster) -> io::Result<Arc<Self>> {
         let hub = Arc::new(Self {
             designs: RwLock::new(HashMap::new()),
             store,
             lobby: broadcast::channel(256).0,
+            cluster,
         });
         for id in hub.store.ids()? {
+            if let Some(owner) = hub.cluster.elsewhere(&id) {
+                tracing::warn!(
+                    id,
+                    owner,
+                    "skipping a stored design another server now owns"
+                );
+                continue;
+            }
             let Some(stored) = hub.store.load(&id)? else {
                 continue;
             };
@@ -668,11 +688,20 @@ impl Hub {
         designs
     }
 
+    /// The base URL of the server that owns `id`, if it isn't this one.
+    pub fn elsewhere(&self, id: &str) -> Option<&str> {
+        self.cluster.elsewhere(id)
+    }
+
     pub fn create(self: &Arc<Self>, name: &str) -> DesignSummary {
         let now = now_ms();
         let name = name.trim();
+        // Only ids this server owns, so the design is reachable where it's created.
+        let id = std::iter::repeat_with(|| random_id(10))
+            .find(|id| self.cluster.owns(id))
+            .expect("some id hashes to this server");
         let design = Design::new(DesignMeta {
-            id: random_id(10),
+            id,
             name: if name.is_empty() {
                 "Untitled".into()
             } else {

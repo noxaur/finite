@@ -208,6 +208,8 @@ On startup, the server loads each snapshot, replays its log with `Design::replay
 
 Only one server can use a data folder at a time. The file store takes an exclusive lock on `FINITE_DATA_DIR/lock` when it opens, and a second server on the same folder exits with `another Finite server is using …`. Without the lock, two servers would each load a design and overwrite the other's edits. The operating system releases the lock when the process exits, even after a crash.
 
+On Ctrl-C or SIGTERM, the server stops accepting connections and writes every loaded design as a full snapshot before it exits. SIGTERM is how Docker, systemd and the desktop app stop it. Until this was handled, the desktop app could lose the last moment of edits when it quit.
+
 The hub only calls four methods on the `Store` trait in `store.rs`: `ids`, `load`, `save` and `append`. A database could replace the files behind them. To check a new store, run `store::contract::check` on it. It's a **contract test**: the same suite of rules every store must follow, such as "the journal keeps append order" and "save clears the journal". The file store and the memory store both run it in `cargo test`. Undo histories aren't saved, so a restart clears them.
 
 ## Following one edit end to end
@@ -290,8 +292,26 @@ All the thread rules live in `crates/design`: `comment.rs` defines the types and
 
 ## Running more than one server
 
-One server process can now hold many designs, because only the ones in use are in memory. Running several servers is the next step, and the rooms model sets it up. A design is only ever loaded in one place, so if each design lived on exactly one server, nothing in the hub would need to change. Three pieces are still missing:
+Each design lives on exactly one server. That server holds it in memory and saves it to its own data folder, so servers never share files and never fight over a design. `crates/server/src/cluster.rs` decides which server that is.
 
-- **A router.** A load balancer would have to send every request for a design to the same server, by hashing the design id from the URL path (`/api/designs/{id}/…`). MCP is harder. The design id sits inside each tool call's JSON body, and one MCP session can work on designs that live on different servers. So MCP would need its own front server that keeps the session and forwards each tool call to the server that owns its design.
-- **A shared store.** Every server would need to see the same designs, so the files in `FINITE_DATA_DIR` would move to a database behind the `Store` trait.
-- **A shared design list.** Each server's lobby socket only hears about its own designs. The list updates would have to go through something every server can read, such as Redis pub/sub or Postgres `LISTEN`/`NOTIFY`.
+It uses **rendezvous hashing** (also called highest random weight). Every server scores the design id, and the highest score wins. The answer depends only on the id and the list of servers, so any server, proxy or load balancer that has the list gets the same answer, with nothing shared between them. Adding a fifth server to four moves only the designs the new server wins, about a fifth of them. Plain `hash % n` would move almost all of them.
+
+To run three servers, give each the same list and its own position:
+
+```bash
+FINITE_NODES=http://10.0.0.1:4100,http://10.0.0.2:4100,http://10.0.0.3:4100 \
+FINITE_NODE=0 FINITE_DATA_DIR=/data/finite finite-server
+```
+
+Each server then behaves like this:
+
+- **Creating:** it only picks ids it owns, so a design is always reachable on the server that made it.
+- **Wrong server:** a request for a design another server owns gets `421 Misdirected Request` with a `Finite-Owner` header naming the owner. An MCP tool call gets an error telling the agent which `/mcp` endpoint to use.
+- **Asking:** `GET /api/owner/{id}` on any server returns `{"owner": "http://…"}`, or `null` when it's that server.
+
+The hash is FNV-1a with a final mix. It's spelled out in `cluster.rs` so you can port it. A test pins one score, which a Python version reproduces exactly. Without `FINITE_NODES`, there's one server, and it owns everything.
+
+Two pieces are still missing before this is a full deployment:
+
+- **A shared design list.** Each server's design list only shows its own designs. The list would have to merge every server's designs, through something they can all read, such as Redis pub/sub or Postgres `LISTEN`/`NOTIFY`.
+- **One front door.** Browsers and agents talk to one server. A reverse proxy would have to send each request to the owner, using the same hash or `/api/owner/{id}`. MCP needs a little more, because one agent session can touch designs on several servers.

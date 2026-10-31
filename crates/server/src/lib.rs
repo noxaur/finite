@@ -8,6 +8,7 @@ use tower_http::{
 };
 
 pub mod api;
+pub mod cluster;
 pub mod hub;
 pub mod mcp;
 pub mod screenshot;

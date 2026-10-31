@@ -152,6 +152,11 @@ impl FiniteMcp {
     }
 
     fn design(&self, id: &str) -> Result<Arc<DesignHandle>, CallToolResult> {
+        if let Some(owner) = self.hub.elsewhere(id) {
+            return Err(CallToolResult::error(vec![ContentBlock::text(format!(
+                "design {id:?} lives on another Finite server. Connect to {owner}/mcp to work on it."
+            ))]));
+        }
         self.hub.get(id).ok_or_else(|| {
             CallToolResult::error(vec![ContentBlock::text(format!(
                 "design {id:?} not found. Call list_designs to see the available ids."
