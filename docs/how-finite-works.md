@@ -10,7 +10,7 @@ If you remember two ideas, make it these. The rest of this guide builds on them.
 How far you read depends on what you want:
 
 - **To understand Finite,** read through "Following one edit end to end". That covers the document, undo, the server and one edit's whole trip.
-- **To change the browser side,** read "The viewer" and "Comments". "The viewer" ends with how a browser reconnects without starting over.
+- **To change the browser side,** read "The viewer" and "Comments". "The viewer" ends with how a browser reconnects without starting over, and how each end notices a connection that died silently.
 - **To run it for real,** read "Saving and recovering". It covers what's saved, when, and what survives a crash, undo included.
 - **To test a change the way a person sees it,** read "The end-to-end test".
 - **To run more than one server,** read "Running more than one server" at the end. One server is the default, and you can skip that section until you need it.
@@ -180,7 +180,15 @@ Because steps 2 and 3 happen under one lock, no other edit can sneak in between 
 A multiplayer server usually treats each document as a **room**: it's loaded into memory when someone joins, and unloaded when everyone has left. Finite's hub works the same way, so memory grows with the designs in use, not with every design ever made.
 
 - **Loading:** `Hub::open` is the way in for requests. If the design's state isn't in memory, it reads the snapshot and journal and replays them. That read runs on Tokio's **blocking pool**, a separate set of threads for slow work like disk reads, so opening a large design never stalls other requests. `Hub::get` does the same on the calling thread, for tests and code that isn't async.
-- **Unloading:** every 30 seconds, the hub's sweep looks for designs to drop. A design unloads only when all of these hold: nothing is waiting to be saved, nobody is watching it, no agent has presence in it, no live MCP session has undo history in it, and it hasn't been opened for five minutes. Other undo histories don't keep a design in memory, because they come back with it from the store (see "Undo across restarts"). The sweep first asks for a full snapshot, so the store has each history as it is now, then unloads the design on its next pass.
+- **Unloading:** every 30 seconds, the hub's sweep looks for designs to drop. A design unloads only when all of these hold:
+  - nothing is waiting to be saved;
+  - nobody is watching it;
+  - no agent has presence in it;
+  - no live MCP session has undo history in it;
+  - it hasn't been opened for five minutes.
+
+  Other undo histories don't keep a design in memory, because they come back with it from the store (see "Undo across restarts"). The sweep first asks for a full snapshot, so the store has each history as it is now, then unloads the design on its next pass.
+
 - **Peeking:** some reads don't need the design kept in memory. The design list draws a thumbnail for each card, and each thumbnail fetches the design's snapshot with `GET /api/designs/{id}`. That request uses `Hub::peek`: a loaded design is read from memory, and a cold one is read from the store and dropped again. Without it, scrolling through the list would load every design for five minutes.
 - **What stays:** the handle itself stays, with a cached `DesignSummary`. That's what the design list shows, so listing designs never loads one. The broadcast channel that feeds the design's sockets is part of the loaded state, not the handle. Its buffer is allocated up front, about 30 KB, and a design that isn't loaded has no sockets. With 20,000 stored designs and none open, a design costs about 2 KB of memory, down from 35 KB when the channel lived on the handle. `cargo run --release -p finite-server --example cold_designs` measures it.
 
@@ -283,11 +291,23 @@ Connections drop: a laptop sleeps, Wi-Fi blinks, a proxy times out. The browser 
 
 The epoch is what makes this safe. A server that crashed may have lost its last few unsaved changes, so after the restart it can hand out the same `seq` again for a different change. And after any reload, the kept changes are gone. A new epoch means the browser's `seq` no longer names the same state, so it gets a snapshot. The router passes the query on to the owner, so resuming works there too.
 
-Some drops never announce themselves. A laptop that sleeps or changes networks can leave a **half-open connection**: the server's end still looks open, but nothing reaches the browser and no close ever arrives. A design unloads only once nobody is subscribed to it, so one such socket would keep its design in memory for as long as the server runs. So every socket that faces a browser sends a WebSocket **ping** every 20 seconds (`heartbeat.rs`). Browsers answer pings with a pong by themselves, without any app code. A socket that hears nothing for 60 seconds closes. Each send also gives up after 60 seconds, because a send to a browser that stopped reading waits forever once the connection's buffers fill. The pings also keep proxies such as nginx from closing a quiet design's viewers, since nginx closes a connection that's silent for a minute by default.
+### Noticing dead connections
 
-That covers the server's side. The browser has the same problem the other way round: after a laptop wakes up on another network, its socket can look open while nothing arrives, and the canvas just stops updating. Browsers answer the server's pings without telling the page, so the page can't use them. So the web app runs its own **heartbeat**, the way Phoenix channels and Socket.IO do. Every 20 seconds, `socket.ts` sends the message `{"type":"ping"}`, and the server answers `{"type":"pong"}`. On a router, a design's socket passes the ping on to the server, and the design list's socket answers it itself, because that list merges several servers. Any message counts as an answer. If none arrives within 10 seconds, the page drops the socket and reconnects, and the reconnect resumes as usual. It doesn't wait for the old socket's `close` event, which on a dead connection can take minutes. `socket.test.ts` drives this with a fake socket and fake timers. When the 10-second deadline was switched off, the test that expects a reconnect failed.
+Some drops never announce themselves. A laptop that sleeps or changes networks can leave a **half-open connection**: one end still looks open, but nothing gets through and no close ever arrives. Both ends need to notice.
 
-On a router, the router pings the browser itself, and it answers the server's pings. The server's pings stop at the router. `tests/heartbeat.rs` runs with Tokio's clock paused, so a minute passes in an instant. Against a server and a router, it checks that a client that stops reading is closed and a client that keeps reading stays open. Without the pings, the silent client stayed open. The test also caught a bug: the router's design list relay ended at the first frame that wasn't text, so the first ping from a server would have cut off every browser's design list.
+**The server's end.** A design unloads only once nobody is subscribed to it, so one half-open socket would keep its design in memory for as long as the server runs. So every socket that faces a browser sends a WebSocket **ping** every 20 seconds (`heartbeat.rs`). Browsers answer pings with a pong by themselves, without any app code. A socket that hears nothing for 60 seconds closes.
+
+Each send also gives up after 60 seconds. A browser that stopped reading fills the connection's buffers, and then a send waits forever. The pings also keep proxies such as nginx from closing a quiet design's viewers, since nginx closes a connection that's silent for a minute by default.
+
+On a router, the router pings the browser itself and answers the server's pings, so the server's pings stop at the router. `tests/heartbeat.rs` runs with Tokio's clock paused, so a minute passes in an instant. Against a server and a router, it checks that a client that stops reading is closed and one that keeps reading stays open. Without the pings, the silent client stayed open. The test also caught a bug: the router's design list relay ended at the first frame that wasn't text. So the first ping from a server would have cut off every browser's design list.
+
+**The browser's end.** After a laptop wakes up on another network, its socket can look open while nothing arrives, and the canvas just stops updating. Browsers answer the server's pings without telling the page, so the page can't use them. So the web app runs its own **heartbeat**, the way Phoenix channels and Socket.IO do:
+
+1. Every 20 seconds, `socket.ts` sends the message `{"type":"ping"}`.
+2. The server answers `{"type":"pong"}`. On a router, a design's socket passes the ping on to the server. The design list's socket answers it itself, because that list merges several servers.
+3. Any message counts as an answer. If none arrives within 10 seconds, the page drops the socket and reconnects, and the reconnect resumes as usual. It doesn't wait for the old socket's `close` event, which on a dead connection can take minutes.
+
+`socket.test.ts` drives this with a fake socket and fake timers. When the 10-second deadline was switched off, the test that expects a reconnect failed.
 
 ## Comments
 
@@ -360,7 +380,11 @@ This works because undo is **deterministic**. The same document and the same sta
 
 Viewers never receive histories: `Design::snapshot` leaves them out, and only `Design::snapshot_to_save` includes them.
 
-A history expires six hours after its actor was last active, and that clock has to survive the design leaving memory. Otherwise a design reopened every few hours would keep its histories forever, and so would the store. So each saved history carries `lastUsed`, the time its actor was last active, and a restored history counts down from there. The journal doesn't record when its changes were made, so an actor with changes in the journal counts as active at load time. That's why a design with histories needs a full snapshot before it unloads. When a history expires, the server writes a full snapshot too, so the store forgets it as well. Before, the store kept expired histories, and they came back on the next load. A hub test edits as a named agent, checks that the design unloads and comes back with its undo, and that the history expires six hours after the edit, not after the reload. When restored histories started their clocks at load time, as before, that last check failed.
+A history expires six hours after its actor was last active, and that clock has to survive the design leaving memory. Otherwise a design reopened every few hours would keep its histories forever, and so would the store. So each saved history carries `lastUsed`, the time its actor was last active, and a restored history counts down from there.
+
+The journal doesn't record when its changes were made, so an actor with changes in the journal counts as active at load time. That's why a design with histories needs a full snapshot before it unloads. When a history expires, the server writes a full snapshot too, so the store forgets it as well. Before, the store kept expired histories, and they came back on the next load.
+
+A hub test edits as a named agent. It checks that the design unloads and comes back with its undo, and that the history expires six hours after the edit, not after the reload. When restored histories started their clocks at load time, as before, that last check failed.
 
 ## The end-to-end test
 
