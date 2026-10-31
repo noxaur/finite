@@ -474,11 +474,23 @@ impl FiniteMcp {
             WriteHtmlMode::ReplaceChildren => WriteMode::ReplaceChildren,
             WriteHtmlMode::Replace => WriteMode::Replace,
         };
+        // Parse on the blocking pool, before taking the design's lock: for a
+        // few MB of HTML, parsing is most of the work.
+        let html = p.html;
+        let parsed = tokio::task::spawn_blocking(move || edit::parse_html(&html)).await;
+        let fragments = match parsed {
+            Ok(Ok(fragments)) => fragments,
+            Ok(Err(error)) => return fail(error.to_string()),
+            Err(error) => return fail(error.to_string()),
+        };
         self.edit(
             &ctx,
             &p.design_id,
             "Write HTML",
-            |doc| edit::write_html(doc, &p.target_id, &p.html, mode, p.index, &mut id_in(doc)),
+            |doc| {
+                let mut new_id = id_in(doc);
+                edit::write_fragments(doc, &p.target_id, fragments, mode, p.index, &mut new_id)
+            },
             |handle, roots, _| {
                 handle.read(|d| {
                     let mut text = format!("Wrote {} root node(s):\n", roots.len());

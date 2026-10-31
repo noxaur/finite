@@ -143,7 +143,8 @@ pub enum WriteMode {
     Replace,
 }
 
-/// Inserts parsed HTML relative to `target`. Returns the ops and the ids of the new root nodes.
+/// Parses HTML and inserts it relative to `target`, as [`write_fragments`]
+/// does. Returns the ops and the ids of the new root nodes.
 pub fn write_html(
     doc: &Document,
     target: &str,
@@ -152,10 +153,24 @@ pub fn write_html(
     index: Option<usize>,
     new_id: &mut impl FnMut() -> NodeId,
 ) -> Result<(Vec<Op>, Vec<NodeId>)> {
-    let fragments = match html::parse(html_source) {
-        Ok(fragments) => fragments,
-        Err(too_deep) => return err(too_deep.to_string()),
-    };
+    write_fragments(doc, target, parse_html(html_source)?, mode, index, new_id)
+}
+
+/// [`html::parse`], with its error as an [`EditError`]. Parsing doesn't need
+/// the document, so the server does it before it takes the design's lock.
+pub fn parse_html(html_source: &str) -> Result<Vec<Fragment>> {
+    html::parse(html_source).or_else(|too_deep| err(too_deep.to_string()))
+}
+
+/// Inserts parsed HTML relative to `target`. Returns the ops and the ids of the new root nodes.
+pub fn write_fragments(
+    doc: &Document,
+    target: &str,
+    fragments: Vec<Fragment>,
+    mode: WriteMode,
+    index: Option<usize>,
+    new_id: &mut impl FnMut() -> NodeId,
+) -> Result<(Vec<Op>, Vec<NodeId>)> {
     if fragments.is_empty() {
         return err("the HTML contained no elements or text (scripts and styles are dropped)");
     }

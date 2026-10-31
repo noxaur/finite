@@ -173,6 +173,16 @@ async fn an_agent_builds_refines_and_undoes() {
         .await;
     let button = id_after(&wrote, "CTA");
 
+    // HTML nested too deep is refused with a reason, before it reaches the design.
+    let deep = format!("{}x{}", "<div>".repeat(5_000), "</div>".repeat(5_000));
+    let (refused, is_error) = agent
+        .call(
+            "write_html",
+            json!({ "designId": design, "targetId": board, "html": deep }),
+        )
+        .await;
+    assert!(is_error && refused.contains("256 levels"), "{refused}");
+
     agent
         .ok(
             "update_styles",
