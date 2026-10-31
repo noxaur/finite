@@ -34,7 +34,7 @@ A comment stores its artboard, the element you clicked, and the pin's offset fro
 
 Agents read comments with `get_comments` and answer with `reply_to_comment`, usually with `resolve: true`. `get_basic_info` counts open comments, and the MCP instructions tell agents to check them. When an agent replies, the server links that agent's changes to the comment's artboard since the thread's previous message. The thread shows them as buttons, and clicking one outlines the elements it changed. A reply from you reopens a resolved comment, so you can keep steering in the same thread. An agent can also call `wait_for_comments`, which returns as soon as a comment or reply is waiting for it, so you can leave feedback for an agent that's already running.
 
-Comments aren't part of the document, so undo never touches them. They're saved with the design's snapshot. People have no accounts yet: each browser keeps a random id in local storage and posts as "Guest" over `POST /api/designs/{id}/comments`.
+Comments aren't part of the document, so undo never touches them. They're saved with the design's snapshot. People have no accounts yet: each browser keeps a random id in local storage and posts over `POST /api/designs/{id}/comments`. It posts as "Guest" until you click the name in a new comment's box and set your own, which is saved in the same browser.
 
 ## Undo and redo
 

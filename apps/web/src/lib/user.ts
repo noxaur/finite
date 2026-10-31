@@ -1,19 +1,36 @@
+import { useState } from "react";
 import type { Author } from "@/design/schema";
 import type { CommentAuthor } from "@/api/Api";
 
-const KEY = "finite.user";
+const ID_KEY = "finite.user";
+const NAME_KEY = "finite.user.name";
+/** The server keeps at most this many characters of a name. */
+export const NAME_LIMIT = 48;
 
 /**
  * This browser's commenting identity. Users have no accounts yet, so each
- * browser keeps a random id in local storage and comments as "Guest".
+ * browser keeps a random id in local storage, plus the name it comments
+ * under ("Guest" until someone sets one).
  */
 export function localUser(): CommentAuthor {
-  let id = localStorage.getItem(KEY);
+  let id = localStorage.getItem(ID_KEY);
   if (!id) {
     id = crypto.randomUUID();
-    localStorage.setItem(KEY, id);
+    localStorage.setItem(ID_KEY, id);
   }
-  return { id, name: "Guest" };
+  return { id, name: localStorage.getItem(NAME_KEY) || "Guest" };
+}
+
+/** The name this browser comments under, and a setter that saves it. */
+export function useLocalName(): [string, (name: string) => void] {
+  const [name, setName] = useState(() => localUser().name);
+  const save = (next: string) => {
+    const trimmed = next.trim().slice(0, NAME_LIMIT);
+    if (trimmed) localStorage.setItem(NAME_KEY, trimmed);
+    else localStorage.removeItem(NAME_KEY);
+    setName(trimmed || "Guest");
+  };
+  return [name, save];
 }
 
 /** Whether `author` is this browser. The server prefixes user ids with `user:`. */

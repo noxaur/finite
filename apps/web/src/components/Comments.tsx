@@ -4,7 +4,7 @@ import * as stylex from "@stylexjs/stylex";
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Replica } from "@/design/replica";
 import type { Comment, CommentMessage } from "@/design/schema";
-import { isLocalUser } from "@/lib/user";
+import { isLocalUser, NAME_LIMIT, useLocalName } from "@/lib/user";
 import { timeAgo } from "@/lib/time";
 
 /** How far right of its pin a popover starts, in pixels. */
@@ -144,6 +144,7 @@ function DraftPin({ replica, draft, onPost, onCancelDraft }: LayerProps & { draf
     <div data-camera-ignore {...stylex.props(styles.anchor(at.x, at.y), styles.raised)}>
       <div {...stylex.props(styles.pin, styles.pinOpen)} />
       <Popover>
+        <NameLine />
         <Composer
           placeholder="Add a comment"
           autoFocus
@@ -152,6 +153,53 @@ function DraftPin({ replica, draft, onPost, onCancelDraft }: LayerProps & { draf
         />
       </Popover>
     </div>
+  );
+}
+
+/**
+ * "Commenting as Guest", where clicking the name lets you change it. There
+ * are no accounts, so the name is saved in this browser only.
+ */
+function NameLine() {
+  const [name, setName] = useLocalName();
+  const [editing, setEditing] = useState(false);
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        defaultValue={name === "Guest" ? "" : name}
+        placeholder="Your name"
+        maxLength={NAME_LIMIT}
+        aria-label="Your name"
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            setName(e.currentTarget.value);
+            setEditing(false);
+          } else if (e.key === "Escape") {
+            e.stopPropagation();
+            setEditing(false);
+          }
+        }}
+        onBlur={(e) => {
+          setName(e.currentTarget.value);
+          setEditing(false);
+        }}
+        {...stylex.props(styles.nameInput)}
+      />
+    );
+  }
+  return (
+    <span {...stylex.props(styles.muted)}>
+      Commenting as{" "}
+      <button
+        type="button"
+        title="Change your name"
+        onClick={() => setEditing(true)}
+        {...stylex.props(styles.nameButton)}
+      >
+        {name}
+      </button>
+    </span>
   );
 }
 
@@ -436,6 +484,29 @@ const styles = stylex.create({
   threadHead: { display: "flex", alignItems: "center", gap: space.xs },
   spacer: { flexGrow: 1 },
   muted: { color: colors.muted, fontSize: 12 },
+  nameButton: {
+    padding: 0,
+    borderWidth: 0,
+    backgroundColor: "transparent",
+    color: colors.text,
+    font: "inherit",
+    textDecoration: "underline",
+    textDecorationStyle: "dotted",
+    textUnderlineOffset: 2,
+    cursor: "pointer",
+  },
+  nameInput: {
+    height: 24,
+    paddingInline: 6,
+    borderWidth: 1,
+    borderStyle: "solid",
+    borderColor: colors.border,
+    borderRadius: radii.sm,
+    backgroundColor: "transparent",
+    color: colors.text,
+    fontSize: 12,
+    fontFamily: "inherit",
+  },
   textButton: {
     paddingInline: 6,
     height: 22,
