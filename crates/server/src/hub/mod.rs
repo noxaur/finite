@@ -33,6 +33,10 @@ const PRESENCE_TTL: Duration = Duration::from_secs(5 * 60);
 const HISTORY_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 /// Edits are written to disk at most this often per design.
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(250);
+/// How long a failed save waits before its first retry. Each retry waits twice as long...
+const RETRY_AFTER: Duration = Duration::from_secs(1);
+/// ...up to this.
+const RETRY_MAX: Duration = Duration::from_secs(60);
 /// A design's journal is compacted into a fresh snapshot after this many records.
 const COMPACT_AFTER: usize = 1000;
 /// How long an unused design stays in memory before it's unloaded.
@@ -397,31 +401,59 @@ async fn hand_off(hub: Weak<Hub>, mut ids: Vec<String>) {
 /// Usually that appends the new records to its journal; every
 /// [`COMPACT_AFTER`] records it writes a full snapshot instead. It holds the
 /// design weakly, so it never keeps a design from unloading.
-async fn persist(hub: Weak<Hub>, handle: Weak<DesignHandle>, mut dirty: watch::Receiver<()>) {
+///
+/// A failed write is retried with **exponential backoff**: after 1 second,
+/// then 2, 4 and so on up to `RETRY_MAX`, until it succeeds or another edit
+/// triggers a save sooner. The retry writes a full snapshot, so the records
+/// of the failed append aren't lost.
+async fn persist(hub: Weak<Hub>, design: Weak<DesignHandle>, mut dirty: watch::Receiver<()>) {
+    let mut failures: u32 = 0;
     while dirty.changed().await.is_ok() {
         tokio::time::sleep(SAVE_DEBOUNCE).await;
         dirty.mark_unchanged();
-        let (Some(hub), Some(handle)) = (hub.upgrade(), handle.upgrade()) else {
-            break;
+        let retry = {
+            let (Some(hub), Some(handle)) = (hub.upgrade(), design.upgrade()) else {
+                break;
+            };
+            let Some(save) = handle.take_save() else {
+                continue;
+            };
+            let store = hub.store.clone();
+            let saved = tokio::task::spawn_blocking(move || match save {
+                Save::Snapshot(snapshot) => store.save(&snapshot),
+                Save::Append(id, records) => store.append(&id, &records),
+            })
+            .await;
+            let retry = match saved.map_err(io::Error::other) {
+                Ok(Ok(())) => {
+                    failures = 0;
+                    None
+                }
+                Ok(Err(error)) | Err(error) => {
+                    let wait = RETRY_AFTER
+                        .saturating_mul(1 << failures.min(10))
+                        .min(RETRY_MAX);
+                    failures += 1;
+                    tracing::error!(%error, ?wait, "failed to save design; will retry");
+                    handle.save_failed();
+                    Some(wait)
+                }
+            };
+            let summary = handle.summary();
+            let _ = hub.lobby.send(Outgoing::new(
+                None,
+                &LobbyMessage::Design { design: &summary },
+            ));
+            retry
         };
-        let Some(save) = handle.take_save() else {
-            continue;
-        };
-        let store = hub.store.clone();
-        let saved = tokio::task::spawn_blocking(move || match save {
-            Save::Snapshot(snapshot) => store.save(&snapshot),
-            Save::Append(id, records) => store.append(&id, &records),
-        })
-        .await;
-        if let Ok(Err(error)) | Err(error) = saved.map_err(io::Error::other) {
-            tracing::error!(%error, "failed to save design");
-            handle.save_failed();
+        // Wait without holding the design, then ask for another save.
+        if let Some(wait) = retry {
+            tokio::time::sleep(wait).await;
+            let Some(handle) = design.upgrade() else {
+                break;
+            };
+            handle.dirty.send_replace(());
         }
-        let summary = handle.summary();
-        let _ = hub.lobby.send(Outgoing::new(
-            None,
-            &LobbyMessage::Design { design: &summary },
-        ));
     }
 }
 
@@ -587,6 +619,64 @@ mod tests {
         }
         assert_eq!(first(Some(&since(1)))["type"], "snapshot");
         assert_eq!(first(Some(&since(10)))["type"], "resume");
+    }
+
+    /// A store whose first `failures` writes fail, like a full disk that
+    /// gets some room back.
+    struct Flaky {
+        inner: MemoryStore,
+        failures: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Flaky {
+        fn write(&self) -> io::Result<()> {
+            use std::sync::atomic::Ordering;
+            let left = self.failures.load(Ordering::SeqCst);
+            if left == 0 {
+                return Ok(());
+            }
+            self.failures.store(left - 1, Ordering::SeqCst);
+            Err(io::Error::other("disk full"))
+        }
+    }
+
+    impl Store for Flaky {
+        fn ids(&self) -> io::Result<Vec<String>> {
+            self.inner.ids()
+        }
+        fn load(&self, id: &str) -> io::Result<Option<crate::store::Stored>> {
+            self.inner.load(id)
+        }
+        fn save(&self, snapshot: &Snapshot) -> io::Result<()> {
+            self.write()?;
+            self.inner.save(snapshot)
+        }
+        fn append(&self, id: &str, records: &[finite_design::Record]) -> io::Result<()> {
+            self.write()?;
+            self.inner.append(id, records)
+        }
+        fn remove(&self, id: &str) -> io::Result<()> {
+            self.inner.remove(id)
+        }
+    }
+
+    /// A failed save is retried on its own, without waiting for another edit.
+    #[tokio::test]
+    async fn failed_saves_are_retried() {
+        let store = Arc::new(Flaky {
+            inner: MemoryStore::default(),
+            failures: 2.into(),
+        });
+        let hub = Hub::new(store.clone()).unwrap();
+        let id = hub.create("Test").meta.id;
+        // Fails at once, then after 1 s, and succeeds after 2 s more.
+        for _ in 0..50 {
+            if store.inner.ids().unwrap().contains(&id) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("the design was never saved");
     }
 
     #[tokio::test]

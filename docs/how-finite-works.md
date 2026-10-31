@@ -322,6 +322,8 @@ On startup, the server loads each snapshot, replays its log with `Design::replay
 - **Mid-append:** the log ends in a torn line. Loading stops at it, and the startup compaction drops it for good.
 - **Mid-compaction:** the new snapshot is written to a temporary file and renamed into place, so it's either all there or not at all. If the old log survives next to the new snapshot, replaying it changes nothing.
 
+A write can also fail without a crash, say on a full disk. Then the design stays in memory, and the save task retries with **exponential backoff**: after 1 second, then 2, 4 and so on, up to a minute between tries. The retry writes a full snapshot, which holds everything the failed append had. A new edit triggers a save sooner. A test store that fails its first two writes checks that the design reaches it with no further edits.
+
 Only one server can use a data folder at a time. The file store takes an exclusive lock on `FINITE_DATA_DIR/lock` when it opens, and a second server on the same folder exits with `another Finite server is using …`. Without the lock, two servers would each load a design and overwrite the other's edits. The operating system releases the lock when the process exits, even after a crash.
 
 On Ctrl-C or SIGTERM, the server stops accepting connections and writes every loaded design as a full snapshot before it exits. SIGTERM is how Docker, systemd and the desktop app stop it. Until this was handled, the desktop app could lose the last moment of edits when it quit. The app now also waits for the server to exit, up to 5 seconds, before it quits itself.
