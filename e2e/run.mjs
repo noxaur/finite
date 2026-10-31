@@ -179,6 +179,40 @@ try {
   );
   await agent.call("undo", { designId: design });
 
+  // Links and forms in a design don't take the viewer anywhere, not even a
+  // form submitted with Enter, which needs no click.
+  await agent.call("write_html", {
+    designId: design,
+    targetId: page1,
+    html: `<div data-name="Leaks" style="display:flex;gap:8px"><a href="https://example.com/" style="display:block;width:80px;height:30px">Out</a><form action="https://example.com/"><input name="q" style="width:120px;height:30px"></form></div>`,
+  });
+  await page.until(`${shadow}.querySelector("form") ? "ready" : null`);
+  // The Navigation API sees every navigation a click or a form starts.
+  await page.eval(
+    `window.__navigations = 0; navigation.addEventListener("navigate", (e) => { __navigations++; if (e.cancelable) e.preventDefault(); }); 0`,
+  );
+  await page.key("c", "KeyC", 67);
+  await page.eval(
+    `new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))`,
+  );
+  const link = await rectOf(`${shadow}.querySelector("a[href]")`);
+  await page.click(link.x + link.w / 2, link.y + link.h / 2);
+  await page.key("Escape", "Escape", 27);
+  await page.key("Escape", "Escape", 27);
+  await page.eval(`${shadow}.querySelector("input").focus(); 0`);
+  // With `text`, Chrome runs Enter's default action: implicit submission.
+  const enter = { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 };
+  await page.send("Input.dispatchKeyEvent", { type: "keyDown", ...enter, text: "\r" });
+  await page.send("Input.dispatchKeyEvent", { type: "keyUp", ...enter });
+  await page.sleep(300);
+  const navigations = await page.eval(`__navigations`);
+  check(
+    "a design's links and forms don't navigate the page",
+    navigations === 0,
+    `${navigations} navigations`,
+  );
+  await agent.call("undo", { designId: design });
+
   // Presence.
   await agent.call("start_working_on_nodes", {
     designId: design,

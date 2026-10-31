@@ -465,6 +465,13 @@ export class Renderer {
     const host = document.createElement("div");
     host.className = stylex.props(styles.host).className ?? "";
     const shadow = host.attachShadow({ mode: "open" });
+    // The constructor cancels clicks and submits on the whole canvas, but
+    // `submit` isn't composed, so it stops at this shadow root. A form with
+    // one text field and no button submits on Enter without any click, and
+    // would send what someone typed to its action and navigate this tab.
+    shadow.addEventListener("submit", (event) => event.preventDefault(), {
+      signal: this.abort.signal,
+    });
     const base = document.createElement("style");
     base.textContent = `${HOST_CSS} ${BASE_CSS}`;
     const commentStyle = document.createElement("style");
