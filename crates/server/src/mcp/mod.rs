@@ -38,7 +38,7 @@ use format::{node_json, outline};
 use params::*;
 
 /// What agents see when they connect: the workflow, the HTML rules, comments and undo.
-const INSTRUCTIONS: &str = include_str!("instructions.md");
+pub(crate) const INSTRUCTIONS: &str = include_str!("instructions.md");
 
 #[derive(Clone)]
 pub struct FiniteMcp {
@@ -63,10 +63,12 @@ impl Drop for SessionGuard {
 
 /// The MCP endpoint as a tower service, to mount at `/mcp`.
 pub fn service(hub: Arc<Hub>) -> StreamableHttpService<FiniteMcp, LocalSessionManager> {
+    let config =
+        StreamableHttpServerConfig::default().with_allowed_hosts(hub.cluster().allowed_hosts());
     StreamableHttpService::new(
         move || Ok(FiniteMcp::new(hub.clone())),
         Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default(),
+        config,
     )
 }
 

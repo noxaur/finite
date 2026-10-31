@@ -9,8 +9,11 @@
 //! - The design list asks every server and merges the answers. Its WebSocket
 //!   subscribes to every server's list and relays their updates.
 //!
-//! The router keeps no state of its own, so you can run several.
-//! It doesn't relay MCP: agents connect to each server's `/mcp` directly.
+//! - `/mcp` relays agents' tool calls the same way (see `relay.rs`).
+//!
+//! The router keeps no state of its own besides those relayed MCP sessions,
+//! so you can run several behind a load balancer that keeps each MCP session
+//! on one router.
 
 use std::sync::{
     Arc,
@@ -77,8 +80,8 @@ pub fn app(nodes: Vec<String>, static_dir: Option<&str>) -> Router {
         .route("/api/designs/{id}/ws", get(design_socket))
         .route("/api/designs/{id}/{*rest}", any(forward))
         .route("/api/owner/{id}", get(owner))
-        .route("/mcp", any(no_mcp))
-        .with_state(front);
+        .with_state(front.clone())
+        .nest_service("/mcp", crate::relay::service(front.cluster.clone()));
     let router = match static_dir {
         Some(dir) => {
             let not_found = format!("{dir}/404.html");
@@ -178,23 +181,6 @@ fn sort_newest_first(designs: &mut [Value]) {
 
 async fn owner(State(front): State<Arc<Front>>, Path(id): Path<String>) -> Json<Value> {
     Json(json!({ "owner": front.cluster.owner_url(&id) }))
-}
-
-async fn no_mcp(State(front): State<Arc<Front>>) -> Response {
-    let endpoints: Vec<String> = front
-        .cluster
-        .nodes()
-        .iter()
-        .map(|n| format!("{n}/mcp"))
-        .collect();
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        format!(
-            "The router doesn't relay MCP. Connect agents to each server: {}",
-            endpoints.join(", ")
-        ),
-    )
-        .into_response()
 }
 
 /// Relays a design's WebSocket to its owner, both ways, until either side closes.

@@ -688,6 +688,10 @@ impl Hub {
         designs
     }
 
+    pub fn cluster(&self) -> &Cluster {
+        &self.cluster
+    }
+
     /// The base URL of the server that owns `id`, if it isn't this one.
     pub fn elsewhere(&self, id: &str) -> Option<&str> {
         self.cluster.elsewhere(id)

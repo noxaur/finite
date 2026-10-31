@@ -11,6 +11,7 @@ pub mod api;
 pub mod cluster;
 pub mod hub;
 pub mod mcp;
+pub mod relay;
 pub mod router;
 pub mod screenshot;
 pub mod store;

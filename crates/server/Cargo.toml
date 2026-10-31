@@ -14,6 +14,8 @@ rmcp = { version = "3.8", features = [
   "server",
   "macros",
   "transport-streamable-http-server",
+  "client",
+  "transport-streamable-http-client-reqwest",
   "schemars",
 ] }
 schemars = "1"

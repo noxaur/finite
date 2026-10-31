@@ -134,3 +134,105 @@ async fn the_router_makes_two_servers_look_like_one() {
         assert_eq!(update["design"]["name"], name);
     }
 }
+
+mod relay {
+    use super::*;
+    use rmcp::{
+        ServiceExt,
+        model::CallToolRequestParams,
+        transport::{
+            StreamableHttpClientTransport,
+            streamable_http_client::StreamableHttpClientTransportConfig,
+        },
+    };
+
+    type Client = rmcp::service::RunningService<rmcp::RoleClient, ()>;
+
+    async fn call(client: &Client, tool: &str, args: Value) -> String {
+        let params = CallToolRequestParams::new(tool.to_owned())
+            .with_arguments(args.as_object().unwrap().clone());
+        let result = client.call_tool(params).await.unwrap();
+        let text: String = result
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect();
+        assert_ne!(result.is_error, Some(true), "{tool} failed: {text}");
+        text
+    }
+
+    fn design_id(text: &str) -> String {
+        text.split(|c: char| !c.is_ascii_alphanumeric())
+            .find(|w| w.len() == 10)
+            .expect("a design id")
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn one_agent_session_reaches_every_server() {
+        let (front, nodes) = deployment().await;
+        let mut headers = std::collections::HashMap::new();
+        headers.insert(
+            http::HeaderName::from_static("x-finite-agent"),
+            http::HeaderValue::from_static("Alice"),
+        );
+        let config = StreamableHttpClientTransportConfig::with_uri(format!("{front}/mcp"))
+            .custom_headers(headers);
+        let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
+
+        let tools = client.list_all_tools().await.unwrap();
+        assert!(tools.iter().any(|t| t.name == "write_html"));
+
+        // Two designs: creation takes turns, so one lands on each server.
+        let mut ids = Vec::new();
+        for name in ["First", "Second"] {
+            ids.push(design_id(
+                &call(&client, "create_design", json!({ "name": name })).await,
+            ));
+        }
+        let cluster = Cluster::new(nodes.clone(), 0).unwrap();
+        let mut owners: Vec<usize> = ids.iter().map(|id| cluster.owner(id)).collect();
+        owners.sort();
+        assert_eq!(owners, [0, 1]);
+
+        for id in &ids {
+            let board = call(
+                &client,
+                "create_artboard",
+                json!({ "designId": id, "name": "Home", "width": 400, "height": 300 }),
+            )
+            .await;
+            let board = board
+                .split('#')
+                .nth(1)
+                .unwrap()
+                .split('.')
+                .next()
+                .unwrap()
+                .to_owned();
+            call(
+                &client,
+                "update_styles",
+                json!({ "designId": id, "updates": [{ "nodeIds": [board], "styles": { "color": "red" } }] }),
+            )
+            .await;
+            // Undo works per server, because the relay keeps one session on each.
+            call(&client, "undo", json!({ "designId": id })).await;
+            let html = call(
+                &client,
+                "get_html",
+                json!({ "designId": id, "nodeId": board }),
+            )
+            .await;
+            assert!(!html.contains("red"), "{html}");
+            let history = call(&client, "get_history", json!({ "designId": id })).await;
+            assert!(history.contains("Create artboard"), "{history}");
+        }
+
+        let listed = call(&client, "list_designs", json!({})).await;
+        for id in &ids {
+            assert!(listed.contains(id.as_str()), "{listed}");
+        }
+        client.cancel().await.unwrap();
+    }
+}

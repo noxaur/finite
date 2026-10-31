@@ -74,6 +74,31 @@ impl Cluster {
         &self.nodes[self.owner(design_id)]
     }
 
+    /// The `Host` values MCP accepts. MCP rejects unknown hosts to block DNS
+    /// rebinding, so this is localhost, every server in the cluster, and any
+    /// extra names in `FINITE_ALLOWED_HOSTS` (comma-separated, like
+    /// `finite.example.com`).
+    pub fn allowed_hosts(&self) -> Vec<String> {
+        let mut hosts: Vec<String> = ["localhost", "127.0.0.1", "::1"].map(String::from).to_vec();
+        for node in &self.nodes {
+            let authority = node.split("://").nth(1).unwrap_or(node);
+            let authority = authority.split('/').next().unwrap_or(authority);
+            if !authority.is_empty() {
+                hosts.push(authority.to_owned());
+            }
+        }
+        if let Ok(extra) = std::env::var("FINITE_ALLOWED_HOSTS") {
+            hosts.extend(
+                extra
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|h| !h.is_empty())
+                    .map(String::from),
+            );
+        }
+        hosts
+    }
+
     pub fn len(&self) -> usize {
         self.nodes.len()
     }
@@ -131,6 +156,13 @@ mod tests {
 
     fn ids() -> impl Iterator<Item = String> {
         (0..10_000).map(|i| format!("design{i}"))
+    }
+
+    #[test]
+    fn mcp_accepts_the_cluster_hosts() {
+        let hosts = cluster(2).allowed_hosts();
+        assert!(hosts.contains(&"node1:4100".to_owned()), "{hosts:?}");
+        assert!(hosts.contains(&"127.0.0.1".to_owned()));
     }
 
     #[test]
