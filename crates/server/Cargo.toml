@@ -4,12 +4,35 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.23.1"
+finite-design = { version = "0.1.0", path = "../design" }
+futures = "0.3.34"
+http = "1"
+rmcp = { version = "3.8", features = [
+  "server",
+  "macros",
+  "transport-streamable-http-server",
+  "schemars",
+] }
+schemars = "1"
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+serde_json = "1"
+tokio = { version = "1", features = [
+  "macros",
+  "rt-multi-thread",
+  "net",
+  "signal",
+  "sync",
+  "time",
+  "fs",
+  "process",
+] }
+tokio-util = "0.7.20"
 tower-http = { version = "0.7", features = ["fs", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.29.0", features = ["v4"] }
 
 [dev-dependencies]
 http-body-util = "0.1"

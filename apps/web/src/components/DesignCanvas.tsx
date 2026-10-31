@@ -1,0 +1,624 @@
+"use client";
+
+import * as stylex from "@stylexjs/stylex";
+import { Exit } from "effect";
+import Link from "next/link";
+import { useEffect, useRef, useState } from "react";
+import { Api } from "@/api/Api";
+import { Camera, union } from "@/design/camera";
+import { type Hit, Renderer } from "@/design/renderer";
+import { Replica } from "@/design/replica";
+import type { Comment, DesignMeta, Presence } from "@/design/schema";
+import { connectDesign, type SocketStatus } from "@/design/socket";
+import { mcpUrl } from "@/lib/mcp";
+import { localUser } from "@/lib/user";
+import { timeAgo } from "@/lib/time";
+import { runtime } from "@/runtime";
+import { colors, radii, space } from "@/styles/tokens.stylex";
+import { CommentLayer, type Draft, type Mode, ToolPill } from "./Comments";
+
+interface Activity {
+  readonly seq: number;
+  readonly actor: string;
+  readonly label: string;
+  readonly at: number;
+}
+
+/** How many recent changes the activity list shows. */
+const ACTIVITY_LIMIT = 6;
+/** How long "show what changed" outlines stay up. */
+const FLASH_MS = 1800;
+/** A press that moves farther than this is a drag, not a click. */
+const CLICK_SLOP = 4;
+
+const isTyping = (target: EventTarget | null) =>
+  target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
+
+/**
+ * A live view of one design. The server streams a snapshot and then every
+ * change; the replica applies them and the renderer patches the DOM. Users
+ * can't edit the design, but in comment mode they pin comments that agents
+ * pick up over MCP.
+ */
+export function DesignCanvas({ id }: { id: string }) {
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const worldRef = useRef<HTMLDivElement>(null);
+  const framesRef = useRef<HTMLDivElement>(null);
+  const pressRef = useRef<{ x: number; y: number } | null>(null);
+  const hoverFrame = useRef(0);
+  const cameraRef = useRef<Camera | null>(null);
+  const rendererRef = useRef<Renderer | null>(null);
+  const replicaRef = useRef<Replica | null>(null);
+  const workingRef = useRef<ReadonlyMap<string, string>>(new Map());
+
+  const [meta, setMeta] = useState<DesignMeta | null>(null);
+  const [presence, setPresence] = useState<ReadonlyArray<Presence>>([]);
+  const [status, setStatus] = useState<SocketStatus>("connecting");
+  const [activity, setActivity] = useState<ReadonlyArray<Activity>>([]);
+  const [zoom, setZoom] = useState(1);
+  const [artboards, setArtboards] = useState(0);
+  const [missing, setMissing] = useState(false);
+  const [, setTick] = useState(0);
+  // Bumped after every snapshot or change, so pins follow their artboards.
+  const [, setVersion] = useState(0);
+  const [mode, setMode] = useState<Mode>("pointer");
+  const [comments, setComments] = useState<ReadonlyMap<string, Comment>>(new Map());
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [draft, setDraft] = useState<Draft | null>(null);
+  const [hover, setHover] = useState<Hit | null>(null);
+  const [flash, setFlash] = useState<ReadonlyArray<string>>([]);
+  const [working, setWorking] = useState<ReadonlyMap<string, string>>(new Map());
+
+  // Whether a draft or thread is open, for the window key handler.
+  const popupRef = useRef(false);
+  popupRef.current = draft !== null || openId !== null;
+
+  const upsertComment = (comment: Comment) =>
+    setComments((map) => new Map(map).set(comment.id, comment));
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    const world = worldRef.current;
+    const frames = framesRef.current;
+    if (!viewport || !world || !frames) return;
+
+    const replica = new Replica();
+    const camera = new Camera(viewport, world);
+    const renderer = new Renderer(frames, replica, {
+      live: true,
+      onWheel: (event) => camera.wheel(event),
+    });
+    replicaRef.current = replica;
+    rendererRef.current = renderer;
+    cameraRef.current = camera;
+    camera.subscribe((view) => setZoom(view.zoom));
+
+    // Frame the artboards once, when the first ones appear.
+    let framed = false;
+    const frameOnce = () => {
+      if (framed) return;
+      const bounds = union(renderer.artboardBounds().values());
+      if (bounds) {
+        camera.fitTo(bounds);
+        framed = true;
+      }
+    };
+    const synced = () => {
+      renderer.setWorking(workingRef.current);
+      setArtboards(replica.artboards().length);
+      setVersion((v) => v + 1);
+      frameOnce();
+    };
+
+    const close = connectDesign(id, {
+      onStatus: setStatus,
+      onMessage: (message) => {
+        switch (message.type) {
+          case "snapshot":
+            replica.load(message.snapshot);
+            renderer.reset();
+            setMeta(message.snapshot.meta);
+            setPresence(message.presence);
+            setComments(new Map(message.snapshot.comments.map((c) => [c.id, c])));
+            synced();
+            return;
+          case "change": {
+            const { change } = message;
+            if (change.seq <= replica.seq) return;
+            for (const op of change.ops) {
+              const applied = replica.apply(op);
+              if (applied) renderer.apply(applied);
+            }
+            replica.seq = change.seq;
+            const label =
+              change.origin === "edit"
+                ? change.label
+                : `${change.origin === "undo" ? "Undo" : "Redo"}: ${change.label}`;
+            setActivity((list) =>
+              [{ seq: change.seq, actor: message.actorName, label, at: Date.now() }, ...list].slice(
+                0,
+                ACTIVITY_LIMIT,
+              ),
+            );
+            synced();
+            return;
+          }
+          case "presence":
+            setPresence(message.presence);
+            return;
+          case "meta":
+            setMeta(message.meta);
+            return;
+          case "comment":
+            upsertComment(message.comment);
+            return;
+        }
+      },
+    });
+
+    // The socket can't report a 404, so ask the API whether the design exists.
+    const controller = new AbortController();
+    void runtime
+      .runPromiseExit(
+        Api.use((api) => api.getDesign(id)),
+        { signal: controller.signal },
+      )
+      .then((exit) => {
+        if (!controller.signal.aborted && Exit.isFailure(exit)) setMissing(true);
+      });
+
+    const onKey = (e: KeyboardEvent) => {
+      if (isTyping(e.target) || e.metaKey || e.ctrlKey || e.altKey) {
+        if (e.key === "Escape") {
+          setDraft(null);
+          setOpenId(null);
+        }
+        return;
+      }
+      if (e.key === "v" || e.key === "V") setMode("pointer");
+      else if (e.key === "c" || e.key === "C") setMode("comment");
+      else if (e.key === "Escape") {
+        // Close the draft or thread first, then leave comment mode.
+        if (!popupRef.current) setMode("pointer");
+        setDraft(null);
+        setOpenId(null);
+      } else if (e.key === "!" || (e.shiftKey && e.code === "Digit1"))
+        camera.fitTo(union(renderer.artboardBounds().values()));
+      else if (e.key === "0" && !e.metaKey && !e.ctrlKey) camera.set({ ...camera.view, zoom: 1 });
+      else if (e.key === "=" || e.key === "+") camera.zoomBy(1.25);
+      else if (e.key === "-") camera.zoomBy(0.8);
+      else return;
+      e.preventDefault();
+    };
+    window.addEventListener("keydown", onKey);
+
+    // Keeps "2 minutes ago" labels fresh.
+    const ticker = setInterval(() => setTick((t) => t + 1), 15_000);
+
+    return () => {
+      close();
+      controller.abort();
+      camera.dispose();
+      renderer.dispose();
+      window.removeEventListener("keydown", onKey);
+      clearInterval(ticker);
+      cancelAnimationFrame(hoverFrame.current);
+      frames.replaceChildren();
+    };
+  }, [id]);
+
+  // In comment mode the left button places comments instead of panning.
+  useEffect(() => {
+    const commenting = mode === "comment";
+    if (cameraRef.current) cameraRef.current.dragToPan = !commenting;
+    rendererRef.current?.setCommenting(commenting);
+    if (!commenting) {
+      setDraft(null);
+      setHover(null);
+    }
+  }, [mode]);
+
+  useEffect(() => {
+    if (flash.length === 0) return;
+    const timer = setTimeout(() => setFlash([]), FLASH_MS);
+    return () => clearTimeout(timer);
+  }, [flash]);
+
+  // Badge each artboard an agent is working on with the agent's name and status.
+  useEffect(() => {
+    const replica = replicaRef.current;
+    const working = new Map<string, string>();
+    for (const p of presence) {
+      for (const nodeId of p.nodeIds) {
+        const board = replica?.artboardOf(nodeId);
+        if (board) working.set(board.id, p.status ? `${p.name}: ${p.status}` : p.name);
+      }
+    }
+    workingRef.current = working;
+    rendererRef.current?.setWorking(working);
+    setWorking(working);
+  }, [presence]);
+
+  const onCanvasPointerMove = (e: React.PointerEvent) => {
+    if (mode !== "comment" || draft) return;
+    const { clientX, clientY } = e;
+    cancelAnimationFrame(hoverFrame.current);
+    hoverFrame.current = requestAnimationFrame(() => {
+      const hit = rendererRef.current?.hitTest(clientX, clientY) ?? null;
+      setHover((prev) =>
+        prev?.nodeId === hit?.nodeId && prev?.artboardId === hit?.artboardId ? prev : hit,
+      );
+    });
+  };
+
+  const onCanvasClick = (e: React.MouseEvent) => {
+    const press = pressRef.current;
+    pressRef.current = null;
+    const moved = press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > CLICK_SLOP;
+    if (moved || (e.target instanceof Element && e.target.closest("[data-camera-ignore]"))) return;
+    // A click elsewhere closes the open thread or draft before it starts a new one.
+    if (openId || draft) {
+      setOpenId(null);
+      setDraft(null);
+      return;
+    }
+    const camera = cameraRef.current;
+    const replica = replicaRef.current;
+    if (mode !== "comment" || !camera || !replica) return;
+    const point = camera.toWorld(e.clientX, e.clientY);
+    const hit = rendererRef.current?.hitTest(e.clientX, e.clientY) ?? null;
+    const board = hit ? replica.get(hit.artboardId) : undefined;
+    setDraft(
+      hit && board
+        ? {
+            artboardId: hit.artboardId,
+            nodeId: hit.nodeId,
+            x: point.x - (board.x ?? 0),
+            y: point.y - (board.y ?? 0),
+          }
+        : { artboardId: null, nodeId: null, ...point },
+    );
+  };
+
+  const postComment = async (body: string) => {
+    if (!draft) return false;
+    const exit = await runtime.runPromiseExit(
+      Api.use((api) => api.createComment(id, { author: localUser(), body, ...draft })),
+    );
+    if (Exit.isFailure(exit)) return false;
+    upsertComment(exit.value);
+    setDraft(null);
+    return true;
+  };
+
+  const reply = async (commentId: string, body: string) => {
+    const exit = await runtime.runPromiseExit(
+      Api.use((api) => api.replyToComment(id, commentId, { author: localUser(), body })),
+    );
+    if (Exit.isFailure(exit)) return false;
+    upsertComment(exit.value);
+    return true;
+  };
+
+  const resolve = (commentId: string, resolved: boolean) => {
+    void runtime
+      .runPromiseExit(Api.use((api) => api.setCommentResolved(id, commentId, resolved)))
+      .then((exit) => {
+        if (Exit.isSuccess(exit)) upsertComment(exit.value);
+      });
+  };
+
+  // Outline what a comment points at: the draft's target, the open thread's
+  // node, or whatever is under the pointer in comment mode. Rects are
+  // converted to canvas coordinates so they pan and zoom with the design.
+  const openComment = openId ? comments.get(openId) : undefined;
+  const target =
+    draft?.nodeId ?? openComment?.nodeId ?? (mode === "comment" ? hover?.nodeId : undefined);
+  const canvasRect = (nodeId: string) => {
+    const rect = rendererRef.current?.nodeRect(nodeId);
+    const camera = cameraRef.current;
+    if (!rect || !camera) return null;
+    const a = camera.toWorld(rect.left, rect.top);
+    const b = camera.toWorld(rect.right, rect.bottom);
+    return { x: a.x, y: a.y, width: b.x - a.x, height: b.y - a.y };
+  };
+  const outlines = [
+    ...(target ? [{ key: "target", rect: canvasRect(target), flash: false }] : []),
+    ...flash.map((nodeId) => ({ key: `flash:${nodeId}`, rect: canvasRect(nodeId), flash: true })),
+  ];
+
+  const fitAll = () => {
+    const renderer = rendererRef.current;
+    if (renderer) cameraRef.current?.fitTo(union(renderer.artboardBounds().values()));
+  };
+
+  if (missing) {
+    return (
+      <main {...stylex.props(styles.notFound)}>
+        <p>This design doesn’t exist.</p>
+        <Link href="/" {...stylex.props(styles.link)}>
+          Back to designs
+        </Link>
+      </main>
+    );
+  }
+
+  return (
+    <main {...stylex.props(styles.page)}>
+      <div
+        ref={viewportRef}
+        onPointerDown={(e) => {
+          pressRef.current = { x: e.clientX, y: e.clientY };
+        }}
+        onPointerMove={onCanvasPointerMove}
+        onPointerLeave={() => setHover(null)}
+        onClick={onCanvasClick}
+        {...stylex.props(styles.viewport, mode === "comment" && styles.commenting)}
+      >
+        <div ref={worldRef} {...stylex.props(styles.world)}>
+          <div ref={framesRef} />
+          {outlines.map(
+            ({ key, rect, flash }) =>
+              rect && (
+                <div
+                  key={key}
+                  {...stylex.props(
+                    styles.outline(rect.x, rect.y, rect.width, rect.height),
+                    flash && styles.flash,
+                  )}
+                />
+              ),
+          )}
+          {replicaRef.current && (
+            <CommentLayer
+              replica={replicaRef.current}
+              comments={comments}
+              openId={openId}
+              draft={draft}
+              working={working}
+              onOpen={(commentId) => {
+                setDraft(null);
+                setOpenId(commentId);
+              }}
+              onPost={postComment}
+              onCancelDraft={() => setDraft(null)}
+              onReply={reply}
+              onResolve={resolve}
+              onShowChange={(nodeIds) => setFlash([...nodeIds])}
+            />
+          )}
+        </div>
+      </div>
+
+      <header {...stylex.props(styles.bar, styles.top)}>
+        <Link href="/" {...stylex.props(styles.link)}>
+          ← Designs
+        </Link>
+        <span {...stylex.props(styles.name)}>{meta?.name ?? "…"}</span>
+        <span {...stylex.props(styles.muted)} title="Pass this to agents as designId">
+          <code {...stylex.props(styles.code)}>{id}</code>
+        </span>
+        <span {...stylex.props(styles.spacer)} />
+        {presence.map((p) => (
+          <span key={p.actor} {...stylex.props(styles.chip)} title={p.status ?? undefined}>
+            {p.name}
+          </span>
+        ))}
+        <span
+          {...stylex.props(styles.dot, status === "open" ? styles.online : styles.offline)}
+          title={status === "open" ? "Live" : "Reconnecting…"}
+        />
+      </header>
+
+      {meta && artboards === 0 && (
+        <div {...stylex.props(styles.empty)}>
+          <p {...stylex.props(styles.emptyTitle)}>No artboards yet</p>
+          <p {...stylex.props(styles.muted)}>
+            Connect an agent to <code {...stylex.props(styles.code)}>{mcpUrl()}</code> and ask it to
+            design something in <code {...stylex.props(styles.code)}>{id}</code>.
+          </p>
+        </div>
+      )}
+
+      {activity.length > 0 && (
+        <ol {...stylex.props(styles.bar, styles.activity)}>
+          {activity.map((a) => (
+            <li key={a.seq} {...stylex.props(styles.activityItem)}>
+              <span {...stylex.props(styles.actor)}>{a.actor}</span> {a.label}{" "}
+              <span {...stylex.props(styles.muted)}>{timeAgo(a.at)}</span>
+            </li>
+          ))}
+        </ol>
+      )}
+
+      <ToolPill mode={mode} onMode={setMode} />
+
+      <div {...stylex.props(styles.bar, styles.zoom)}>
+        <button
+          type="button"
+          onClick={() => cameraRef.current?.zoomBy(0.8)}
+          {...stylex.props(styles.tool)}
+          aria-label="Zoom out"
+        >
+          −
+        </button>
+        <button
+          type="button"
+          onClick={() => cameraRef.current?.set({ ...cameraRef.current.view, zoom: 1 })}
+          {...stylex.props(styles.tool, styles.percent)}
+          title="Zoom to 100% (0)"
+        >
+          {Math.round(zoom * 100)}%
+        </button>
+        <button
+          type="button"
+          onClick={() => cameraRef.current?.zoomBy(1.25)}
+          {...stylex.props(styles.tool)}
+          aria-label="Zoom in"
+        >
+          +
+        </button>
+        <button
+          type="button"
+          onClick={fitAll}
+          {...stylex.props(styles.tool)}
+          title="Zoom to fit (Shift+1)"
+        >
+          Fit
+        </button>
+      </div>
+    </main>
+  );
+}
+
+const styles = stylex.create({
+  page: {
+    position: "fixed",
+    inset: 0,
+    overflow: "hidden",
+    backgroundColor: colors.canvas,
+    color: colors.text,
+    fontFamily: "ui-sans-serif, system-ui, sans-serif",
+    fontSize: 13,
+  },
+  viewport: {
+    position: "absolute",
+    inset: 0,
+    overflow: "hidden",
+    cursor: "grab",
+    touchAction: "none",
+    userSelect: "none",
+  },
+  // A comment bubble, with its tip as the hotspot.
+  commenting: {
+    cursor:
+      "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Cpath d='M12 2a9 9 0 1 1-4.5 16.8L2 22l1.4-5.4A9 9 0 0 1 12 2z' fill='white' stroke='black' stroke-width='1.5'/%3E%3C/svg%3E\") 2 22, crosshair",
+  },
+  world: {
+    position: "absolute",
+    left: 0,
+    top: 0,
+    transformOrigin: "0 0",
+  },
+  outline: (x: number, y: number, width: number, height: number) => ({
+    position: "absolute",
+    left: x,
+    top: y,
+    width,
+    height,
+    outline: `calc(1.5px * var(--inv-zoom, 1)) solid ${colors.accent}`,
+    pointerEvents: "none",
+  }),
+  flash: {
+    backgroundColor: "rgba(21, 128, 61, 0.12)",
+    outlineColor: colors.ok,
+    outlineWidth: "calc(2px * var(--inv-zoom, 1))",
+  },
+  bar: {
+    position: "absolute",
+    display: "flex",
+    alignItems: "center",
+    gap: space.sm,
+    padding: space.xs,
+    paddingInline: space.sm,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderStyle: "solid",
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  top: {
+    top: space.sm,
+    left: space.sm,
+    right: space.sm,
+  },
+  spacer: { flexGrow: 1 },
+  link: {
+    color: colors.muted,
+    textDecoration: { default: "none", ":hover": "underline" },
+  },
+  name: { fontWeight: 500 },
+  muted: { margin: 0, color: colors.muted },
+  code: {
+    fontFamily: "ui-monospace, monospace",
+    fontSize: 12,
+    userSelect: "all",
+  },
+  chip: {
+    paddingInline: 6,
+    paddingBlock: 1,
+    borderRadius: 4,
+    backgroundColor: colors.accent,
+    color: "white",
+    fontSize: 12,
+  },
+  dot: {
+    width: 8,
+    height: 8,
+    borderRadius: "50%",
+  },
+  online: { backgroundColor: colors.ok },
+  offline: { backgroundColor: colors.danger },
+  empty: {
+    position: "absolute",
+    top: "50%",
+    left: "50%",
+    transform: "translate(-50%, -50%)",
+    maxWidth: 420,
+    textAlign: "center",
+    pointerEvents: "none",
+  },
+  emptyTitle: {
+    margin: 0,
+    marginBottom: space.xs,
+    fontSize: 15,
+    fontWeight: 500,
+  },
+  activity: {
+    left: space.sm,
+    bottom: space.sm,
+    flexDirection: "column",
+    alignItems: "flex-start",
+    gap: 2,
+    margin: 0,
+    maxWidth: 360,
+    listStyle: "none",
+  },
+  activityItem: {
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    maxWidth: "100%",
+  },
+  actor: { fontWeight: 500 },
+  zoom: {
+    right: space.sm,
+    bottom: space.sm,
+    gap: 2,
+  },
+  tool: {
+    minWidth: 28,
+    height: 24,
+    paddingInline: 6,
+    borderWidth: 0,
+    borderRadius: 4,
+    backgroundColor: { default: "transparent", ":hover": colors.bg },
+    color: "inherit",
+    font: "inherit",
+    cursor: "pointer",
+  },
+  percent: {
+    minWidth: 48,
+    fontVariantNumeric: "tabular-nums",
+  },
+  notFound: {
+    minHeight: "100vh",
+    display: "grid",
+    placeContent: "center",
+    gap: space.sm,
+    textAlign: "center",
+    backgroundColor: colors.bg,
+    color: colors.text,
+    fontFamily: "ui-sans-serif, system-ui, sans-serif",
+  },
+});

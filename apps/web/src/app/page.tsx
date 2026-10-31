@@ -1,5 +1,5 @@
-import { App } from "@/components/App";
+import { DesignGrid } from "@/components/DesignGrid";
 
 export default function Page() {
-  return <App />;
+  return <DesignGrid />;
 }

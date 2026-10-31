@@ -34,3 +34,6 @@ dist-ssr
 
 # Rust
 target
+
+# Designs saved by a local dev server
+crates/server/data

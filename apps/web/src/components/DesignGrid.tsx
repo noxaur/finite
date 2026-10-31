@@ -1,0 +1,171 @@
+"use client";
+
+import * as stylex from "@stylexjs/stylex";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
+import { Api } from "@/api/Api";
+import type { DesignSummary } from "@/design/schema";
+import { connectLobby } from "@/design/socket";
+import { mcpUrl } from "@/lib/mcp";
+import { timeAgo } from "@/lib/time";
+import { runtime } from "@/runtime";
+import { colors, radii, space } from "@/styles/tokens.stylex";
+import { Thumbnail } from "./Thumbnail";
+
+/** Every design, newest edit first, updated live as agents create and edit them. */
+export function DesignGrid() {
+  const router = useRouter();
+  const [designs, setDesigns] = useState<ReadonlyArray<DesignSummary> | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [mcp, setMcp] = useState("");
+
+  useEffect(() => setMcp(mcpUrl()), []);
+
+  useEffect(
+    () =>
+      connectLobby({
+        onMessage: (message) => {
+          if (message.type === "designs") {
+            setDesigns(message.designs);
+            return;
+          }
+          setDesigns((current) => [
+            message.design,
+            ...(current ?? []).filter((d) => d.id !== message.design.id),
+          ]);
+        },
+      }),
+    [],
+  );
+
+  const sorted = [...(designs ?? [])].sort((a, b) => b.updatedAt - a.updatedAt);
+
+  const create = () => {
+    setCreating(true);
+    runtime.runPromise(Api.use((api) => api.createDesign("Untitled"))).then(
+      (design) => router.push(`/design/?id=${design.id}`),
+      () => setCreating(false),
+    );
+  };
+
+  return (
+    <main {...stylex.props(styles.page)}>
+      <header {...stylex.props(styles.header)}>
+        <h1 {...stylex.props(styles.title)}>Designs</h1>
+        <button type="button" onClick={create} disabled={creating} {...stylex.props(styles.button)}>
+          New design
+        </button>
+      </header>
+
+      {designs !== null && sorted.length === 0 && (
+        <p {...stylex.props(styles.muted)}>No designs yet. Create one, or ask an agent to.</p>
+      )}
+
+      <ul {...stylex.props(styles.grid)}>
+        {sorted.map((design) => (
+          <li key={design.id}>
+            <Link href={`/design/?id=${design.id}`} {...stylex.props(styles.card)}>
+              <Thumbnail id={design.id} seq={design.seq} />
+              <div {...stylex.props(styles.meta)}>
+                <span {...stylex.props(styles.name)}>{design.name}</span>
+                <span {...stylex.props(styles.muted)}>
+                  {design.artboardCount} {design.artboardCount === 1 ? "artboard" : "artboards"} ·{" "}
+                  {timeAgo(design.updatedAt)}
+                </span>
+              </div>
+            </Link>
+          </li>
+        ))}
+      </ul>
+
+      <footer {...stylex.props(styles.footer)}>
+        Agents connect over MCP at <code {...stylex.props(styles.code)}>{mcp}</code>
+      </footer>
+    </main>
+  );
+}
+
+const styles = stylex.create({
+  page: {
+    minHeight: "100vh",
+    display: "flex",
+    flexDirection: "column",
+    gap: space.lg,
+    padding: space.xl,
+    backgroundColor: colors.bg,
+    color: colors.text,
+    fontFamily: "ui-sans-serif, system-ui, sans-serif",
+  },
+  header: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  title: {
+    margin: 0,
+    fontSize: 20,
+    fontWeight: 600,
+  },
+  button: {
+    paddingBlock: space.xs,
+    paddingInline: space.md,
+    borderRadius: radii.sm,
+    borderWidth: 0,
+    backgroundColor: colors.text,
+    color: colors.bg,
+    font: "inherit",
+    fontSize: 14,
+    cursor: "pointer",
+    opacity: { default: 1, ":hover": 0.85, ":disabled": 0.5 },
+  },
+  grid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))",
+    gap: space.lg,
+    margin: 0,
+    padding: 0,
+    listStyle: "none",
+  },
+  card: {
+    display: "flex",
+    flexDirection: "column",
+    overflow: "hidden",
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderStyle: "solid",
+    borderColor: { default: colors.border, ":hover": colors.muted },
+    backgroundColor: colors.surface,
+    color: "inherit",
+    textDecoration: "none",
+  },
+  meta: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 2,
+    padding: space.sm,
+    paddingInline: space.md,
+    borderTopWidth: 1,
+    borderTopStyle: "solid",
+    borderTopColor: colors.border,
+  },
+  name: {
+    fontSize: 14,
+    fontWeight: 500,
+  },
+  muted: {
+    margin: 0,
+    fontSize: 13,
+    color: colors.muted,
+  },
+  footer: {
+    marginTop: "auto",
+    fontSize: 13,
+    color: colors.muted,
+  },
+  code: {
+    fontFamily: "ui-monospace, monospace",
+    color: colors.text,
+    userSelect: "all",
+  },
+});

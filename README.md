@@ -1,17 +1,71 @@
 # Finite
 
-Finite is a desktop and web app. The frontend is Next.js (React), styled with StyleX, and talks to the backend through an Effect HTTP client. The backend is a Rust server built on axum. Vite+ (`vp`) runs the JavaScript side, and Cargo builds the Rust side.
+Finite is a design canvas that agents edit. Agents connect over MCP and build designs out of HTML and inline CSS. Several agents can work at once, on the same design or on different ones. People open the app to browse every design in a grid and watch any one of them update live on a pan-and-zoom canvas. In this MVP, people can create empty designs but can't edit them. Every edit to a design's content comes from an agent, and people steer agents by pinning comments to the canvas.
+
+The frontend is Next.js (React), styled with StyleX, and talks to the backend through an Effect HTTP client and WebSockets. The backend is a Rust server built on axum. Vite+ (`vp`) runs the JavaScript side, and Cargo builds the Rust side.
+
+## Connect an agent
+
+Start the app with `vp run dev`, then point an MCP client at the server's Streamable HTTP endpoint:
+
+```bash
+claude mcp add --transport http finite http://127.0.0.1:4100/mcp
+```
+
+The tools follow [Paper's MCP server](https://paper.design/docs/mcp): `get_basic_info` and `get_tree_summary` to orient, `create_artboard` and `write_html` to build, `update_styles` and `set_text_content` to refine, and `get_screenshot` to check the render. Every tool except `list_designs` and `create_design` takes a `designId`, which is how agents pick the canvas they edit. The server's MCP instructions explain the workflow to the agent, and `crates/server/src/mcp.rs` defines every tool.
+
+`get_screenshot` renders the artboard with a local headless Chrome, Chromium or Edge. Set `FINITE_CHROME` if yours isn't in a standard location.
+
+## Styles, motion and scripts
+
+Agents can style with inline `style` attributes or with `<style>` blocks and classes, so `@keyframes` animations and `:hover` effects work. Each artboard renders inside a shadow root, which scopes its CSS to that artboard and keeps the app's CSS out.
+
+An artboard that contains a `<script>` renders in a sandboxed iframe instead. The `sandbox="allow-scripts"` attribute gives the iframe an opaque origin, so its code can't reach the app or the app's API. A content security policy also blocks its network requests, while still letting it load remote images, fonts and stylesheets. The iframe reloads after each burst of edits, so a script's state resets when an agent changes the artboard. A small runtime inside the iframe forwards wheel events to the canvas, so you can still pan and zoom over it. The server strips inline `on*` handlers and `<script src>`, so scripts attach listeners with `addEventListener`.
+
+Thumbnails never run scripts. Screenshots run them under the same content policy, capturing the frame about 3 seconds after load.
+
+## Comments
+
+The pill at the bottom of the canvas switches between the pointer tool (`V`) and the comment tool (`C`). In comment mode, you see an outline around the element under the cursor, and a click pins a comment to it. The left button no longer drags the canvas in comment mode; the wheel and the middle button still pan.
+
+A comment stores its artboard, the element you clicked, and the pin's offset from the artboard's corner, so the pin follows the artboard when an agent moves it. Inside a sandboxed artboard, the iframe can't be inspected, so the comment points at the artboard itself.
+
+Agents read comments with `get_comments` and answer with `reply_to_comment`, usually with `resolve: true`. `get_basic_info` counts open comments, and the MCP instructions tell agents to check them. When an agent replies, the server links that agent's changes to the comment's artboard since the thread's previous message. The thread shows them as buttons, and clicking one outlines the elements it changed. A reply from you reopens a resolved comment, so you can keep steering in the same thread.
+
+Comments aren't part of the document, so undo never touches them. They're saved with the design's snapshot. People have no accounts yet: each browser keeps a random id in local storage and posts as "Guest" over `POST /api/designs/{id}/comments`.
+
+## Undo and redo
+
+Each agent can undo only its own changes. This follows Liveblocks' [multiplayer undo/redo design](https://liveblocks.io/blog/how-to-build-undo-redo-in-a-multiplayer-environment), which is the command pattern: applying an op returns its inverse, captured from the document at that moment, and undo applies that inverse as a new change. Undo never restores a snapshot, so it can't wipe out another agent's work.
+
+Conflicts resolve per property, last writer wins. Two things are easy to miss:
+
+- If another agent deleted the nodes an undo step touches, that step is skipped, and undo moves on to the next one that still applies.
+- Undo then redo returns the document to where it was. If you delete an artboard that holds another agent's nodes, redo brings those nodes back too, because the inverse captured the whole subtree.
+
+The history belongs to an actor, per design. Today an actor is an MCP session, or the value of an `X-Finite-Agent` header if the client sends one. A user's browser tab will be another kind of actor when users can edit. `History` also supports batching (Liveblocks calls it pausing), so a drag can undo in one step.
+
+## How a change flows
+
+1. An MCP tool call, like `update_styles`, runs an edit command from `crates/design/src/edit.rs`. The command validates the request and turns it into ops: `create`, `delete`, `set` (one property) or `move`.
+2. `Design::commit` applies the ops to the server's document, pushes the inverse onto the actor's undo stack, and assigns the change a sequence number. Each design has its own lock, so edits to one design are applied in a single order, and edits to different designs never wait on each other.
+3. The hub broadcasts the change to every viewer's WebSocket and saves the design to disk a moment later.
+4. In the browser, `Replica` applies the same ops with the same rules, and `Renderer` patches only the DOM nodes they touched.
+
+Sibling order uses fractional indexes, so inserting or moving a node rewrites only that node. That keeps concurrent edits from conflicting and is what multiplayer editing will build on.
 
 ## Layout
 
-| Path            | What it is                                                                       |
-| --------------- | -------------------------------------------------------------------------------- |
-| `apps/web`      | Next.js + StyleX + Effect frontend, built as a static export into `out/`         |
-| `apps/desktop`  | Electron main and preload processes, bundled with `vp pack`                      |
-| `crates/server` | Rust API server (axum). Serves `/api/*`, plus the built frontend in release mode |
-| `Cargo.toml`    | Cargo workspace for everything in `crates/`                                      |
+| Path                  | What it is                                                                                              |
+| --------------------- | ------------------------------------------------------------------------------------------------------- |
+| `apps/web`            | Next.js + StyleX + Effect frontend, built as a static export into `out/`                                |
+| `apps/web/src/design` | The canvas client: schemas, `Replica` (document copy), `Renderer` (DOM), `Camera` (pan/zoom)            |
+| `apps/desktop`        | Electron main and preload processes, bundled with `vp pack`                                             |
+| `crates/design`       | The document model with no I/O: nodes, ops and inverses, history, edit commands, HTML import/export     |
+| `crates/server`       | Rust server (axum). Serves `/api/*`, the MCP endpoint at `/mcp`, and the built frontend in release mode |
+| `Cargo.toml`          | Cargo workspace for everything in `crates/`                                                             |
 
-`crates/server/package.json` wraps the Cargo commands, so `vp run` can start, test and build the server along with the JS packages.
+`crates/server/package.json` and `crates/design/package.json` wrap the Cargo commands, so `vp run` can start, test and build the Rust crates along with the JS packages.
 
 ## Commands
 
@@ -20,7 +74,7 @@ vp install              # install deps (also downloads the Electron binary)
 vp run dev              # web on http://localhost:5310, Rust API on :4100
 vp run dev:desktop      # same, plus an Electron window pointed at the dev server
 vp run start:desktop    # release build of everything, then Electron with the Rust sidecar
-vp run test             # cargo test (add `test` scripts to JS packages as needed)
+vp run test             # cargo test for both crates, plus the web app's Vitest suite
 vp run ready            # format + lint + type check, test, build
 ```
 
@@ -30,10 +84,12 @@ The frontend calls the API with relative `/api/...` URLs, so it needs both on th
 
 - **Web dev:** `next dev` rewrites `/api/*` to the Rust server on `127.0.0.1:4100`. Set `FINITE_API_URL` to point elsewhere.
 - **Desktop dev:** Electron loads the Next.js dev server, so it uses the same rewrite.
-- **Desktop release:** Electron starts `finite-server` as a sidecar process on a free port, with `FINITE_STATIC_DIR` pointing at `apps/web/out`. The window loads that server, and Electron kills the server when the app quits.
+- **Desktop release:** Electron starts `finite-server` as a sidecar process on port 4100 (or a free port if that's taken), with `FINITE_STATIC_DIR` pointing at `apps/web/out`. The window loads that server, and Electron kills the server when the app quits.
 - **Web deploy:** run `finite-server` with `FINITE_STATIC_DIR` and `FINITE_PORT`.
 
-The API client is `apps/web/src/api/Api.ts`, an Effect `Context.Service` whose responses are decoded with `Schema`. Keep its schemas in sync with the Rust structs in `crates/server/src/lib.rs`. StyleX design tokens are in `apps/web/src/styles/tokens.stylex.ts`.
+The API client is `apps/web/src/api/Api.ts`, an Effect `Context.Service` whose responses are decoded with `Schema`. Live updates arrive over two WebSockets: `/api/designs/ws` streams the design list, and `/api/designs/{id}/ws` streams one design (a snapshot, then every change and presence update). `apps/web/src/design/schema.ts` defines the schemas for both. Keep them in sync with the Rust types in `crates/design` and `crates/server/src/hub.rs`.
+
+The server saves each design as a JSON file in `FINITE_DATA_DIR/designs/` (default `./data`, so `crates/server/data` in dev). The desktop app sets it to Electron's user data folder. Storage goes through the `Store` trait in `crates/server/src/store.rs`, so a database can replace the files without touching anything else. StyleX design tokens are in `apps/web/src/styles/tokens.stylex.ts`.
 
 `next build` produces a static export (`output: "export"` in `apps/web/next.config.ts`), so there's no Node server to ship. That rules out Next features that need a server at request time: route handlers, server actions, middleware, and dynamic routes without `generateStaticParams`. The Rust server handles everything dynamic. Components that use Effect or `window` need `"use client"`.
 

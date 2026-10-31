@@ -1,24 +1,24 @@
-use axum::{Json, Router, extract::Query, routing::get};
-use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+use axum::{Json, Router, routing::get};
+use serde::Serialize;
 use tower_http::{
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
 
+pub mod api;
+pub mod hub;
+pub mod mcp;
+pub mod screenshot;
+pub mod store;
+
+pub use hub::Hub;
+
 #[derive(Serialize)]
 pub struct Health {
     status: &'static str,
     version: &'static str,
-}
-
-#[derive(Deserialize)]
-pub struct GreetParams {
-    name: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct Greeting {
-    message: String,
 }
 
 async fn health() -> Json<Health> {
@@ -28,22 +28,20 @@ async fn health() -> Json<Health> {
     })
 }
 
-async fn greet(Query(params): Query<GreetParams>) -> Json<Greeting> {
-    let name = params.name.as_deref().map(str::trim).unwrap_or_default();
-    let name = if name.is_empty() { "world" } else { name };
-    Json(Greeting {
-        message: format!("Hello, {name}! (from Rust)"),
-    })
-}
-
-/// Builds the router. Routes the frontend calls live under `/api`, matching
-/// `apps/web/src/api/Api.ts`.
-pub fn app(static_dir: Option<&str>) -> Router {
+/// Builds the router:
+///
+/// - `/api/*` for the web app, matching `apps/web/src/api/Api.ts`
+/// - `/mcp` for agents (MCP over Streamable HTTP)
+/// - the built frontend, when `static_dir` is set
+pub fn app(hub: Arc<Hub>, static_dir: Option<&str>) -> Router {
     let api = Router::new()
         .route("/health", get(health))
-        .route("/greet", get(greet));
+        .merge(api::routes())
+        .with_state(hub.clone());
 
-    let router = Router::new().nest("/api", api);
+    let router = Router::new()
+        .nest("/api", api)
+        .nest_service("/mcp", mcp::service(hub));
 
     let router = match static_dir {
         // A Next.js static export: one HTML file per route, plus `404.html`.
@@ -60,38 +58,74 @@ pub fn app(static_dir: Option<&str>) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{body::Body, http::Request};
+    use crate::store::MemoryStore;
+    use axum::{
+        body::Body,
+        http::{Request, header},
+    };
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    async fn get_json(uri: &str) -> serde_json::Value {
-        let res = app(None)
-            .oneshot(Request::get(uri).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert!(res.status().is_success());
+    fn test_app() -> Router {
+        app(Hub::new(Arc::new(MemoryStore::default())).unwrap(), None)
+    }
+
+    async fn call(app: &Router, req: Request<Body>) -> (axum::http::StatusCode, serde_json::Value) {
+        let res = app.clone().oneshot(req).await.unwrap();
+        let status = res.status();
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
-        serde_json::from_slice(&bytes).unwrap()
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
     }
 
     #[tokio::test]
     async fn health_is_ok() {
-        assert_eq!(get_json("/api/health").await["status"], "ok");
+        let (_, body) = call(
+            &test_app(),
+            Request::get("/api/health").body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(body["status"], "ok");
     }
 
     #[tokio::test]
-    async fn greet_uses_name() {
-        assert_eq!(
-            get_json("/api/greet?name=Ada").await["message"],
-            "Hello, Ada! (from Rust)"
-        );
+    async fn create_and_fetch_design() {
+        let app = test_app();
+        let req = Request::post("/api/designs")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"name":"Landing"}"#))
+            .unwrap();
+        let (status, created) = call(&app, req).await;
+        assert_eq!(status, 201);
+        assert_eq!(created["name"], "Landing");
+
+        let id = created["id"].as_str().unwrap();
+        let (_, snapshot) = call(
+            &app,
+            Request::get(format!("/api/designs/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(snapshot["seq"], 0);
+        assert_eq!(snapshot["nodes"], serde_json::json!([]));
+
+        let (_, list) = call(
+            &app,
+            Request::get("/api/designs").body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(list.as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
-    async fn greet_defaults_to_world() {
-        assert_eq!(
-            get_json("/api/greet?name=%20").await["message"],
-            "Hello, world! (from Rust)"
-        );
+    async fn unknown_design_is_404() {
+        let (status, _) = call(
+            &test_app(),
+            Request::get("/api/designs/nope")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, 404);
     }
 }

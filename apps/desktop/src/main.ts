@@ -25,11 +25,17 @@ function resources() {
   };
 }
 
-function freePort(): Promise<number> {
+/** Agents connect to `http://127.0.0.1:<port>/mcp`, so keep the port stable when it's free. */
+const PREFERRED_PORT = 4100;
+
+function freePort(port = PREFERRED_PORT): Promise<number> {
   return new Promise((resolve, reject) => {
     const probe = createServer();
-    probe.once("error", reject);
-    probe.listen(0, "127.0.0.1", () => {
+    probe.once("error", (error: NodeJS.ErrnoException) => {
+      if (port !== 0 && error.code === "EADDRINUSE") resolve(freePort(0));
+      else reject(error);
+    });
+    probe.listen(port, "127.0.0.1", () => {
       const address = probe.address();
       const port = typeof address === "object" && address ? address.port : 0;
       probe.close(() => resolve(port));
@@ -56,7 +62,12 @@ async function startServer(): Promise<string> {
   const { serverBin, staticDir } = resources();
   const port = await freePort();
   server = spawn(serverBin, [], {
-    env: { ...process.env, FINITE_PORT: String(port), FINITE_STATIC_DIR: staticDir },
+    env: {
+      ...process.env,
+      FINITE_PORT: String(port),
+      FINITE_STATIC_DIR: staticDir,
+      FINITE_DATA_DIR: path.join(app.getPath("userData"), "data"),
+    },
     stdio: "inherit",
   });
   server.once("exit", (code) => {
