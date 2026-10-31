@@ -194,7 +194,7 @@ pub(crate) fn check_anchor(doc: &Document, anchor: &Anchor) -> Result<(), Commen
     Ok(())
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Logged {
     actor: ActorId,
     change: ChangeRef,
@@ -202,9 +202,11 @@ struct Logged {
 }
 
 /// The most recent changes to a design, with the artboards each one touched,
-/// so a reply can link the edits its author made for a comment.
-#[derive(Debug, Default)]
-pub(crate) struct ChangeLog {
+/// so a reply can link the edits its author made for a comment. It's saved
+/// with full snapshots, so replies still link edits made before a restart.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ChangeLog {
     entries: VecDeque<Logged>,
 }
 

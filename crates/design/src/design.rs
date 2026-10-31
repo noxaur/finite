@@ -37,6 +37,9 @@ pub struct Snapshot {
     /// sent to viewers leave them out. See [`Design::snapshot_to_save`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub histories: Option<HashMap<ActorId, History>>,
+    /// Recent changes, for linking replies to edits. Only in saved snapshots, like `histories`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log: Option<ChangeLog>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,7 +126,7 @@ impl Design {
             seq: snapshot.seq,
             comments: snapshot.comments,
             histories: snapshot.histories.unwrap_or_default(),
-            log: ChangeLog::default(),
+            log: snapshot.log.unwrap_or_default(),
             comment_updates: Vec::new(),
         }
     }
@@ -137,14 +140,16 @@ impl Design {
             nodes,
             comments: self.comments.clone(),
             histories: None,
+            log: None,
         }
     }
 
     /// A snapshot for the store: [`Design::snapshot`] plus every actor's
-    /// history, so undo survives a clean restart.
+    /// history and the change log, so undo and reply links survive a restart.
     pub fn snapshot_to_save(&self) -> Snapshot {
         Snapshot {
             histories: (!self.histories.is_empty()).then(|| self.histories.clone()),
+            log: Some(self.log.clone()),
             ..self.snapshot()
         }
     }
@@ -271,6 +276,7 @@ impl Design {
         match record {
             Record::Change { change } => {
                 if change.seq > self.seq {
+                    let before = comment::artboards_of(&self.doc, &change.ops);
                     if !self.replay_with_history(&change) {
                         self.doc.apply_all(&change.ops);
                         // The saved undo steps don't explain this change, so
@@ -279,6 +285,7 @@ impl Design {
                         self.histories.clear();
                     }
                     self.seq = change.seq;
+                    self.log.record(&change, &self.doc, before);
                 }
             }
             Record::Comment { comment } => {
@@ -777,6 +784,31 @@ mod tests {
             assert_eq!(a.map(|c| c.ops), b.map(|c| c.ops), "{actor}");
             assert_eq!(color_of(&live, "a"), color_of(&crashed, "a"));
         }
+    }
+
+    #[test]
+    fn replies_link_edits_made_before_a_restart() {
+        let mut live = design();
+        live.commit("agent", "board", &[create("a", None)], 1);
+        let id = pin(&mut live, "a");
+        live.commit("agent", "red", &[color("a", "red")], 2);
+        let saved = live.snapshot_to_save();
+        assert!(live.snapshot().log.is_none(), "viewers never get the log");
+        let blue = live
+            .commit("agent", "blue", &[color("a", "blue")], 3)
+            .unwrap();
+
+        // A clean restart from the snapshot, then a crash that replays the journal.
+        let mut restored = Design::from_snapshot(saved);
+        restored.replay(Record::Change { change: blue });
+        let agent = author("agent", AuthorKind::Agent);
+        let replied = restored.reply(&id, agent, "Done", None, 4).unwrap();
+        let labels: Vec<&str> = replied.messages[1]
+            .changes
+            .iter()
+            .map(|c| c.label.as_str())
+            .collect();
+        assert_eq!(labels, ["red", "blue"]);
     }
 
     #[test]
