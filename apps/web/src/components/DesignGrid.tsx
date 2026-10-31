@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Api } from "@/api/Api";
 import type { DesignSummary } from "@/design/schema";
-import { connectLobby } from "@/design/socket";
+import { connectLobby, type SocketStatus } from "@/design/socket";
 import { mcpUrl } from "@/lib/mcp";
 import { timeAgo } from "@/lib/time";
 import { runtime } from "@/runtime";
@@ -18,6 +18,8 @@ export function DesignGrid() {
   const router = useRouter();
   const [designs, setDesigns] = useState<ReadonlyArray<DesignSummary> | null>(null);
   const [creating, setCreating] = useState(false);
+  const [createFailed, setCreateFailed] = useState(false);
+  const [status, setStatus] = useState<SocketStatus>("connecting");
   const [mcp, setMcp] = useState("");
 
   useEffect(() => setMcp(mcpUrl()), []);
@@ -25,6 +27,7 @@ export function DesignGrid() {
   useEffect(
     () =>
       connectLobby({
+        onStatus: setStatus,
         onMessage: (message) => {
           if (message.type === "designs") {
             setDesigns(message.designs);
@@ -43,9 +46,13 @@ export function DesignGrid() {
 
   const create = () => {
     setCreating(true);
+    setCreateFailed(false);
     runtime.runPromise(Api.use((api) => api.createDesign("Untitled"))).then(
       (design) => router.push(`/design/?id=${design.id}`),
-      () => setCreating(false),
+      () => {
+        setCreating(false);
+        setCreateFailed(true);
+      },
     );
   };
 
@@ -57,6 +64,16 @@ export function DesignGrid() {
           New design
         </button>
       </header>
+
+      {createFailed && (
+        <p role="alert" {...stylex.props(styles.muted, styles.failed)}>
+          Couldn’t create a design. Check the connection and try again.
+        </p>
+      )}
+
+      {designs === null && status === "closed" && (
+        <p {...stylex.props(styles.muted)}>Can’t reach the Finite server. Retrying…</p>
+      )}
 
       {designs !== null && sorted.length === 0 && (
         <p {...stylex.props(styles.muted)}>No designs yet. Create one, or ask an agent to.</p>
@@ -153,6 +170,7 @@ const styles = stylex.create({
     fontSize: 14,
     fontWeight: 500,
   },
+  failed: { color: colors.danger, marginBottom: space.md },
   muted: {
     margin: 0,
     fontSize: 13,

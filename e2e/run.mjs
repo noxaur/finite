@@ -334,6 +334,22 @@ try {
   await page.send("Network.setBlockedURLs", { urls: [] });
   await page.key("Escape", "Escape", 27);
 
+  // On the design list, a design that can't be created says so.
+  await page.goto(`${base}/`);
+  await page.until(`document.querySelectorAll("main li").length > 0`);
+  await page.send("Network.setBlockedURLs", { urls: ["*/api/designs"] });
+  const newButton = await rectOf(
+    `[...document.querySelectorAll("button")].find((b) => b.textContent === "New design")`,
+  );
+  await page.click(newButton.x + 5, newButton.y + 5);
+  check(
+    "a design that fails to be created says so",
+    Boolean(
+      await page.until(`document.querySelector('[role="alert"]')?.textContent.includes("Couldn")`),
+    ),
+  );
+  await page.send("Network.setBlockedURLs", { urls: [] });
+
   check("no errors on the page", page.errors.length === 0, page.errors.join(" | "));
 } catch (error) {
   check("the run finished", false, error.stack ?? String(error));

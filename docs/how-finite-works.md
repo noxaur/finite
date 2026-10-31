@@ -261,7 +261,7 @@ The browser side lives in `apps/web/src/design`. It's plain TypeScript classes, 
 
 `components/DesignCanvas.tsx` wires these together and adds what's specific to the page: the comment tool, hover outlines, the zoom controls and keyboard shortcuts.
 
-The design list page (`DesignGrid.tsx`) uses the lobby socket, and each card's `Thumbnail` renders a static copy of the design with scripts off.
+The design list page (`DesignGrid.tsx`) uses the lobby socket, and each card's `Thumbnail` renders a static copy of the design with scripts off. Until the first list arrives, a dropped socket shows "Can't reach the Finite server. Retrying…", and a design that can't be created says so instead of silently re-enabling the button.
 
 ### Reconnecting without starting over
 
@@ -292,7 +292,7 @@ Here's what happened in the demo you saw:
 
 A thread opens up and to the right of its pin. Near the window's right edge it opens to the left, and near the top bar it hangs below the pin instead (`Popover` in `components/Comments.tsx`).
 
-If a comment or reply can't be sent, say the connection dropped, the box keeps the text and shows "Couldn't send" under it, so you can try again. The end-to-end test blocks the comments endpoint to check this.
+If a comment or reply can't be sent, say the connection dropped, the box keeps the text and shows "Couldn't send" under it, so you can try again. The end-to-end test blocks the comments endpoint to check this, and does the same for creating a design.
 
 An agent doesn't have to check for comments on a timer. `wait_for_comments` is a **long poll**: the tool call stays open until a comment is waiting for an agent, then returns it. A comment is waiting when it's open and a person wrote the last message (`Comment::awaits_agent`). Each design has a `Notify`, a Tokio primitive that wakes every task waiting on it, and every comment update fires it. On the demo server, a waiting agent woke 30 ms after a comment was posted. The call gives up after `timeoutSeconds` (60 by default, 300 at most), so an agent can call it in a loop.
 
