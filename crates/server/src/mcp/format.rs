@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use finite_design::{Document, NodeKind};
+use finite_design::{Design, Document, NodeKind, comment::Comment};
 
 /// One line per node, indented by depth: `tag "Name" #id [width×height] "text"`.
 pub(super) fn outline(doc: &Document, id: &str, max_depth: usize) -> String {
@@ -87,3 +87,50 @@ pub(super) fn node_json(doc: &Document, id: &str) -> serde_json::Value {
 }
 
 // Tool parameters. Doc comments become the JSON Schema descriptions agents see.
+
+/// Comments as agents see them: what was asked, where, and the thread so far.
+pub(super) fn comments_json<'a>(
+    design: &Design,
+    comments: impl Iterator<Item = &'a Comment>,
+) -> Vec<serde_json::Value> {
+    let doc = design.doc();
+    comments
+        .map(|c| {
+            let artboard = c.artboard_id.as_deref().and_then(|id| doc.get(id));
+            // The outline line for the element, like `button "CTA" #ab12 "Sign up"`.
+            let node = c
+                .node_id
+                .as_deref()
+                .filter(|id| doc.contains(id))
+                .map(|id| outline(doc, id, 0).lines().next().unwrap_or("").to_owned());
+            let thread: Vec<_> = c
+                .messages
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "author": m.author.name,
+                        "from": m.author.kind,
+                        "message": m.body,
+                        "at": m.at,
+                        "changes": m.changes.iter().map(|c| &c.label).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            let relative_to = if c.artboard_id.is_some() {
+                "artboard"
+            } else {
+                "canvas"
+            };
+            serde_json::json!({
+                "commentId": c.id,
+                "resolved": c.resolved,
+                "artboardId": c.artboard_id,
+                "artboardName": artboard.map(|a| a.display_name()),
+                "nodeId": c.node_id,
+                "node": node,
+                "pin": { "x": c.x.round(), "y": c.y.round(), "relativeTo": relative_to },
+                "thread": thread,
+            })
+        })
+        .collect()
+}

@@ -253,3 +253,12 @@ pub struct WorkingParams {
     #[serde(default)]
     pub(super) status: Option<String>,
 }
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitParams {
+    pub(super) design_id: String,
+    /// How long to wait, in seconds. Defaults to 60; at most 300.
+    #[serde(default)]
+    pub(super) timeout_seconds: Option<u64>,
+}

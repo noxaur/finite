@@ -275,6 +275,8 @@ Here's what happened in the demo you saw:
 4. `Design` keeps a **change log**: the last 512 changes, each with its actor, the artboards it touched, and the elements it changed. Every commit, undo and redo goes through one function (`Design::finish`) that writes to the log, so no path can skip it. When an agent replies, `Design::reply` attaches that agent's changes to the comment's artboard since the thread's previous message. Those become the "Show what changed" buttons.
 5. Your reply reopens a resolved comment, so you can keep steering in one thread.
 
+An agent doesn't have to check for comments on a timer. `wait_for_comments` is a **long poll**: the tool call stays open until a comment is waiting for an agent, then returns it. A comment is waiting when it's open and a person wrote the last message (`Comment::awaits_agent`). Each design has a `Notify`, a Tokio primitive that wakes every task waiting on it, and every comment update fires it. On the demo server, a waiting agent woke 30 ms after a comment was posted. The call gives up after `timeoutSeconds` (60 by default, 300 at most), so an agent can call it in a loop.
+
 Comments live beside the document, not inside it, so undo never touches them. They're saved in the same JSON file as the design.
 
 All the thread rules live in `crates/design`: `comment.rs` defines the types and checks, and `Design::add_comment`, `reply` and `set_resolved` apply them. The hub only takes the lock, calls one of those, and broadcasts the updated comment. That means you can test a comment rule with a plain function call, like the tests at the bottom of `design.rs`.

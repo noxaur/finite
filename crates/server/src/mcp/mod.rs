@@ -6,7 +6,10 @@
 //! design with `designId`, so one agent or many can work on several canvases
 //! at once, and each agent has its own `undo`/`redo`.
 
-use std::sync::{Arc, OnceLock};
+use std::{
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use base64::Engine;
 use finite_design::{
@@ -34,7 +37,7 @@ use crate::{
 mod format;
 mod params;
 
-use format::{node_json, outline};
+use format::{comments_json, node_json, outline};
 use params::*;
 
 /// What agents see when they connect: the workflow, the HTML rules, comments and undo.
@@ -708,44 +711,11 @@ impl FiniteMcp {
     async fn get_comments(&self, Parameters(p): Parameters<CommentsParams>) -> ToolResult {
         let handle = design!(self, &p.design_id);
         let comments = handle.read(|design| {
-            let doc = design.doc();
-            design
+            let shown = design
                 .comments()
                 .iter()
-                .filter(|c| p.include_resolved || !c.resolved)
-                .map(|c| {
-                    let artboard = c.artboard_id.as_deref().and_then(|id| doc.get(id));
-                    // The outline line for the element, like `button "CTA" #ab12 "Sign up"`.
-                    let node = c
-                        .node_id
-                        .as_deref()
-                        .filter(|id| doc.contains(id))
-                        .map(|id| outline(doc, id, 0).lines().next().unwrap_or("").to_owned());
-                    let thread: Vec<_> = c
-                        .messages
-                        .iter()
-                        .map(|m| {
-                            serde_json::json!({
-                                "author": m.author.name,
-                                "from": m.author.kind,
-                                "message": m.body,
-                                "at": m.at,
-                                "changes": m.changes.iter().map(|c| &c.label).collect::<Vec<_>>(),
-                            })
-                        })
-                        .collect();
-                    serde_json::json!({
-                        "commentId": c.id,
-                        "resolved": c.resolved,
-                        "artboardId": c.artboard_id,
-                        "artboardName": artboard.map(|a| a.display_name()),
-                        "nodeId": c.node_id,
-                        "node": node,
-                        "pin": { "x": c.x.round(), "y": c.y.round(), "relativeTo": if c.artboard_id.is_some() { "artboard" } else { "canvas" } },
-                        "thread": thread,
-                    })
-                })
-                .collect::<Vec<_>>()
+                .filter(|c| p.include_resolved || !c.resolved);
+            comments_json(design, shown)
         });
         if comments.is_empty() {
             return ok(if p.include_resolved {
@@ -755,6 +725,37 @@ impl FiniteMcp {
             });
         }
         json(comments.into())
+    }
+
+    #[tool(
+        description = "Wait for users to ask for something. Returns as soon as a comment or reply is waiting for an agent (open, with a user's message last), with those comments in the same form as get_comments. Returns right away if some already are, or with a message saying none arrived when timeoutSeconds (default 60, at most 300) runs out. Call it in a loop to keep taking feedback.",
+        annotations(read_only_hint = true)
+    )]
+    async fn wait_for_comments(&self, Parameters(p): Parameters<WaitParams>) -> ToolResult {
+        let handle = design!(self, &p.design_id);
+        let timeout = Duration::from_secs(p.timeout_seconds.unwrap_or(60).clamp(1, 300));
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            // Register before checking, so a comment that lands in between still wakes us.
+            let changed = handle.comments_changed();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let waiting = handle.read(|design| {
+                comments_json(
+                    design,
+                    design.comments().iter().filter(|c| c.awaits_agent()),
+                )
+            });
+            if !waiting.is_empty() {
+                return json(waiting.into());
+            }
+            if tokio::time::timeout_at(deadline, changed).await.is_err() {
+                return ok(format!(
+                    "No comments arrived in {} seconds.",
+                    timeout.as_secs()
+                ));
+            }
+        }
     }
 
     #[tool(

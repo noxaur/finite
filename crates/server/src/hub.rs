@@ -235,6 +235,8 @@ pub struct DesignHandle {
     summary: Mutex<DesignSummary>,
     events: broadcast::Sender<Outgoing>,
     dirty: watch::Sender<()>,
+    /// Wakes `wait_for_comments` callers when any comment changes.
+    comments: tokio::sync::Notify,
 }
 
 /// A locked, loaded design state.
@@ -271,7 +273,13 @@ impl DesignHandle {
             summary: Mutex::new(summary),
             events: broadcast::channel(1024).0,
             dirty: watch::channel(()).0,
+            comments: tokio::sync::Notify::new(),
         }
+    }
+
+    /// Resolves the next time a comment is created or changes.
+    pub fn comments_changed(&self) -> tokio::sync::futures::Notified<'_> {
+        self.comments.notified()
     }
 
     /// The state, loaded or not. Hub-wide passes (sweep, flush) use this.
@@ -525,6 +533,7 @@ impl DesignHandle {
             comment: comment.clone(),
         };
         self.record(&mut state, record);
+        self.comments.notify_waiters();
         Ok(comment)
     }
 

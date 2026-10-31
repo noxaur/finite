@@ -266,3 +266,64 @@ async fn agents_answer_comments_and_link_their_changes() {
         .await;
     assert!(info.contains("\"openComments\": 0"), "{info}");
 }
+
+#[tokio::test]
+async fn an_agent_waits_for_the_next_comment() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Claude").await;
+    let created = agent
+        .ok("create_design", json!({ "name": "Landing" }))
+        .await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .unwrap()
+        .to_owned();
+
+    // Nothing to do yet: the wait times out.
+    let idle = agent
+        .ok(
+            "wait_for_comments",
+            json!({ "designId": design, "timeoutSeconds": 1 }),
+        )
+        .await;
+    assert!(idle.contains("No comments arrived"), "{idle}");
+
+    // A second agent waits while a user comments.
+    let waiter = {
+        let app = app.clone();
+        let design = design.clone();
+        tokio::spawn(async move {
+            let mut agent = Agent::connect(&app, "Waiter").await;
+            agent
+                .ok(
+                    "wait_for_comments",
+                    json!({ "designId": design, "timeoutSeconds": 10 }),
+                )
+                .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let req = Request::post(format!("/api/designs/{design}/comments"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({ "author": { "id": "u1", "name": "Guest" }, "body": "Add a footer", "x": 5, "y": 5 })
+                .to_string(),
+        ))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(req).await.unwrap().status(), 201);
+    let woke = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+        .await
+        .expect("the waiting agent wakes up")
+        .unwrap();
+    assert!(woke.contains("Add a footer"), "{woke}");
+
+    // A comment already waiting comes back right away.
+    let now = agent
+        .ok(
+            "wait_for_comments",
+            json!({ "designId": design, "timeoutSeconds": 10 }),
+        )
+        .await;
+    assert!(now.contains("Add a footer"), "{now}");
+}

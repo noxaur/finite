@@ -86,6 +86,15 @@ impl Comment {
     pub fn last_seq(&self) -> u64 {
         self.messages.last().map_or(0, |m| m.seq)
     }
+
+    /// Whether an agent should act on this: it's open, and a user wrote last.
+    pub fn awaits_agent(&self) -> bool {
+        !self.resolved
+            && self
+                .messages
+                .last()
+                .is_some_and(|m| m.author.kind == AuthorKind::User)
+    }
 }
 
 /// Where a new comment is pinned. `x` and `y` are relative to the artboard's
@@ -345,5 +354,37 @@ mod tests {
             check_body(&"x".repeat(MAX_BODY + 1)),
             Err(CommentError::TooLong)
         );
+    }
+
+    #[test]
+    fn a_comment_awaits_an_agent_until_one_answers() {
+        let message = |kind| Message {
+            author: Author {
+                id: "x".into(),
+                name: "X".into(),
+                kind,
+            },
+            body: "Hi".into(),
+            at: 0,
+            seq: 0,
+            changes: Vec::new(),
+        };
+        let mut comment = Comment {
+            id: "c".into(),
+            artboard_id: None,
+            node_id: None,
+            x: 0.0,
+            y: 0.0,
+            resolved: false,
+            created_at: 0,
+            messages: vec![message(AuthorKind::User)],
+        };
+        assert!(comment.awaits_agent());
+        comment.messages.push(message(AuthorKind::Agent));
+        assert!(!comment.awaits_agent(), "an agent answered");
+        comment.messages.push(message(AuthorKind::User));
+        assert!(comment.awaits_agent(), "the user replied");
+        comment.resolved = true;
+        assert!(!comment.awaits_agent(), "resolved");
     }
 }
