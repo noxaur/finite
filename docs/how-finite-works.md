@@ -7,6 +7,15 @@ If you remember two ideas, make it these. The rest of this guide builds on them.
 - **Every change is a list of ops.** An op is one tiny edit, like "set this node's `color` to red". Applying an op hands back its inverse, the op that undoes it. Undo, live updates and the comment links are all built from ops.
 - **The server is the single source of truth.** Each design has a lock, so its edits happen one at a time in one order. Every browser applies the same ops in the same order, so every copy ends up the same.
 
+How far you read depends on what you want:
+
+- **To understand Finite,** read through "Following one edit end to end". That covers the document, undo, the server and one edit's whole trip.
+- **To change the browser side,** read "The viewer" and "Comments".
+- **To run it for real,** read "Storage" and "Undo across restarts". They cover what's saved, when, and what survives a crash.
+- **To run more than one server,** read "Running more than one server" at the end. One server is the default, and you can skip that section until you need it.
+
+"Words used in the code" at the very end is a glossary for when a term isn't clear.
+
 ## The big picture
 
 ```
@@ -24,6 +33,8 @@ If you remember two ideas, make it these. The rest of this guide builds on them.
  │  node, document, op, design, history, edit, html   │
  └────────────────────────────────────────────────────┘
 ```
+
+That's one server, which is the default. With several, a router sits in front, and each server holds a share of the designs (see "Running more than one server").
 
 You can think of the code as three layers:
 
@@ -281,24 +292,9 @@ Comments live beside the document, not inside it, so undo never touches them. Th
 
 All the thread rules live in `crates/design`: `comment.rs` defines the types and checks, and `Design::add_comment`, `reply` and `set_resolved` apply them. The hub only takes the lock, calls one of those, and broadcasts the updated comment. That means you can test a comment rule with a plain function call, like the tests at the bottom of `design.rs`.
 
-## Words used in the code
-
-| Word     | Meaning                                                                   |
-| -------- | ------------------------------------------------------------------------- |
-| Design   | One canvas. Also called a canvas in the MCP tools.                        |
-| Artboard | A top-level node: a fixed-size frame placed on the canvas.                |
-| Node     | One element or text node.                                                 |
-| Op       | The smallest edit: `create`, `delete`, `set` or `move`.                   |
-| Change   | The ops from one commit, undo or redo, with a `seq`, actor and label.     |
-| Actor    | Whoever made a change: an agent session today.                            |
-| Snapshot | Everything needed to rebuild a design. Saved to disk and sent on connect. |
-| Replica  | The browser's copy of a design.                                           |
-| Presence | "Agent X is working on these nodes", shown as a badge.                    |
-| Hub      | The server's index of designs, with the ones in use loaded in memory.     |
-
 ## Running more than one server
 
-Each design lives on exactly one server. That server holds it in memory and saves it to its own data folder, so servers never share files and never fight over a design. `crates/server/src/cluster.rs` decides which server that is.
+Each design lives on exactly one server. That server holds it in memory and saves it to its own data folder, so two servers can't overwrite each other's edits. `crates/server/src/cluster.rs` decides which server that is.
 
 It uses **rendezvous hashing** (also called highest random weight). Every server scores the design id, and the highest score wins. The answer depends only on the id and the list of servers, so any server, proxy or load balancer that has the list gets the same answer, with nothing shared between them. Adding a fifth server to four moves only the designs the new server wins, about a fifth of them. Plain `hash % n` would move almost all of them.
 
@@ -349,3 +345,24 @@ Those relayed sessions are the router's only state, and they can be shared. Give
 Undo has to survive that move too, so the backends must see the same actor whichever router relays the call. An agent that sends `X-Finite-Agent` keeps that name. An agent that doesn't is identified by its router session id (`relay:<id>`), which every router sees the same way, and is shown under its client's name. `tests/router.rs` moves one session from one router to another mid-conversation and undoes, on the second router, an edit made through the first. With the identity switched off, that same test finds "Nothing to undo". Without a shared directory, a second router answers `404` for a session it doesn't know, and MCP clients respond by starting a new session.
 
 MCP rejects requests whose `Host` header it doesn't know, to block **DNS rebinding**: a trick where a web page gets a browser to send requests to a server on your machine. By default it only accepts `localhost`, `127.0.0.1` and `::1`. Servers and routers also accept every host in `FINITE_NODES`, and any names you list in `FINITE_ALLOWED_HOSTS`, such as `finite.example.com`. Without that, a server at `10.0.0.2` would reject the router's calls.
+
+## Words used in the code
+
+| Word       | Meaning                                                                       |
+| ---------- | ----------------------------------------------------------------------------- |
+| Design     | One canvas. Also called a canvas in the MCP tools.                            |
+| Artboard   | A top-level node: a fixed-size frame placed on the canvas.                    |
+| Node       | One element or text node.                                                     |
+| Op         | The smallest edit: `create`, `delete`, `set` or `move`.                       |
+| Change     | The ops from one commit, undo or redo, with a `seq`, actor and label.         |
+| Actor      | Whoever made a change: an agent, by its `X-Finite-Agent` name or its session. |
+| Snapshot   | Everything needed to rebuild a design. Saved to disk and sent on connect.     |
+| Journal    | The records appended to `<id>.log` since the last snapshot.                   |
+| Compaction | Writing a fresh snapshot and deleting the journal, every 1,000 records.       |
+| Replica    | The browser's copy of a design.                                               |
+| Presence   | "Agent X is working on these nodes", shown as a badge.                        |
+| Hub        | The server's index of designs, with the ones in use loaded in memory.         |
+| Room       | The model for loading: a design is in memory only while someone uses it.      |
+| Long poll  | A request that stays open until there's news, like `wait_for_comments`.       |
+| Owner      | The one server that holds a design, picked by hashing its id.                 |
+| Router     | `finite-server router`: the front door that sends requests to each owner.     |
