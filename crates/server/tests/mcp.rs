@@ -1,0 +1,268 @@
+//! Drives the MCP endpoint the way an agent does: initialize a session over
+//! Streamable HTTP, then call tools and read their text results.
+
+use std::sync::Arc;
+
+use axum::{
+    Router,
+    body::Body,
+    http::{Request, header},
+};
+use finite_server::{Hub, app, store::MemoryStore};
+use http_body_util::BodyExt;
+use serde_json::{Value, json};
+use tower::ServiceExt;
+
+struct Agent {
+    app: Router,
+    name: &'static str,
+    session: Option<String>,
+    next_id: u64,
+}
+
+impl Agent {
+    async fn connect(app: &Router, name: &'static str) -> Self {
+        let mut agent = Self {
+            app: app.clone(),
+            name,
+            session: None,
+            next_id: 1,
+        };
+        let init = json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": { "name": "test", "version": "1" },
+        });
+        agent.rpc("initialize", Some(init)).await;
+        agent.notify("notifications/initialized").await;
+        agent
+    }
+
+    fn request(&self, body: Value) -> Request<Body> {
+        // rmcp checks Host to block DNS rebinding, so send what a local client would.
+        let mut req = Request::post("/mcp")
+            .header(header::HOST, "127.0.0.1:4100")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ACCEPT, "application/json, text/event-stream")
+            .header("x-finite-agent", self.name);
+        if let Some(session) = &self.session {
+            req = req.header("mcp-session-id", session);
+        }
+        req.body(Body::from(body.to_string())).unwrap()
+    }
+
+    async fn send(&mut self, body: Value) -> Option<Value> {
+        let res = self.app.clone().oneshot(self.request(body)).await.unwrap();
+        if let Some(session) = res.headers().get("mcp-session-id") {
+            self.session = Some(session.to_str().unwrap().to_owned());
+        }
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        // Responses arrive as server-sent events: `data: {...}` lines.
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        let data: String = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .collect();
+        (!data.trim().is_empty()).then(|| serde_json::from_str(&data).unwrap())
+    }
+
+    async fn notify(&mut self, method: &str) {
+        self.send(json!({ "jsonrpc": "2.0", "method": method }))
+            .await;
+    }
+
+    async fn rpc(&mut self, method: &str, params: Option<Value>) -> Value {
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut body = json!({ "jsonrpc": "2.0", "id": id, "method": method });
+        if let Some(params) = params {
+            body["params"] = params;
+        }
+        let response = self.send(body).await.expect("a response");
+        assert!(
+            response.get("error").is_none(),
+            "{method} failed: {response}"
+        );
+        response["result"].clone()
+    }
+
+    /// Calls a tool and returns its text, and whether it reported an error.
+    async fn call(&mut self, tool: &str, args: Value) -> (String, bool) {
+        let result = self
+            .rpc(
+                "tools/call",
+                Some(json!({ "name": tool, "arguments": args })),
+            )
+            .await;
+        let text = result["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        (text, result["isError"] == true)
+    }
+
+    async fn ok(&mut self, tool: &str, args: Value) -> String {
+        let (text, error) = self.call(tool, args).await;
+        assert!(!error, "{tool} failed: {text}");
+        text
+    }
+}
+
+/// The first `#id` after `needle` in a tool's text output.
+fn id_after(text: &str, needle: &str) -> String {
+    let rest = &text[text
+        .find(needle)
+        .unwrap_or_else(|| panic!("{needle:?} in {text}"))..];
+    let start = rest.find('#').unwrap() + 1;
+    rest[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect()
+}
+
+fn test_app() -> Router {
+    app(Hub::new(Arc::new(MemoryStore::default())).unwrap(), None)
+}
+
+#[tokio::test]
+async fn an_agent_builds_refines_and_undoes() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Alice").await;
+
+    let tools = agent.rpc("tools/list", None).await;
+    let names: Vec<&str> = tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    for tool in [
+        "create_design",
+        "write_html",
+        "get_comments",
+        "reply_to_comment",
+    ] {
+        assert!(names.contains(&tool), "missing tool {tool}");
+    }
+
+    let created = agent
+        .ok("create_design", json!({ "name": "Landing" }))
+        .await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .expect("a design id")
+        .to_owned();
+
+    let board = agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Home", "width": 1440, "height": 900 }),
+        )
+        .await;
+    let board = id_after(&board, "Created artboard");
+    let wrote = agent
+        .ok(
+            "write_html",
+            json!({ "designId": design, "targetId": board,
+                    "html": "<button data-name=\"CTA\" style=\"padding: 12px\">Start</button>" }),
+        )
+        .await;
+    let button = id_after(&wrote, "CTA");
+
+    agent
+        .ok(
+            "update_styles",
+            json!({ "designId": design,
+                    "updates": [{ "nodeIds": [button], "styles": { "backgroundColor": "orange" } }] }),
+        )
+        .await;
+    let html = agent
+        .ok("get_html", json!({ "designId": design, "nodeId": button }))
+        .await;
+    assert!(html.contains("background-color: orange"), "{html}");
+
+    agent.ok("undo", json!({ "designId": design })).await;
+    let html = agent
+        .ok("get_html", json!({ "designId": design, "nodeId": button }))
+        .await;
+    assert!(!html.contains("orange"), "undo reverted the style: {html}");
+
+    // Errors come back as tool errors the agent can read, not protocol errors.
+    let (text, error) = agent
+        .call(
+            "update_styles",
+            json!({ "designId": design,
+                    "updates": [{ "nodeIds": ["missing"], "styles": { "color": "red" } }] }),
+        )
+        .await;
+    assert!(error && text.contains("not found"), "{text}");
+}
+
+#[tokio::test]
+async fn agents_answer_comments_and_link_their_changes() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Claude").await;
+    let created = agent
+        .ok("create_design", json!({ "name": "Landing" }))
+        .await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .unwrap()
+        .to_owned();
+    let board = agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Home", "width": 400, "height": 300 }),
+        )
+        .await;
+    let board = id_after(&board, "Created artboard");
+
+    // A user pins a comment over the web API.
+    let req = Request::post(format!("/api/designs/{design}/comments"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({ "author": { "id": "u1", "name": "Guest" }, "body": "Make it dark",
+                    "artboardId": board, "nodeId": board, "x": 10, "y": 10 })
+            .to_string(),
+        ))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), 201);
+
+    let info = agent
+        .ok("get_basic_info", json!({ "designId": design }))
+        .await;
+    assert!(info.contains("\"openComments\": 1"), "{info}");
+    let comments = agent
+        .ok("get_comments", json!({ "designId": design }))
+        .await;
+    assert!(comments.contains("Make it dark"), "{comments}");
+    let comment: Value = serde_json::from_str(&comments).unwrap();
+    let comment_id = comment[0]["commentId"].as_str().unwrap().to_owned();
+
+    agent
+        .ok(
+            "update_styles",
+            json!({ "designId": design,
+                    "updates": [{ "nodeIds": [board], "styles": { "background": "#111" } }] }),
+        )
+        .await;
+    let replied = agent
+        .ok(
+            "reply_to_comment",
+            json!({ "designId": design, "commentId": comment_id,
+                    "message": "Made it dark", "resolve": true }),
+        )
+        .await;
+    assert!(replied.contains("1 change"), "{replied}");
+
+    let info = agent
+        .ok("get_basic_info", json!({ "designId": design }))
+        .await;
+    assert!(info.contains("\"openComments\": 0"), "{info}");
+}
