@@ -106,6 +106,7 @@ The preload script exposes `window.finite` (platform and versions) to the render
 
 ## Gotchas
 
+- If the browser gets `403` with `unknown host` or `requests from … aren't allowed`, you opened Finite under a name it doesn't know, such as your machine's network address. Add that name to `FINITE_ALLOWED_HOSTS` (comma-separated, like `192.168.1.20,finite.example.com`). The check keeps other websites from reading your designs.
 - If the server exits with `another Finite server is using …`, a second server is pointed at the same data folder. Stop the other one, or give this one its own `FINITE_DATA_DIR`.
 - If Electron crashes with `Cannot read properties of undefined (reading 'whenReady')`, your shell has `ELECTRON_RUN_AS_NODE=1` set. Electron-based terminals and editors often export it. Run `unset ELECTRON_RUN_AS_NODE` first.
 - Packaging into a `.app`/`.exe` isn't set up yet. When you add electron-builder or Forge, copy `target/release/finite-server` and `apps/web/out` (as `web/`) into the app's resources directory. `apps/desktop/src/main.ts` looks for them there.

@@ -260,6 +260,52 @@ async fn the_design_list_survives_a_server_being_down() {
     client.cancel().await.unwrap();
 }
 
+/// Another site can't read designs through a WebSocket (cross-site
+/// WebSocket hijacking) or a name that points here (DNS rebinding). The
+/// app's own pages, and clients that send no Origin, still can.
+#[tokio::test]
+async fn other_sites_cant_read_the_api() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let (server, server_url) = listen().await;
+    let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
+    tokio::spawn(async move { axum::serve(server, app(hub, None)).await });
+    let (front, front_url) = listen().await;
+    let routes = router::app(vec![server_url.clone()], None);
+    tokio::spawn(async move { axum::serve(front, routes).await });
+
+    for base in [&server_url, &front_url] {
+        let ws = format!("{base}/api/designs/ws").replacen("http://", "ws://", 1);
+        let open = |origin: Option<&str>| {
+            let mut request = ws.as_str().into_client_request().unwrap();
+            if let Some(origin) = origin {
+                request
+                    .headers_mut()
+                    .insert("origin", origin.parse().unwrap());
+            }
+            tokio_tungstenite::connect_async(request)
+        };
+        let refused = open(Some("https://evil.example")).await;
+        assert!(
+            matches!(&refused, Err(tokio_tungstenite::tungstenite::Error::Http(res)) if res.status() == 403),
+            "{base}: {refused:?}"
+        );
+        assert!(
+            open(Some(base)).await.is_ok(),
+            "{base}: the app's own origin"
+        );
+        assert!(open(None).await.is_ok(), "{base}: no origin");
+
+        let rebound = reqwest::Client::new()
+            .get(format!("{base}/api/designs"))
+            .header("host", "evil.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rebound.status(), 403, "{base}");
+    }
+}
+
 mod relay {
     use super::*;
     use rmcp::{

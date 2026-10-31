@@ -9,6 +9,7 @@ use tower_http::{
 
 pub mod api;
 pub mod cluster;
+pub mod guard;
 pub mod hub;
 pub mod mcp;
 pub mod relay;
@@ -37,10 +38,15 @@ async fn health() -> Json<Health> {
 /// - `/mcp` for agents (MCP over Streamable HTTP)
 /// - the built frontend, when `static_dir` is set
 pub fn app(hub: Arc<Hub>, static_dir: Option<&str>) -> Router {
+    let allowed: std::sync::Arc<[String]> = hub.cluster().allowed_hosts().into();
     let api = Router::new()
         .route("/health", get(health))
         .merge(api::routes())
-        .with_state(hub.clone());
+        .with_state(hub.clone())
+        .layer(axum::middleware::from_fn_with_state(
+            allowed,
+            guard::known_hosts,
+        ));
 
     let router = Router::new()
         .nest("/api", api)

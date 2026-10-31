@@ -93,6 +93,10 @@ pub fn app_with_sessions(
         .route("/api/designs/{id}/{*rest}", any(forward))
         .route("/api/owner/{id}", get(owner))
         .with_state(front.clone())
+        .route_layer(axum::middleware::from_fn_with_state(
+            std::sync::Arc::<[String]>::from(front.cluster.allowed_hosts()),
+            crate::guard::known_hosts,
+        ))
         .nest_service(
             "/mcp",
             crate::relay::service(front.cluster.clone(), sessions),
