@@ -78,8 +78,10 @@ vp run dev:desktop      # same, plus an Electron window pointed at the dev serve
 vp run start:desktop    # release build of everything, then Electron with the Rust sidecar
 vp run test             # cargo test for both crates, plus the web app's Vitest suite
 vp run e2e              # build, start a server, and drive the app in headless Chrome
-vp run ready            # format + lint + type check, test, build
+vp run ready            # format, lint and type check (web and Rust, clippy too), test, build
 ```
+
+Each commit runs `vp staged` from the pre-commit hook (`.vite-hooks/pre-commit`). It runs `vp check --fix` on the staged files and `rustfmt` on staged Rust files, as set in the `staged` block of `vite.config.ts`.
 
 ## How the pieces connect
 

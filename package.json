@@ -10,7 +10,7 @@
     "start:desktop": "vp run -r build && vp run desktop#start",
     "test": "vp run -r test",
     "e2e": "node e2e/run.mjs",
-    "ready": "vp check && vp run -r test && vp run -r build",
+    "ready": "vp check && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && vp run -r test && vp run -r build",
     "prepare": "vp config"
   },
   "devDependencies": {
