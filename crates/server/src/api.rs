@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{
-        Path, Query, State,
+        DefaultBodyLimit, Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::StatusCode,
@@ -22,13 +22,21 @@ use tokio::sync::broadcast::{self, error::RecvError};
 use crate::heartbeat::{self, Heartbeat};
 use crate::hub::{AdoptError, DesignHandle, DesignSummary, Hub, LOBBY_LIMIT, Outgoing, Since};
 
+/// The largest design another server can hand off. axum's default of 2 MB
+/// suits API calls, but a handoff carries a whole design with its undo
+/// histories, and one MCP call alone can add 4 MB.
+const HANDOFF_LIMIT: usize = 256 << 20;
+
 pub fn routes() -> Router<Arc<Hub>> {
     Router::new()
         .route("/designs", get(list_designs).post(create_design))
         .route("/designs/ws", get(lobby_socket))
         .route("/designs/{id}", get(get_design))
         .route("/owner/{id}", get(owner_of))
-        .route("/designs/{id}/handoff", put(adopt))
+        .route(
+            "/designs/{id}/handoff",
+            put(adopt).layer(DefaultBodyLimit::max(HANDOFF_LIMIT)),
+        )
         .route("/designs/{id}/ws", get(design_socket))
         .route("/designs/{id}/comments", post(create_comment))
         .route("/designs/{id}/comments/{comment}", patch(update_comment))

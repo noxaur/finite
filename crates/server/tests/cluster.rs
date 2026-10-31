@@ -150,3 +150,59 @@ async fn designs_stay_put_while_the_new_owner_is_down() {
     all.sort();
     assert_eq!(kept, all);
 }
+
+/// A design's whole saved state moves in one request, so the new owner takes
+/// bodies far larger than an API call's.
+#[tokio::test]
+async fn large_designs_move_too() {
+    use finite_design::edit::{self, NewArtboard, WriteMode};
+    use finite_server::hub::Actor;
+
+    let solo = Hub::new(Arc::new(MemoryStore::default())).unwrap();
+    let to_b = Cluster::new(NODES.map(String::from).to_vec(), 0).unwrap();
+    let id = std::iter::repeat_with(|| solo.create("Big").meta.id)
+        .find(|id| to_b.owner(id) == 1)
+        .unwrap();
+    let design = solo.get(&id).unwrap();
+    let agent = Actor {
+        id: "agent:big".into(),
+        name: "Big".into(),
+    };
+    let artboard = NewArtboard {
+        name: "Page".into(),
+        width: 800.0,
+        height: 600.0,
+        position: None,
+        styles: Default::default(),
+    };
+    design
+        .edit(&agent, "Add page", |doc| {
+            Ok((edit::create_artboard(doc, "page".into(), artboard)?, ()))
+        })
+        .unwrap();
+    // Three 1 MB writes: more than 2 MB, though each fits in one MCP call.
+    for i in 0..3 {
+        let html = format!("<p>{}</p>", "x".repeat(1 << 20));
+        let mut n = 0;
+        let mut new_id = || {
+            n += 1;
+            format!("p{i}-{n}")
+        };
+        design
+            .edit(&agent, "Write", |doc| {
+                let (ops, _) =
+                    edit::write_html(doc, "page", &html, WriteMode::Append, None, &mut new_id)?;
+                Ok((ops, ()))
+            })
+            .unwrap();
+    }
+    let snapshot = serde_json::to_string(&design.read(|d| d.snapshot_to_save())).unwrap();
+    assert!(snapshot.len() > 3 << 20);
+
+    let req = Request::put(format!("/api/designs/{id}/handoff"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(snapshot))
+        .unwrap();
+    let (status, _, _) = call(&node(1), req).await;
+    assert_eq!(status, StatusCode::CREATED);
+}
