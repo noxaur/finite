@@ -69,10 +69,25 @@ impl FileStore {
                 fs::TryLockError::Error(error) => error,
             });
         }
-        Ok(Self {
+        let store = Self {
             dir: root.join("designs"),
             _lock: lock,
-        })
+        };
+        store.remove_leftovers()?;
+        Ok(store)
+    }
+
+    /// Deletes temporary snapshots a crash left mid-save. Holding the lock
+    /// means no other server is writing one right now.
+    fn remove_leftovers(&self) -> io::Result<()> {
+        for entry in fs::read_dir(&self.dir)? {
+            let path = entry?.path();
+            if path.to_str().is_some_and(|p| p.ends_with(".json.tmp")) {
+                tracing::info!(?path, "removing a snapshot left half-written by a crash");
+                fs::remove_file(path)?;
+            }
+        }
+        Ok(())
     }
 
     /// Makes the directory's entries (new, renamed and deleted files)
@@ -189,7 +204,11 @@ impl Store for FileStore {
     }
 
     fn remove(&self, id: &str) -> io::Result<()> {
-        for path in [self.dir.join(format!("{id}.json")), self.journal_path(id)] {
+        for path in [
+            self.dir.join(format!("{id}.json")),
+            self.journal_path(id),
+            self.dir.join(format!("{id}.json.tmp")),
+        ] {
             match fs::remove_file(path) {
                 Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
                 _ => {}
@@ -397,6 +416,22 @@ mod tests {
         assert_eq!(second.kind(), io::ErrorKind::WouldBlock);
         drop(first);
         FileStore::new(&dir).expect("the lock is released with the store");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn opening_removes_snapshots_a_crash_left_half_written() {
+        let dir = temp_dir();
+        let store = FileStore::new(&dir).unwrap();
+        store.save(&snapshot()).unwrap();
+        fs::write(dir.join("designs/d.json.tmp"), b"{\"half").unwrap();
+        drop(store);
+        let store = FileStore::new(&dir).unwrap();
+        assert!(!dir.join("designs/d.json.tmp").exists());
+        assert!(
+            store.load("d").unwrap().is_some(),
+            "the real snapshot stays"
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
