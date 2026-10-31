@@ -101,25 +101,21 @@ impl Hub {
             lobby: broadcast::channel(256).0,
             cluster,
         });
-        let mut foreign = Vec::new();
-        for id in hub.store.ids()? {
-            if let Some(owner) = hub.cluster.elsewhere(&id) {
-                tracing::info!(
-                    id,
-                    owner,
-                    "another server owns this design now; handing it off"
-                );
-                foreign.push(id);
-                continue;
-            }
-            let Some(stored) = hub.store.load(&id)? else {
-                continue;
-            };
-            let state = DesignState::restore(stored);
-            if state.needs_snapshot {
-                hub.store.save(&state.design.snapshot_to_save())?;
-            }
-            hub.insert(DesignSummary::of(&state.design), None);
+        let (foreign, own): (Vec<String>, Vec<String>) = hub
+            .store
+            .ids()?
+            .into_iter()
+            .partition(|id| hub.cluster.elsewhere(id).is_some());
+        for id in &foreign {
+            let owner = hub.cluster.elsewhere(id);
+            tracing::info!(
+                id,
+                owner,
+                "another server owns this design now; handing it off"
+            );
+        }
+        for summary in summaries(hub.store.as_ref(), &own)? {
+            hub.insert(summary, None);
         }
         if !foreign.is_empty() {
             tokio::spawn(hand_off(Arc::downgrade(&hub), foreign));
@@ -375,6 +371,38 @@ pub enum AdoptError {
     /// This server already has a design with that id.
     Exists,
     Io(io::Error),
+}
+
+/// Reads every design in `ids` for the design list, compacting any whose
+/// journal had to be replayed, and drops each one again. Designs don't depend
+/// on each other, so the work is split across a thread per core.
+fn summaries(store: &dyn Store, ids: &[String]) -> io::Result<Vec<DesignSummary>> {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let chunk = ids.len().div_ceil(threads).max(1);
+    let read = |id: &String| -> io::Result<Option<DesignSummary>> {
+        let Some(stored) = store.load(id)? else {
+            return Ok(None);
+        };
+        let state = DesignState::restore(stored);
+        if state.needs_snapshot {
+            store.save(&state.design.snapshot_to_save())?;
+        }
+        Ok(Some(DesignSummary::of(&state.design)))
+    };
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = ids
+            .chunks(chunk)
+            .map(|ids| scope.spawn(move || ids.iter().map(read).collect::<io::Result<Vec<_>>>()))
+            .collect();
+        let mut summaries = Vec::with_capacity(ids.len());
+        for worker in workers {
+            let read = worker
+                .join()
+                .map_err(|_| io::Error::other("a startup reader panicked"))?;
+            summaries.extend(read?.into_iter().flatten());
+        }
+        Ok(summaries)
+    })
 }
 
 /// Hands off stored designs this server no longer owns, retrying every 30
