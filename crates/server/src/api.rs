@@ -19,6 +19,7 @@ use finite_design::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::{self, error::RecvError};
 
+use crate::heartbeat::{self, Heartbeat};
 use crate::hub::{AdoptError, DesignHandle, DesignSummary, Hub, LOBBY_LIMIT, Outgoing, Since};
 
 pub fn routes() -> Router<Arc<Hub>> {
@@ -330,7 +331,8 @@ async fn design_socket(
 
 /// Sends `first`, then every broadcast message newer than `seq`. If the
 /// client falls behind the broadcast buffer, it gets a fresh snapshot instead
-/// of the changes it missed.
+/// of the changes it missed. Pings the client, and closes if it goes quiet
+/// (see [`crate::heartbeat`]).
 async fn stream(
     mut socket: WebSocket,
     first: Outgoing,
@@ -338,9 +340,10 @@ async fn stream(
     mut rx: broadcast::Receiver<Outgoing>,
     resync: impl Fn() -> (Outgoing, u64),
 ) {
-    if send(&mut socket, &first).await.is_err() {
+    if !send(&mut socket, &first).await {
         return;
     }
+    let mut heartbeat = Heartbeat::new();
     loop {
         tokio::select! {
             message = rx.recv() => match message {
@@ -348,7 +351,7 @@ async fn stream(
                     if message.seq.is_some_and(|s| s <= seq) {
                         continue;
                     }
-                    if send(&mut socket, &message).await.is_err() {
+                    if !send(&mut socket, &message).await {
                         return;
                     }
                 }
@@ -356,7 +359,7 @@ async fn stream(
                     rx = rx.resubscribe();
                     let (snapshot, snapshot_seq) = resync();
                     seq = snapshot_seq;
-                    if send(&mut socket, &snapshot).await.is_err() {
+                    if !send(&mut socket, &snapshot).await {
                         return;
                     }
                 }
@@ -364,14 +367,17 @@ async fn stream(
             },
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
-                Some(Ok(_)) => {}
+                Some(Ok(_)) => heartbeat.heard(),
             },
+            alive = heartbeat.tick() => {
+                if !alive || !heartbeat::send(&mut socket, Message::Ping(Default::default())).await {
+                    return;
+                }
+            }
         }
     }
 }
 
-async fn send(socket: &mut WebSocket, message: &Outgoing) -> Result<(), axum::Error> {
-    socket
-        .send(Message::Text(message.json.as_ref().into()))
-        .await
+async fn send(socket: &mut WebSocket, message: &Outgoing) -> bool {
+    heartbeat::send(socket, Message::Text(message.json.as_ref().into())).await
 }

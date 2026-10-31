@@ -1,0 +1,65 @@
+//! Sockets whose browser went quiet close; sockets whose browser answers
+//! pings stay open. Tokio's clock is paused, so a minute passes instantly.
+
+use std::sync::Arc;
+
+use finite_server::{
+    Hub, app,
+    heartbeat::{PING_EVERY, SILENT_FOR},
+    router,
+    store::MemoryStore,
+};
+use futures::StreamExt;
+use tokio::net::TcpListener;
+use tokio_tungstenite::tungstenite::Message;
+
+async fn listen() -> (TcpListener, String) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    (listener, url)
+}
+
+#[tokio::test(start_paused = true)]
+async fn quiet_sockets_close_and_answering_ones_stay_open() {
+    let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
+    let id = hub.create("Pinged").meta.id;
+    let (server, server_url) = listen().await;
+    tokio::spawn(async move { axum::serve(server, app(hub, None)).await });
+    let (front, front_url) = listen().await;
+    let routes = router::app(vec![server_url.replacen("ws://", "http://", 1)], None);
+    tokio::spawn(async move { axum::serve(front, routes).await });
+
+    for base in [&server_url, &front_url] {
+        for path in [
+            format!("/api/designs/{id}/ws"),
+            "/api/designs/ws".to_owned(),
+        ] {
+            let url = format!("{base}{path}");
+            // This one reads the first message and then stops reading, so it
+            // never answers a ping, like a browser that went to sleep.
+            let (mut quiet, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            quiet.next().await.unwrap().unwrap();
+            // This one keeps reading, and tungstenite answers each ping.
+            let (mut live, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            let live = tokio::spawn(async move { while let Some(Ok(_)) = live.next().await {} });
+
+            tokio::time::sleep(SILENT_FOR + PING_EVERY * 2).await;
+
+            let closed = tokio::time::timeout(PING_EVERY * 10, async {
+                loop {
+                    match quiet.next().await {
+                        Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                        Some(Ok(_)) => {}
+                    }
+                }
+            })
+            .await;
+            assert!(closed.is_ok(), "{url}: a silent client should be closed");
+            assert!(
+                !live.is_finished(),
+                "{url}: an answering client should stay open"
+            );
+            live.abort();
+        }
+    }
+}

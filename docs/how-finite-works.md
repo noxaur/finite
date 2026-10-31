@@ -283,6 +283,10 @@ Connections drop: a laptop sleeps, Wi-Fi blinks, a proxy times out. The browser 
 
 The epoch is what makes this safe. A server that crashed may have lost its last few unsaved changes, so after the restart it can hand out the same `seq` again for a different change. And after any reload, the kept changes are gone. A new epoch means the browser's `seq` no longer names the same state, so it gets a snapshot. The router passes the query on to the owner, so resuming works there too.
 
+Some drops never announce themselves. A laptop that sleeps or changes networks can leave a **half-open connection**: the server's end still looks open, but nothing reaches the browser and no close ever arrives. A design unloads only once nobody is subscribed to it, so one such socket would keep its design in memory for as long as the server runs. So every socket that faces a browser sends a WebSocket **ping** every 20 seconds (`heartbeat.rs`). Browsers answer pings with a pong by themselves, without any app code. A socket that hears nothing for 60 seconds closes. Each send also gives up after 60 seconds, because a send to a browser that stopped reading waits forever once the connection's buffers fill. The pings also keep proxies such as nginx from closing a quiet design's viewers, since nginx closes a connection that's silent for a minute by default.
+
+On a router, the router pings the browser itself, and it answers the server's pings. The server's pings stop at the router. `tests/heartbeat.rs` runs with Tokio's clock paused, so a minute passes in an instant. Against a server and a router, it checks that a client that stops reading is closed and a client that keeps reading stays open. Without the pings, the silent client stayed open. The test also caught a bug: the router's design list relay ended at the first frame that wasn't text, so the first ping from a server would have cut off every browser's design list.
+
 ## Comments
 
 You can't edit a design yourself, but you can pin comments, and agents act on them. A comment is a thread of messages anchored to an artboard and to the element the person clicked.

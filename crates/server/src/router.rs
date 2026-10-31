@@ -31,7 +31,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{any, get},
 };
-use futures::{SinkExt, StreamExt, stream::SelectAll};
+use futures::{StreamExt, stream::SelectAll};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite;
 use tower_http::{
@@ -41,7 +41,11 @@ use tower_http::{
 
 use rmcp::transport::streamable_http_server::session::store::SessionStore;
 
-use crate::{cluster::Cluster, hub::LOBBY_LIMIT};
+use crate::{
+    cluster::Cluster,
+    heartbeat::{self, Heartbeat},
+    hub::LOBBY_LIMIT,
+};
 
 /// Bodies larger than this aren't forwarded.
 const MAX_BODY: usize = 8 << 20;
@@ -281,41 +285,47 @@ async fn design_socket(
         Err(tungstenite::Error::Http(res)) => return res.status().into_response(),
         Err(error) => return bad_gateway(error),
     };
-    upgrade.on_upgrade(move |client| async move {
-        let (mut up_tx, mut up_rx) = upstream.split();
-        let (mut client_tx, mut client_rx) = client.split();
-        let down = async {
-            while let Some(Ok(message)) = up_rx.next().await {
+    upgrade.on_upgrade(move |client| relay_design(client, upstream))
+}
+
+/// Copies messages both ways until either side closes. The router pings the
+/// browser itself (see [`crate::heartbeat`]); the server's pings stop here,
+/// and tungstenite answers them.
+async fn relay_design(mut client: WebSocket, mut upstream: Upstream) {
+    let mut heartbeat = Heartbeat::new();
+    loop {
+        tokio::select! {
+            message = upstream.next() => {
                 let message = match message {
-                    tungstenite::Message::Text(text) => ws::Message::text(text.as_str()),
-                    tungstenite::Message::Binary(bytes) => ws::Message::Binary(bytes),
-                    tungstenite::Message::Close(_) => break,
-                    _ => continue,
+                    Some(Ok(tungstenite::Message::Text(text))) => ws::Message::text(text.as_str()),
+                    Some(Ok(tungstenite::Message::Binary(bytes))) => ws::Message::Binary(bytes),
+                    Some(Ok(tungstenite::Message::Close(_))) | Some(Err(_)) | None => return,
+                    Some(Ok(_)) => continue,
                 };
-                if client_tx.send(message).await.is_err() {
-                    break;
+                if !heartbeat::send(&mut client, message).await {
+                    return;
                 }
             }
-        };
-        let up = async {
-            while let Some(Ok(message)) = client_rx.next().await {
+            message = client.recv() => {
+                heartbeat.heard();
                 // axum answers pings itself, so only data and close matter here.
                 let message = match message {
-                    ws::Message::Text(text) => tungstenite::Message::text(text.as_str()),
-                    ws::Message::Binary(bytes) => tungstenite::Message::binary(bytes),
-                    ws::Message::Close(_) => break,
-                    ws::Message::Ping(_) | ws::Message::Pong(_) => continue,
+                    Some(Ok(ws::Message::Text(text))) => tungstenite::Message::text(text.as_str()),
+                    Some(Ok(ws::Message::Binary(bytes))) => tungstenite::Message::binary(bytes),
+                    Some(Ok(ws::Message::Close(_))) | Some(Err(_)) | None => return,
+                    Some(Ok(ws::Message::Ping(_) | ws::Message::Pong(_))) => continue,
                 };
-                if up_tx.send(message).await.is_err() {
-                    break;
+                if !heartbeat::send(&mut upstream, message).await {
+                    return;
                 }
             }
-        };
-        tokio::select! {
-            () = down => {}
-            () = up => {}
+            alive = heartbeat.tick() => {
+                if !alive || !heartbeat::send(&mut client, ws::Message::Ping(Default::default())).await {
+                    return;
+                }
+            }
         }
-    })
+    }
 }
 
 /// How long a design list socket that's missing a server stays open before
@@ -374,9 +384,10 @@ async fn relay_lobby(mut client: WebSocket, upstreams: Vec<Upstream>, mut comple
     sort_newest_first(&mut designs);
     designs.truncate(LOBBY_LIMIT);
     let first = json!({ "type": "designs", "designs": designs, "total": total }).to_string();
-    if client.send(ws::Message::text(first)).await.is_err() {
+    if !heartbeat::send(&mut client, ws::Message::text(first)).await {
         return;
     }
+    let mut heartbeat = Heartbeat::new();
     let retry = async {
         if complete {
             std::future::pending::<()>().await;
@@ -387,15 +398,24 @@ async fn relay_lobby(mut client: WebSocket, upstreams: Vec<Upstream>, mut comple
     loop {
         tokio::select! {
             message = streams.next() => {
+                // Servers ping too; tungstenite answers them.
+                if let Some(Ok(tungstenite::Message::Ping(_) | tungstenite::Message::Pong(_))) = message {
+                    continue;
+                }
                 let Some(message) = text(message) else { return };
-                if client.send(ws::Message::text(message.to_string())).await.is_err() {
+                if !heartbeat::send(&mut client, ws::Message::text(message.to_string())).await {
                     return;
                 }
             }
             incoming = client.recv() => match incoming {
                 Some(Ok(ws::Message::Close(_))) | None | Some(Err(_)) => return,
-                Some(Ok(_)) => {}
+                Some(Ok(_)) => heartbeat.heard(),
             },
+            alive = heartbeat.tick() => {
+                if !alive || !heartbeat::send(&mut client, ws::Message::Ping(Default::default())).await {
+                    return;
+                }
+            }
             () = &mut retry => {
                 let _ = client.send(ws::Message::Close(None)).await;
                 return;

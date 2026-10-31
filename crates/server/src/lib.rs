@@ -10,6 +10,7 @@ use tower_http::{
 pub mod api;
 pub mod cluster;
 pub mod guard;
+pub mod heartbeat;
 pub mod hub;
 pub mod mcp;
 pub mod relay;
