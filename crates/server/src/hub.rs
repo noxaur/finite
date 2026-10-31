@@ -613,13 +613,15 @@ impl Hub {
             lobby: broadcast::channel(256).0,
             cluster,
         });
+        let mut foreign = Vec::new();
         for id in hub.store.ids()? {
             if let Some(owner) = hub.cluster.elsewhere(&id) {
-                tracing::warn!(
+                tracing::info!(
                     id,
                     owner,
-                    "skipping a stored design another server now owns"
+                    "another server owns this design now; handing it off"
                 );
+                foreign.push(id);
                 continue;
             }
             let Some(stored) = hub.store.load(&id)? else {
@@ -630,6 +632,9 @@ impl Hub {
                 hub.store.save(&state.design.snapshot())?;
             }
             hub.insert(DesignSummary::of(&state.design), None);
+        }
+        if !foreign.is_empty() {
+            tokio::spawn(hand_off(Arc::downgrade(&hub), foreign));
         }
         let weak = Arc::downgrade(&hub);
         tokio::spawn(async move {
@@ -733,6 +738,67 @@ impl Hub {
         )
     }
 
+    /// Takes over a design another server handed off, after the cluster
+    /// changed. It's saved before this returns, so the sender can delete its
+    /// copy as soon as it hears back.
+    pub fn adopt(self: &Arc<Self>, snapshot: Snapshot) -> Result<DesignSummary, AdoptError> {
+        let id = snapshot.meta.id.clone();
+        if let Some(owner) = self.cluster.elsewhere(&id) {
+            return Err(AdoptError::NotOwner(owner.to_owned()));
+        }
+        if self.designs.read().unwrap().contains_key(&id) {
+            return Err(AdoptError::Exists);
+        }
+        self.store.save(&snapshot).map_err(AdoptError::Io)?;
+        let design = Design::from_snapshot(snapshot);
+        let summary = DesignSummary::of(&design);
+        self.insert(summary.clone(), None);
+        let _ = self.lobby.send(Outgoing::new(
+            None,
+            &LobbyMessage::Design { design: &summary },
+        ));
+        Ok(summary)
+    }
+
+    /// Sends one stored design to the server that owns it now, and deletes
+    /// the local copy once that server has saved it.
+    async fn hand_off_one(&self, http: &reqwest::Client, id: &str) -> Result<(), String> {
+        let Some(owner) = self.cluster.elsewhere(id) else {
+            return Ok(());
+        };
+        let store = self.store.clone();
+        let key = id.to_owned();
+        let stored = tokio::task::spawn_blocking(move || store.load(&key))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        let Some(stored) = stored else { return Ok(()) };
+        let snapshot = DesignState::restore(stored).design.snapshot();
+        let res = http
+            .put(format!("{owner}/api/designs/{id}/handoff"))
+            .json(&snapshot)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        match res.status().as_u16() {
+            201 => {
+                self.store.remove(id).map_err(|e| e.to_string())?;
+                tracing::info!(id, owner, "handed off design");
+                Ok(())
+            }
+            409 => {
+                // Never delete a copy the owner might not have; keep ours for a person to check.
+                tracing::warn!(
+                    id,
+                    owner,
+                    "the owner already has this design; keeping the local copy"
+                );
+                Ok(())
+            }
+            status => Err(format!("{owner} answered {status}")),
+        }
+    }
+
     /// Drops an actor's presence and histories everywhere, when its session ends.
     pub fn forget_actor(&self, actor: &str) {
         for handle in self.handles() {
@@ -766,6 +832,38 @@ impl Hub {
                 tracing::error!(id = snapshot.meta.id, %error, "failed to save design");
             }
         }
+    }
+}
+
+/// Why [`Hub::adopt`] refused a design.
+#[derive(Debug)]
+pub enum AdoptError {
+    /// Another server owns it; this is that server's base URL.
+    NotOwner(String),
+    /// This server already has a design with that id.
+    Exists,
+    Io(io::Error),
+}
+
+/// Hands off stored designs this server no longer owns, retrying every 30
+/// seconds for any whose owner can't be reached yet.
+async fn hand_off(hub: Weak<Hub>, mut ids: Vec<String>) {
+    let http = reqwest::Client::new();
+    loop {
+        let Some(strong) = hub.upgrade() else { return };
+        let mut left = Vec::new();
+        for id in ids {
+            if let Err(error) = strong.hand_off_one(&http, &id).await {
+                tracing::warn!(id, error, "couldn't hand off design yet; will retry");
+                left.push(id);
+            }
+        }
+        drop(strong);
+        if left.is_empty() {
+            return;
+        }
+        ids = left;
+        tokio::time::sleep(Duration::from_secs(30)).await;
     }
 }
 

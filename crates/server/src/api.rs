@@ -10,7 +10,7 @@ use axum::{
     },
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, patch, post},
+    routing::{get, patch, post, put},
 };
 use finite_design::{
     Design, Snapshot,
@@ -19,7 +19,7 @@ use finite_design::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::{self, error::RecvError};
 
-use crate::hub::{DesignHandle, DesignSummary, Hub, Outgoing};
+use crate::hub::{AdoptError, DesignHandle, DesignSummary, Hub, Outgoing};
 
 pub fn routes() -> Router<Arc<Hub>> {
     Router::new()
@@ -27,6 +27,7 @@ pub fn routes() -> Router<Arc<Hub>> {
         .route("/designs/ws", get(lobby_socket))
         .route("/designs/{id}", get(get_design))
         .route("/owner/{id}", get(owner_of))
+        .route("/designs/{id}/handoff", put(adopt))
         .route("/designs/{id}/ws", get(design_socket))
         .route("/designs/{id}/comments", post(create_comment))
         .route("/designs/{id}/comments/{comment}", patch(update_comment))
@@ -108,6 +109,38 @@ async fn get_design(
     Path(id): Path<String>,
 ) -> Result<Json<Snapshot>, ApiError> {
     Ok(Json(open(&hub, &id)?.read(Design::snapshot)))
+}
+
+/// Takes over a design another server is handing off, after the list of
+/// servers changed. Only the new owner accepts it, and only if it doesn't
+/// already have that design.
+async fn adopt(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    Json(snapshot): Json<Snapshot>,
+) -> Response {
+    if snapshot.meta.id != id {
+        return ApiError::Unprocessable("the snapshot is for another design".into())
+            .into_response();
+    }
+    let adopted = match tokio::task::spawn_blocking(move || hub.adopt(snapshot)).await {
+        Ok(adopted) => adopted,
+        Err(error) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
+        }
+    };
+    match adopted {
+        Ok(summary) => (StatusCode::CREATED, Json(summary)).into_response(),
+        Err(AdoptError::NotOwner(owner)) => ApiError::Misdirected { id, owner }.into_response(),
+        Err(AdoptError::Exists) => (
+            StatusCode::CONFLICT,
+            format!("design {id:?} is already here"),
+        )
+            .into_response(),
+        Err(AdoptError::Io(error)) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        }
+    }
 }
 
 #[derive(Serialize)]

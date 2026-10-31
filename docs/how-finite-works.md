@@ -210,7 +210,7 @@ Only one server can use a data folder at a time. The file store takes an exclusi
 
 On Ctrl-C or SIGTERM, the server stops accepting connections and writes every loaded design as a full snapshot before it exits. SIGTERM is how Docker, systemd and the desktop app stop it. Until this was handled, the desktop app could lose the last moment of edits when it quit.
 
-The hub only calls four methods on the `Store` trait in `store.rs`: `ids`, `load`, `save` and `append`. A database could replace the files behind them. To check a new store, run `store::contract::check` on it. It's a **contract test**: the same suite of rules every store must follow, such as "the journal keeps append order" and "save clears the journal". The file store and the memory store both run it in `cargo test`. Undo histories aren't saved, so a restart clears them.
+The hub only calls five methods on the `Store` trait in `store.rs`: `ids`, `load`, `save`, `append` and `remove`. A database could replace the files behind them. To check a new store, run `store::contract::check` on it. It's a **contract test**: the same suite of rules every store must follow, such as "the journal keeps append order" and "save clears the journal". The file store and the memory store both run it in `cargo test`. Undo histories aren't saved, so a restart clears them.
 
 ## Following one edit end to end
 
@@ -309,6 +309,12 @@ Each server then behaves like this:
 - **Wrong server:** a request for a design another server owns gets `421 Misdirected Request` with a `Finite-Owner` header naming the owner. An MCP tool call gets an error telling the agent which `/mcp` endpoint to use.
 - **Asking:** `GET /api/owner/{id}` on any server returns `{"owner": "http://…"}`, or `null` when it's that server.
 
+### Adding or removing a server
+
+When the list changes, some designs get a new owner, but their files are still in the old owner's data folder. So on startup, each server checks its stored designs. It sends each one it no longer owns to the new owner with `PUT /api/designs/{id}/handoff`. The new owner saves it before it answers `201 Created`, and only then does the old server delete its copy. A crash at any point leaves a copy on at least one server.
+
+If the new owner is down, the old server keeps the design and tries again every 30 seconds. If the new owner already has a design with that id, it answers `409 Conflict`. The old server then keeps its copy and logs a warning, because deleting it could lose edits the owner doesn't have. `tests/cluster.rs` covers a second server joining and an owner that can't be reached.
+
 The hash is FNV-1a with a final mix. It's spelled out in `cluster.rs` so you can port it. A test pins one score, which a Python version reproduces exactly. Without `FINITE_NODES`, there's one server, and it owns everything.
 
 ### The router
@@ -319,7 +325,7 @@ The hash is FNV-1a with a final mix. It's spelled out in `cluster.rs` so you can
 - **New designs:** `POST /api/designs` takes turns between servers. Each server picks an id it owns, so the design lands where the hash says it belongs.
 - **The design list:** `GET /api/designs` asks every server and merges the answers, newest first. The list's WebSocket subscribes to every server's list and relays their updates. If one server drops, the router closes the socket, and the browser reconnects and gets a fresh merged list.
 
-The router keeps no state, so you can run several behind a plain load balancer. Here's a two-server setup on one machine:
+Apart from relayed MCP sessions (below), the router keeps no state. Here's a two-server setup on one machine:
 
 ```bash
 export FINITE_NODES=http://127.0.0.1:4101,http://127.0.0.1:4102

@@ -16,7 +16,7 @@ pub struct Stored {
 }
 
 /// Where designs persist. Swap the file store for a database by implementing
-/// this trait; the hub only ever calls these four methods.
+/// this trait; the hub only ever calls these five methods.
 ///
 /// Saving is a write-ahead journal with compaction. After each burst of edits
 /// the hub appends the new records with [`Store::append`], which is cheap
@@ -31,6 +31,8 @@ pub trait Store: Send + Sync + 'static {
     fn save(&self, snapshot: &Snapshot) -> io::Result<()>;
     /// Adds records to the design's journal. The design must have been saved once.
     fn append(&self, id: &str, records: &[Record]) -> io::Result<()>;
+    /// Deletes a design's snapshot and journal, after it moved to another server.
+    fn remove(&self, id: &str) -> io::Result<()>;
 }
 
 /// Two files per design in `<dir>/designs/`: `<id>.json` is the last snapshot,
@@ -161,6 +163,16 @@ impl Store for FileStore {
         file.write_all(&out)?;
         file.sync_data()
     }
+
+    fn remove(&self, id: &str) -> io::Result<()> {
+        for path in [self.dir.join(format!("{id}.json")), self.journal_path(id)] {
+            match fs::remove_file(path) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Keeps designs in memory. Used by tests.
@@ -205,6 +217,11 @@ impl Store for MemoryStore {
             .get_mut(id)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "design was never saved"))?;
         journal.extend_from_slice(records);
+        Ok(())
+    }
+
+    fn remove(&self, id: &str) -> io::Result<()> {
+        self.designs.lock().unwrap().remove(id);
         Ok(())
     }
 }
@@ -288,6 +305,15 @@ pub mod contract {
         let a = store.load("a").unwrap().unwrap();
         assert_eq!(a.snapshot.seq, 9, "save replaces the snapshot");
         assert!(a.journal.is_empty(), "save clears the journal");
+
+        store.append("a", &[rename("a", "Four")]).unwrap();
+        store.remove("a").unwrap();
+        assert!(
+            store.load("a").unwrap().is_none(),
+            "a removed design is gone"
+        );
+        assert_eq!(store.ids().unwrap(), ["b"], "and no longer listed");
+        store.remove("a").unwrap();
     }
 }
 
