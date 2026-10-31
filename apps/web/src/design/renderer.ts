@@ -3,6 +3,7 @@ import { colors } from "@/styles/tokens.stylex";
 import { artboardDocument, BASE_CSS, pixelSize } from "./html";
 import type { Applied, Replica } from "./replica";
 import type { Node } from "./schema";
+import { isSafeAttr } from "./attributes";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -34,17 +35,6 @@ const BLOCKED_TAGS = new Set([
 /** How long a sandboxed artboard waits for edits to settle before reloading. */
 const RELOAD_DELAY_MS = 150;
 const MAX_SIDE = 16_000;
-
-const isSafeAttr = (name: string, value: string) => {
-  const lower = name.toLowerCase();
-  const url = value.replace(/\s/g, "").toLowerCase();
-  return (
-    !lower.startsWith("on") &&
-    lower !== "srcdoc" &&
-    !url.startsWith("javascript:") &&
-    !url.startsWith("vbscript:")
-  );
-};
 
 const isScript = (node: Node) => node.type === "element" && node.tag?.toLowerCase() === "script";
 

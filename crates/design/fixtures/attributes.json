@@ -1,0 +1,80 @@
+{
+  "about": "Which attributes may be set, recorded from crates/design/tests/attributes.rs. apps/web/src/design/attributes.test.ts checks the viewer's isSafeAttr against it.",
+  "cases": [
+    {
+      "name": "href",
+      "safe": true,
+      "value": "https://example.com"
+    },
+    {
+      "name": "href",
+      "safe": true,
+      "value": "#section"
+    },
+    {
+      "name": "title",
+      "safe": true,
+      "value": "Checkout"
+    },
+    {
+      "name": "onclick",
+      "safe": false,
+      "value": "alert(1)"
+    },
+    {
+      "name": "OnMouseOver",
+      "safe": false,
+      "value": "alert(1)"
+    },
+    {
+      "name": "srcdoc",
+      "safe": false,
+      "value": "<p>hi</p>"
+    },
+    {
+      "name": "href",
+      "safe": false,
+      "value": "javascript:alert(1)"
+    },
+    {
+      "name": "href",
+      "safe": false,
+      "value": " JaVaScRiPt:alert(1)"
+    },
+    {
+      "name": "href",
+      "safe": false,
+      "value": "java\tscript:alert(1)"
+    },
+    {
+      "name": "href",
+      "safe": false,
+      "value": "java\u0001script:alert(1)"
+    },
+    {
+      "name": "href",
+      "safe": false,
+      "value": "vbscript:msgbox(1)"
+    },
+    {
+      "name": "values",
+      "safe": false,
+      "value": "0;javascript:alert(1)"
+    },
+    {
+      "name": "to",
+      "safe": false,
+      "value": "javascript:alert(1)"
+    },
+    {
+      "name": "xlink:href",
+      "safe": false,
+      "value": "javascript:alert(1)"
+    },
+    {
+      "name": "src",
+      "safe": true,
+      "value": "data:image/png;base64,AAAA"
+    }
+  ]
+}

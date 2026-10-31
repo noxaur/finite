@@ -143,6 +143,9 @@ Agents don't send ops. They call tools with friendlier arguments, and `crates/de
 Some of the work these commands do:
 
 - `write_html` parses HTML with `html.rs`, drops anything unsafe (`on*` attributes, `javascript:` URLs, `<iframe>` and the like), and emits one `create` per node. `set_attributes` refuses the same attributes using the same rule (`html::is_safe_attr`). It also refuses names that aren't valid attribute names, because exports write names as they are, and a name like `x" onload="…` would break out of its tag.
+
+A script URL is refused anywhere in a value, not just at its start. SVG animation can set an `href` while the page runs, from a list like `<animate attributeName="href" values="0;javascript:…">`, and an artboard without a script renders in a shadow root on the app's own origin. So a check that only looked at the start of the value let that through, and a click would have run the script as the app. The viewer's renderer checks attributes again before it sets them (`isSafeAttr` in `apps/web/src/design/attributes.ts`). Both sides read the same golden file of cases (`crates/design/fixtures/attributes.json`), and the end-to-end test writes that SVG and checks the attribute never reaches the page.
+
 - `update_styles` accepts `backgroundColor` or `background-color`. When you set a shorthand like `padding`, it also clears `padding-top` and friends. Styles are stored as a map, not as ordered CSS, so a leftover longhand would otherwise win.
 - `move_nodes` and `duplicate` pick free canvas space for anything that becomes a new artboard.
 

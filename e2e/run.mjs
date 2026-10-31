@@ -166,6 +166,19 @@ try {
   await agent.call("undo", { designId: design });
   await page.until(`${shadow}.querySelector("button").style.outline === ""`);
 
+  // Agent HTML can't smuggle a script URL in through SVG animation.
+  await agent.call("write_html", {
+    designId: design,
+    targetId: page1,
+    html: `<svg data-name="Trap" width="80" height="20"><a><animate attributeName="href" values="0;javascript:alert(1)"/><text y="15">Go</text></a></svg>`,
+  });
+  check(
+    "an SVG animation can't set a script URL",
+    (await page.until(`${shadow}.querySelector("animate") ? "ready" : null`)) === "ready" &&
+      (await page.eval(`${shadow}.querySelector("animate").getAttribute("values")`)) === null,
+  );
+  await agent.call("undo", { designId: design });
+
   // Presence.
   await agent.call("start_working_on_nodes", {
     designId: design,

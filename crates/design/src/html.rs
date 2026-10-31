@@ -126,17 +126,24 @@ pub fn is_attr_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '.' | '-'))
 }
 
+///
+/// A script URL is refused anywhere in the value, not just at the start:
+/// SVG animation can set an `href` at runtime from a list such as
+/// `<animate attributeName="href" values="0;javascript:…">`. Browsers ignore
+/// whitespace and control characters inside a URL scheme, so they're
+/// ignored here too. The viewer's `isSafeAttr` applies the same rules
+/// (checked against `fixtures/attributes.json`).
 pub fn is_safe_attr(name: &str, value: &str) -> bool {
     let name = name.to_ascii_lowercase();
     let value: String = value
         .chars()
-        .filter(|c| !c.is_whitespace())
+        .filter(|c| !c.is_whitespace() && !c.is_control())
         .collect::<String>()
         .to_ascii_lowercase();
     !name.starts_with("on")
         && name != "srcdoc"
-        && !value.starts_with("javascript:")
-        && !value.starts_with("vbscript:")
+        && !value.contains("javascript:")
+        && !value.contains("vbscript:")
 }
 
 /// Splits a `style` attribute into `(property, value)` pairs, respecting
