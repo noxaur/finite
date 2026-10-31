@@ -485,6 +485,32 @@ async fn long_results_are_cut_with_directions() {
     let page: Vec<Value> = serde_json::from_str(&last).unwrap();
     assert_eq!(page.len(), 100);
 
+    let first: Vec<Value> =
+        serde_json::from_str(&children[..children.rfind(']').unwrap() + 1]).unwrap();
+    // Details for 1,000 nodes are more than one result holds.
+    let all: Vec<&str> = first
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .cycle()
+        .take(1_000)
+        .collect();
+    let info = agent
+        .ok(
+            "get_node_info",
+            json!({ "designId": design, "nodeIds": all }),
+        )
+        .await;
+    assert!(
+        info.len() < limit,
+        "get_node_info said {} chars",
+        info.len()
+    );
+    assert!(
+        info.contains("of 1000 nodes. Ask for the rest"),
+        "{}",
+        tail(&info)
+    );
+
     // Presence names at most 100 nodes; repeats count once.
     let ids: Vec<&str> = page.iter().map(|c| c["id"].as_str().unwrap()).collect();
     let repeated: Vec<&str> = ids.iter().cycle().take(5_000).copied().collect();
@@ -494,8 +520,6 @@ async fn long_results_are_cut_with_directions() {
             json!({ "designId": design, "nodeIds": repeated }),
         )
         .await;
-    let first: Vec<Value> =
-        serde_json::from_str(&children[..children.rfind(']').unwrap() + 1]).unwrap();
     let too_many: Vec<&str> = first
         .iter()
         .map(|c| c["id"].as_str().unwrap())

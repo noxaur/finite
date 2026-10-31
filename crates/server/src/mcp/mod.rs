@@ -122,10 +122,12 @@ fn fit(items: impl Iterator<Item = serde_json::Value>) -> (ContentBlock, usize) 
     let mut size = 0;
     for item in items {
         let text = serde_json::to_string_pretty(&item).expect("json values serialize");
-        if !kept.is_empty() && size + text.len() > OUTPUT_LIMIT {
+        // Inside the array, every line is indented two more spaces.
+        let len = text.len() + 2 * text.lines().count() + 2;
+        if !kept.is_empty() && size + len > OUTPUT_LIMIT {
             break;
         }
-        size += text.len() + 4;
+        size += len;
         kept.push(item);
     }
     let shown = kept.len();
@@ -390,7 +392,16 @@ impl FiniteMcp {
         let handle = design!(self, &p.design_id);
         let nodes: Vec<_> =
             handle.read(|d| p.node_ids.iter().map(|id| node_json(d.doc(), id)).collect());
-        json(nodes.into())
+        let total = nodes.len();
+        let (content, shown) = fit(nodes.into_iter());
+        Ok(CallToolResult::success(with_note(
+            content,
+            (shown < total).then(|| {
+                format!(
+                    "Showing the first {shown} of {total} nodes. Ask for the rest in another call."
+                )
+            }),
+        )))
     }
 
     #[tool(
