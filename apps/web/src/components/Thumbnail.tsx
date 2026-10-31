@@ -9,6 +9,11 @@ import { Replica } from "@/design/replica";
 import { runtime } from "@/runtime";
 import { colors } from "@/styles/tokens.stylex";
 
+/** Agents edit in bursts: wait for a pause this long before re-rendering... */
+const PAUSE_MS = 300;
+/** ...and fetch at most this often while a design keeps changing. */
+const MIN_INTERVAL_MS = 2000;
+
 /**
  * A static preview of a design. It loads the snapshot once the card scrolls
  * into view, and again when `seq` changes.
@@ -18,6 +23,7 @@ export function Thumbnail({ id, seq }: { id: string; seq: number }) {
   const worldRef = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
   const [empty, setEmpty] = useState(false);
+  const lastFetch = useRef(0);
 
   useEffect(() => {
     const frame = frameRef.current;
@@ -38,8 +44,9 @@ export function Thumbnail({ id, seq }: { id: string; seq: number }) {
     if (!visible || !frame || !world) return;
     const controller = new AbortController();
     let renderer: Renderer | undefined;
-    // Agents edit in bursts; wait for a pause before re-rendering.
+    const wait = Math.max(PAUSE_MS, lastFetch.current + MIN_INTERVAL_MS - Date.now());
     const timer = setTimeout(() => {
+      lastFetch.current = Date.now();
       void runtime
         .runPromise(
           Api.use((api) => api.getDesign(id)),
@@ -62,7 +69,7 @@ export function Thumbnail({ id, seq }: { id: string; seq: number }) {
           },
           () => {},
         );
-    }, 300);
+    }, wait);
     return () => {
       clearTimeout(timer);
       controller.abort();

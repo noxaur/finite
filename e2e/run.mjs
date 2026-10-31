@@ -337,6 +337,25 @@ try {
   // On the design list, a design that can't be created says so.
   await page.goto(`${base}/`);
   await page.until(`document.querySelectorAll("main li").length > 0`);
+
+  // A thumbnail follows an agent's edits, but fetches at most every 2 seconds.
+  const fetches = `performance.getEntriesByType("resource").filter((e) => e.name.endsWith("/api/designs/${design}")).length`;
+  await page.sleep(1000);
+  const fetchedBefore = await page.eval(fetches);
+  for (let i = 0; i < 6; i++) {
+    await agent.call("update_styles", {
+      designId: design,
+      updates: [{ nodeIds: [cta], styles: { opacity: String(0.5 + i / 20) } }],
+    });
+    await page.sleep(400);
+  }
+  await page.sleep(2500);
+  const thumbnailFetches = (await page.eval(fetches)) - fetchedBefore;
+  check(
+    "a thumbnail refetches at most every 2 seconds",
+    thumbnailFetches >= 1 && thumbnailFetches <= 3,
+    `${thumbnailFetches} fetches for 6 edits over 2.4 s`,
+  );
   await page.send("Network.setBlockedURLs", { urls: ["*/api/designs"] });
   const newButton = await rectOf(
     `[...document.querySelectorAll("button")].find((b) => b.textContent === "New design")`,

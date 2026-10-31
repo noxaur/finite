@@ -263,7 +263,7 @@ The browser side lives in `apps/web/src/design`. It's plain TypeScript classes, 
 
 `components/DesignCanvas.tsx` wires these together and adds what's specific to the page: the comment tool, hover outlines, the zoom controls and keyboard shortcuts.
 
-The design list page (`DesignGrid.tsx`) uses the lobby socket, and each card's `Thumbnail` renders a static copy of the design with scripts off. Until the first list arrives, a dropped socket shows "Can't reach the Finite server. Retrying…", and a design that can't be created says so instead of silently re-enabling the button.
+The design list page (`DesignGrid.tsx`) uses the lobby socket, and each card's `Thumbnail` renders a static copy of the design with scripts off. A thumbnail refetches after an agent's edit, once the edits pause for 300 ms, and at most every 2 seconds while they keep coming. In the end-to-end test, six edits 400 ms apart cause two fetches instead of six. Until the first list arrives, a dropped socket shows "Can't reach the Finite server. Retrying…", and a design that can't be created says so instead of silently re-enabling the button.
 
 ### Reconnecting without starting over
 
