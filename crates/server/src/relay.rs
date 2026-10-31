@@ -345,18 +345,42 @@ impl DirSessionStore {
 
 #[async_trait::async_trait]
 impl SessionStore for DirSessionStore {
+    /// A file that doesn't parse (cut short by a power cut, say) counts as
+    /// no session. An error here would fail every request in that session,
+    /// while "no session" gets a `404`, and MCP clients answer that by
+    /// starting a new one.
     async fn load(&self, session_id: &str) -> Result<Option<SessionState>, SessionStoreError> {
-        match tokio::fs::read(self.path(session_id)).await {
-            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
+        let path = self.path(session_id);
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        match serde_json::from_slice(&bytes) {
+            Ok(state) => Ok(Some(state)),
+            Err(error) => {
+                tracing::warn!(session_id, %error, "dropping an unreadable session file");
+                let _ = tokio::fs::remove_file(&path).await;
+                Ok(None)
+            }
         }
     }
 
+    /// Writes to a temporary file, syncs it, then renames it into place, so
+    /// a session file is always whole.
     async fn store(&self, session_id: &str, state: &SessionState) -> Result<(), SessionStoreError> {
         let path = self.path(session_id);
         let tmp = path.with_extension("json.tmp");
-        tokio::fs::write(&tmp, serde_json::to_vec(state)?).await?;
+        let bytes = serde_json::to_vec(state)?;
+        let written = tmp.clone();
+        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&written)?;
+            file.write_all(&bytes)?;
+            file.sync_all()
+        })
+        .await
+        .map_err(std::io::Error::other)??;
         tokio::fs::rename(tmp, path).await?;
         Ok(())
     }
@@ -366,5 +390,21 @@ impl SessionStore for DirSessionStore {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
             _ => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_unreadable_session_file_counts_as_no_session() {
+        let dir =
+            std::env::temp_dir().join(format!("finite-sessions-{}", crate::hub::random_id(8)));
+        let store = DirSessionStore::new(&dir).unwrap();
+        std::fs::write(dir.join("abc.json"), b"{\"cut sh").unwrap();
+        assert!(store.load("abc").await.unwrap().is_none());
+        assert!(!dir.join("abc.json").exists(), "the broken file is removed");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
