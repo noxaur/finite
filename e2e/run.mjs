@@ -99,6 +99,10 @@ try {
   const go = idAfter(scripted, '"Go"');
 
   page = await launch();
+  // Keep every WebSocket the page opens, so a check can drop one.
+  await page.send("Page.addScriptToEvaluateOnNewDocument", {
+    source: `const Native = WebSocket; window.__sockets = []; window.WebSocket = class extends Native { constructor(...args) { super(...args); __sockets.push(this); } };`,
+  });
   await page.goto(`${base}/design/?id=${design}`);
   check(
     "both artboards render",
@@ -136,6 +140,31 @@ try {
     "undo reverts it",
     Boolean(await page.until(`${shadow}.querySelector("button").style.outline === ""`)),
   );
+
+  // A dropped connection resumes: the page gets what it missed, and the
+  // artboards aren't rebuilt (a snapshot would replace the iframe).
+  await page.eval(
+    `window.__frame = document.querySelector("[data-artboard] iframe"); __sockets.filter((s) => s.url.includes("/ws")).forEach((s) => s.close()); 0`,
+  );
+  await agent.call("update_styles", {
+    designId: design,
+    updates: [{ nodeIds: [cta], styles: { outline: "3px solid rgb(0, 0, 255)" } }],
+  });
+  check(
+    "a dropped connection catches up",
+    Boolean(
+      await page.until(
+        `${shadow}.querySelector("button").style.outline.includes("rgb(0, 0, 255)")`,
+      ),
+    ),
+  );
+  check(
+    "by resuming, not starting over",
+    (await page.eval(`__sockets.some((s) => s.url.includes("since="))`)) &&
+      (await page.eval(`__frame.isConnected`)),
+  );
+  await agent.call("undo", { designId: design });
+  await page.until(`${shadow}.querySelector("button").style.outline === ""`);
 
   // Presence.
   await agent.call("start_working_on_nodes", {

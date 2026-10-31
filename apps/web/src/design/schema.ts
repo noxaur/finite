@@ -136,6 +136,16 @@ export const DesignMessage = Schema.Union([
     type: Schema.Literal("snapshot"),
     snapshot: Snapshot,
     presence: Schema.Array(Presence),
+    /** Names this load of the design on the server. Send it back to resume. */
+    epoch: Schema.String,
+  }),
+  /** Instead of a snapshot, after reconnecting with `?epoch=…&since=…`: what was missed. */
+  Schema.Struct({
+    type: Schema.Literal("resume"),
+    changes: Schema.Array(Schema.Struct({ change: Change, actorName: Schema.String })),
+    comments: Schema.Array(Comment),
+    presence: Schema.Array(Presence),
+    meta: DesignMeta,
   }),
   Schema.Struct({ type: Schema.Literal("change"), change: Change, actorName: Schema.String }),
   Schema.Struct({ type: Schema.Literal("presence"), presence: Schema.Array(Presence) }),

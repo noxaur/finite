@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{
-        Path, State,
+        Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::StatusCode,
@@ -19,7 +19,7 @@ use finite_design::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::{self, error::RecvError};
 
-use crate::hub::{AdoptError, DesignHandle, DesignSummary, Hub, Outgoing};
+use crate::hub::{AdoptError, DesignHandle, DesignSummary, Hub, Outgoing, Since};
 
 pub fn routes() -> Router<Arc<Hub>> {
     Router::new()
@@ -276,21 +276,37 @@ async fn lobby_socket(State(hub): State<Arc<Hub>>, ws: WebSocketUpgrade) -> Resp
     })
 }
 
-/// Streams one design: a snapshot, then every change and presence update.
+/// `?epoch=…&since=…` on a design's socket: where a reconnecting viewer left off.
+#[derive(Deserialize)]
+struct ResumeQuery {
+    epoch: Option<String>,
+    since: Option<u64>,
+}
+
+/// Streams one design: a snapshot (or, for a viewer that reconnects with
+/// `?epoch=…&since=…`, just what it missed), then every change and presence update.
 ///
 /// Viewers can't edit the design yet, only comment on it (over HTTP). When
 /// users can edit, they will send ops and undo/redo requests on this socket.
 async fn design_socket(
     State(hub): State<Arc<Hub>>,
     Path(id): Path<String>,
+    Query(query): Query<ResumeQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
     let handle = match open(&hub, &id).await {
         Ok(handle) => handle,
         Err(error) => return error.into_response(),
     };
+    let since = match query {
+        ResumeQuery {
+            epoch: Some(epoch),
+            since: Some(seq),
+        } => Some(Since { epoch, seq }),
+        _ => None,
+    };
     ws.on_upgrade(move |socket| async move {
-        let (first, seq, rx) = handle.subscribe();
+        let (first, seq, rx) = handle.subscribe_from(since.as_ref());
         let resync = move || {
             let (first, seq, _) = handle.subscribe();
             (first, seq)

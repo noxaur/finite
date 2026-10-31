@@ -56,6 +56,17 @@ pub enum DesignMessage<'a> {
     Snapshot {
         snapshot: &'a Snapshot,
         presence: Vec<&'a Presence>,
+        /// Names this load of the design. A viewer that reconnects sends it
+        /// back with its `seq` to resume (see [`super::Since`]).
+        epoch: &'a str,
+    },
+    /// Sent instead of a snapshot to a viewer that reconnects within the same
+    /// epoch, while the server still has every change it missed.
+    Resume {
+        changes: Vec<Missed<'a>>,
+        comments: &'a [Comment],
+        presence: Vec<&'a Presence>,
+        meta: &'a DesignMeta,
     },
     Change {
         change: &'a Change,
@@ -72,6 +83,14 @@ pub enum DesignMessage<'a> {
     Comment {
         comment: &'a Comment,
     },
+}
+
+/// A change a reconnecting viewer missed, as its `change` message had it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Missed<'a> {
+    pub change: &'a Change,
+    pub actor_name: &'a str,
 }
 
 /// Messages pushed to the design list over WebSocket.

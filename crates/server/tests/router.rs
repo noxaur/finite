@@ -110,6 +110,13 @@ async fn the_router_makes_two_servers_look_like_one() {
         assert_eq!(first["type"], "snapshot");
         assert_eq!(first["snapshot"]["meta"]["id"], id.as_str());
         assert_eq!(first["snapshot"]["comments"].as_array().unwrap().len(), 1);
+
+        // A viewer that reconnects says where it left off, and that reaches
+        // the owner too, so it resumes instead of starting over.
+        let epoch = first["epoch"].as_str().unwrap();
+        let seq = first["snapshot"]["seq"].as_u64().unwrap();
+        let url = format!("{front}/api/designs/{id}/ws?epoch={epoch}&since={seq}");
+        assert_eq!(first_text(&url).await["type"], "resume");
     }
 
     // The design list's WebSocket starts with every server's designs, then

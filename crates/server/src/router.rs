@@ -24,7 +24,7 @@ use axum::{
     Json, Router,
     body::{Body, Bytes},
     extract::{
-        Path, Request, State,
+        Path, RawQuery, Request, State,
         ws::{self, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, Method, StatusCode, header},
@@ -202,11 +202,14 @@ async fn owner(State(front): State<Arc<Front>>, Path(id): Path<String>) -> Json<
 async fn design_socket(
     State(front): State<Arc<Front>>,
     Path(id): Path<String>,
+    RawQuery(query): RawQuery,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    // The query carries where a reconnecting viewer left off.
+    let query = query.map(|q| format!("?{q}")).unwrap_or_default();
     let url = Front::ws_url(
         front.cluster.owner_url(&id),
-        &format!("/api/designs/{id}/ws"),
+        &format!("/api/designs/{id}/ws{query}"),
     );
     let upstream = match tokio_tungstenite::connect_async(&url).await {
         Ok((upstream, _)) => upstream,

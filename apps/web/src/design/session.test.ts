@@ -26,6 +26,7 @@ const snapshot = (presence: ReadonlyArray<Presence> = []): DesignMessage => ({
     comments: [],
   },
   presence,
+  epoch: "e1",
 });
 
 const recolor = (seq: number, origin: "edit" | "undo" = "edit"): DesignMessage => ({
@@ -69,6 +70,43 @@ const session = () => {
 };
 
 describe("DesignSession", () => {
+  it("applies only the missed changes when it resumes, without redrawing", () => {
+    const { view, session: s } = session();
+    s.receive(snapshot());
+    s.receive(recolor(4));
+    const changes = [5, 6].map((seq) => {
+      const message = recolor(seq);
+      if (message.type !== "change") throw new Error("expected a change");
+      return { change: message.change, actorName: message.actorName };
+    });
+    const pin: Comment = {
+      id: "c1",
+      artboardId: null,
+      nodeId: null,
+      x: 0,
+      y: 0,
+      resolved: false,
+      createdAt: 0,
+      messages: [],
+      rev: 0,
+    };
+    s.receive({
+      type: "resume",
+      // A change it already has is skipped.
+      changes: [...changes.slice(0, 1), ...changes],
+      comments: [pin],
+      presence: [presence(["b"])],
+      meta: { id: "d", name: "Renamed", createdAt: 0, updatedAt: 0 },
+    });
+    expect(view.resets).toBe(1);
+    expect(view.applied).toHaveLength(3);
+    expect(s.replica.seq).toBe(6);
+    expect(s.state.activity.map((a) => a.seq)).toEqual([6, 5, 4]);
+    expect([...s.state.comments.keys()]).toEqual(["c1"]);
+    expect(s.state.meta?.name).toBe("Renamed");
+    expect(view.working).toEqual(new Map([["a", "Claude: Building"]]));
+  });
+
   it("loads a snapshot and draws it from scratch", () => {
     const { view, session: s } = session();
     s.receive(snapshot());

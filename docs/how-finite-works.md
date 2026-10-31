@@ -207,11 +207,24 @@ Read tools (`get_tree_summary`, `get_node_info`, `get_html`, `get_screenshot`) l
 | `GET /api/designs/{id}`                                  | One snapshot (used by thumbnails)                   |
 | `GET /api/designs/ws`                                    | WebSocket: the design list, then updates            |
 | `GET /api/designs/{id}/ws`                               | WebSocket: one design's snapshot, then every change |
+| `GET /api/designs/{id}/ws?epoch=…&since=…`               | The same socket, resuming after a reconnect         |
 | `POST …/comments`, `…/replies`, `PATCH …/comments/{cid}` | Comment, reply, resolve                             |
 
 The messages on these sockets are Rust types on the server and Effect schemas in `apps/web/src/design/schema.ts`. A second golden file keeps those in step. `crates/server/tests/wire.rs` drives a real hub through an edit, an undo, presence, a comment, an agent reply and a rename, and records every message it broadcasts in `crates/server/fixtures/messages.json`. Then `apps/web/src/design/wire.test.ts` decodes each one with the web schemas. If you rename a field on the Rust side, `cargo test` fails until you regenerate the file, and then `vp test` fails until you update the schema.
 
 When a browser opens a design's socket, the server takes the lock first. Under that lock, it subscribes the socket to the broadcast channel and builds a snapshot. That way no change can land between the snapshot and the stream. If a slow browser falls more than 1024 messages behind, it gets a fresh snapshot instead of the missed changes.
+
+#### Reconnecting without starting over
+
+Connections drop: a laptop sleeps, Wi-Fi blinks, a proxy times out. The browser reconnects with backoff (`socket.ts`). A fresh snapshot after every drop would be wasteful. It would also rebuild every artboard and reload every sandboxed one, so the canvas would flicker and animations would restart. So the socket supports **resume**, the way chat and multiplayer protocols do: the browser says where it left off, and the server sends only what it missed.
+
+1. Every snapshot message carries an `epoch`. The epoch is a random id the server picks each time it loads the design into memory.
+2. Each loaded design keeps its last 256 changes, with their actors' names (`recent` in `hub/design.rs`).
+3. On reconnect, `DesignSession` opens `…/ws?epoch=<epoch>&since=<seq>`, where `seq` is the last change it applied.
+4. If the epoch matches and every change after `since` is still kept, the server answers with a `resume` message. It holds those changes, plus the current comments, presence and name, which are small enough to send whole. The browser applies the changes as if they had arrived live.
+5. Otherwise the server sends a snapshot, as for a new viewer.
+
+The epoch is what makes this safe. A server that crashed may have lost its last few unsaved changes, so after the restart it can hand out the same `seq` again for a different change. And after any reload, the kept changes are gone. A new epoch means the browser's `seq` no longer names the same state, so it gets a snapshot. The router passes the query on to the owner, so resuming works there too.
 
 ### Storage
 
@@ -385,22 +398,23 @@ MCP rejects requests whose `Host` header it doesn't know, to block **DNS rebindi
 
 ## Words used in the code
 
-| Word       | Meaning                                                                       |
-| ---------- | ----------------------------------------------------------------------------- |
-| Design     | One canvas. Also called a canvas in the MCP tools.                            |
-| Artboard   | A top-level node: a fixed-size frame placed on the canvas.                    |
-| Node       | One element or text node.                                                     |
-| Op         | The smallest edit: `create`, `delete`, `set` or `move`.                       |
-| Change     | The ops from one commit, undo or redo, with a `seq`, actor and label.         |
-| Actor      | Whoever made a change: an agent, by its `X-Finite-Agent` name or its session. |
-| Snapshot   | Everything needed to rebuild a design. Saved to disk and sent on connect.     |
-| Journal    | The records appended to `<id>.log` since the last snapshot.                   |
-| Compaction | Writing a fresh snapshot and deleting the journal, every 1,000 records.       |
-| Replica    | The browser's copy of a design.                                               |
-| Presence   | "Agent X is working on these nodes", shown as a badge.                        |
-| Hub        | The server's index of designs, with the ones in use loaded in memory.         |
-| Room       | The model for loading: a design is in memory only while someone uses it.      |
-| Long poll  | A request that stays open until there's news, like `wait_for_comments`.       |
-| Revision   | A comment's `rev`: it goes up with each change, so the higher copy is newer.  |
-| Owner      | The one server that holds a design, picked by hashing its id.                 |
-| Router     | `finite-server router`: the front door that sends requests to each owner.     |
+| Word       | Meaning                                                                         |
+| ---------- | ------------------------------------------------------------------------------- |
+| Design     | One canvas. Also called a canvas in the MCP tools.                              |
+| Artboard   | A top-level node: a fixed-size frame placed on the canvas.                      |
+| Node       | One element or text node.                                                       |
+| Op         | The smallest edit: `create`, `delete`, `set` or `move`.                         |
+| Change     | The ops from one commit, undo or redo, with a `seq`, actor and label.           |
+| Actor      | Whoever made a change: an agent, by its `X-Finite-Agent` name or its session.   |
+| Snapshot   | Everything needed to rebuild a design. Saved to disk and sent on connect.       |
+| Journal    | The records appended to `<id>.log` since the last snapshot.                     |
+| Compaction | Writing a fresh snapshot and deleting the journal, every 1,000 records.         |
+| Replica    | The browser's copy of a design.                                                 |
+| Presence   | "Agent X is working on these nodes", shown as a badge.                          |
+| Hub        | The server's index of designs, with the ones in use loaded in memory.           |
+| Room       | The model for loading: a design is in memory only while someone uses it.        |
+| Long poll  | A request that stays open until there's news, like `wait_for_comments`.         |
+| Epoch      | One load of a design on a server. A viewer can resume only within the same one. |
+| Revision   | A comment's `rev`: it goes up with each change, so the higher copy is newer.    |
+| Owner      | The one server that holds a design, picked by hashing its id.                   |
+| Router     | `finite-server router`: the front door that sends requests to each owner.       |

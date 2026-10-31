@@ -3,7 +3,7 @@
 //! its save queue before the lock is released.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     io,
     ops::{Deref, DerefMut},
     sync::{Arc, Mutex, MutexGuard},
@@ -17,8 +17,8 @@ use finite_design::{
 use tokio::sync::{broadcast, watch};
 
 use super::{
-    Actor, COMPACT_AFTER, DesignMessage, DesignSummary, HISTORY_TTL, Outgoing, PRESENCE_TTL,
-    Presence, UNLOAD_AFTER, now_ms, random_id,
+    Actor, COMPACT_AFTER, DesignMessage, DesignSummary, HISTORY_TTL, Missed, Outgoing,
+    PRESENCE_TTL, Presence, RESUME_LIMIT, UNLOAD_AFTER, now_ms, random_id,
 };
 use crate::store::{Store, Stored};
 
@@ -32,6 +32,12 @@ pub(super) struct DesignState {
     journaled: usize,
     /// Set when the next save must be a full snapshot: a new design, or a failed write.
     pub(super) needs_snapshot: bool,
+    /// A random name for this load of the design. Changes after a restart or
+    /// a reload can reuse a `seq`, so a viewer may resume only within one epoch.
+    epoch: String,
+    /// The latest changes and their actors' names, oldest first, so a viewer
+    /// that reconnects can get just what it missed.
+    recent: VecDeque<(Change, String)>,
     /// When the design was last opened through [`super::Hub::get`].
     last_used: u64,
 }
@@ -51,6 +57,8 @@ impl DesignState {
             pending: Vec::new(),
             journaled: 0,
             needs_snapshot,
+            epoch: random_id(8),
+            recent: VecDeque::new(),
             last_used: now_ms(),
         }
     }
@@ -70,6 +78,23 @@ impl DesignState {
             state.last_seen.insert(actor, now);
         }
         state
+    }
+
+    /// Every change after `since`, if this is its epoch and none have been
+    /// dropped from `recent`.
+    fn missed_since(&self, since: &Since) -> Option<Vec<Missed<'_>>> {
+        let seq = self.design.seq();
+        if since.epoch != self.epoch || since.seq > seq {
+            return None;
+        }
+        let missed: Vec<Missed> = self
+            .recent
+            .iter()
+            .filter(|(change, _)| change.seq > since.seq)
+            .map(|(change, actor_name)| Missed { change, actor_name })
+            .collect();
+        // Seqs have no gaps, so a full set has exactly this many.
+        (missed.len() as u64 == seq - since.seq).then_some(missed)
     }
 
     /// Whether the design can leave memory: nothing unsaved, and nobody with
@@ -111,6 +136,14 @@ pub struct DesignHandle {
     pub(super) dirty: watch::Sender<()>,
     /// Wakes `wait_for_comments` callers when any comment changes.
     comments: tokio::sync::Notify,
+}
+
+/// Where a reconnecting viewer left off: the epoch from its snapshot and the
+/// `seq` of the last change it applied.
+#[derive(Clone, Debug)]
+pub struct Since {
+    pub epoch: String,
+    pub seq: u64,
 }
 
 /// A locked, loaded design state.
@@ -226,23 +259,46 @@ impl DesignHandle {
     }
 
     /// The current snapshot as a message, plus a receiver for everything after it.
+    /// Subscribes a new viewer: a snapshot, then a receiver for what follows.
     pub fn subscribe(&self) -> (Outgoing, u64, broadcast::Receiver<Outgoing>) {
-        // Subscribing under the lock means no change can slip between the snapshot and the stream.
+        self.subscribe_from(None)
+    }
+
+    /// Subscribes a viewer that may have been here before. If it was, in this
+    /// epoch, and every change since its `seq` is still kept, it gets a
+    /// `resume` with just those changes. Otherwise it gets a snapshot.
+    pub fn subscribe_from(
+        &self,
+        since: Option<&Since>,
+    ) -> (Outgoing, u64, broadcast::Receiver<Outgoing>) {
+        // Subscribing under the lock means no change can slip between the first message and the stream.
         let state = self.lock();
         let rx = self.events.subscribe();
-        let snapshot = state.design.snapshot();
+        let seq = state.design.seq();
         let presence = state.presence.values().collect();
-        let message = Outgoing::new(
-            None,
-            &DesignMessage::Snapshot {
-                snapshot: &snapshot,
+        if let Some(missed) = since.and_then(|since| state.missed_since(since)) {
+            let message = DesignMessage::Resume {
+                changes: missed,
+                comments: state.design.comments(),
                 presence,
-            },
-        );
-        (message, snapshot.seq, rx)
+                meta: &state.design.meta,
+            };
+            return (Outgoing::new(None, &message), seq, rx);
+        }
+        let snapshot = state.design.snapshot();
+        let message = DesignMessage::Snapshot {
+            snapshot: &snapshot,
+            presence,
+            epoch: &state.epoch,
+        };
+        (Outgoing::new(None, &message), seq, rx)
     }
 
     pub(super) fn publish(&self, state: &mut DesignState, actor: &Actor, change: &Change) {
+        state.recent.push_back((change.clone(), actor.name.clone()));
+        if state.recent.len() > RESUME_LIMIT {
+            state.recent.pop_front();
+        }
         let message = DesignMessage::Change {
             change,
             actor_name: &actor.name,

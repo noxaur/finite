@@ -21,9 +21,9 @@ use finite_design::{Design, DesignMeta, Snapshot};
 use tokio::sync::{broadcast, watch};
 
 use crate::{cluster::Cluster, store::Store};
-pub use design::{DesignHandle, Edited};
+pub use design::{DesignHandle, Edited, Since};
 use design::{DesignState, Save};
-pub use messages::{Actor, DesignMessage, DesignSummary, LobbyMessage, Outgoing, Presence};
+pub use messages::{Actor, DesignMessage, DesignSummary, LobbyMessage, Missed, Outgoing, Presence};
 
 /// How long an agent's "working on" indicator lasts without activity.
 const PRESENCE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -35,6 +35,8 @@ const SAVE_DEBOUNCE: Duration = Duration::from_millis(250);
 const COMPACT_AFTER: usize = 1000;
 /// How long an unused design stays in memory before it's unloaded.
 const UNLOAD_AFTER: Duration = Duration::from_secs(5 * 60);
+/// How many recent changes a design keeps for viewers that reconnect.
+const RESUME_LIMIT: usize = 256;
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -510,6 +512,77 @@ mod tests {
             sent(),
             [("change".into(), false), ("comment".into(), false)]
         );
+    }
+
+    /// A viewer that reconnects gets only what it missed, but a snapshot if
+    /// it comes from another epoch or missed more than the server kept.
+    #[tokio::test]
+    async fn reconnecting_viewers_resume_where_they_left_off() {
+        use finite_design::edit::{self, NewArtboard};
+
+        let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
+        let handle = hub.get(&hub.create("Test").meta.id).unwrap();
+        let agent = Actor {
+            id: "agent".into(),
+            name: "Agent".into(),
+        };
+        let change = |n: usize| {
+            handle
+                .edit(&agent, "Rename", |doc| {
+                    let ops = if n == 0 {
+                        let spec = NewArtboard {
+                            name: "Home".into(),
+                            width: 100.0,
+                            height: 100.0,
+                            position: None,
+                            styles: BTreeMap::new(),
+                        };
+                        edit::create_artboard(doc, "board".into(), spec)?
+                    } else {
+                        edit::rename(doc, "board", Some(&format!("Home {n}")))?
+                    };
+                    Ok((ops, ()))
+                })
+                .unwrap();
+        };
+        let first = |since: Option<&Since>| -> serde_json::Value {
+            let (message, _, _) = handle.subscribe_from(since);
+            serde_json::from_str(&message.json).unwrap()
+        };
+        let epoch = first(None)["epoch"].as_str().unwrap().to_owned();
+        for n in 0..3 {
+            change(n);
+        }
+        let since = |seq| Since {
+            epoch: epoch.clone(),
+            seq,
+        };
+
+        let resumed = first(Some(&since(1)));
+        assert_eq!(resumed["type"], "resume");
+        let seqs: Vec<_> = resumed["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["change"]["seq"].as_u64().unwrap())
+            .collect();
+        assert_eq!(seqs, [2, 3]);
+        assert_eq!(first(Some(&since(3)))["changes"], serde_json::json!([]));
+
+        // From another epoch, such as before a restart, or from the future.
+        let other = Since {
+            epoch: "other".into(),
+            seq: 1,
+        };
+        assert_eq!(first(Some(&other))["type"], "snapshot");
+        assert_eq!(first(Some(&since(9)))["type"], "snapshot");
+
+        // Once more changes than the server keeps have gone by.
+        for n in 3..RESUME_LIMIT + 4 {
+            change(n);
+        }
+        assert_eq!(first(Some(&since(1)))["type"], "snapshot");
+        assert_eq!(first(Some(&since(10)))["type"], "resume");
     }
 
     #[tokio::test]

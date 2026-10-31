@@ -1,5 +1,5 @@
 import { type Applied, Replica } from "./replica";
-import type { Comment, DesignMessage, DesignMeta, Presence } from "./schema";
+import type { Change, Comment, DesignMessage, DesignMeta, Presence } from "./schema";
 import { connectDesign, type SocketStatus } from "./socket";
 
 /** One line in the activity list: a recent change and who made it. */
@@ -58,6 +58,8 @@ export const initialSessionState: SessionState = {
 export class DesignSession {
   private current = initialSessionState;
   private readonly listeners = new Set<() => void>();
+  /** The server's name for the load our snapshot came from, so a reconnect can resume. */
+  private epoch: string | null = null;
 
   /** `view` must draw from `replica`, so pass the renderer the same replica. */
   constructor(
@@ -75,17 +77,28 @@ export class DesignSession {
     return () => this.listeners.delete(listener);
   }
 
-  /** Streams the design from the server. Returns a function that disconnects. */
+  /**
+   * Streams the design from the server. After a dropped connection it asks to
+   * resume from the last change it applied, so the server sends only what it
+   * missed instead of a snapshot that would rebuild every artboard.
+   * Returns a function that disconnects.
+   */
   connect(id: string): () => void {
-    return connectDesign(id, {
-      onStatus: (status) => this.update({ status }),
-      onMessage: (message) => this.receive(message),
-    });
+    return connectDesign(
+      id,
+      {
+        onStatus: (status) => this.update({ status }),
+        onMessage: (message) => this.receive(message),
+      },
+      () =>
+        this.epoch ? `?epoch=${encodeURIComponent(this.epoch)}&since=${this.replica.seq}` : "",
+    );
   }
 
   receive(message: DesignMessage) {
     switch (message.type) {
       case "snapshot":
+        this.epoch = message.epoch;
         this.replica.load(message.snapshot);
         this.view.reset();
         this.update({
@@ -95,21 +108,22 @@ export class DesignSession {
           ...this.synced(),
         });
         return;
-      case "change": {
-        const { change } = message;
-        if (change.seq <= this.replica.seq) return;
-        for (const op of change.ops) {
-          const applied = this.replica.apply(op);
-          if (applied) this.view.apply(applied);
-        }
-        this.replica.seq = change.seq;
-        const label =
-          change.origin === "edit"
-            ? change.label
-            : `${change.origin === "undo" ? "Undo" : "Redo"}: ${change.label}`;
-        const entry = { seq: change.seq, actor: message.actorName, label, at: this.now() };
+      case "resume": {
+        const missed = message.changes.flatMap((m) => this.applyChange(m.change, m.actorName));
         this.update({
-          activity: [entry, ...this.current.activity].slice(0, ACTIVITY_LIMIT),
+          meta: message.meta,
+          comments: new Map(message.comments.map((c) => [c.id, c])),
+          activity: [...missed.reverse(), ...this.current.activity].slice(0, ACTIVITY_LIMIT),
+          ...this.withPresence(message.presence),
+          ...this.synced(),
+        });
+        return;
+      }
+      case "change": {
+        const entry = this.applyChange(message.change, message.actorName);
+        if (entry.length === 0) return;
+        this.update({
+          activity: [...entry, ...this.current.activity].slice(0, ACTIVITY_LIMIT),
           // A change can move the nodes an agent is working on to another artboard.
           ...this.withPresence(this.current.presence),
           ...this.synced(),
@@ -137,6 +151,21 @@ export class DesignSession {
     const known = this.current.comments.get(comment.id);
     if (known && known.rev > comment.rev) return;
     this.update({ comments: new Map(this.current.comments).set(comment.id, comment) });
+  }
+
+  /** Applies a change we haven't seen, and returns its activity entry (none if we had). */
+  private applyChange(change: Change, actor: string): Activity[] {
+    if (change.seq <= this.replica.seq) return [];
+    for (const op of change.ops) {
+      const applied = this.replica.apply(op);
+      if (applied) this.view.apply(applied);
+    }
+    this.replica.seq = change.seq;
+    const label =
+      change.origin === "edit"
+        ? change.label
+        : `${change.origin === "undo" ? "Undo" : "Redo"}: ${change.label}`;
+    return [{ seq: change.seq, actor, label, at: this.now() }];
   }
 
   private synced() {

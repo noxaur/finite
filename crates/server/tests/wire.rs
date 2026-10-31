@@ -15,7 +15,7 @@ use finite_design::{
 };
 use finite_server::{
     Hub,
-    hub::{Actor, Outgoing},
+    hub::{Actor, Outgoing, Since},
     store::MemoryStore,
 };
 use serde_json::{Value, json};
@@ -154,8 +154,17 @@ async fn wire_messages_match_the_fixture() {
     handle.rename("Landing v2".into());
 
     let first = |o: Outgoing| serde_json::from_str::<Value>(&o.json).unwrap();
-    let mut design = vec![first(design_first)];
+    let design_first = first(design_first);
+    let epoch = design_first["epoch"].as_str().unwrap().to_owned();
+    // A viewer that saw the first four changes reconnects and gets the rest.
+    let since = Since {
+        epoch: epoch.clone(),
+        seq: 4,
+    };
+    let (resumed, _, _) = handle.subscribe_from(Some(&since));
+    let mut design = vec![design_first];
     design.extend(drain(&mut events));
+    design.push(first(resumed));
     let mut lobby_messages = vec![first(lobby_first)];
     lobby_messages.extend(drain(&mut lobby));
     let mut messages = json!({
@@ -167,6 +176,7 @@ async fn wire_messages_match_the_fixture() {
         (summary.meta.id.clone(), "design1"),
         (comment.id.clone(), "comment1"),
         (scratch_comment.id.clone(), "comment2"),
+        (epoch, "epoch1"),
     ];
     normalize(&mut messages, &ids);
 
@@ -176,7 +186,9 @@ async fn wire_messages_match_the_fixture() {
         .iter()
         .map(|m| m["type"].as_str().unwrap())
         .collect();
-    for kind in ["snapshot", "change", "presence", "comment", "meta"] {
+    for kind in [
+        "snapshot", "change", "presence", "comment", "meta", "resume",
+    ] {
         assert!(types.contains(&kind), "no {kind} message recorded");
     }
 

@@ -16,11 +16,11 @@ function socketUrl(path: string) {
 
 /**
  * Opens a WebSocket that decodes each message with `schema` and reconnects
- * with backoff. The server starts every connection with a full snapshot, so
- * a reconnect resyncs on its own. Returns a function that closes it for good.
+ * with backoff. `path` is called for each attempt, so a reconnect can say
+ * where it left off. Returns a function that closes it for good.
  */
 function connect<S extends Schema.Top>(
-  path: string,
+  path: () => string,
   schema: S,
   { onMessage, onStatus }: SocketHandlers<S["Type"]>,
 ): () => void {
@@ -32,7 +32,7 @@ function connect<S extends Schema.Top>(
 
   const open = () => {
     onStatus?.("connecting");
-    socket = new WebSocket(socketUrl(path));
+    socket = new WebSocket(socketUrl(path()));
     socket.onopen = () => {
       attempt = 0;
       onStatus?.("open");
@@ -59,8 +59,15 @@ function connect<S extends Schema.Top>(
   };
 }
 
-export const connectDesign = (id: string, handlers: SocketHandlers<DesignMessage>) =>
-  connect(`/api/designs/${encodeURIComponent(id)}/ws`, DesignMessage, handlers);
+/**
+ * Streams one design. The server starts each connection with a snapshot,
+ * unless `query` says where the last one left off (see `DesignSession`).
+ */
+export const connectDesign = (
+  id: string,
+  handlers: SocketHandlers<DesignMessage>,
+  query: () => string = () => "",
+) => connect(() => `/api/designs/${encodeURIComponent(id)}/ws${query()}`, DesignMessage, handlers);
 
 export const connectLobby = (handlers: SocketHandlers<LobbyMessage>) =>
-  connect("/api/designs/ws", LobbyMessage, handlers);
+  connect(() => "/api/designs/ws", LobbyMessage, handlers);
