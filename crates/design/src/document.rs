@@ -42,6 +42,12 @@ impl Op {
     }
 }
 
+/// How deep nodes can nest. An artboard is at depth 0, its children at 1,
+/// and so on. Exports, the outline and the browser's renderer walk the tree
+/// recursively, so a much deeper tree would overflow the stack and abort the
+/// server. (Chrome's HTML parser stops nesting at 512.)
+pub const MAX_DEPTH: usize = 256;
+
 /// The node tree of one design, stored flat by id, with an index from each
 /// parent to its children in sibling order.
 #[derive(Clone, Debug, Default)]
@@ -133,6 +139,32 @@ impl Document {
             node = self.nodes.get(parent)?;
         }
         Some(node)
+    }
+
+    /// How many ancestors `id` has: 0 for an artboard.
+    pub fn depth(&self, id: &str) -> usize {
+        let mut depth = 0;
+        let mut current = self.nodes.get(id).and_then(|n| n.parent.as_deref());
+        while let Some(p) = current {
+            depth += 1;
+            current = self.nodes.get(p).and_then(|n| n.parent.as_deref());
+        }
+        depth
+    }
+
+    /// How many levels the subtree at `id` spans below it: 0 for a leaf.
+    pub fn height(&self, id: &str) -> usize {
+        let mut height = 0;
+        let mut stack = vec![(id, 0)];
+        while let Some((id, level)) = stack.pop() {
+            height = height.max(level);
+            stack.extend(
+                self.children(Some(id))
+                    .iter()
+                    .map(|c| (c.id.as_str(), level + 1)),
+            );
+        }
+        height
     }
 
     pub fn is_ancestor(&self, ancestor: &str, id: &str) -> bool {

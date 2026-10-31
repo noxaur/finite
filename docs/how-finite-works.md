@@ -149,6 +149,10 @@ A script URL is refused anywhere in a value, not just at its start. SVG animatio
 - `update_styles` accepts `backgroundColor` or `background-color`. When you set a shorthand like `padding`, it also clears `padding-top` and friends. Styles are stored as a map, not as ordered CSS, so a leftover longhand would otherwise win.
 - `move_nodes` and `duplicate` pick free canvas space for anything that becomes a new artboard.
 
+Nodes can nest at most 256 levels deep (`MAX_DEPTH` in `document.rs`). An artboard is at depth 0, its children at 1, and so on. `write_html` and `move_nodes`, the only commands that can make a tree deeper, refuse anything that would pass the limit and say why. The limit exists because exports, the outline and the browser's renderer walk the tree recursively. Before it, `write_html` with 5,000 nested `<div>`s, about 50 KB, overflowed the stack and aborted the whole server, taking every design and viewer with it. Chrome's HTML parser has a similar limit and stops nesting at 512 levels.
+
+Deep HTML is also slow to parse. html5ever, the HTML parser behind `scraper`, takes time quadratic in the nesting depth: 10,000 levels took 0.13 seconds in a release build, and 100,000 took 10. An edit holds the design's lock while it parses, so `html::parse` first runs a one-pass scan that counts start tags minus end tags. If that count passes 4,096, sixteen times the limit, it refuses the HTML without parsing it. The count can be too high, for example when a `<p>` is left open and the parser closes it at the next `<p>`. It's never too low, and that margin keeps ordinary HTML from being refused by mistake. A test in `edit.rs` writes 1,000,000 levels on a thread with a Tokio worker's 2 MiB stack and gets the error in well under 2 seconds. It also checks that a tree at the limit still exports on that stack in a debug build.
+
 ## The server
 
 ### The hub

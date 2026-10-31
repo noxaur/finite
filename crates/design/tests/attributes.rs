@@ -60,7 +60,7 @@ fn attribute_rules_match_the_shared_fixture() {
 #[test]
 fn an_svg_animation_cant_smuggle_in_a_script_url() {
     let html = r#"<svg><a><animate attributeName="href" values="0;javascript:alert(1)"/><text>Go</text></a></svg>"#;
-    let fragments = html::parse(html);
+    let fragments = html::parse(html).unwrap();
     let animate = &fragments[0].children[0].children[0];
     assert!(
         animate.attrs.contains_key("attributeName"),

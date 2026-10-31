@@ -7,7 +7,7 @@ use std::{collections::BTreeMap, fmt};
 use serde_json::Value;
 
 use crate::{
-    document::{Document, Op},
+    document::{Document, MAX_DEPTH, Op},
     fractional,
     html::{self, Fragment},
     label,
@@ -152,7 +152,10 @@ pub fn write_html(
     index: Option<usize>,
     new_id: &mut impl FnMut() -> NodeId,
 ) -> Result<(Vec<Op>, Vec<NodeId>)> {
-    let fragments = html::parse(html_source);
+    let fragments = match html::parse(html_source) {
+        Ok(fragments) => fragments,
+        Err(too_deep) => return err(too_deep.to_string()),
+    };
     if fragments.is_empty() {
         return err("the HTML contained no elements or text (scripts and styles are dropped)");
     }
@@ -197,6 +200,14 @@ pub fn write_html(
             (parent, indexes)
         }
     };
+    let depth = doc.depth(&parent) + 1;
+    let height = fragments.iter().map(Fragment::height).max().unwrap_or(0);
+    if depth + height > MAX_DEPTH {
+        return err(format!(
+            "that would nest {} levels deep; the limit is {MAX_DEPTH}",
+            depth + height
+        ));
+    }
     let roots = fragments
         .into_iter()
         .zip(indexes)
@@ -468,6 +479,12 @@ pub fn move_nodes(
         if parent.is_none() && n.kind == NodeKind::Text {
             return err(format!("text node {id:?} can't become an artboard"));
         }
+        let depth = parent.map_or(0, |p| doc.depth(p) + 1) + doc.height(id);
+        if depth > MAX_DEPTH {
+            return err(format!(
+                "moving {id:?} there would nest {depth} levels deep; the limit is {MAX_DEPTH}"
+            ));
+        }
     }
     let ids = top_level(doc, ids);
     let indexes = doc.insertion_indexes(parent, index, ids.len());
@@ -565,6 +582,116 @@ mod tests {
         .unwrap();
         doc.apply_all(&ops);
         "board".into()
+    }
+
+    fn nested(levels: usize) -> String {
+        format!("{}x{}", "<div>".repeat(levels), "</div>".repeat(levels))
+    }
+
+    /// Runs `f` on a thread with a Tokio worker's 2 MiB stack.
+    fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
+    fn html_can_only_nest_so_deep() {
+        // 5,000 levels used to overflow the stack and abort the server.
+        // 1,000,000 levels would keep the parser busy for minutes, so the
+        // pre-scan refuses them at once.
+        for levels in [5_000, 1_000_000] {
+            let refused = on_small_stack(move || {
+                let mut doc = Document::default();
+                let board = board(&mut doc);
+                let started = std::time::Instant::now();
+                let refused = write_html(
+                    &doc,
+                    &board,
+                    &nested(levels),
+                    WriteMode::Append,
+                    None,
+                    &mut ids(),
+                )
+                .unwrap_err();
+                (refused, started.elapsed())
+            });
+            assert!(refused.0.0.contains("256 levels"), "{}", refused.0.0);
+            assert!(
+                refused.1 < std::time::Duration::from_secs(2),
+                "{levels}: {:?}",
+                refused.1
+            );
+        }
+
+        // The artboard is at depth 0, so its content can nest 256 levels:
+        // 255 divs and the text inside them.
+        let mut doc = Document::default();
+        let board = board(&mut doc);
+        let html = nested(MAX_DEPTH);
+        assert!(write_html(&doc, &board, &html, WriteMode::Append, None, &mut ids()).is_err());
+        let (ops, roots) = write_html(
+            &doc,
+            &board,
+            &nested(MAX_DEPTH - 1),
+            WriteMode::Append,
+            None,
+            &mut ids(),
+        )
+        .unwrap();
+        doc.apply_all(&ops);
+        let deepest = doc
+            .nodes()
+            .max_by_key(|n| doc.depth(&n.id))
+            .unwrap()
+            .id
+            .clone();
+        assert_eq!(doc.depth(&deepest), MAX_DEPTH);
+        assert_eq!(doc.height(&board), MAX_DEPTH);
+        // Nothing more fits under the deepest element.
+        let inner = doc.get(&deepest).unwrap().parent.clone().unwrap();
+        assert!(
+            write_html(
+                &doc,
+                &inner,
+                "<b>no</b>",
+                WriteMode::Append,
+                None,
+                &mut ids()
+            )
+            .is_err()
+        );
+
+        // Moving the whole stack one level down doesn't fit either.
+        let (ops, _) = write_html(
+            &doc,
+            &board,
+            "<section></section>",
+            WriteMode::Append,
+            None,
+            &mut ids(),
+        )
+        .unwrap();
+        doc.apply_all(&ops);
+        let section = doc.children(Some(&board)).last().unwrap().id.clone();
+        assert!(move_nodes(&doc, &roots, Some(&section), None).is_err());
+
+        // A tree at the limit exports, and copies, on a small stack, even
+        // in a debug build.
+        let exported = on_small_stack(move || {
+            let compact = html::export_compact(&doc, &board).unwrap();
+            let copy = Fragment::from_document(&doc, &board).unwrap();
+            (
+                compact,
+                copy.count(),
+                html::export(&doc, &board, true).unwrap(),
+            )
+        });
+        assert!(exported.0.contains("x"));
+        assert_eq!(exported.1, MAX_DEPTH + 1);
     }
 
     #[test]

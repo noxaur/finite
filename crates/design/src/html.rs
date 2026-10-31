@@ -9,7 +9,7 @@ use std::{collections::BTreeMap, fmt::Write};
 use scraper::{Html, node::Node as HtmlNode};
 
 use crate::{
-    document::{Document, Op},
+    document::{Document, MAX_DEPTH, Op},
     label,
     node::{Node, NodeId, NodeKind},
 };
@@ -59,23 +59,95 @@ pub const ID_ATTR: &str = "data-id";
 /// Inline `style` attributes become styles, `data-name` becomes the layer
 /// name, and anything that could run code is dropped. Whitespace-only text
 /// containing a newline is treated as source indentation and dropped.
-pub fn parse(html: &str) -> Vec<Fragment> {
+///
+/// Fails if elements nest more than [`MAX_DEPTH`] levels deep. Converting
+/// is recursive, so it stops there rather than overflow the stack.
+pub fn parse(html: &str) -> Result<Vec<Fragment>, TooDeep> {
+    // html5ever's tree builder takes time quadratic in the nesting depth:
+    // 100,000 levels took 10 seconds in a release build. So refuse HTML that
+    // can't possibly fit before handing it over.
+    if nesting_bound(html) > MAX_DEPTH * 16 {
+        return Err(TooDeep);
+    }
     let doc = Html::parse_fragment(html);
-    convert_children(doc.root_element().children())
+    convert_children(doc.root_element().children(), 0)
+}
+
+/// How deeply `html` could nest, at most, counted in one pass: start tags
+/// minus end tags, skipping void and self-closing ones. Tags the parser
+/// closes by itself, like a `<p>` before another `<p>`, count as open, so
+/// this can overestimate but never underestimates.
+fn nesting_bound(html: &str) -> usize {
+    let bytes = html.as_bytes();
+    let (mut depth, mut deepest, mut i) = (0usize, 0usize, 0);
+    while let Some(offset) = bytes[i..].iter().position(|&b| b == b'<') {
+        let start = i + offset + 1;
+        let end = bytes[start..]
+            .iter()
+            .position(|&b| b == b'>')
+            .map_or(bytes.len(), |e| start + e);
+        let tag = &bytes[start..end];
+        if !tag
+            .first()
+            .is_some_and(|b| *b == b'/' || b.is_ascii_alphabetic())
+        {
+            // Not a tag, like the `<` in `x < y`. Look again right after it.
+            i = start;
+            continue;
+        }
+        if tag.first() == Some(&b'/') {
+            depth = depth.saturating_sub(1);
+        } else if tag.last() != Some(&b'/') {
+            let name_len = tag
+                .iter()
+                .position(|b| !b.is_ascii_alphanumeric())
+                .unwrap_or(tag.len());
+            let name = std::str::from_utf8(&tag[..name_len]).unwrap_or("");
+            if !VOID_TAGS.iter().any(|v| v.eq_ignore_ascii_case(name)) {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+        }
+        i = end.min(bytes.len());
+    }
+    deepest
+}
+
+/// HTML that nests deeper than [`MAX_DEPTH`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TooDeep;
+
+impl std::fmt::Display for TooDeep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the HTML nests more than {MAX_DEPTH} levels deep")
+    }
 }
 
 fn convert_children<'a>(
     children: impl Iterator<Item = ego_tree::NodeRef<'a, HtmlNode>>,
-) -> Vec<Fragment> {
-    children.filter_map(convert).collect()
+    depth: usize,
+) -> Result<Vec<Fragment>, TooDeep> {
+    if depth > MAX_DEPTH {
+        return Err(TooDeep);
+    }
+    let mut out = Vec::new();
+    for child in children {
+        if let Some(fragment) = convert(child, depth)? {
+            out.push(fragment);
+        }
+    }
+    Ok(out)
 }
 
-fn convert(node: ego_tree::NodeRef<'_, HtmlNode>) -> Option<Fragment> {
-    match node.value() {
+fn convert(
+    node: ego_tree::NodeRef<'_, HtmlNode>,
+    depth: usize,
+) -> Result<Option<Fragment>, TooDeep> {
+    Ok(match node.value() {
         HtmlNode::Text(text) => {
             let text: &str = text;
             if text.trim().is_empty() && text.contains('\n') {
-                return None;
+                return Ok(None);
             }
             Some(Fragment {
                 text: Some(text.to_owned()),
@@ -85,7 +157,7 @@ fn convert(node: ego_tree::NodeRef<'_, HtmlNode>) -> Option<Fragment> {
         HtmlNode::Element(el) => {
             let tag = el.name();
             if BLOCKED_TAGS.contains(&tag.to_ascii_lowercase().as_str()) {
-                return None;
+                return Ok(None);
             }
             let mut fragment = Fragment::empty(NodeKind::Element {
                 tag: tag.to_owned(),
@@ -105,11 +177,11 @@ fn convert(node: ego_tree::NodeRef<'_, HtmlNode>) -> Option<Fragment> {
                     _ => {}
                 }
             }
-            fragment.children = convert_children(node.children());
+            fragment.children = convert_children(node.children(), depth + 1)?;
             Some(fragment)
         }
         _ => None,
-    }
+    })
 }
 
 /// Whether an attribute is allowed on a node: no event handlers, no
@@ -207,6 +279,15 @@ impl Fragment {
                 .filter_map(|c| Self::from_document(doc, &c.id))
                 .collect(),
         })
+    }
+
+    /// How many levels this subtree spans below its root: 0 for a leaf.
+    pub fn height(&self) -> usize {
+        self.children
+            .iter()
+            .map(|c| c.height() + 1)
+            .max()
+            .unwrap_or(0)
     }
 
     pub fn count(&self) -> usize {
@@ -398,6 +479,24 @@ fn escape(s: &str, attr: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse(html: &str) -> Vec<Fragment> {
+        super::parse(html).unwrap()
+    }
+
+    #[test]
+    fn the_nesting_bound_never_underestimates() {
+        let cases = [
+            ("<div><span>a</span><br><img src=x></div>", 2),
+            ("<svg><path d=\"M0 0\"/><g><rect/></g></svg>", 2),
+            // The parser closes each <p> at the next, but the bound counts them open.
+            ("<p>a<p>b<p>c", 3),
+            ("x < y and <b>bold</b>", 1),
+        ];
+        for (html, bound) in cases {
+            assert_eq!(nesting_bound(html), bound, "{html}");
+        }
+    }
 
     #[test]
     fn parses_styles_names_and_text() {
