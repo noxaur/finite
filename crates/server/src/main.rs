@@ -20,7 +20,14 @@ async fn main() -> std::io::Result<()> {
     // Designs are saved here as JSON files.
     let data_dir = std::env::var("FINITE_DATA_DIR").unwrap_or_else(|_| "data".into());
 
-    let hub = Hub::new(Arc::new(FileStore::new(&data_dir)?))?;
+    let store = match FileStore::new(&data_dir) {
+        Ok(store) => store,
+        Err(error) => {
+            eprintln!("finite-server: {error}");
+            std::process::exit(1);
+        }
+    };
+    let hub = Hub::new(Arc::new(store))?;
     tracing::info!(data_dir, designs = hub.list().len(), "loaded designs");
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));

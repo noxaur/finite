@@ -39,15 +39,38 @@ pub trait Store: Send + Sync + 'static {
 /// Snapshots go to a temporary file first and are renamed into place, so a
 /// crash never leaves a half-written snapshot. A crash mid-append can leave a
 /// torn last line; loading stops there, and the hub compacts on startup.
+///
+/// Only one server may use a data folder at a time. Two servers writing the
+/// same files would overwrite each other's edits, so the store holds an
+/// exclusive lock on `<dir>/lock` for as long as it's open.
 pub struct FileStore {
     dir: PathBuf,
+    /// Held for the store's lifetime; the OS releases it if the process dies.
+    _lock: fs::File,
 }
 
 impl FileStore {
+    /// Opens the store, or fails with `WouldBlock` if another server already uses `dir`.
     pub fn new(dir: impl AsRef<Path>) -> io::Result<Self> {
-        let dir = dir.as_ref().join("designs");
-        fs::create_dir_all(&dir)?;
-        Ok(Self { dir })
+        let root = dir.as_ref();
+        fs::create_dir_all(root.join("designs"))?;
+        let lock = fs::File::create(root.join("lock"))?;
+        if let Err(error) = lock.try_lock() {
+            return Err(match error {
+                fs::TryLockError::WouldBlock => io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!(
+                        "another Finite server is using {}; stop it or set FINITE_DATA_DIR",
+                        root.display()
+                    ),
+                ),
+                fs::TryLockError::Error(error) => error,
+            });
+        }
+        Ok(Self {
+            dir: root.join("designs"),
+            _lock: lock,
+        })
     }
 
     fn journal_path(&self, id: &str) -> PathBuf {
@@ -309,6 +332,17 @@ mod tests {
     fn file_store_meets_the_contract() {
         let dir = temp_dir();
         contract::check(&FileStore::new(&dir).unwrap());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_data_folder_has_one_server_at_a_time() {
+        let dir = temp_dir();
+        let first = FileStore::new(&dir).unwrap();
+        let second = FileStore::new(&dir).err().expect("the folder is locked");
+        assert_eq!(second.kind(), io::ErrorKind::WouldBlock);
+        drop(first);
+        FileStore::new(&dir).expect("the lock is released with the store");
         fs::remove_dir_all(dir).unwrap();
     }
 
