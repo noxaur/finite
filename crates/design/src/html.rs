@@ -111,7 +111,21 @@ fn convert(node: ego_tree::NodeRef<'_, HtmlNode>) -> Option<Fragment> {
     }
 }
 
-fn is_safe_attr(name: &str, value: &str) -> bool {
+/// Whether an attribute is allowed on a node: no event handlers, no
+/// `srcdoc`, no `javascript:` or `vbscript:` URLs. `write_html` drops the
+/// ones that fail, and `set_attributes` refuses them.
+/// Whether `name` can be written as an attribute name. Exports write names
+/// as they are, so anything else could break out of the tag. Allows SVG's
+/// `viewBox` and namespaced names like `xlink:href`.
+pub fn is_attr_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == ':')
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '.' | '-'))
+}
+
+pub fn is_safe_attr(name: &str, value: &str) -> bool {
     let name = name.to_ascii_lowercase();
     let value: String = value
         .chars()

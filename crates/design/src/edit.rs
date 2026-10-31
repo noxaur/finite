@@ -341,6 +341,17 @@ pub fn update_attributes(
                     "event handler attributes like {name:?} aren't supported; add a <script> that calls addEventListener"
                 ));
             }
+            if !html::is_attr_name(name) {
+                return err(format!("{name:?} isn't a valid attribute name"));
+            }
+            // The same rule write_html applies when it parses HTML.
+            if let Some(value) = value
+                && !html::is_safe_attr(name, value)
+            {
+                return err(format!(
+                    "{name}={value:?} isn't allowed: no srcdoc, and no javascript: or vbscript: URLs"
+                ));
+            }
             ops.push(Op::Set {
                 id: id.clone(),
                 key: PropKey::Attr(name.clone()),
@@ -713,5 +724,23 @@ mod tests {
         .unwrap();
         doc.apply_all(&ops);
         assert!(move_nodes(&doc, std::slice::from_ref(&board), Some(&roots[0]), None).is_err());
+    }
+
+    #[test]
+    fn set_attributes_follows_the_same_rules_as_write_html() {
+        let mut doc = Document::default();
+        let board = board(&mut doc);
+        let set = |name: &str, value: &str| {
+            let attrs = BTreeMap::from([(name.to_owned(), Some(value.to_owned()))]);
+            update_attributes(&doc, std::slice::from_ref(&board), &attrs)
+        };
+        assert!(set("href", "https://example.com").is_ok());
+        assert!(set("viewBox", "0 0 10 10").is_ok());
+        assert!(set("xlink:href", "#icon").is_ok());
+        assert!(set("href", " JavaScript:alert(1)").is_err());
+        assert!(set("srcdoc", "<p>hi</p>").is_err());
+        assert!(set("onclick", "x()").is_err());
+        assert!(set("x\" onload=\"alert(1)", "y").is_err());
+        assert!(set("", "y").is_err());
     }
 }

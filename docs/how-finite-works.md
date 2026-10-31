@@ -139,7 +139,7 @@ Agents don't send ops. They call tools with friendlier arguments, and `crates/de
 
 Some of the work these commands do:
 
-- `write_html` parses HTML with `html.rs`, drops anything unsafe (`on*` attributes, `javascript:` URLs, `<iframe>` and the like), and emits one `create` per node.
+- `write_html` parses HTML with `html.rs`, drops anything unsafe (`on*` attributes, `javascript:` URLs, `<iframe>` and the like), and emits one `create` per node. `set_attributes` refuses the same attributes using the same rule (`html::is_safe_attr`). It also refuses names that aren't valid attribute names, because exports write names as they are, and a name like `x" onload="…` would break out of its tag.
 - `update_styles` accepts `backgroundColor` or `background-color`. When you set a shorthand like `padding`, it also clears `padding-top` and friends. Styles are stored as a map, not as ordered CSS, so a leftover longhand would otherwise win.
 - `move_nodes` and `duplicate` pick free canvas space for anything that becomes a new artboard.
 
