@@ -1,0 +1,252 @@
+{
+  "about": "One of each WebSocket message, recorded from crates/server/tests/wire.rs. apps/web/src/design/wire.test.ts decodes them with the web app's schemas.",
+  "design": [
+    {
+      "presence": [],
+      "snapshot": {
+        "comments": [],
+        "meta": {
+          "createdAt": 0,
+          "id": "design1",
+          "name": "Landing",
+          "updatedAt": 0
+        },
+        "nodes": [],
+        "seq": 0
+      },
+      "type": "snapshot"
+    },
+    {
+      "actorName": "Claude",
+      "change": {
+        "actor": "agent:Claude",
+        "label": "Create artboard",
+        "ops": [
+          {
+            "node": {
+              "attrs": {},
+              "id": "board",
+              "index": "V",
+              "name": "Home",
+              "parent": null,
+              "styles": {
+                "background-color": "#ffffff",
+                "display": "flex",
+                "flex-direction": "column",
+                "height": "900px",
+                "overflow": "hidden",
+                "position": "relative",
+                "width": "1440px"
+              },
+              "tag": "div",
+              "text": null,
+              "type": "element",
+              "x": 0.0,
+              "y": 0.0
+            },
+            "op": "create"
+          }
+        ],
+        "origin": "edit",
+        "seq": 1
+      },
+      "type": "change"
+    },
+    {
+      "actorName": "Claude",
+      "change": {
+        "actor": "agent:Claude",
+        "label": "Write HTML",
+        "ops": [
+          {
+            "node": {
+              "attrs": {},
+              "id": "n1",
+              "index": "V",
+              "name": "CTA",
+              "parent": "board",
+              "styles": {
+                "padding": "12px"
+              },
+              "tag": "button",
+              "text": null,
+              "type": "element",
+              "x": null,
+              "y": null
+            },
+            "op": "create"
+          },
+          {
+            "node": {
+              "attrs": {},
+              "id": "n2",
+              "index": "V",
+              "name": null,
+              "parent": "n1",
+              "styles": {},
+              "text": "Start",
+              "type": "text",
+              "x": null,
+              "y": null
+            },
+            "op": "create"
+          }
+        ],
+        "origin": "edit",
+        "seq": 2
+      },
+      "type": "change"
+    },
+    {
+      "presence": [
+        {
+          "actor": "agent:Claude",
+          "name": "Claude",
+          "nodeIds": [
+            "n1"
+          ],
+          "status": "Styling the CTA",
+          "updatedAt": 0
+        }
+      ],
+      "type": "presence"
+    },
+    {
+      "comment": {
+        "artboardId": "board",
+        "createdAt": 0,
+        "id": "comment1",
+        "messages": [
+          {
+            "at": 0,
+            "author": {
+              "id": "user:1",
+              "kind": "user",
+              "name": "Guest"
+            },
+            "body": "Make it orange",
+            "seq": 2
+          }
+        ],
+        "nodeId": "n1",
+        "resolved": false,
+        "x": 24.0,
+        "y": 16.0
+      },
+      "type": "comment"
+    },
+    {
+      "actorName": "Claude",
+      "change": {
+        "actor": "agent:Claude",
+        "label": "Update styles",
+        "ops": [
+          {
+            "id": "n1",
+            "key": "style:background",
+            "op": "set",
+            "value": "orange"
+          }
+        ],
+        "origin": "edit",
+        "seq": 3
+      },
+      "type": "change"
+    },
+    {
+      "actorName": "Claude",
+      "change": {
+        "actor": "agent:Claude",
+        "label": "Update styles",
+        "ops": [
+          {
+            "id": "n1",
+            "key": "style:background",
+            "op": "set",
+            "value": null
+          }
+        ],
+        "origin": "undo",
+        "seq": 4
+      },
+      "type": "change"
+    },
+    {
+      "comment": {
+        "artboardId": "board",
+        "createdAt": 0,
+        "id": "comment1",
+        "messages": [
+          {
+            "at": 0,
+            "author": {
+              "id": "user:1",
+              "kind": "user",
+              "name": "Guest"
+            },
+            "body": "Make it orange",
+            "seq": 2
+          },
+          {
+            "at": 0,
+            "author": {
+              "id": "agent:Claude",
+              "kind": "agent",
+              "name": "Claude"
+            },
+            "body": "Tried orange, then undid it",
+            "changes": [
+              {
+                "label": "Update styles",
+                "nodeIds": [
+                  "n1"
+                ],
+                "seq": 3
+              },
+              {
+                "label": "Update styles",
+                "nodeIds": [
+                  "n1"
+                ],
+                "seq": 4
+              }
+            ],
+            "seq": 4
+          }
+        ],
+        "nodeId": "n1",
+        "resolved": true,
+        "x": 24.0,
+        "y": 16.0
+      },
+      "type": "comment"
+    },
+    {
+      "meta": {
+        "createdAt": 0,
+        "id": "design1",
+        "name": "Landing v2",
+        "updatedAt": 0
+      },
+      "type": "meta"
+    }
+  ],
+  "lobby": [
+    {
+      "designs": [],
+      "type": "designs"
+    },
+    {
+      "design": {
+        "artboardCount": 0,
+        "createdAt": 0,
+        "id": "design1",
+        "name": "Landing",
+        "nodeCount": 0,
+        "seq": 0,
+        "updatedAt": 0
+      },
+      "type": "design"
+    }
+  ]
+}

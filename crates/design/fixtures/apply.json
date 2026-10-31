@@ -84,7 +84,12 @@
         }
       ],
       "expect": {
-        "applied": [true, true, true, true],
+        "applied": [
+          true,
+          true,
+          true,
+          true
+        ],
         "nodes": [
           {
             "id": "a",
@@ -288,7 +293,12 @@
         }
       ],
       "expect": {
-        "applied": [false, false, false, true],
+        "applied": [
+          false,
+          false,
+          false,
+          true
+        ],
         "nodes": [
           {
             "id": "a",
@@ -457,7 +467,12 @@
         }
       ],
       "expect": {
-        "applied": [true, false, false, true],
+        "applied": [
+          true,
+          false,
+          false,
+          true
+        ],
         "nodes": [
           {
             "id": "z",
@@ -606,7 +621,18 @@
         }
       ],
       "expect": {
-        "applied": [true, false, true, true, true, true, true, true, false, false],
+        "applied": [
+          true,
+          false,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          false,
+          false
+        ],
         "nodes": [
           {
             "id": "a",
@@ -778,7 +804,13 @@
         }
       ],
       "expect": {
-        "applied": [false, false, false, false, false],
+        "applied": [
+          false,
+          false,
+          false,
+          false,
+          false
+        ],
         "nodes": [
           {
             "id": "a",
@@ -942,7 +974,12 @@
         }
       ],
       "expect": {
-        "applied": [true, true, true, true],
+        "applied": [
+          true,
+          true,
+          true,
+          true
+        ],
         "nodes": [
           {
             "id": "a",
@@ -1130,7 +1167,16 @@
         }
       ],
       "expect": {
-        "applied": [false, false, false, false, false, false, false, false],
+        "applied": [
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false,
+          false
+        ],
         "nodes": [
           {
             "id": "a",

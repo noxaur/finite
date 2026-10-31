@@ -114,6 +114,8 @@ The expected results come from the Rust rules. To change a rule, you change `doc
 FINITE_UPDATE_FIXTURES=1 cargo test -p finite-design --test conformance
 ```
 
+The formatter skips `crates/*/fixtures`, so a regenerated file only changes where the results did.
+
 Then `vp test` tells you whether `Replica` agrees. On its first run, it caught three ways it didn't: the browser cleared `x` when an op set it to the string `"10"` (Rust rejects it), and it accepted invalid indexes like `"V0"` and moves to where a node already was.
 
 ## Edit commands: from a tool call to ops
@@ -164,6 +166,8 @@ Read tools (`get_tree_summary`, `get_node_info`, `get_html`, `get_screenshot`) l
 | `GET /api/designs/ws`                                    | WebSocket: the design list, then updates            |
 | `GET /api/designs/{id}/ws`                               | WebSocket: one design's snapshot, then every change |
 | `POST …/comments`, `…/replies`, `PATCH …/comments/{cid}` | Comment, reply, resolve                             |
+
+The messages on these sockets are Rust types on the server and Effect schemas in `apps/web/src/design/schema.ts`. A second golden file keeps those in step. `crates/server/tests/wire.rs` drives a real hub through an edit, an undo, presence, a comment, an agent reply and a rename, and records every message it broadcasts in `crates/server/fixtures/messages.json`. Then `apps/web/src/design/wire.test.ts` decodes each one with the web schemas. If you rename a field on the Rust side, `cargo test` fails until you regenerate the file, and then `vp test` fails until you update the schema.
 
 When a browser opens a design's socket, the server takes the lock first. Under that lock, it subscribes the socket to the broadcast channel and builds a snapshot. That way no change can land between the snapshot and the stream. If a slow browser falls more than 1024 messages behind, it gets a fresh snapshot instead of the missed changes.
 
