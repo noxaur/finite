@@ -39,7 +39,7 @@ use crate::{
 mod format;
 mod params;
 
-use format::{comments_json, node_json, outline};
+use format::{OUTPUT_LIMIT, comments_json, cut, node_json, outline};
 use params::*;
 
 /// What agents see when they connect: the workflow, the HTML rules, comments and undo.
@@ -333,7 +333,10 @@ impl FiniteMcp {
             }
         });
         match text {
-            Ok(text) => ok(text),
+            Ok(text) => ok(cut(
+                text,
+                "Pass the nodeId of one part, or a smaller depth, to see the rest.",
+            )),
             Err(error) => fail(error),
         }
     }
@@ -388,7 +391,23 @@ impl FiniteMcp {
     )]
     async fn get_html(&self, Parameters(p): Parameters<NodeParams>) -> ToolResult {
         let handle = design!(self, &p.design_id);
-        match handle.read(|d| html::export(d.doc(), &p.node_id, true)) {
+        let html = handle.read(|d| {
+            let html = html::export(d.doc(), &p.node_id, true)?;
+            if html.len() <= OUTPUT_LIMIT {
+                return Some(html);
+            }
+            // Cut HTML would be broken HTML, so show the outline instead.
+            Some(cut(
+                format!(
+                    "This node's HTML is {} characters, more than the {OUTPUT_LIMIT} a call returns. \
+                     Call get_html on one of its children instead:\n{}",
+                    html.len(),
+                    outline(d.doc(), &p.node_id, 1)
+                ),
+                "Use get_children to list them all.",
+            ))
+        });
+        match html {
             Some(html) => ok(html),
             None => fail(format!("node {:?} not found", p.node_id)),
         }
@@ -497,7 +516,7 @@ impl FiniteMcp {
                     for root in &roots {
                         text.push_str(&outline(d.doc(), root, 3));
                     }
-                    text
+                    cut(text, "Call get_tree_summary on a root to see it.")
                 })
             },
         )

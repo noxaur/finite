@@ -4,6 +4,30 @@ use std::fmt::Write;
 
 use finite_design::{Design, Document, NodeKind, comment::Comment};
 
+/// The most text one tool result returns, about 15,000 tokens. Claude Code
+/// cuts MCP results at 25,000 tokens by default, wherever that falls, and a
+/// long result crowds out the rest of the agent's context anyway.
+pub(super) const OUTPUT_LIMIT: usize = 60_000;
+
+/// Cuts `text` to [`OUTPUT_LIMIT`] at the end of a line, and says how to see
+/// the rest with `hint`.
+pub(super) fn cut(text: String, hint: &str) -> String {
+    if text.len() <= OUTPUT_LIMIT {
+        return text;
+    }
+    let mut end = OUTPUT_LIMIT;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let end = text[..end].rfind('\n').map_or(end, |i| i + 1);
+    let shown = text[..end].lines().count();
+    let total = text.lines().count();
+    format!(
+        "{}… cut off after {shown} of {total} lines. {hint}\n",
+        &text[..end]
+    )
+}
+
 /// One line per node, indented by depth: `tag "Name" #id [width×height] "text"`.
 pub(super) fn outline(doc: &Document, id: &str, max_depth: usize) -> String {
     let mut out = String::new();

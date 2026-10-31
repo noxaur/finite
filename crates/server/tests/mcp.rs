@@ -111,6 +111,12 @@ impl Agent {
     }
 }
 
+/// The last few lines of a tool's text output, for failure messages.
+fn tail(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(3)..].join("\n")
+}
+
 /// The first `#id` after `needle` in a tool's text output.
 fn id_after(text: &str, needle: &str) -> String {
     let rest = &text[text
@@ -400,5 +406,71 @@ async fn list_designs_filters_and_limits() {
     assert!(
         first.contains("Showing the 1 most recently edited of 3"),
         "{first}"
+    );
+}
+
+/// A big artboard's outline and HTML don't flood the agent's context: long
+/// results are cut, and say how to see the rest.
+#[tokio::test]
+async fn long_results_are_cut_with_directions() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Alice").await;
+    let created = agent
+        .ok("create_design", json!({ "name": "Catalog" }))
+        .await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .unwrap()
+        .to_owned();
+    let board = agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Grid", "width": 1440, "height": 900 }),
+        )
+        .await;
+    let board = id_after(&board, "Created artboard");
+    let card = r#"<div data-name="Card" style="padding: 8px"><p>A product with a long description</p></div>"#;
+    let wrote = agent
+        .ok(
+            "write_html",
+            json!({ "designId": design, "targetId": board, "html": card.repeat(3_000) }),
+        )
+        .await;
+    let limit = 60_000 + 200;
+    assert!(wrote.len() < limit, "write_html said {} chars", wrote.len());
+    assert!(wrote.contains("cut off after"), "{}", tail(&wrote));
+
+    let tree = agent
+        .ok("get_tree_summary", json!({ "designId": design }))
+        .await;
+    assert!(tree.len() < limit, "the outline is {} chars", tree.len());
+    assert!(
+        tree.contains("of 6001 lines. Pass the nodeId of one part"),
+        "{}",
+        tail(&tree)
+    );
+
+    let html = agent
+        .ok("get_html", json!({ "designId": design, "nodeId": board }))
+        .await;
+    assert!(html.len() < limit, "get_html said {} chars", html.len());
+    assert!(
+        html.contains("Call get_html on one of its children"),
+        "{}",
+        tail(&html)
+    );
+
+    // A small part still comes back whole.
+    let first_card = id_after(&tree, "\"Card\"");
+    let small = agent
+        .ok(
+            "get_html",
+            json!({ "designId": design, "nodeId": first_card }),
+        )
+        .await;
+    assert!(
+        small.starts_with("<div") && !small.contains("cut off"),
+        "{small}"
     );
 }
