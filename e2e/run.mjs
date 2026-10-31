@@ -310,6 +310,30 @@ try {
     back?.x === before.x && back?.y === before.y,
   );
 
+  // A comment that can't be sent says so, and keeps its text.
+  await page.send("Network.enable");
+  await page.send("Network.setBlockedURLs", { urls: ["*/comments"] });
+  await page.key("Escape", "Escape", 27);
+  await page.key("c", "KeyC", 67);
+  const board = await rectOf(`document.querySelector('[data-artboard="${page1}"]')`);
+  await page.click(board.x + 20, board.y + board.h - 20);
+  const draftBox = await rectOf(`document.querySelector("textarea")`);
+  await page.click(draftBox.x + 10, draftBox.y + 10);
+  await page.type("Offline note");
+  await page.key("Enter", "Enter", 13);
+  check(
+    "a comment that fails to send says so",
+    Boolean(
+      await page.until(`document.querySelector('[role="alert"]')?.textContent.includes("Couldn")`),
+    ),
+  );
+  check(
+    "and keeps its text",
+    (await page.eval(`document.querySelector("textarea").value`)) === "Offline note",
+  );
+  await page.send("Network.setBlockedURLs", { urls: [] });
+  await page.key("Escape", "Escape", 27);
+
   check("no errors on the page", page.errors.length === 0, page.errors.join(" | "));
 } catch (error) {
   check("the run finished", false, error.stack ?? String(error));

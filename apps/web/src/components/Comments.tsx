@@ -330,6 +330,7 @@ function Composer({
 }) {
   const [body, setBody] = useState("");
   const [sending, setSending] = useState(false);
+  const [failed, setFailed] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     if (autoFocus) ref.current?.focus();
@@ -338,45 +339,55 @@ function Composer({
   const submit = async () => {
     if (!body.trim() || sending) return;
     setSending(true);
-    if (await onSubmit(body)) setBody("");
+    const sent = await onSubmit(body);
+    // Keep the text after a failure, so it can be sent again.
+    if (sent) setBody("");
+    setFailed(!sent);
     setSending(false);
   };
 
   return (
-    <form
-      {...stylex.props(styles.composer)}
-      onSubmit={(e) => {
-        e.preventDefault();
-        void submit();
-      }}
-    >
-      <textarea
-        ref={ref}
-        value={body}
-        rows={2}
-        maxLength={COMMENT_LIMIT}
-        placeholder={placeholder}
-        onChange={(e) => setBody(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            void submit();
-          } else if (e.key === "Escape") {
-            e.preventDefault();
-            onCancel();
-          }
+    <>
+      <form
+        {...stylex.props(styles.composer)}
+        onSubmit={(e) => {
+          e.preventDefault();
+          void submit();
         }}
-        {...stylex.props(styles.input)}
-      />
-      <button
-        type="submit"
-        disabled={!body.trim() || sending}
-        aria-label="Send"
-        {...stylex.props(styles.send)}
       >
-        ↑
-      </button>
-    </form>
+        <textarea
+          ref={ref}
+          value={body}
+          rows={2}
+          maxLength={COMMENT_LIMIT}
+          placeholder={placeholder}
+          onChange={(e) => setBody(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              void submit();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              onCancel();
+            }
+          }}
+          {...stylex.props(styles.input)}
+        />
+        <button
+          type="submit"
+          disabled={!body.trim() || sending}
+          aria-label="Send"
+          {...stylex.props(styles.send)}
+        >
+          ↑
+        </button>
+      </form>
+      {failed && (
+        <p role="alert" {...stylex.props(styles.failed)}>
+          Couldn’t send. Check the connection and try again.
+        </p>
+      )}
+    </>
   );
 }
 
@@ -565,6 +576,7 @@ const styles = stylex.create({
     animationIterationCount: "infinite",
   },
   composer: { display: "flex", alignItems: "flex-end", gap: space.xs, margin: 0 },
+  failed: { margin: 0, marginTop: space.xs, fontSize: 12, color: colors.danger },
   input: {
     flexGrow: 1,
     minHeight: 36,

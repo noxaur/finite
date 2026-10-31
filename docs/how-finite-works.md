@@ -292,6 +292,8 @@ Here's what happened in the demo you saw:
 
 A thread opens up and to the right of its pin. Near the window's right edge it opens to the left, and near the top bar it hangs below the pin instead (`Popover` in `components/Comments.tsx`).
 
+If a comment or reply can't be sent, say the connection dropped, the box keeps the text and shows "Couldn't send" under it, so you can try again. The end-to-end test blocks the comments endpoint to check this.
+
 An agent doesn't have to check for comments on a timer. `wait_for_comments` is a **long poll**: the tool call stays open until a comment is waiting for an agent, then returns it. A comment is waiting when it's open and a person wrote the last message (`Comment::awaits_agent`). Each design has a `Notify`, a Tokio primitive that wakes every task waiting on it, and every comment update fires it. On the demo server, a waiting agent woke 30 ms after a comment was posted. The call gives up after `timeoutSeconds` (60 by default, 300 at most), so an agent can call it in a loop.
 
 If an agent deletes an artboard that has comments, the pins don't vanish. Before the change applies, `Design` notes where the artboard is. Afterwards, every comment on it gets a `detachedAt` canvas position, and viewers pin it there. If an undo brings the artboard back, `detachedAt` is cleared and the pin follows the artboard again. `get_comments` marks such comments with `artboardDeleted`.
