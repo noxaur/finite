@@ -46,6 +46,13 @@ use params::*;
 /// The `_meta` key on a tool error that names the server owning the design,
 /// so the router's relay can send the call there instead (see `relay.rs`).
 /// The call didn't run, so sending it again is safe.
+/// The note after a `list_designs` result that was cut short.
+pub(crate) fn more_designs(shown: usize, total: usize) -> String {
+    format!(
+        "Showing the {shown} most recently edited of {total} designs. Pass a query to find one by name, or a larger limit."
+    )
+}
+
 pub const OWNER_META: &str = "finite/owner";
 
 pub(crate) const INSTRUCTIONS: &str = include_str!("instructions.md");
@@ -215,14 +222,20 @@ macro_rules! design {
 #[tool_router]
 impl FiniteMcp {
     #[tool(
-        description = "List every design (canvas) with its id, name, artboard count and last edit time.",
+        description = "List designs (canvases), most recently edited first, with each one's id, name, artboard count and last edit time. Returns 50 unless you pass a limit; pass a query to find one by name.",
         annotations(read_only_hint = true)
     )]
-    async fn list_designs(&self) -> ToolResult {
-        let designs: Vec<_> = self
+    async fn list_designs(&self, Parameters(p): Parameters<ListParams>) -> ToolResult {
+        let matching: Vec<_> = self
             .hub
             .list()
             .into_iter()
+            .filter(|d| p.matches(&d.meta.name))
+            .collect();
+        let limit = p.limit();
+        let designs: Vec<_> = matching
+            .iter()
+            .take(limit)
             .map(|d| {
                 serde_json::json!({
                     "designId": d.meta.id,
@@ -233,7 +246,13 @@ impl FiniteMcp {
                 })
             })
             .collect();
-        json(designs.into())
+        let mut content = vec![ContentBlock::text(
+            serde_json::to_string_pretty(&designs).expect("json values serialize"),
+        )];
+        if matching.len() > limit {
+            content.push(ContentBlock::text(more_designs(limit, matching.len())));
+        }
+        Ok(CallToolResult::success(content))
     }
 
     #[tool(description = "Create a new, empty design (canvas). Returns its designId.")]

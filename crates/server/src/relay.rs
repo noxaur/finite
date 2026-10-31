@@ -215,7 +215,9 @@ impl Relay {
     }
 
     /// Calls `list_designs` on every server at once and merges the JSON
-    /// arrays, newest first. Servers that don't answer are named after the list.
+    /// arrays, newest first. Each server applies the `query` and `limit`, so
+    /// the merged list is cut to the limit again. Servers that don't answer
+    /// are named after the list.
     async fn list_designs(
         &self,
         params: CallToolRequestParams,
@@ -226,24 +228,41 @@ impl Relay {
             .nodes()
             .iter()
             .map(|base| self.call(base, params.clone(), ctx));
+        let limit = params
+            .arguments
+            .as_ref()
+            .and_then(|args| args.get("limit"))
+            .and_then(Value::as_u64)
+            .map_or(50, |n| n.clamp(1, 500) as usize);
         let mut designs: Vec<Value> = Vec::new();
         let mut missing = Vec::new();
+        // Whether a server left some out, so the merged list is partial too.
+        let mut cut = false;
         for (base, result) in self.cluster.nodes().iter().zip(join_all(calls).await) {
             let Ok(result) = result else {
                 missing.push(base.as_str());
                 continue;
             };
             for block in &result.content {
-                if let Some(text) = block.as_text()
-                    && let Ok(Value::Array(list)) = serde_json::from_str(&text.text)
-                {
-                    designs.extend(list);
+                let Some(text) = block.as_text() else {
+                    continue;
+                };
+                match serde_json::from_str(&text.text) {
+                    Ok(Value::Array(list)) => designs.extend(list),
+                    _ => cut = true,
                 }
             }
         }
         designs.sort_by_key(|d| std::cmp::Reverse(d["updatedAt"].as_u64().unwrap_or(0)));
+        cut |= designs.len() > limit;
+        designs.truncate(limit);
         let text = serde_json::to_string_pretty(&designs).expect("json values serialize");
         let mut content = vec![ContentBlock::text(text)];
+        if cut {
+            content.push(ContentBlock::text(format!(
+                "Showing the {limit} most recently edited designs; there are more. Pass a query to find one by name, or a larger limit."
+            )));
+        }
         if !missing.is_empty() {
             content.push(ContentBlock::text(format!(
                 "These Finite servers didn't answer, so their designs are missing: {}",

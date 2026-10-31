@@ -368,3 +368,27 @@ async fn long_agent_names_are_cut() {
         .unwrap();
     assert_eq!(name.chars().count(), finite_design::comment::MAX_NAME);
 }
+
+/// An agent can find a design by name, and a long list is cut short.
+#[tokio::test]
+async fn list_designs_filters_and_limits() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Alice").await;
+    for name in ["Alpha", "Beta", "Alphabet"] {
+        agent.ok("create_design", json!({ "name": name })).await;
+    }
+    // The JSON list, before any note about designs left out.
+    let count = |text: &str| {
+        let list = text.split("\nShowing").next().unwrap();
+        serde_json::from_str::<Vec<Value>>(list).unwrap().len()
+    };
+    let found = agent.ok("list_designs", json!({ "query": "alpha" })).await;
+    assert_eq!(count(&found), 2, "{found}");
+    assert!(!found.contains("Showing"), "{found}");
+    let first = agent.ok("list_designs", json!({ "limit": 1 })).await;
+    assert_eq!(count(&first), 1, "{first}");
+    assert!(
+        first.contains("Showing the 1 most recently edited of 3"),
+        "{first}"
+    );
+}

@@ -4,7 +4,7 @@ Every tool except list_designs and create_design takes a designId. You can work 
 
 Workflow:
 
-1. Pick a design: list_designs, or create_design for a new one.
+1. Pick a design: list_designs (the 50 most recently edited; pass a query to find one by name), or create_design for a new one.
 2. Orient: get_basic_info (it counts open comments), then get_tree_summary.
 3. New screen: find_placement, then create_artboard (typical sizes: desktop 1440x900, tablet 768x1024, mobile 390x844).
 4. Call start_working_on_nodes with the artboard id so users see what you're doing.

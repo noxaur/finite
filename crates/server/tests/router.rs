@@ -337,6 +337,11 @@ mod relay {
         for id in &ids {
             assert!(listed.contains(id.as_str()), "{listed}");
         }
+        // The merged list is cut to the limit too, and says so.
+        let one = call(&client, "list_designs", json!({ "limit": 1 })).await;
+        let shown = ids.iter().filter(|id| one.contains(id.as_str())).count();
+        assert_eq!(shown, 1, "{one}");
+        assert!(one.contains("Showing the 1 most recently edited"), "{one}");
         client.cancel().await.unwrap();
     }
 

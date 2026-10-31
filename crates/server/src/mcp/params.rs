@@ -13,6 +13,34 @@ pub struct DesignParams {
     pub(super) design_id: String,
 }
 
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct ListParams {
+    /// Only designs whose name contains this, ignoring case.
+    #[serde(default)]
+    pub(super) query: Option<String>,
+    /// How many designs to return, most recently edited first. Defaults to
+    /// 50; at most 500.
+    #[serde(default)]
+    pub(super) limit: Option<usize>,
+}
+
+impl ListParams {
+    pub(super) const DEFAULT_LIMIT: usize = 50;
+    pub(super) const MAX_LIMIT: usize = 500;
+
+    pub(super) fn limit(&self) -> usize {
+        self.limit
+            .unwrap_or(Self::DEFAULT_LIMIT)
+            .clamp(1, Self::MAX_LIMIT)
+    }
+
+    pub(super) fn matches(&self, name: &str) -> bool {
+        self.query
+            .as_deref()
+            .is_none_or(|q| name.to_lowercase().contains(&q.to_lowercase()))
+    }
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct CreateDesignParams {
     /// A short name, like "Checkout flow".
