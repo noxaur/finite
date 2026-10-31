@@ -16,6 +16,17 @@ use crate::hub::random_id;
 const FALLBACK_HEIGHT: f64 = 900.0;
 const MAX_SIDE: f64 = 8000.0;
 
+/// How many browsers may render at once. Each capture starts its own Chrome,
+/// so without a limit, many agents checking their work together would start
+/// that many browsers. Further captures wait their turn.
+fn browsers() -> &'static tokio::sync::Semaphore {
+    static BROWSERS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    BROWSERS.get_or_init(|| {
+        let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
+        tokio::sync::Semaphore::new((cores / 2).clamp(1, 4))
+    })
+}
+
 fn chrome() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("FINITE_CHROME") {
         return Some(path.into());
@@ -53,6 +64,10 @@ pub async fn capture(page: &str, width: f64, height: f64, scale: f64) -> Result<
     let chrome = chrome().ok_or(
         "no Chrome, Chromium or Edge found for screenshots; set FINITE_CHROME to a browser binary",
     )?;
+    let _turn = browsers()
+        .acquire()
+        .await
+        .map_err(|_| "screenshots are shutting down")?;
     let dir = std::env::temp_dir().join(format!("finite-shot-{}", random_id(10)));
     tokio::fs::create_dir_all(&dir)
         .await
