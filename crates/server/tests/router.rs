@@ -181,6 +181,36 @@ async fn the_router_follows_a_misdirected_answer_to_the_owner() {
     assert_eq!(first["type"], "snapshot");
 }
 
+/// With one server down, the design list still shows the others' designs,
+/// over plain HTTP and over its socket.
+#[tokio::test]
+async fn the_design_list_survives_a_server_being_down() {
+    let (a, a_url) = listen().await;
+    // Port 9 (discard) refuses connections on a normal machine.
+    let nodes = vec![a_url, "http://127.0.0.1:9".to_owned()];
+    let hub = Hub::with_cluster(
+        Arc::new(MemoryStore::default()),
+        Cluster::new(nodes.clone(), 0).unwrap(),
+    )
+    .unwrap();
+    let id = hub.create("Still here").meta.id;
+    tokio::spawn(async move { axum::serve(a, app(hub, None)).await });
+    let (front, front_url) = listen().await;
+    let routes = router::app(nodes, None);
+    tokio::spawn(async move { axum::serve(front, routes).await });
+
+    let listed: Vec<Value> = reqwest::get(format!("{front_url}/api/designs"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    let first = first_text(&format!("{front_url}/api/designs/ws")).await;
+    assert_eq!(first["type"], "designs");
+    assert_eq!(first["designs"][0]["id"], id.as_str());
+}
+
 mod relay {
     use super::*;
     use rmcp::{

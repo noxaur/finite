@@ -283,28 +283,40 @@ async fn design_socket(
     })
 }
 
+/// How long a design list socket that's missing a server stays open before
+/// it closes, so the browser reconnects and tries that server again.
+const LOBBY_RETRY: std::time::Duration = std::time::Duration::from_secs(15);
+
+type Upstream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
 /// The design list's WebSocket across every server: one merged `designs`
-/// message, then each server's `design` updates as they come. If any server
+/// message, then each server's `design` updates as they come. If a server
 /// drops, the socket closes, and the browser reconnects and starts over.
+///
+/// A server that's down is left out, as in [`list`], rather than failing the
+/// whole list. Then the socket closes after `LOBBY_RETRY`, so the browser
+/// reconnects and the router tries that server again.
 async fn lobby(State(front): State<Arc<Front>>, upgrade: WebSocketUpgrade) -> Response {
+    let connects = front.cluster.nodes().iter().map(|base| async move {
+        let url = Front::ws_url(base, "/api/designs/ws");
+        (base, tokio_tungstenite::connect_async(url).await)
+    });
     let mut upstreams = Vec::new();
-    for base in front.cluster.nodes() {
-        match tokio_tungstenite::connect_async(Front::ws_url(base, "/api/designs/ws")).await {
+    for (base, connected) in futures::future::join_all(connects).await {
+        match connected {
             Ok((upstream, _)) => upstreams.push(upstream),
-            Err(error) => return bad_gateway(format!("{base}: {error}")),
+            Err(error) => tracing::warn!(base, %error, "a server didn't answer the design list"),
         }
     }
-    upgrade.on_upgrade(move |client| relay_lobby(client, upstreams))
+    if upstreams.is_empty() {
+        return bad_gateway("no Finite server answered");
+    }
+    let complete = upstreams.len() == front.cluster.len();
+    upgrade.on_upgrade(move |client| relay_lobby(client, upstreams, complete))
 }
 
-async fn relay_lobby(
-    mut client: WebSocket,
-    upstreams: Vec<
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-    >,
-) {
+async fn relay_lobby(mut client: WebSocket, upstreams: Vec<Upstream>, mut complete: bool) {
     let text = |m: Option<Result<tungstenite::Message, tungstenite::Error>>| match m {
         Some(Ok(tungstenite::Message::Text(text))) => {
             serde_json::from_str::<Value>(text.as_str()).ok()
@@ -316,7 +328,8 @@ async fn relay_lobby(
     let mut designs = Vec::new();
     for mut upstream in upstreams {
         let Some(first) = text(upstream.next().await) else {
-            return;
+            complete = false;
+            continue;
         };
         designs.extend(first["designs"].as_array().cloned().unwrap_or_default());
         streams.push(upstream);
@@ -326,6 +339,13 @@ async fn relay_lobby(
     if client.send(ws::Message::text(first)).await.is_err() {
         return;
     }
+    let retry = async {
+        if complete {
+            std::future::pending::<()>().await;
+        }
+        tokio::time::sleep(LOBBY_RETRY).await;
+    };
+    tokio::pin!(retry);
     loop {
         tokio::select! {
             message = streams.next() => {
@@ -338,6 +358,10 @@ async fn relay_lobby(
                 Some(Ok(ws::Message::Close(_))) | None | Some(Err(_)) => return,
                 Some(Ok(_)) => {}
             },
+            () = &mut retry => {
+                let _ = client.send(ws::Message::Close(None)).await;
+                return;
+            }
         }
     }
 }
