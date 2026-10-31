@@ -8,6 +8,10 @@ const isDev = process.argv.includes("--dev");
 const DEV_URL = "http://localhost:5310";
 
 let server: ChildProcess | undefined;
+/** The running server's origin. Started once: on macOS the app outlives its windows. */
+let origin: Promise<string> | undefined;
+/** How long quitting waits for the server to save and exit. */
+const SHUTDOWN_MS = 5_000;
 
 /** Locates the Rust binary and built frontend: app resources when packaged, the repo otherwise. */
 function resources() {
@@ -57,7 +61,16 @@ async function waitFor(url: string, timeoutMs = 15_000): Promise<void> {
   throw new Error(`Timed out waiting for ${url}`);
 }
 
-/** Starts the Rust server as a sidecar. It serves both `/api` and the frontend on one origin. */
+/**
+ * Starts the Rust server as a sidecar. It serves both `/api` and the frontend
+ * on one origin. A second server would find the data folder locked and exit,
+ * so a new window reuses the first one.
+ */
+function serverOrigin(): Promise<string> {
+  origin ??= startServer();
+  return origin;
+}
+
 async function startServer(): Promise<string> {
   const { serverBin, staticDir } = resources();
   const port = await freePort();
@@ -74,9 +87,9 @@ async function startServer(): Promise<string> {
     server = undefined;
     if (code !== 0 && code !== null) app.quit();
   });
-  const origin = `http://127.0.0.1:${port}`;
-  await waitFor(`${origin}/api/health`);
-  return origin;
+  const url = `http://127.0.0.1:${port}`;
+  await waitFor(`${url}/api/health`);
+  return url;
 }
 
 async function createWindow() {
@@ -104,7 +117,7 @@ async function createWindow() {
     await win.loadURL(DEV_URL);
     win.webContents.openDevTools({ mode: "detach" });
   } else {
-    await win.loadURL(await startServer());
+    await win.loadURL(await serverOrigin());
   }
 }
 
@@ -125,6 +138,16 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
-app.on("before-quit", () => {
-  server?.kill();
+// The server saves pending edits when it gets SIGTERM, so let it finish
+// before the app exits.
+app.on("before-quit", (event) => {
+  const running = server;
+  if (!running) return;
+  event.preventDefault();
+  const force = setTimeout(() => running.kill("SIGKILL"), SHUTDOWN_MS);
+  running.once("exit", () => {
+    clearTimeout(force);
+    app.quit();
+  });
+  running.kill("SIGTERM");
 });
