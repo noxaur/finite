@@ -93,14 +93,15 @@ impl From<CommentError> for ApiError {
 }
 
 /// Opens a design this server owns.
-fn open(hub: &Hub, id: &str) -> Result<Arc<DesignHandle>, ApiError> {
+async fn open(hub: &Hub, id: &str) -> Result<Arc<DesignHandle>, ApiError> {
     if let Some(owner) = hub.elsewhere(id) {
         return Err(ApiError::Misdirected {
             id: id.into(),
             owner: owner.into(),
         });
     }
-    hub.get(id)
+    hub.open(id)
+        .await
         .ok_or_else(|| ApiError::NotFound(format!("design {id:?} not found")))
 }
 
@@ -108,7 +109,7 @@ async fn get_design(
     State(hub): State<Arc<Hub>>,
     Path(id): Path<String>,
 ) -> Result<Json<Snapshot>, ApiError> {
-    Ok(Json(open(&hub, &id)?.read(Design::snapshot)))
+    Ok(Json(open(&hub, &id).await?.read(Design::snapshot)))
 }
 
 /// Takes over a design another server is handing off, after the list of
@@ -219,7 +220,10 @@ async fn create_comment(
         x: body.x,
         y: body.y,
     };
-    let comment = open(&hub, &id)?.add_comment(body.author.into_author(), anchor, &body.body)?;
+    let comment =
+        open(&hub, &id)
+            .await?
+            .add_comment(body.author.into_author(), anchor, &body.body)?;
     Ok((StatusCode::CREATED, Json(comment)))
 }
 
@@ -228,7 +232,10 @@ async fn reply_to_comment(
     Path((id, comment)): Path<(String, String)>,
     Json(body): Json<Reply>,
 ) -> CommentResult {
-    let comment = open(&hub, &id)?.reply(&comment, body.author.into_author(), &body.body, None)?;
+    let comment =
+        open(&hub, &id)
+            .await?
+            .reply(&comment, body.author.into_author(), &body.body, None)?;
     Ok((StatusCode::CREATED, Json(comment)))
 }
 
@@ -237,7 +244,9 @@ async fn update_comment(
     Path((id, comment)): Path<(String, String)>,
     Json(body): Json<UpdateComment>,
 ) -> CommentResult {
-    let comment = open(&hub, &id)?.set_resolved(&comment, body.resolved)?;
+    let comment = open(&hub, &id)
+        .await?
+        .set_resolved(&comment, body.resolved)?;
     Ok((StatusCode::OK, Json(comment)))
 }
 
@@ -265,7 +274,7 @@ async fn design_socket(
     Path(id): Path<String>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let handle = match open(&hub, &id) {
+    let handle = match open(&hub, &id).await {
         Ok(handle) => handle,
         Err(error) => return error.into_response(),
     };

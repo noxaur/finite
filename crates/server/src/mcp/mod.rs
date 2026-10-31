@@ -153,13 +153,13 @@ impl FiniteMcp {
         }
     }
 
-    fn design(&self, id: &str) -> Result<Arc<DesignHandle>, CallToolResult> {
+    async fn design(&self, id: &str) -> Result<Arc<DesignHandle>, CallToolResult> {
         if let Some(owner) = self.hub.elsewhere(id) {
             return Err(CallToolResult::error(vec![ContentBlock::text(format!(
                 "design {id:?} lives on another Finite server. Connect to {owner}/mcp to work on it."
             ))]));
         }
-        self.hub.get(id).ok_or_else(|| {
+        self.hub.open(id).await.ok_or_else(|| {
             CallToolResult::error(vec![ContentBlock::text(format!(
                 "design {id:?} not found. Call list_designs to see the available ids."
             ))])
@@ -167,7 +167,7 @@ impl FiniteMcp {
     }
 
     /// Runs an edit as one undo step and reports the outcome.
-    fn edit<T>(
+    async fn edit<T>(
         &self,
         ctx: &RequestContext<RoleServer>,
         design_id: &str,
@@ -175,7 +175,7 @@ impl FiniteMcp {
         build: impl FnOnce(&Document) -> Result<(Vec<Op>, T), EditError>,
         report: impl FnOnce(&DesignHandle, T, Option<&Change>) -> String,
     ) -> ToolResult {
-        let handle = match self.design(design_id) {
+        let handle = match self.design(design_id).await {
             Ok(handle) => handle,
             Err(result) => return Ok(result),
         };
@@ -188,7 +188,7 @@ impl FiniteMcp {
 
 macro_rules! design {
     ($self:ident, $id:expr) => {
-        match $self.design($id) {
+        match $self.design($id).await {
             Ok(handle) => handle,
             Err(result) => return Ok(result),
         }
@@ -422,6 +422,7 @@ impl FiniteMcp {
                 )
             },
         )
+        .await
     }
 
     #[tool(
@@ -452,6 +453,7 @@ impl FiniteMcp {
                 })
             },
         )
+        .await
     }
 
     #[tool(
@@ -475,6 +477,7 @@ impl FiniteMcp {
             },
             |_, (), change| describe(change).into(),
         )
+        .await
     }
 
     #[tool(
@@ -502,6 +505,7 @@ impl FiniteMcp {
             },
             |_, (), change| describe(change).into(),
         )
+        .await
     }
 
     #[tool(
@@ -531,6 +535,7 @@ impl FiniteMcp {
             },
             |_, (), change| describe(change).into(),
         )
+        .await
     }
 
     #[tool(description = "Rename layers (the names shown in the layer tree).")]
@@ -552,6 +557,7 @@ impl FiniteMcp {
             },
             |_, (), change| describe(change).into(),
         )
+        .await
     }
 
     #[tool(
@@ -574,6 +580,7 @@ impl FiniteMcp {
             },
             |_, (), change| describe(change).into(),
         )
+        .await
     }
 
     #[tool(description = "Move artboards to new canvas positions.")]
@@ -595,6 +602,7 @@ impl FiniteMcp {
             },
             |_, (), change| describe(change).into(),
         )
+        .await
     }
 
     #[tool(
@@ -621,6 +629,7 @@ impl FiniteMcp {
                 )
             },
         )
+        .await
     }
 
     #[tool(
@@ -639,6 +648,7 @@ impl FiniteMcp {
             |doc| Ok((edit::delete(doc, &p.node_ids)?, ())),
             |_, (), change| describe(change).into(),
         )
+        .await
     }
 
     #[tool(

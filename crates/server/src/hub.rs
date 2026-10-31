@@ -668,8 +668,32 @@ impl Hub {
         self.designs.read().unwrap().values().cloned().collect()
     }
 
-    /// Opens a design, loading it from the store if it isn't in memory.
-    /// `None` if there's no such design or it can't be read.
+    /// Opens a design from async code. A design that isn't in memory is read
+    /// on Tokio's blocking pool, so a large design never stalls the requests
+    /// sharing this worker thread. `None` if there's no such design or it
+    /// can't be read.
+    pub async fn open(&self, id: &str) -> Option<Arc<DesignHandle>> {
+        let handle = self.designs.read().unwrap().get(id).cloned()?;
+        // Holding a reference keeps the design from unloading from here on.
+        let result = if handle.is_loaded() {
+            handle.load()
+        } else {
+            let loading = handle.clone();
+            tokio::task::spawn_blocking(move || loading.load())
+                .await
+                .unwrap_or_else(|e| Err(io::Error::other(e)))
+        };
+        match result {
+            Ok(()) => Some(handle),
+            Err(error) => {
+                tracing::error!(id, %error, "failed to load design");
+                None
+            }
+        }
+    }
+
+    /// Like [`Hub::open`], but reads a cold design on the calling thread.
+    /// For tests and code that isn't async.
     pub fn get(&self, id: &str) -> Option<Arc<DesignHandle>> {
         let handle = self.designs.read().unwrap().get(id).cloned()?;
         match handle.load() {
@@ -1034,7 +1058,8 @@ mod tests {
         assert_eq!(hub.list()[0].artboard_count, 1);
         assert_eq!(hub.loaded(), 0);
 
-        let after = hub.get(&id).unwrap().read(Design::snapshot);
+        // Reopening reads it back on the blocking pool.
+        let after = hub.open(&id).await.unwrap().read(Design::snapshot);
         assert_eq!(hub.loaded(), 1);
         assert_eq!((after.seq, after.nodes), (before.seq, before.nodes));
     }

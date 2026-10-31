@@ -153,11 +153,11 @@ Because steps 2 and 3 happen under one lock, no other edit can sneak in between 
 
 A multiplayer server usually treats each document as a **room**: it's loaded into memory when someone joins, and unloaded when everyone has left. Finite's hub works the same way, so memory grows with the designs in use, not with every design ever made.
 
-- **Loading:** `Hub::get` is the only way in. If the design's state isn't in memory, it reads the snapshot and journal from the store and replays them.
+- **Loading:** `Hub::open` is the way in for requests. If the design's state isn't in memory, it reads the snapshot and journal and replays them. That read runs on Tokio's **blocking pool**, a separate set of threads for slow work like disk reads, so opening a large design never stalls other requests. `Hub::get` does the same on the calling thread, for tests and code that isn't async.
 - **Unloading:** every 30 seconds, the hub's sweep looks for designs to drop. A design unloads only when all of these hold: nothing is waiting to be saved, nobody is watching it, no agent has presence or undo history in it, and it hasn't been opened for five minutes.
 - **What stays:** the handle itself stays, with its channels and a cached `DesignSummary`. That's what the design list shows, so listing designs never loads one.
 
-Unloading can't race with loading. The sweep holds the hub's write lock, which blocks `Hub::get`, and only unloads a handle when the hub holds the only reference to it. Anything using a design got it from `Hub::get`, so it holds a reference, and the design stays loaded until it's done. The save task holds only a weak reference, so it never keeps a design in memory.
+Unloading can't race with loading. The sweep holds the hub's write lock, which blocks `Hub::get`, and only unloads a handle when the hub holds the only reference to it. Anything using a design got it from `Hub::open` or `Hub::get`, so it holds a reference, and the design stays loaded until it's done. The save task holds only a weak reference, so it never keeps a design in memory.
 
 On startup, the hub reads designs one at a time to build the list, then drops each one. So startup never holds every design in memory either.
 
