@@ -379,6 +379,37 @@ try {
     (await page.eval(`document.querySelector("textarea").value`)) === "Offline note",
   );
   await page.send("Network.setBlockedURLs", { urls: [] });
+
+  // A comment the server refuses says why. Fill the design to its 500 open comments.
+  let filled = 0;
+  for (; filled < 600; filled++) {
+    const res = await fetch(`${base}/api/designs/${design}/comments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        author: { id: "e2e", name: "Tester" },
+        body: `Filler ${filled}`,
+        artboardId: null,
+        nodeId: null,
+        x: -2000 - filled,
+        y: -2000,
+      }),
+    });
+    if (res.status === 422) break;
+  }
+  check("a design stops taking comments at 500 open ones", filled < 600, `${filled} posted`);
+  // Clicking the box again left focus on the page here, so focus it directly.
+  await page.eval(`document.querySelector("textarea").focus()`);
+  await page.key("Enter", "Enter", 13);
+  check(
+    "a comment the server refuses says why",
+    Boolean(
+      await page.until(
+        `document.querySelector('[role="alert"]')?.textContent.includes("500 open comments")`,
+      ),
+    ),
+    await page.eval(`document.querySelector('[role="alert"]')?.textContent`),
+  );
   await page.key("Escape", "Escape", 27);
 
   // On the design list, a design that can't be created says so.

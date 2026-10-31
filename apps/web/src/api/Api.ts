@@ -28,6 +28,16 @@ export class ApiError extends Schema.TaggedError<ApiError>()("ApiError", {
 }) {}
 
 /**
+ * The server understood a request and refused it, with a reason a person can
+ * read, like "this design has 500 open comments, the most it can have;
+ * resolve some first". It answers such requests with `422` and the reason
+ * as plain text.
+ */
+export class Refused extends Schema.TaggedError<Refused>()("Refused", {
+  reason: Schema.String,
+}) {}
+
+/**
  * Typed client for the Rust server. Every route lives under `/api` on the
  * page's origin. Live updates come over WebSockets (see `@/design/socket`).
  */
@@ -39,17 +49,20 @@ export class Api extends Context.Service<
     searchDesigns(query: string): Effect.Effect<ReadonlyArray<DesignSummary>, ApiError>;
     createDesign(name: string): Effect.Effect<DesignSummary, ApiError>;
     getDesign(id: string): Effect.Effect<Snapshot, ApiError>;
-    createComment(designId: string, comment: NewComment): Effect.Effect<Comment, ApiError>;
+    createComment(
+      designId: string,
+      comment: NewComment,
+    ): Effect.Effect<Comment, ApiError | Refused>;
     replyToComment(
       designId: string,
       commentId: string,
       reply: { readonly author: CommentAuthor; readonly body: string },
-    ): Effect.Effect<Comment, ApiError>;
+    ): Effect.Effect<Comment, ApiError | Refused>;
     setCommentResolved(
       designId: string,
       commentId: string,
       resolved: boolean,
-    ): Effect.Effect<Comment, ApiError>;
+    ): Effect.Effect<Comment, ApiError | Refused>;
   }
 >()("finite/Api") {
   static readonly layer = Layer.effect(
@@ -99,10 +112,21 @@ export class Api extends Context.Service<
           .pipe(Effect.flatMap(HttpClientResponse.schemaBodyJson(Snapshot)), toApiError);
       });
 
+      // A `422` says why the server refused, so that reaches the person as `Refused`.
       const sendComment = (request: HttpClientRequest.HttpClientRequest, body: unknown) =>
-        client
-          .execute(request.pipe(HttpClientRequest.bodyJsonUnsafe(body)))
-          .pipe(Effect.flatMap(HttpClientResponse.schemaBodyJson(Comment)), toApiError);
+        client.execute(request.pipe(HttpClientRequest.bodyJsonUnsafe(body))).pipe(
+          Effect.flatMap(HttpClientResponse.schemaBodyJson(Comment)),
+          Effect.catchTag("HttpClientError", (error) =>
+            error.reason._tag === "StatusCodeError" && error.reason.response.status === 422
+              ? error.reason.response.text.pipe(
+                  Effect.flatMap((reason) => Effect.fail(new Refused({ reason }))),
+                )
+              : Effect.fail(error),
+          ),
+          Effect.mapError((error) =>
+            error instanceof Refused ? error : new ApiError({ cause: error }),
+          ),
+        );
 
       const comments = (designId: string) => `/designs/${encodeURIComponent(designId)}/comments`;
 

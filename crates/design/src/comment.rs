@@ -25,6 +25,12 @@ pub const MAX_BODY: usize = 4000;
 pub const MAX_NAME: usize = 48;
 /// The longest id a browser can pick for a person, in characters.
 pub const MAX_USER_ID: usize = 64;
+/// How many open comments a design can have. Anyone who can see a design can
+/// comment on it, and every comment is saved, sent to every viewer and
+/// loaded with the design, so there has to be a limit.
+pub const MAX_OPEN: usize = 500;
+/// How many messages one comment's thread can hold.
+pub const MAX_MESSAGES: usize = 200;
 /// How many recent changes [`ChangeLog`] remembers.
 const LOG_LIMIT: usize = 512;
 /// How many nodes a [`ChangeRef`] lists.
@@ -135,6 +141,8 @@ pub enum CommentError {
     Empty,
     TooLong,
     BadPosition,
+    TooManyOpen,
+    ThreadFull,
 }
 
 impl fmt::Display for CommentError {
@@ -148,6 +156,14 @@ impl fmt::Display for CommentError {
             Self::Empty => f.write_str("a comment can't be empty"),
             Self::TooLong => write!(f, "a comment can be at most {MAX_BODY} characters"),
             Self::BadPosition => f.write_str("x and y must be finite numbers"),
+            Self::TooManyOpen => write!(
+                f,
+                "this design has {MAX_OPEN} open comments, the most it can have; resolve some first"
+            ),
+            Self::ThreadFull => write!(
+                f,
+                "this thread has {MAX_MESSAGES} messages, the most it can have; start a new comment"
+            ),
         }
     }
 }

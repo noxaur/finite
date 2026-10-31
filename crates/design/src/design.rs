@@ -376,6 +376,7 @@ impl Design {
     ) -> Result<&Comment, CommentError> {
         let body = comment::check_body(body)?;
         comment::check_anchor(&self.doc, &anchor)?;
+        self.check_room_to_open()?;
         let id = loop {
             let id = new_id();
             if !self.comments.iter().any(|c| c.id == id) {
@@ -415,7 +416,15 @@ impl Design {
         now: u64,
     ) -> Result<&Comment, CommentError> {
         let body = comment::check_body(body)?;
+        let room_to_open = self.check_room_to_open();
         let comment = find(&mut self.comments, id)?;
+        if comment.messages.len() >= comment::MAX_MESSAGES {
+            return Err(CommentError::ThreadFull);
+        }
+        let resolved = resolve.unwrap_or(comment.resolved && author.kind == AuthorKind::Agent);
+        if comment.resolved && !resolved {
+            room_to_open?;
+        }
         let changes = match author.kind {
             AuthorKind::Agent => self.log.since(
                 &author.id,
@@ -424,7 +433,7 @@ impl Design {
             ),
             AuthorKind::User => Vec::new(),
         };
-        comment.resolved = resolve.unwrap_or(comment.resolved && author.kind == AuthorKind::Agent);
+        comment.resolved = resolved;
         comment.messages.push(Message {
             author,
             body,
@@ -437,10 +446,25 @@ impl Design {
     }
 
     pub fn set_resolved(&mut self, id: &str, resolved: bool) -> Result<&Comment, CommentError> {
+        let room_to_open = self.check_room_to_open();
         let comment = find(&mut self.comments, id)?;
+        if comment.resolved && !resolved {
+            room_to_open?;
+        }
         comment.resolved = resolved;
         comment.rev += 1;
         Ok(comment)
+    }
+}
+
+impl Design {
+    /// Refuses another open comment, new or reopened, past [`comment::MAX_OPEN`].
+    fn check_room_to_open(&self) -> Result<(), CommentError> {
+        let open = self.comments.iter().filter(|c| !c.resolved).count();
+        if open >= comment::MAX_OPEN {
+            return Err(CommentError::TooManyOpen);
+        }
+        Ok(())
     }
 }
 
@@ -705,6 +729,54 @@ mod tests {
         let replied = d.reply(&id, agent, "Tried and reverted", None, 4).unwrap();
         let seqs: Vec<_> = replied.messages[1].changes.iter().map(|c| c.seq).collect();
         assert_eq!(seqs, [2, 3]);
+    }
+
+    #[test]
+    fn comments_and_threads_have_limits() {
+        let mut d = design();
+        d.commit("agent", "board", &[create("a", None)], 1);
+        let ids: Vec<String> = (0..comment::MAX_OPEN).map(|_| pin(&mut d, "a")).collect();
+        let anchor = Anchor {
+            artboard_id: Some("a".into()),
+            node_id: None,
+            x: 0.0,
+            y: 0.0,
+        };
+        let user = author("user:1", AuthorKind::User);
+        let more = d.add_comment(
+            user.clone(),
+            anchor.clone(),
+            "One more",
+            &mut || "z".into(),
+            0,
+        );
+        assert_eq!(more.unwrap_err(), CommentError::TooManyOpen);
+
+        // Resolving one makes room, and reopening it is refused once that room is taken.
+        d.set_resolved(&ids[0], true).unwrap();
+        d.add_comment(user.clone(), anchor, "One more", &mut || "z".into(), 0)
+            .unwrap();
+        assert_eq!(
+            d.set_resolved(&ids[0], false).unwrap_err(),
+            CommentError::TooManyOpen
+        );
+        // A person's reply would reopen it too.
+        assert_eq!(
+            d.reply(&ids[0], user.clone(), "Not done", None, 0)
+                .unwrap_err(),
+            CommentError::TooManyOpen
+        );
+
+        // A thread holds at most MAX_MESSAGES.
+        let thread = &ids[1];
+        for _ in 1..comment::MAX_MESSAGES {
+            d.reply(thread, user.clone(), "And another thing", None, 0)
+                .unwrap();
+        }
+        assert_eq!(
+            d.reply(thread, user, "Too many", None, 0).unwrap_err(),
+            CommentError::ThreadFull
+        );
     }
 
     #[test]

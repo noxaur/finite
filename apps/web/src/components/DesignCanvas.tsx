@@ -1,10 +1,10 @@
 "use client";
 
 import * as stylex from "@stylexjs/stylex";
-import { Exit } from "effect";
+import { Cause, Exit } from "effect";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { Api } from "@/api/Api";
+import { Api, Refused } from "@/api/Api";
 import { Camera, union } from "@/design/camera";
 import { type Hit, Renderer } from "@/design/renderer";
 import { Replica } from "@/design/replica";
@@ -30,6 +30,16 @@ const isTyping = (target: EventTarget | null) =>
  * keyboard shortcuts. Users can't edit the design, but in comment mode they
  * pin comments that agents pick up over MCP.
  */
+
+/** Why a comment didn't go through: the server's reason, or a connection problem. */
+function unsent(cause: Cause.Cause<unknown>): string {
+  const error = Cause.squash(cause);
+  if (error instanceof Refused) {
+    const reason = error.reason.trim();
+    return `${reason.charAt(0).toUpperCase()}${reason.slice(1)}.`;
+  }
+  return "Couldn’t send. Check the connection and try again.";
+}
 export function DesignCanvas({ id }: { id: string }) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const worldRef = useRef<HTMLDivElement>(null);
@@ -213,23 +223,23 @@ export function DesignCanvas({ id }: { id: string }) {
   };
 
   const postComment = async (body: string) => {
-    if (!draft) return false;
+    if (!draft) return undefined;
     const exit = await runtime.runPromiseExit(
       Api.use((api) => api.createComment(id, { author: localUser(), body, ...draft })),
     );
-    if (Exit.isFailure(exit)) return false;
+    if (Exit.isFailure(exit)) return unsent(exit.cause);
     sessionRef.current?.upsertComment(exit.value);
     setDraft(null);
-    return true;
+    return undefined;
   };
 
   const reply = async (commentId: string, body: string) => {
     const exit = await runtime.runPromiseExit(
       Api.use((api) => api.replyToComment(id, commentId, { author: localUser(), body })),
     );
-    if (Exit.isFailure(exit)) return false;
+    if (Exit.isFailure(exit)) return unsent(exit.cause);
     sessionRef.current?.upsertComment(exit.value);
-    return true;
+    return undefined;
   };
 
   const resolve = (commentId: string, resolved: boolean) => {

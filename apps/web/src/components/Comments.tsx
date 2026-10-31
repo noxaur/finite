@@ -79,9 +79,10 @@ interface LayerProps {
   /** Agent labels by artboard id, for the artboards agents are working on. */
   readonly working: ReadonlyMap<string, string>;
   readonly onOpen: (id: string | null) => void;
-  readonly onPost: (body: string) => Promise<boolean>;
+  /** Resolves to nothing once sent, or to why it wasn't, to show. */
+  readonly onPost: (body: string) => Promise<string | undefined>;
   readonly onCancelDraft: () => void;
-  readonly onReply: (id: string, body: string) => Promise<boolean>;
+  readonly onReply: (id: string, body: string) => Promise<string | undefined>;
   readonly onResolve: (id: string, resolved: boolean) => void;
   /** Outlines the nodes a linked change touched. */
   readonly onShowChange: (nodeIds: ReadonlyArray<string>) => void;
@@ -254,7 +255,7 @@ function Thread({
   comment: Comment;
   working: string | undefined;
   onClose: () => void;
-  onReply: (body: string) => Promise<boolean>;
+  onReply: (body: string) => Promise<string | undefined>;
   onResolve: (resolved: boolean) => void;
   onShowChange: (nodeIds: ReadonlyArray<string>) => void;
 }) {
@@ -325,12 +326,12 @@ function Composer({
 }: {
   placeholder: string;
   autoFocus?: boolean;
-  onSubmit: (body: string) => Promise<boolean>;
+  onSubmit: (body: string) => Promise<string | undefined>;
   onCancel: () => void;
 }) {
   const [body, setBody] = useState("");
   const [sending, setSending] = useState(false);
-  const [failed, setFailed] = useState(false);
+  const [failed, setFailed] = useState<string>();
   const ref = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     if (autoFocus) ref.current?.focus();
@@ -339,10 +340,10 @@ function Composer({
   const submit = async () => {
     if (!body.trim() || sending) return;
     setSending(true);
-    const sent = await onSubmit(body);
+    const failure = await onSubmit(body);
     // Keep the text after a failure, so it can be sent again.
-    if (sent) setBody("");
-    setFailed(!sent);
+    if (failure === undefined) setBody("");
+    setFailed(failure);
     setSending(false);
   };
 
@@ -384,7 +385,7 @@ function Composer({
       </form>
       {failed && (
         <p role="alert" {...stylex.props(styles.failed)}>
-          Couldn’t send. Check the connection and try again.
+          {failed}
         </p>
       )}
     </>
