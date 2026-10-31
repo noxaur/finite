@@ -18,7 +18,7 @@ mod history;
 pub mod html;
 mod node;
 
-pub use design::{ActorId, Change, Design, DesignMeta, Origin, Snapshot};
+pub use design::{ActorId, Change, Design, DesignMeta, Origin, Record, Snapshot};
 pub use document::{Document, Op};
 pub use history::{Entry, History};
 pub use node::{Node, NodeId, NodeKind, PropError, PropKey};

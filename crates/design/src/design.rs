@@ -55,6 +55,29 @@ pub struct Change {
     pub ops: Vec<Op>,
 }
 
+/// One entry in a design's journal: something that happened after its last
+/// saved snapshot. Replaying a snapshot's journal with [`Design::replay`]
+/// rebuilds the design, so the server can append small records instead of
+/// rewriting the whole snapshot after every edit.
+///
+/// Replaying is idempotent: changes at or below the design's `seq` are
+/// skipped, and comments and meta replace what's there. So a journal that
+/// overlaps its snapshot (after a crash mid-compaction) replays safely.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum Record {
+    Change {
+        change: Change,
+    },
+    /// The whole comment, as it is after an update.
+    Comment {
+        comment: Comment,
+    },
+    Meta {
+        meta: DesignMeta,
+    },
+}
+
 /// A design (one canvas): its document, change counter, per-actor histories,
 /// and comment threads.
 ///
@@ -197,6 +220,26 @@ impl Design {
         };
         self.log.record(&change, &self.doc, before);
         change
+    }
+
+    /// Applies a journal record. Changes go straight to the document; they
+    /// aren't added to anyone's undo history.
+    pub fn replay(&mut self, record: Record) {
+        match record {
+            Record::Change { change } => {
+                if change.seq > self.seq {
+                    self.doc.apply_all(&change.ops);
+                    self.seq = change.seq;
+                }
+            }
+            Record::Comment { comment } => {
+                match self.comments.iter_mut().find(|c| c.id == comment.id) {
+                    Some(existing) => *existing = comment,
+                    None => self.comments.push(comment),
+                }
+            }
+            Record::Meta { meta } => self.meta = meta,
+        }
     }
 
     pub fn comments(&self) -> &[Comment] {
@@ -496,5 +539,34 @@ mod tests {
             d.reply("nope", agent, "Hi", None, 0),
             Err(CommentError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn replaying_a_journal_rebuilds_the_design() {
+        let mut live = design();
+        let mut journal = Vec::new();
+        for (seq, ops) in [(1, vec![create("a", None)]), (2, vec![color("a", "red")])] {
+            let change = live.commit("alice", "edit", &ops, seq).unwrap();
+            journal.push(Record::Change { change });
+        }
+        let id = pin(&mut live, "a");
+        let comment = live.set_resolved(&id, true).unwrap().clone();
+        journal.push(Record::Comment { comment });
+        live.meta.name = "Renamed".into();
+        journal.push(Record::Meta {
+            meta: live.meta.clone(),
+        });
+
+        let mut restored = design();
+        // Replaying twice, as after a crash mid-compaction, changes nothing.
+        for record in journal.iter().chain(&journal).cloned() {
+            restored.replay(record);
+        }
+        let (a, b) = (live.snapshot(), restored.snapshot());
+        assert_eq!(
+            (a.seq, &a.nodes, &a.comments),
+            (b.seq, &b.nodes, &b.comments)
+        );
+        assert_eq!(b.meta.name, "Renamed");
     }
 }

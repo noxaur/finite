@@ -17,7 +17,7 @@ If you remember two ideas, make it these. The rest of this guide builds on them.
  │  mcp.rs   tool → edit command → ops                        │
  │  hub.rs   lock the design, commit, broadcast, save later   │
  │  api.rs   REST + WebSockets for the web app                │
- │  store.rs one JSON file per design                         │
+ │  store.rs snapshot + append-only journal per design        │
  └────────────────────────────────────────────────────────────┘
         uses
  ┌─────────── finite-design (Rust, no I/O) ───────────┐
@@ -136,7 +136,7 @@ Some of the work these commands do:
 
 - a **mutex** around the design, so edits to one design run one at a time and edits to different designs never wait on each other;
 - a **broadcast channel**, which fans each change out to every open WebSocket;
-- a **dirty flag**, which a background task watches to save the design 250 ms after the last edit.
+- a **save queue**: every change, comment update and rename is queued as a record, and a background task writes the queue 250 ms after the last edit.
 
 `DesignHandle::edit` is the path almost every tool call takes:
 
@@ -173,7 +173,19 @@ When a browser opens a design's socket, the server takes the lock first. Under t
 
 ### Storage
 
-`store.rs` saves each design as one JSON file in `FINITE_DATA_DIR/designs/` (`crates/server/data` in dev). It writes a temporary file and renames it into place, so a crash never leaves half a file. The hub only calls two methods, `load_all` and `save`, so a database could replace the files behind the `Store` trait. Undo histories aren't saved. A restart clears them.
+Saving is a **write-ahead journal with compaction**, the same idea databases use. Each design has two files in `FINITE_DATA_DIR/designs/` (`crates/server/data` in dev):
+
+- `<id>.json` is the last full snapshot.
+- `<id>.log` is the journal: one JSON record per line for everything since that snapshot. A record is a change, the new state of a comment, or the design's name and timestamps (`Record` in `crates/design/src/design.rs`).
+
+After a burst of edits, the save task appends the new records to the log. That costs the same for a ten-node design as for a ten-thousand-node one. In the demo, one style change appended 305 bytes instead of rewriting the 11 KB snapshot. Every 1000 records, the task writes a fresh snapshot instead and deletes the log. That step is **compaction**.
+
+On startup, the server loads each snapshot, replays its log with `Design::replay`, and compacts right away. Replaying is safe to repeat: changes at or below the snapshot's `seq` are skipped, and comments and meta just overwrite. So a crash at any point loses at most the last 250 ms of edits:
+
+- **Mid-append:** the log ends in a torn line. Loading stops at it, and the startup compaction drops it for good.
+- **Mid-compaction:** the new snapshot is written to a temporary file and renamed into place, so it's either all there or not at all. If the old log survives next to the new snapshot, replaying it changes nothing.
+
+The hub only calls three methods on the `Store` trait in `store.rs`: `load_all`, `save` and `append`. A database could replace the files behind them. Undo histories aren't saved, so a restart clears them.
 
 ## Following one edit end to end
 
@@ -205,7 +217,7 @@ update_styles({ "designId": "k7jo11y14e",
    }
    ```
 
-5. 250 ms later, the design is saved to disk.
+5. 250 ms later, the change is appended to the design's journal on disk.
 6. In each browser, `Replica` applies the op, and `Renderer` calls `style.setProperty("background-color", "#ff5a1f")` on that one button.
 
 ## The viewer
@@ -257,5 +269,4 @@ All the thread rules live in `crates/design`: `comment.rs` defines the types and
 
 If you grow Finite, these are the places that will hurt first.
 
-- **Saving rewrites the whole design** every time. That's fine for a few thousand nodes, and slow for very large designs.
 - **Everything lives in one process.** The hub keeps designs in memory and broadcasts in-process, so two server instances can't share a design yet.
