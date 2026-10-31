@@ -45,7 +45,7 @@ Conflicts resolve per property, last writer wins. Two things are easy to miss:
 - If another agent deleted the nodes an undo step touches, that step is skipped, and undo moves on to the next one that still applies.
 - Undo then redo returns the document to where it was. If you delete an artboard that holds another agent's nodes, redo brings those nodes back too, because the inverse captured the whole subtree.
 
-The history belongs to an actor, per design. Today an actor is an MCP session, or the value of an `X-Finite-Agent` header if the client sends one. A user's browser tab will be another kind of actor when users can edit. `History` also supports batching (Liveblocks calls it pausing), so a drag can undo in one step.
+The history belongs to an actor, per design. Today an actor is an MCP session, or the value of an `X-Finite-Agent` header if the client sends one. Send the header if you can: a named agent's undo survives restarts and lasts six idle hours, while a session's undo ends with the session, after an hour without a call. Each stack keeps up to 200 steps and about 32 MB of ops. A user's browser tab will be another kind of actor when users can edit. `History` also supports batching (Liveblocks calls it pausing), so a drag can undo in one step.
 
 ## How a change flows
 
@@ -107,6 +107,7 @@ The preload script exposes `window.finite` (platform and versions) to the render
 ## Gotchas
 
 - If the browser gets `403` with `unknown host` or `requests from … aren't allowed`, you opened Finite under a name it doesn't know, such as your machine's network address. Add that name to `FINITE_ALLOWED_HOSTS` (comma-separated, like `192.168.1.20,finite.example.com`). The check keeps other websites from reading your designs.
+- If a tool call or comment is refused with a limit, that's on purpose, and the message says what to do instead. A design holds up to 100,000 nodes nested at most 256 deep, 500 open comments, and 200 messages per thread. An agent's working indicator names up to 100 nodes. Long tool results are cut at 60,000 characters, with a note on how to see the rest. The guide's sections on edit commands, MCP and comments say why each limit exists.
 - If the server exits with `another Finite server is using …`, a second server is pointed at the same data folder. Stop the other one, or give this one its own `FINITE_DATA_DIR`.
 - If Electron crashes with `Cannot read properties of undefined (reading 'whenReady')`, your shell has `ELECTRON_RUN_AS_NODE=1` set. Electron-based terminals and editors often export it. Run `unset ELECTRON_RUN_AS_NODE` first.
 - Packaging into a `.app`/`.exe` isn't set up yet. When you add electron-builder or Forge, copy `target/release/finite-server` and `apps/web/out` (as `web/`) into the app's resources directory. `apps/desktop/src/main.ts` looks for them there.
