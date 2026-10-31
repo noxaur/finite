@@ -303,6 +303,22 @@ async fn other_sites_cant_read_the_api() {
             .await
             .unwrap();
         assert_eq!(rebound.status(), 403, "{base}");
+
+        // Nor can it drive an agent session from the page.
+        let init = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": "2025-06-18", "capabilities": {},
+                        "clientInfo": { "name": "page", "version": "1" } },
+        });
+        let mcp = reqwest::Client::new()
+            .post(format!("{base}/mcp"))
+            .header("origin", "https://evil.example")
+            .header("accept", "application/json, text/event-stream")
+            .json(&init)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(mcp.status(), 403, "{base}");
     }
 }
 

@@ -97,9 +97,16 @@ pub fn app_with_sessions(
             std::sync::Arc::<[String]>::from(front.cluster.allowed_hosts()),
             crate::guard::known_hosts,
         ))
-        .nest_service(
-            "/mcp",
-            crate::relay::service(front.cluster.clone(), sessions),
+        .merge(
+            Router::new()
+                .nest_service(
+                    "/mcp",
+                    crate::relay::service(front.cluster.clone(), sessions),
+                )
+                .layer(axum::middleware::from_fn_with_state(
+                    std::sync::Arc::<[String]>::from(front.cluster.allowed_hosts()),
+                    crate::guard::known_hosts,
+                )),
         );
     let router = match static_dir {
         Some(dir) => {

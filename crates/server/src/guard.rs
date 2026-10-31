@@ -7,7 +7,8 @@
 //! makes its requests same-origin. So `/api` accepts a request only if its
 //! `Host`, and its `Origin` if it has one, name a host this server knows: a
 //! loopback name, a server in `FINITE_NODES`, or one in `FINITE_ALLOWED_HOSTS`.
-//! That's the same list MCP checks `Host` against.
+//! That's the same list MCP checks `Host` against, and the guard covers
+//! `/mcp` too, since rmcp doesn't check `Origin` unless it's given a list.
 
 use std::sync::Arc;
 
