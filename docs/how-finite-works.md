@@ -12,6 +12,7 @@ How far you read depends on what you want:
 - **To understand Finite,** read through "Following one edit end to end". That covers the document, undo, the server and one edit's whole trip.
 - **To change the browser side,** read "The viewer" and "Comments".
 - **To run it for real,** read "Storage" and "Undo across restarts". They cover what's saved, when, and what survives a crash.
+- **To test a change the way a person sees it,** read "The end-to-end test".
 - **To run more than one server,** read "Running more than one server" at the end. One server is the default, and you can skip that section until you need it.
 
 "Words used in the code" at the very end is a glossary for when a term isn't clear.
@@ -297,9 +298,25 @@ An agent doesn't have to check for comments on a timer. `wait_for_comments` is a
 
 If an agent deletes an artboard that has comments, the pins don't vanish. Before the change applies, `Design` notes where the artboard is. Afterwards, every comment on it gets a `detachedAt` canvas position, and viewers pin it there. If an undo brings the artboard back, `detachedAt` is cleared and the pin follows the artboard again. `get_comments` marks such comments with `artboardDeleted`.
 
+The order of the messages matters here. A viewer draws a pin at its artboard if the artboard exists, and at `detachedAt` if not. If the delete arrived first, there'd be a moment with neither, and the pin would blink out. So the hub sends a pin that lost its artboard before the change that deletes it, and a pin that got it back after the change that restores it (`publish_with_comments` in `hub.rs`). The end-to-end test found this blink.
+
 Comments live beside the document, not inside it, so undo never touches them. They're saved in the same JSON file as the design.
 
 All the thread rules live in `crates/design`: `comment.rs` defines the types and checks, and `Design::add_comment`, `reply` and `set_resolved` apply them. The hub only takes the lock, calls one of those, and broadcasts the updated comment. That means you can test a comment rule with a plain function call, like the tests at the bottom of `design.rs`.
+
+## The end-to-end test
+
+The unit tests and golden files check each side on its own. `vp run e2e` checks what a person sees. The script lives in `e2e/run.mjs` and has three parts:
+
+1. It builds the server and the web app (`E2E_SKIP_BUILD=1` reuses the last builds), then starts the server on a free port with a throwaway data folder.
+2. It connects an agent over MCP (`e2e/mcp.mjs`) and builds a design: one plain artboard and one with a script, so it renders in a sandbox.
+3. It opens the design in headless Chrome and drives it with the Chrome DevTools Protocol (`e2e/cdp.mjs`): it moves the mouse, clicks, types and reads the page.
+
+The checks follow the comment demo. The agent edits and undoes, and the page follows. A person hovers a button, comments on it under their own name, and the agent picks the comment up with `wait_for_comments`. The agent changes the button and replies, and the person jumps to the change. Then the same happens inside the sandboxed artboard. Last, a pin stays in place while its artboard is deleted and brought back. Each check prints `PASS` or `FAIL`, and the script exits with 1 if any failed. On a failure it saves a screenshot to `finite-e2e-failure.png` in the temp folder.
+
+It needs Chrome. Set `FINITE_CHROME` to its path if it isn't in the usual place. It isn't part of `vp test`, because it builds the whole app first. With `E2E_SKIP_BUILD=1`, a run takes about 6 seconds.
+
+One trap is worth knowing if you add a check. Comment mode sets `pointer-events: none` on sandboxed iframes, so the page gets the mouse. But Chrome's **input routing** hit-tests the last frame it drew to choose which frame gets the mouse. Until it draws again, the moves still go to the iframe, and the page never sees them. People move the mouse all the time, so they never notice. A script that presses `c` and moves at once does, so the test waits two animation frames first.
 
 ## Running more than one server
 

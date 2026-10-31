@@ -294,6 +294,7 @@ export function DesignCanvas({ id }: { id: string }) {
               rect && (
                 <div
                   key={key}
+                  data-outline={flash ? "flash" : "target"}
                   {...stylex.props(
                     styles.outline(rect.x, rect.y, rect.width, rect.height),
                     flash && styles.flash,

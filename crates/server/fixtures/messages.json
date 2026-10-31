@@ -282,22 +282,6 @@
       "type": "comment"
     },
     {
-      "actorName": "Claude",
-      "change": {
-        "actor": "agent:Claude",
-        "label": "Delete",
-        "ops": [
-          {
-            "id": "scratch",
-            "op": "delete"
-          }
-        ],
-        "origin": "edit",
-        "seq": 6
-      },
-      "type": "change"
-    },
-    {
       "comment": {
         "artboardId": "scratch",
         "createdAt": 0,
@@ -324,6 +308,22 @@
         "y": 5.0
       },
       "type": "comment"
+    },
+    {
+      "actorName": "Claude",
+      "change": {
+        "actor": "agent:Claude",
+        "label": "Delete",
+        "ops": [
+          {
+            "id": "scratch",
+            "op": "delete"
+          }
+        ],
+        "origin": "edit",
+        "seq": 6
+      },
+      "type": "change"
     },
     {
       "meta": {

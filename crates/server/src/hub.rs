@@ -373,14 +373,24 @@ impl DesignHandle {
         );
     }
 
-    /// Sends and saves the comments a change moved, like pins whose artboard
-    /// was deleted.
-    fn publish_comment_updates(&self, state: &mut DesignState) {
-        for comment in state.design.take_comment_updates() {
-            let _ = self.events.send(Outgoing::new(
-                None,
-                &DesignMessage::Comment { comment: &comment },
-            ));
+    /// Sends a change with the comments it moved, like pins whose artboard
+    /// was deleted, and saves them all. A pin that lost its artboard is sent
+    /// before the change and one that got it back after, so a viewer always
+    /// has somewhere to draw it.
+    fn publish_with_comments(&self, state: &mut DesignState, actor: &Actor, change: &Change) {
+        let (detached, reattached): (Vec<_>, Vec<_>) = state
+            .design
+            .take_comment_updates()
+            .into_iter()
+            .partition(|c| c.detached_at.is_some());
+        let send = |comment: &Comment| {
+            let message = DesignMessage::Comment { comment };
+            let _ = self.events.send(Outgoing::new(None, &message));
+        };
+        detached.iter().for_each(send);
+        self.publish(state, actor, change);
+        reattached.iter().for_each(send);
+        for comment in detached.into_iter().chain(reattached) {
             self.record(state, Record::Comment { comment });
         }
     }
@@ -446,8 +456,7 @@ impl DesignHandle {
         let (ops, output) = build(state.design.doc())?;
         let change = state.design.commit(&actor.id, label, &ops, now);
         if let Some(change) = &change {
-            self.publish(&mut state, actor, change);
-            self.publish_comment_updates(&mut state);
+            self.publish_with_comments(&mut state, actor, change);
         }
         Ok((output, change))
     }
@@ -469,8 +478,7 @@ impl DesignHandle {
         let mut state = self.lock();
         state.touch(actor, now);
         let change = f(&mut state.design, &actor.id, now)?;
-        self.publish(&mut state, actor, &change);
-        self.publish_comment_updates(&mut state);
+        self.publish_with_comments(&mut state, actor, &change);
         Some(change)
     }
 
@@ -980,6 +988,69 @@ mod tests {
             serde_json::from_str(&rx.try_recv().unwrap().json).unwrap();
         assert_eq!(message["type"], "comment");
         assert_eq!(message["comment"]["id"], comment.id.as_str());
+    }
+
+    /// A viewer never sees a pin with nowhere to go: its new place arrives
+    /// before the artboard goes, and is cleared only after it comes back.
+    #[tokio::test]
+    async fn pins_move_in_step_with_their_artboard() {
+        use finite_design::edit::{self, NewArtboard};
+
+        let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
+        let handle = hub.get(&hub.create("Test").meta.id).unwrap();
+        let agent = Actor {
+            id: "agent".into(),
+            name: "Agent".into(),
+        };
+        handle
+            .edit(&agent, "Create artboard", |doc| {
+                let spec = NewArtboard {
+                    name: "Home".into(),
+                    width: 100.0,
+                    height: 100.0,
+                    position: None,
+                    styles: BTreeMap::new(),
+                };
+                Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
+            })
+            .unwrap();
+        let author = Author {
+            id: "user:1".into(),
+            name: "Guest".into(),
+            kind: AuthorKind::User,
+        };
+        let anchor = Anchor {
+            artboard_id: Some("board".into()),
+            node_id: None,
+            x: 1.0,
+            y: 2.0,
+        };
+        handle.add_comment(author, anchor, "Hello").unwrap();
+
+        let (_, _, mut rx) = handle.subscribe();
+        let mut sent = || -> Vec<(String, bool)> {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .map(|m| {
+                    let v: serde_json::Value = serde_json::from_str(&m.json).unwrap();
+                    let detached = !v["comment"]["detachedAt"].is_null();
+                    (v["type"].as_str().unwrap().to_owned(), detached)
+                })
+                .collect()
+        };
+        handle
+            .edit(&agent, "Delete", |doc| {
+                Ok((edit::delete(doc, &["board".into()])?, ()))
+            })
+            .unwrap();
+        assert_eq!(
+            sent(),
+            [("comment".into(), true), ("change".into(), false)]
+        );
+        handle.undo(&agent).unwrap();
+        assert_eq!(
+            sent(),
+            [("change".into(), false), ("comment".into(), false)]
+        );
     }
 
     #[tokio::test]

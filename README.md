@@ -77,6 +77,7 @@ vp run dev              # web on http://localhost:5310, Rust API on :4100
 vp run dev:desktop      # same, plus an Electron window pointed at the dev server
 vp run start:desktop    # release build of everything, then Electron with the Rust sidecar
 vp run test             # cargo test for both crates, plus the web app's Vitest suite
+vp run e2e              # build, start a server, and drive the app in headless Chrome
 vp run ready            # format + lint + type check, test, build
 ```
 
