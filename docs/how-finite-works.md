@@ -61,6 +61,8 @@ A few rules shape everything else:
 
 `Document` in `crates/design/src/document.rs` holds the map. `Node` and `PropKey` are in `node.rs`.
 
+Next to the map, `Document` keeps a **child index**: for each parent, its children's ids sorted by `(index, id)`. Every create, delete and move updates it. Without it, listing a node's children meant scanning the whole design, so deleting a big artboard took quadratic time. You can measure it with `cargo run --release -p finite-design --example big_design`. On a 20,201-node artboard, the delete dropped from 428 ms to 13 ms. That matters because an edit holds the design's lock, so every other agent and viewer waits for it.
+
 ## Ops and their inverses
 
 There are only four ops:

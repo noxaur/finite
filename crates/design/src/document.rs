@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -42,17 +42,43 @@ impl Op {
     }
 }
 
-/// The node tree of one design, stored flat by id.
+/// The node tree of one design, stored flat by id, with an index from each
+/// parent to its children in sibling order.
 #[derive(Clone, Debug, Default)]
 pub struct Document {
     nodes: HashMap<NodeId, Node>,
+    /// Children of each parent (`None` for artboards), sorted by `(index, id)`.
+    child_index: HashMap<Option<NodeId>, BTreeSet<(String, NodeId)>>,
 }
 
 impl Document {
     pub fn from_nodes(nodes: impl IntoIterator<Item = Node>) -> Self {
-        Self {
-            nodes: nodes.into_iter().map(|n| (n.id.clone(), n)).collect(),
+        let mut doc = Self::default();
+        for node in nodes {
+            doc.insert(node);
         }
+        doc
+    }
+
+    /// Adds or replaces a node, keeping the child index current.
+    fn insert(&mut self, node: Node) {
+        self.remove(&node.id);
+        self.child_index
+            .entry(node.parent.clone())
+            .or_default()
+            .insert((node.index.clone(), node.id.clone()));
+        self.nodes.insert(node.id.clone(), node);
+    }
+
+    fn remove(&mut self, id: &str) -> Option<Node> {
+        let node = self.nodes.remove(id)?;
+        if let Some(siblings) = self.child_index.get_mut(&node.parent) {
+            siblings.remove(&(node.index.clone(), node.id.clone()));
+            if siblings.is_empty() {
+                self.child_index.remove(&node.parent);
+            }
+        }
+        Some(node)
     }
 
     pub fn get(&self, id: &str) -> Option<&Node> {
@@ -76,17 +102,13 @@ impl Document {
     }
 
     /// Children of `parent` (or artboards, for `None`) in sibling order.
-    ///
-    /// This scans every node. Fine at MVP sizes; add a parent → children index
-    /// here when documents get large.
     pub fn children(&self, parent: Option<&str>) -> Vec<&Node> {
-        let mut children: Vec<&Node> = self
-            .nodes
-            .values()
-            .filter(|n| n.parent.as_deref() == parent)
-            .collect();
-        children.sort_by(|a, b| a.index.cmp(&b.index).then_with(|| a.id.cmp(&b.id)));
-        children
+        self.child_index
+            .get(&parent.map(str::to_owned))
+            .into_iter()
+            .flatten()
+            .filter_map(|(_, id)| self.nodes.get(id))
+            .collect()
     }
 
     pub fn artboards(&self) -> Vec<&Node> {
@@ -167,7 +189,7 @@ impl Document {
                 if self.nodes.contains_key(&node.id) || !self.can_parent(node.parent.as_deref()) {
                     return None;
                 }
-                self.nodes.insert(node.id.clone(), node.clone());
+                self.insert(node.clone());
                 Some(vec![Op::Delete {
                     id: node.id.clone(),
                 }])
@@ -178,7 +200,7 @@ impl Document {
                     return None;
                 }
                 for node in &removed {
-                    self.nodes.remove(&node.id);
+                    self.remove(&node.id);
                 }
                 Some(
                     removed
@@ -216,9 +238,10 @@ impl Document {
                     parent: node.parent.clone(),
                     index: node.index.clone(),
                 };
-                let node = self.nodes.get_mut(id)?;
+                let mut node = self.remove(id)?;
                 node.parent = parent.clone();
                 node.index = index.clone();
+                self.insert(node);
                 Some(vec![inverse])
             }
         }
@@ -325,5 +348,35 @@ mod tests {
         assert_eq!(serde_json::from_value::<Op>(wire).unwrap(), op);
         let node = serde_json::to_value(Node::text("t", "hi")).unwrap();
         assert_eq!(node["type"], "text");
+    }
+
+    #[test]
+    fn child_index_follows_moves_and_deletes() {
+        let mut d = doc();
+        d.apply(&Op::Create {
+            node: child("e", "a", "k"),
+        });
+        let ids = |d: &Document, parent: Option<&str>| -> Vec<String> {
+            d.children(parent).iter().map(|n| n.id.clone()).collect()
+        };
+        assert_eq!(ids(&d, Some("a")), ["b", "e"]);
+        // Reorder before b, then reparent under b.
+        d.apply(&Op::Move {
+            id: "e".into(),
+            parent: Some("a".into()),
+            index: "F".into(),
+        });
+        assert_eq!(ids(&d, Some("a")), ["e", "b"]);
+        d.apply(&Op::Move {
+            id: "e".into(),
+            parent: Some("b".into()),
+            index: "k".into(),
+        });
+        assert_eq!(ids(&d, Some("a")), ["b"]);
+        assert_eq!(ids(&d, Some("b")), ["c", "e"]);
+        d.apply(&Op::Delete { id: "b".into() });
+        assert!(ids(&d, Some("a")).is_empty());
+        assert!(ids(&d, Some("b")).is_empty());
+        assert_eq!(ids(&d, None), ["a"]);
     }
 }
