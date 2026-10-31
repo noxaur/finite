@@ -6,11 +6,7 @@
 //! design with `designId`, so one agent or many can work on several canvases
 //! at once, and each agent has its own `undo`/`redo`.
 
-use std::{
-    collections::BTreeMap,
-    fmt::Write,
-    sync::{Arc, OnceLock},
-};
+use std::sync::{Arc, OnceLock};
 
 use base64::Engine;
 use finite_design::{
@@ -23,41 +19,26 @@ use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig},
-    schemars::{self, JsonSchema},
     service::RequestContext,
     tool, tool_handler, tool_router,
     transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     },
 };
-use serde::Deserialize;
 
 use crate::{
     hub::{Actor, DesignHandle, Hub, random_id},
     screenshot,
 };
 
-const INSTRUCTIONS: &str = r#"Finite is a design canvas for agents. A design (also called a canvas) holds artboards: fixed-size frames placed on an infinite canvas. Artboards contain ordinary HTML elements styled with inline CSS. Users watch designs live and can't edit them, so all changes come from agents. Users steer agents by pinning comments to the canvas.
+mod format;
+mod params;
 
-Every tool except list_designs and create_design takes a designId. You can work on several designs at once, and other agents may be editing the same design at the same time, so re-read the tree before editing nodes you didn't create.
+use format::{node_json, outline};
+use params::*;
 
-Workflow:
-1. Pick a design: list_designs, or create_design for a new one.
-2. Orient: get_basic_info (it counts open comments), then get_tree_summary.
-3. New screen: find_placement, then create_artboard (typical sizes: desktop 1440x900, tablet 768x1024, mobile 390x844).
-4. Call start_working_on_nodes with the artboard id so users see what you're doing.
-5. Build in small sections with write_html (one call per section, such as a header, a hero or a card grid), not one huge call.
-6. Check the result with get_screenshot after each section. Correct markup doesn't guarantee a correct render.
-7. Refine with update_styles, set_text_content, set_attributes, move_nodes or delete_nodes.
-8. Call finish_working_on_nodes when done.
-
-HTML rules: style with inline style attributes, or with <style> blocks and classes. Prefer flexbox and gap for layout. Name layers with data-name="Header". box-sizing is border-box. Images use <img src="https://...">. Inline <svg> works. New artboards default to a white flex column with overflow hidden.
-
-Motion and interaction: each artboard is isolated, so a <style> or <script> inside it only affects that artboard. Put them inside the artboard, and select by class or id rather than html or body. Use CSS @keyframes and transitions for animation, and :hover for simple pointer effects. For anything that follows the cursor, use a <script> with addEventListener and requestAnimationFrame (inline on* attributes are dropped). An artboard with a script runs in a sandbox: inline code only, no network requests, remote images and fonts allowed. It restarts after every edit. get_screenshot runs scripts and captures the frame about 3 seconds after load.
-
-Comments: a comment is a request from a user, pinned to an artboard and usually to the element they clicked. When a design has open comments, call get_comments, call start_working_on_nodes on the comment's node, make the change, check it with get_screenshot, then reply_to_comment saying what you changed, with resolve: true. Your reply links the edits you made to that artboard since the thread's last message, so the user can see what changed. If a comment is unclear, reply with a question and leave it open.
-
-Undo: undo and redo reverse only your own changes, one tool call per step. Other agents' work is left alone. If someone else has since deleted the nodes a step touched, that step is skipped."#;
+/// What agents see when they connect: the workflow, the HTML rules, comments and undo.
+const INSTRUCTIONS: &str = include_str!("instructions.md");
 
 #[derive(Clone)]
 pub struct FiniteMcp {
@@ -119,338 +100,6 @@ fn describe(change: Option<&Change>) -> &'static str {
     } else {
         "Nothing changed: the design already looked like that."
     }
-}
-
-/// One line per node, indented by depth: `tag "Name" #id [width×height] "text"`.
-fn outline(doc: &Document, id: &str, max_depth: usize) -> String {
-    let mut out = String::new();
-    outline_into(doc, id, 0, max_depth, &mut out);
-    out
-}
-
-fn outline_into(doc: &Document, id: &str, depth: usize, max_depth: usize, out: &mut String) {
-    let Some(node) = doc.get(id) else { return };
-    let pad = "  ".repeat(depth);
-    match &node.kind {
-        NodeKind::Text => {
-            let _ = writeln!(out, "{pad}text #{} {:?}", node.id, node.display_name());
-            return;
-        }
-        NodeKind::Element { tag } => {
-            let _ = write!(out, "{pad}{tag}");
-            if let Some(name) = &node.name {
-                let _ = write!(out, " {name:?}");
-            }
-            let _ = write!(out, " #{}", node.id);
-            if node.is_artboard() {
-                let _ = write!(
-                    out,
-                    " (artboard at {}, {})",
-                    node.x.unwrap_or(0.0),
-                    node.y.unwrap_or(0.0)
-                );
-            }
-            let size = |k: &str| node.styles.get(k).map(String::as_str);
-            if let (Some(w), Some(h)) = (size("width"), size("height")) {
-                let _ = write!(out, " [{w} × {h}]");
-            }
-            if let Some(display) = size("display") {
-                let direction = size("flex-direction").unwrap_or("");
-                let _ = write!(out, " {display} {direction}");
-            }
-        }
-    }
-    let children = doc.children(Some(id));
-    match children.as_slice() {
-        [] => out.push('\n'),
-        [only] if only.kind == NodeKind::Text => {
-            let _ = writeln!(out, " {:?}", only.display_name());
-        }
-        _ if depth >= max_depth => {
-            let _ = writeln!(out, " … {} children", children.len());
-        }
-        _ => {
-            out.push('\n');
-            for child in children {
-                outline_into(doc, &child.id, depth + 1, max_depth, out);
-            }
-        }
-    }
-}
-
-fn node_json(doc: &Document, id: &str) -> serde_json::Value {
-    let Some(node) = doc.get(id) else {
-        return serde_json::json!({ "id": id, "error": "not found" });
-    };
-    let children: Vec<&str> = doc
-        .children(Some(id))
-        .iter()
-        .map(|c| c.id.as_str())
-        .collect();
-    serde_json::json!({
-        "id": node.id,
-        "type": if node.kind == NodeKind::Text { "text" } else { "element" },
-        "tag": node.tag(),
-        "name": node.display_name(),
-        "parentId": node.parent,
-        "artboardId": doc.artboard_of(id).map(|a| &a.id),
-        "x": node.x,
-        "y": node.y,
-        "text": node.text,
-        "styles": node.styles,
-        "attributes": node.attrs,
-        "childIds": children,
-    })
-}
-
-// Tool parameters. Doc comments become the JSON Schema descriptions agents see.
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct DesignParams {
-    /// The design (canvas) id, from list_designs or create_design.
-    design_id: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-pub struct CreateDesignParams {
-    /// A short name, like "Checkout flow".
-    name: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct RenameDesignParams {
-    design_id: String,
-    name: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct TreeParams {
-    design_id: String,
-    /// Root of the summary. Omit to summarize every artboard.
-    #[serde(default)]
-    node_id: Option<String>,
-    /// How many levels below the root to show. Defaults to 4.
-    #[serde(default)]
-    depth: Option<usize>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct NodesParams {
-    design_id: String,
-    node_ids: Vec<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ChildrenParams {
-    design_id: String,
-    /// Parent node. Omit to list the artboards.
-    #[serde(default)]
-    node_id: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct NodeParams {
-    design_id: String,
-    node_id: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ScreenshotParams {
-    design_id: String,
-    /// An artboard, or any node inside one (the whole artboard is captured).
-    node_id: String,
-    /// Device pixel ratio, 1 or 2. Defaults to 1.
-    #[serde(default)]
-    scale: Option<f64>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct PlacementParams {
-    design_id: String,
-    width: f64,
-    height: f64,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateArtboardParams {
-    design_id: String,
-    name: String,
-    /// Width in CSS pixels.
-    width: f64,
-    /// Height in CSS pixels.
-    height: f64,
-    /// Canvas position. Omit x and y to place it beside the existing artboards.
-    #[serde(default)]
-    x: Option<f64>,
-    #[serde(default)]
-    y: Option<f64>,
-    /// Extra CSS for the artboard, like {"background-color": "#0b0b0b", "padding": "48px"}.
-    #[serde(default)]
-    styles: BTreeMap<String, String>,
-}
-
-#[derive(Deserialize, JsonSchema, Clone, Copy, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum WriteHtmlMode {
-    /// Insert as children of the target (at `index`, or at the end).
-    #[default]
-    Append,
-    /// Replace all of the target's children.
-    ReplaceChildren,
-    /// Replace the target node itself.
-    Replace,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct WriteHtmlParams {
-    design_id: String,
-    /// The node to write into (an artboard or an element inside one).
-    target_id: String,
-    /// HTML with inline styles, like `<div data-name="Hero" style="display: flex; gap: 24px">…</div>`.
-    html: String,
-    #[serde(default)]
-    mode: WriteHtmlMode,
-    /// Child position for "append" mode. 0 inserts first. Omit to append at the end.
-    #[serde(default)]
-    index: Option<usize>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct StyleUpdate {
-    node_ids: Vec<String>,
-    /// CSS properties to set (kebab-case or camelCase). A null value removes the property.
-    styles: BTreeMap<String, Option<String>>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateStylesParams {
-    design_id: String,
-    updates: Vec<StyleUpdate>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct AttributeUpdate {
-    node_ids: Vec<String>,
-    /// Attributes to set, like {"src": "https://…", "alt": "Logo"}. A null value removes it.
-    attributes: BTreeMap<String, Option<String>>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct SetAttributesParams {
-    design_id: String,
-    updates: Vec<AttributeUpdate>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct TextUpdate {
-    /// A text node, or an element whose content becomes this text.
-    node_id: String,
-    text: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct SetTextParams {
-    design_id: String,
-    updates: Vec<TextUpdate>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct RenameUpdate {
-    node_id: String,
-    /// The new layer name. Null clears it.
-    name: Option<String>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct RenameNodesParams {
-    design_id: String,
-    updates: Vec<RenameUpdate>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct MoveNodesParams {
-    design_id: String,
-    node_ids: Vec<String>,
-    /// The new parent. Null turns the nodes into artboards on the canvas.
-    parent_id: Option<String>,
-    /// Child position under the new parent. 0 is first. Omit to append at the end.
-    #[serde(default)]
-    index: Option<usize>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct PositionUpdate {
-    node_id: String,
-    x: f64,
-    y: f64,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct PositionParams {
-    design_id: String,
-    updates: Vec<PositionUpdate>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct StepParams {
-    design_id: String,
-    /// How many steps. Defaults to 1.
-    #[serde(default)]
-    steps: Option<usize>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct CommentsParams {
-    design_id: String,
-    /// Include resolved comments too. Defaults to false.
-    #[serde(default)]
-    include_resolved: bool,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ReplyParams {
-    design_id: String,
-    comment_id: String,
-    /// What you changed, or a question if the request is unclear. Users read this.
-    message: String,
-    /// true marks the comment done, false reopens it. Omit to leave it as is.
-    #[serde(default)]
-    resolve: Option<bool>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkingParams {
-    design_id: String,
-    /// The nodes (usually artboards) you're about to change.
-    node_ids: Vec<String>,
-    /// A few words shown to users, like "Building the pricing section".
-    #[serde(default)]
-    status: Option<String>,
 }
 
 impl FiniteMcp {

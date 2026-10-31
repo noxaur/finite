@@ -14,7 +14,7 @@ If you remember two ideas, make it these. The rest of this guide builds on them.
         │  MCP tool call                           ▲  WebSocket: snapshot, then changes
         ▼                                          │
  ┌─────────────── finite-server (Rust, axum) ──────┴──────────┐
- │  mcp.rs   tool → edit command → ops                        │
+ │  mcp/     tool → edit command → ops                        │
  │  hub.rs   lock the design, commit, broadcast, save later   │
  │  api.rs   REST + WebSockets for the web app                │
  │  store.rs snapshot + append-only journal per design        │
@@ -163,7 +163,14 @@ On startup, the hub reads designs one at a time to build the list, then drops ea
 
 ### MCP
 
-`crates/server/src/mcp.rs` is the agent-facing side, served at `/mcp` over Streamable HTTP with the `rmcp` crate. It defines every tool, the instructions agents see when they connect, and how a caller maps to an actor. The tool names follow [Paper's MCP server](https://paper.design/docs/mcp). Every tool except `list_designs` and `create_design` takes a `designId`.
+`crates/server/src/mcp/` is the agent-facing side, served at `/mcp` over Streamable HTTP with the `rmcp` crate. It has four files:
+
+- `mod.rs` defines every tool and works out which actor is calling.
+- `params.rs` holds each tool's arguments. `rmcp` turns them into the JSON schemas agents see.
+- `format.rs` writes the compact outlines that tools like `get_tree_summary` return.
+- `instructions.md` is the text agents read when they connect. It's plain Markdown, so you can edit the workflow without touching Rust.
+
+`crates/server/tests/mcp.rs` drives the endpoint the way an agent does. It opens a session, builds and styles a design, undoes, and answers a user's comment. If you change a tool, run it with `cargo test -p finite-server --test mcp`. The tool names follow [Paper's MCP server](https://paper.design/docs/mcp). Every tool except `list_designs` and `create_design` takes a `designId`.
 
 Read tools (`get_tree_summary`, `get_node_info`, `get_html`, `get_screenshot`) lock the design just long enough to copy what they need. `get_screenshot` writes the artboard to a temporary HTML file and runs headless Chrome on it (`screenshot.rs`).
 
@@ -210,7 +217,7 @@ update_styles({ "designId": "k7jo11y14e",
   "updates": [{ "nodeIds": ["4biyjm26"], "styles": { "backgroundColor": "#ff5a1f" } }] })
 ```
 
-1. `mcp.rs` works out the actor (`agent:Claude`, from the header) and calls `DesignHandle::edit` with the label "Update styles".
+1. `mcp/mod.rs` works out the actor (`agent:Claude`, from the header) and calls `DesignHandle::edit` with the label "Update styles".
 2. `edit::update_styles` normalizes the name and returns one op: `set 4biyjm26 style:background-color "#ff5a1f"`.
 3. `Design::commit` applies it, gets back `set … "#111"` as the inverse, pushes that onto Claude's undo stack, and bumps `seq` to 13.
 4. The hub broadcasts this message to every browser on the design:
