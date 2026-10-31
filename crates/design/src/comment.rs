@@ -11,7 +11,7 @@
 //!   current state unless it asks to resolve or reopen.
 
 use std::{
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeSet, HashSet, VecDeque},
     fmt,
 };
 
@@ -236,24 +236,39 @@ impl ChangeLog {
     pub(crate) fn record(&mut self, change: &Change, doc: &Document, before: BTreeSet<NodeId>) {
         let mut artboards = before;
         artboards.extend(artboards_of(doc, &change.ops));
-        let mut node_ids: Vec<NodeId> = Vec::new();
+        // A set, not a list: a big write touches tens of thousands of nodes,
+        // and checking a list for each one took seconds.
+        let mut node_ids: Vec<&str> = Vec::new();
+        let mut touched: HashSet<&str> = HashSet::new();
         for op in &change.ops {
             let Some(node) = doc.get(op.id()) else {
                 continue;
             };
             let id = match (&node.kind, &node.parent) {
-                (NodeKind::Text, Some(parent)) => parent,
-                _ => &node.id,
+                (NodeKind::Text, Some(parent)) => parent.as_str(),
+                _ => node.id.as_str(),
             };
-            if !node_ids.contains(id) {
-                node_ids.push(id.clone());
+            if touched.insert(id) {
+                node_ids.push(id);
             }
         }
+        // The outermost: nodes with no touched ancestor. Walking up is at most
+        // `MAX_DEPTH` steps per node.
+        let has_touched_ancestor = |id: &str| {
+            let mut parent = doc.get(id).and_then(|n| n.parent.as_deref());
+            while let Some(p) = parent {
+                if touched.contains(p) {
+                    return true;
+                }
+                parent = doc.get(p).and_then(|n| n.parent.as_deref());
+            }
+            false
+        };
         let outermost: Vec<NodeId> = node_ids
             .iter()
-            .filter(|id| !node_ids.iter().any(|other| doc.is_ancestor(other, id)))
+            .filter(|id| !has_touched_ancestor(id))
             .take(NODE_LIMIT)
-            .cloned()
+            .map(|id| (*id).to_owned())
             .collect();
         self.entries.push_back(Logged {
             actor: change.actor.clone(),

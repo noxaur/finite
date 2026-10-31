@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use finite_design::{
-    Document, Node, Op,
+    Design, DesignMeta, Document, Node, Op,
     edit::{self, WriteMode},
     fractional,
 };
@@ -63,4 +63,40 @@ fn main() {
         t.elapsed(),
         refused.unwrap_err()
     );
+
+    // The biggest write that fits: 33,000 cards, 99,000 nodes, committed the
+    // way the server does, with its change log entry.
+    let mut design = Design::new(DesignMeta {
+        id: "big".into(),
+        name: "Big".into(),
+        created_at: 0,
+        updated_at: 0,
+    });
+    let ops = edit::create_artboard(
+        design.doc(),
+        "page".into(),
+        edit::NewArtboard {
+            name: "Page".into(),
+            width: 1440.0,
+            height: 900.0,
+            position: None,
+            styles: Default::default(),
+        },
+    )
+    .unwrap();
+    design.commit("agent", "Add page", &ops, 0);
+    let card = r#"<div data-name="Card" style="padding: 8px"><p>A product</p></div>"#;
+    let fragments = edit::parse_html(&card.repeat(33_000)).unwrap();
+    let (ops, _) = edit::write_fragments(
+        design.doc(),
+        "page",
+        fragments,
+        WriteMode::Append,
+        None,
+        &mut new_id,
+    )
+    .unwrap();
+    let t = Instant::now();
+    design.commit("agent", "Write cards", &ops, 1);
+    println!("commit a {}-node write: {:?}", ops.len(), t.elapsed());
 }
