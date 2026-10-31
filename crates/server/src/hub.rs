@@ -373,6 +373,18 @@ impl DesignHandle {
         );
     }
 
+    /// Sends and saves the comments a change moved, like pins whose artboard
+    /// was deleted.
+    fn publish_comment_updates(&self, state: &mut DesignState) {
+        for comment in state.design.take_comment_updates() {
+            let _ = self.events.send(Outgoing::new(
+                None,
+                &DesignMessage::Comment { comment: &comment },
+            ));
+            self.record(state, Record::Comment { comment });
+        }
+    }
+
     /// Queues `record` for the save task.
     fn record(&self, state: &mut DesignState, record: Record) {
         state.pending.push(record);
@@ -435,6 +447,7 @@ impl DesignHandle {
         let change = state.design.commit(&actor.id, label, &ops, now);
         if let Some(change) = &change {
             self.publish(&mut state, actor, change);
+            self.publish_comment_updates(&mut state);
         }
         Ok((output, change))
     }
@@ -457,6 +470,7 @@ impl DesignHandle {
         state.touch(actor, now);
         let change = f(&mut state.design, &actor.id, now)?;
         self.publish(&mut state, actor, &change);
+        self.publish_comment_updates(&mut state);
         Some(change)
     }
 

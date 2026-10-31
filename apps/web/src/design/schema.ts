@@ -86,6 +86,8 @@ export const Comment = Schema.Struct({
   createdAt: Schema.Number,
   /** The first message is the comment itself; the rest are replies. */
   messages: Schema.Array(CommentMessage),
+  /** Where the pin was on the canvas when its artboard was deleted. */
+  detachedAt: Schema.optionalKey(Schema.Struct({ x: Schema.Number, y: Schema.Number })),
 });
 export type Comment = typeof Comment.Type;
 

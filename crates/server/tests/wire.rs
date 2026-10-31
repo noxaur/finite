@@ -121,6 +121,36 @@ async fn wire_messages_match_the_fixture() {
             Some(true),
         )
         .unwrap();
+    // A comment on an artboard that's then deleted stays pinned where it was.
+    handle
+        .edit(&agent, "Create artboard", |doc| {
+            let spec = NewArtboard {
+                name: "Scratch".into(),
+                width: 300.0,
+                height: 200.0,
+                position: Some((2000.0, 0.0)),
+                styles: BTreeMap::new(),
+            };
+            Ok((edit::create_artboard(doc, "scratch".into(), spec)?, ()))
+        })
+        .unwrap();
+    let user = Author {
+        id: "user:1".into(),
+        name: "Guest".into(),
+        kind: AuthorKind::User,
+    };
+    let anchor = Anchor {
+        artboard_id: Some("scratch".into()),
+        node_id: None,
+        x: 5.0,
+        y: 5.0,
+    };
+    let scratch_comment = handle.add_comment(user, anchor, "Remove this?").unwrap();
+    handle
+        .edit(&agent, "Delete", |doc| {
+            Ok((edit::delete(doc, &["scratch".into()])?, ()))
+        })
+        .unwrap();
     handle.rename("Landing v2".into());
 
     let first = |o: Outgoing| serde_json::from_str::<Value>(&o.json).unwrap();
@@ -136,6 +166,7 @@ async fn wire_messages_match_the_fixture() {
     let ids = [
         (summary.meta.id.clone(), "design1"),
         (comment.id.clone(), "comment1"),
+        (scratch_comment.id.clone(), "comment2"),
     ];
     normalize(&mut messages, &ids);
 

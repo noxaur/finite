@@ -293,6 +293,8 @@ A thread opens up and to the right of its pin. Near the window's right edge it o
 
 An agent doesn't have to check for comments on a timer. `wait_for_comments` is a **long poll**: the tool call stays open until a comment is waiting for an agent, then returns it. A comment is waiting when it's open and a person wrote the last message (`Comment::awaits_agent`). Each design has a `Notify`, a Tokio primitive that wakes every task waiting on it, and every comment update fires it. On the demo server, a waiting agent woke 30 ms after a comment was posted. The call gives up after `timeoutSeconds` (60 by default, 300 at most), so an agent can call it in a loop.
 
+If an agent deletes an artboard that has comments, the pins don't vanish. Before the change applies, `Design` notes where the artboard is. Afterwards, every comment on it gets a `detachedAt` canvas position, and viewers pin it there. If an undo brings the artboard back, `detachedAt` is cleared and the pin follows the artboard again. `get_comments` marks such comments with `artboardDeleted`.
+
 Comments live beside the document, not inside it, so undo never touches them. They're saved in the same JSON file as the design.
 
 All the thread rules live in `crates/design`: `comment.rs` defines the types and checks, and `Design::add_comment`, `reply` and `set_resolved` apply them. The hub only takes the lock, calls one of those, and broadcasts the updated comment. That means you can test a comment rule with a plain function call, like the tests at the bottom of `design.rs`.

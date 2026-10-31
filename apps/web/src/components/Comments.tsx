@@ -22,14 +22,16 @@ export interface Draft {
   readonly y: number;
 }
 
-/** Where a pin sits on the canvas, or `null` when its artboard is gone. */
+/** Where a pin sits on the canvas. A pin whose artboard is gone stays where it last was. */
 export function pinPosition(
   replica: Replica,
-  pin: Pick<Draft, "artboardId" | "x" | "y">,
+  pin: Pick<Draft, "artboardId" | "x" | "y"> & Pick<Partial<Comment>, "detachedAt">,
 ): { x: number; y: number } | null {
   if (pin.artboardId === null) return { x: pin.x, y: pin.y };
   const board = replica.get(pin.artboardId);
-  return board ? { x: (board.x ?? 0) + pin.x, y: (board.y ?? 0) + pin.y } : null;
+  if (board?.parent === null) return { x: (board.x ?? 0) + pin.x, y: (board.y ?? 0) + pin.y };
+  // The artboard is gone: the pin stays where it was when it went.
+  return pin.detachedAt ?? null;
 }
 
 /** The pointer and comment tools, in a pill at the bottom of the screen. */

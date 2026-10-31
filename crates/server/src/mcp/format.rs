@@ -126,6 +126,8 @@ pub(super) fn comments_json<'a>(
                 "resolved": c.resolved,
                 "artboardId": c.artboard_id,
                 "artboardName": artboard.map(|a| a.display_name()),
+                // The artboard was deleted; the pin stays where it was.
+                "artboardDeleted": c.detached_at.is_some(),
                 "nodeId": c.node_id,
                 "node": node,
                 "pin": { "x": c.x.round(), "y": c.y.round(), "relativeTo": relative_to },

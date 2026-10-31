@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     NodeId,
-    comment::{self, Anchor, Author, AuthorKind, ChangeLog, Comment, CommentError, Message},
+    comment::{self, Anchor, Author, AuthorKind, ChangeLog, Comment, CommentError, Message, Point},
     document::{Document, Op},
     history::{Entry, History},
     node::Node,
@@ -99,6 +99,8 @@ pub struct Design {
     comments: Vec<Comment>,
     /// Recent changes, so a reply can link the edits that answered a comment.
     log: ChangeLog,
+    /// Ids of comments that a change updated, for [`Design::take_comment_updates`].
+    comment_updates: Vec<String>,
 }
 
 impl Design {
@@ -110,6 +112,7 @@ impl Design {
             histories: HashMap::new(),
             comments: Vec::new(),
             log: ChangeLog::default(),
+            comment_updates: Vec::new(),
         }
     }
 
@@ -121,6 +124,7 @@ impl Design {
             comments: snapshot.comments,
             histories: snapshot.histories.unwrap_or_default(),
             log: ChangeLog::default(),
+            comment_updates: Vec::new(),
         }
     }
 
@@ -179,11 +183,18 @@ impl Design {
     /// Returns `None` when nothing changed.
     pub fn commit(&mut self, actor: &str, label: &str, ops: &[Op], now: u64) -> Option<Change> {
         let before = comment::artboards_of(&self.doc, ops);
+        let places = board_places(&self.doc, &before);
         let (applied, inverse) = self.doc.apply_all(ops);
         if applied.is_empty() {
             return None;
         }
         self.history_mut(actor).record(label.to_owned(), inverse);
+        reattach(
+            &self.doc,
+            &mut self.comments,
+            &mut self.comment_updates,
+            &places,
+        );
         Some(self.finish(actor, Origin::Edit, label, applied, before, now))
     }
 
@@ -205,10 +216,17 @@ impl Design {
                 _ => history.pop_redo(),
             }?;
             let before = comment::artboards_of(&self.doc, &entry.ops);
+            let places = board_places(&self.doc, &before);
             let (applied, inverse) = self.doc.apply_all(&entry.ops);
             if applied.is_empty() {
                 continue;
             }
+            reattach(
+                &self.doc,
+                &mut self.comments,
+                &mut self.comment_updates,
+                &places,
+            );
             let reverse = Entry {
                 label: entry.label.clone(),
                 ops: inverse,
@@ -270,6 +288,17 @@ impl Design {
         }
     }
 
+    /// Comments a change has updated since the last call, so the server can
+    /// send them to viewers and save them.
+    pub fn take_comment_updates(&mut self) -> Vec<Comment> {
+        let ids = std::mem::take(&mut self.comment_updates);
+        self.comments
+            .iter()
+            .filter(|c| ids.contains(&c.id))
+            .cloned()
+            .collect()
+    }
+
     pub fn comments(&self) -> &[Comment] {
         &self.comments
     }
@@ -307,6 +336,7 @@ impl Design {
                 seq: self.seq,
                 changes: Vec::new(),
             }],
+            detached_at: None,
         });
         Ok(self.comments.last().expect("just pushed"))
     }
@@ -347,6 +377,52 @@ impl Design {
         let comment = find(&mut self.comments, id)?;
         comment.resolved = resolved;
         Ok(comment)
+    }
+}
+
+/// Canvas positions of the given artboards, before a change applies.
+fn board_places(doc: &Document, boards: &BTreeSet<NodeId>) -> Vec<(NodeId, Point)> {
+    boards
+        .iter()
+        .filter_map(|id| doc.get(id))
+        .filter(|board| board.is_artboard())
+        .map(|board| {
+            let at = Point {
+                x: board.x.unwrap_or(0.0),
+                y: board.y.unwrap_or(0.0),
+            };
+            (board.id.clone(), at)
+        })
+        .collect()
+}
+
+/// After a change: pins whose artboard is gone stay where they were on the
+/// canvas, and pins whose artboard came back (by undo, say) follow it again.
+/// The ids of comments it changes go on `updates`.
+fn reattach(
+    doc: &Document,
+    comments: &mut [Comment],
+    updates: &mut Vec<String>,
+    places: &[(NodeId, Point)],
+) {
+    for comment in comments {
+        let Some(board_id) = comment.artboard_id.as_deref() else {
+            continue;
+        };
+        let on_canvas = doc.get(board_id).is_some_and(|n| n.is_artboard());
+        let detached = match (on_canvas, comment.detached_at) {
+            (true, Some(_)) => None,
+            (false, None) => match places.iter().find(|(id, _)| id == board_id) {
+                Some((_, at)) => Some(Point {
+                    x: at.x + comment.x,
+                    y: at.y + comment.y,
+                }),
+                None => continue,
+            },
+            _ => continue,
+        };
+        comment.detached_at = detached;
+        updates.push(comment.id.clone());
     }
 }
 
@@ -622,5 +698,28 @@ mod tests {
         crashed.replay(Record::Change { change });
         assert!(crashed.undo("alice", 5).is_none());
         assert_eq!(color_of(&crashed, "a").as_deref(), Some("blue"));
+    }
+
+    #[test]
+    fn pins_stay_put_when_their_artboard_goes_and_follow_it_back() {
+        let mut d = design();
+        let mut board = Node::element("a", "div");
+        board.index = "V".into();
+        board.x = Some(100.0);
+        board.y = Some(50.0);
+        d.commit("agent", "board", &[Op::Create { node: board }], 1);
+        let id = pin(&mut d, "a");
+        assert!(d.take_comment_updates().is_empty());
+
+        d.commit("agent", "delete", &[Op::Delete { id: "a".into() }], 2);
+        let updated = d.take_comment_updates();
+        assert_eq!(updated.len(), 1);
+        // The pin was 10, 20 into the artboard at 100, 50.
+        assert_eq!(updated[0].detached_at, Some(Point { x: 110.0, y: 70.0 }));
+
+        d.undo("agent", 3).unwrap();
+        let updated = d.take_comment_updates();
+        assert_eq!(updated[0].id, id);
+        assert_eq!(updated[0].detached_at, None, "back on its artboard");
     }
 }

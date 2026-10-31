@@ -222,6 +222,110 @@
       "type": "comment"
     },
     {
+      "actorName": "Claude",
+      "change": {
+        "actor": "agent:Claude",
+        "label": "Create artboard",
+        "ops": [
+          {
+            "node": {
+              "attrs": {},
+              "id": "scratch",
+              "index": "l",
+              "name": "Scratch",
+              "parent": null,
+              "styles": {
+                "background-color": "#ffffff",
+                "display": "flex",
+                "flex-direction": "column",
+                "height": "200px",
+                "overflow": "hidden",
+                "position": "relative",
+                "width": "300px"
+              },
+              "tag": "div",
+              "text": null,
+              "type": "element",
+              "x": 2000.0,
+              "y": 0.0
+            },
+            "op": "create"
+          }
+        ],
+        "origin": "edit",
+        "seq": 5
+      },
+      "type": "change"
+    },
+    {
+      "comment": {
+        "artboardId": "scratch",
+        "createdAt": 0,
+        "id": "comment2",
+        "messages": [
+          {
+            "at": 0,
+            "author": {
+              "id": "user:1",
+              "kind": "user",
+              "name": "Guest"
+            },
+            "body": "Remove this?",
+            "seq": 5
+          }
+        ],
+        "nodeId": null,
+        "resolved": false,
+        "x": 5.0,
+        "y": 5.0
+      },
+      "type": "comment"
+    },
+    {
+      "actorName": "Claude",
+      "change": {
+        "actor": "agent:Claude",
+        "label": "Delete",
+        "ops": [
+          {
+            "id": "scratch",
+            "op": "delete"
+          }
+        ],
+        "origin": "edit",
+        "seq": 6
+      },
+      "type": "change"
+    },
+    {
+      "comment": {
+        "artboardId": "scratch",
+        "createdAt": 0,
+        "detachedAt": {
+          "x": 2005.0,
+          "y": 5.0
+        },
+        "id": "comment2",
+        "messages": [
+          {
+            "at": 0,
+            "author": {
+              "id": "user:1",
+              "kind": "user",
+              "name": "Guest"
+            },
+            "body": "Remove this?",
+            "seq": 5
+          }
+        ],
+        "nodeId": null,
+        "resolved": false,
+        "x": 5.0,
+        "y": 5.0
+      },
+      "type": "comment"
+    },
+    {
       "meta": {
         "createdAt": 0,
         "id": "design1",

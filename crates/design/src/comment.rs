@@ -79,6 +79,17 @@ pub struct Comment {
     pub created_at: u64,
     /// The first message is the comment itself; the rest are replies.
     pub messages: Vec<Message>,
+    /// Where the pin was on the canvas when its artboard was deleted (or moved
+    /// into another element). Viewers pin it there until the artboard is back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detached_at: Option<Point>,
+}
+
+/// A point on the canvas.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Point {
+    pub x: f64,
+    pub y: f64,
 }
 
 impl Comment {
@@ -378,6 +389,7 @@ mod tests {
             resolved: false,
             created_at: 0,
             messages: vec![message(AuthorKind::User)],
+            detached_at: None,
         };
         assert!(comment.awaits_agent());
         comment.messages.push(message(AuthorKind::Agent));
