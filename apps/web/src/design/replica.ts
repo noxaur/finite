@@ -12,6 +12,9 @@ export type Applied =
   | { readonly op: "set"; readonly node: Node; readonly key: string }
   | { readonly op: "move"; readonly node: Node; readonly from: string | null };
 
+/** Base-62 digits, as in `crates/design/src/fractional.rs`. Keys never end in `0`. */
+const INDEX_RE = /^[0-9A-Za-z]*[1-9A-Za-z]$/;
+
 const byIndex = (a: Node, b: Node) =>
   a.index < b.index ? -1 : a.index > b.index ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 
@@ -87,8 +90,9 @@ export class Replica {
       }
       case "move": {
         const node = this.nodes.get(op.id);
-        if (!node || !this.canParent(op.parent)) return null;
+        if (!node || !INDEX_RE.test(op.index) || !this.canParent(op.parent)) return null;
         if (op.parent === op.id || (op.parent && this.isAncestor(op.id, op.parent))) return null;
+        if (node.parent === op.parent && node.index === op.index) return null;
         const from = node.parent;
         this.remove(node.id);
         const moved = { ...node, parent: op.parent, index: op.index };
@@ -139,8 +143,13 @@ export class Replica {
   }
 }
 
-/** A copy of `node` with one property changed, or `null` if it already had that value. */
+/**
+ * A copy of `node` with one property changed, or `null` if it already had that
+ * value or the value has the wrong type (`x` and `y` take numbers, the rest strings).
+ */
 function withProp(node: Node, key: string, raw: string | number | null): Node | null {
+  const numeric = key === "x" || key === "y";
+  if (raw !== null && typeof raw !== (numeric ? "number" : "string")) return null;
   const str = typeof raw === "string" ? raw : null;
   const num = typeof raw === "number" ? raw : null;
   const record = (map: Readonly<Record<string, string>>, name: string) => {

@@ -104,6 +104,18 @@ Say Alice and Bob are both agents on one design:
 
 The test `undo_only_reverses_own_changes` in `design.rs` runs exactly this.
 
+### The same rules in two languages
+
+The browser applies ops too, in `Replica` (`apps/web/src/design/replica.ts`), so the rules exist twice: once in Rust and once in TypeScript. A shared **golden file** keeps them in step. `crates/design/fixtures/apply.json` lists cases: starting nodes, a list of ops, and the expected result. The Rust test (`crates/design/tests/conformance.rs`) and the TypeScript test (`apps/web/src/design/conformance.test.ts`) both run every case.
+
+The expected results come from the Rust rules. To change a rule, you change `document.rs`, add or edit a case in the fixture, and regenerate:
+
+```bash
+FINITE_UPDATE_FIXTURES=1 cargo test -p finite-design --test conformance
+```
+
+Then `vp test` tells you whether `Replica` agrees. On its first run, it caught three ways it didn't: the browser cleared `x` when an op set it to the string `"10"` (Rust rejects it), and it accepted invalid indexes like `"V0"` and moves to where a node already was.
+
 ## Edit commands: from a tool call to ops
 
 Agents don't send ops. They call tools with friendlier arguments, and `crates/design/src/edit.rs` translates them. If you want to add a tool, you start here. Each command reads the current document, checks the request, and returns ops. It never changes the document itself.
@@ -238,7 +250,6 @@ All the thread rules live in `crates/design`: `comment.rs` defines the types and
 
 If you grow Finite, these are the places that will hurt first.
 
-- **The op rules are written twice**, once in Rust (`document.rs`) and once in TypeScript (`replica.ts`). Nothing checks that they agree, so a fix in one can silently skip the other.
 - **`DesignCanvas.tsx` does a lot**: the socket, the replica, the renderer, the camera, comments, hover and keyboard shortcuts all live in one 600-line component.
 - **Saving rewrites the whole design** every time. That's fine for a few thousand nodes, and slow for very large designs.
 - **Everything lives in one process.** The hub keeps designs in memory and broadcasts in-process, so two server instances can't share a design yet.
