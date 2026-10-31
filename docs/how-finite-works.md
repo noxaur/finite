@@ -206,12 +206,15 @@ update_styles({ "designId": "k7jo11y14e",
 
 ## The viewer
 
-The browser side lives in `apps/web/src/design`. It's plain TypeScript classes. React only hosts them, in `components/DesignCanvas.tsx`.
+The browser side lives in `apps/web/src/design`. It's plain TypeScript classes, and React only hosts them. Here they are in the order a message flows through them:
 
 - **`socket.ts`** opens the WebSocket, decodes each message with the Effect schemas in `schema.ts`, and reconnects with backoff. Every connection starts with a snapshot, so a reconnect needs no special catch-up logic.
+- **`DesignSession`** (`session.ts`) owns one open design. It feeds each socket message to the replica, hands every applied op to the renderer, and keeps what the page shows around the canvas: the design's name, presence badges, comments, the activity list and the connection status. It holds all of that in one immutable state object, and `DesignCanvas` re-renders when it changes. The renderer plugs in through a three-method interface (`DesignView`), so `session.test.ts` runs it in Node with a fake renderer.
 - **`Replica`** (`replica.ts`) is the browser's copy of the document. Its `apply` follows the same rules as the Rust `Document::apply`, op for op. It returns what it touched, for the renderer.
 - **`Renderer`** (`renderer.ts`) draws each artboard and patches only the DOM nodes an op touched. An artboard normally renders inside a **shadow root**, which scopes its `<style>` blocks to it and keeps the app's CSS out. An artboard that contains a `<script>` renders in a **sandboxed iframe** instead (`sandbox="allow-scripts"`), with a content security policy that blocks network requests. Iframes can't be patched from outside, so they reload 150 ms after a burst of edits.
 - **`Camera`** (`camera.ts`) handles pan and zoom with one CSS transform on the canvas. It also converts page coordinates to canvas coordinates (`toWorld`).
+
+`components/DesignCanvas.tsx` wires these together and adds what's specific to the page: the comment tool, hover outlines, the zoom controls and keyboard shortcuts.
 
 The design list page (`DesignGrid.tsx`) uses the lobby socket, and each card's `Thumbnail` renders a static copy of the design with scripts off.
 
@@ -250,6 +253,5 @@ All the thread rules live in `crates/design`: `comment.rs` defines the types and
 
 If you grow Finite, these are the places that will hurt first.
 
-- **`DesignCanvas.tsx` does a lot**: the socket, the replica, the renderer, the camera, comments, hover and keyboard shortcuts all live in one 600-line component.
 - **Saving rewrites the whole design** every time. That's fine for a few thousand nodes, and slow for very large designs.
 - **Everything lives in one process.** The hub keeps designs in memory and broadcasts in-process, so two server instances can't share a design yet.

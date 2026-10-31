@@ -1,0 +1,133 @@
+import { describe, expect, it } from "vite-plus/test";
+import type { Applied } from "./replica";
+import type { Comment, DesignMessage, Node, Presence } from "./schema";
+import { ACTIVITY_LIMIT, DesignSession, type DesignView } from "./session";
+
+const node = (id: string, parent: string | null): Node => ({
+  id,
+  parent,
+  index: "V",
+  type: "element",
+  tag: "div",
+  name: null,
+  text: null,
+  x: parent === null ? 0 : null,
+  y: parent === null ? 0 : null,
+  styles: {},
+  attrs: {},
+});
+
+const snapshot = (presence: ReadonlyArray<Presence> = []): DesignMessage => ({
+  type: "snapshot",
+  snapshot: {
+    meta: { id: "d", name: "Landing", createdAt: 0, updatedAt: 0 },
+    seq: 3,
+    nodes: [node("a", null), node("b", "a")],
+    comments: [],
+  },
+  presence,
+});
+
+const recolor = (seq: number, origin: "edit" | "undo" = "edit"): DesignMessage => ({
+  type: "change",
+  actorName: "Claude",
+  change: {
+    seq,
+    actor: "agent:Claude",
+    origin,
+    label: "Update styles",
+    ops: [{ op: "set", id: "b", key: "style:color", value: `#${seq}` }],
+  },
+});
+
+const presence = (nodeIds: ReadonlyArray<string>): Presence => ({
+  actor: "agent:Claude",
+  name: "Claude",
+  nodeIds,
+  status: "Building",
+  updatedAt: 0,
+});
+
+class FakeView implements DesignView {
+  resets = 0;
+  applied: Applied[] = [];
+  working: ReadonlyMap<string, string> = new Map();
+  reset() {
+    this.resets++;
+  }
+  apply(applied: Applied) {
+    this.applied.push(applied);
+  }
+  setWorking(working: ReadonlyMap<string, string>) {
+    this.working = working;
+  }
+}
+
+const session = () => {
+  const view = new FakeView();
+  return { view, session: new DesignSession(view, undefined, () => 42) };
+};
+
+describe("DesignSession", () => {
+  it("loads a snapshot and draws it from scratch", () => {
+    const { view, session: s } = session();
+    s.receive(snapshot());
+    expect(view.resets).toBe(1);
+    expect(s.state.meta?.name).toBe("Landing");
+    expect(s.state.artboardCount).toBe(1);
+    expect(s.state.version).toBe(1);
+  });
+
+  it("applies new changes, skips old ones, and records activity", () => {
+    const { view, session: s } = session();
+    s.receive(snapshot());
+    s.receive(recolor(3));
+    expect(view.applied).toHaveLength(0);
+    s.receive(recolor(4));
+    s.receive(recolor(5, "undo"));
+    expect(view.applied).toHaveLength(2);
+    expect(s.replica.get("b")?.styles.color).toBe("#5");
+    expect(s.state.activity.map((a) => a.label)).toEqual(["Undo: Update styles", "Update styles"]);
+    expect(s.state.activity[0]).toMatchObject({ seq: 5, actor: "Claude", at: 42 });
+  });
+
+  it("keeps only the latest activity", () => {
+    const { session: s } = session();
+    s.receive(snapshot());
+    for (let seq = 4; seq < 4 + ACTIVITY_LIMIT + 3; seq++) s.receive(recolor(seq));
+    expect(s.state.activity).toHaveLength(ACTIVITY_LIMIT);
+    expect(s.state.activity[0]?.seq).toBe(3 + ACTIVITY_LIMIT + 3);
+  });
+
+  it("badges the artboard that holds the nodes an agent works on", () => {
+    const { view, session: s } = session();
+    s.receive(snapshot([presence(["b"])]));
+    expect(view.working).toEqual(new Map([["a", "Claude: Building"]]));
+    s.receive({ type: "presence", presence: [] });
+    expect(s.state.working.size).toBe(0);
+  });
+
+  it("replaces comments by id and notifies listeners", () => {
+    const { session: s } = session();
+    let calls = 0;
+    const unsubscribe = s.subscribe(() => calls++);
+    s.receive(snapshot());
+    const comment: Comment = {
+      id: "c1",
+      artboardId: "a",
+      nodeId: "b",
+      x: 0,
+      y: 0,
+      resolved: false,
+      createdAt: 0,
+      messages: [],
+    };
+    s.receive({ type: "comment", comment });
+    s.upsertComment({ ...comment, resolved: true });
+    expect([...s.state.comments.values()].map((c) => c.resolved)).toEqual([true]);
+    expect(calls).toBe(3);
+    unsubscribe();
+    s.upsertComment(comment);
+    expect(calls).toBe(3);
+  });
+});

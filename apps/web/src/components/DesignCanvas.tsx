@@ -8,8 +8,7 @@ import { Api } from "@/api/Api";
 import { Camera, union } from "@/design/camera";
 import { type Hit, Renderer } from "@/design/renderer";
 import { Replica } from "@/design/replica";
-import type { Comment, DesignMeta, Presence } from "@/design/schema";
-import { connectDesign, type SocketStatus } from "@/design/socket";
+import { DesignSession, initialSessionState, type SessionState } from "@/design/session";
 import { mcpUrl } from "@/lib/mcp";
 import { localUser } from "@/lib/user";
 import { timeAgo } from "@/lib/time";
@@ -17,15 +16,6 @@ import { runtime } from "@/runtime";
 import { colors, radii, space } from "@/styles/tokens.stylex";
 import { CommentLayer, type Draft, type Mode, ToolPill } from "./Comments";
 
-interface Activity {
-  readonly seq: number;
-  readonly actor: string;
-  readonly label: string;
-  readonly at: number;
-}
-
-/** How many recent changes the activity list shows. */
-const ACTIVITY_LIMIT = 6;
 /** How long "show what changed" outlines stay up. */
 const FLASH_MS = 1800;
 /** A press that moves farther than this is a drag, not a click. */
@@ -35,10 +25,10 @@ const isTyping = (target: EventTarget | null) =>
   target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
 
 /**
- * A live view of one design. The server streams a snapshot and then every
- * change; the replica applies them and the renderer patches the DOM. Users
- * can't edit the design, but in comment mode they pin comments that agents
- * pick up over MCP.
+ * A live view of one design. `DesignSession` streams it from the server and
+ * the renderer patches the DOM; this component adds the camera, comments and
+ * keyboard shortcuts. Users can't edit the design, but in comment mode they
+ * pin comments that agents pick up over MCP.
  */
 export function DesignCanvas({ id }: { id: string }) {
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -48,33 +38,23 @@ export function DesignCanvas({ id }: { id: string }) {
   const hoverFrame = useRef(0);
   const cameraRef = useRef<Camera | null>(null);
   const rendererRef = useRef<Renderer | null>(null);
-  const replicaRef = useRef<Replica | null>(null);
-  const workingRef = useRef<ReadonlyMap<string, string>>(new Map());
+  const sessionRef = useRef<DesignSession | null>(null);
 
-  const [meta, setMeta] = useState<DesignMeta | null>(null);
-  const [presence, setPresence] = useState<ReadonlyArray<Presence>>([]);
-  const [status, setStatus] = useState<SocketStatus>("connecting");
-  const [activity, setActivity] = useState<ReadonlyArray<Activity>>([]);
+  // Re-rendering on every session update also moves pins with their artboards.
+  const [session, setSession] = useState<SessionState>(initialSessionState);
+  const { meta, presence, status, activity, comments, working } = session;
   const [zoom, setZoom] = useState(1);
-  const [artboards, setArtboards] = useState(0);
   const [missing, setMissing] = useState(false);
   const [, setTick] = useState(0);
-  // Bumped after every snapshot or change, so pins follow their artboards.
-  const [, setVersion] = useState(0);
   const [mode, setMode] = useState<Mode>("pointer");
-  const [comments, setComments] = useState<ReadonlyMap<string, Comment>>(new Map());
   const [openId, setOpenId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [hover, setHover] = useState<Hit | null>(null);
   const [flash, setFlash] = useState<ReadonlyArray<string>>([]);
-  const [working, setWorking] = useState<ReadonlyMap<string, string>>(new Map());
 
   // Whether a draft or thread is open, for the window key handler.
   const popupRef = useRef(false);
   popupRef.current = draft !== null || openId !== null;
-
-  const upsertComment = (comment: Comment) =>
-    setComments((map) => new Map(map).set(comment.id, comment));
 
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -82,79 +62,30 @@ export function DesignCanvas({ id }: { id: string }) {
     const frames = framesRef.current;
     if (!viewport || !world || !frames) return;
 
-    const replica = new Replica();
     const camera = new Camera(viewport, world);
+    const replica = new Replica();
     const renderer = new Renderer(frames, replica, {
       live: true,
       onWheel: (event) => camera.wheel(event),
     });
-    replicaRef.current = replica;
+    const session = new DesignSession(renderer, replica);
+    sessionRef.current = session;
     rendererRef.current = renderer;
     cameraRef.current = camera;
     camera.subscribe((view) => setZoom(view.zoom));
 
     // Frame the artboards once, when the first ones appear.
     let framed = false;
-    const frameOnce = () => {
+    const unsubscribe = session.subscribe(() => {
+      setSession(session.state);
       if (framed) return;
       const bounds = union(renderer.artboardBounds().values());
       if (bounds) {
         camera.fitTo(bounds);
         framed = true;
       }
-    };
-    const synced = () => {
-      renderer.setWorking(workingRef.current);
-      setArtboards(replica.artboards().length);
-      setVersion((v) => v + 1);
-      frameOnce();
-    };
-
-    const close = connectDesign(id, {
-      onStatus: setStatus,
-      onMessage: (message) => {
-        switch (message.type) {
-          case "snapshot":
-            replica.load(message.snapshot);
-            renderer.reset();
-            setMeta(message.snapshot.meta);
-            setPresence(message.presence);
-            setComments(new Map(message.snapshot.comments.map((c) => [c.id, c])));
-            synced();
-            return;
-          case "change": {
-            const { change } = message;
-            if (change.seq <= replica.seq) return;
-            for (const op of change.ops) {
-              const applied = replica.apply(op);
-              if (applied) renderer.apply(applied);
-            }
-            replica.seq = change.seq;
-            const label =
-              change.origin === "edit"
-                ? change.label
-                : `${change.origin === "undo" ? "Undo" : "Redo"}: ${change.label}`;
-            setActivity((list) =>
-              [{ seq: change.seq, actor: message.actorName, label, at: Date.now() }, ...list].slice(
-                0,
-                ACTIVITY_LIMIT,
-              ),
-            );
-            synced();
-            return;
-          }
-          case "presence":
-            setPresence(message.presence);
-            return;
-          case "meta":
-            setMeta(message.meta);
-            return;
-          case "comment":
-            upsertComment(message.comment);
-            return;
-        }
-      },
     });
+    const close = session.connect(id);
 
     // The socket can't report a 404, so ask the API whether the design exists.
     const controller = new AbortController();
@@ -196,6 +127,7 @@ export function DesignCanvas({ id }: { id: string }) {
     const ticker = setInterval(() => setTick((t) => t + 1), 15_000);
 
     return () => {
+      unsubscribe();
       close();
       controller.abort();
       camera.dispose();
@@ -224,21 +156,6 @@ export function DesignCanvas({ id }: { id: string }) {
     return () => clearTimeout(timer);
   }, [flash]);
 
-  // Badge each artboard an agent is working on with the agent's name and status.
-  useEffect(() => {
-    const replica = replicaRef.current;
-    const working = new Map<string, string>();
-    for (const p of presence) {
-      for (const nodeId of p.nodeIds) {
-        const board = replica?.artboardOf(nodeId);
-        if (board) working.set(board.id, p.status ? `${p.name}: ${p.status}` : p.name);
-      }
-    }
-    workingRef.current = working;
-    rendererRef.current?.setWorking(working);
-    setWorking(working);
-  }, [presence]);
-
   const onCanvasPointerMove = (e: React.PointerEvent) => {
     if (mode !== "comment" || draft) return;
     const { clientX, clientY } = e;
@@ -263,7 +180,7 @@ export function DesignCanvas({ id }: { id: string }) {
       return;
     }
     const camera = cameraRef.current;
-    const replica = replicaRef.current;
+    const replica = sessionRef.current?.replica;
     if (mode !== "comment" || !camera || !replica) return;
     const point = camera.toWorld(e.clientX, e.clientY);
     const hit = rendererRef.current?.hitTest(e.clientX, e.clientY) ?? null;
@@ -286,7 +203,7 @@ export function DesignCanvas({ id }: { id: string }) {
       Api.use((api) => api.createComment(id, { author: localUser(), body, ...draft })),
     );
     if (Exit.isFailure(exit)) return false;
-    upsertComment(exit.value);
+    sessionRef.current?.upsertComment(exit.value);
     setDraft(null);
     return true;
   };
@@ -296,7 +213,7 @@ export function DesignCanvas({ id }: { id: string }) {
       Api.use((api) => api.replyToComment(id, commentId, { author: localUser(), body })),
     );
     if (Exit.isFailure(exit)) return false;
-    upsertComment(exit.value);
+    sessionRef.current?.upsertComment(exit.value);
     return true;
   };
 
@@ -304,7 +221,7 @@ export function DesignCanvas({ id }: { id: string }) {
     void runtime
       .runPromiseExit(Api.use((api) => api.setCommentResolved(id, commentId, resolved)))
       .then((exit) => {
-        if (Exit.isSuccess(exit)) upsertComment(exit.value);
+        if (Exit.isSuccess(exit)) sessionRef.current?.upsertComment(exit.value);
       });
   };
 
@@ -369,9 +286,9 @@ export function DesignCanvas({ id }: { id: string }) {
                 />
               ),
           )}
-          {replicaRef.current && (
+          {sessionRef.current && (
             <CommentLayer
-              replica={replicaRef.current}
+              replica={sessionRef.current.replica}
               comments={comments}
               openId={openId}
               draft={draft}
@@ -410,7 +327,7 @@ export function DesignCanvas({ id }: { id: string }) {
         />
       </header>
 
-      {meta && artboards === 0 && (
+      {meta && session.artboardCount === 0 && (
         <div {...stylex.props(styles.empty)}>
           <p {...stylex.props(styles.emptyTitle)}>No artboards yet</p>
           <p {...stylex.props(styles.muted)}>
