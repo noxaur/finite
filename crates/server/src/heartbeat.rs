@@ -10,11 +10,20 @@
 //!
 //! Pings also keep proxies such as nginx, which close connections that are
 //! quiet for a minute by default, from cutting off a viewer of a quiet design.
+//!
+//! Browsers can't see those pings, though, so they can't tell a dead
+//! connection from a quiet design. So the web app also sends [`PING`] as a
+//! message, and the server answers [`PONG`]. If the answer doesn't come, the
+//! app reconnects (`socket.ts`).
 
 use std::time::Duration;
 
 use futures::{Sink, SinkExt};
 use tokio::time::{Instant, Interval, MissedTickBehavior};
+
+/// The web app's ping, and the server's answer.
+pub const PING: &str = r#"{"type":"ping"}"#;
+pub const PONG: &str = r#"{"type":"pong"}"#;
 
 pub const PING_EVERY: Duration = Duration::from_secs(20);
 pub const SILENT_FOR: Duration = Duration::from_secs(60);

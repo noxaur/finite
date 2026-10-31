@@ -375,7 +375,14 @@ async fn stream(
             },
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
-                Some(Ok(_)) => heartbeat.heard(),
+                Some(Ok(message)) => {
+                    heartbeat.heard();
+                    if matches!(&message, Message::Text(text) if text.as_str() == heartbeat::PING)
+                        && !heartbeat::send(&mut socket, Message::text(heartbeat::PONG)).await
+                    {
+                        return;
+                    }
+                }
             },
             alive = heartbeat.tick() => {
                 if !alive || !heartbeat::send(&mut socket, Message::Ping(Default::default())).await {

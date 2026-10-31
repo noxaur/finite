@@ -1,15 +1,16 @@
 //! Sockets whose browser went quiet close; sockets whose browser answers
-//! pings stay open. Tokio's clock is paused, so a minute passes instantly.
+//! pings stay open, and the web app's own pings get an answer. Tokio's clock
+//! is paused, so a minute passes instantly.
 
 use std::sync::Arc;
 
 use finite_server::{
     Hub, app,
-    heartbeat::{PING_EVERY, SILENT_FOR},
+    heartbeat::{PING, PING_EVERY, PONG, SILENT_FOR},
     router,
     store::MemoryStore,
 };
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -60,6 +61,17 @@ async fn quiet_sockets_close_and_answering_ones_stay_open() {
                 "{url}: an answering client should stay open"
             );
             live.abort();
+
+            // The web app's own ping gets an answer.
+            let (mut app, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            app.next().await.unwrap().unwrap();
+            app.send(Message::text(PING)).await.unwrap();
+            let answer = loop {
+                if let Message::Text(text) = app.next().await.unwrap().unwrap() {
+                    break text;
+                }
+            };
+            assert_eq!(answer.as_str(), PONG, "{url}");
         }
     }
 }

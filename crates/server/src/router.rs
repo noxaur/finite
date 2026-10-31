@@ -422,7 +422,15 @@ async fn relay_lobby(mut client: WebSocket, upstreams: Vec<Upstream>, mut comple
             }
             incoming = client.recv() => match incoming {
                 Some(Ok(ws::Message::Close(_))) | None | Some(Err(_)) => return,
-                Some(Ok(_)) => heartbeat.heard(),
+                Some(Ok(message)) => {
+                    heartbeat.heard();
+                    // The list merges several servers, so the router answers itself.
+                    if matches!(&message, ws::Message::Text(text) if text.as_str() == heartbeat::PING)
+                        && !heartbeat::send(&mut client, ws::Message::text(heartbeat::PONG)).await
+                    {
+                        return;
+                    }
+                }
             },
             alive = heartbeat.tick() => {
                 if !alive || !heartbeat::send(&mut client, ws::Message::Ping(Default::default())).await {

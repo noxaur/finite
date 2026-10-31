@@ -15,47 +15,95 @@ function socketUrl(path: string) {
 }
 
 /**
+ * How often the socket asks the server whether the connection still works,
+ * and how long it waits for any message before it gives up and reconnects.
+ * The server pings too, but browsers answer those pings without telling the
+ * page, so after a laptop wakes up on another network, a dead connection
+ * looks like a quiet design. The server answers `PING` with `PONG`.
+ */
+export const PING_EVERY = 20_000;
+export const ANSWER_WITHIN = 10_000;
+export const PING = '{"type":"ping"}';
+export const PONG = '{"type":"pong"}';
+
+/** The part of `WebSocket` this file uses, so tests can pass a fake. */
+export interface SocketLike {
+  onopen: (() => void) | null;
+  onmessage: ((event: { data: unknown }) => void) | null;
+  onclose: (() => void) | null;
+  send(data: string): void;
+  close(): void;
+}
+
+/**
  * Opens a WebSocket that decodes each message with `schema` and reconnects
- * with backoff. `path` is called for each attempt, so a reconnect can say
+ * with backoff. `url` is called for each attempt, so a reconnect can say
  * where it left off. Returns a function that closes it for good.
  */
-function connect<S extends Schema.Top>(
-  path: () => string,
+export function connect<S extends Schema.Top>(
+  url: () => string,
   schema: S,
   { onMessage, onStatus }: SocketHandlers<S["Type"]>,
+  open: (url: string) => SocketLike = (url) => new WebSocket(url) as unknown as SocketLike,
 ): () => void {
   const decode = Schema.decodeUnknownSync(schema as never) as (input: unknown) => S["Type"];
-  let socket: WebSocket | undefined;
+  let socket: SocketLike | undefined;
   let retry: ReturnType<typeof setTimeout> | undefined;
+  let ping: ReturnType<typeof setInterval> | undefined;
+  let deadline: ReturnType<typeof setTimeout> | undefined;
   let attempt = 0;
   let closed = false;
 
-  const open = () => {
+  const stopPinging = () => {
+    clearInterval(ping);
+    clearTimeout(deadline);
+  };
+
+  // Drops the socket and tries again. A dead connection can take minutes to
+  // fire `close`, so the old socket is detached rather than waited for.
+  const lost = () => {
+    stopPinging();
+    if (socket) {
+      socket.onopen = socket.onmessage = socket.onclose = null;
+      socket.close();
+      socket = undefined;
+    }
+    if (closed) return;
+    onStatus?.("closed");
+    retry = setTimeout(start, Math.min(500 * 2 ** attempt++, 5000));
+  };
+
+  const start = () => {
     onStatus?.("connecting");
-    socket = new WebSocket(socketUrl(path()));
-    socket.onopen = () => {
+    const current = open(url());
+    socket = current;
+    current.onopen = () => {
       attempt = 0;
       onStatus?.("open");
+      ping = setInterval(() => {
+        current.send(PING);
+        clearTimeout(deadline);
+        deadline = setTimeout(lost, ANSWER_WITHIN);
+      }, PING_EVERY);
     };
-    socket.onmessage = (event) => {
+    current.onmessage = (event) => {
+      // Any message shows the connection works.
+      clearTimeout(deadline);
+      if (event.data === PONG) return;
       try {
         onMessage(decode(JSON.parse(String(event.data))));
       } catch (error) {
         console.error("Dropped a malformed socket message", error);
       }
     };
-    socket.onclose = () => {
-      if (closed) return;
-      onStatus?.("closed");
-      retry = setTimeout(open, Math.min(500 * 2 ** attempt++, 5000));
-    };
+    current.onclose = lost;
   };
 
-  open();
+  start();
   return () => {
     closed = true;
     clearTimeout(retry);
-    socket?.close();
+    lost();
   };
 }
 
@@ -67,7 +115,12 @@ export const connectDesign = (
   id: string,
   handlers: SocketHandlers<DesignMessage>,
   query: () => string = () => "",
-) => connect(() => `/api/designs/${encodeURIComponent(id)}/ws${query()}`, DesignMessage, handlers);
+) =>
+  connect(
+    () => socketUrl(`/api/designs/${encodeURIComponent(id)}/ws${query()}`),
+    DesignMessage,
+    handlers,
+  );
 
 export const connectLobby = (handlers: SocketHandlers<LobbyMessage>) =>
-  connect(() => "/api/designs/ws", LobbyMessage, handlers);
+  connect(() => socketUrl("/api/designs/ws"), LobbyMessage, handlers);
