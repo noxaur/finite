@@ -17,7 +17,8 @@ pub struct Entry {
 /// drag or a multi-step tool call undoes in one step.
 ///
 /// Histories are saved with full snapshots (see [`crate::Design::snapshot_to_save`]),
-/// so a named agent can still undo after a clean restart. An open batch isn't saved.
+/// so a named agent can still undo after a clean restart, and rebuilt from the
+/// journal after a crash (see [`crate::Design::replay`]). An open batch isn't saved.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct History {
     #[serde(default)]

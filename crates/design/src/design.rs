@@ -264,18 +264,21 @@ impl Design {
         change
     }
 
-    /// Applies a journal record. Changes go straight to the document; they
-    /// aren't added to anyone's undo history.
+    /// Applies a journal record. A change also updates its actor's undo
+    /// history the way the live call did (see `replay_with_history`), so
+    /// undo keeps working after a crash.
     pub fn replay(&mut self, record: Record) {
         match record {
             Record::Change { change } => {
                 if change.seq > self.seq {
-                    self.doc.apply_all(&change.ops);
+                    if !self.replay_with_history(&change) {
+                        self.doc.apply_all(&change.ops);
+                        // The saved undo steps don't explain this change, so
+                        // they may no longer fit the document. Drop them
+                        // rather than undo the wrong thing.
+                        self.histories.clear();
+                    }
                     self.seq = change.seq;
-                    // Saved undo steps were recorded against the snapshot's
-                    // document. Once later changes replay on top, they no
-                    // longer match it, so drop them rather than undo the wrong thing.
-                    self.histories.clear();
                 }
             }
             Record::Comment { comment } => {
@@ -285,6 +288,49 @@ impl Design {
                 }
             }
             Record::Meta { meta } => self.meta = meta,
+        }
+    }
+
+    /// Applies a journaled change and updates its actor's history the way the
+    /// live call did, so undo still works after a crash. An edit records its
+    /// inverse, as [`Design::commit`] does. An undo or redo takes the entry
+    /// the live call took: the first from the top that still applies. If that
+    /// entry doesn't produce the journaled ops, it's put back and this returns
+    /// `false` with the document unchanged.
+    fn replay_with_history(&mut self, change: &Change) -> bool {
+        if change.origin == Origin::Edit {
+            let (_, inverse) = self.doc.apply_all(&change.ops);
+            self.history_mut(&change.actor)
+                .record(change.label.clone(), inverse);
+            return true;
+        }
+        let Some(mut history) = self.histories.get(&change.actor).cloned() else {
+            return false;
+        };
+        loop {
+            let entry = match change.origin {
+                Origin::Undo => history.pop_undo(),
+                _ => history.pop_redo(),
+            };
+            let Some(entry) = entry else { return false };
+            let (applied, inverse) = self.doc.apply_all(&entry.ops);
+            if applied.is_empty() {
+                continue;
+            }
+            if applied != change.ops {
+                self.doc.apply_all(&inverse);
+                return false;
+            }
+            let reverse = Entry {
+                label: entry.label,
+                ops: inverse,
+            };
+            match change.origin {
+                Origin::Undo => history.push_redo(reverse),
+                _ => history.push_undo(reverse),
+            }
+            self.histories.insert(change.actor.clone(), history);
+            return true;
         }
     }
 
@@ -695,7 +741,7 @@ mod tests {
     }
 
     #[test]
-    fn histories_survive_a_saved_snapshot_but_not_a_replayed_journal() {
+    fn histories_survive_a_saved_snapshot_and_a_replayed_journal() {
         let mut live = design();
         live.commit("alice", "board", &[create("a", None)], 1);
         live.commit("alice", "red", &[color("a", "red")], 2);
@@ -709,15 +755,49 @@ mod tests {
         assert_eq!(restored.undo("alice", 3).unwrap().label, "red");
         assert_eq!(color_of(&restored, "a"), None);
 
-        // After a crash, the journal replays changes the saved history never saw.
+        // After a crash, the journal replays what happened since the snapshot:
+        // edits by two actors, an undo and a redo.
         let saved = live.snapshot_to_save();
-        let change = live
-            .commit("bob", "blue", &[color("a", "blue")], 4)
-            .unwrap();
+        let mut journal = vec![
+            live.commit("bob", "blue", &[color("a", "blue")], 3)
+                .unwrap(),
+            live.commit("alice", "green", &[color("a", "green")], 4)
+                .unwrap(),
+        ];
+        journal.push(live.undo("alice", 5).unwrap());
+        journal.push(live.undo("alice", 6).unwrap());
+        journal.push(live.redo("alice", 7).unwrap());
         let mut crashed = Design::from_snapshot(saved);
-        crashed.replay(Record::Change { change });
-        assert!(crashed.undo("alice", 5).is_none());
-        assert_eq!(color_of(&crashed, "a").as_deref(), Some("blue"));
+        for change in journal {
+            crashed.replay(Record::Change { change });
+        }
+        // Both now undo the same steps the same way.
+        for actor in ["alice", "bob", "alice", "alice"] {
+            let (a, b) = (live.undo(actor, 8), crashed.undo(actor, 8));
+            assert_eq!(a.map(|c| c.ops), b.map(|c| c.ops), "{actor}");
+            assert_eq!(color_of(&live, "a"), color_of(&crashed, "a"));
+        }
+    }
+
+    #[test]
+    fn a_change_its_history_doesnt_explain_drops_the_histories() {
+        let mut live = design();
+        live.commit("alice", "board", &[create("a", None)], 1);
+        live.commit("alice", "red", &[color("a", "red")], 2);
+        let saved = live.snapshot_to_save();
+        // A journaled undo that doesn't match alice's saved top entry, as if
+        // the saved history were from another timeline.
+        let odd = Change {
+            seq: 3,
+            actor: "alice".into(),
+            origin: Origin::Undo,
+            label: "red".into(),
+            ops: vec![color("a", "purple")],
+        };
+        let mut crashed = Design::from_snapshot(saved);
+        crashed.replay(Record::Change { change: odd });
+        assert_eq!(color_of(&crashed, "a").as_deref(), Some("purple"));
+        assert!(crashed.undo("alice", 4).is_none());
     }
 
     #[test]

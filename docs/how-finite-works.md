@@ -11,7 +11,7 @@ How far you read depends on what you want:
 
 - **To understand Finite,** read through "Following one edit end to end". That covers the document, undo, the server and one edit's whole trip.
 - **To change the browser side,** read "The viewer" and "Comments".
-- **To run it for real,** read "Storage" and "Undo across restarts". They cover what's saved, when, and what survives a crash.
+- **To run it for real,** read "Storage" and "Undo across restarts". They cover what's saved, when, and what survives a crash, undo included.
 - **To test a change the way a person sees it,** read "The end-to-end test".
 - **To run more than one server,** read "Running more than one server" at the end. One server is the default, and you can skip that section until you need it.
 
@@ -248,7 +248,14 @@ The hub only calls five methods on the `Store` trait in `store.rs`: `ids`, `load
 
 ### Undo across restarts
 
-Undo histories are saved, but only in full snapshots, which the server writes when it shuts down, compacts or hands a design off. So an agent that connects with an `X-Finite-Agent` header can undo after a normal restart. (An agent without one is identified by its MCP session, which ends with the restart.) The journal never holds histories. An undo step is an inverse op recorded against the document at one moment, so it only fits a document that hasn't changed since. If the journal replays changes on top of the snapshot after a crash, `Design::replay` drops the saved histories rather than undo the wrong thing. Viewers never receive histories: `Design::snapshot` leaves them out, and only `Design::snapshot_to_save` includes them.
+Undo histories are saved, but only in full snapshots, which the server writes when it shuts down, compacts or hands a design off. So an agent that connects with an `X-Finite-Agent` header can undo after a normal restart. (An agent without one is identified by its MCP session, which ends with the restart.) The journal doesn't hold histories, but it doesn't need to. After a crash, `Design::replay` rebuilds them from the journaled changes, because each change says who made it and whether it was an edit, an undo or a redo:
+
+- **An edit** is applied, and its inverse goes on its actor's undo stack, as `Design::commit` does.
+- **An undo or redo** takes the entry the live call took: the first one from the top of the stack that still applies. That entry must produce exactly the ops in the journal. Then its reverse goes on the other stack.
+
+This works because undo is **deterministic**. The same document and the same stacks always pick the same entry and produce the same ops. A `Design` test replays a journal of edits, undos and redos by two actors, and checks that every later undo matches the live design's. If an entry ever produces other ops, say a saved history from a different timeline, replay puts it back, applies the journaled ops as they are, and drops the histories. An undo step that doesn't fit the document could undo the wrong thing, so dropping them is safer.
+
+Viewers never receive histories: `Design::snapshot` leaves them out, and only `Design::snapshot_to_save` includes them.
 
 ## Following one edit end to end
 

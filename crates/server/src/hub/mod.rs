@@ -736,4 +736,56 @@ mod tests {
         assert!(handle.undo(&agent).is_some());
         assert_eq!(handle.read(|d| d.doc().len()), 0);
     }
+
+    /// After a crash, the edits since the last snapshot are only in the
+    /// journal. Replaying it rebuilds the agent's undo history too.
+    #[tokio::test]
+    async fn a_named_agent_can_undo_after_a_crash() {
+        use finite_design::edit;
+
+        let store = Arc::new(MemoryStore::default());
+        let hub = Hub::new(store.clone()).unwrap();
+        let id = hub.create("Test").meta.id;
+        let agent = Actor {
+            id: "agent:Claude".into(),
+            name: "Claude".into(),
+        };
+        // The new design's snapshot is saved first.
+        tokio::time::sleep(SAVE_DEBOUNCE * 2).await;
+        let handle = hub.get(&id).unwrap();
+        handle
+            .edit(&agent, "Create artboard", |doc| {
+                let spec = edit::NewArtboard {
+                    name: "Home".into(),
+                    width: 100.0,
+                    height: 100.0,
+                    position: None,
+                    styles: BTreeMap::new(),
+                };
+                Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
+            })
+            .unwrap();
+        handle
+            .edit(&agent, "Rename", |doc| {
+                Ok((edit::rename(doc, "board", Some("Landing"))?, ()))
+            })
+            .unwrap();
+        handle.undo(&agent).unwrap();
+        // The save task appends those to the journal; then the server dies
+        // without a final snapshot.
+        tokio::time::sleep(SAVE_DEBOUNCE * 2).await;
+        assert!(store.journal_len(&id) > 0);
+
+        let restarted = Hub::new(store.clone()).unwrap();
+        let handle = restarted.open(&id).await.unwrap();
+        assert_eq!(
+            handle.history(&agent),
+            (vec!["Create artboard".into()], vec!["Rename".into()])
+        );
+        assert!(handle.redo(&agent).is_some());
+        assert_eq!(
+            handle.read(|d| d.doc().get("board").unwrap().name.clone()),
+            Some("Landing".into())
+        );
+    }
 }
