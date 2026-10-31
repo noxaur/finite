@@ -250,10 +250,7 @@ impl Hub {
     pub fn create(self: &Arc<Self>, name: &str) -> DesignSummary {
         let now = now_ms();
         let name = finite_design::label::clip(name, finite_design::label::DESIGN_NAME);
-        // Only ids this server owns, so the design is reachable where it's created.
-        let id = std::iter::repeat_with(|| random_id(10))
-            .find(|id| self.cluster.owns(id))
-            .expect("some id hashes to this server");
+        let id = self.fresh_id(std::iter::repeat_with(|| random_id(10)));
         let design = Design::new(DesignMeta {
             id,
             name: if name.is_empty() {
@@ -272,6 +269,17 @@ impl Hub {
             &LobbyMessage::Design { design: &summary },
         ));
         summary
+    }
+
+    /// The first of `candidates` that this server owns, so the design is
+    /// reachable where it's created, and that no design here has yet. A
+    /// repeat would replace that design, in memory and on disk. With 36¹⁰
+    /// possible ids, the chance is tiny but grows with the number of designs.
+    fn fresh_id(&self, mut candidates: impl Iterator<Item = String>) -> String {
+        let designs = self.designs.read().unwrap();
+        candidates
+            .find(|id| self.cluster.owns(id) && !designs.contains_key(id))
+            .expect("some id is free and hashes to this server")
     }
 
     /// The design list's socket: the newest `LOBBY_LIMIT` designs and the
@@ -845,6 +853,14 @@ mod tests {
     }
 
     /// A few huge edits compact the journal, as many small ones do.
+    #[tokio::test]
+    async fn a_new_design_never_reuses_an_id() {
+        let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
+        let taken = hub.create("Existing").meta.id;
+        let candidates = [taken.clone(), taken.clone(), "fresh0001".to_owned()];
+        assert_eq!(hub.fresh_id(candidates.into_iter()), "fresh0001");
+    }
+
     #[tokio::test]
     async fn big_edits_compact_the_journal() {
         use finite_design::edit::{self, NewArtboard, WriteMode};
