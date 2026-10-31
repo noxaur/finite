@@ -37,7 +37,7 @@ use crate::{
 };
 
 mod format;
-mod params;
+pub(crate) mod params;
 
 use format::{OUTPUT_LIMIT, comments_json, cut, node_json, outline};
 use params::*;

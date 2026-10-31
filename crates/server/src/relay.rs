@@ -56,6 +56,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     cluster::Cluster,
+    mcp::params::ListParams,
     mcp::{INSTRUCTIONS, OWNER_META},
 };
 
@@ -233,7 +234,9 @@ impl Relay {
             .as_ref()
             .and_then(|args| args.get("limit"))
             .and_then(Value::as_u64)
-            .map_or(50, |n| n.clamp(1, 500) as usize);
+            .map_or(ListParams::DEFAULT_LIMIT, |n| {
+                (n as usize).clamp(1, ListParams::MAX_LIMIT)
+            });
         let mut designs: Vec<Value> = Vec::new();
         let mut missing = Vec::new();
         // Whether a server left some out, so the merged list is partial too.

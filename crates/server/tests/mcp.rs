@@ -647,3 +647,20 @@ async fn an_unnamed_agent_can_undo_after_a_pause() {
         .await;
     assert!(gone.is_none(), "{gone:?}");
 }
+
+/// The longest design list an agent can ask for fits in one result.
+#[tokio::test]
+async fn the_longest_design_list_fits() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Alice").await;
+    for i in 0..250 {
+        let name = format!("{i:03} {}", "Long name ".repeat(12));
+        agent.ok("create_design", json!({ "name": name })).await;
+    }
+    let list = agent.ok("list_designs", json!({ "limit": 1_000 })).await;
+    let json_end = list.rfind(']').unwrap() + 1;
+    let designs: Vec<Value> = serde_json::from_str(&list[..json_end]).unwrap();
+    assert_eq!(designs.len(), 200, "the limit is capped at 200");
+    assert!(list.len() < 60_000, "{} chars", list.len());
+    assert!(list.contains("of 250 designs"), "{}", tail(&list));
+}

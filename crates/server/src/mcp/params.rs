@@ -19,14 +19,17 @@ pub struct ListParams {
     #[serde(default)]
     pub(super) query: Option<String>,
     /// How many designs to return, most recently edited first. Defaults to
-    /// 50; at most 500.
+    /// 50; at most 200.
     #[serde(default)]
     pub(super) limit: Option<usize>,
 }
 
 impl ListParams {
-    pub(super) const DEFAULT_LIMIT: usize = 50;
-    pub(super) const MAX_LIMIT: usize = 500;
+    pub(crate) const DEFAULT_LIMIT: usize = 50;
+    /// Names are cut at 120 characters, so an entry is at most about 230
+    /// characters of JSON, and 200 of them fit in one tool result
+    /// ([`super::format::OUTPUT_LIMIT`]). 500 didn't.
+    pub(crate) const MAX_LIMIT: usize = 200;
 
     pub(super) fn limit(&self) -> usize {
         self.limit

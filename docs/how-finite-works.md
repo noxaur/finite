@@ -217,7 +217,7 @@ On startup, the hub reads every stored design to build the list, then drops each
 - `format.rs` writes the compact outlines that tools like `get_tree_summary` return.
 - `instructions.md` is the text agents read when they connect. It's plain Markdown, so you can edit the workflow without touching Rust.
 
-`crates/server/tests/mcp.rs` drives the endpoint the way an agent does. It opens a session, builds and styles a design, undoes, and answers a user's comment. If you change a tool, run it with `cargo test -p finite-server --test mcp`. The tool names follow [Paper's MCP server](https://paper.design/docs/mcp). Every tool except `list_designs` and `create_design` takes a `designId`. `list_designs` returns the 50 most recently edited designs, or up to 500 with a `limit`, and a `query` finds designs by name.
+`crates/server/tests/mcp.rs` drives the endpoint the way an agent does. It opens a session, builds and styles a design, undoes, and answers a user's comment. If you change a tool, run it with `cargo test -p finite-server --test mcp`. The tool names follow [Paper's MCP server](https://paper.design/docs/mcp). Every tool except `list_designs` and `create_design` takes a `designId`. `list_designs` returns the 50 most recently edited designs, or up to 200 with a `limit`, and a `query` finds designs by name. Names are cut at 120 characters, so 200 entries always fit in one result. The maximum used to be 500, which could come to about 115,000 characters.
 
 #### Keeping tool results short
 
