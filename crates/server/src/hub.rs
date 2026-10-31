@@ -1042,10 +1042,7 @@ mod tests {
                 Ok((edit::delete(doc, &["board".into()])?, ()))
             })
             .unwrap();
-        assert_eq!(
-            sent(),
-            [("comment".into(), true), ("change".into(), false)]
-        );
+        assert_eq!(sent(), [("comment".into(), true), ("change".into(), false)]);
         handle.undo(&agent).unwrap();
         assert_eq!(
             sent(),

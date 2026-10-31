@@ -244,7 +244,11 @@ mod relay {
     }
 
     impl Node {
-        fn start(listener: std::net::TcpListener, cluster: Cluster, store: Arc<MemoryStore>) -> Self {
+        fn start(
+            listener: std::net::TcpListener,
+            cluster: Cluster,
+            store: Arc<MemoryStore>,
+        ) -> Self {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             let _inside = runtime.enter();
             listener.set_nonblocking(true).unwrap();
