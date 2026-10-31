@@ -7,7 +7,7 @@ use std::{collections::BTreeMap, fmt};
 use serde_json::Value;
 
 use crate::{
-    document::{Document, MAX_DEPTH, Op},
+    document::{Document, MAX_DEPTH, MAX_NODES, Op},
     fractional,
     html::{self, Fragment},
     label,
@@ -208,6 +208,11 @@ pub fn write_html(
             depth + height
         ));
     }
+    let removed = ops
+        .iter()
+        .map(|op| doc.subtree(op.id()).len())
+        .sum::<usize>();
+    room_for(doc, removed, fragments.iter().map(Fragment::count).sum())?;
     let roots = fragments
         .into_iter()
         .zip(indexes)
@@ -552,7 +557,19 @@ pub fn duplicate(
         let parent = original.parent.clone();
         roots.push(fragment.create_ops(parent.as_deref(), index, position, new_id, &mut ops));
     }
+    room_for(doc, 0, ops.len())?;
     Ok((ops, roots))
+}
+
+/// Refuses an edit that would leave the design with more than [`MAX_NODES`].
+fn room_for(doc: &Document, removed: usize, added: usize) -> Result<()> {
+    let total = doc.len().saturating_sub(removed) + added;
+    if total > MAX_NODES {
+        return err(format!(
+            "that would make the design {total} nodes; the limit is {MAX_NODES}"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -692,6 +709,48 @@ mod tests {
         });
         assert!(exported.0.contains("x"));
         assert_eq!(exported.1, MAX_DEPTH + 1);
+    }
+
+    #[test]
+    fn a_design_holds_at_most_100_000_nodes() {
+        let mut doc = Document::default();
+        let board = board(&mut doc);
+        let siblings = |n: usize| "<i></i>".repeat(n);
+        let refused = write_html(
+            &doc,
+            &board,
+            &siblings(MAX_NODES),
+            WriteMode::Append,
+            None,
+            &mut ids(),
+        )
+        .unwrap_err();
+        assert!(refused.0.contains("100001 nodes"), "{}", refused.0);
+
+        let (ops, _) = write_html(
+            &doc,
+            &board,
+            &siblings(MAX_NODES - 1),
+            WriteMode::Append,
+            None,
+            &mut ids(),
+        )
+        .unwrap();
+        doc.apply_all(&ops);
+        assert_eq!(doc.len(), MAX_NODES);
+        assert!(duplicate(&doc, &["board".into()], &mut ids()).is_err());
+        // Replacing counts what the write removes.
+        let (ops, _) = write_html(
+            &doc,
+            &board,
+            "<p>Fresh</p>",
+            WriteMode::ReplaceChildren,
+            None,
+            &mut ids(),
+        )
+        .unwrap();
+        doc.apply_all(&ops);
+        assert_eq!(doc.len(), 3);
     }
 
     #[test]

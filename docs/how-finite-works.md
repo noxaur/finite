@@ -153,6 +153,8 @@ Nodes can nest at most 256 levels deep (`MAX_DEPTH` in `document.rs`). An artboa
 
 Deep HTML is also slow to parse. html5ever, the HTML parser behind `scraper`, takes time quadratic in the nesting depth: 10,000 levels took 0.13 seconds in a release build, and 100,000 took 10. An edit holds the design's lock while it parses, so `html::parse` first runs a one-pass scan that counts start tags minus end tags. If that count passes 4,096, sixteen times the limit, it refuses the HTML without parsing it. The count can be too high, for example when a `<p>` is left open and the parser closes it at the next `<p>`. It's never too low, and that margin keeps ordinary HTML from being refused by mistake. A test in `edit.rs` writes 1,000,000 levels on a thread with a Tokio worker's 2 MiB stack and gets the error in well under 2 seconds. It also checks that a tree at the limit still exports on that stack in a debug build.
 
+A design also holds at most 100,000 nodes (`MAX_NODES`), and `write_html` and `duplicate` refuse edits that would pass it. When `write_html` replaces nodes, the ones it removes count against what it adds. For scale, the `big_design` example's 20,201-node artboard is already a big design. Without a limit, the largest `write_html` one MCP call can carry, 4 MB of `<i></i>`, made about 600,000 nodes. Its ops came to 92 MB of JSON, which the server journals and sends to every viewer, and an agent stuck in a loop could keep going. `cargo run --release -p finite-design --example big_design` now shows that write refused in about 0.2 seconds, most of it parsing.
+
 ## The server
 
 ### The hub

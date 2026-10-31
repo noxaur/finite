@@ -48,6 +48,11 @@ impl Op {
 /// server. (Chrome's HTML parser stops nesting at 512.)
 pub const MAX_DEPTH: usize = 256;
 
+/// How many nodes a design can hold. A big real design has about 20,000.
+/// Every node is journaled, held in memory and sent to every viewer, and
+/// without a limit an agent stuck in a loop could grow a design forever.
+pub const MAX_NODES: usize = 100_000;
+
 /// The node tree of one design, stored flat by id, with an index from each
 /// parent to its children in sibling order.
 #[derive(Clone, Debug, Default)]

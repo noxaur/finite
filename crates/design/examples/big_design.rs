@@ -3,7 +3,11 @@
 
 use std::time::Instant;
 
-use finite_design::{Document, Node, Op, fractional};
+use finite_design::{
+    Document, Node, Op,
+    edit::{self, WriteMode},
+    fractional,
+};
 
 fn main() {
     // One artboard with 200 sections of 100 children each: 20,201 nodes.
@@ -43,4 +47,20 @@ fn main() {
     let t = Instant::now();
     doc.apply_all(&inverse);
     println!("undo the delete:       {:?}", t.elapsed());
+
+    // The largest write_html one MCP call can carry, 4 MB of siblings, would
+    // be about 600,000 nodes and 92 MB of ops. It's over the node limit.
+    let html = "<i></i>".repeat((4 << 20) / 7);
+    let mut n = 0;
+    let mut new_id = || {
+        n += 1;
+        format!("w{n}")
+    };
+    let t = Instant::now();
+    let refused = edit::write_html(&doc, "s0", &html, WriteMode::Append, None, &mut new_id);
+    println!(
+        "refuse a 4 MB write:   {:?} ({})",
+        t.elapsed(),
+        refused.unwrap_err()
+    );
 }
