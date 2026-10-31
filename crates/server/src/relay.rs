@@ -12,9 +12,15 @@
 //! with a shared session store ([`DirSessionStore`]), a session can move to
 //! another router mid-conversation and keep its undo history.
 //!
-//! - `list_designs` asks every server and merges the lists.
+//! - `list_designs` asks every server at once and merges the lists. A server
+//!   that doesn't answer is named at the end instead of failing the call.
 //! - `create_design` takes turns between servers, like `POST /api/designs`.
 //! - Every other tool goes to the owner of its `designId`.
+//!
+//! A server that restarts forgets its sessions. rmcp's client notices (the
+//! server answers 404) and opens a new session by itself, and the relay opens
+//! one if the old one closed. The server knows the agent by its identity, not
+//! its session, so the agent's undo history there carries on.
 
 use std::{
     collections::HashMap,
@@ -24,13 +30,15 @@ use std::{
     },
 };
 
+use futures::future::join_all;
+
 use rmcp::{
     ErrorData as McpError, RoleClient, RoleServer, ServerHandler, ServiceExt,
     model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
         ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig,
     },
-    service::{RequestContext, RunningService},
+    service::{RequestContext, RunningService, ServiceError},
     transport::{
         StreamableHttpClientTransport,
         streamable_http_client::StreamableHttpClientTransportConfig,
@@ -55,8 +63,9 @@ pub struct Relay {
     cluster: Arc<Cluster>,
     /// Shared by every session, so creation takes turns across all agents.
     next: Arc<AtomicUsize>,
-    /// Backend sessions by server position, opened on first use.
-    backends: Mutex<HashMap<usize, Backend>>,
+    /// Each server's backend session, by position, opened on first use. Each
+    /// has its own lock, so a slow server doesn't hold up calls to the others.
+    backends: Vec<Mutex<Option<Backend>>>,
 }
 
 /// The router's MCP endpoint, to mount at `/mcp`. With `sessions`, routers
@@ -75,7 +84,7 @@ pub fn service(
             Ok(Relay {
                 cluster: cluster.clone(),
                 next: next.clone(),
-                backends: Mutex::new(HashMap::new()),
+                backends: (0..cluster.len()).map(|_| Mutex::new(None)).collect(),
             })
         },
         Arc::new(LocalSessionManager::default()),
@@ -128,13 +137,18 @@ fn unreachable(base: &str, error: impl std::fmt::Display) -> McpError {
 }
 
 impl Relay {
+    /// The session on server `node`, opening one if there's none or the last
+    /// one closed.
     async fn backend(
         &self,
         node: usize,
         ctx: &RequestContext<RoleServer>,
     ) -> Result<Backend, McpError> {
-        let mut backends = self.backends.lock().await;
-        if let Some(backend) = backends.get(&node) {
+        let mut slot = self.backends[node].lock().await;
+        if let Some(backend) = slot.as_ref()
+            && !backend.is_closed()
+            && !backend.is_transport_closed()
+        {
             return Ok(backend.clone());
         }
         let base = &self.cluster.nodes()[node];
@@ -144,11 +158,11 @@ impl Relay {
             ().serve(StreamableHttpClientTransport::from_config(config))
                 .await
                 .map_err(|e| unreachable(base, e))?;
-        let backend = Arc::new(backend);
-        backends.insert(node, backend.clone());
-        Ok(backend)
+        Ok(slot.insert(Arc::new(backend)).clone())
     }
 
+    /// Calls a tool on server `node`. A call that fails to get through isn't
+    /// retried, because it may have run before the connection broke.
     async fn call(
         &self,
         node: usize,
@@ -159,19 +173,26 @@ impl Relay {
         match backend.call_tool_once(params).await {
             Ok(CallToolResponse::Complete(result)) => Ok(result),
             Ok(_) => Err(McpError::internal_error("unexpected tool response", None)),
+            Err(ServiceError::McpError(error)) => Err(error),
             Err(error) => Err(unreachable(&self.cluster.nodes()[node], error)),
         }
     }
 
-    /// Calls `list_designs` everywhere and merges the JSON arrays, newest first.
+    /// Calls `list_designs` on every server at once and merges the JSON
+    /// arrays, newest first. Servers that don't answer are named after the list.
     async fn list_designs(
         &self,
         params: CallToolRequestParams,
         ctx: &RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> CallToolResult {
+        let calls = (0..self.cluster.len()).map(|node| self.call(node, params.clone(), ctx));
         let mut designs: Vec<Value> = Vec::new();
-        for node in 0..self.cluster.len() {
-            let result = self.call(node, params.clone(), ctx).await?;
+        let mut missing = Vec::new();
+        for (base, result) in self.cluster.nodes().iter().zip(join_all(calls).await) {
+            let Ok(result) = result else {
+                missing.push(base.as_str());
+                continue;
+            };
             for block in &result.content {
                 if let Some(text) = block.as_text()
                     && let Ok(Value::Array(list)) = serde_json::from_str(&text.text)
@@ -182,7 +203,14 @@ impl Relay {
         }
         designs.sort_by_key(|d| std::cmp::Reverse(d["updatedAt"].as_u64().unwrap_or(0)));
         let text = serde_json::to_string_pretty(&designs).expect("json values serialize");
-        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
+        let mut content = vec![ContentBlock::text(text)];
+        if !missing.is_empty() {
+            content.push(ContentBlock::text(format!(
+                "These Finite servers didn't answer, so their designs are missing: {}",
+                missing.join(", ")
+            )));
+        }
+        CallToolResult::success(content)
     }
 }
 
@@ -222,7 +250,7 @@ impl ServerHandler for Relay {
             .and_then(Value::as_str)
             .map(str::to_owned);
         let result = match (request.name.as_ref(), design_id) {
-            ("list_designs", _) => self.list_designs(request, &ctx).await?,
+            ("list_designs", _) => self.list_designs(request, &ctx).await,
             ("create_design", _) => {
                 let node = self.next.fetch_add(1, Ordering::Relaxed) % self.cluster.len();
                 self.call(node, request, &ctx).await?

@@ -235,6 +235,81 @@ mod relay {
         }
         client.cancel().await.unwrap();
     }
+
+    /// A server on its own runtime, so stopping it drops every connection at
+    /// once, the way a crash would.
+    struct Node {
+        runtime: Option<tokio::runtime::Runtime>,
+        hub: Arc<Hub>,
+    }
+
+    impl Node {
+        fn start(listener: std::net::TcpListener, cluster: Cluster, store: Arc<MemoryStore>) -> Self {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let _inside = runtime.enter();
+            listener.set_nonblocking(true).unwrap();
+            let listener = TcpListener::from_std(listener).unwrap();
+            let hub = Hub::with_cluster(store, cluster).unwrap();
+            runtime.spawn(axum::serve(listener, app(hub.clone(), None)).into_future());
+            Self {
+                runtime: Some(runtime),
+                hub,
+            }
+        }
+    }
+
+    impl Drop for Node {
+        fn drop(&mut self) {
+            self.hub.flush();
+            if let Some(runtime) = self.runtime.take() {
+                runtime.shutdown_background();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_relay_rides_out_a_server_restart() {
+        let a = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let b = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let b_addr = b.local_addr().unwrap();
+        let nodes: Vec<String> = [&a, &b]
+            .map(|l| format!("http://{}", l.local_addr().unwrap()))
+            .to_vec();
+        let cluster = |me| Cluster::new(nodes.clone(), me).unwrap();
+        let _a = Node::start(a, cluster(0), Arc::new(MemoryStore::default()));
+        let b_store = Arc::new(MemoryStore::default());
+        let b_node = Node::start(b, cluster(1), b_store.clone());
+        let (front, front_url) = listen().await;
+        let routes = router::app(nodes.clone(), None);
+        tokio::spawn(async move { axum::serve(front, routes).await });
+
+        let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp"));
+        let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
+        // Creation takes turns: the first design is A's, the second B's.
+        let on_a = design_id(&call(&client, "create_design", json!({ "name": "On A" })).await);
+        let on_b = design_id(&call(&client, "create_design", json!({ "name": "On B" })).await);
+        assert_eq!(cluster(0).owner(&on_b), 1);
+        call(&client, "get_basic_info", json!({ "designId": on_b })).await;
+
+        // While B is down, its designs fail, but the list still shows A's.
+        drop(b_node);
+        let params = CallToolRequestParams::new("get_basic_info")
+            .with_arguments(json!({ "designId": on_b }).as_object().unwrap().clone());
+        let down = client.call_tool(params).await;
+        assert!(down.is_err() || down.unwrap().is_error == Some(true));
+        let listed = call(&client, "list_designs", json!({})).await;
+        assert!(listed.contains(&on_a), "{listed}");
+        assert!(listed.contains("didn't answer"), "{listed}");
+
+        // Once B is back, the same agent session reaches it again.
+        let b = std::net::TcpListener::bind(b_addr).unwrap();
+        let _b = Node::start(b, cluster(1), b_store);
+        let info = call(&client, "get_basic_info", json!({ "designId": on_b })).await;
+        assert!(info.contains("On B"), "{info}");
+        let listed = call(&client, "list_designs", json!({})).await;
+        assert!(listed.contains(&on_a) && listed.contains(&on_b), "{listed}");
+        client.cancel().await.unwrap();
+    }
 }
 
 mod failover {
