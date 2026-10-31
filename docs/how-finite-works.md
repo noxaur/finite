@@ -159,15 +159,16 @@ The hub lives in `crates/server/src/hub/`, in three files:
 The hub holds a `DesignHandle` for every design. Each handle has:
 
 - a **mutex** around the design's state, so edits to one design run one at a time and edits to different designs never wait on each other;
-- a **broadcast channel**, which fans each change out to every open WebSocket;
 - a **save queue**: every change, comment update and rename is queued as a record, and a background task writes the queue 250 ms after the last edit.
+
+While the design is loaded, its state also holds a **broadcast channel**, which fans each change out to every open WebSocket, and the latest changes for browsers that reconnect.
 
 `DesignHandle::edit` is the path almost every tool call takes:
 
 1. Lock the design.
 2. Run the edit command against the current document to get ops.
 3. `Design::commit` them. This also logs the change for comments.
-4. Broadcast the change and mark the design dirty.
+4. Broadcast the change, keep it for browsers that reconnect, and mark the design dirty.
 
 Because steps 2 and 3 happen under one lock, no other edit can sneak in between reading the document and writing to it.
 
@@ -229,8 +230,8 @@ update_styles({ "designId": "k7jo11y14e",
 
 1. `mcp/mod.rs` works out the actor (`agent:Claude`, from the header) and calls `DesignHandle::edit` with the label "Update styles".
 2. `edit::update_styles` normalizes the name and returns one op: `set 4biyjm26 style:background-color "#ff5a1f"`.
-3. `Design::commit` applies it, gets back `set … "#111"` as the inverse, pushes that onto Claude's undo stack, and bumps `seq` to 13.
-4. The hub broadcasts this message to every browser on the design:
+3. `Design::commit` applies it, gets back `set … "#111"` as the inverse, pushes that onto Claude's undo stack, and bumps `seq` to 13. It also records the change in the change log, so Claude's next reply to a comment on this artboard can link it.
+4. The hub broadcasts this message to every browser on the design, and keeps a copy for any browser that reconnects later:
 
    ```json
    {
