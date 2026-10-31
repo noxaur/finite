@@ -3,7 +3,7 @@
 //! its save queue before the lock is released.
 
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     io,
     ops::{Deref, DerefMut},
     sync::{Arc, Mutex, MutexGuard},
@@ -73,7 +73,13 @@ impl DesignState {
     pub(super) fn restore(stored: Stored) -> Self {
         let needs_snapshot = !stored.journal.is_empty();
         let mut design = Design::from_snapshot(stored.snapshot);
+        // The journal doesn't say when its changes were made, so their actors
+        // count as active now.
+        let mut journaled = HashSet::new();
         for record in stored.journal {
+            if let Record::Change { change } = &record {
+                journaled.insert(change.actor.clone());
+            }
             design.replay(record);
         }
         let mut state = Self::new(design, needs_snapshot);
@@ -81,15 +87,30 @@ impl DesignState {
         let actors: Vec<ActorId> = state.design.actors().map(String::from).collect();
         for actor in actors {
             if actor.starts_with(SESSION_ACTOR) {
-                // Its session is gone, so nobody can use this history, and
-                // keeping it would hold the design in memory for hours.
+                // Restored after a restart, its session is gone, so nobody
+                // can use this history. (A design with a live session's
+                // history stays in memory; see `is_idle`.)
                 state.design.forget_actor(&actor);
-            } else {
-                // Restored histories expire like live ones, counting from now.
-                state.last_seen.insert(actor, now);
+                continue;
             }
+            // Restored histories expire on the clock they had when saved.
+            let last_used = state.design.history(&actor).map_or(0, |h| h.last_used());
+            let seen = if last_used == 0 || journaled.contains(&actor) {
+                now
+            } else {
+                last_used
+            };
+            state.last_seen.insert(actor, seen);
         }
         state
+    }
+
+    /// A full snapshot for the store, with each history's last-use time.
+    pub(super) fn snapshot_to_save(&mut self) -> Snapshot {
+        for (actor, seen) in &self.last_seen {
+            self.design.set_last_used(actor, *seen);
+        }
+        self.design.snapshot_to_save()
     }
 
     /// Every change after `since`, if this is its epoch and none have been
@@ -113,14 +134,33 @@ impl DesignState {
         (missed.len() as u64 == seq - since.seq).then_some(missed)
     }
 
-    /// Whether the design can leave memory: nothing unsaved, and nobody with
-    /// presence or undo history in it.
+    /// Whether the design can leave memory: unused for a while, nothing
+    /// unsaved, nobody present, and its histories saved as they are now.
+    ///
+    /// A history comes back with its design, unless it belongs to an MCP
+    /// session (see `restore`). So a live session's history keeps the design
+    /// loaded, and other histories need a full snapshot first: the journal
+    /// doesn't hold their last-use times.
     pub(super) fn is_idle(&self, now: u64) -> bool {
+        self.unused(now) && self.histories_saved()
+    }
+
+    fn unused(&self, now: u64) -> bool {
         self.pending.is_empty()
             && !self.needs_snapshot
             && self.presence.is_empty()
-            && !self.design.has_histories()
+            && !self.design.actors().any(|a| a.starts_with(SESSION_ACTOR))
             && now.saturating_sub(self.last_used) >= UNLOAD_AFTER.as_millis() as u64
+    }
+
+    fn histories_saved(&self) -> bool {
+        !self.design.has_histories()
+            || (self.journaled == 0
+                && self.last_seen.iter().all(|(actor, seen)| {
+                    self.design
+                        .history(actor)
+                        .is_none_or(|h| h.last_used() == *seen)
+                }))
     }
 
     pub(super) fn presence_message(&self) -> Outgoing {
@@ -413,7 +453,7 @@ impl DesignHandle {
         if state.needs_snapshot || state.journaled > COMPACT_AFTER {
             state.needs_snapshot = false;
             state.journaled = 0;
-            return Some(Save::Snapshot(state.design.snapshot_to_save()));
+            return Some(Save::Snapshot(state.snapshot_to_save()));
         }
         Some(Save::Append(state.design.meta.id.clone(), records))
     }
@@ -433,7 +473,7 @@ impl DesignHandle {
         state.pending.clear();
         state.journaled = 0;
         state.needs_snapshot = false;
-        Some(state.design.snapshot_to_save())
+        Some(state.snapshot_to_save())
     }
 
     /// Builds ops from the current document with `build`, then commits them as
@@ -594,7 +634,9 @@ impl DesignHandle {
         state.last_seen.remove(actor);
     }
 
-    /// Expires stale presence and the histories of long-idle actors.
+    /// Expires stale presence and the histories of long-idle actors. Asks for
+    /// a full snapshot when the store's histories are out of date: one expired,
+    /// or the design is otherwise ready to unload (see `is_idle`).
     pub(super) fn sweep(&self, now: u64) {
         let mut state = self.raw();
         let Some(state) = state.as_mut() else { return };
@@ -613,9 +655,16 @@ impl DesignHandle {
             .filter(|(_, seen)| now.saturating_sub(**seen) >= ttl)
             .map(|(actor, _)| actor.clone())
             .collect();
+        let mut resave = false;
         for actor in idle {
+            resave |= state.design.history(&actor).is_some();
             state.design.forget_actor(&actor);
             state.last_seen.remove(&actor);
+        }
+        resave |= state.unused(now) && !state.histories_saved();
+        if resave {
+            state.needs_snapshot = true;
+            self.dirty.send_replace(());
         }
     }
 }

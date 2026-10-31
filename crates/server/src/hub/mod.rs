@@ -321,7 +321,7 @@ impl Hub {
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
         let Some(stored) = stored else { return Ok(()) };
-        let snapshot = DesignState::restore(stored).design.snapshot_to_save();
+        let snapshot = DesignState::restore(stored).snapshot_to_save();
         let res = http
             .put(format!("{owner}/api/designs/{id}/handoff"))
             .json(&snapshot)
@@ -403,9 +403,9 @@ fn summaries(store: &dyn Store, ids: &[String]) -> io::Result<Vec<DesignSummary>
         let Some(stored) = store.load(id)? else {
             return Ok(None);
         };
-        let state = DesignState::restore(stored);
+        let mut state = DesignState::restore(stored);
         if state.needs_snapshot {
-            store.save(&state.design.snapshot_to_save())?;
+            store.save(&state.snapshot_to_save())?;
         }
         Ok(Some(DesignSummary::of(&state.design)))
     };
@@ -838,7 +838,7 @@ mod tests {
         let hub = Hub::new(store.clone()).unwrap();
         let id = hub.create("Test").meta.id;
         let agent = Actor {
-            id: "agent".into(),
+            id: format!("{SESSION_ACTOR}abc"),
             name: "Agent".into(),
         };
         hub.get(&id)
@@ -858,12 +858,13 @@ mod tests {
         tokio::time::sleep(SAVE_DEBOUNCE * 2).await;
         let later = now_ms() + UNLOAD_AFTER.as_millis() as u64;
 
-        // The agent can still undo, so the design stays in memory.
+        // The agent's session can still undo, and its history wouldn't come
+        // back from the store, so the design stays in memory.
         hub.sweep(later);
         assert_eq!(hub.loaded(), 1);
 
         // So does a design someone is watching.
-        hub.forget_actor("agent");
+        hub.forget_actor(&agent.id);
         let viewer = hub.get(&id).unwrap().subscribe();
         hub.sweep(later + 1);
         assert_eq!(hub.loaded(), 1);
@@ -884,6 +885,67 @@ mod tests {
         let after = hub.open(&id).await.unwrap().read(Design::snapshot);
         assert_eq!(hub.loaded(), 1);
         assert_eq!((after.seq, after.nodes), (before.seq, before.nodes));
+    }
+
+    /// A named agent's history is in the store, so it doesn't keep the design
+    /// in memory. It comes back with the design, and still expires six hours
+    /// after the agent last used it.
+    #[tokio::test]
+    async fn named_histories_unload_and_still_expire() {
+        use finite_design::edit::{self, NewArtboard};
+
+        let store = Arc::new(MemoryStore::default());
+        let hub = Hub::new(store.clone()).unwrap();
+        let id = hub.create("Test").meta.id;
+        tokio::time::sleep(SAVE_DEBOUNCE * 2).await;
+        let agent = Actor {
+            id: "agent:Claude".into(),
+            name: "Claude".into(),
+        };
+        let edited = now_ms();
+        hub.get(&id)
+            .unwrap()
+            .edit(&agent, "Create artboard", |doc| {
+                let spec = NewArtboard {
+                    name: "Home".into(),
+                    width: 100.0,
+                    height: 100.0,
+                    position: None,
+                    styles: BTreeMap::new(),
+                };
+                Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
+            })
+            .unwrap();
+        tokio::time::sleep(SAVE_DEBOUNCE * 2).await;
+        assert!(!store.load(&id).unwrap().unwrap().journal.is_empty());
+        let unused = now_ms() + UNLOAD_AFTER.as_millis() as u64;
+
+        // The edit is only in the journal, which doesn't record when it was
+        // made. So the first sweep asks for a full snapshot, and the next unloads.
+        hub.sweep(unused);
+        assert_eq!(hub.loaded(), 1);
+        tokio::time::sleep(SAVE_DEBOUNCE * 2).await;
+        assert!(store.load(&id).unwrap().unwrap().journal.is_empty());
+        hub.sweep(unused);
+        assert_eq!(hub.loaded(), 0);
+
+        // Reopened, the agent can still undo.
+        let handle = hub.open(&id).await.unwrap();
+        assert_eq!(handle.history(&agent).0, ["Create artboard"]);
+        drop(handle);
+
+        // Six hours after the edit, not after the reload, the history expires,
+        // and the store forgets it too.
+        let expired = edited + HISTORY_TTL.as_millis() as u64 + 1000;
+        hub.sweep(expired);
+        let handle = hub.get(&id).unwrap();
+        assert!(handle.history(&agent).0.is_empty());
+        drop(handle);
+        tokio::time::sleep(SAVE_DEBOUNCE * 2).await;
+        hub.sweep(expired);
+        assert_eq!(hub.loaded(), 0);
+        let handle = hub.open(&id).await.unwrap();
+        assert!(handle.history(&agent).0.is_empty());
     }
 
     #[tokio::test]

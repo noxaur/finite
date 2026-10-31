@@ -25,6 +25,11 @@ pub struct History {
     undo: Vec<Entry>,
     #[serde(default)]
     redo: Vec<Entry>,
+    /// When its actor was last active, in milliseconds since the Unix epoch,
+    /// or 0 if unknown. The server sets it before saving, so a history
+    /// expires on time even after its design leaves memory and comes back.
+    #[serde(default, rename = "lastUsed", skip_serializing_if = "is_zero")]
+    last_used: u64,
     #[serde(skip)]
     batch_depth: usize,
     #[serde(skip)]
@@ -34,6 +39,14 @@ pub struct History {
 impl History {
     /// Entries kept per stack. Older ones fall off the bottom.
     pub const LIMIT: usize = 200;
+
+    pub fn last_used(&self) -> u64 {
+        self.last_used
+    }
+
+    pub fn set_last_used(&mut self, at: u64) {
+        self.last_used = at;
+    }
 
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
@@ -109,4 +122,8 @@ fn push(stack: &mut Vec<Entry>, entry: Entry) {
         stack.remove(0);
     }
     stack.push(entry);
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }

@@ -166,6 +166,14 @@ impl Design {
         self.histories.get(actor)
     }
 
+    /// Records when `actor` was last active, for saving. Does nothing if
+    /// the actor has no history here.
+    pub fn set_last_used(&mut self, actor: &str, at: u64) {
+        if let Some(history) = self.histories.get_mut(actor) {
+            history.set_last_used(at);
+        }
+    }
+
     pub fn history_mut(&mut self, actor: &str) -> &mut History {
         self.histories.entry(actor.to_owned()).or_default()
     }
