@@ -356,7 +356,7 @@ The unit tests and golden files check each side on its own. `vp run e2e` checks 
 
 The checks follow the comment demo. The agent edits and undoes, and the page follows. A person hovers a button, comments on it under their own name, and the agent picks the comment up with `wait_for_comments`. The agent changes the button and replies, and the person jumps to the change. Then the same happens inside the sandboxed artboard. Last, a pin stays in place while its artboard is deleted and brought back. Each check prints `PASS` or `FAIL`, and the script exits with 1 if any failed. On a failure it saves a screenshot to `finite-e2e-failure.png` in the temp folder.
 
-It needs Chrome. Set `FINITE_CHROME` to its path if it isn't in the usual place. It isn't part of `vp test`, because it builds the whole app first. With `E2E_SKIP_BUILD=1`, a run takes about 6 seconds.
+It needs Chrome. Set `FINITE_CHROME` to its path if it isn't in the usual place. It isn't part of `vp test`, because it builds the whole app first. CI runs it after `vp run ready` (`.github/workflows/ci.yml`). With `E2E_SKIP_BUILD=1`, a run takes about 6 seconds.
 
 One trap is worth knowing if you add a check. Comment mode sets `pointer-events: none` on sandboxed iframes, so the page gets the mouse. But Chrome's **input routing** hit-tests the last frame it drew to choose which frame gets the mouse. Until it draws again, the moves still go to the iframe, and the page never sees them. People move the mouse all the time, so they never notice. A script that presses `c` and moves at once does, so the test waits two animation frames first.
 
