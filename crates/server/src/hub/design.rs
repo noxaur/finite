@@ -208,6 +208,11 @@ impl DesignHandle {
         f(&self.lock().design)
     }
 
+    /// Like [`DesignHandle::read`], but only if the design is in memory.
+    pub(super) fn read_loaded<T>(&self, f: impl FnOnce(&Design) -> T) -> Option<T> {
+        self.raw().as_ref().map(|state| f(&state.design))
+    }
+
     /// Works whether or not the design is loaded.
     pub fn summary(&self) -> DesignSummary {
         self.summary

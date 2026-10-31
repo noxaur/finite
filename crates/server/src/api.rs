@@ -13,7 +13,7 @@ use axum::{
     routing::{get, patch, post, put},
 };
 use finite_design::{
-    Design, Snapshot,
+    Snapshot,
     comment::{Anchor, Author, AuthorKind, Comment, CommentError},
 };
 use serde::{Deserialize, Serialize};
@@ -105,11 +105,22 @@ async fn open(hub: &Hub, id: &str) -> Result<Arc<DesignHandle>, ApiError> {
         .ok_or_else(|| ApiError::NotFound(format!("design {id:?} not found")))
 }
 
+/// A design's snapshot. Thumbnails ask for every design in the list, so this
+/// doesn't load the design into memory (see [`Hub::peek`]).
 async fn get_design(
     State(hub): State<Arc<Hub>>,
     Path(id): Path<String>,
 ) -> Result<Json<Snapshot>, ApiError> {
-    Ok(Json(open(&hub, &id).await?.read(Design::snapshot)))
+    if let Some(owner) = hub.elsewhere(&id) {
+        return Err(ApiError::Misdirected {
+            id,
+            owner: owner.into(),
+        });
+    }
+    hub.peek(&id)
+        .await
+        .map(Json)
+        .ok_or_else(|| ApiError::NotFound(format!("design {id:?} not found")))
 }
 
 /// Takes over a design another server is handing off, after the list of

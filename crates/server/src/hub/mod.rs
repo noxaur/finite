@@ -168,6 +168,26 @@ impl Hub {
         }
     }
 
+    /// A design's snapshot, for a one-off read like a thumbnail. A design in
+    /// memory is read from there. A cold one is read from the store and not
+    /// kept, so browsing the design list doesn't load every design.
+    pub async fn peek(&self, id: &str) -> Option<Snapshot> {
+        let handle = self.designs.read().unwrap().get(id).cloned()?;
+        if let Some(snapshot) = handle.read_loaded(Design::snapshot) {
+            return Some(snapshot);
+        }
+        let (store, key) = (self.store.clone(), id.to_owned());
+        let read = tokio::task::spawn_blocking(move || store.load(&key)).await;
+        match read.unwrap_or_else(|e| Err(io::Error::other(e))) {
+            Ok(Some(stored)) => Some(DesignState::restore(stored).design.snapshot()),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::error!(id, %error, "failed to read design");
+                None
+            }
+        }
+    }
+
     /// Like [`Hub::open`], but reads a cold design on the calling thread.
     /// For tests and code that isn't async.
     pub fn get(&self, id: &str) -> Option<Arc<DesignHandle>> {
@@ -597,6 +617,11 @@ mod tests {
         // The design list still knows it without loading it.
         assert_eq!(hub.list()[0].artboard_count, 1);
         assert_eq!(hub.loaded(), 0);
+
+        // A one-off read, like a thumbnail's, doesn't load it.
+        let peeked = hub.peek(&id).await.unwrap();
+        assert_eq!(hub.loaded(), 0);
+        assert_eq!((peeked.seq, &peeked.nodes), (before.seq, &before.nodes));
 
         // Reopening reads it back on the blocking pool.
         let after = hub.open(&id).await.unwrap().read(Design::snapshot);
