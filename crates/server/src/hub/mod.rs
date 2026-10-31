@@ -234,7 +234,7 @@ impl Hub {
 
     pub fn create(self: &Arc<Self>, name: &str) -> DesignSummary {
         let now = now_ms();
-        let name = name.trim();
+        let name = finite_design::label::clip(name, finite_design::label::DESIGN_NAME);
         // Only ids this server owns, so the design is reachable where it's created.
         let id = std::iter::repeat_with(|| random_id(10))
             .find(|id| self.cluster.owns(id))
@@ -244,7 +244,7 @@ impl Hub {
             name: if name.is_empty() {
                 "Untitled".into()
             } else {
-                name.into()
+                name
             },
             created_at: now,
             updated_at: now,
@@ -466,6 +466,25 @@ mod tests {
     use super::*;
     use crate::store::MemoryStore;
     use finite_design::comment::AuthorKind;
+
+    /// Every viewer shows design names and statuses, so long ones are cut.
+    #[tokio::test]
+    async fn long_names_and_statuses_are_cut() {
+        let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
+        let long = "x".repeat(500);
+        let summary = hub.create(&long);
+        assert_eq!(summary.meta.name.len(), finite_design::label::DESIGN_NAME);
+        let handle = hub.get(&summary.meta.id).unwrap();
+        handle.rename("   ".into());
+        assert_eq!(handle.summary().meta.name, "Untitled");
+        let agent = Actor {
+            id: "agent".into(),
+            name: "Agent".into(),
+        };
+        handle.set_presence(&agent, Vec::new(), Some(long));
+        let status = handle.presence()[0].status.clone().unwrap();
+        assert_eq!(status.len(), finite_design::label::STATUS);
+    }
 
     #[tokio::test]
     async fn comment_updates_reach_viewers() {

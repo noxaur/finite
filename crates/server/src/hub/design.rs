@@ -13,6 +13,7 @@ use finite_design::{
     ActorId, Change, Design, Document, NodeId, Op, Record, Snapshot,
     comment::{Anchor, Author, Comment, CommentError},
     edit::EditError,
+    label,
 };
 use tokio::sync::{broadcast, watch};
 
@@ -482,8 +483,13 @@ impl DesignHandle {
     }
 
     pub fn rename(&self, name: String) {
+        let name = label::clip(&name, label::DESIGN_NAME);
         let mut state = self.lock();
-        state.design.meta.name = name;
+        state.design.meta.name = if name.is_empty() {
+            "Untitled".into()
+        } else {
+            name
+        };
         state.design.meta.updated_at = now_ms();
         let message = Outgoing::new(
             None,
@@ -554,7 +560,9 @@ impl DesignHandle {
                 actor: actor.id.clone(),
                 name: actor.name.clone(),
                 node_ids,
-                status,
+                status: status
+                    .map(|s| label::clip(&s, label::STATUS))
+                    .filter(|s| !s.is_empty()),
                 updated_at: now,
             },
         );

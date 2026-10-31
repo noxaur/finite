@@ -16,6 +16,7 @@ pub mod edit;
 pub mod fractional;
 mod history;
 pub mod html;
+pub mod label;
 mod node;
 
 pub use design::{ActorId, Change, Design, DesignMeta, Origin, Record, Snapshot};

@@ -10,6 +10,7 @@ use scraper::{Html, node::Node as HtmlNode};
 
 use crate::{
     document::{Document, Op},
+    label,
     node::{Node, NodeId, NodeKind},
 };
 
@@ -39,7 +40,6 @@ const VOID_TAGS: &[&str] = &[
     "area", "br", "col", "hr", "img", "input", "source", "track", "wbr",
 ];
 
-/// Names a node when written as an attribute (`<div data-name="Header">`).
 /// Base styles for rendering an artboard. Screenshots and the web viewer both
 /// use them (the viewer's copy is checked against `fixtures/export.json`).
 pub const BASE_CSS: &str = "*, *::before, *::after { box-sizing: border-box; }";
@@ -49,6 +49,7 @@ pub const BASE_CSS: &str = "*, *::before, *::after { box-sizing: border-box; }";
 /// Shared by screenshots and the viewer's sandboxed iframes.
 pub const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https:; img-src https: http: data: blob:; font-src https: data:; media-src https: data: blob:";
 
+/// Names a node when written as an attribute (`<div data-name="Header">`).
 pub const NAME_ATTR: &str = "data-name";
 /// Identifies a node in exported HTML.
 pub const ID_ATTR: &str = "data-id";
@@ -93,7 +94,7 @@ fn convert(node: ego_tree::NodeRef<'_, HtmlNode>) -> Option<Fragment> {
             for (name, value) in el.attrs() {
                 match name {
                     "style" => fragment.styles.extend(parse_style(value)),
-                    NAME_ATTR => fragment.name = Some(value.to_owned()),
+                    NAME_ATTR => fragment.name = Some(label::clip(value, label::LAYER_NAME)),
                     // Node ids come from the document. Scripts must be inline:
                     // the sandbox doesn't load anything that runs.
                     ID_ATTR => {}

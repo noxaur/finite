@@ -10,6 +10,7 @@ use crate::{
     document::{Document, Op},
     fractional,
     html::{self, Fragment},
+    label,
     node::{Node, NodeId, NodeKind, PropKey},
 };
 
@@ -123,7 +124,7 @@ pub fn create_artboard(doc: &Document, id: NodeId, spec: NewArtboard) -> Result<
         node: Node {
             parent: None,
             index,
-            name: Some(spec.name),
+            name: Some(label::clip(&spec.name, label::LAYER_NAME)),
             x: Some(x),
             y: Some(y),
             styles,
@@ -404,7 +405,7 @@ pub fn rename(doc: &Document, id: &str, name: Option<&str>) -> Result<Vec<Op>> {
     Ok(vec![Op::Set {
         id: id.to_owned(),
         key: PropKey::Name,
-        value: name.map(|n| Value::String(n.to_owned())),
+        value: name.map(|n| Value::String(label::clip(n, label::LAYER_NAME))),
     }])
 }
 
@@ -663,6 +664,21 @@ mod tests {
         .unwrap();
         doc.apply_all(&ops);
         assert_eq!(doc.children(Some(&board)).len(), 1);
+    }
+
+    #[test]
+    fn long_layer_names_are_cut() {
+        let mut doc = Document::default();
+        let board = board(&mut doc);
+        let long = "x".repeat(500);
+        let html = format!(r#"<div data-name="  {long}  "></div>"#);
+        let (ops, roots) =
+            write_html(&doc, &board, &html, WriteMode::Append, None, &mut ids()).unwrap();
+        doc.apply_all(&ops);
+        let name = |doc: &Document| doc.get(&roots[0]).unwrap().name.clone().unwrap();
+        assert_eq!(name(&doc).len(), label::LAYER_NAME);
+        doc.apply_all(&rename(&doc, &roots[0], Some(&long)).unwrap());
+        assert_eq!(name(&doc).len(), label::LAYER_NAME);
     }
 
     #[test]

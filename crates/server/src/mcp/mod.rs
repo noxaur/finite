@@ -14,9 +14,9 @@ use std::{
 use base64::Engine;
 use finite_design::{
     Change, Document, NodeKind, Op,
-    comment::{Author, AuthorKind},
+    comment::{self, Author, AuthorKind},
     edit::{self, EditError, NewArtboard, WriteMode},
-    html,
+    html, label,
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -142,12 +142,14 @@ impl FiniteMcp {
             .peer_info()
             .map(|info| info.client_info.name.clone())
             .unwrap_or_else(|| "Agent".into());
+        // Every viewer shows it, so it's held to the same limit as people's names.
+        let display = |name: &str| label::clip(name, comment::MAX_NAME);
         if let Some(agent) = header("x-finite-agent") {
             // The router names relayed agents separately from their identity.
             let name = header("x-finite-agent-name").unwrap_or_else(|| agent.clone());
             return Actor {
                 id: format!("agent:{agent}"),
-                name,
+                name: display(&name),
             };
         }
         if let Some(session) = header("mcp-session-id") {
@@ -156,12 +158,12 @@ impl FiniteMcp {
             let short: String = session.chars().take(4).collect();
             return Actor {
                 id,
-                name: format!("{client} · {short}"),
+                name: display(&format!("{client} · {short}")),
             };
         }
         Actor {
             id: format!("{SESSION_ACTOR}anonymous"),
-            name: client,
+            name: display(&client),
         }
     }
 

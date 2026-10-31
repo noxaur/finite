@@ -199,6 +199,8 @@ Read tools (`get_tree_summary`, `get_node_info`, `get_html`, `get_screenshot`) l
 
 `start_working_on_nodes` sets **presence**: a note that an agent is busy on some nodes. Browsers show it as a badge on the artboard. Presence expires after five minutes without activity, and an actor's undo history is dropped after six idle hours or when its MCP session ends.
 
+Every viewer shows the names and notes agents write, so they're cut to a fixed length rather than refused (`finite_design::label`). Layer names, design names and presence notes keep 120 characters. An agent's display name keeps 48, the same as a person's. Surrounding spaces are trimmed, and an empty design name becomes "Untitled".
+
 ### The web API
 
 `crates/server/src/api.rs` serves the browser:
