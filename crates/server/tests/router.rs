@@ -142,6 +142,51 @@ async fn the_router_makes_two_servers_look_like_one() {
     }
 }
 
+/// While servers are being added or removed, the router can think a design
+/// lives on a server that says it's elsewhere. The router follows the
+/// server's `421` to the real owner, for requests and the design's socket.
+#[tokio::test]
+async fn the_router_follows_a_misdirected_answer_to_the_owner() {
+    let (b, b_url) = listen().await;
+    // B runs alone, so it owns every design it creates.
+    let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
+    let ids: Vec<String> = (0..12)
+        .map(|i| hub.create(&format!("D{i}")).meta.id)
+        .collect();
+    tokio::spawn(async move { axum::serve(b, app(hub, None)).await });
+
+    // A stale server that sends every design request to B.
+    let (stale, stale_url) = listen().await;
+    let owner = b_url.clone();
+    let misdirect = axum::Router::new().fallback(move || {
+        let owner = owner.clone();
+        async move {
+            (
+                axum::http::StatusCode::MISDIRECTED_REQUEST,
+                [("finite-owner", owner)],
+            )
+        }
+    });
+    tokio::spawn(async move { axum::serve(stale, misdirect).await });
+
+    let nodes = vec![stale_url, b_url];
+    let (front, front_url) = listen().await;
+    let routes = router::app(nodes.clone(), None);
+    tokio::spawn(async move { axum::serve(front, routes).await });
+
+    let cluster = Cluster::new(nodes, 0).unwrap();
+    let id = ids
+        .iter()
+        .find(|id| cluster.owner(id) == 0)
+        .expect("some design hashes to the stale server");
+    let res = reqwest::get(format!("{front_url}/api/designs/{id}"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let first = first_text(&format!("{front_url}/api/designs/{id}/ws")).await;
+    assert_eq!(first["type"], "snapshot");
+}
+
 mod relay {
     use super::*;
     use rmcp::{

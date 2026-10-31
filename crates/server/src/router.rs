@@ -111,7 +111,22 @@ fn bad_gateway(error: impl std::fmt::Display) -> Response {
     (StatusCode::BAD_GATEWAY, error.to_string()).into_response()
 }
 
-/// Sends a request on to `base` and returns its response.
+impl Front {
+    /// Where a `421 Misdirected Request` says to go instead: its
+    /// `Finite-Owner`, if that's another server in this router's list. While
+    /// servers are being added or removed, the router's list and a server's
+    /// can briefly disagree about who owns a design.
+    fn redirect(&self, status: StatusCode, headers: &HeaderMap, base: &str) -> Option<String> {
+        if status != StatusCode::MISDIRECTED_REQUEST {
+            return None;
+        }
+        let owner = headers.get("finite-owner")?.to_str().ok()?;
+        (owner != base && self.cluster.nodes().iter().any(|n| n == owner)).then(|| owner.to_owned())
+    }
+}
+
+/// Sends a request on to `base` and returns its response. If `base` says
+/// another server owns the design, it follows that once.
 async fn relay(
     front: &Front,
     base: &str,
@@ -120,17 +135,26 @@ async fn relay(
     headers: &HeaderMap,
     body: Bytes,
 ) -> Response {
-    let mut req = front
-        .http
-        .request(method, format!("{base}{path_and_query}"))
-        .body(body);
-    if let Some(content_type) = headers.get(header::CONTENT_TYPE) {
-        req = req.header(header::CONTENT_TYPE, content_type);
-    }
-    let res = match req.send().await {
+    let send = |base: &str| {
+        let mut req = front
+            .http
+            .request(method.clone(), format!("{base}{path_and_query}"))
+            .body(body.clone());
+        if let Some(content_type) = headers.get(header::CONTENT_TYPE) {
+            req = req.header(header::CONTENT_TYPE, content_type);
+        }
+        req.send()
+    };
+    let mut res = match send(base).await {
         Ok(res) => res,
         Err(error) => return bad_gateway(error),
     };
+    if let Some(owner) = front.redirect(res.status(), res.headers(), base) {
+        res = match send(&owner).await {
+            Ok(res) => res,
+            Err(error) => return bad_gateway(error),
+        };
+    }
     let mut out = Response::builder().status(res.status());
     for name in [header::CONTENT_TYPE, header::CACHE_CONTROL] {
         if let Some(value) = res.headers().get(&name) {
@@ -207,11 +231,16 @@ async fn design_socket(
 ) -> Response {
     // The query carries where a reconnecting viewer left off.
     let query = query.map(|q| format!("?{q}")).unwrap_or_default();
-    let url = Front::ws_url(
-        front.cluster.owner_url(&id),
-        &format!("/api/designs/{id}/ws{query}"),
-    );
-    let upstream = match tokio_tungstenite::connect_async(&url).await {
+    let path = format!("/api/designs/{id}/ws{query}");
+    let base = front.cluster.owner_url(&id);
+    let mut connected = tokio_tungstenite::connect_async(Front::ws_url(base, &path)).await;
+    // As in `relay`: follow a server that says another one owns the design.
+    if let Err(tungstenite::Error::Http(res)) = &connected
+        && let Some(owner) = front.redirect(res.status(), res.headers(), base)
+    {
+        connected = tokio_tungstenite::connect_async(Front::ws_url(&owner, &path)).await;
+    }
+    let upstream = match connected {
         Ok((upstream, _)) => upstream,
         Err(tungstenite::Error::Http(res)) => return res.status().into_response(),
         Err(error) => return bad_gateway(error),

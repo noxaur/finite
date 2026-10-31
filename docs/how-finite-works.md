@@ -389,6 +389,7 @@ The hash is FNV-1a with a final mix. It's spelled out in `cluster.rs` so you can
 
 - **One design:** anything under `/api/designs/{id}` goes to the design's owner. That includes the design's WebSocket, which the router relays in both directions.
 - **New designs:** `POST /api/designs` takes turns between servers. Each server picks an id it owns, so the design lands where the hash says it belongs.
+- **A server that says it's elsewhere:** while servers are being added or removed, the router's list and a server's can briefly disagree about who owns a design. Then the server answers `421 Misdirected Request` with a `Finite-Owner` header, and the router follows it once, for requests and design sockets alike. It only follows to a server in its own list, so a bad header can't send it anywhere else.
 - **The design list:** `GET /api/designs` asks every server and merges the answers, newest first. The list's WebSocket subscribes to every server's list and relays their updates. If one server drops, the router closes the socket, and the browser reconnects and gets a fresh merged list.
 
 Apart from relayed MCP sessions (below), the router keeps no state. Here's a two-server setup on one machine:
