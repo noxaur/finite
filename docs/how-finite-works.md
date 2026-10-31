@@ -229,7 +229,7 @@ Cut HTML would be broken HTML, so a `get_html` that's too long returns the node'
 
 Read tools (`get_tree_summary`, `get_node_info`, `get_html`, `get_screenshot`) lock the design just long enough to copy what they need. `get_screenshot` writes the artboard to a temporary HTML file and runs headless Chrome on it (`screenshot.rs`). Each capture starts its own browser, so a **semaphore** caps how many run at once: half the CPU cores, between 1 and 4. Further captures wait their turn. On a 10-core Mac, six agents asking at once got their screenshots in about 5 seconds, and at most 4 browsers ran together.
 
-`start_working_on_nodes` sets **presence**: a note that an agent is busy on some nodes. Browsers show it as a badge on the artboard. Presence expires after five minutes without activity, and an actor's undo history is dropped after six idle hours or when its MCP session ends.
+`start_working_on_nodes` sets **presence**: a note that an agent is busy on some nodes. Browsers show it as a badge on the artboard. It names at most 100 nodes, and repeats count once. Every viewer gets the whole list on each update, and naming a parent covers its children. Presence expires after five minutes without activity, and an actor's undo history is dropped after six idle hours or when its MCP session ends.
 
 A session ends when its agent disconnects, or after an hour without a call (`SESSION_IDLE` in `mcp/mod.rs`). An agent that sends `X-Finite-Agent` keeps its history across sessions. One that doesn't is known by its session, so its undo lasts only as long as the session.
 

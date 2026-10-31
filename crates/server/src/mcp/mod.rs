@@ -84,6 +84,9 @@ impl Drop for SessionGuard {
 /// short pause for an agent waiting on a person, so allow an hour.
 pub const SESSION_IDLE: Duration = Duration::from_secs(60 * 60);
 
+/// The most nodes one agent's presence can name.
+const PRESENCE_NODES: usize = 100;
+
 /// A session manager whose sessions close after [`SESSION_IDLE`].
 pub(crate) fn sessions() -> LocalSessionManager {
     let mut sessions = LocalSessionManager::default();
@@ -932,12 +935,22 @@ impl FiniteMcp {
         ctx: RequestContext<RoleServer>,
     ) -> ToolResult {
         let handle = design!(self, &p.design_id);
+        // Every viewer gets the list on each update, and a parent covers its
+        // children, so keep it short.
+        let mut node_ids = p.node_ids;
+        let mut seen = std::collections::HashSet::new();
+        node_ids.retain(|id| seen.insert(id.clone()));
+        if node_ids.len() > PRESENCE_NODES {
+            return fail(format!(
+                "pass at most {PRESENCE_NODES} node ids; to cover more, pass their artboard or a parent"
+            ));
+        }
         if let Some(missing) =
-            handle.read(|d| p.node_ids.iter().find(|id| !d.doc().contains(id)).cloned())
+            handle.read(|d| node_ids.iter().find(|id| !d.doc().contains(id)).cloned())
         {
             return fail(format!("node {missing:?} not found"));
         }
-        handle.set_presence(&self.actor(&ctx), p.node_ids, p.status);
+        handle.set_presence(&self.actor(&ctx), node_ids, p.status);
         ok("Users can now see what you're working on.")
     }
 

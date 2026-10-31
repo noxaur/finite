@@ -485,6 +485,30 @@ async fn long_results_are_cut_with_directions() {
     let page: Vec<Value> = serde_json::from_str(&last).unwrap();
     assert_eq!(page.len(), 100);
 
+    // Presence names at most 100 nodes; repeats count once.
+    let ids: Vec<&str> = page.iter().map(|c| c["id"].as_str().unwrap()).collect();
+    let repeated: Vec<&str> = ids.iter().cycle().take(5_000).copied().collect();
+    agent
+        .ok(
+            "start_working_on_nodes",
+            json!({ "designId": design, "nodeIds": repeated }),
+        )
+        .await;
+    let first: Vec<Value> =
+        serde_json::from_str(&children[..children.rfind(']').unwrap() + 1]).unwrap();
+    let too_many: Vec<&str> = first
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .take(101)
+        .collect();
+    let (refused, is_error) = agent
+        .call(
+            "start_working_on_nodes",
+            json!({ "designId": design, "nodeIds": too_many }),
+        )
+        .await;
+    assert!(is_error && refused.contains("at most 100"), "{refused}");
+
     // A small part still comes back whole.
     let first_card = id_after(&tree, "\"Card\"");
     let small = agent
