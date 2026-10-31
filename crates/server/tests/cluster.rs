@@ -29,7 +29,11 @@ async fn call(app: &Router, req: Request<Body>) -> (StatusCode, Option<String>, 
         .get("finite-owner")
         .map(|v| v.to_str().unwrap().to_owned());
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
-    (status, owner, serde_json::from_slice(&bytes).unwrap_or_default())
+    (
+        status,
+        owner,
+        serde_json::from_slice(&bytes).unwrap_or_default(),
+    )
 }
 
 fn get(path: &str) -> Request<Body> {

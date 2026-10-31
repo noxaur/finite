@@ -17,6 +17,20 @@ async fn main() -> std::io::Result<()> {
         .unwrap_or(4100);
     // Serve the built frontend when a directory is given (desktop release, web deploy).
     let static_dir = std::env::var("FINITE_STATIC_DIR").ok();
+    // `finite-server router` runs the front door for the servers in FINITE_NODES.
+    if std::env::args().nth(1).as_deref() == Some("router") {
+        let Some(nodes) = Cluster::nodes_from_env().filter(|n| !n.is_empty()) else {
+            eprintln!("finite-server: the router needs FINITE_NODES");
+            std::process::exit(1);
+        };
+        let listener =
+            tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await?;
+        tracing::info!(nodes = ?nodes, "routing on http://{}", listener.local_addr()?);
+        let app = finite_server::router::app(nodes, static_dir.as_deref());
+        return axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown())
+            .await;
+    }
     // Designs are saved here as JSON files.
     let data_dir = std::env::var("FINITE_DATA_DIR").unwrap_or_else(|_| "data".into());
 

@@ -311,7 +311,23 @@ Each server then behaves like this:
 
 The hash is FNV-1a with a final mix. It's spelled out in `cluster.rs` so you can port it. A test pins one score, which a Python version reproduces exactly. Without `FINITE_NODES`, there's one server, and it owns everything.
 
-Two pieces are still missing before this is a full deployment:
+### The router
 
-- **A shared design list.** Each server's design list only shows its own designs. The list would have to merge every server's designs, through something they can all read, such as Redis pub/sub or Postgres `LISTEN`/`NOTIFY`.
-- **One front door.** Browsers and agents talk to one server. A reverse proxy would have to send each request to the owner, using the same hash or `/api/owner/{id}`. MCP needs a little more, because one agent session can touch designs on several servers.
+`finite-server router` is the front door. Browsers talk to it as if it were one server, and it sends each request on to the right one. It's in `crates/server/src/router.rs`.
+
+- **One design:** anything under `/api/designs/{id}` goes to the design's owner. That includes the design's WebSocket, which the router relays in both directions.
+- **New designs:** `POST /api/designs` takes turns between servers. Each server picks an id it owns, so the design lands where the hash says it belongs.
+- **The design list:** `GET /api/designs` asks every server and merges the answers, newest first. The list's WebSocket subscribes to every server's list and relays their updates. If one server drops, the router closes the socket, and the browser reconnects and gets a fresh merged list.
+
+The router keeps no state, so you can run several behind a plain load balancer. Here's a two-server setup on one machine:
+
+```bash
+export FINITE_NODES=http://127.0.0.1:4101,http://127.0.0.1:4102
+FINITE_NODE=0 FINITE_PORT=4101 FINITE_DATA_DIR=data/a finite-server &
+FINITE_NODE=1 FINITE_PORT=4102 FINITE_DATA_DIR=data/b finite-server &
+FINITE_PORT=4100 FINITE_STATIC_DIR=apps/web/out finite-server router
+```
+
+`crates/server/tests/router.rs` runs exactly this over real sockets. It checks that new designs spread across both servers, that every design's requests and WebSocket reach its owner, and that the list merges both. I also ran the browser smoke test through a router on a fresh build, and live edits, undo and comments all went through.
+
+What the router doesn't do is relay MCP. One agent session can work on designs that live on different servers, so relaying it means splitting one session across several. For now, connect agents to each server's `/mcp` directly. If an agent asks the wrong server for a design, the error names the right endpoint. The router's `/mcp` answers with the list of endpoints.

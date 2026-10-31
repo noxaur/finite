@@ -41,22 +41,37 @@ impl Cluster {
         Ok(Self { nodes, me })
     }
 
+    /// The base URLs in `FINITE_NODES` (comma-separated), if it's set.
+    pub fn nodes_from_env() -> Option<Vec<String>> {
+        let list = std::env::var("FINITE_NODES").ok()?;
+        Some(
+            list.split(',')
+                .map(|n| n.trim().trim_end_matches('/').to_owned())
+                .filter(|n| !n.is_empty())
+                .collect(),
+        )
+    }
+
     /// Reads `FINITE_NODES` (comma-separated base URLs) and `FINITE_NODE`
     /// (this server's 0-based position). Without them, it's a single server.
     pub fn from_env() -> Result<Self, String> {
-        let Ok(list) = std::env::var("FINITE_NODES") else {
+        let Some(nodes) = Self::nodes_from_env() else {
             return Ok(Self::default());
         };
-        let nodes: Vec<String> = list
-            .split(',')
-            .map(|n| n.trim().trim_end_matches('/').to_owned())
-            .filter(|n| !n.is_empty())
-            .collect();
         let me = std::env::var("FINITE_NODE")
             .map_err(|_| "FINITE_NODES is set, so FINITE_NODE must be too".to_owned())?
             .parse()
             .map_err(|_| "FINITE_NODE must be a number".to_owned())?;
         Self::new(nodes, me)
+    }
+
+    pub fn nodes(&self) -> &[String] {
+        &self.nodes
+    }
+
+    /// The base URL of the server that owns `design_id`.
+    pub fn owner_url(&self, design_id: &str) -> &str {
+        &self.nodes[self.owner(design_id)]
     }
 
     pub fn len(&self) -> usize {
