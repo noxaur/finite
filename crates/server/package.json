@@ -1,0 +1,10 @@
+{
+  "name": "server",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "cargo run -p finite-server",
+    "build": "cargo build --release -p finite-server",
+    "test": "cargo test -p finite-server"
+  }
+}

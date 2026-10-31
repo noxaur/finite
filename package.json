@@ -1,0 +1,28 @@
+{
+  "name": "finite",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vp run --parallel -F web -F server dev",
+    "dev:desktop": "vp run --parallel -F web -F server -F desktop dev",
+    "build": "vp run -r build",
+    "start:desktop": "vp run -r build && vp run desktop#start",
+    "test": "vp run -r test",
+    "ready": "vp check && vp run -r test && vp run -r build",
+    "prepare": "vp config"
+  },
+  "devDependencies": {
+    "vite-plus": "catalog:"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "12.16.1",
+      "onFail": "download"
+    }
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  }
+}

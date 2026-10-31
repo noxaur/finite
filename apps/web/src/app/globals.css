@@ -1,0 +1,13 @@
+/* Replaced at build time with every rule StyleX collects from src/. */
+@stylex;
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+}
