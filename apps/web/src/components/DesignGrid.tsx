@@ -11,6 +11,7 @@ import { connectLobby, type SocketStatus } from "@/design/socket";
 import { mcpUrl } from "@/lib/mcp";
 import { timeAgo } from "@/lib/time";
 import { runtime } from "@/runtime";
+import { mergeLobby } from "@/lib/lobby";
 import { colors, radii, space } from "@/styles/tokens.stylex";
 import { Thumbnail } from "./Thumbnail";
 
@@ -46,10 +47,12 @@ export function DesignGrid() {
             setTotal(message.total);
             return;
           }
-          setDesigns((current) => [
-            message.design,
-            ...(current ?? []).filter((d) => d.id !== message.design.id),
-          ]);
+          setDesigns((current) => {
+            const { designs, trimmed } = mergeLobby(current ?? [], message.design);
+            // One fell off the end, so there are more than the page shows.
+            if (trimmed) setTotal((total) => Math.max(total, designs.length + 1));
+            return designs;
+          });
         },
       }),
     [],
