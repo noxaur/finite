@@ -6,6 +6,11 @@ use std::sync::Arc;
 use finite_design::{ActorId, Change, Design, DesignMeta, NodeId, Snapshot, comment::Comment};
 use serde::Serialize;
 
+/// The id prefix of an agent known only by its MCP session on this server.
+/// Sessions live in memory, so such an agent never comes back once its
+/// session ends or the server restarts.
+pub const SESSION_ACTOR: &str = "mcp:";
+
 /// Whoever is making a change, with a name to show in the UI.
 #[derive(Clone, Debug, Serialize)]
 pub struct Actor {

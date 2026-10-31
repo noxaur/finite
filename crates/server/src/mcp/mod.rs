@@ -30,7 +30,7 @@ use rmcp::{
 };
 
 use crate::{
-    hub::{Actor, DesignHandle, Hub, random_id},
+    hub::{Actor, DesignHandle, Hub, SESSION_ACTOR, random_id},
     screenshot,
 };
 
@@ -144,7 +144,7 @@ impl FiniteMcp {
             };
         }
         if let Some(session) = header("mcp-session-id") {
-            let id = format!("mcp:{session}");
+            let id = format!("{SESSION_ACTOR}{session}");
             let _ = self.session.actor.set(id.clone());
             let short: String = session.chars().take(4).collect();
             return Actor {
@@ -153,7 +153,7 @@ impl FiniteMcp {
             };
         }
         Actor {
-            id: "mcp:anonymous".into(),
+            id: format!("{SESSION_ACTOR}anonymous"),
             name: client,
         }
     }

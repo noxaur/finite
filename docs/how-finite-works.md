@@ -248,7 +248,7 @@ The hub only calls five methods on the `Store` trait in `store.rs`: `ids`, `load
 
 ### Undo across restarts
 
-Undo histories are saved, but only in full snapshots, which the server writes when it shuts down, compacts or hands a design off. So an agent that connects with an `X-Finite-Agent` header can undo after a normal restart. (An agent without one is identified by its MCP session, which ends with the restart.) The journal doesn't hold histories, but it doesn't need to. After a crash, `Design::replay` rebuilds them from the journaled changes, because each change says who made it and whether it was an edit, an undo or a redo:
+Undo histories are saved, but only in full snapshots, which the server writes when it shuts down, compacts or hands a design off. So an agent that connects with an `X-Finite-Agent` header can undo after a normal restart. (An agent without one is identified by its MCP session, which ends with the restart. So when a design is restored, histories of `mcp:` actors are dropped. Nobody could use them, and a design with history stays in memory until the history expires, six hours later.) The journal doesn't hold histories, but it doesn't need to. After a crash, `Design::replay` rebuilds them from the journaled changes, because each change says who made it and whether it was an edit, an undo or a redo:
 
 - **An edit** is applied, and its inverse goes on its actor's undo stack, as `Design::commit` does.
 - **An undo or redo** takes the entry the live call took: the first one from the top of the stack that still applies. That entry must produce exactly the ops in the journal. Then its reverse goes on the other stack.

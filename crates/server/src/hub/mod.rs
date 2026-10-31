@@ -23,7 +23,9 @@ use tokio::sync::{broadcast, watch};
 use crate::{cluster::Cluster, store::Store};
 pub use design::{DesignHandle, Edited, Since};
 use design::{DesignState, Save};
-pub use messages::{Actor, DesignMessage, DesignSummary, LobbyMessage, Missed, Outgoing, Presence};
+pub use messages::{
+    Actor, DesignMessage, DesignSummary, LobbyMessage, Missed, Outgoing, Presence, SESSION_ACTOR,
+};
 
 /// How long an agent's "working on" indicator lasts without activity.
 const PRESENCE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -735,6 +737,46 @@ mod tests {
         assert_eq!(handle.history(&agent).0, ["Create artboard"]);
         assert!(handle.undo(&agent).is_some());
         assert_eq!(handle.read(|d| d.doc().len()), 0);
+    }
+
+    /// An agent known only by its MCP session can't come back after a
+    /// restart, so its history isn't restored and doesn't keep the design in memory.
+    #[tokio::test]
+    async fn session_only_histories_end_with_the_server() {
+        use finite_design::edit;
+
+        let store = Arc::new(MemoryStore::default());
+        let hub = Hub::new(store.clone()).unwrap();
+        let id = hub.create("Test").meta.id;
+        let session = Actor {
+            id: format!("{SESSION_ACTOR}abc"),
+            name: "Claude · abc".into(),
+        };
+        let named = Actor {
+            id: "agent:Claude".into(),
+            name: "Claude".into(),
+        };
+        let handle = hub.get(&id).unwrap();
+        for (actor, board) in [(&session, "one"), (&named, "two")] {
+            handle
+                .edit(actor, "Create artboard", |doc| {
+                    let spec = edit::NewArtboard {
+                        name: board.into(),
+                        width: 100.0,
+                        height: 100.0,
+                        position: None,
+                        styles: BTreeMap::new(),
+                    };
+                    Ok((edit::create_artboard(doc, board.into(), spec)?, ()))
+                })
+                .unwrap();
+        }
+        hub.flush();
+
+        let restarted = Hub::new(store.clone()).unwrap();
+        let handle = restarted.open(&id).await.unwrap();
+        assert!(handle.history(&session).0.is_empty());
+        assert_eq!(handle.history(&named).0, ["Create artboard"]);
     }
 
     /// After a crash, the edits since the last snapshot are only in the

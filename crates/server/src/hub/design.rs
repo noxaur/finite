@@ -18,7 +18,8 @@ use tokio::sync::{broadcast, watch};
 
 use super::{
     Actor, COMPACT_AFTER, DesignMessage, DesignSummary, HISTORY_TTL, Missed, Outgoing,
-    PRESENCE_TTL, Presence, RESUME_BYTES, RESUME_LIMIT, UNLOAD_AFTER, now_ms, random_id,
+    PRESENCE_TTL, Presence, RESUME_BYTES, RESUME_LIMIT, SESSION_ACTOR, UNLOAD_AFTER, now_ms,
+    random_id,
 };
 use crate::store::{Store, Stored};
 
@@ -70,11 +71,17 @@ impl DesignState {
             design.replay(record);
         }
         let mut state = Self::new(design, needs_snapshot);
-        // Restored histories expire like live ones, counting from now.
         let now = now_ms();
         let actors: Vec<ActorId> = state.design.actors().map(String::from).collect();
         for actor in actors {
-            state.last_seen.insert(actor, now);
+            if actor.starts_with(SESSION_ACTOR) {
+                // Its session is gone, so nobody can use this history, and
+                // keeping it would hold the design in memory for hours.
+                state.design.forget_actor(&actor);
+            } else {
+                // Restored histories expire like live ones, counting from now.
+                state.last_seen.insert(actor, now);
+            }
         }
         state
     }
