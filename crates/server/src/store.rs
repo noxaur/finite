@@ -75,6 +75,16 @@ impl FileStore {
         })
     }
 
+    /// Makes the directory's entries (new, renamed and deleted files)
+    /// durable. Without it, a rename can reach the disk before the file it
+    /// points to, or not at all. Windows can't open a directory as a file and
+    /// doesn't need this, so it's a no-op there.
+    fn sync_dir(&self) -> io::Result<()> {
+        #[cfg(unix)]
+        fs::File::open(&self.dir)?.sync_all()?;
+        Ok(())
+    }
+
     fn journal_path(&self, id: &str) -> PathBuf {
         self.dir.join(format!("{id}.log"))
     }
@@ -131,11 +141,18 @@ impl Store for FileStore {
         Ok(Some(Stored { snapshot, journal }))
     }
 
+    /// The order matters after a power cut, not just a crash: the snapshot's
+    /// bytes reach the disk before the rename does, and the rename before the
+    /// old journal is deleted. Otherwise the disk could end up with an empty
+    /// snapshot and no journal.
     fn save(&self, snapshot: &Snapshot) -> io::Result<()> {
         let path = self.dir.join(format!("{}.json", snapshot.meta.id));
         let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, serde_json::to_vec(snapshot)?)?;
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(&serde_json::to_vec(snapshot)?)?;
+        file.sync_all()?;
         fs::rename(tmp, path)?;
+        self.sync_dir()?;
         // If this fails or we crash first, the old journal replays harmlessly:
         // see `Record`.
         match fs::remove_file(self.journal_path(&snapshot.meta.id)) {
@@ -156,12 +173,19 @@ impl Store for FileStore {
                 "design was never saved",
             ));
         }
+        let path = self.journal_path(id);
+        let new = !path.exists();
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(self.journal_path(id))?;
+            .open(path)?;
         file.write_all(&out)?;
-        file.sync_data()
+        file.sync_data()?;
+        // A new file's name is in the directory, which needs its own sync.
+        if new {
+            self.sync_dir()?;
+        }
+        Ok(())
     }
 
     fn remove(&self, id: &str) -> io::Result<()> {

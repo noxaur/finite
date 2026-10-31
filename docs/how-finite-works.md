@@ -321,6 +321,7 @@ On startup, the server loads each snapshot, replays its log with `Design::replay
 
 - **Mid-append:** the log ends in a torn line. Loading stops at it, and the startup compaction drops it for good.
 - **Mid-compaction:** the new snapshot is written to a temporary file and renamed into place, so it's either all there or not at all. If the old log survives next to the new snapshot, replaying it changes nothing.
+- **Power cut:** a process crash keeps whatever the operating system had buffered, but a power cut loses it, and the disk may write things in a different order than the program did. So every write is **fsynced** (forced to the disk) before the next one depends on it. An append syncs the log. A snapshot syncs its temporary file before the rename, then syncs the folder so the rename itself is on disk, and only then deletes the old log. Without that order, a power cut could leave an empty snapshot and no log.
 
 A write can also fail without a crash, say on a full disk. Then the design stays in memory, and the save task retries with **exponential backoff**: after 1 second, then 2, 4 and so on, up to a minute between tries. The retry writes a full snapshot, which holds everything the failed append had. A new edit triggers a save sooner. A test store that fails its first two writes checks that the design reaches it with no further edits.
 
