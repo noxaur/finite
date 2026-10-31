@@ -39,6 +39,8 @@ use tower_http::{
     trace::TraceLayer,
 };
 
+use rmcp::transport::streamable_http_server::session::store::SessionStore;
+
 use crate::cluster::Cluster;
 
 /// Bodies larger than this aren't forwarded.
@@ -63,6 +65,16 @@ impl Front {
 /// Builds the router for the servers in `nodes`. With `static_dir`, it also
 /// serves the built frontend.
 pub fn app(nodes: Vec<String>, static_dir: Option<&str>) -> Router {
+    app_with_sessions(nodes, static_dir, None)
+}
+
+/// Like [`app`], with MCP sessions kept in `sessions`. Routers that share it
+/// can each serve any agent's session, so a load balancer needn't pin them.
+pub fn app_with_sessions(
+    nodes: Vec<String>,
+    static_dir: Option<&str>,
+    sessions: Option<Arc<dyn SessionStore>>,
+) -> Router {
     let cluster = Cluster::new(nodes, 0).expect("the router needs at least one server");
     let front = Arc::new(Front {
         cluster,
@@ -81,7 +93,10 @@ pub fn app(nodes: Vec<String>, static_dir: Option<&str>) -> Router {
         .route("/api/designs/{id}/{*rest}", any(forward))
         .route("/api/owner/{id}", get(owner))
         .with_state(front.clone())
-        .nest_service("/mcp", crate::relay::service(front.cluster.clone()));
+        .nest_service(
+            "/mcp",
+            crate::relay::service(front.cluster.clone(), sessions),
+        );
     let router = match static_dir {
         Some(dir) => {
             let not_found = format!("{dir}/404.html");

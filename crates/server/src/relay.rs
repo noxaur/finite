@@ -7,6 +7,11 @@
 //! works as if it were connected directly. The `X-Finite-Agent` header is
 //! passed on, so a named agent keeps its name.
 //!
+//! An agent without its own `X-Finite-Agent` is identified by its router
+//! session instead, and every router derives the same identity from it. So
+//! with a shared session store ([`DirSessionStore`]), a session can move to
+//! another router mid-conversation and keep its undo history.
+//!
 //! - `list_designs` asks every server and merges the lists.
 //! - `create_design` takes turns between servers, like `POST /api/designs`.
 //! - Every other tool goes to the owner of its `designId`.
@@ -30,7 +35,11 @@ use rmcp::{
         StreamableHttpClientTransport,
         streamable_http_client::StreamableHttpClientTransportConfig,
         streamable_http_server::{
-            StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+            StreamableHttpServerConfig, StreamableHttpService,
+            session::{
+                local::LocalSessionManager,
+                store::{SessionState, SessionStore, SessionStoreError},
+            },
         },
     },
 };
@@ -50,9 +59,15 @@ pub struct Relay {
     backends: Mutex<HashMap<usize, Backend>>,
 }
 
-/// The router's MCP endpoint, to mount at `/mcp`.
-pub fn service(cluster: Cluster) -> StreamableHttpService<Relay, LocalSessionManager> {
-    let config = StreamableHttpServerConfig::default().with_allowed_hosts(cluster.allowed_hosts());
+/// The router's MCP endpoint, to mount at `/mcp`. With `sessions`, routers
+/// that share the store can each serve any session.
+pub fn service(
+    cluster: Cluster,
+    sessions: Option<Arc<dyn SessionStore>>,
+) -> StreamableHttpService<Relay, LocalSessionManager> {
+    let mut config =
+        StreamableHttpServerConfig::default().with_allowed_hosts(cluster.allowed_hosts());
+    config.session_store = sessions;
     let cluster = Arc::new(cluster);
     let next = Arc::new(AtomicUsize::new(0));
     StreamableHttpService::new(
@@ -68,11 +83,44 @@ pub fn service(cluster: Cluster) -> StreamableHttpService<Relay, LocalSessionMan
     )
 }
 
-fn agent_header(ctx: &RequestContext<RoleServer>) -> Option<http::HeaderValue> {
+fn header(ctx: &RequestContext<RoleServer>, name: &str) -> Option<http::HeaderValue> {
     ctx.extensions
         .get::<http::request::Parts>()
-        .and_then(|p| p.headers.get("x-finite-agent"))
+        .and_then(|p| p.headers.get(name))
         .cloned()
+}
+
+/// Who the backends see. A named agent keeps its name. An unnamed one is
+/// identified by its router session, which every router sees the same way,
+/// and shown as its client's name.
+fn identity(ctx: &RequestContext<RoleServer>) -> HashMap<http::HeaderName, http::HeaderValue> {
+    let mut headers = HashMap::new();
+    let agent = http::HeaderName::from_static("x-finite-agent");
+    if let Some(named) = header(ctx, "x-finite-agent") {
+        headers.insert(agent, named);
+        return headers;
+    }
+    let Some(session) =
+        header(ctx, "mcp-session-id").and_then(|v| v.to_str().ok().map(String::from))
+    else {
+        return headers;
+    };
+    let client: String = ctx
+        .peer
+        .peer_info()
+        .map(|info| info.client_info.name.clone())
+        .unwrap_or_else(|| "Agent".into())
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .collect();
+    let short: String = session.chars().take(4).collect();
+    if let Ok(id) = http::HeaderValue::from_str(&format!("relay:{session}")) {
+        headers.insert(agent, id);
+    }
+    if let Ok(name) = http::HeaderValue::from_str(&format!("{client} ({short})")) {
+        headers.insert(http::HeaderName::from_static("x-finite-agent-name"), name);
+    }
+    headers
 }
 
 fn unreachable(base: &str, error: impl std::fmt::Display) -> McpError {
@@ -90,12 +138,8 @@ impl Relay {
             return Ok(backend.clone());
         }
         let base = &self.cluster.nodes()[node];
-        let mut headers = HashMap::new();
-        if let Some(agent) = agent_header(ctx) {
-            headers.insert(http::HeaderName::from_static("x-finite-agent"), agent);
-        }
         let config = StreamableHttpClientTransportConfig::with_uri(format!("{base}/mcp"))
-            .custom_headers(headers);
+            .custom_headers(identity(ctx));
         let backend =
             ().serve(StreamableHttpClientTransport::from_config(config))
                 .await
@@ -188,5 +232,55 @@ impl ServerHandler for Relay {
             (_, None) => self.call(0, request, &ctx).await?,
         };
         Ok(result.into())
+    }
+}
+
+/// MCP sessions as JSON files in one directory, so several routers on a
+/// shared volume can serve the same sessions. Each file holds what the
+/// session's `initialize` request said, which is all a router needs to
+/// resume it.
+pub struct DirSessionStore {
+    dir: std::path::PathBuf,
+}
+
+impl DirSessionStore {
+    pub fn new(dir: impl Into<std::path::PathBuf>) -> std::io::Result<Self> {
+        let dir = dir.into();
+        std::fs::create_dir_all(&dir)?;
+        Ok(Self { dir })
+    }
+
+    fn path(&self, session_id: &str) -> std::path::PathBuf {
+        let safe: String = session_id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        self.dir.join(format!("{safe}.json"))
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionStore for DirSessionStore {
+    async fn load(&self, session_id: &str) -> Result<Option<SessionState>, SessionStoreError> {
+        match tokio::fs::read(self.path(session_id)).await {
+            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn store(&self, session_id: &str, state: &SessionState) -> Result<(), SessionStoreError> {
+        let path = self.path(session_id);
+        let tmp = path.with_extension("json.tmp");
+        tokio::fs::write(&tmp, serde_json::to_vec(state)?).await?;
+        tokio::fs::rename(tmp, path).await?;
+        Ok(())
+    }
+
+    async fn delete(&self, session_id: &str) -> Result<(), SessionStoreError> {
+        match tokio::fs::remove_file(self.path(session_id)).await {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
+            _ => Ok(()),
+        }
     }
 }

@@ -26,7 +26,12 @@ async fn main() -> std::io::Result<()> {
         let listener =
             tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await?;
         tracing::info!(nodes = ?nodes, "routing on http://{}", listener.local_addr()?);
-        let app = finite_server::router::app(nodes, static_dir.as_deref());
+        // With a shared FINITE_SESSION_DIR, any router can serve any MCP session.
+        let sessions = match std::env::var("FINITE_SESSION_DIR") {
+            Ok(dir) => Some(Arc::new(finite_server::relay::DirSessionStore::new(dir)?) as _),
+            Err(_) => None,
+        };
+        let app = finite_server::router::app_with_sessions(nodes, static_dir.as_deref(), sessions);
         return axum::serve(listener, app)
             .with_graceful_shutdown(shutdown())
             .await;

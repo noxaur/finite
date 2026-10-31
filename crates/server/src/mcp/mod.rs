@@ -136,9 +136,11 @@ impl FiniteMcp {
             .map(|info| info.client_info.name.clone())
             .unwrap_or_else(|| "Agent".into());
         if let Some(agent) = header("x-finite-agent") {
+            // The router names relayed agents separately from their identity.
+            let name = header("x-finite-agent-name").unwrap_or_else(|| agent.clone());
             return Actor {
                 id: format!("agent:{agent}"),
-                name: agent,
+                name,
             };
         }
         if let Some(session) = header("mcp-session-id") {

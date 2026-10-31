@@ -236,3 +236,157 @@ mod relay {
         client.cancel().await.unwrap();
     }
 }
+
+mod failover {
+    use super::*;
+    use finite_server::relay::DirSessionStore;
+
+    /// A bare MCP client over HTTP, so a test can send one session's requests
+    /// to different routers.
+    struct Session {
+        http: reqwest::Client,
+        id: Option<String>,
+        next: u64,
+    }
+
+    impl Session {
+        async fn post(&mut self, base: &str, body: Value) -> (u16, Option<Value>) {
+            let mut req = self
+                .http
+                .post(format!("{base}/mcp"))
+                .header("accept", "application/json, text/event-stream")
+                .header("mcp-protocol-version", "2025-06-18")
+                .json(&body);
+            if let Some(id) = &self.id {
+                req = req.header("mcp-session-id", id);
+            }
+            let res = req.send().await.unwrap();
+            if let Some(id) = res.headers().get("mcp-session-id") {
+                self.id = Some(id.to_str().unwrap().to_owned());
+            }
+            let status = res.status().as_u16();
+            let text = res.text().await.unwrap();
+            let data: String = text
+                .lines()
+                .filter_map(|l| l.strip_prefix("data: "))
+                .collect();
+            (
+                status,
+                (!data.trim().is_empty()).then(|| serde_json::from_str(&data).unwrap()),
+            )
+        }
+
+        async fn start(base: &str) -> Self {
+            let mut session = Self {
+                http: reqwest::Client::new(),
+                id: None,
+                next: 1,
+            };
+            let init = json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": { "name": "Tester", "version": "1" } } });
+            session.post(base, init).await;
+            session
+                .post(
+                    base,
+                    json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+                )
+                .await;
+            session
+        }
+
+        /// Calls a tool through `base`. Returns the HTTP status and the tool's text.
+        async fn call(&mut self, base: &str, tool: &str, args: Value) -> (u16, String) {
+            self.next += 1;
+            let body = json!({ "jsonrpc": "2.0", "id": self.next, "method": "tools/call",
+                               "params": { "name": tool, "arguments": args } });
+            let (status, response) = self.post(base, body).await;
+            let text = response
+                .and_then(|r| r["result"]["content"].as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|c| c["text"].as_str().map(String::from))
+                .collect();
+            (status, text)
+        }
+    }
+
+    async fn two_routers(sessions: Option<&std::path::Path>) -> (String, String) {
+        let (_, nodes) = deployment().await;
+        let mut urls = Vec::new();
+        for _ in 0..2 {
+            let store = sessions.map(|dir| {
+                Arc::new(DirSessionStore::new(dir).unwrap())
+                    as Arc<
+                        dyn rmcp::transport::streamable_http_server::session::store::SessionStore,
+                    >
+            });
+            let (listener, url) = listen().await;
+            let routes = router::app_with_sessions(nodes.clone(), None, store);
+            tokio::spawn(async move { axum::serve(listener, routes).await });
+            urls.push(url);
+        }
+        (urls[0].clone(), urls[1].clone())
+    }
+
+    #[tokio::test]
+    async fn a_session_moves_between_routers_and_keeps_its_undo() {
+        let dir = std::env::temp_dir().join(format!("finite-sessions-{}", uuid::Uuid::new_v4()));
+        let (a, b) = two_routers(Some(&dir)).await;
+
+        // An unnamed agent starts on router A.
+        let mut agent = Session::start(&a).await;
+        let (_, created) = agent
+            .call(&a, "create_design", json!({ "name": "Moving" }))
+            .await;
+        let id: String = created
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .find(|w| w.len() == 10)
+            .unwrap()
+            .to_owned();
+        let (_, board) = agent
+            .call(
+                &a,
+                "create_artboard",
+                json!({ "designId": id, "name": "Home", "width": 400, "height": 300 }),
+            )
+            .await;
+        let board = board
+            .split('#')
+            .nth(1)
+            .unwrap()
+            .split('.')
+            .next()
+            .unwrap()
+            .to_owned();
+        agent
+            .call(
+                &a,
+                "update_styles",
+                json!({ "designId": id,
+                "updates": [{ "nodeIds": [board], "styles": { "color": "red" } }] }),
+            )
+            .await;
+
+        // Router A goes away; the same session carries on at router B.
+        let (status, undone) = agent.call(&b, "undo", json!({ "designId": id })).await;
+        assert_eq!(status, 200);
+        assert!(
+            undone.contains("Update styles"),
+            "B undid A's edit: {undone}"
+        );
+        let (_, html) = agent
+            .call(&b, "get_html", json!({ "designId": id, "nodeId": board }))
+            .await;
+        assert!(!html.contains("red"), "{html}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn without_a_shared_store_routers_dont_know_each_others_sessions() {
+        let (a, b) = two_routers(None).await;
+        let mut agent = Session::start(&a).await;
+        let (status, _) = agent.call(&b, "list_designs", json!({})).await;
+        assert_eq!(status, 404);
+    }
+}
