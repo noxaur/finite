@@ -83,6 +83,11 @@ pub struct Comment {
     /// into another element). Viewers pin it there until the artboard is back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detached_at: Option<Point>,
+    /// The revision: 0 when posted, and one more after every change. A viewer
+    /// gets a comment both on the socket and in reply to its own requests, and
+    /// keeps whichever copy is newer.
+    #[serde(default)]
+    pub rev: u64,
 }
 
 /// A point on the canvas.
@@ -390,6 +395,7 @@ mod tests {
             created_at: 0,
             messages: vec![message(AuthorKind::User)],
             detached_at: None,
+            rev: 0,
         };
         assert!(comment.awaits_agent());
         comment.messages.push(message(AuthorKind::Agent));

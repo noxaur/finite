@@ -128,8 +128,14 @@ export class DesignSession {
     }
   }
 
-  /** Adds or replaces a comment, as the server's `comment` message and REST replies do. */
+  /**
+   * Adds or replaces a comment, from the server's `comment` message or a REST
+   * reply. The same change arrives both ways, in either order, so an older
+   * copy than the one we have is ignored.
+   */
   upsertComment(comment: Comment) {
+    const known = this.current.comments.get(comment.id);
+    if (known && known.rev > comment.rev) return;
     this.update({ comments: new Map(this.current.comments).set(comment.id, comment) });
   }
 

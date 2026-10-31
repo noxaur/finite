@@ -121,13 +121,34 @@ describe("DesignSession", () => {
       resolved: false,
       createdAt: 0,
       messages: [],
+      rev: 0,
     };
     s.receive({ type: "comment", comment });
-    s.upsertComment({ ...comment, resolved: true });
+    s.upsertComment({ ...comment, resolved: true, rev: 1 });
     expect([...s.state.comments.values()].map((c) => c.resolved)).toEqual([true]);
     expect(calls).toBe(3);
     unsubscribe();
-    s.upsertComment(comment);
+    s.upsertComment({ ...comment, rev: 2 });
     expect(calls).toBe(3);
+  });
+
+  it("keeps the newer copy of a comment when an older one arrives late", () => {
+    const { session: s } = session();
+    s.receive(snapshot());
+    const comment: Comment = {
+      id: "c1",
+      artboardId: null,
+      nodeId: null,
+      x: 0,
+      y: 0,
+      resolved: false,
+      createdAt: 0,
+      messages: [],
+      rev: 0,
+    };
+    // The agent's reply comes over the socket before the REST answer to ours.
+    s.receive({ type: "comment", comment: { ...comment, resolved: true, rev: 2 } });
+    s.upsertComment({ ...comment, rev: 1 });
+    expect(s.state.comments.get("c1")?.resolved).toBe(true);
   });
 });

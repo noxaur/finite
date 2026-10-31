@@ -306,7 +306,9 @@ If an agent deletes an artboard that has comments, the pins don't vanish. Before
 
 The order of the messages matters here. A viewer draws a pin at its artboard if the artboard exists, and at `detachedAt` if not. If the delete arrived first, there'd be a moment with neither, and the pin would blink out. So the hub sends a pin that lost its artboard before the change that deletes it, and a pin that got it back after the change that restores it (`publish_with_comments` in `hub/design.rs`). The end-to-end test found this blink.
 
-Comments live beside the document, not inside it, so undo never touches them. They're saved in the same JSON file as the design.
+Comments live beside the document, not inside it, so undo never touches them. They're saved with the design, in its snapshot and journal.
+
+Each comment carries a **revision number**, `rev`. It starts at 0 and goes up by one with every change: a reply, a resolve, or a pin moving because its artboard went or came back. A browser can get the same comment twice. The server broadcasts it on the socket, and the REST call that changed it also returns it. The two can arrive in either order, and another change can land in between. Say you reply, and an agent answers at once. The agent's reply can reach your socket before the REST answer to your own reply. So `DesignSession.upsertComment` keeps whichever copy has the higher `rev`, and drops an older copy that arrives late.
 
 All the thread rules live in `crates/design`: `comment.rs` defines the types and checks, and `Design::add_comment`, `reply` and `set_resolved` apply them. The hub only takes the lock, calls one of those, and broadcasts the updated comment. That means you can test a comment rule with a plain function call, like the tests at the bottom of `design.rs`.
 
@@ -398,5 +400,6 @@ MCP rejects requests whose `Host` header it doesn't know, to block **DNS rebindi
 | Hub        | The server's index of designs, with the ones in use loaded in memory.         |
 | Room       | The model for loading: a design is in memory only while someone uses it.      |
 | Long poll  | A request that stays open until there's news, like `wait_for_comments`.       |
+| Revision   | A comment's `rev`: it goes up with each change, so the higher copy is newer.  |
 | Owner      | The one server that holds a design, picked by hashing its id.                 |
 | Router     | `finite-server router`: the front door that sends requests to each owner.     |

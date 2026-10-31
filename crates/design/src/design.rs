@@ -337,6 +337,7 @@ impl Design {
                 changes: Vec::new(),
             }],
             detached_at: None,
+            rev: 0,
         });
         Ok(self.comments.last().expect("just pushed"))
     }
@@ -370,12 +371,14 @@ impl Design {
             seq: self.seq,
             changes,
         });
+        comment.rev += 1;
         Ok(comment)
     }
 
     pub fn set_resolved(&mut self, id: &str, resolved: bool) -> Result<&Comment, CommentError> {
         let comment = find(&mut self.comments, id)?;
         comment.resolved = resolved;
+        comment.rev += 1;
         Ok(comment)
     }
 }
@@ -422,6 +425,7 @@ fn reattach(
             _ => continue,
         };
         comment.detached_at = detached;
+        comment.rev += 1;
         updates.push(comment.id.clone());
     }
 }
@@ -610,6 +614,22 @@ mod tests {
         assert!(!reopened.resolved);
         assert!(reopened.messages.last().unwrap().changes.is_empty());
         assert_eq!(d.snapshot().comments.len(), 1);
+    }
+
+    #[test]
+    fn every_comment_change_bumps_its_revision() {
+        let mut d = design();
+        d.commit("agent", "board", &[create("a", None)], 1);
+        let id = pin(&mut d, "a");
+        let rev = |d: &Design| d.comments()[0].rev;
+        assert_eq!(rev(&d), 0);
+        d.reply(&id, author("agent", AuthorKind::Agent), "Done", None, 2)
+            .unwrap();
+        d.set_resolved(&id, true).unwrap();
+        assert_eq!(rev(&d), 2);
+        // Deleting the artboard moves the pin, and that's a change too.
+        d.commit("agent", "delete", &[Op::Delete { id: "a".into() }], 3);
+        assert_eq!(rev(&d), 3);
     }
 
     #[test]

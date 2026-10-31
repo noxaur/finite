@@ -130,6 +130,7 @@
         ],
         "nodeId": "n1",
         "resolved": false,
+        "rev": 0,
         "x": 24.0,
         "y": 16.0
       },
@@ -216,6 +217,7 @@
         ],
         "nodeId": "n1",
         "resolved": true,
+        "rev": 1,
         "x": 24.0,
         "y": 16.0
       },
@@ -276,6 +278,7 @@
         ],
         "nodeId": null,
         "resolved": false,
+        "rev": 0,
         "x": 5.0,
         "y": 5.0
       },
@@ -304,6 +307,7 @@
         ],
         "nodeId": null,
         "resolved": false,
+        "rev": 1,
         "x": 5.0,
         "y": 5.0
       },
