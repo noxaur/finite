@@ -35,8 +35,10 @@ const SAVE_DEBOUNCE: Duration = Duration::from_millis(250);
 const COMPACT_AFTER: usize = 1000;
 /// How long an unused design stays in memory before it's unloaded.
 const UNLOAD_AFTER: Duration = Duration::from_secs(5 * 60);
-/// How many recent changes a design keeps for viewers that reconnect.
+/// How many recent changes a design keeps for viewers that reconnect...
 const RESUME_LIMIT: usize = 256;
+/// ...and how much they may add up to, as JSON.
+const RESUME_BYTES: usize = 4 << 20;
 
 pub fn now_ms() -> u64 {
     SystemTime::now()

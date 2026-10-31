@@ -18,7 +18,7 @@ use tokio::sync::{broadcast, watch};
 
 use super::{
     Actor, COMPACT_AFTER, DesignMessage, DesignSummary, HISTORY_TTL, Missed, Outgoing,
-    PRESENCE_TTL, Presence, RESUME_LIMIT, UNLOAD_AFTER, now_ms, random_id,
+    PRESENCE_TTL, Presence, RESUME_BYTES, RESUME_LIMIT, UNLOAD_AFTER, now_ms, random_id,
 };
 use crate::store::{Store, Stored};
 
@@ -35,9 +35,8 @@ pub(super) struct DesignState {
     /// A random name for this load of the design. Changes after a restart or
     /// a reload can reuse a `seq`, so a viewer may resume only within one epoch.
     epoch: String,
-    /// The latest changes and their actors' names, oldest first, so a viewer
-    /// that reconnects can get just what it missed.
-    recent: VecDeque<(Change, String)>,
+    /// The latest changes, so a viewer that reconnects can get just what it missed.
+    recent: Recent,
     /// When the design was last opened through [`super::Hub::get`].
     last_used: u64,
 }
@@ -58,7 +57,7 @@ impl DesignState {
             journaled: 0,
             needs_snapshot,
             epoch: random_id(8),
-            recent: VecDeque::new(),
+            recent: Recent::default(),
             last_used: now_ms(),
         }
     }
@@ -89,9 +88,13 @@ impl DesignState {
         }
         let missed: Vec<Missed> = self
             .recent
+            .changes
             .iter()
-            .filter(|(change, _)| change.seq > since.seq)
-            .map(|(change, actor_name)| Missed { change, actor_name })
+            .filter(|kept| kept.change.seq > since.seq)
+            .map(|kept| Missed {
+                change: &kept.change,
+                actor_name: &kept.actor_name,
+            })
             .collect();
         // Seqs have no gaps, so a full set has exactly this many.
         (missed.len() as u64 == seq - since.seq).then_some(missed)
@@ -136,6 +139,35 @@ pub struct DesignHandle {
     pub(super) dirty: watch::Sender<()>,
     /// Wakes `wait_for_comments` callers when any comment changes.
     comments: tokio::sync::Notify,
+}
+
+/// A design's latest changes, oldest first. It keeps at most `RESUME_LIMIT`
+/// of them, adding up to at most `RESUME_BYTES`, so a few huge edits can't
+/// hold on to a lot of memory.
+#[derive(Default)]
+pub(super) struct Recent {
+    changes: VecDeque<Kept>,
+    bytes: usize,
+}
+
+struct Kept {
+    change: Change,
+    actor_name: String,
+    /// The size of its `change` message.
+    bytes: usize,
+}
+
+impl Recent {
+    fn push(&mut self, kept: Kept) {
+        self.bytes += kept.bytes;
+        self.changes.push_back(kept);
+        while self.changes.len() > RESUME_LIMIT || self.bytes > RESUME_BYTES {
+            let Some(dropped) = self.changes.pop_front() else {
+                break;
+            };
+            self.bytes -= dropped.bytes;
+        }
+    }
 }
 
 /// Where a reconnecting viewer left off: the epoch from its snapshot and the
@@ -295,15 +327,17 @@ impl DesignHandle {
     }
 
     pub(super) fn publish(&self, state: &mut DesignState, actor: &Actor, change: &Change) {
-        state.recent.push_back((change.clone(), actor.name.clone()));
-        if state.recent.len() > RESUME_LIMIT {
-            state.recent.pop_front();
-        }
         let message = DesignMessage::Change {
             change,
             actor_name: &actor.name,
         };
-        let _ = self.events.send(Outgoing::new(Some(change.seq), &message));
+        let message = Outgoing::new(Some(change.seq), &message);
+        state.recent.push(Kept {
+            change: change.clone(),
+            actor_name: actor.name.clone(),
+            bytes: message.json.len(),
+        });
+        let _ = self.events.send(message);
         self.record(
             state,
             Record::Change {
@@ -560,5 +594,43 @@ impl DesignHandle {
             state.design.forget_actor(&actor);
             state.last_seen.remove(&actor);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use finite_design::Origin;
+
+    use super::*;
+
+    fn kept(seq: u64, bytes: usize) -> Kept {
+        Kept {
+            change: Change {
+                seq,
+                actor: "agent".into(),
+                origin: Origin::Edit,
+                label: "Edit".into(),
+                ops: Vec::new(),
+            },
+            actor_name: "Agent".into(),
+            bytes,
+        }
+    }
+
+    #[test]
+    fn recent_changes_stay_within_their_byte_budget() {
+        let mut recent = Recent::default();
+        recent.push(kept(1, RESUME_BYTES / 2));
+        recent.push(kept(2, RESUME_BYTES / 2));
+        assert_eq!(recent.changes.len(), 2);
+        // A third pushes the oldest out.
+        recent.push(kept(3, 1));
+        let seqs: Vec<u64> = recent.changes.iter().map(|k| k.change.seq).collect();
+        assert_eq!(seqs, [2, 3]);
+        assert_eq!(recent.bytes, RESUME_BYTES / 2 + 1);
+        // One bigger than the whole budget leaves nothing, so viewers get a snapshot.
+        recent.push(kept(4, RESUME_BYTES + 1));
+        assert!(recent.changes.is_empty());
+        assert_eq!(recent.bytes, 0);
     }
 }

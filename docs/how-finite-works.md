@@ -219,7 +219,7 @@ When a browser opens a design's socket, the server takes the lock first. Under t
 Connections drop: a laptop sleeps, Wi-Fi blinks, a proxy times out. The browser reconnects with backoff (`socket.ts`). A fresh snapshot after every drop would be wasteful. It would also rebuild every artboard and reload every sandboxed one, so the canvas would flicker and animations would restart. So the socket supports **resume**, the way chat and multiplayer protocols do: the browser says where it left off, and the server sends only what it missed.
 
 1. Every snapshot message carries an `epoch`. The epoch is a random id the server picks each time it loads the design into memory.
-2. Each loaded design keeps its last 256 changes, with their actors' names (`recent` in `hub/design.rs`).
+2. Each loaded design keeps its latest changes, with their actors' names (`Recent` in `hub/design.rs`). It keeps up to 256, and drops the oldest sooner if together they pass 4 MB of JSON, so a few huge `write_html` calls can't hold on to much memory.
 3. On reconnect, `DesignSession` opens `…/ws?epoch=<epoch>&since=<seq>`, where `seq` is the last change it applied.
 4. If the epoch matches and every change after `since` is still kept, the server answers with a `resume` message. It holds those changes, plus the current comments, presence and name, which are small enough to send whole. The browser applies the changes as if they had arrived live.
 5. Otherwise the server sends a snapshot, as for a new viewer.
