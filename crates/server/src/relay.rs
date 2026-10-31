@@ -294,8 +294,19 @@ impl ServerHandler for Relay {
         let result = match (request.name.as_ref(), design_id) {
             ("list_designs", _) => self.list_designs(request, &ctx).await,
             ("create_design", _) => {
-                let node = self.next.fetch_add(1, Ordering::Relaxed) % nodes.len();
-                self.call(&nodes[node], request, &ctx).await?
+                let turn = self.next.fetch_add(1, Ordering::Relaxed);
+                let mut created = None;
+                for i in 0..nodes.len() {
+                    let base = &nodes[(turn + i) % nodes.len()];
+                    // A server we can't open a session with never saw the
+                    // call, so the next one can take it.
+                    if i + 1 < nodes.len() && self.backend(base, &ctx).await.is_err() {
+                        continue;
+                    }
+                    created = Some(self.call(base, request.clone(), &ctx).await?);
+                    break;
+                }
+                created.expect("the last server is always tried")
             }
             (_, Some(id)) => {
                 self.call(self.cluster.owner_url(&id), request, &ctx)

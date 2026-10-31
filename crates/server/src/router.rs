@@ -126,16 +126,16 @@ impl Front {
     }
 }
 
-/// Sends a request on to `base` and returns its response. If `base` says
-/// another server owns the design, it follows that once.
-async fn relay(
+/// Sends a request on to `base`. If `base` says another server owns the
+/// design, it follows that once.
+async fn send(
     front: &Front,
     base: &str,
-    method: Method,
+    method: &Method,
     path_and_query: &str,
     headers: &HeaderMap,
-    body: Bytes,
-) -> Response {
+    body: &Bytes,
+) -> reqwest::Result<reqwest::Response> {
     let send = |base: &str| {
         let mut req = front
             .http
@@ -146,16 +146,19 @@ async fn relay(
         }
         req.send()
     };
-    let mut res = match send(base).await {
+    let res = send(base).await?;
+    match Front::redirect(res.status(), res.headers(), base) {
+        Some(owner) => send(&owner).await,
+        None => Ok(res),
+    }
+}
+
+/// A server's answer, passed on to the browser.
+async fn pass_on(res: reqwest::Result<reqwest::Response>) -> Response {
+    let res = match res {
         Ok(res) => res,
         Err(error) => return bad_gateway(error),
     };
-    if let Some(owner) = Front::redirect(res.status(), res.headers(), base) {
-        res = match send(&owner).await {
-            Ok(res) => res,
-            Err(error) => return bad_gateway(error),
-        };
-    }
     let mut out = Response::builder().status(res.status());
     for name in [header::CONTENT_TYPE, header::CACHE_CONTROL] {
         if let Some(value) = res.headers().get(&name) {
@@ -182,13 +185,25 @@ async fn forward(
     };
     let path = parts.uri.path_and_query().map_or("/", |p| p.as_str());
     let base = front.cluster.owner_url(&id).to_owned();
-    relay(&front, &base, parts.method, path, &parts.headers, body).await
+    pass_on(send(&front, &base, &parts.method, path, &parts.headers, &body).await).await
 }
 
+/// Creates a design on the server whose turn it is. If that server can't be
+/// reached, the next one takes it: a refused connection never reached the
+/// server, so nothing was created twice.
 async fn create(State(front): State<Arc<Front>>, headers: HeaderMap, body: Bytes) -> Response {
     let nodes = front.cluster.nodes();
-    let base = nodes[front.next.fetch_add(1, Ordering::Relaxed) % nodes.len()].clone();
-    relay(&front, &base, Method::POST, "/api/designs", &headers, body).await
+    let turn = front.next.fetch_add(1, Ordering::Relaxed);
+    for i in 0..nodes.len() {
+        let base = &nodes[(turn + i) % nodes.len()];
+        match send(&front, base, &Method::POST, "/api/designs", &headers, &body).await {
+            Err(error) if error.is_connect() && i + 1 < nodes.len() => {
+                tracing::warn!(base, %error, "a server is down; creating the design on the next");
+            }
+            res => return pass_on(res).await,
+        }
+    }
+    unreachable!("the last server's answer is passed on")
 }
 
 /// Every server's designs, most recently edited first. Servers that don't

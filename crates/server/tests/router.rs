@@ -209,6 +209,34 @@ async fn the_design_list_survives_a_server_being_down() {
     let first = first_text(&format!("{front_url}/api/designs/ws")).await;
     assert_eq!(first["type"], "designs");
     assert_eq!(first["designs"][0]["id"], id.as_str());
+
+    // New designs skip the server that's down, whoever's turn it is.
+    let http = reqwest::Client::new();
+    for _ in 0..2 {
+        let res = http
+            .post(format!("{front_url}/api/designs"))
+            .json(&json!({ "name": "New" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 201);
+    }
+    use rmcp::{
+        ServiceExt,
+        transport::{
+            StreamableHttpClientTransport,
+            streamable_http_client::StreamableHttpClientTransportConfig,
+        },
+    };
+    let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp"));
+    let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
+    for _ in 0..2 {
+        let params = rmcp::model::CallToolRequestParams::new("create_design")
+            .with_arguments(json!({ "name": "By agent" }).as_object().unwrap().clone());
+        let result = client.call_tool(params).await.unwrap();
+        assert_ne!(result.is_error, Some(true));
+    }
+    client.cancel().await.unwrap();
 }
 
 mod relay {
