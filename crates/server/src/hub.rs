@@ -4,7 +4,9 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{Arc, Mutex, RwLock},
+    io,
+    ops::{Deref, DerefMut},
+    sync::{Arc, Mutex, MutexGuard, RwLock, Weak},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -16,7 +18,7 @@ use finite_design::{
 use serde::Serialize;
 use tokio::sync::{broadcast, watch};
 
-use crate::store::Store;
+use crate::store::{Store, Stored};
 
 /// How long an agent's "working on" indicator lasts without activity.
 const PRESENCE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -26,6 +28,8 @@ const HISTORY_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(250);
 /// A design's journal is compacted into a fresh snapshot after this many records.
 const COMPACT_AFTER: usize = 1000;
+/// How long an unused design stays in memory before it's unloaded.
+const UNLOAD_AFTER: Duration = Duration::from_secs(5 * 60);
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -152,6 +156,8 @@ struct DesignState {
     journaled: usize,
     /// Set when the next save must be a full snapshot: a new design, or a failed write.
     needs_snapshot: bool,
+    /// When the design was last opened through [`Hub::get`].
+    last_used: u64,
 }
 
 /// What the save task writes next.
@@ -161,6 +167,38 @@ enum Save {
 }
 
 impl DesignState {
+    fn new(design: Design, needs_snapshot: bool) -> Self {
+        Self {
+            design,
+            presence: BTreeMap::new(),
+            last_seen: HashMap::new(),
+            pending: Vec::new(),
+            journaled: 0,
+            needs_snapshot,
+            last_used: now_ms(),
+        }
+    }
+
+    /// Rebuilds a stored design. A replayed journal is compacted on the next save.
+    fn restore(stored: Stored) -> Self {
+        let needs_snapshot = !stored.journal.is_empty();
+        let mut design = Design::from_snapshot(stored.snapshot);
+        for record in stored.journal {
+            design.replay(record);
+        }
+        Self::new(design, needs_snapshot)
+    }
+
+    /// Whether the design can leave memory: nothing unsaved, and nobody with
+    /// presence or undo history in it.
+    fn is_idle(&self, now: u64) -> bool {
+        self.pending.is_empty()
+            && !self.needs_snapshot
+            && self.presence.is_empty()
+            && !self.design.has_histories()
+            && now.saturating_sub(self.last_used) >= UNLOAD_AFTER.as_millis() as u64
+    }
+
     fn presence_message(&self) -> Outgoing {
         let presence = self.presence.values().collect();
         Outgoing::new(None, &DesignMessage::Presence { presence })
@@ -174,11 +212,40 @@ impl DesignState {
     }
 }
 
-/// One live design: its state, its viewers, and the records waiting to be saved.
+/// One design. The hub keeps a handle for every design, but the state (the
+/// document, comments and histories) is only in memory while the design is in
+/// use: [`Hub::get`] loads it, and the hub's sweep unloads it once it's idle.
+/// Every public method expects the state to be loaded, which holds for any
+/// handle obtained from [`Hub::get`].
 pub struct DesignHandle {
-    state: Mutex<DesignState>,
+    id: String,
+    store: Arc<dyn Store>,
+    state: Mutex<Option<DesignState>>,
+    /// Kept current while loaded, so the design list never loads a design.
+    summary: Mutex<DesignSummary>,
     events: broadcast::Sender<Outgoing>,
     dirty: watch::Sender<()>,
+}
+
+/// A locked, loaded design state.
+struct Loaded<'a>(MutexGuard<'a, Option<DesignState>>);
+
+impl Deref for Loaded<'_> {
+    type Target = DesignState;
+
+    fn deref(&self) -> &DesignState {
+        self.0
+            .as_ref()
+            .expect("design handles are only used after Hub::get loads them")
+    }
+}
+
+impl DerefMut for Loaded<'_> {
+    fn deref_mut(&mut self) -> &mut DesignState {
+        self.0
+            .as_mut()
+            .expect("design handles are only used after Hub::get loads them")
+    }
 }
 
 /// The result of an edit: the command's output and the change it produced
@@ -186,31 +253,71 @@ pub struct DesignHandle {
 pub type Edited<T> = (T, Option<Change>);
 
 impl DesignHandle {
-    fn new(design: Design, needs_snapshot: bool) -> Self {
+    fn new(store: Arc<dyn Store>, summary: DesignSummary, state: Option<DesignState>) -> Self {
         Self {
-            state: Mutex::new(DesignState {
-                design,
-                presence: BTreeMap::new(),
-                last_seen: HashMap::new(),
-                pending: Vec::new(),
-                journaled: 0,
-                needs_snapshot,
-            }),
+            id: summary.meta.id.clone(),
+            store,
+            state: Mutex::new(state),
+            summary: Mutex::new(summary),
             events: broadcast::channel(1024).0,
             dirty: watch::channel(()).0,
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, DesignState> {
+    /// The state, loaded or not. Hub-wide passes (sweep, flush) use this.
+    fn raw(&self) -> MutexGuard<'_, Option<DesignState>> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn lock(&self) -> Loaded<'_> {
+        Loaded(self.raw())
+    }
+
+    /// Loads the state from the store if it isn't in memory.
+    fn load(&self) -> io::Result<()> {
+        let mut state = self.raw();
+        if state.is_none() {
+            let stored = self.store.load(&self.id)?.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "design missing from the store")
+            })?;
+            let restored = DesignState::restore(stored);
+            if restored.needs_snapshot {
+                self.dirty.send_replace(());
+            }
+            *state = Some(restored);
+        }
+        if let Some(state) = state.as_mut() {
+            state.last_used = now_ms();
+        }
+        Ok(())
+    }
+
+    /// Drops the state from memory if it's idle. The caller makes sure nobody
+    /// else holds this handle.
+    fn unload_if_idle(&self, now: u64) -> bool {
+        let mut state = self.raw();
+        let idle = state.as_ref().is_some_and(|s| s.is_idle(now));
+        if idle && self.events.receiver_count() == 0 {
+            *state = None;
+            return true;
+        }
+        false
+    }
+
+    fn is_loaded(&self) -> bool {
+        self.raw().is_some()
     }
 
     pub fn read<T>(&self, f: impl FnOnce(&Design) -> T) -> T {
         f(&self.lock().design)
     }
 
+    /// Works whether or not the design is loaded.
     pub fn summary(&self) -> DesignSummary {
-        DesignSummary::of(&self.lock().design)
+        self.summary
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn presence(&self) -> Vec<Presence> {
@@ -251,13 +358,15 @@ impl DesignHandle {
     /// Queues `record` for the save task.
     fn record(&self, state: &mut DesignState, record: Record) {
         state.pending.push(record);
+        *self.summary.lock().unwrap_or_else(|e| e.into_inner()) = DesignSummary::of(&state.design);
         self.dirty.send_replace(());
     }
 
     /// Takes what the save task should write: the pending records, or a full
     /// snapshot when one is due. `None` when there's nothing to save.
     fn take_save(&self) -> Option<Save> {
-        let mut state = self.lock();
+        let mut state = self.raw();
+        let state = state.as_mut()?;
         if state.pending.is_empty() && !state.needs_snapshot {
             return None;
         }
@@ -277,16 +386,20 @@ impl DesignHandle {
 
     /// After a failed write, the next save rewrites the snapshot so nothing is lost.
     fn save_failed(&self) {
-        self.lock().needs_snapshot = true;
+        if let Some(state) = self.raw().as_mut() {
+            state.needs_snapshot = true;
+        }
     }
 
-    /// A full snapshot, with the pending records counted as saved.
-    fn compact(&self) -> Snapshot {
-        let mut state = self.lock();
+    /// A full snapshot, with the pending records counted as saved. `None` when
+    /// the design isn't loaded, which means it's already saved.
+    fn compact(&self) -> Option<Snapshot> {
+        let mut state = self.raw();
+        let state = state.as_mut()?;
         state.pending.clear();
         state.journaled = 0;
         state.needs_snapshot = false;
-        state.design.snapshot()
+        Some(state.design.snapshot())
     }
 
     /// Builds ops from the current document with `build`, then commits them as
@@ -430,15 +543,19 @@ impl DesignHandle {
     }
 
     fn forget(&self, actor: &str) {
-        self.clear_presence(actor);
-        let mut state = self.lock();
+        let mut state = self.raw();
+        let Some(state) = state.as_mut() else { return };
+        if state.presence.remove(actor).is_some() {
+            let _ = self.events.send(state.presence_message());
+        }
         state.design.forget_actor(actor);
         state.last_seen.remove(actor);
     }
 
     /// Expires stale presence and the histories of long-idle actors.
     fn sweep(&self, now: u64) {
-        let mut state = self.lock();
+        let mut state = self.raw();
+        let Some(state) = state.as_mut() else { return };
         let ttl = PRESENCE_TTL.as_millis() as u64;
         let before = state.presence.len();
         state
@@ -461,7 +578,12 @@ impl DesignHandle {
     }
 }
 
-/// Every live design, plus the design list's subscribers.
+/// Every design, plus the design list's subscribers.
+///
+/// Designs work like rooms in a multiplayer server: a design's state is
+/// loaded the first time someone opens it and unloaded after it has sat
+/// unused for [`UNLOAD_AFTER`], so memory grows with the designs in use, not
+/// with every design ever made.
 pub struct Hub {
     designs: RwLock<HashMap<String, Arc<DesignHandle>>>,
     store: Arc<dyn Store>,
@@ -469,25 +591,25 @@ pub struct Hub {
 }
 
 impl Hub {
-    /// Loads every stored design, replaying its journal. A design that had a
-    /// journal is compacted into a fresh snapshot right away. Must run inside a
-    /// Tokio runtime: each design gets a background task that saves it after edits.
-    pub fn new(store: Arc<dyn Store>) -> std::io::Result<Arc<Self>> {
+    /// Indexes every stored design, one at a time, so startup never holds them
+    /// all in memory. A design with a journal is compacted into a fresh
+    /// snapshot. Must run inside a Tokio runtime: each design gets a
+    /// background task that saves it after edits.
+    pub fn new(store: Arc<dyn Store>) -> io::Result<Arc<Self>> {
         let hub = Arc::new(Self {
             designs: RwLock::new(HashMap::new()),
             store,
             lobby: broadcast::channel(256).0,
         });
-        for stored in hub.store.load_all()? {
-            let replayed = !stored.journal.is_empty();
-            let mut design = Design::from_snapshot(stored.snapshot);
-            for record in stored.journal {
-                design.replay(record);
+        for id in hub.store.ids()? {
+            let Some(stored) = hub.store.load(&id)? else {
+                continue;
+            };
+            let state = DesignState::restore(stored);
+            if state.needs_snapshot {
+                hub.store.save(&state.design.snapshot())?;
             }
-            if replayed {
-                hub.store.save(&design.snapshot())?;
-            }
-            hub.insert(design, false);
+            hub.insert(DesignSummary::of(&state.design), None);
         }
         let weak = Arc::downgrade(&hub);
         tokio::spawn(async move {
@@ -495,22 +617,23 @@ impl Hub {
             loop {
                 tick.tick().await;
                 let Some(hub) = weak.upgrade() else { break };
-                let now = now_ms();
-                for handle in hub.handles() {
-                    handle.sweep(now);
-                }
+                hub.sweep(now_ms());
             }
         });
         Ok(hub)
     }
 
-    fn insert(self: &Arc<Self>, design: Design, is_new: bool) -> Arc<DesignHandle> {
-        let id = design.meta.id.clone();
-        let handle = Arc::new(DesignHandle::new(design, is_new));
+    fn insert(
+        self: &Arc<Self>,
+        summary: DesignSummary,
+        state: Option<DesignState>,
+    ) -> Arc<DesignHandle> {
+        let id = summary.meta.id.clone();
+        let handle = Arc::new(DesignHandle::new(self.store.clone(), summary, state));
         self.designs.write().unwrap().insert(id, handle.clone());
         tokio::spawn(persist(
             Arc::downgrade(self),
-            handle.clone(),
+            Arc::downgrade(&handle),
             handle.dirty.subscribe(),
         ));
         handle
@@ -520,11 +643,25 @@ impl Hub {
         self.designs.read().unwrap().values().cloned().collect()
     }
 
+    /// Opens a design, loading it from the store if it isn't in memory.
+    /// `None` if there's no such design or it can't be read.
     pub fn get(&self, id: &str) -> Option<Arc<DesignHandle>> {
-        self.designs.read().unwrap().get(id).cloned()
+        let handle = self.designs.read().unwrap().get(id).cloned()?;
+        match handle.load() {
+            Ok(()) => Some(handle),
+            Err(error) => {
+                tracing::error!(id, %error, "failed to load design");
+                None
+            }
+        }
     }
 
-    /// Every design, most recently edited first.
+    /// How many designs are in memory right now.
+    pub fn loaded(&self) -> usize {
+        self.handles().iter().filter(|h| h.is_loaded()).count()
+    }
+
+    /// Every design, most recently edited first. Doesn't load any of them.
     pub fn list(&self) -> Vec<DesignSummary> {
         let mut designs: Vec<DesignSummary> = self.handles().iter().map(|h| h.summary()).collect();
         designs.sort_by_key(|d| std::cmp::Reverse(d.meta.updated_at));
@@ -544,9 +681,9 @@ impl Hub {
             created_at: now,
             updated_at: now,
         });
-        let handle = self.insert(design, true);
+        let summary = DesignSummary::of(&design);
+        let handle = self.insert(summary.clone(), Some(DesignState::new(design, true)));
         handle.dirty.send_replace(());
-        let summary = handle.summary();
         let _ = self.lobby.send(Outgoing::new(
             None,
             &LobbyMessage::Design { design: &summary },
@@ -570,10 +707,28 @@ impl Hub {
         }
     }
 
-    /// Writes every design to the store as a full snapshot. Called on shutdown.
+    /// Expires stale presence and histories, then unloads idle designs.
+    pub fn sweep(&self, now: u64) {
+        for handle in self.handles() {
+            handle.sweep(now);
+        }
+        // The write lock is the point: it stops `get` from handing out new
+        // references, so a count of one means nobody else is using the handle.
+        #[allow(clippy::readonly_write_lock)]
+        let designs = self.designs.write().unwrap();
+        for handle in designs.values() {
+            if Arc::strong_count(handle) == 1 {
+                handle.unload_if_idle(now);
+            }
+        }
+    }
+
+    /// Writes every loaded design to the store as a full snapshot. Called on shutdown.
     pub fn flush(&self) {
         for handle in self.handles() {
-            let snapshot = handle.compact();
+            let Some(snapshot) = handle.compact() else {
+                continue;
+            };
             if let Err(error) = self.store.save(&snapshot) {
                 tracing::error!(id = snapshot.meta.id, %error, "failed to save design");
             }
@@ -583,16 +738,15 @@ impl Hub {
 
 /// Saves a design shortly after it changes, then tells the design list.
 /// Usually that appends the new records to its journal; every
-/// [`COMPACT_AFTER`] records it writes a full snapshot instead.
-async fn persist(
-    hub: std::sync::Weak<Hub>,
-    handle: Arc<DesignHandle>,
-    mut dirty: watch::Receiver<()>,
-) {
+/// [`COMPACT_AFTER`] records it writes a full snapshot instead. It holds the
+/// design weakly, so it never keeps a design from unloading.
+async fn persist(hub: Weak<Hub>, handle: Weak<DesignHandle>, mut dirty: watch::Receiver<()>) {
     while dirty.changed().await.is_ok() {
         tokio::time::sleep(SAVE_DEBOUNCE).await;
         dirty.mark_unchanged();
-        let Some(hub) = hub.upgrade() else { break };
+        let (Some(hub), Some(handle)) = (hub.upgrade(), handle.upgrade()) else {
+            break;
+        };
         let Some(save) = handle.take_save() else {
             continue;
         };
@@ -602,7 +756,7 @@ async fn persist(
             Save::Append(id, records) => store.append(&id, &records),
         })
         .await;
-        if let Ok(Err(error)) | Err(error) = saved.map_err(std::io::Error::other) {
+        if let Ok(Err(error)) | Err(error) = saved.map_err(io::Error::other) {
             tracing::error!(%error, "failed to save design");
             handle.save_failed();
         }
@@ -702,5 +856,55 @@ mod tests {
         assert_eq!(after.comments, before.comments);
         assert_eq!(after.meta, before.meta);
         assert_eq!(store.journal_len(&id), 0, "loading compacts the journal");
+    }
+
+    #[tokio::test]
+    async fn idle_designs_unload_and_reload() {
+        use finite_design::edit::{self, NewArtboard};
+
+        let store = Arc::new(MemoryStore::default());
+        let hub = Hub::new(store.clone()).unwrap();
+        let id = hub.create("Test").meta.id;
+        let agent = Actor {
+            id: "agent".into(),
+            name: "Agent".into(),
+        };
+        hub.get(&id)
+            .unwrap()
+            .edit(&agent, "Create artboard", |doc| {
+                let spec = NewArtboard {
+                    name: "Home".into(),
+                    width: 100.0,
+                    height: 100.0,
+                    position: None,
+                    styles: BTreeMap::new(),
+                };
+                Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
+            })
+            .unwrap();
+        let before = hub.get(&id).unwrap().read(Design::snapshot);
+        tokio::time::sleep(SAVE_DEBOUNCE * 2).await;
+        let later = now_ms() + UNLOAD_AFTER.as_millis() as u64;
+
+        // The agent can still undo, so the design stays in memory.
+        hub.sweep(later);
+        assert_eq!(hub.loaded(), 1);
+
+        // So does a design someone is watching.
+        hub.forget_actor("agent");
+        let viewer = hub.get(&id).unwrap().subscribe();
+        hub.sweep(later + 1);
+        assert_eq!(hub.loaded(), 1);
+        drop(viewer);
+
+        hub.sweep(now_ms() + UNLOAD_AFTER.as_millis() as u64);
+        assert_eq!(hub.loaded(), 0);
+        // The design list still knows it without loading it.
+        assert_eq!(hub.list()[0].artboard_count, 1);
+        assert_eq!(hub.loaded(), 0);
+
+        let after = hub.get(&id).unwrap().read(Design::snapshot);
+        assert_eq!(hub.loaded(), 1);
+        assert_eq!((after.seq, after.nodes), (before.seq, before.nodes));
     }
 }

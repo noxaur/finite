@@ -147,6 +147,11 @@ impl Design {
         self.histories.entry(actor.to_owned()).or_default()
     }
 
+    /// Whether any actor still has undo or redo history here.
+    pub fn has_histories(&self) -> bool {
+        !self.histories.is_empty()
+    }
+
     pub fn forget_actor(&mut self, actor: &str) {
         self.histories.remove(actor);
     }

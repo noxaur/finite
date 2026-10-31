@@ -16,14 +16,17 @@ pub struct Stored {
 }
 
 /// Where designs persist. Swap the file store for a database by implementing
-/// this trait; the hub only ever calls these three methods.
+/// this trait; the hub only ever calls these four methods.
 ///
 /// Saving is a write-ahead journal with compaction. After each burst of edits
 /// the hub appends the new records with [`Store::append`], which is cheap
 /// however large the design is. Now and then it writes a full snapshot with
 /// [`Store::save`], which replaces the journal.
 pub trait Store: Send + Sync + 'static {
-    fn load_all(&self) -> io::Result<Vec<Stored>>;
+    /// The id of every stored design.
+    fn ids(&self) -> io::Result<Vec<String>>;
+    /// One design, or `None` if it isn't stored.
+    fn load(&self, id: &str) -> io::Result<Option<Stored>>;
     /// Writes a full snapshot and clears the design's journal.
     fn save(&self, snapshot: &Snapshot) -> io::Result<()>;
     /// Adds records to the design's journal. The design must have been saved once.
@@ -72,28 +75,35 @@ impl FileStore {
 }
 
 impl Store for FileStore {
-    fn load_all(&self) -> io::Result<Vec<Stored>> {
-        let mut designs = Vec::new();
+    fn ids(&self) -> io::Result<Vec<String>> {
+        let mut ids = Vec::new();
         for entry in fs::read_dir(&self.dir)? {
             let path = entry?.path();
-            if path.extension().is_none_or(|ext| ext != "json") {
-                continue;
+            if path.extension().is_some_and(|ext| ext == "json")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            {
+                ids.push(stem.to_owned());
             }
-            let snapshot = match fs::read(&path).map(|b| serde_json::from_slice::<Snapshot>(&b)) {
-                Ok(Ok(snapshot)) => snapshot,
-                Ok(Err(error)) => {
-                    tracing::warn!(?path, %error, "skipping unreadable design");
-                    continue;
-                }
-                Err(error) => {
-                    tracing::warn!(?path, %error, "skipping unreadable design");
-                    continue;
-                }
-            };
-            let journal = self.read_journal(&snapshot.meta.id)?;
-            designs.push(Stored { snapshot, journal });
         }
-        Ok(designs)
+        Ok(ids)
+    }
+
+    fn load(&self, id: &str) -> io::Result<Option<Stored>> {
+        let path = self.dir.join(format!("{id}.json"));
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let snapshot: Snapshot = match serde_json::from_slice(&bytes) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::warn!(?path, %error, "skipping unreadable design");
+                return Ok(None);
+            }
+        };
+        let journal = self.read_journal(id)?;
+        Ok(Some(Stored { snapshot, journal }))
     }
 
     fn save(&self, snapshot: &Snapshot) -> io::Result<()> {
@@ -142,15 +152,16 @@ impl MemoryStore {
 }
 
 impl Store for MemoryStore {
-    fn load_all(&self) -> io::Result<Vec<Stored>> {
+    fn ids(&self) -> io::Result<Vec<String>> {
+        Ok(self.designs.lock().unwrap().keys().cloned().collect())
+    }
+
+    fn load(&self, id: &str) -> io::Result<Option<Stored>> {
         let designs = self.designs.lock().unwrap();
-        Ok(designs
-            .values()
-            .map(|(snapshot, journal)| Stored {
-                snapshot: snapshot.clone(),
-                journal: journal.clone(),
-            })
-            .collect())
+        Ok(designs.get(id).map(|(snapshot, journal)| Stored {
+            snapshot: snapshot.clone(),
+            journal: journal.clone(),
+        }))
     }
 
     fn save(&self, snapshot: &Snapshot) -> io::Result<()> {
@@ -204,8 +215,9 @@ mod tests {
         store.save(&snapshot()).unwrap();
         store.append("d", &[meta("One")]).unwrap();
         store.append("d", &[meta("Two")]).unwrap();
-        let loaded = store.load_all().unwrap();
-        assert_eq!(loaded[0].journal.len(), 2);
+        let load = || store.load("d").unwrap().unwrap();
+        assert_eq!(store.ids().unwrap(), ["d"]);
+        assert_eq!(load().journal.len(), 2);
 
         // A torn last line, as after a crash mid-append, is ignored.
         let mut log = fs::OpenOptions::new()
@@ -213,11 +225,12 @@ mod tests {
             .open(dir.join("designs/d.log"))
             .unwrap();
         log.write_all(br#"{"type":"me"#).unwrap();
-        assert_eq!(store.load_all().unwrap()[0].journal.len(), 2);
+        assert_eq!(load().journal.len(), 2);
 
         // Saving a snapshot clears the journal.
         store.save(&snapshot()).unwrap();
-        assert!(store.load_all().unwrap()[0].journal.is_empty());
+        assert!(load().journal.is_empty());
+        assert!(store.load("missing").unwrap().is_none());
         fs::remove_dir_all(dir).unwrap();
     }
 }

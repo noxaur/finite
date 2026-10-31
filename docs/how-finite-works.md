@@ -132,9 +132,9 @@ Some of the work these commands do:
 
 ### The hub
 
-`crates/server/src/hub.rs` keeps every design in memory. Each one sits in a `DesignHandle` with:
+`crates/server/src/hub.rs` holds a `DesignHandle` for every design. Each handle has:
 
-- a **mutex** around the design, so edits to one design run one at a time and edits to different designs never wait on each other;
+- a **mutex** around the design's state, so edits to one design run one at a time and edits to different designs never wait on each other;
 - a **broadcast channel**, which fans each change out to every open WebSocket;
 - a **save queue**: every change, comment update and rename is queued as a record, and a background task writes the queue 250 ms after the last edit.
 
@@ -146,6 +146,18 @@ Some of the work these commands do:
 4. Broadcast the change and mark the design dirty.
 
 Because steps 2 and 3 happen under one lock, no other edit can sneak in between reading the document and writing to it.
+
+### Designs load and unload like rooms
+
+A multiplayer server usually treats each document as a **room**: it's loaded into memory when someone joins, and unloaded when everyone has left. Finite's hub works the same way, so memory grows with the designs in use, not with every design ever made.
+
+- **Loading:** `Hub::get` is the only way in. If the design's state isn't in memory, it reads the snapshot and journal from the store and replays them.
+- **Unloading:** every 30 seconds, the hub's sweep looks for designs to drop. A design unloads only when all of these hold: nothing is waiting to be saved, nobody is watching it, no agent has presence or undo history in it, and it hasn't been opened for five minutes.
+- **What stays:** the handle itself stays, with its channels and a cached `DesignSummary`. That's what the design list shows, so listing designs never loads one.
+
+Unloading can't race with loading. The sweep holds the hub's write lock, which blocks `Hub::get`, and only unloads a handle when the hub holds the only reference to it. Anything using a design got it from `Hub::get`, so it holds a reference, and the design stays loaded until it's done. The save task holds only a weak reference, so it never keeps a design in memory.
+
+On startup, the hub reads designs one at a time to build the list, then drops each one. So startup never holds every design in memory either.
 
 ### MCP
 
@@ -185,7 +197,7 @@ On startup, the server loads each snapshot, replays its log with `Design::replay
 - **Mid-append:** the log ends in a torn line. Loading stops at it, and the startup compaction drops it for good.
 - **Mid-compaction:** the new snapshot is written to a temporary file and renamed into place, so it's either all there or not at all. If the old log survives next to the new snapshot, replaying it changes nothing.
 
-The hub only calls three methods on the `Store` trait in `store.rs`: `load_all`, `save` and `append`. A database could replace the files behind them. Undo histories aren't saved, so a restart clears them.
+The hub only calls four methods on the `Store` trait in `store.rs`: `ids`, `load`, `save` and `append`. A database could replace the files behind them. Undo histories aren't saved, so a restart clears them.
 
 ## Following one edit end to end
 
@@ -263,10 +275,12 @@ All the thread rules live in `crates/design`: `comment.rs` defines the types and
 | Snapshot | Everything needed to rebuild a design. Saved to disk and sent on connect. |
 | Replica  | The browser's copy of a design.                                           |
 | Presence | "Agent X is working on these nodes", shown as a badge.                    |
-| Hub      | The server's in-memory set of live designs.                               |
+| Hub      | The server's index of designs, with the ones in use loaded in memory.     |
 
-## Weak spots
+## Running more than one server
 
-If you grow Finite, these are the places that will hurt first.
+One server process can now hold many designs, because only the ones in use are in memory. Running several servers is the next step, and the rooms model sets it up. A design is only ever loaded in one place, so if each design lived on exactly one server, nothing in the hub would need to change. Three pieces are still missing:
 
-- **Everything lives in one process.** The hub keeps designs in memory and broadcasts in-process, so two server instances can't share a design yet.
+- **A router.** A load balancer would have to send every request for a design to the same server, by hashing the design id from the URL path (`/api/designs/{id}/…`). MCP is harder. The design id sits inside each tool call's JSON body, and one MCP session can work on designs that live on different servers. So MCP would need its own front server that keeps the session and forwards each tool call to the server that owns its design.
+- **A shared store.** Every server would need to see the same designs, so the files in `FINITE_DATA_DIR` would move to a database behind the `Store` trait.
+- **A shared design list.** Each server's lobby socket only hears about its own designs. The list updates would have to go through something every server can read, such as Redis pub/sub or Postgres `LISTEN`/`NOTIFY`.
