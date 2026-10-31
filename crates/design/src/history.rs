@@ -39,6 +39,11 @@ pub struct History {
 impl History {
     /// Entries kept per stack. Older ones fall off the bottom.
     pub const LIMIT: usize = 200;
+    /// About how many bytes of ops a stack keeps (see [`Op::size`]). Undoing
+    /// a big delete recreates every node in it, so 200 such steps could hold
+    /// millions of nodes, in memory and in every saved snapshot. Older entries
+    /// fall off past this, but the newest is always kept.
+    pub const BYTE_LIMIT: usize = 32 << 20;
 
     pub fn last_used(&self) -> u64 {
         self.last_used
@@ -88,6 +93,7 @@ impl History {
             let older = std::mem::take(&mut top.ops);
             top.ops = inverse;
             top.ops.extend(older);
+            trim(&mut self.undo);
             return;
         }
         push(
@@ -122,8 +128,67 @@ fn push(stack: &mut Vec<Entry>, entry: Entry) {
         stack.remove(0);
     }
     stack.push(entry);
+    trim(stack);
+}
+
+/// Drops the oldest entries until the stack fits in [`History::BYTE_LIMIT`],
+/// keeping at least the newest.
+fn trim(stack: &mut Vec<Entry>) {
+    let mut total = 0;
+    let mut keep = 0;
+    for entry in stack.iter().rev() {
+        total += entry.ops.iter().map(Op::size).sum::<usize>();
+        if keep > 0 && total > History::BYTE_LIMIT {
+            break;
+        }
+        keep += 1;
+    }
+    stack.drain(..stack.len() - keep);
 }
 
 fn is_zero(n: &u64) -> bool {
     *n == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Node;
+
+    /// An entry whose ops carry `mb` megabytes of text.
+    fn heavy(label: &str, mb: usize) -> (String, Vec<Op>) {
+        let node = Node {
+            text: Some("x".repeat(mb << 20)),
+            ..Node::element(label, "p")
+        };
+        (label.to_owned(), vec![Op::Create { node }])
+    }
+
+    #[test]
+    fn big_steps_push_old_ones_off_the_stack() {
+        let mut history = History::default();
+        for i in 0..10 {
+            let (label, ops) = heavy(&format!("step {i}"), 5);
+            history.record(label, ops);
+        }
+        // 32 MB holds six 5 MB steps, newest first.
+        let labels: Vec<&str> = history.undo_labels().collect();
+        assert_eq!(
+            labels,
+            ["step 9", "step 8", "step 7", "step 6", "step 5", "step 4"]
+        );
+
+        // One step over the limit on its own is still kept, so it can be undone.
+        let (label, ops) = heavy("huge", 40);
+        history.record(label, ops);
+        assert_eq!(history.undo_labels().collect::<Vec<_>>(), ["huge"]);
+
+        // Small steps don't count for much.
+        let mut history = History::default();
+        for i in 0..History::LIMIT {
+            let (label, ops) = heavy(&format!("small {i}"), 0);
+            history.record(label, ops);
+        }
+        assert_eq!(history.undo_labels().count(), History::LIMIT);
+    }
 }

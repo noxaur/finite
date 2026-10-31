@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -33,6 +33,32 @@ pub enum Op {
 }
 
 impl Op {
+    /// Roughly how many bytes this op takes, counting its strings plus a
+    /// fixed amount for the rest. Cheap enough to call on every undo step.
+    pub fn size(&self) -> usize {
+        const BASE: usize = 64;
+        match self {
+            Op::Create { node } => {
+                let strings = |map: &BTreeMap<String, String>| {
+                    map.iter()
+                        .map(|(k, v)| k.len() + v.len() + 8)
+                        .sum::<usize>()
+                };
+                BASE + node.id.len()
+                    + node.index.len()
+                    + node.name.as_ref().map_or(0, String::len)
+                    + node.text.as_ref().map_or(0, String::len)
+                    + strings(&node.styles)
+                    + strings(&node.attrs)
+            }
+            Op::Delete { id } => BASE + id.len(),
+            Op::Set { id, value, .. } => {
+                BASE + id.len() + value.as_ref().and_then(Value::as_str).map_or(16, str::len)
+            }
+            Op::Move { id, index, .. } => BASE + id.len() + index.len(),
+        }
+    }
+
     /// The node this op creates, deletes or changes.
     pub fn id(&self) -> &str {
         match self {

@@ -106,6 +106,8 @@ All edits go through three methods. Each returns a `Change`, or `None` if nothin
 
 Undo applies inverses as new changes. It never rolls the document back to an old snapshot, so it can't erase another agent's work. This follows Liveblocks' design for [multiplayer undo](https://liveblocks.io/blog/how-to-build-undo-redo-in-a-multiplayer-environment).
 
+Each stack keeps at most 200 steps and about 32 MB of ops (`History::LIMIT` and `History::BYTE_LIMIT`), and older steps fall off the bottom. The size estimate, `Op::size`, adds up an op's strings plus a fixed amount, so it's cheap enough to run on every step. The byte limit matters because undoing a big delete recreates every node in it. Two hundred steps that each replaced a large artboard could hold millions of nodes, in memory and in every saved snapshot. The newest step is always kept, even if it's bigger than the limit on its own, so any edit can be undone at least once.
+
 ### Undo with two agents, step by step
 
 Say Alice and Bob are both agents on one design:
