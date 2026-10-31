@@ -78,13 +78,26 @@ impl Drop for SessionGuard {
     }
 }
 
+/// How long an MCP session can sit idle before it closes. An agent that
+/// doesn't send `X-Finite-Agent` is known by its session, and its undo history
+/// ends with it (see [`SessionGuard`]). rmcp's default of five minutes is a
+/// short pause for an agent waiting on a person, so allow an hour.
+pub const SESSION_IDLE: Duration = Duration::from_secs(60 * 60);
+
+/// A session manager whose sessions close after [`SESSION_IDLE`].
+pub(crate) fn sessions() -> LocalSessionManager {
+    let mut sessions = LocalSessionManager::default();
+    sessions.session_config.keep_alive = Some(SESSION_IDLE);
+    sessions
+}
+
 /// The MCP endpoint as a tower service, to mount at `/mcp`.
 pub fn service(hub: Arc<Hub>) -> StreamableHttpService<FiniteMcp, LocalSessionManager> {
     let config =
         StreamableHttpServerConfig::default().with_allowed_hosts(hub.cluster().allowed_hosts());
     StreamableHttpService::new(
         move || Ok(FiniteMcp::new(hub.clone())),
-        Arc::new(LocalSessionManager::default()),
+        Arc::new(sessions()),
         config,
     )
 }

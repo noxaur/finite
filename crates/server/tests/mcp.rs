@@ -43,8 +43,11 @@ impl Agent {
         let mut req = Request::post("/mcp")
             .header(header::HOST, "127.0.0.1:4100")
             .header(header::CONTENT_TYPE, "application/json")
-            .header(header::ACCEPT, "application/json, text/event-stream")
-            .header("x-finite-agent", self.name);
+            .header(header::ACCEPT, "application/json, text/event-stream");
+        // An empty name stands for an agent that doesn't name itself.
+        if !self.name.is_empty() {
+            req = req.header("x-finite-agent", self.name);
+        }
         if let Some(session) = &self.session {
             req = req.header("mcp-session-id", session);
         }
@@ -562,4 +565,37 @@ async fn long_comment_lists_come_in_parts() {
         "{}",
         tail(&waiting)
     );
+}
+
+/// An agent that doesn't name itself is known by its MCP session, so its undo
+/// lasts as long as the session. A pause of a few minutes, say while a person
+/// reviews the work, doesn't end it.
+#[tokio::test(start_paused = true)]
+async fn an_unnamed_agent_can_undo_after_a_pause() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "").await;
+    let created = agent.ok("create_design", json!({ "name": "Paused" })).await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .unwrap()
+        .to_owned();
+    agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Home", "width": 400, "height": 300 }),
+        )
+        .await;
+
+    tokio::time::sleep(std::time::Duration::from_secs(20 * 60)).await;
+
+    let undone = agent.ok("undo", json!({ "designId": design })).await;
+    assert!(undone.contains("Undid"), "{undone}");
+
+    // An hour without a call does end the session, so idle ones don't pile up.
+    tokio::time::sleep(std::time::Duration::from_secs(61 * 60)).await;
+    let gone = agent
+        .send(json!({ "jsonrpc": "2.0", "id": 99, "method": "tools/list" }))
+        .await;
+    assert!(gone.is_none(), "{gone:?}");
 }

@@ -92,7 +92,7 @@ pub fn service(
                 backends: Default::default(),
             })
         },
-        Arc::new(LocalSessionManager::default()),
+        Arc::new(crate::mcp::sessions()),
         config,
     )
 }
