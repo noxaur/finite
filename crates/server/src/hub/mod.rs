@@ -41,6 +41,8 @@ const RETRY_MAX: Duration = Duration::from_secs(60);
 const COMPACT_AFTER: usize = 1000;
 /// How long an unused design stays in memory before it's unloaded.
 const UNLOAD_AFTER: Duration = Duration::from_secs(5 * 60);
+/// How many messages a slow viewer can fall behind before it gets a fresh snapshot.
+const EVENT_BUFFER: usize = 1024;
 /// How many recent changes a design keeps for viewers that reconnect...
 const RESUME_LIMIT: usize = 256;
 /// ...and how much they may add up to, as JSON.

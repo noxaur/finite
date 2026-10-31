@@ -18,9 +18,9 @@ use finite_design::{
 use tokio::sync::{broadcast, watch};
 
 use super::{
-    Actor, COMPACT_AFTER, DesignMessage, DesignSummary, HISTORY_TTL, Missed, Outgoing,
-    PRESENCE_TTL, Presence, RESUME_BYTES, RESUME_LIMIT, SESSION_ACTOR, UNLOAD_AFTER, now_ms,
-    random_id,
+    Actor, COMPACT_AFTER, DesignMessage, DesignSummary, EVENT_BUFFER, HISTORY_TTL, Missed,
+    Outgoing, PRESENCE_TTL, Presence, RESUME_BYTES, RESUME_LIMIT, SESSION_ACTOR, UNLOAD_AFTER,
+    now_ms, random_id,
 };
 use crate::store::{Store, Stored};
 
@@ -39,6 +39,10 @@ pub(super) struct DesignState {
     epoch: String,
     /// The latest changes, so a viewer that reconnects can get just what it missed.
     recent: Recent,
+    /// Fans each change out to the design's open sockets. It lives here, not
+    /// on the handle, because its buffer is allocated up front (about 30 KB),
+    /// and a design that isn't loaded has no sockets to send to.
+    events: broadcast::Sender<Outgoing>,
     /// When the design was last opened through [`super::Hub::get`].
     last_used: u64,
 }
@@ -60,6 +64,7 @@ impl DesignState {
             needs_snapshot,
             epoch: random_id(8),
             recent: Recent::default(),
+            events: broadcast::channel(EVENT_BUFFER).0,
             last_used: now_ms(),
         }
     }
@@ -142,7 +147,6 @@ pub struct DesignHandle {
     state: Mutex<Option<DesignState>>,
     /// Kept current while loaded, so the design list never loads a design.
     summary: Mutex<DesignSummary>,
-    events: broadcast::Sender<Outgoing>,
     /// Pinged on every change; the save task waits on it.
     pub(super) dirty: watch::Sender<()>,
     /// Wakes `wait_for_comments` callers when any comment changes.
@@ -222,7 +226,6 @@ impl DesignHandle {
             store,
             state: Mutex::new(state),
             summary: Mutex::new(summary),
-            events: broadcast::channel(1024).0,
             dirty: watch::channel(()).0,
             comments: tokio::sync::Notify::new(),
         }
@@ -266,7 +269,11 @@ impl DesignHandle {
     pub(super) fn unload_if_idle(&self, now: u64) -> bool {
         let mut state = self.raw();
         let idle = state.as_ref().is_some_and(|s| s.is_idle(now));
-        if idle && self.events.receiver_count() == 0 {
+        if idle
+            && state
+                .as_ref()
+                .is_some_and(|s| s.events.receiver_count() == 0)
+        {
             *state = None;
             return true;
         }
@@ -313,7 +320,7 @@ impl DesignHandle {
     ) -> (Outgoing, u64, broadcast::Receiver<Outgoing>) {
         // Subscribing under the lock means no change can slip between the first message and the stream.
         let state = self.lock();
-        let rx = self.events.subscribe();
+        let rx = state.events.subscribe();
         let seq = state.design.seq();
         let presence = state.presence.values().collect();
         if let Some(missed) = since.and_then(|since| state.missed_since(since)) {
@@ -345,7 +352,7 @@ impl DesignHandle {
             actor_name: actor.name.clone(),
             bytes: message.json.len(),
         });
-        let _ = self.events.send(message);
+        let _ = state.events.send(message);
         self.record(
             state,
             Record::Change {
@@ -369,9 +376,10 @@ impl DesignHandle {
             .take_comment_updates()
             .into_iter()
             .partition(|c| c.detached_at.is_some());
+        let events = state.events.clone();
         let send = |comment: &Comment| {
             let message = DesignMessage::Comment { comment };
-            let _ = self.events.send(Outgoing::new(None, &message));
+            let _ = events.send(Outgoing::new(None, &message));
         };
         detached.iter().for_each(send);
         self.publish(state, actor, change);
@@ -497,7 +505,7 @@ impl DesignHandle {
                 meta: &state.design.meta,
             },
         );
-        let _ = self.events.send(message);
+        let _ = state.events.send(message);
         let meta = state.design.meta.clone();
         self.record(&mut state, Record::Meta { meta });
     }
@@ -541,7 +549,7 @@ impl DesignHandle {
         let mut state = self.lock();
         let comment = f(&mut state.design)?.clone();
         let message = DesignMessage::Comment { comment: &comment };
-        let _ = self.events.send(Outgoing::new(None, &message));
+        let _ = state.events.send(Outgoing::new(None, &message));
         let record = Record::Comment {
             comment: comment.clone(),
         };
@@ -566,13 +574,13 @@ impl DesignHandle {
                 updated_at: now,
             },
         );
-        let _ = self.events.send(state.presence_message());
+        let _ = state.events.send(state.presence_message());
     }
 
     pub fn clear_presence(&self, actor: &str) {
         let mut state = self.lock();
         if state.presence.remove(actor).is_some() {
-            let _ = self.events.send(state.presence_message());
+            let _ = state.events.send(state.presence_message());
         }
     }
 
@@ -580,7 +588,7 @@ impl DesignHandle {
         let mut state = self.raw();
         let Some(state) = state.as_mut() else { return };
         if state.presence.remove(actor).is_some() {
-            let _ = self.events.send(state.presence_message());
+            let _ = state.events.send(state.presence_message());
         }
         state.design.forget_actor(actor);
         state.last_seen.remove(actor);
@@ -596,7 +604,7 @@ impl DesignHandle {
             .presence
             .retain(|_, p| now.saturating_sub(p.updated_at) < ttl);
         if state.presence.len() != before {
-            let _ = self.events.send(state.presence_message());
+            let _ = state.events.send(state.presence_message());
         }
         let ttl = HISTORY_TTL.as_millis() as u64;
         let idle: Vec<ActorId> = state
