@@ -361,7 +361,7 @@ Saving is a **write-ahead journal with compaction**, the same idea databases use
 - `<id>.json` is the last full snapshot.
 - `<id>.log` is the journal: one JSON record per line for everything since that snapshot. A record is a change, the new state of a comment, or the design's name and timestamps (`Record` in `crates/design/src/design.rs`).
 
-After a burst of edits, the save task appends the new records to the log. That costs the same for a ten-node design as for a ten-thousand-node one. In the demo, one style change appended 305 bytes instead of rewriting the 11 KB snapshot. Every 1000 records, the task writes a fresh snapshot instead and deletes the log. That step is **compaction**.
+After a burst of edits, the save task appends the new records to the log. That costs the same for a ten-node design as for a ten-thousand-node one. In the demo, one style change appended 305 bytes instead of rewriting the 11 KB snapshot. Every 1,000 records, or once the log's changes add up to 16 MB, the task writes a fresh snapshot instead and deletes the log. That step is **compaction**. The size rule matters because one `write_html` can be tens of MB of ops, so 1,000 records alone could let a log reach gigabytes, and all of it is read back when the design loads. The size is an estimate that costs nothing: each change's JSON is already built to send to viewers, so its length is known. A hub test writes 20 changes of 1 MB each and checks that the log is compacted. With only the count rule, the log still held all 22 records.
 
 On startup, the server loads each snapshot, replays its log with `Design::replay`, and compacts right away. Replaying is safe to repeat: changes at or below the snapshot's `seq` are skipped, and comments and meta just overwrite. So a crash at any point loses at most the last 250 ms of edits:
 
@@ -469,23 +469,23 @@ MCP rejects requests whose `Host` header it doesn't know, to block **DNS rebindi
 
 ## Words used in the code
 
-| Word       | Meaning                                                                         |
-| ---------- | ------------------------------------------------------------------------------- |
-| Design     | One canvas. Also called a canvas in the MCP tools.                              |
-| Artboard   | A top-level node: a fixed-size frame placed on the canvas.                      |
-| Node       | One element or text node.                                                       |
-| Op         | The smallest edit: `create`, `delete`, `set` or `move`.                         |
-| Change     | The ops from one commit, undo or redo, with a `seq`, actor and label.           |
-| Actor      | Whoever made a change: an agent, by its `X-Finite-Agent` name or its session.   |
-| Snapshot   | Everything needed to rebuild a design. Saved to disk and sent on connect.       |
-| Journal    | The records appended to `<id>.log` since the last snapshot.                     |
-| Compaction | Writing a fresh snapshot and deleting the journal, every 1,000 records.         |
-| Replica    | The browser's copy of a design.                                                 |
-| Presence   | "Agent X is working on these nodes", shown as a badge.                          |
-| Hub        | The server's index of designs, with the ones in use loaded in memory.           |
-| Room       | The model for loading: a design is in memory only while someone uses it.        |
-| Long poll  | A request that stays open until there's news, like `wait_for_comments`.         |
-| Epoch      | One load of a design on a server. A viewer can resume only within the same one. |
-| Revision   | A comment's `rev`: it goes up with each change, so the higher copy is newer.    |
-| Owner      | The one server that holds a design, picked by hashing its id.                   |
-| Router     | `finite-server router`: the front door that sends requests to each owner.       |
+| Word       | Meaning                                                                          |
+| ---------- | -------------------------------------------------------------------------------- |
+| Design     | One canvas. Also called a canvas in the MCP tools.                               |
+| Artboard   | A top-level node: a fixed-size frame placed on the canvas.                       |
+| Node       | One element or text node.                                                        |
+| Op         | The smallest edit: `create`, `delete`, `set` or `move`.                          |
+| Change     | The ops from one commit, undo or redo, with a `seq`, actor and label.            |
+| Actor      | Whoever made a change: an agent, by its `X-Finite-Agent` name or its session.    |
+| Snapshot   | Everything needed to rebuild a design. Saved to disk and sent on connect.        |
+| Journal    | The records appended to `<id>.log` since the last snapshot.                      |
+| Compaction | Writing a fresh snapshot and deleting the journal, every 1,000 records or 16 MB. |
+| Replica    | The browser's copy of a design.                                                  |
+| Presence   | "Agent X is working on these nodes", shown as a badge.                           |
+| Hub        | The server's index of designs, with the ones in use loaded in memory.            |
+| Room       | The model for loading: a design is in memory only while someone uses it.         |
+| Long poll  | A request that stays open until there's news, like `wait_for_comments`.          |
+| Epoch      | One load of a design on a server. A viewer can resume only within the same one.  |
+| Revision   | A comment's `rev`: it goes up with each change, so the higher copy is newer.     |
+| Owner      | The one server that holds a design, picked by hashing its id.                    |
+| Router     | `finite-server router`: the front door that sends requests to each owner.        |

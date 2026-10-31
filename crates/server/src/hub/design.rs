@@ -18,9 +18,9 @@ use finite_design::{
 use tokio::sync::{broadcast, watch};
 
 use super::{
-    Actor, COMPACT_AFTER, DesignMessage, DesignSummary, EVENT_BUFFER, HISTORY_TTL, Missed,
-    Outgoing, PRESENCE_TTL, Presence, RESUME_BYTES, RESUME_LIMIT, SESSION_ACTOR, UNLOAD_AFTER,
-    now_ms, random_id,
+    Actor, COMPACT_AFTER, COMPACT_BYTES, DesignMessage, DesignSummary, EVENT_BUFFER, HISTORY_TTL,
+    Missed, Outgoing, PRESENCE_TTL, Presence, RESUME_BYTES, RESUME_LIMIT, SESSION_ACTOR,
+    UNLOAD_AFTER, now_ms, random_id,
 };
 use crate::store::{Store, Stored};
 
@@ -32,6 +32,9 @@ pub(super) struct DesignState {
     pending: Vec<Record>,
     /// Records in the store's journal since the last snapshot.
     journaled: usize,
+    /// About how many bytes those records and the pending ones take: the
+    /// size of each change as sent to viewers.
+    journal_bytes: usize,
     /// Set when the next save must be a full snapshot: a new design, or a failed write.
     pub(super) needs_snapshot: bool,
     /// A random name for this load of the design. Changes after a restart or
@@ -61,6 +64,7 @@ impl DesignState {
             last_seen: HashMap::new(),
             pending: Vec::new(),
             journaled: 0,
+            journal_bytes: 0,
             needs_snapshot,
             epoch: random_id(8),
             recent: Recent::default(),
@@ -392,6 +396,7 @@ impl DesignHandle {
             actor_name: actor.name.clone(),
             bytes: message.json.len(),
         });
+        state.journal_bytes += message.json.len();
         let _ = state.events.send(message);
         self.record(
             state,
@@ -450,9 +455,13 @@ impl DesignHandle {
             meta: state.design.meta.clone(),
         });
         state.journaled += records.len();
-        if state.needs_snapshot || state.journaled > COMPACT_AFTER {
+        if state.needs_snapshot
+            || state.journaled > COMPACT_AFTER
+            || state.journal_bytes > COMPACT_BYTES
+        {
             state.needs_snapshot = false;
             state.journaled = 0;
+            state.journal_bytes = 0;
             return Some(Save::Snapshot(state.snapshot_to_save()));
         }
         Some(Save::Append(state.design.meta.id.clone(), records))
@@ -472,6 +481,7 @@ impl DesignHandle {
         let state = state.as_mut()?;
         state.pending.clear();
         state.journaled = 0;
+        state.journal_bytes = 0;
         state.needs_snapshot = false;
         Some(state.snapshot_to_save())
     }

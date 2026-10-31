@@ -37,8 +37,12 @@ const SAVE_DEBOUNCE: Duration = Duration::from_millis(250);
 const RETRY_AFTER: Duration = Duration::from_secs(1);
 /// ...up to this.
 const RETRY_MAX: Duration = Duration::from_secs(60);
-/// A design's journal is compacted into a fresh snapshot after this many records.
+/// A design's journal is compacted into a fresh snapshot after this many records...
 const COMPACT_AFTER: usize = 1000;
+/// ...or once its changes add up to this many bytes. One `write_html` can be
+/// tens of MB of ops, so a count alone could let a journal reach gigabytes,
+/// all of it read back when the design loads.
+const COMPACT_BYTES: usize = 16 << 20;
 /// How long an unused design stays in memory before it's unloaded.
 const UNLOAD_AFTER: Duration = Duration::from_secs(5 * 60);
 /// How many designs the design list's socket starts with. With more, the
@@ -459,7 +463,7 @@ async fn hand_off(hub: Weak<Hub>, mut ids: Vec<String>) {
 
 /// Saves a design shortly after it changes, then tells the design list.
 /// Usually that appends the new records to its journal; every
-/// [`COMPACT_AFTER`] records it writes a full snapshot instead. It holds the
+/// [`COMPACT_AFTER`] records or [`COMPACT_BYTES`] it writes a full snapshot instead. It holds the
 /// design weakly, so it never keeps a design from unloading.
 ///
 /// A failed write is retried with **exponential backoff**: after 1 second,
@@ -838,6 +842,66 @@ mod tests {
         assert_eq!(after.comments, before.comments);
         assert_eq!(after.meta, before.meta);
         assert_eq!(store.journal_len(&id), 0, "loading compacts the journal");
+    }
+
+    /// A few huge edits compact the journal, as many small ones do.
+    #[tokio::test]
+    async fn big_edits_compact_the_journal() {
+        use finite_design::edit::{self, NewArtboard, WriteMode};
+
+        let store = Arc::new(MemoryStore::default());
+        let hub = Hub::new(store.clone()).unwrap();
+        let id = hub.create("Test").meta.id;
+        let agent = Actor {
+            id: "agent:big".into(),
+            name: "Big".into(),
+        };
+        let handle = hub.get(&id).unwrap();
+        handle
+            .edit(&agent, "Create artboard", |doc| {
+                let spec = NewArtboard {
+                    name: "Home".into(),
+                    width: 100.0,
+                    height: 100.0,
+                    position: None,
+                    styles: BTreeMap::new(),
+                };
+                Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
+            })
+            .unwrap();
+        tokio::time::sleep(SAVE_DEBOUNCE * 2).await;
+        let mut n = 0;
+        let mut write_mb = |count: usize| {
+            for _ in 0..count {
+                let html = format!("<p>{}</p>", "x".repeat(1 << 20));
+                handle
+                    .edit(&agent, "Write", |doc| {
+                        let mut new_id = || {
+                            n += 1;
+                            format!("n{n}")
+                        };
+                        let (ops, _) = edit::write_html(
+                            doc,
+                            "board",
+                            &html,
+                            WriteMode::Append,
+                            None,
+                            &mut new_id,
+                        )?;
+                        Ok((ops, ()))
+                    })
+                    .unwrap();
+            }
+        };
+        // 10 MB of changes go into the journal...
+        write_mb(10);
+        tokio::time::sleep(SAVE_DEBOUNCE * 2).await;
+        assert!(store.journal_len(&id) > 0);
+        // ...and past 16 MB, they're compacted into a snapshot, though that's
+        // far fewer than 1,000 records.
+        write_mb(10);
+        tokio::time::sleep(SAVE_DEBOUNCE * 2).await;
+        assert_eq!(store.journal_len(&id), 0);
     }
 
     #[tokio::test]
