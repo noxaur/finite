@@ -461,6 +461,27 @@ async fn long_results_are_cut_with_directions() {
         tail(&html)
     );
 
+    // Children come 200 at a time.
+    let children = agent
+        .ok(
+            "get_children",
+            json!({ "designId": design, "nodeId": board }),
+        )
+        .await;
+    assert!(
+        children.ends_with("Showing children 1 to 200 of 3000. Pass offset 200 for the next ones."),
+        "{}",
+        tail(&children)
+    );
+    let last = agent
+        .ok(
+            "get_children",
+            json!({ "designId": design, "nodeId": board, "offset": 2_900 }),
+        )
+        .await;
+    let page: Vec<Value> = serde_json::from_str(&last).unwrap();
+    assert_eq!(page.len(), 100);
+
     // A small part still comes back whole.
     let first_card = id_after(&tree, "\"Card\"");
     let small = agent

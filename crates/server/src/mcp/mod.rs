@@ -353,7 +353,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "The direct children of a node, in order, or the artboards when nodeId is omitted.",
+        description = "The direct children of a node, in order, or the artboards when nodeId is omitted. Returns 200 at a time; pass offset for the next ones.",
         annotations(read_only_hint = true)
     )]
     async fn get_children(&self, Parameters(p): Parameters<ChildrenParams>) -> ToolResult {
@@ -365,9 +365,12 @@ impl FiniteMcp {
             {
                 return Err(format!("node {id:?} not found"));
             }
-            Ok(doc
-                .children(p.node_id.as_deref())
+            let all = doc.children(p.node_id.as_deref());
+            let total = all.len();
+            let page = all
                 .into_iter()
+                .skip(p.offset)
+                .take(ChildrenParams::PAGE)
                 .map(|c| {
                     serde_json::json!({
                         "id": c.id,
@@ -377,12 +380,24 @@ impl FiniteMcp {
                         "childCount": doc.children(Some(&c.id)).len(),
                     })
                 })
-                .collect::<Vec<_>>())
+                .collect::<Vec<_>>();
+            Ok((page, total))
         });
-        match children {
-            Ok(children) => json(children.into()),
-            Err(error) => fail(error),
+        let (page, total) = match children {
+            Ok(children) => children,
+            Err(error) => return fail(error),
+        };
+        let shown = page.len();
+        let mut content = vec![ContentBlock::text(
+            serde_json::to_string_pretty(&page).expect("json values serialize"),
+        )];
+        if p.offset + shown < total {
+            let (from, to) = (p.offset + 1, p.offset + shown);
+            content.push(ContentBlock::text(format!(
+                "Showing children {from} to {to} of {total}. Pass offset {to} for the next ones."
+            )));
         }
+        Ok(CallToolResult::success(content))
     }
 
     #[tool(

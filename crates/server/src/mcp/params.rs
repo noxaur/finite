@@ -80,6 +80,14 @@ pub struct ChildrenParams {
     /// Parent node. Omit to list the artboards.
     #[serde(default)]
     pub(super) node_id: Option<String>,
+    /// How many children to skip, to page through a long list.
+    #[serde(default)]
+    pub(super) offset: usize,
+}
+
+impl ChildrenParams {
+    /// Children returned per call.
+    pub(super) const PAGE: usize = 200;
 }
 
 #[derive(Deserialize, JsonSchema)]
