@@ -2,6 +2,8 @@
 
 Finite is a design canvas that agents edit. Agents connect over MCP and build designs out of HTML and inline CSS. Several agents can work at once, on the same design or on different ones. People open the app to browse every design in a grid and watch any one of them update live on a pan-and-zoom canvas. In this MVP, people can create empty designs but can't edit them. Every edit to a design's content comes from an agent, and people steer agents by pinning comments to the canvas.
 
+For a guided tour of the internals, read [How Finite works](docs/how-finite-works.md).
+
 The frontend is Next.js (React), styled with StyleX, and talks to the backend through an Effect HTTP client and WebSockets. The backend is a Rust server built on axum. Vite+ (`vp`) runs the JavaScript side, and Cargo builds the Rust side.
 
 ## Connect an agent
