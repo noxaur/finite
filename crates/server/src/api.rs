@@ -14,12 +14,12 @@ use axum::{
 };
 use finite_design::{
     Design, Snapshot,
-    comment::{Author, AuthorKind, Comment, CommentError},
+    comment::{Anchor, Author, AuthorKind, Comment, CommentError},
 };
 use serde::Deserialize;
 use tokio::sync::broadcast::{self, error::RecvError};
 
-use crate::hub::{CommentAnchor, DesignHandle, DesignSummary, Hub, Outgoing};
+use crate::hub::{DesignHandle, DesignSummary, Hub, Outgoing};
 
 pub fn routes() -> Router<Arc<Hub>> {
     Router::new()
@@ -29,7 +29,10 @@ pub fn routes() -> Router<Arc<Hub>> {
         .route("/designs/{id}/ws", get(design_socket))
         .route("/designs/{id}/comments", post(create_comment))
         .route("/designs/{id}/comments/{comment}", patch(update_comment))
-        .route("/designs/{id}/comments/{comment}/replies", post(reply_to_comment))
+        .route(
+            "/designs/{id}/comments/{comment}/replies",
+            post(reply_to_comment),
+        )
 }
 
 async fn list_designs(State(hub): State<Arc<Hub>>) -> Json<Vec<DesignSummary>> {
@@ -125,10 +128,7 @@ async fn create_comment(
     Path(id): Path<String>,
     Json(body): Json<CreateComment>,
 ) -> CommentResult {
-    if !body.x.is_finite() || !body.y.is_finite() {
-        return Err((StatusCode::UNPROCESSABLE_ENTITY, "x and y must be numbers".into()));
-    }
-    let anchor = CommentAnchor {
+    let anchor = Anchor {
         artboard_id: body.artboard_id,
         node_id: body.node_id,
         x: body.x,

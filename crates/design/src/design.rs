@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    comment::Comment,
+    NodeId,
+    comment::{self, Anchor, Author, AuthorKind, ChangeLog, Comment, CommentError, Message},
     document::{Document, Op},
     history::{Entry, History},
     node::Node,
@@ -54,39 +55,45 @@ pub struct Change {
     pub ops: Vec<Op>,
 }
 
-/// A design (one canvas): its document, change counter, and per-actor histories.
+/// A design (one canvas): its document, change counter, per-actor histories,
+/// and comment threads.
 ///
 /// The server holds one of these per open design and serializes access to it,
 /// so it is the single source of truth. All edits go through [`Design::commit`],
-/// [`Design::undo`] or [`Design::redo`].
+/// [`Design::undo`] or [`Design::redo`], and all comment updates through
+/// [`Design::add_comment`], [`Design::reply`] or [`Design::set_resolved`].
 #[derive(Debug)]
 pub struct Design {
     pub meta: DesignMeta,
-    /// Comment threads, oldest first. They aren't part of the document or its undo history.
-    pub comments: Vec<Comment>,
     doc: Document,
     seq: u64,
     histories: HashMap<ActorId, History>,
+    /// Comment threads, oldest first. They aren't part of the document or its undo history.
+    comments: Vec<Comment>,
+    /// Recent changes, so a reply can link the edits that answered a comment.
+    log: ChangeLog,
 }
 
 impl Design {
     pub fn new(meta: DesignMeta) -> Self {
         Self {
             meta,
-            comments: Vec::new(),
             doc: Document::default(),
             seq: 0,
             histories: HashMap::new(),
+            comments: Vec::new(),
+            log: ChangeLog::default(),
         }
     }
 
     pub fn from_snapshot(snapshot: Snapshot) -> Self {
         Self {
             meta: snapshot.meta,
-            comments: snapshot.comments,
             doc: Document::from_nodes(snapshot.nodes),
             seq: snapshot.seq,
             histories: HashMap::new(),
+            comments: snapshot.comments,
+            log: ChangeLog::default(),
         }
     }
 
@@ -124,12 +131,13 @@ impl Design {
     /// Applies an edit and records its inverse on `actor`'s undo stack.
     /// Returns `None` when nothing changed.
     pub fn commit(&mut self, actor: &str, label: &str, ops: &[Op], now: u64) -> Option<Change> {
+        let before = comment::artboards_of(&self.doc, ops);
         let (applied, inverse) = self.doc.apply_all(ops);
         if applied.is_empty() {
             return None;
         }
         self.history_mut(actor).record(label.to_owned(), inverse);
-        Some(self.finish(actor, Origin::Edit, label, applied, now))
+        Some(self.finish(actor, Origin::Edit, label, applied, before, now))
     }
 
     /// Reverses `actor`'s most recent change that still applies. Entries whose
@@ -149,6 +157,7 @@ impl Design {
                 Origin::Undo => history.pop_undo(),
                 _ => history.pop_redo(),
             }?;
+            let before = comment::artboards_of(&self.doc, &entry.ops);
             let (applied, inverse) = self.doc.apply_all(&entry.ops);
             if applied.is_empty() {
                 continue;
@@ -161,28 +170,120 @@ impl Design {
                 Origin::Undo => history.push_redo(reverse),
                 _ => history.push_undo(reverse),
             }
-            return Some(self.finish(actor, origin, &entry.label, applied, now));
+            return Some(self.finish(actor, origin, &entry.label, applied, before, now));
         }
     }
 
+    /// Numbers a change that has been applied and logs it. `before` holds the
+    /// artboards its nodes were on before it applied, so a change that deletes
+    /// nodes still counts as touching their artboard.
     fn finish(
         &mut self,
         actor: &str,
         origin: Origin,
         label: &str,
         ops: Vec<Op>,
+        before: BTreeSet<NodeId>,
         now: u64,
     ) -> Change {
         self.seq += 1;
         self.meta.updated_at = now;
-        Change {
+        let change = Change {
             seq: self.seq,
             actor: actor.to_owned(),
             origin,
             label: label.to_owned(),
             ops,
-        }
+        };
+        self.log.record(&change, &self.doc, before);
+        change
     }
+
+    pub fn comments(&self) -> &[Comment] {
+        &self.comments
+    }
+
+    /// Pins a new comment, with `body` as its first message. `new_id` must
+    /// return a fresh random id; it's called again if the id is taken.
+    pub fn add_comment(
+        &mut self,
+        author: Author,
+        anchor: Anchor,
+        body: &str,
+        new_id: &mut impl FnMut() -> String,
+        now: u64,
+    ) -> Result<&Comment, CommentError> {
+        let body = comment::check_body(body)?;
+        comment::check_anchor(&self.doc, &anchor)?;
+        let id = loop {
+            let id = new_id();
+            if !self.comments.iter().any(|c| c.id == id) {
+                break id;
+            }
+        };
+        self.comments.push(Comment {
+            id,
+            artboard_id: anchor.artboard_id,
+            node_id: anchor.node_id,
+            x: anchor.x,
+            y: anchor.y,
+            resolved: false,
+            created_at: now,
+            messages: vec![Message {
+                author,
+                body,
+                at: now,
+                seq: self.seq,
+                changes: Vec::new(),
+            }],
+        });
+        Ok(self.comments.last().expect("just pushed"))
+    }
+
+    /// Adds a reply to comment `id`. See [`crate::comment`] for how replies
+    /// link changes and change the resolved state. `resolve` sets the state
+    /// explicitly.
+    pub fn reply(
+        &mut self,
+        id: &str,
+        author: Author,
+        body: &str,
+        resolve: Option<bool>,
+        now: u64,
+    ) -> Result<&Comment, CommentError> {
+        let body = comment::check_body(body)?;
+        let comment = find(&mut self.comments, id)?;
+        let changes = match author.kind {
+            AuthorKind::Agent => self.log.since(
+                &author.id,
+                comment.last_seq(),
+                comment.artboard_id.as_deref(),
+            ),
+            AuthorKind::User => Vec::new(),
+        };
+        comment.resolved = resolve.unwrap_or(comment.resolved && author.kind == AuthorKind::Agent);
+        comment.messages.push(Message {
+            author,
+            body,
+            at: now,
+            seq: self.seq,
+            changes,
+        });
+        Ok(comment)
+    }
+
+    pub fn set_resolved(&mut self, id: &str, resolved: bool) -> Result<&Comment, CommentError> {
+        let comment = find(&mut self.comments, id)?;
+        comment.resolved = resolved;
+        Ok(comment)
+    }
+}
+
+fn find<'a>(comments: &'a mut [Comment], id: &str) -> Result<&'a mut Comment, CommentError> {
+    comments
+        .iter_mut()
+        .find(|c| c.id == id)
+        .ok_or_else(|| CommentError::NotFound(id.into()))
 }
 
 #[cfg(test)]
@@ -298,5 +399,102 @@ mod tests {
         d.commit("alice", "red", &[color("a", "red")], 2);
         assert!(d.commit("alice", "red", &[color("a", "red")], 3).is_none());
         assert_eq!(d.seq(), 2);
+    }
+
+    fn author(id: &str, kind: AuthorKind) -> Author {
+        Author {
+            id: id.into(),
+            name: id.into(),
+            kind,
+        }
+    }
+
+    fn pin(d: &mut Design, artboard: &str) -> String {
+        let anchor = Anchor {
+            artboard_id: Some(artboard.into()),
+            node_id: Some(artboard.into()),
+            x: 10.0,
+            y: 20.0,
+        };
+        let user = author("user:1", AuthorKind::User);
+        let mut n = 0;
+        let mut ids = || {
+            n += 1;
+            format!("c{n}")
+        };
+        d.add_comment(user, anchor, "Make it red", &mut ids, 0)
+            .unwrap()
+            .id
+            .clone()
+    }
+
+    #[test]
+    fn agent_reply_links_its_changes_and_resolves() {
+        let mut d = design();
+        d.commit(
+            "agent",
+            "boards",
+            &[create("a", None), create("b", None)],
+            1,
+        );
+        let id = pin(&mut d, "a");
+
+        // Only the agent's change to the comment's artboard, made after the comment, is linked.
+        d.commit("agent", "b red", &[color("b", "red")], 2);
+        d.commit("other", "a blue", &[color("a", "blue")], 3);
+        d.commit("agent", "a red", &[color("a", "red")], 4);
+        let agent = author("agent", AuthorKind::Agent);
+        let replied = d.reply(&id, agent, "Made it red", Some(true), 5).unwrap();
+        assert!(replied.resolved);
+        let reply = replied.messages.last().unwrap();
+        assert_eq!(
+            reply
+                .changes
+                .iter()
+                .map(|c| c.label.as_str())
+                .collect::<Vec<_>>(),
+            ["a red"]
+        );
+        assert_eq!(reply.changes[0].node_ids, ["a"]);
+
+        // A user's reply reopens the comment and links nothing.
+        let user = author("user:1", AuthorKind::User);
+        let reopened = d.reply(&id, user, "Darker", None, 6).unwrap();
+        assert!(!reopened.resolved);
+        assert!(reopened.messages.last().unwrap().changes.is_empty());
+        assert_eq!(d.snapshot().comments.len(), 1);
+    }
+
+    #[test]
+    fn undo_that_deletes_nodes_still_links_to_their_artboard() {
+        let mut d = design();
+        d.commit("agent", "board", &[create("a", None)], 1);
+        let id = pin(&mut d, "a");
+        d.commit("agent", "child", &[create("b", Some("a"))], 2);
+        // Undoing the child deletes it, so after the undo it's on no artboard.
+        d.undo("agent", 3).unwrap();
+        let agent = author("agent", AuthorKind::Agent);
+        let replied = d.reply(&id, agent, "Tried and reverted", None, 4).unwrap();
+        let seqs: Vec<_> = replied.messages[1].changes.iter().map(|c| c.seq).collect();
+        assert_eq!(seqs, [2, 3]);
+    }
+
+    #[test]
+    fn comments_must_point_at_real_nodes() {
+        let mut d = design();
+        let anchor = Anchor {
+            artboard_id: Some("missing".into()),
+            node_id: None,
+            x: 0.0,
+            y: 0.0,
+        };
+        let user = author("user:1", AuthorKind::User);
+        let result = d.add_comment(user, anchor, "Hi", &mut || "c".into(), 0);
+        assert!(matches!(result, Err(CommentError::NodeNotFound(_))));
+        let agent = author("agent", AuthorKind::Agent);
+        assert!(matches!(
+            d.reply("nope", agent, "Hi", None, 0),
+            Err(CommentError::NotFound(_))
+        ));
     }
 }

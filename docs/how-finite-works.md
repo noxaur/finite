@@ -82,7 +82,7 @@ An op that no longer makes sense is skipped. A `set` on a deleted node does noth
 
 - **`seq`**, a counter that goes up by one for every change. It's how browsers know they're up to date.
 - **One history per actor.** An actor is whoever made a change. Today that's an agent: its `X-Finite-Agent` header if it sends one, otherwise its MCP session id. A `History` (`history.rs`) is an undo stack and a redo stack of inverse ops.
-- **Comment threads**, which are covered below.
+- **Comment threads**, and a **change log** of the last 512 changes. Both are covered under Comments below.
 
 All edits go through three methods. Each returns a `Change`, or `None` if nothing changed. A change holds the seq, the actor, a label and the ops that took effect.
 
@@ -128,9 +128,8 @@ Some of the work these commands do:
 
 1. Lock the design.
 2. Run the edit command against the current document to get ops.
-3. `Design::commit` them.
-4. Record the change in the change log (used by comments).
-5. Broadcast the change and mark the design dirty.
+3. `Design::commit` them. This also logs the change for comments.
+4. Broadcast the change and mark the design dirty.
 
 Because steps 2 and 3 happen under one lock, no other edit can sneak in between reading the document and writing to it.
 
@@ -213,10 +212,12 @@ Here's what happened in the demo you saw:
 1. In comment mode, the canvas asks `Renderer.hitTest` what's under the pointer. It finds the deepest element with `elementFromPoint` inside the artboard's shadow root, and outlines it.
 2. A click posts the comment over REST. It sends the artboard id, the node id, and the click's offset from the artboard's corner, so the pin moves with the artboard.
 3. The agent sees `openComments: 1` in `get_basic_info`, reads the thread with `get_comments`, edits, and answers with `reply_to_comment`.
-4. The hub keeps a **change log**: the last 512 changes, each with its actor, the artboards it touched, and the elements it changed. When an agent replies, the server attaches that agent's changes to the comment's artboard since the thread's previous message. Those become the "Show what changed" buttons.
+4. `Design` keeps a **change log**: the last 512 changes, each with its actor, the artboards it touched, and the elements it changed. Every commit, undo and redo goes through one function (`Design::finish`) that writes to the log, so no path can skip it. When an agent replies, `Design::reply` attaches that agent's changes to the comment's artboard since the thread's previous message. Those become the "Show what changed" buttons.
 5. Your reply reopens a resolved comment, so you can keep steering in one thread.
 
 Comments live beside the document, not inside it, so undo never touches them. They're saved in the same JSON file as the design.
+
+All the thread rules live in `crates/design`: `comment.rs` defines the types and checks, and `Design::add_comment`, `reply` and `set_resolved` apply them. The hub only takes the lock, calls one of those, and broadcasts the updated comment. That means you can test a comment rule with a plain function call, like the tests at the bottom of `design.rs`.
 
 ## Words used in the code
 
@@ -238,7 +239,6 @@ Comments live beside the document, not inside it, so undo never touches them. Th
 If you grow Finite, these are the places that will hurt first.
 
 - **The op rules are written twice**, once in Rust (`document.rs`) and once in TypeScript (`replica.ts`). Nothing checks that they agree, so a fix in one can silently skip the other.
-- **Comment rules sit in the server**, in `hub.rs`, instead of in the document model with the other rules. The change log is recorded by hand in two places, and an undo that deletes nodes doesn't record which artboard they were on.
 - **`DesignCanvas.tsx` does a lot**: the socket, the replica, the renderer, the camera, comments, hover and keyboard shortcuts all live in one 600-line component.
 - **Saving rewrites the whole design** every time. That's fine for a few thousand nodes, and slow for very large designs.
 - **Everything lives in one process.** The hub keeps designs in memory and broadcasts in-process, so two server instances can't share a design yet.

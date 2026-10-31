@@ -10,7 +10,7 @@ use std::{
 
 use finite_design::{
     ActorId, Change, Design, DesignMeta, Document, NodeId, Op, Snapshot,
-    comment::{self, Author, AuthorKind, ChangeLog, Comment, CommentError, Message},
+    comment::{Anchor, Author, Comment, CommentError},
     edit::EditError,
 };
 use serde::Serialize;
@@ -144,7 +144,6 @@ struct DesignState {
     design: Design,
     presence: BTreeMap<ActorId, Presence>,
     last_seen: HashMap<ActorId, u64>,
-    log: ChangeLog,
 }
 
 impl DesignState {
@@ -179,7 +178,6 @@ impl DesignHandle {
                 design,
                 presence: BTreeMap::new(),
                 last_seen: HashMap::new(),
-                log: ChangeLog::default(),
             }),
             events: broadcast::channel(1024).0,
             dirty: watch::channel(()).0,
@@ -240,11 +238,8 @@ impl DesignHandle {
         let mut state = self.lock();
         state.touch(actor, now);
         let (ops, output) = build(state.design.doc())?;
-        let before = comment::artboards_of(state.design.doc(), &ops);
         let change = state.design.commit(&actor.id, label, &ops, now);
         if let Some(change) = &change {
-            let state = &mut *state;
-            state.log.record(change, state.design.doc(), before);
             self.publish(actor, change);
         }
         Ok((output, change))
@@ -267,8 +262,6 @@ impl DesignHandle {
         let mut state = self.lock();
         state.touch(actor, now);
         let change = f(&mut state.design, &actor.id, now)?;
-        let state = &mut *state;
-        state.log.record(&change, state.design.doc(), Default::default());
         self.publish(actor, &change);
         Some(change)
     }
@@ -302,56 +295,22 @@ impl DesignHandle {
     }
 
     pub fn comments(&self) -> Vec<Comment> {
-        self.lock().design.comments.clone()
+        self.lock().design.comments().to_vec()
     }
 
-    /// Pins a new comment. `x` and `y` are relative to `artboard_id`, or canvas
-    /// coordinates when it's `None`.
+    /// Pins a new comment. See [`Design::add_comment`].
     pub fn add_comment(
         &self,
         author: Author,
-        anchor: CommentAnchor,
+        anchor: Anchor,
         body: &str,
     ) -> Result<Comment, CommentError> {
-        let body = comment::check_body(body)?;
-        let mut state = self.lock();
-        let design = &mut state.design;
-        comment::check_anchor(
-            design.doc(),
-            anchor.artboard_id.as_deref(),
-            anchor.node_id.as_deref(),
-        )?;
-        let id = loop {
-            let id = random_id(8);
-            if !design.comments.iter().any(|c| c.id == id) {
-                break id;
-            }
-        };
-        let now = now_ms();
-        let comment = Comment {
-            id,
-            artboard_id: anchor.artboard_id,
-            node_id: anchor.node_id,
-            x: anchor.x,
-            y: anchor.y,
-            resolved: false,
-            created_at: now,
-            messages: vec![Message {
-                author,
-                body,
-                at: now,
-                seq: design.seq(),
-                changes: Vec::new(),
-            }],
-        };
-        design.comments.push(comment.clone());
-        self.publish_comment(&comment);
-        Ok(comment)
+        self.update_comment(|design| {
+            design.add_comment(author, anchor, body, &mut || random_id(8), now_ms())
+        })
     }
 
-    /// Adds a reply. An agent's reply links its changes to the comment's
-    /// artboard since the previous message. A user's reply reopens a resolved
-    /// comment; `resolve` sets the state either way.
+    /// Adds a reply. See [`Design::reply`].
     pub fn reply(
         &self,
         id: &str,
@@ -359,56 +318,24 @@ impl DesignHandle {
         body: &str,
         resolve: Option<bool>,
     ) -> Result<Comment, CommentError> {
-        let body = comment::check_body(body)?;
-        let mut state = self.lock();
-        let state = &mut *state;
-        let seq = state.design.seq();
-        let comment = state
-            .design
-            .comments
-            .iter_mut()
-            .find(|c| c.id == id)
-            .ok_or_else(|| CommentError::NotFound(id.into()))?;
-        let changes = match author.kind {
-            AuthorKind::Agent => {
-                state
-                    .log
-                    .since(&author.id, comment.last_seq(), comment.artboard_id.as_deref())
-            }
-            AuthorKind::User => Vec::new(),
-        };
-        comment.resolved = resolve.unwrap_or(comment.resolved && author.kind == AuthorKind::Agent);
-        comment.messages.push(Message {
-            author,
-            body,
-            at: now_ms(),
-            seq,
-            changes,
-        });
-        let comment = comment.clone();
-        self.publish_comment(&comment);
-        Ok(comment)
+        self.update_comment(|design| design.reply(id, author, body, resolve, now_ms()))
     }
 
     pub fn set_resolved(&self, id: &str, resolved: bool) -> Result<Comment, CommentError> {
-        let mut state = self.lock();
-        let comment = state
-            .design
-            .comments
-            .iter_mut()
-            .find(|c| c.id == id)
-            .ok_or_else(|| CommentError::NotFound(id.into()))?;
-        comment.resolved = resolved;
-        let comment = comment.clone();
-        self.publish_comment(&comment);
-        Ok(comment)
+        self.update_comment(|design| design.set_resolved(id, resolved))
     }
 
-    fn publish_comment(&self, comment: &Comment) {
-        let _ = self
-            .events
-            .send(Outgoing::new(None, &DesignMessage::Comment { comment }));
+    /// Runs a comment update, then sends the whole comment to viewers.
+    fn update_comment(
+        &self,
+        f: impl FnOnce(&mut Design) -> Result<&Comment, CommentError>,
+    ) -> Result<Comment, CommentError> {
+        let mut state = self.lock();
+        let comment = f(&mut state.design)?.clone();
+        let message = DesignMessage::Comment { comment: &comment };
+        let _ = self.events.send(Outgoing::new(None, &message));
         self.dirty.send_replace(());
+        Ok(comment)
     }
 
     pub fn set_presence(&self, actor: &Actor, node_ids: Vec<NodeId>, status: Option<String>) {
@@ -465,14 +392,6 @@ impl DesignHandle {
             state.last_seen.remove(&actor);
         }
     }
-}
-
-/// Where a new comment is pinned.
-pub struct CommentAnchor {
-    pub artboard_id: Option<NodeId>,
-    pub node_id: Option<NodeId>,
-    pub x: f64,
-    pub y: f64,
 }
 
 /// Every live design, plus the design list's subscribers.
@@ -614,95 +533,28 @@ async fn persist(
 mod tests {
     use super::*;
     use crate::store::MemoryStore;
-    use finite_design::edit::{self, NewArtboard};
-
-    fn author(id: &str, kind: AuthorKind) -> Author {
-        Author {
-            id: id.into(),
-            name: id.into(),
-            kind,
-        }
-    }
-
-    fn agent() -> Actor {
-        Actor {
-            id: "agent".into(),
-            name: "Agent".into(),
-        }
-    }
-
-    fn artboard(handle: &DesignHandle, id: &str) {
-        handle
-            .edit(&agent(), "Create artboard", |doc| {
-                let spec = NewArtboard {
-                    name: id.into(),
-                    width: 100.0,
-                    height: 100.0,
-                    position: None,
-                    styles: BTreeMap::new(),
-                };
-                Ok((edit::create_artboard(doc, id.into(), spec)?, ()))
-            })
-            .unwrap();
-    }
-
-    fn color(handle: &DesignHandle, id: &str) {
-        handle
-            .edit(&agent(), "Update styles", |doc| {
-                let styles = BTreeMap::from([("color".to_owned(), Some("red".to_owned()))]);
-                Ok((edit::update_styles(doc, &[id.into()], &styles)?, ()))
-            })
-            .unwrap();
-    }
+    use finite_design::comment::AuthorKind;
 
     #[tokio::test]
-    async fn agent_reply_links_its_changes_and_resolves() {
+    async fn comment_updates_reach_viewers() {
         let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
         let handle = hub.get(&hub.create("Test").meta.id).unwrap();
-        artboard(&handle, "a");
-        artboard(&handle, "b");
-
-        let anchor = CommentAnchor {
-            artboard_id: Some("a".into()),
-            node_id: Some("a".into()),
-            x: 10.0,
-            y: 20.0,
+        let (_, _, mut rx) = handle.subscribe();
+        let author = Author {
+            id: "user:1".into(),
+            name: "Guest".into(),
+            kind: AuthorKind::User,
         };
-        let comment = handle
-            .add_comment(author("user:1", AuthorKind::User), anchor, "Make it red")
-            .unwrap();
-
-        // Only the change to the comment's artboard, made after the comment, is linked.
-        color(&handle, "b");
-        color(&handle, "a");
-        let agent = author("agent", AuthorKind::Agent);
-        let replied = handle
-            .reply(&comment.id, agent, "Made it red", Some(true))
-            .unwrap();
-        assert!(replied.resolved);
-        let reply = replied.messages.last().unwrap();
-        assert_eq!(reply.changes.len(), 1);
-        assert_eq!(reply.changes[0].node_ids, ["a"]);
-
-        // A user's reply reopens the comment.
-        let reopened = handle
-            .reply(&comment.id, author("user:1", AuthorKind::User), "Darker", None)
-            .unwrap();
-        assert!(!reopened.resolved);
-        assert_eq!(handle.read(|d| d.snapshot().comments.len()), 1);
-    }
-
-    #[tokio::test]
-    async fn comments_must_point_at_real_nodes() {
-        let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
-        let handle = hub.get(&hub.create("Test").meta.id).unwrap();
-        let anchor = CommentAnchor {
-            artboard_id: Some("missing".into()),
+        let anchor = Anchor {
+            artboard_id: None,
             node_id: None,
-            x: 0.0,
-            y: 0.0,
+            x: 1.0,
+            y: 2.0,
         };
-        let result = handle.add_comment(author("user:1", AuthorKind::User), anchor, "Hi");
-        assert!(matches!(result, Err(CommentError::NodeNotFound(_))));
+        let comment = handle.add_comment(author, anchor, "Hello").unwrap();
+        let message: serde_json::Value =
+            serde_json::from_str(&rx.try_recv().unwrap().json).unwrap();
+        assert_eq!(message["type"], "comment");
+        assert_eq!(message["comment"]["id"], comment.id.as_str());
     }
 }

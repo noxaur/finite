@@ -1,9 +1,14 @@
 //! Comments: threads that users pin to the canvas to ask agents for changes.
 //!
 //! Comments sit beside the document, not in it, so they're never part of an
-//! undo step. A reply from an agent links the edits it made since the
-//! thread's previous message, which is how a viewer goes from a comment to the
-//! change that answered it.
+//! undo step. [`crate::Design`] owns them and enforces the thread rules:
+//!
+//! - A new comment must point at a real artboard, and its node must be inside it.
+//! - An agent's reply links the edits that agent made to the comment's
+//!   artboard since the thread's previous message (from [`ChangeLog`]). That's
+//!   how a viewer goes from a comment to the change that answered it.
+//! - A user's reply reopens a resolved comment. An agent's reply keeps the
+//!   current state unless it asks to resolve or reopen.
 
 use std::{
     collections::{BTreeSet, VecDeque},
@@ -83,6 +88,16 @@ impl Comment {
     }
 }
 
+/// Where a new comment is pinned. `x` and `y` are relative to the artboard's
+/// top-left corner, or canvas coordinates when `artboard_id` is `None`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Anchor {
+    pub artboard_id: Option<NodeId>,
+    pub node_id: Option<NodeId>,
+    pub x: f64,
+    pub y: f64,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum CommentError {
     NotFound(String),
@@ -90,6 +105,7 @@ pub enum CommentError {
     NotInArtboard { node: NodeId, artboard: NodeId },
     Empty,
     TooLong,
+    BadPosition,
 }
 
 impl fmt::Display for CommentError {
@@ -102,6 +118,7 @@ impl fmt::Display for CommentError {
             }
             Self::Empty => f.write_str("a comment can't be empty"),
             Self::TooLong => write!(f, "a comment can be at most {MAX_BODY} characters"),
+            Self::BadPosition => f.write_str("x and y must be finite numbers"),
         }
     }
 }
@@ -109,7 +126,7 @@ impl fmt::Display for CommentError {
 impl std::error::Error for CommentError {}
 
 /// Trims `body` and checks its length.
-pub fn check_body(body: &str) -> Result<String, CommentError> {
+pub(crate) fn check_body(body: &str) -> Result<String, CommentError> {
     let body = body.trim();
     if body.is_empty() {
         return Err(CommentError::Empty);
@@ -122,12 +139,12 @@ pub fn check_body(body: &str) -> Result<String, CommentError> {
 
 /// Checks that a new comment's anchor exists: the artboard is an artboard, and
 /// the node is inside it.
-pub fn check_anchor(
-    doc: &Document,
-    artboard_id: Option<&str>,
-    node_id: Option<&str>,
-) -> Result<(), CommentError> {
-    let Some(artboard) = artboard_id else {
+pub(crate) fn check_anchor(doc: &Document, anchor: &Anchor) -> Result<(), CommentError> {
+    if !anchor.x.is_finite() || !anchor.y.is_finite() {
+        return Err(CommentError::BadPosition);
+    }
+    let node_id = anchor.node_id.as_deref();
+    let Some(artboard) = anchor.artboard_id.as_deref() else {
         return match node_id {
             Some(node) => Err(CommentError::NodeNotFound(node.into())),
             None => Ok(()),
@@ -152,6 +169,7 @@ pub fn check_anchor(
     Ok(())
 }
 
+#[derive(Debug)]
 struct Logged {
     actor: ActorId,
     change: ChangeRef,
@@ -160,20 +178,22 @@ struct Logged {
 
 /// The most recent changes to a design, with the artboards each one touched,
 /// so a reply can link the edits its author made for a comment.
-#[derive(Default)]
-pub struct ChangeLog {
+#[derive(Debug, Default)]
+pub(crate) struct ChangeLog {
     entries: VecDeque<Logged>,
 }
 
 impl ChangeLog {
     /// Records `change`. `doc` is the document after it applied; `before` adds
     /// artboards it touched that no longer contain the node (such as a delete).
-    pub fn record(&mut self, change: &Change, doc: &Document, before: BTreeSet<NodeId>) {
+    pub(crate) fn record(&mut self, change: &Change, doc: &Document, before: BTreeSet<NodeId>) {
         let mut artboards = before;
         artboards.extend(artboards_of(doc, &change.ops));
         let mut node_ids: Vec<NodeId> = Vec::new();
         for op in &change.ops {
-            let Some(node) = doc.get(op.id()) else { continue };
+            let Some(node) = doc.get(op.id()) else {
+                continue;
+            };
             let id = match (&node.kind, &node.parent) {
                 (NodeKind::Text, Some(parent)) => parent,
                 _ => &node.id,
@@ -204,7 +224,7 @@ impl ChangeLog {
 
     /// `actor`'s changes after `seq`, oldest first. With `artboard`, only the
     /// changes that touched it.
-    pub fn since(&self, actor: &str, seq: u64, artboard: Option<&str>) -> Vec<ChangeRef> {
+    pub(crate) fn since(&self, actor: &str, seq: u64, artboard: Option<&str>) -> Vec<ChangeRef> {
         self.entries
             .iter()
             .filter(|e| e.actor == actor && e.change.seq > seq)
@@ -215,7 +235,7 @@ impl ChangeLog {
 }
 
 /// The artboards that contain the nodes `ops` target, as of `doc`.
-pub fn artboards_of(doc: &Document, ops: &[Op]) -> BTreeSet<NodeId> {
+pub(crate) fn artboards_of(doc: &Document, ops: &[Op]) -> BTreeSet<NodeId> {
     let mut out = BTreeSet::new();
     for op in ops {
         let mut add = |id: &str| {
@@ -266,19 +286,36 @@ mod tests {
         }
     }
 
+    fn anchor(artboard: Option<&str>, node: Option<&str>) -> Anchor {
+        Anchor {
+            artboard_id: artboard.map(Into::into),
+            node_id: node.map(Into::into),
+            x: 0.0,
+            y: 0.0,
+        }
+    }
+
     #[test]
     fn anchors_must_exist_and_match() {
         let doc = doc();
-        assert_eq!(check_anchor(&doc, Some("board"), Some("child")), Ok(()));
-        assert_eq!(check_anchor(&doc, None, None), Ok(()));
+        assert_eq!(
+            check_anchor(&doc, &anchor(Some("board"), Some("child"))),
+            Ok(())
+        );
+        assert_eq!(check_anchor(&doc, &anchor(None, None)), Ok(()));
         assert!(matches!(
-            check_anchor(&doc, Some("child"), None),
+            check_anchor(&doc, &anchor(Some("child"), None)),
             Err(CommentError::NodeNotFound(_))
         ));
         assert!(matches!(
-            check_anchor(&doc, Some("other"), Some("child")),
+            check_anchor(&doc, &anchor(Some("other"), Some("child"))),
             Err(CommentError::NotInArtboard { .. })
         ));
+        let nowhere = Anchor {
+            x: f64::NAN,
+            ..anchor(None, None)
+        };
+        assert_eq!(check_anchor(&doc, &nowhere), Err(CommentError::BadPosition));
     }
 
     #[test]
@@ -304,6 +341,9 @@ mod tests {
     fn bodies_are_trimmed_and_checked() {
         assert_eq!(check_body("  hi \n").as_deref(), Ok("hi"));
         assert_eq!(check_body(" \n"), Err(CommentError::Empty));
-        assert_eq!(check_body(&"x".repeat(MAX_BODY + 1)), Err(CommentError::TooLong));
+        assert_eq!(
+            check_body(&"x".repeat(MAX_BODY + 1)),
+            Err(CommentError::TooLong)
+        );
     }
 }

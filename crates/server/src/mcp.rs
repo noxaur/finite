@@ -610,7 +610,7 @@ impl FiniteMcp {
                 "nodeCount": doc.len(),
                 "artboards": artboards,
                 "agentsWorking": presence,
-                "openComments": design.comments.iter().filter(|c| !c.resolved).count(),
+                "openComments": design.comments().iter().filter(|c| !c.resolved).count(),
             })
         });
         json(info)
@@ -1044,7 +1044,7 @@ impl FiniteMcp {
         let comments = handle.read(|design| {
             let doc = design.doc();
             design
-                .comments
+                .comments()
                 .iter()
                 .filter(|c| p.include_resolved || !c.resolved)
                 .map(|c| {
