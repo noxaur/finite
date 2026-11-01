@@ -63,7 +63,7 @@ jobs:
         with:
           # Pull requests read main's cache but don't save their own, which
           # would push main's out of the repository's 10 GB.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: true # TEMP: measure a warm cache
           # Saved even when a test fails, so one red run doesn't send the
           # next one back to compiling everything.
           cache-on-failure: true
