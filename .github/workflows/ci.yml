@@ -1,5 +1,5 @@
-# Runs the same checks as `vp run ready`, then the end-to-end test, and the
-# tests that need Postgres against a Postgres service.
+# Runs the checks in `vp run ready`, then the end-to-end test, and the tests
+# that need Postgres against a Postgres service.
 name: CI
 
 on:
@@ -7,10 +7,24 @@ on:
     branches: [main]
   pull_request:
 
+# A new push to a pull request cancels the run for the push before it. Runs
+# on main queue instead, so every commit there gets a result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Line numbers in backtraces, without the rest of the debug info, which
+  # makes the build slower to link and the cache bigger.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
 jobs:
   check:
     runs-on: ubuntu-24.04
     steps:
+      # Ubuntu 24.04 blocks the user namespaces Chrome's sandbox needs.
+      # First, since the server's screenshot test starts Chrome too.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - uses: actions/checkout@v5
       - uses: voidzero-dev/setup-vp@v1.21.2
         with:
@@ -22,17 +36,26 @@ jobs:
           # The browser's copy of the document model (crates/wasm).
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Pull requests read main's cache but don't save their own, which
+          # would push main's out of the repository's 10 GB.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # Format, lint and type check (web and Rust), test, build.
-      - run: vp run ready
+      # `vp run ready`, except that the server is built in debug, the
+      # build the end-to-end test runs, rather than in release.
+      - run: vp check
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: vp run -r test
+      - run: vp run -F web... -F desktop build
+      - run: cargo build -p finite-server
 
-      # Ubuntu 24.04 blocks the user namespaces Chrome's sandbox needs.
-      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: vp run e2e
         env:
+          E2E_SKIP_BUILD: "1"
           # So a failure's screenshot lands where the next step looks.
           TMPDIR: ${{ runner.temp }}
-      # The same checks through a router in front of two servers, reusing those builds.
+      # The same checks through a router in front of two servers.
       - run: vp run e2e:router
         env:
           E2E_SKIP_BUILD: "1"
@@ -66,6 +89,7 @@ jobs:
     env:
       FINITE_TEST_DATABASE_URL: postgres://postgres:finite@localhost:5432/finite_test
     steps:
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - uses: actions/checkout@v5
       - uses: voidzero-dev/setup-vp@v1.21.2
         with:
@@ -77,11 +101,12 @@ jobs:
           # e2e:shared builds the web app, which needs crates/wasm.
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy -p finite-server --all-targets --features postgres -- -D warnings
       - run: cargo test -p finite-server --features postgres
       # The end-to-end checks through a router in front of two servers that
       # share this Postgres. It builds the server with the feature itself.
-      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: vp run e2e:shared
         env:
           TMPDIR: ${{ runner.temp }}
