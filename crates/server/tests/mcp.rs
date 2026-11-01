@@ -863,3 +863,75 @@ async fn a_long_agent_name_is_cut() {
     );
     assert_eq!(author["name"].as_str().unwrap().chars().count(), 48);
 }
+
+#[tokio::test]
+async fn agents_choose_what_html_and_screenshots_show() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Alice").await;
+    let created = agent.ok("create_design", json!({ "name": "Shots" })).await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .unwrap()
+        .to_owned();
+    let board = agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Card", "width": 400, "height": 300 }),
+        )
+        .await;
+    let board = id_after(&board, "Created artboard");
+    let wrote = agent
+        .ok(
+            "write_html",
+            json!({ "designId": design, "targetId": board, "html": r#"<style>.title { color: red }</style><section data-name="Body" style="padding: 24px"><div data-name="Row"><p class="title">Hello</p><img src="data:image/png;base64,AAAAAAAAAAAAAAAAAAAAAAAA"></div></section>"# }),
+        )
+        .await;
+    let body = id_after(&wrote, "\"Body\"");
+
+    // A depth, no styles, short values and the artboard's stylesheet.
+    let html = agent
+        .ok(
+            "get_html",
+            json!({ "designId": design, "nodeId": body, "depth": 1, "includeStyles": false,
+                    "includeStylesheets": true, "maxValueLength": 10 }),
+        )
+        .await;
+    assert!(html.starts_with("<style"), "{html}");
+    assert!(
+        html.contains("<!-- 2 child elements not shown -->"),
+        "{html}"
+    );
+    assert!(!html.contains("padding"), "{html}");
+    assert!(html.contains("shows 1 level below the node"), "{html}");
+    assert!(html.contains("from elsewhere in the artboard"), "{html}");
+
+    // Screenshots: the outcome depends on whether a browser is installed.
+    let result = agent
+        .rpc(
+            "tools/call",
+            Some(json!({ "name": "get_screenshot",
+                         "arguments": { "designId": design, "nodeIds": [board, body], "padding": 4 } })),
+        )
+        .await;
+    let content = result["content"].as_array().unwrap();
+    let texts: Vec<&str> = content.iter().filter_map(|c| c["text"].as_str()).collect();
+    if texts.iter().any(|t| t.contains("no Chrome")) {
+        eprintln!("skipped the screenshot: no browser");
+        return;
+    }
+    let images = content.iter().filter(|c| c["type"] == "image").count();
+    assert_eq!(images, 2, "{texts:?}");
+    assert!(
+        texts[1].contains(&format!("#{body} in artboard #{board}")),
+        "{texts:?}"
+    );
+
+    let (refused, is_error) = agent
+        .call(
+            "get_screenshot",
+            json!({ "designId": design, "nodeId": body, "format": "jpeg", "transparent": true }),
+        )
+        .await;
+    assert!(is_error && refused.contains("no transparency"), "{refused}");
+}

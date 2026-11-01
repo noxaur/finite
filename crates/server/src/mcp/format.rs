@@ -196,3 +196,62 @@ pub(super) fn comments_json<'a>(
         })
         .collect()
 }
+
+/// What a screenshot shows, after its image: where it is in the artboard,
+/// and anything the agent should know about it.
+pub(super) fn shot(image: &crate::screenshot::Image) -> String {
+    let px = |v: f64| format!("{}", (v * 10.0).round() / 10.0);
+    let a = &image.area;
+    let b = &image.bounds;
+    let mut out = format!(
+        "#{} in artboard #{}: shows {}×{} at ({}, {}); the node's box is {}×{} at ({}, {}). {}×{} pixels.",
+        image.node,
+        image.artboard,
+        px(a.width),
+        px(a.height),
+        px(a.x),
+        px(a.y),
+        px(b.width),
+        px(b.height),
+        px(b.x),
+        px(b.y),
+        image.pixel_width,
+        image.pixel_height,
+    );
+    if image.element != image.node {
+        let _ = write!(out, " A text node: captured its parent #{}.", image.element);
+    }
+    if image.scale < image.requested_scale {
+        let _ = write!(
+            out,
+            " Captured at {:.2}× instead of {}×, so its longer side fits in {} pixels.",
+            image.scale,
+            image.requested_scale,
+            crate::screenshot::MAX_OUTPUT_SIDE
+        );
+    }
+    if image.cut_off {
+        out.push_str(" Part of it is past the artboard's edge and isn't shown.");
+    }
+    if image.overflow.any() {
+        let _ = write!(
+            out,
+            " The artboard's content overflows it by {}px right and {}px down",
+            px(image.overflow.right),
+            px(image.overflow.bottom)
+        );
+        out.push_str(if image.overflow_shown {
+            ", shown here."
+        } else {
+            ", and is cut off there; pass revealOverflow to see it."
+        });
+    }
+    if let Some(settled) = image.settled {
+        let _ = write!(
+            out,
+            " It has scripts or animations, captured {:.1}s after load.",
+            settled.as_secs_f64()
+        );
+    }
+    out
+}

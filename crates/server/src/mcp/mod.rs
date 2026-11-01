@@ -485,34 +485,77 @@ impl FiniteMcp {
         description = "A node's subtree as HTML with inline styles. Every element carries data-id, so you can target it in later calls.",
         annotations(read_only_hint = true)
     )]
-    async fn get_html(&self, Parameters(p): Parameters<NodeParams>) -> ToolResult {
+    async fn get_html(&self, Parameters(p): Parameters<HtmlParams>) -> ToolResult {
         let handle = design!(self, &p.design_id);
+        let options = html::ExportOptions {
+            ids: true,
+            styles: p.include_styles.unwrap_or(true),
+            depth: p.depth,
+            max_value_len: p.max_value_length.map(|n| n.max(1)),
+            stylesheets: p.include_stylesheets,
+            ..Default::default()
+        };
         let html = handle.read(|d| {
-            let html = html::export(d.doc(), &p.node_id, true)?;
-            if html.len() <= OUTPUT_LIMIT {
-                return Some(html);
-            }
-            // Cut HTML would be broken HTML, so show the outline instead.
-            if d.doc().children(Some(&p.node_id)).is_empty() {
+            let doc = d.doc();
+            let (export, depth) = html::export_within(doc, &p.node_id, &options, OUTPUT_LIMIT)?;
+            let has_children = !doc.children(Some(&p.node_id)).is_empty();
+            if export.html.len() > OUTPUT_LIMIT && !has_children {
                 // A leaf this long is long attribute values, like an image's
                 // inline data. Shortening them here would lose them if the
                 // HTML were written back, so point to get_node_info.
                 return Some(format!(
                     "This node's HTML is {} characters, more than the {OUTPUT_LIMIT} a call returns, \
                      and it has no children: its attribute values are long. \
-                     get_node_info shows them, with long values shortened.",
-                    html.len()
+                     get_node_info shows them, with long values shortened, or pass maxValueLength.",
+                    export.html.len()
                 ));
             }
-            Some(cut(
-                format!(
-                    "This node's HTML is {} characters, more than the {OUTPUT_LIMIT} a call returns. \
-                     Call get_html on one of its children instead:\n{}",
-                    html.len(),
-                    outline(d.doc(), &p.node_id, 1)
-                ),
-                "Use get_children to list them all.",
-            ))
+            if p.depth.is_none() && depth == Some(0) && has_children {
+                // Not even the children fit, so list them instead.
+                let full = html::export_with(doc, &p.node_id, &options)?;
+                return Some(cut(
+                    format!(
+                        "This node's HTML is {} characters, more than the {OUTPUT_LIMIT} a call returns. \
+                         Call get_html on one of its children instead:\n{}",
+                        full.html.len(),
+                        outline(doc, &p.node_id, 1)
+                    ),
+                    "Use get_children to list them all.",
+                ));
+            }
+            let mut out = export.html;
+            if export.collapsed > 0 {
+                let reason = if p.depth.is_some() {
+                    String::new()
+                } else {
+                    format!("The whole subtree is more than the {OUTPUT_LIMIT} characters a call returns, so this ")
+                };
+                let levels = depth.unwrap_or(0);
+                out.push_str(&format!(
+                        "\n{}{}shows {levels} level{} below the node. {} element{} marked \"not shown\" hold more: call get_html on their data-id.",
+                        reason,
+                        if reason.is_empty() { "This " } else { "" },
+                        if levels == 1 { "" } else { "s" },
+                        export.collapsed,
+                        if export.collapsed == 1 { "" } else { "s" },
+                ));
+            }
+            if export.shortened > 0 {
+                out.push_str(&format!(
+                        "\n{} value{} cut short, ending in …. Don't write this HTML back as it is.",
+                        export.shortened,
+                        if export.shortened == 1 { " was" } else { "s were" },
+                ));
+            }
+            if export.stylesheets > 0 {
+                out.push_str(&format!(
+                        "\nThe first {} <style> element{} {} from elsewhere in the artboard, not inside this node.",
+                        export.stylesheets,
+                        if export.stylesheets == 1 { "" } else { "s" },
+                        if export.stylesheets == 1 { "is" } else { "are" },
+                ));
+            }
+            Some(out)
         });
         match html {
             Some(html) => ok(html),
@@ -521,36 +564,65 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Render an artboard to a PNG image to check how it looks. Pass the artboard id or any node inside it.",
+        description = "Render an artboard, or nodes inside one, to images to check how they look. Each image is cropped to its node's box.",
         annotations(read_only_hint = true)
     )]
     async fn get_screenshot(&self, Parameters(p): Parameters<ScreenshotParams>) -> ToolResult {
         let handle = design!(self, &p.design_id);
-        let page = handle.read(|d| {
-            let board = d.doc().artboard_of(&p.node_id)?;
-            screenshot::page(d.doc(), &board.id)
-        });
-        let Some((page, width, height)) = page else {
-            return fail(format!("node {:?} not found", p.node_id));
+        let nodes: Vec<String> = p.node_id.into_iter().chain(p.node_ids).collect();
+        let shots = nodes
+            .into_iter()
+            .map(|node| screenshot::Shot {
+                node,
+                region: p
+                    .region
+                    .map(|r| screenshot::Rect::new(r.x, r.y, r.width, r.height)),
+                padding: p.padding.unwrap_or(0.0),
+            })
+            .collect();
+        let quality = p.quality.unwrap_or(80);
+        let options = screenshot::Options {
+            scale: p.scale.unwrap_or(1.0),
+            format: match p.format {
+                ImageFormat::Png => screenshot::Format::Png,
+                ImageFormat::Jpeg => screenshot::Format::Jpeg { quality },
+                ImageFormat::Webp => screenshot::Format::Webp { quality },
+            },
+            hide: p.hide_node_ids,
+            highlight: p.highlight_node_ids,
+            transparent: p.transparent,
+            reveal_overflow: p.reveal_overflow,
+            ..Default::default()
         };
-        let requested = p.scale.unwrap_or(1.0).clamp(0.25, 2.0);
-        let scale = screenshot::output_scale(width, height, requested);
-        match screenshot::capture(&page, width, height, scale).await {
-            Ok(png) => {
-                let mut content = vec![ContentBlock::image(
-                    base64::engine::general_purpose::STANDARD.encode(png),
-                    "image/png",
-                )];
-                if scale < requested {
-                    content.push(ContentBlock::text(format!(
-                        "Captured at {scale:.2}× instead of {requested}×, so the {width}×{height} artboard's longer side fits in {} pixels, the most a screenshot returns.",
-                        screenshot::MAX_OUTPUT_SIDE
-                    )));
+        let plan = match handle.read(|d| screenshot::plan(d.doc(), shots, options)) {
+            Ok(plan) => plan,
+            Err(error) => return fail(error),
+        };
+        let images = match screenshot::capture(plan).await {
+            Ok(images) => images,
+            Err(error) => return fail(error),
+        };
+        let mut content = Vec::new();
+        let mut failed = 0;
+        for image in &images {
+            match image {
+                Ok(image) => {
+                    content.push(ContentBlock::image(
+                        base64::engine::general_purpose::STANDARD.encode(&image.data),
+                        image.mime,
+                    ));
+                    content.push(ContentBlock::text(format::shot(image)));
                 }
-                Ok(CallToolResult::success(content))
+                Err(error) => {
+                    failed += 1;
+                    content.push(ContentBlock::text(error.clone()));
+                }
             }
-            Err(error) => fail(error),
         }
+        if failed == images.len() {
+            return Ok(CallToolResult::error(content));
+        }
+        Ok(CallToolResult::success(content))
     }
 
     #[tool(
