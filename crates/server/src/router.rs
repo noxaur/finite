@@ -374,6 +374,24 @@ async fn lobby(State(front): State<Arc<Front>>, upgrade: WebSocketUpgrade) -> Re
     upgrade.on_upgrade(move |client| relay_lobby(client, upstreams, complete))
 }
 
+/// A server's `designs` message as its list and total.
+fn list_of(message: &Value) -> (Vec<Value>, u64) {
+    (
+        message["designs"].as_array().cloned().unwrap_or_default(),
+        message["total"].as_u64().unwrap_or(0),
+    )
+}
+
+/// One `designs` message for every server's latest list: newest first, cut
+/// to `LOBBY_LIMIT`, with the totals added up.
+fn merged(lists: &[(Vec<Value>, u64)]) -> String {
+    let mut designs: Vec<Value> = lists.iter().flat_map(|(list, _)| list.clone()).collect();
+    sort_newest_first(&mut designs);
+    designs.truncate(LOBBY_LIMIT);
+    let total: u64 = lists.iter().map(|(_, total)| total).sum();
+    json!({ "type": "designs", "designs": designs, "total": total }).to_string()
+}
+
 async fn relay_lobby(mut client: WebSocket, upstreams: Vec<Upstream>, mut complete: bool) {
     let text = |m: Option<Result<tungstenite::Message, tungstenite::Error>>| match m {
         Some(Ok(tungstenite::Message::Text(text))) => {
@@ -381,23 +399,21 @@ async fn relay_lobby(mut client: WebSocket, upstreams: Vec<Upstream>, mut comple
         }
         _ => None,
     };
-    // Every server starts with its full list; merge those into one.
+    // Every server starts with its full list. The router keeps each one,
+    // because a server sends its full list again when its socket falls
+    // behind, and that replaces only that server's part of the merge.
     let mut streams: SelectAll<_> = SelectAll::new();
-    let mut designs = Vec::new();
-    let mut total = 0;
+    let mut lists: Vec<(Vec<Value>, u64)> = Vec::new();
     for mut upstream in upstreams {
         let Some(first) = text(upstream.next().await) else {
             complete = false;
             continue;
         };
-        designs.extend(first["designs"].as_array().cloned().unwrap_or_default());
-        total += first["total"].as_u64().unwrap_or(0);
-        streams.push(upstream);
+        let at = lists.len();
+        lists.push(list_of(&first));
+        streams.push(upstream.map(move |message| (at, message)));
     }
-    sort_newest_first(&mut designs);
-    designs.truncate(LOBBY_LIMIT);
-    let first = json!({ "type": "designs", "designs": designs, "total": total }).to_string();
-    if !heartbeat::send(&mut client, ws::Message::text(first)).await {
+    if !heartbeat::send(&mut client, ws::Message::text(merged(&lists))).await {
         return;
     }
     let mut heartbeat = Heartbeat::new();
@@ -410,13 +426,20 @@ async fn relay_lobby(mut client: WebSocket, upstreams: Vec<Upstream>, mut comple
     tokio::pin!(retry);
     loop {
         tokio::select! {
-            message = streams.next() => {
+            next = streams.next() => {
+                let Some((at, message)) = next else { return };
                 // Servers ping too; tungstenite answers them.
-                if let Some(Ok(tungstenite::Message::Ping(_) | tungstenite::Message::Pong(_))) = message {
+                if let Ok(tungstenite::Message::Ping(_) | tungstenite::Message::Pong(_)) = message {
                     continue;
                 }
-                let Some(message) = text(message) else { return };
-                if !heartbeat::send(&mut client, ws::Message::text(message.to_string())).await {
+                let Some(message) = text(Some(message)) else { return };
+                let out = if message["type"] == "designs" {
+                    lists[at] = list_of(&message);
+                    merged(&lists)
+                } else {
+                    message.to_string()
+                };
+                if !heartbeat::send(&mut client, ws::Message::text(out)).await {
                     return;
                 }
             }

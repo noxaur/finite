@@ -737,3 +737,67 @@ async fn the_router_relays_large_designs() {
     assert_eq!(snapshot["type"], "snapshot");
     assert_eq!(snapshot["snapshot"]["nodes"].as_array().unwrap().len(), 37);
 }
+
+/// A stand-in server whose design list socket sends `messages`, 50 ms apart,
+/// then stays open.
+async fn scripted_lobby(messages: Vec<Value>) -> String {
+    use axum::extract::ws::{Message as WsMessage, WebSocketUpgrade};
+    let (listener, url) = listen().await;
+    let app = axum::Router::new().route(
+        "/api/designs/ws",
+        axum::routing::get(move |ws: WebSocketUpgrade| {
+            let messages = messages.clone();
+            async move {
+                ws.on_upgrade(move |mut socket| async move {
+                    for message in messages {
+                        let _ = socket.send(WsMessage::text(message.to_string())).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                    std::future::pending::<()>().await;
+                })
+            }
+        }),
+    );
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    url
+}
+
+/// A server whose design list socket falls behind sends its full list again.
+/// The router replaces only that server's part, so the others' designs stay.
+#[tokio::test]
+async fn a_server_resending_its_list_keeps_the_others() {
+    let design = |id: &str, at: u64| json!({ "id": id, "name": id, "updatedAt": at });
+    let list = |designs: Vec<Value>| json!({ "type": "designs", "total": designs.len(), "designs": designs });
+    let a = scripted_lobby(vec![
+        list(vec![design("a1", 1)]),
+        // Fell behind: its whole list again, now with a second design.
+        list(vec![design("a1", 1), design("a2", 3)]),
+    ])
+    .await;
+    let b = scripted_lobby(vec![list(vec![design("b1", 2)])]).await;
+    let (front, front_url) = listen().await;
+    let routes = router::app(vec![a, b], None);
+    tokio::spawn(async move { axum::serve(front, routes).await });
+
+    let url = format!("{front_url}/api/designs/ws").replacen("http://", "ws://", 1);
+    let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    let mut next = async || loop {
+        if let Message::Text(text) = socket.next().await.unwrap().unwrap() {
+            break serde_json::from_str::<Value>(text.as_str()).unwrap();
+        }
+    };
+    let ids = |message: &Value| -> Vec<String> {
+        message["designs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let first = next().await;
+    assert_eq!(ids(&first), ["b1", "a1"]);
+    let again = next().await;
+    assert_eq!(again["type"], "designs");
+    assert_eq!(ids(&again), ["a2", "b1", "a1"], "b1 is still there");
+    assert_eq!(again["total"], 3);
+}
