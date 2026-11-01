@@ -434,6 +434,34 @@ try {
     thumbnailFetches >= 1 && thumbnailFetches <= 3,
     `${thumbnailFetches} fetches for 6 edits over 2.4 s`,
   );
+  // A design too big to preview shows its size, and stops being fetched.
+  const huge = (await agent.call("create_design", { name: "Huge" })).match(
+    /designId "([a-z0-9]+)"/,
+  )[1];
+  const hugeBoard = idAfter(
+    await agent.call("create_artboard", { designId: huge, name: "Wall", width: 400, height: 300 }),
+    "artboard",
+  );
+  await agent.call("write_html", {
+    designId: huge,
+    targetId: hugeBoard,
+    html: "<i></i>".repeat(6000),
+  });
+  await page.until(`document.body.textContent.includes("6,001 nodes, too many to preview")`);
+  const hugeFetches = `performance.getEntriesByType("resource").filter((e) => e.name.endsWith("/api/designs/${huge}")).length`;
+  const hugeBefore = await page.eval(hugeFetches);
+  for (let i = 0; i < 3; i++) {
+    await agent.call("update_styles", {
+      designId: huge,
+      updates: [{ nodeIds: [hugeBoard], styles: { opacity: String(0.9 - i / 10) } }],
+    });
+  }
+  await page.sleep(2500);
+  check(
+    "a design too big to preview shows its size and isn't fetched",
+    (await page.eval(hugeFetches)) === hugeBefore,
+  );
+
   // With more designs than the list starts with, a search finds the rest.
   for (let i = 0; i < 200; i++) {
     await fetch(`${base}/api/designs`, {
@@ -446,7 +474,7 @@ try {
   check(
     "a long design list says how much it shows",
     Boolean(
-      await page.until(`document.body.textContent.includes("most recently edited of 201 designs")`),
+      await page.until(`document.body.textContent.includes("most recently edited of 202 designs")`),
     ),
   );
   const search = await rectOf(`document.querySelector('input[type="search"]')`);

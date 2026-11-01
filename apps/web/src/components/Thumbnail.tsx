@@ -13,12 +13,31 @@ import { colors } from "@/styles/tokens.stylex";
 const PAUSE_MS = 300;
 /** ...and fetch at most this often while a design keeps changing. */
 const MIN_INTERVAL_MS = 2000;
+/**
+ * Designs bigger than this show their size instead of a preview. A preview
+ * fetches the whole snapshot and builds every node, and refetches while
+ * agents edit: a 100,000-node design is about 15 MB every 2 seconds.
+ */
+export const PREVIEW_NODES = 5000;
 
 /**
  * A static preview of a design. It loads the snapshot once the card scrolls
  * into view, and again when `seq` changes.
  */
-export function Thumbnail({ id, seq }: { id: string; seq: number }) {
+export function Thumbnail({ id, seq, nodeCount }: { id: string; seq: number; nodeCount: number }) {
+  if (nodeCount > PREVIEW_NODES) {
+    return (
+      <div {...stylex.props(styles.frame)}>
+        <span {...stylex.props(styles.empty)}>
+          {nodeCount.toLocaleString()} nodes, too many to preview
+        </span>
+      </div>
+    );
+  }
+  return <Preview id={id} seq={seq} />;
+}
+
+function Preview({ id, seq }: { id: string; seq: number }) {
   const frameRef = useRef<HTMLDivElement>(null);
   const worldRef = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);

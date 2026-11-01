@@ -145,7 +145,7 @@ export function DesignGrid() {
         {sorted.map((design) => (
           <li key={design.id}>
             <Link href={`/design/?id=${design.id}`} {...stylex.props(styles.card)}>
-              <Thumbnail id={design.id} seq={design.seq} />
+              <Thumbnail id={design.id} seq={design.seq} nodeCount={design.nodeCount} />
               <div {...stylex.props(styles.meta)}>
                 <span {...stylex.props(styles.name)}>{design.name}</span>
                 <span {...stylex.props(styles.muted)}>
