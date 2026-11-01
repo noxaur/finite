@@ -56,7 +56,7 @@ Sonnet 5.5 at high effort compared Finite with Paper, Figma, Pencil, Penpot, Fra
 
 Smaller changes: edits name the nodes they changed instead of "Done.", `duplicate_nodes` returns its copies' outlines, comments include their element's HTML, `get_screenshot` takes up to 6 artboards per call, and edits show presence on their own.
 
-Agents also asked for two features Finite doesn't have yet:
+Agents also asked for two features Finite didn't have:
 
-- **Shared styles across artboards.** `FINITE_MCP_EXTRA=shared-styles` demos the agent's side (`crates/server/src/mcp/demo.rs`), and [issue #8](https://github.com/noxaur/finite/issues/8) tracks the real feature.
+- **Shared styles across artboards.** `FINITE_MCP_EXTRA=shared-styles` turns on `set_shared_css` and `get_shared_css` (`crates/server/src/mcp/styles.rs`). They started as a demo that kept the CSS in the server's memory. Now the CSS is part of the design ([issue #8](https://github.com/noxaur/finite/issues/8)), and the tool names are the same, so runs from before and after compare.
 - **Components with instances.** Agents on `screens` and `ui-states` asked for them about as often as for shared styles. There's no demo yet.

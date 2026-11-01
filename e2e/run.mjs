@@ -318,6 +318,47 @@ try {
     Boolean(await page.until(`!document.body.textContent.includes("E2E: Testing")`)),
   );
 
+  // A person sets the shared CSS in the app. Every artboard uses it, the
+  // sandboxed one too, and an artboard's inline styles still override it.
+  const panel = `document.querySelector('form[aria-label="Shared CSS"]')`;
+  const cssToggle = await rectOf(
+    `[...document.querySelectorAll("header button")].find((b) => b.textContent === "Shared CSS")`,
+  );
+  await page.click(cssToggle.x + cssToggle.w / 2, cssToggle.y + cssToggle.h / 2);
+  await page.until(panel);
+  const cssBox = await rectOf(`${panel}.querySelector("textarea")`);
+  await page.click(cssBox.x + 10, cssBox.y + 10);
+  await page.type("button { color: rgb(0, 128, 0); width: 300px; }");
+  const save = await rectOf(`${panel}.querySelector('button[type="submit"]')`);
+  await page.click(save.x + save.w / 2, save.y + save.h / 2);
+  const ctaStyle = `getComputedStyle(${shadow}.querySelector("button"))`;
+  check(
+    "shared CSS styles every artboard",
+    Boolean(await page.until(`${ctaStyle}.color === "rgb(0, 128, 0)"`)) &&
+      Boolean(
+        await page.until(
+          `document.querySelector("[data-artboard] iframe").srcdoc.includes("rgb(0, 128, 0)")`,
+        ),
+      ),
+  );
+  check(
+    "an artboard's inline styles override it",
+    (await page.eval(`${ctaStyle}.width`)) === "160px",
+  );
+  check(
+    "the activity list shows the person's edit",
+    (await page.eval(activity)).includes("Set shared CSS"),
+  );
+  const close = await rectOf(`${panel}.querySelector('button[type="button"]')`);
+  await page.click(close.x + close.w / 2, close.y + close.h / 2);
+  await page.until(`!${panel}`);
+  await fetch(`${base}/api/designs/${design}/css`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ author: { id: "e2e", name: "E2E" }, css: "" }),
+  });
+  await page.until(`${ctaStyle}.color !== "rgb(0, 128, 0)"`);
+
   // A person comments on the button, under their own name.
   await page.key("c", "KeyC", 67);
   const button = await rectOf(`${shadow}.querySelector("button")`);

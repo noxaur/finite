@@ -492,6 +492,26 @@ pub fn set_position(doc: &Document, id: &str, x: f64, y: f64) -> Result<Vec<Op>>
     ])
 }
 
+/// The longest shared stylesheet, the same order as a large `<style>` block.
+pub const MAX_CSS: usize = 100_000;
+
+/// Replaces the design's shared stylesheet, or removes it when `css` is
+/// blank. Exports put it in a `<style>` element, so it can't contain
+/// `</style`, which would end that element early.
+pub fn set_css(css: &str) -> Result<Vec<Op>> {
+    if css.len() > MAX_CSS {
+        return err(format!(
+            "the shared CSS can be at most {MAX_CSS} characters; this is {}",
+            css.len()
+        ));
+    }
+    if css.to_ascii_lowercase().contains("</style") {
+        return err("pass the CSS alone, without <style> tags");
+    }
+    let css = (!css.trim().is_empty()).then(|| css.to_owned());
+    Ok(vec![Op::Css { css }])
+}
+
 /// Drops ids nested inside other ids in the list, so a subtree is handled once.
 /// The ids in `ids` with none of their ancestors in `ids`, in order, each
 /// once. Each node walks up its ancestors (at most `MAX_DEPTH`) instead of

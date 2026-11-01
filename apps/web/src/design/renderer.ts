@@ -47,6 +47,8 @@ interface Frame {
   readonly shadow: ShadowRoot | null;
   /** Holds `COMMENTING_CSS` while in comment mode. */
   readonly commentStyle: HTMLStyleElement | null;
+  /** Holds the design's shared CSS, before the artboard's own styles. */
+  readonly sharedStyle: HTMLStyleElement | null;
   /** Set for artboards with scripts, rendered in a sandboxed iframe. */
   readonly iframe: HTMLIFrameElement | null;
   reload?: ReturnType<typeof setTimeout>;
@@ -153,6 +155,14 @@ export class Renderer {
   }
 
   apply(applied: Applied) {
+    if (applied.op === "css") {
+      // Every artboard uses it: restyle shadow roots, reload sandboxed ones.
+      for (const [id, frame] of this.frames) {
+        if (frame.sharedStyle) frame.sharedStyle.textContent = applied.css ?? "";
+        else this.scheduleReload(id, frame);
+      }
+      return;
+    }
     const boards = this.touchedBoards(applied);
     if (applied.op === "create" && isScript(applied.node)) this.scripts.add(applied.node.id);
     if (applied.op === "delete") for (const id of applied.removed) this.scripts.delete(id);
@@ -294,7 +304,7 @@ export class Renderer {
   }
 
   /** Artboards an op changed: where its node is now, and where it was before. */
-  private touchedBoards(applied: Applied): Set<string> {
+  private touchedBoards(applied: Exclude<Applied, { op: "css" }>): Set<string> {
     const boards = new Set<string>();
     const add = (id: string | null) => {
       const board = id === null ? undefined : this.replica.artboardOf(id);
@@ -306,7 +316,7 @@ export class Renderer {
     return boards;
   }
 
-  private patch(applied: Applied) {
+  private patch(applied: Exclude<Applied, { op: "css" }>) {
     switch (applied.op) {
       case "create":
         this.mount(applied.node);
@@ -455,6 +465,7 @@ export class Renderer {
         content,
         shadow: null,
         commentStyle: null,
+        sharedStyle: null,
         iframe,
         rects: new Map(),
         pendingRects: new Set(),
@@ -473,8 +484,11 @@ export class Renderer {
     });
     const base = document.createElement("style");
     base.textContent = `${HOST_CSS} ${designModel().baseCss}`;
+    // The artboard's own `<style>` blocks come after it, so they override it.
+    const sharedStyle = document.createElement("style");
+    sharedStyle.textContent = this.replica.css ?? "";
     const commentStyle = document.createElement("style");
-    shadow.append(base, commentStyle);
+    shadow.append(base, sharedStyle, commentStyle);
     content.append(host);
     return {
       root,
@@ -483,6 +497,7 @@ export class Renderer {
       content,
       shadow,
       commentStyle,
+      sharedStyle,
       iframe: null,
       rects: new Map(),
       pendingRects: new Set(),

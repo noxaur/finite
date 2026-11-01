@@ -67,7 +67,7 @@ describe("Replica", () => {
       ],
       (a: Applied) => {
         // Each callback sees the tree right after its own op.
-        const where = a.op === "delete" ? a.parent : a.node.id;
+        const where = a.op === "delete" ? a.parent : a.op === "css" ? null : a.node.id;
         seen.push(
           `${a.op} ${r
             .children("a")
@@ -131,5 +131,24 @@ describe("Replica", () => {
     expect(r.children("b")).toEqual([]);
     expect(r.children("c").map((n) => n.id)).toEqual(["d"]);
     expect(r.artboardOf("d")?.id).toBe("a");
+  });
+
+  it("keeps the shared CSS from the snapshot and from changes", () => {
+    const r = new Replica();
+    const snapshot = {
+      meta: { id: "d", name: "D", createdAt: 0, updatedAt: 0 },
+      seq: 0,
+      nodes: [node("a", null)],
+      comments: [],
+    };
+    r.load({ ...snapshot, css: ".btn { color: red; }" });
+    expect(r.css).toBe(".btn { color: red; }");
+    // The same CSS again doesn't apply, as on the server.
+    expect(r.apply({ op: "css", css: ".btn { color: red; }" })).toBeNull();
+    expect(r.apply({ op: "css", css: null })).toEqual({ op: "css", css: null });
+    expect(r.css).toBeNull();
+    r.apply({ op: "css", css: ":root { --brand: blue; }" });
+    r.load(snapshot);
+    expect(r.css).toBeNull();
   });
 });

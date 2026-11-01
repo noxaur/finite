@@ -16,6 +16,7 @@ import { timeAgo } from "@/lib/time";
 import { runtime } from "@/runtime";
 import { colors, radii, space } from "@/styles/tokens.stylex";
 import { CommentLayer, type Draft, type Mode, ToolPill } from "./Comments";
+import { SharedCssPanel } from "./SharedCss";
 
 /** How long "show what changed" outlines stay up. */
 const FLASH_MS = 1800;
@@ -28,11 +29,12 @@ const isTyping = (target: EventTarget | null) =>
 /**
  * A live view of one design. `DesignSession` streams it from the server and
  * the renderer patches the DOM; this component adds the camera, comments and
- * keyboard shortcuts. Users can't edit the design, but in comment mode they
- * pin comments that agents pick up over MCP.
+ * keyboard shortcuts. Users can't edit the design's artboards, but in comment
+ * mode they pin comments that agents pick up over MCP, and they can edit the
+ * shared CSS every artboard uses.
  */
 
-/** Why a comment didn't go through: the server's reason, or a connection problem. */
+/** Why a comment or edit didn’t go through: the server’s reason, or a connection problem. */
 function unsent(cause: Cause.Cause<unknown>): string {
   const error = Cause.squash(cause);
   if (error instanceof Refused) {
@@ -86,6 +88,7 @@ export function DesignCanvas({ id }: { id: string }) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [hover, setHover] = useState<Hit | null>(null);
   const [flash, setFlash] = useState<ReadonlyArray<string>>([]);
+  const [cssOpen, setCssOpen] = useState(false);
 
   // Whether a draft or thread is open, for the window key handler.
   const popupRef = useRef(false);
@@ -267,6 +270,13 @@ export function DesignCanvas({ id }: { id: string }) {
     return undefined;
   };
 
+  const saveCss = async (css: string) => {
+    const exit = await runtime.runPromiseExit(
+      Api.use((api) => api.setSharedCss(id, localUser(), css)),
+    );
+    return Exit.isFailure(exit) ? unsent(exit.cause) : undefined;
+  };
+
   const resolve = (commentId: string, resolved: boolean) => {
     void runtime
       .runPromiseExit(Api.use((api) => api.setCommentResolved(id, commentId, resolved)))
@@ -378,6 +388,15 @@ export function DesignCanvas({ id }: { id: string }) {
           <code {...stylex.props(styles.code)}>{id}</code>
         </span>
         <span {...stylex.props(styles.spacer)} />
+        <button
+          type="button"
+          aria-pressed={cssOpen}
+          onClick={() => setCssOpen((open) => !open)}
+          {...stylex.props(styles.tool)}
+          title="CSS every artboard uses"
+        >
+          Shared CSS
+        </button>
         {presence.map((p) => (
           <span key={p.actor} {...stylex.props(styles.chip)} title={p.status ?? undefined}>
             {p.name}
@@ -408,6 +427,10 @@ export function DesignCanvas({ id }: { id: string }) {
             </li>
           ))}
         </ol>
+      )}
+
+      {cssOpen && (
+        <SharedCssPanel css={session.css} onSave={saveCss} onClose={() => setCssOpen(false)} />
       )}
 
       <ToolPill mode={mode} onMode={setMode} />

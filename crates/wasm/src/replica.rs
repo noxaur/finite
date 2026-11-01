@@ -32,6 +32,10 @@ enum Applied<'a> {
         from: Option<&'a str>,
         before: Option<&'a str>,
     },
+    /// The shared stylesheet is now `css`.
+    Css {
+        css: Option<&'a str>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -120,6 +124,7 @@ fn describe<'a>(doc: &'a Document, op: &'a Op, inverse: &'a [Op]) -> Applied<'a>
             },
             before: next(id),
         },
+        Op::Css { .. } => Applied::Css { css: doc.css() },
     }
 }
 
@@ -193,6 +198,25 @@ mod tests {
             results[4],
             json!({ "op": "delete", "parent": "a", "removed": ["b"] })
         );
+    }
+
+    #[test]
+    fn css_results_hold_the_new_stylesheet() {
+        let mut r = replica();
+        let results = apply(
+            &mut r,
+            json!([
+                { "op": "css", "css": ".btn { color: red; }" },
+                { "op": "css", "css": ".btn { color: red; }" },
+                { "op": "css", "css": null },
+            ]),
+        );
+        assert_eq!(
+            results[0],
+            json!({ "op": "css", "css": ".btn { color: red; }" })
+        );
+        assert_eq!(results[1], Value::Null);
+        assert_eq!(results[2], json!({ "op": "css", "css": null }));
     }
 
     #[test]

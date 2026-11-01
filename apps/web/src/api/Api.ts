@@ -18,6 +18,9 @@ export interface NewComment {
   readonly y: number;
 }
 
+/** What an edit made: its change's `seq`, or `null` when nothing changed. */
+const Changed = Schema.Struct({ seq: Schema.NullOr(Schema.Number) });
+
 export class Health extends Schema.Class<Health>("Health")({
   status: Schema.Literal("ok"),
   version: Schema.String,
@@ -63,6 +66,12 @@ export class Api extends Context.Service<
       commentId: string,
       resolved: boolean,
     ): Effect.Effect<Comment, ApiError | Refused>;
+    /** Replaces the CSS every artboard shares, as an edit by `author`. Blank CSS removes it. */
+    setSharedCss(
+      designId: string,
+      author: CommentAuthor,
+      css: string,
+    ): Effect.Effect<void, ApiError | Refused>;
   }
 >()("finite/Api") {
   static readonly layer = Layer.effect(
@@ -113,9 +122,13 @@ export class Api extends Context.Service<
       });
 
       // A `422` says why the server refused, so that reaches the person as `Refused`.
-      const sendComment = (request: HttpClientRequest.HttpClientRequest, body: unknown) =>
+      const send = <A>(
+        request: HttpClientRequest.HttpClientRequest,
+        body: unknown,
+        schema: Schema.Codec<A, unknown>,
+      ) =>
         client.execute(request.pipe(HttpClientRequest.bodyJsonUnsafe(body))).pipe(
-          Effect.flatMap(HttpClientResponse.schemaBodyJson(Comment)),
+          Effect.flatMap(HttpClientResponse.schemaBodyJson(schema)),
           Effect.catchTag("HttpClientError", (error) =>
             error.reason._tag === "StatusCodeError" && error.reason.response.status === 422
               ? error.reason.response.text.pipe(
@@ -127,6 +140,9 @@ export class Api extends Context.Service<
             error instanceof Refused ? error : new ApiError({ cause: error }),
           ),
         );
+
+      const sendComment = (request: HttpClientRequest.HttpClientRequest, body: unknown) =>
+        send(request, body, Comment);
 
       const comments = (designId: string) => `/designs/${encodeURIComponent(designId)}/comments`;
 
@@ -155,6 +171,15 @@ export class Api extends Context.Service<
         return yield* sendComment(HttpClientRequest.patch(path), { resolved });
       });
 
+      const setSharedCss = Effect.fn("Api.setSharedCss")(function* (
+        designId: string,
+        author: CommentAuthor,
+        css: string,
+      ) {
+        const path = `/designs/${encodeURIComponent(designId)}/css`;
+        yield* send(HttpClientRequest.put(path), { author, css }, Changed);
+      });
+
       return Api.of({
         health,
         searchDesigns,
@@ -163,6 +188,7 @@ export class Api extends Context.Service<
         createComment,
         replyToComment,
         setCommentResolved,
+        setSharedCss,
       });
     }),
   ).pipe(Layer.provide(FetchHttpClient.layer));

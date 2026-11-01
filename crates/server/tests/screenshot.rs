@@ -65,7 +65,7 @@ async fn a_capture_measures_where_each_element_rendered() {
     })
     .unwrap();
     doc.apply_all(&ops);
-    let (page, width, height) = page(&doc, "board", None).unwrap();
+    let (page, width, height) = page(&doc, "board").unwrap();
     match capture(&page, width, height, 1.0).await {
         Ok(shot) => {
             let boxes = shot.boxes.expect("the page was measured");
@@ -77,6 +77,39 @@ async fn a_capture_measures_where_each_element_rendered() {
             let text = find(&roots[1]);
             assert_eq!(text.y, 260.0);
             assert!(text.text_overflow.0 > 20.0, "{text:?}");
+        }
+        Err(error) if error.contains("no Chrome") => eprintln!("skipped: {error}"),
+        Err(error) => panic!("{error}"),
+    }
+}
+
+#[tokio::test]
+async fn shared_css_applies_and_the_artboard_overrides_it() {
+    let mut doc = Document::default();
+    let spec = NewArtboard {
+        name: "Phone".into(),
+        width: 300.0,
+        height: 200.0,
+        position: Some((0.0, 0.0)),
+        styles: Default::default(),
+    };
+    doc.apply_all(&edit::create_artboard(&doc, "board".into(), spec).unwrap());
+    doc.apply_all(&edit::set_css(".a, .b { width: 50px; height: 10px; }").unwrap());
+    let mut n = 0;
+    let html = r#"<style>.b { width: 70px; }</style><div class="a"></div><div class="b"></div>"#;
+    let (ops, roots) = edit::write_html(&doc, "board", html, WriteMode::Append, None, &mut || {
+        n += 1;
+        format!("n{n}")
+    })
+    .unwrap();
+    doc.apply_all(&ops);
+    let (page, width, height) = page(&doc, "board").unwrap();
+    match capture(&page, width, height, 1.0).await {
+        Ok(shot) => {
+            let boxes = shot.boxes.expect("the page was measured");
+            let width = |id: &str| boxes.iter().find(|b| b.id == id).unwrap().width;
+            assert_eq!(width(&roots[1]), 50.0);
+            assert_eq!(width(&roots[2]), 70.0);
         }
         Err(error) if error.contains("no Chrome") => eprintln!("skipped: {error}"),
         Err(error) => panic!("{error}"),

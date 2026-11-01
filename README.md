@@ -29,11 +29,11 @@ The tools follow [Paper's MCP server](https://paper.design/docs/mcp): `get_basic
 
 `get_screenshot` renders artboards with a local headless Chrome, Chromium or Edge, and reports anything cut off by the artboard's edge. Set `FINITE_CHROME` if yours isn't in a standard location.
 
-`find_nodes` and `replace_values` search a design and change a value, like a brand color, everywhere at once. `FINITE_MCP_EXTRA` turns on experimental tool groups, as a comma-separated list. So far there's one, `shared-styles`, a demo of design-wide CSS that only screenshots apply. `e2e/ax` runs real agents against the tools to measure whether a change helps (see `e2e/ax/README.md`).
+`find_nodes` and `replace_values` search a design and change a value, like a brand color, everywhere at once. `FINITE_MCP_EXTRA` turns on experimental tool groups, as a comma-separated list. So far there's one, `shared-styles`: `set_shared_css` and `get_shared_css` for the design's shared CSS. `e2e/ax` runs real agents against the tools to measure whether a change helps (see `e2e/ax/README.md`).
 
 ## Styles, motion and scripts
 
-Agents can style with inline `style` attributes or with `<style>` blocks and classes, so `@keyframes` animations and `:hover` effects work. Each artboard renders inside a shadow root, which scopes its CSS to that artboard and keeps the app's CSS out.
+Agents can style with inline `style` attributes or with `<style>` blocks and classes, so `@keyframes` animations and `:hover` effects work. Each artboard renders inside a shadow root, which scopes its CSS to that artboard and keeps the app's CSS out. CSS that every artboard needs, like a `--brand` variable or a `.btn` class, goes in the design's shared CSS instead. Artboards render with it before their own styles, so those still override it. People can read and edit it with the Shared CSS button on the canvas.
 
 An artboard that contains a `<script>` renders in a sandboxed iframe instead. The `sandbox="allow-scripts"` attribute gives the iframe an opaque origin, so its code can't reach the app or the app's API. A content security policy also blocks its network requests, while still letting it load remote images, fonts and stylesheets. The iframe reloads after each burst of edits, so a script's state resets when an agent changes the artboard. A small runtime inside the iframe forwards wheel events to the canvas, so you can still pan and zoom over it. The server strips inline `on*` handlers and `<script src>`, so scripts attach listeners with `addEventListener`.
 
