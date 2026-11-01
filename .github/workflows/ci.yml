@@ -23,16 +23,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       # Ubuntu 24.04 blocks the user namespaces Chrome's sandbox needs.
-      # First, since the server's screenshot test starts Chrome too.
+      # Before the tests, since the server's screenshot test starts Chrome.
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - uses: actions/checkout@v5
-      # TEMP: why the screenshot test gets no PNG.
-      - run: |
-          google-chrome --version; ls -la /usr/bin/google-chrome; readlink -f /usr/bin/google-chrome
-          d=$(mktemp -d); echo '<!doctype html><body style="margin:0;background:#000">x</body>' > $d/index.html
-          for size in 540,3000 800,600; do
-            timeout 30 google-chrome --headless --disable-gpu --hide-scrollbars --no-first-run --no-default-browser-check --mute-audio --user-data-dir=$d/profile-$size --window-size=$size --force-device-scale-factor=1 --virtual-time-budget=3000 --screenshot=$d/shot-$size.png file://$d/index.html; echo "exit $?"; ls -la $d
-          done
       - uses: voidzero-dev/setup-vp@v1.21.2
         with:
           node-version: "24"
@@ -48,12 +41,19 @@ jobs:
           # would push main's out of the repository's 10 GB.
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # `vp run ready`, except that the server is built in debug, the
-      # build the end-to-end test runs, rather than in release.
+      # `vp run ready`, with two changes. Cargo runs directly, not under
+      # `vp run`, whose file tracking left Chrome, which the screenshot test
+      # starts, without a screenshot (and can't hit its cache on a fresh
+      # runner anyway). And the server is built in debug, the build the
+      # end-to-end test runs, rather than in release.
       - run: vp check
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: vp run -r test
+      # Its test build leaves target/debug/finite-server for the e2e step.
+      - run: cargo test -p finite-server
+      - run: cargo test -p finite-design
+      - run: cargo test -p finite-wasm
+      - run: vp run -F web -F desktop test
       - run: vp run -F web... -F desktop build
       - run: cargo build -p finite-server
 
