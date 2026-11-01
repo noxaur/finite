@@ -240,7 +240,7 @@ Chrome doesn't render below a device scale of 0.5. Asked for 0.375, it rendered 
 
 `start_working_on_nodes` sets **presence**: a note that an agent is busy on some nodes. Browsers show it as a badge on the artboard. It names at most 100 nodes, and repeats count once. Every viewer gets the whole list on each update, and naming a parent covers its children. Presence expires after five minutes without activity, and an actor's undo history is dropped after six idle hours or when its MCP session ends.
 
-A session ends when its agent disconnects, or after an hour without a call (`SESSION_IDLE` in `mcp/mod.rs`). An agent that sends `X-Finite-Agent` keeps its history across sessions. One that doesn't is known by its session, so its undo lasts only as long as the session.
+A session ends when its agent disconnects, or after an hour without a call (`SESSION_IDLE` in `mcp/mod.rs`). An agent that sends `X-Finite-Agent` keeps its history across sessions. Its id is cut to 64 characters, as people's ids are, because it's stored with every change and reply the agent makes. Before, a header of a few KB was copied into each of them. One that doesn't is known by its session, so its undo lasts only as long as the session.
 
 rmcp closes idle sessions after five minutes by default, which is a short pause for an agent waiting on a person. Then the client gets `404`, opens a new session, and comes back as a different actor with nothing to undo. A test in `tests/mcp.rs` pauses Tokio's clock, waits 20 minutes, and undoes. With the default, the session was already gone. The router's relay uses the same setting.
 
@@ -516,6 +516,7 @@ Each limit is explained where it applies. This is the list in one place. Most ar
 | Open comments per design               | 500                                                               | `MAX_OPEN` in `comment.rs`              | Anyone who can see a design can comment                     |
 | Messages per comment thread            | 200                                                               | `MAX_MESSAGES` in `comment.rs`          | Same reason                                                 |
 | Comment length, author name            | 4,000 and 48 characters                                           | `MAX_BODY`, `MAX_NAME` in `comment.rs`  | Shared with the web app through a golden file               |
+| Agent id from `X-Finite-Agent`         | 64 characters                                                     | `MAX_USER_ID` in `comment.rs`           | Stored with every change and reply the agent makes          |
 | Layer, design and status names         | 120 characters                                                    | `label.rs`                              | Every viewer shows them; cut rather than refused            |
 | Presence                               | 100 nodes, 5 idle minutes                                         | `PRESENCE_NODES`, `PRESENCE_TTL`        | Every viewer gets the list on each update                   |
 | One tool result                        | 60,000 characters                                                 | `OUTPUT_LIMIT` in `mcp/format.rs`       | Claude Code cuts at 25,000 tokens wherever that falls       |

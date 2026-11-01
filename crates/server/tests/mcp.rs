@@ -811,3 +811,55 @@ async fn an_overview_lists_at_most_200_artboards() {
         tail(&info)
     );
 }
+
+/// An agent's id from `X-Finite-Agent` is cut to 64 characters, since it's
+/// stored with every change and reply it makes.
+#[tokio::test]
+async fn a_long_agent_name_is_cut() {
+    let app = test_app();
+    let name: &'static str = Box::leak("Agent".repeat(400).into_boxed_str());
+    let mut agent = Agent::connect(&app, name).await;
+    let created = agent.ok("create_design", json!({ "name": "Named" })).await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .unwrap()
+        .to_owned();
+    let board = agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Home", "width": 400, "height": 300 }),
+        )
+        .await;
+    let board = id_after(&board, "Created artboard");
+    let req = Request::post(format!("/api/designs/{design}/comments"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({ "author": { "id": "u1", "name": "Guest" }, "body": "Hi",
+                    "artboardId": board, "nodeId": board, "x": 1, "y": 1 })
+            .to_string(),
+        ))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let comment: Value =
+        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    agent
+        .ok(
+            "reply_to_comment",
+            json!({ "designId": design, "commentId": comment["id"], "message": "Done" }),
+        )
+        .await;
+    let req = Request::get(format!("/api/designs/{design}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let snapshot: Value =
+        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let author = snapshot["comments"][0]["messages"][1]["author"].clone();
+    assert_eq!(
+        author["id"].as_str().unwrap().len(),
+        "agent:".len() + 64,
+        "{author}"
+    );
+    assert_eq!(author["name"].as_str().unwrap().chars().count(), 48);
+}

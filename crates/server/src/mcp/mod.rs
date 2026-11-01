@@ -195,6 +195,9 @@ impl FiniteMcp {
         // Every viewer shows it, so it's held to the same limit as people's names.
         let display = |name: &str| label::clip(name, comment::MAX_NAME);
         if let Some(agent) = header("x-finite-agent") {
+            // The id goes into every change it broadcasts and every saved
+            // history, so it's held to the limit on people's ids.
+            let agent = label::clip(&agent, comment::MAX_USER_ID);
             // The router names relayed agents separately from their identity.
             let name = header("x-finite-agent-name").unwrap_or_else(|| agent.clone());
             return Actor {
