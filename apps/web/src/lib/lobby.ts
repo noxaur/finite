@@ -21,3 +21,13 @@ export function mergeLobby(
   const designs = [design, ...current.filter((d) => d.id !== design.id)];
   return { designs: designs.slice(0, LOBBY_LIMIT), trimmed: designs.length > LOBBY_LIMIT };
 }
+
+/**
+ * Whether a design's name contains `query`, ignoring case, as the server's
+ * search matches (`Hub::find` in `crates/server/src/hub/mod.rs`). The page
+ * uses it on the designs it already has while the search runs, or when the
+ * search fails.
+ */
+export function matchesName(name: string, query: string): boolean {
+  return name.toLowerCase().includes(query.toLowerCase());
+}

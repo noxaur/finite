@@ -11,7 +11,7 @@ import { connectLobby, type SocketStatus } from "@/design/socket";
 import { mcpUrl } from "@/lib/mcp";
 import { timeAgo } from "@/lib/time";
 import { runtime } from "@/runtime";
-import { mergeLobby } from "@/lib/lobby";
+import { matchesName, mergeLobby } from "@/lib/lobby";
 import { colors, radii, space } from "@/styles/tokens.stylex";
 import { Thumbnail } from "./Thumbnail";
 
@@ -32,7 +32,11 @@ export function DesignGrid() {
   /** How many designs there are in all, from the socket's first message. */
   const [total, setTotal] = useState(0);
   const [query, setQuery] = useState("");
-  const [found, setFound] = useState<ReadonlyArray<DesignSummary> | null>(null);
+  /** The server's answer to the last search: its designs, or null if it failed. */
+  const [found, setFound] = useState<{
+    readonly query: string;
+    readonly designs: ReadonlyArray<DesignSummary> | null;
+  } | null>(null);
   const [mcp, setMcp] = useState("");
 
   useEffect(() => setMcp(mcpUrl()), []);
@@ -60,10 +64,7 @@ export function DesignGrid() {
 
   useEffect(() => {
     const search = query.trim();
-    if (!search) {
-      setFound(null);
-      return;
-    }
+    if (!search) return;
     const controller = new AbortController();
     const timer = setTimeout(() => {
       void runtime
@@ -72,7 +73,8 @@ export function DesignGrid() {
           { signal: controller.signal },
         )
         .then((exit) => {
-          if (Exit.isSuccess(exit)) setFound(exit.value);
+          if (controller.signal.aborted) return;
+          setFound({ query: search, designs: Exit.isSuccess(exit) ? exit.value : null });
         });
     }, SEARCH_DELAY_MS);
     return () => {
@@ -81,7 +83,15 @@ export function DesignGrid() {
     };
   }, [query]);
 
-  const sorted = [...(found ?? designs ?? [])].sort((a, b) => b.updatedAt - a.updatedAt);
+  const search = query.trim();
+  const answer = search && found?.query === search ? found : null;
+  // Until the server answers, or if it can't, the page searches the designs
+  // it already has. Those are the most recent, so they're a fair start.
+  const matches = !search
+    ? (designs ?? [])
+    : (answer?.designs ?? (designs ?? []).filter((d) => matchesName(d.name, search)));
+  const searchFailed = answer !== null && answer.designs === null;
+  const sorted = [...matches].sort((a, b) => b.updatedAt - a.updatedAt);
   const more = designs !== null && total > designs.length;
 
   const create = () => {
@@ -133,8 +143,15 @@ export function DesignGrid() {
         </div>
       )}
 
-      {query && found !== null && found.length === 0 && (
-        <p {...stylex.props(styles.muted)}>No designs match “{query.trim()}”.</p>
+      {searchFailed && (
+        <p role="alert" {...stylex.props(styles.muted, styles.failed)}>
+          Couldn’t search every design. These are matches among the {designs?.length ?? 0} most
+          recently edited.
+        </p>
+      )}
+
+      {answer?.designs?.length === 0 && (
+        <p {...stylex.props(styles.muted)}>No designs match “{search}”.</p>
       )}
 
       {!query && designs !== null && sorted.length === 0 && (

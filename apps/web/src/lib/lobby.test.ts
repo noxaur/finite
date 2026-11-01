@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import type { DesignSummary } from "@/design/schema";
-import { LOBBY_LIMIT, mergeLobby } from "./lobby";
+import { LOBBY_LIMIT, matchesName, mergeLobby } from "./lobby";
 
 const summary = (id: string, updatedAt: number): DesignSummary => ({
   id,
@@ -29,5 +29,13 @@ describe("mergeLobby", () => {
     expect(designs).toHaveLength(LOBBY_LIMIT);
     expect(designs[0]?.id).toBe(`d${LOBBY_LIMIT + 49}`);
     expect(trimmed).toBe(true);
+  });
+});
+
+describe("matchesName", () => {
+  it("finds the query anywhere in the name, ignoring case", () => {
+    expect(matchesName("Checkout Flow", "flow")).toBe(true);
+    expect(matchesName("Checkout Flow", "OUT F")).toBe(true);
+    expect(matchesName("Checkout Flow", "login")).toBe(false);
   });
 });

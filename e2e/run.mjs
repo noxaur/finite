@@ -544,6 +544,23 @@ try {
   );
   await page.send("Network.setBlockedURLs", { urls: [] });
 
+  // A search that fails says so, and searches the designs the page has.
+  await page.send("Network.setBlockedURLs", { urls: ["*/api/designs?q=*"] });
+  // The alert above moved the search box, so find it again.
+  const searchNow = await rectOf(`document.querySelector('input[type="search"]')`);
+  await page.click(searchNow.x + 10, searchNow.y + 5);
+  await page.eval(`document.querySelector('input[type="search"]').select()`);
+  await page.type("Filler 19");
+  check(
+    "a search that fails says so and shows the matches it has",
+    Boolean(
+      await page.until(
+        `[...document.querySelectorAll('[role="alert"]')].some((a) => a.textContent.includes("search every design")) && document.querySelectorAll("main li").length === 11`,
+      ),
+    ),
+  );
+  await page.send("Network.setBlockedURLs", { urls: [] });
+
   check("no errors on the page", page.errors.length === 0, page.errors.join(" | "));
 } catch (error) {
   check("the run finished", false, error.stack ?? String(error));

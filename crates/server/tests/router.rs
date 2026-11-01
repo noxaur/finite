@@ -829,3 +829,16 @@ async fn tools_are_listed_while_the_first_server_is_down() {
     assert!(tools.iter().any(|t| t.name == "write_html"));
     client.cancel().await.unwrap();
 }
+
+/// With every server down, the design list is an error, not an empty list
+/// that would say there are no designs.
+#[tokio::test]
+async fn the_design_list_fails_when_no_server_answers() {
+    let (front, front_url) = listen().await;
+    let routes = router::app(vec!["http://127.0.0.1:9".to_owned()], None);
+    tokio::spawn(async move { axum::serve(front, routes).await });
+    let res = reqwest::get(format!("{front_url}/api/designs?q=x"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 502);
+}

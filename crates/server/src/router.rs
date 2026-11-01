@@ -235,9 +235,17 @@ async fn list(State(front): State<Arc<Front>>, RawQuery(query): RawQuery) -> Res
     let requests = front.cluster.nodes().iter().map(|base| {
         let http = front.http.clone();
         let url = format!("{base}/api/designs{query}");
-        async move { http.get(&url).send().await?.json::<Vec<Value>>().await }
+        async move {
+            http.get(&url)
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<Vec<Value>>()
+                .await
+        }
     });
     let mut designs = Vec::new();
+    let mut answered = false;
     for (base, result) in front
         .cluster
         .nodes()
@@ -245,9 +253,17 @@ async fn list(State(front): State<Arc<Front>>, RawQuery(query): RawQuery) -> Res
         .zip(futures::future::join_all(requests).await)
     {
         match result {
-            Ok(list) => designs.extend(list),
+            Ok(list) => {
+                answered = true;
+                designs.extend(list);
+            }
             Err(error) => tracing::warn!(base, %error, "a server didn't answer the design list"),
         }
+    }
+    // With some servers down, the others' designs are still worth showing.
+    // With all of them down, an empty list would say there are no designs.
+    if !answered {
+        return bad_gateway("no server answered the design list");
     }
     sort_newest_first(&mut designs);
     designs.truncate(limit);
