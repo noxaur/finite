@@ -6,7 +6,7 @@ use std::{path::PathBuf, process::Stdio, time::Duration};
 use finite_design::{
     Document,
     edit::pixel_size,
-    html::{self, BASE_CSS, CSP},
+    html::{self, BASE_CSS, BASE_LAYER, CSP},
 };
 use tokio::process::Command;
 
@@ -74,7 +74,7 @@ pub fn page(doc: &Document, artboard: &str) -> Option<(String, f64, f64)> {
         format!("<style>{}</style>", html::shared_style(css, false))
     });
     let page = format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\"><style>{BASE_CSS} html, body {{ margin: 0; }}</style>{shared}</head><body>{body}{MEASURE}</body></html>"
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\"><style>@layer {BASE_LAYER} {{ {BASE_CSS} html, body {{ margin: 0; }} }}</style>{shared}</head><body>{body}{MEASURE}</body></html>"
     );
     Some((page, width, height))
 }

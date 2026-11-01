@@ -1,6 +1,6 @@
 import * as stylex from "@stylexjs/stylex";
 import { colors } from "@/styles/tokens.stylex";
-import { artboardDocument, pixelSize } from "./html";
+import { artboardDocument, BASE_LAYER, pixelSize } from "./html";
 import type { Applied, Replica } from "./replica";
 import type { Node } from "./schema";
 import { designModel } from "./wasm";
@@ -486,7 +486,7 @@ export class Renderer {
     // In a layer, so the shared CSS can set what `HOST_CSS` resets, like
     // the font on `:root`.
     const base = document.createElement("style");
-    base.textContent = `@layer finite-base { ${HOST_CSS} ${designModel().baseCss} }`;
+    base.textContent = `@layer ${BASE_LAYER} { ${HOST_CSS} ${designModel().baseCss} }`;
     const sharedStyle = document.createElement("style");
     sharedStyle.textContent = this.sharedCss();
     const commentStyle = document.createElement("style");

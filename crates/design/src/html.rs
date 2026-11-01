@@ -49,53 +49,170 @@ pub const BASE_CSS: &str = "*, *::before, *::after { box-sizing: border-box; }";
 /// Shared by screenshots and the viewer's sandboxed iframes.
 pub const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https:; img-src https: http: data: blob:; font-src https: data:; media-src https: data: blob:";
 
+/// The cascade layer for the base styles every artboard renders with. It
+/// comes first, so the shared CSS can override them, like the font that a
+/// shadow root's `all: initial` resets.
+pub const BASE_LAYER: &str = "finite-base";
+
 /// The cascade layer the design's shared CSS goes in. Styles outside any
 /// layer beat layered ones whatever their specificity, so an artboard's own
-/// `<style>` blocks and inline styles override the shared CSS.
+/// `<style>` blocks and inline styles override the shared CSS. The cascade
+/// reverses that for `!important`: a shared `!important` wins.
 pub const SHARED_LAYER: &str = "finite-shared";
 
-/// The design's shared CSS as the text of a `<style>` element: in
-/// [`SHARED_LAYER`], after any `@import` and `@charset` it starts with, which
-/// can't go inside a layer block, and with `</style` broken up so it can't
-/// end the element early. For a shadow root, where `:root` matches nothing,
-/// `:root` becomes `:host`, so variables defined there reach the artboard.
+/// The design's shared CSS as the text of a `<style>` element, with `</style`
+/// broken up so it can't end the element early. Its rules go in
+/// [`SHARED_LAYER`], and so do its leading `@import`s, which can't go inside
+/// a layer block and take a `layer()` instead. For a shadow root, where
+/// `:root` matches nothing, `:root` becomes `:host`, so variables defined
+/// there reach the artboard.
 pub fn shared_style(css: &str, shadow: bool) -> String {
-    let mut rest = css.trim_start();
     let mut head = String::new();
-    while ["@import", "@charset"].iter().any(|at| {
-        rest.get(..at.len())
-            .is_some_and(|start| start.eq_ignore_ascii_case(at))
-    }) {
-        let end = rest.find(';').map_or(rest.len(), |i| i + 1);
-        head.push_str(&rest[..end]);
+    let mut rest = css;
+    loop {
+        let at = &rest[skip_comments(rest)..];
+        let starts = |keyword: &str| {
+            at.get(..keyword.len())
+                .is_some_and(|s| s.eq_ignore_ascii_case(keyword))
+        };
+        if !starts("@import") && !starts("@charset") {
+            break;
+        }
+        let end = statement_end(at);
+        head.push_str(&layered_import(&at[..end]));
         head.push('\n');
-        rest = rest[end..].trim_start();
+        rest = &at[end..];
     }
-    let mut body = rest.to_owned();
-    if shadow {
-        body = replace_root(&body);
-    }
+    let rest = rest.trim_start();
+    let body = if shadow {
+        replace_root(rest)
+    } else {
+        rest.to_owned()
+    };
     raw_text(
         &format!("{head}@layer {SHARED_LAYER} {{\n{body}\n}}"),
         "style",
     )
 }
 
-/// `css` with each `:root` selector, in any case, written as `:host`.
-fn replace_root(css: &str) -> String {
-    let lower = css.to_ascii_lowercase();
-    let mut out = String::with_capacity(css.len());
-    let mut last = 0;
-    for (at, _) in lower.match_indices(":root") {
-        let next = lower[at + 5..].chars().next();
-        if next.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-            continue;
+/// How far `css` starts with whitespace and comments.
+fn skip_comments(css: &str) -> usize {
+    let mut at = 0;
+    loop {
+        at = css.len() - css[at..].trim_start().len();
+        if !css[at..].starts_with("/*") {
+            return at;
         }
-        out.push_str(&css[last..at]);
-        out.push_str(":host");
-        last = at + 5;
+        at = css[at + 2..]
+            .find("*/")
+            .map_or(css.len(), |end| at + 2 + end + 2);
     }
-    out.push_str(&css[last..]);
+}
+
+/// The end of the quoted string that starts at `start`, past its closing quote.
+fn string_end(css: &str, start: usize) -> usize {
+    let bytes = css.as_bytes();
+    let mut i = start + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            c if c == bytes[start] => return i + 1,
+            _ => i += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// The end of the statement `css` starts with, past its `;`. Semicolons in
+/// strings and parentheses, like a font URL's `wght@400;700`, don't count.
+fn statement_end(css: &str) -> usize {
+    let bytes = css.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' | b'\'' => {
+                i = string_end(css, i);
+                continue;
+            }
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            b';' if depth == 0 => return i + 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+/// An `@import` with `layer(finite-shared)` after its URL, unless it names a
+/// layer already. Other rules come back as they are.
+fn layered_import(rule: &str) -> String {
+    if !rule
+        .get(..7)
+        .is_some_and(|s| s.eq_ignore_ascii_case("@import"))
+    {
+        return rule.to_owned();
+    }
+    let url = rule.len() - rule[7..].trim_start().len();
+    let rest = &rule[url..];
+    let url_len = if rest.starts_with(['"', '\'']) {
+        string_end(rest, 0)
+    } else if rest
+        .get(..4)
+        .is_some_and(|s| s.eq_ignore_ascii_case("url("))
+    {
+        // `url(` opens a parenthesis, so the statement scan ends at its `)`.
+        let inside = &rest[4..];
+        4 + inside.find(')').map_or(inside.len(), |end| end + 1)
+    } else {
+        return rule.to_owned();
+    };
+    let after = &rest[url_len..];
+    if after
+        .trim_start()
+        .get(..5)
+        .is_some_and(|s| s.eq_ignore_ascii_case("layer"))
+    {
+        return rule.to_owned();
+    }
+    format!(
+        "{}{} layer({SHARED_LAYER}){after}",
+        &rule[..url],
+        &rest[..url_len]
+    )
+}
+
+/// `css` with each `:root` selector, in any case, written as `:host`.
+/// Strings and comments stay as they are.
+fn replace_root(css: &str) -> String {
+    let bytes = css.as_bytes();
+    let mut out = String::with_capacity(css.len());
+    let (mut i, mut copied) = (0, 0);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' | b'\'' => i = string_end(css, i),
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i = css[i + 2..]
+                    .find("*/")
+                    .map_or(bytes.len(), |end| i + 2 + end + 2);
+            }
+            b':' if css
+                .get(i..i + 5)
+                .is_some_and(|s| s.eq_ignore_ascii_case(":root"))
+                && !bytes
+                    .get(i + 5)
+                    .is_some_and(|&c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_') =>
+            {
+                out.push_str(&css[copied..i]);
+                out.push_str(":host");
+                i += 5;
+                copied = i;
+            }
+            _ => i += 1,
+        }
+    }
+    out.push_str(&css[copied..]);
     out
 }
 
@@ -713,15 +830,25 @@ mod tests {
     }
 
     #[test]
-    fn shared_css_goes_in_its_layer_after_its_imports() {
-        let css = "@import url(https://fonts.example/a.css);\n:root { --brand: red; } :root-ish {}";
+    fn shared_css_goes_in_its_layer_with_its_imports() {
+        let css = "/* fonts */ @import \"https://fonts.example/css?family=A:wght@400;700\";\n\
+                   @import url(https://fonts.example/b;c.css) screen;\n\
+                   @import url(c.css) layer(mine);\n\
+                   :root { --brand: red; } :root-ish {}";
         assert_eq!(
             shared_style(css, false),
-            "@import url(https://fonts.example/a.css);\n@layer finite-shared {\n:root { --brand: red; } :root-ish {}\n}"
+            "@import \"https://fonts.example/css?family=A:wght@400;700\" layer(finite-shared);\n\
+             @import url(https://fonts.example/b;c.css) layer(finite-shared) screen;\n\
+             @import url(c.css) layer(mine);\n\
+             @layer finite-shared {\n:root { --brand: red; } :root-ish {}\n}"
         );
+        // In a shadow root, :root selectors become :host, but not text.
         assert_eq!(
-            shared_style(":ROOT { --brand: red; }", true),
-            "@layer finite-shared {\n:host { --brand: red; }\n}"
+            shared_style(
+                ":ROOT { --brand: red; } [title=\":root\"] {} /* :root */",
+                true
+            ),
+            "@layer finite-shared {\n:host { --brand: red; } [title=\":root\"] {} /* :root */\n}"
         );
         // It can't end its <style> element, wherever it came from.
         assert!(!shared_style("a{}</style><script>x()</script>", false).contains("</style"));
