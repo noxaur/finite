@@ -5,7 +5,8 @@
 // It builds the server and the web app (set E2E_SKIP_BUILD=1 to reuse the
 // last builds), starts the server on a free port with a throwaway data folder,
 // and checks what a person sees while an agent works. Set FINITE_CHROME if
-// Chrome isn't in a standard place. Exits with 1 if any check fails.
+// Chrome isn't in a standard place, and E2E_SERVER to run a server binary
+// other than target/debug/finite-server. Exits with 1 if any check fails.
 //
 // With E2E_ROUTER=1 (`vp run e2e:router`), it starts two servers and a router
 // in front of them instead, and runs every check through the router.
@@ -59,7 +60,7 @@ const freePort = () =>
     });
   });
 const viaRouter = Boolean(process.env.E2E_ROUTER) || shared;
-const bin = path.join(root, "target/debug/finite-server");
+const bin = process.env.E2E_SERVER || path.join(root, "target/debug/finite-server");
 const staticDir = path.join(root, "apps/web/out");
 /** Every process this run starts, and the throwaway data folders they use. */
 const processes = [];

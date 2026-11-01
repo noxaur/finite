@@ -36,24 +36,19 @@ env:
 jobs:
   check:
     runs-on: ubuntu-24.04
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_PASSWORD: finite
-          POSTGRES_DB: finite_test
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 2s
-          --health-timeout 5s
-          --health-retries 20
     env:
       FINITE_TEST_DATABASE_URL: postgres://postgres:finite@localhost:5432/finite_test
     steps:
       # Ubuntu 24.04 blocks the user namespaces Chrome's sandbox needs.
       # Before the tests, since the server's screenshot test starts Chrome.
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # Postgres for the shared store's tests. Started in the background, not
+      # as a service container, so it comes up while the steps before those
+      # tests run instead of holding up the first step.
+      - run: >-
+          nohup docker run --rm --name postgres -p 5432:5432
+          -e POSTGRES_PASSWORD=finite -e POSTGRES_DB=finite_test postgres:17
+          > "$RUNNER_TEMP/postgres.log" 2>&1 &
       - uses: actions/checkout@v5
       - uses: voidzero-dev/setup-vp@v1.21.2
         with:
@@ -86,8 +81,11 @@ jobs:
       # default, like the desktop app.
       - run: cargo clippy -p finite-server --all-targets --features postgres -- -D warnings
       # The one server test that needs the feature off. Its build leaves the
-      # default target/debug/finite-server for the first e2e steps.
+      # default server in target/debug, kept for the e2e checks without
+      # Postgres. A separate `cargo build` would rebuild tokio and
+      # everything above it without the `test-util` feature tests turn on.
       - run: cargo test -p finite-server --test no_postgres
+      - run: cp target/debug/finite-server "$RUNNER_TEMP/finite-server"
       - run: cargo test -p finite-design
       - run: cargo test -p finite-wasm
       - run: vp run -F web -F desktop test
@@ -95,36 +93,48 @@ jobs:
       - if: github.ref == 'refs/heads/main'
         run: cargo build --release -p finite-server
 
-      # Every e2e step reuses the builds above. A separate `cargo build`
-      # would rebuild tokio and everything above it without the
-      # `test-util` feature the tests turn on.
-      - run: vp run e2e
-        env:
-          E2E_SKIP_BUILD: "1"
-          # So a failure's screenshot lands where the last step looks.
-          TMPDIR: ${{ runner.temp }}
-      # The same checks through a router in front of two servers.
-      - run: vp run e2e:router
-        env:
-          E2E_SKIP_BUILD: "1"
-          TMPDIR: ${{ runner.temp }}
-
       # Every server test with the feature on, including the ones that need
       # Postgres (the store's contract, TLS, servers that share one
       # database, failover with real processes), which skip without
       # FINITE_TEST_DATABASE_URL. Its build replaces target/debug/finite-server
       # with one that has the feature.
+      # Over TCP: while the image sets up the database, a temporary server
+      # answers on the socket only.
+      - run: |
+          for i in $(seq 60); do
+            docker exec postgres pg_isready -h 127.0.0.1 -U postgres -q && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/postgres.log"
+          exit 1
       - run: cargo test -p finite-server --features postgres
-      # The end-to-end checks through a router in front of two servers that
-      # share this Postgres.
-      - run: vp run e2e:shared
-        env:
+
+      # The three end-to-end runs at once: they spend most of their time
+      # waiting on the browser, and each uses its own ports and folders. One
+      # server, then two behind a router, then two sharing this Postgres.
+      # Each run's log is printed after all three finish.
+      - env:
           E2E_SKIP_BUILD: "1"
-          TMPDIR: ${{ runner.temp }}
+        run: |
+          e2e() {
+            # Its own TMPDIR, so a failure's screenshot isn't overwritten.
+            mkdir -p "$RUNNER_TEMP/$1"
+            TMPDIR="$RUNNER_TEMP/$1" vp run "$1" > "$RUNNER_TEMP/$1.log" 2>&1
+          }
+          E2E_SERVER="$RUNNER_TEMP/finite-server" e2e e2e & one=$!
+          E2E_SERVER="$RUNNER_TEMP/finite-server" e2e e2e:router & router=$!
+          e2e e2e:shared & shared=$!
+          failed=0
+          for run in $one $router $shared; do wait "$run" || failed=1; done
+          for name in e2e e2e:router e2e:shared; do
+            echo "::group::$name"; cat "$RUNNER_TEMP/$name.log"; echo "::endgroup::"
+            if grep -q "^FAIL" "$RUNNER_TEMP/$name.log"; then echo "::error::$name failed"; fi
+          done
+          exit "$failed"
 
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-failure
-          path: ${{ runner.temp }}/finite-e2e-failure.png
+          path: ${{ runner.temp }}/e2e*/finite-e2e-failure.png
           if-no-files-found: ignore
