@@ -293,6 +293,24 @@ async fn overflow_is_reported_and_can_be_revealed() {
 }
 
 #[tokio::test]
+async fn revealed_overflow_follows_a_scaled_artboard() {
+    // Scaled 2× from its top-left corner: 400×200 on the page, with 150px
+    // of overflow that shows as 300px.
+    let (doc, names) = design(
+        r#"<div data-name="Board" style="width: 200px; height: 100px; background: #fff; overflow: hidden; transform: scale(2); transform-origin: 0 0"><div style="width: 200px; height: 250px; background: #00f; flex-shrink: 0"></div></div>"#,
+    );
+    let options = Options {
+        reveal_overflow: true,
+        ..Default::default()
+    };
+    let Some(images) = shoot(&doc, vec![Shot::node(&names["Board"])], options).await else {
+        return;
+    };
+    let shown = images[0].as_ref().unwrap();
+    assert_eq!(shown.area, Rect::new(0.0, 0.0, 400.0, 500.0));
+}
+
+#[tokio::test]
 async fn scales_and_formats() {
     let (doc, names) = design(BOARD);
     let red = &names["Red"];

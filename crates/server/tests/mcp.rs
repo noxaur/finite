@@ -463,6 +463,19 @@ async fn long_results_are_cut_with_directions() {
         "{}",
         tail(&html)
     );
+    // An explicit depth that's still too long falls back the same way.
+    let html = agent
+        .ok(
+            "get_html",
+            json!({ "designId": design, "nodeId": board, "depth": 1 }),
+        )
+        .await;
+    assert!(html.len() < limit, "get_html said {} chars", html.len());
+    assert!(
+        html.contains("Call get_html on one of its children"),
+        "{}",
+        tail(&html)
+    );
 
     // Children come 200 at a time.
     let children = agent

@@ -424,7 +424,10 @@ pub fn export_with(doc: &Document, id: &str, options: &ExportOptions) -> Option<
     })
 }
 
-/// [`export_with`] at the greatest depth whose HTML fits in `limit` bytes.
+/// [`export_with`] at a depth whose HTML fits in `limit` bytes, found by
+/// binary search. Deeper exports are almost always longer, but a "not
+/// shown" comment can be longer than the few small children it stands for,
+/// so the depth found fits but may not be the deepest that would.
 /// `options.depth` is the deepest it goes; the shallowest is the root
 /// alone, which is returned even if it doesn't fit. Returns the export and
 /// the depth used, `None` for the whole subtree.
@@ -438,7 +441,7 @@ pub fn export_within(
     if full.html.len() <= limit {
         return Some((full, options.depth));
     }
-    // A deeper export is never shorter, so search for the deepest that fits.
+    // Search as if a deeper export were never shorter (see above).
     let deepest = options.depth.unwrap_or_else(|| height(doc, id));
     let at = |depth| {
         let options = ExportOptions {

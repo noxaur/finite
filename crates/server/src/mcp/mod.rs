@@ -510,7 +510,9 @@ impl FiniteMcp {
                     export.html.len()
                 ));
             }
-            if p.depth.is_none() && depth == Some(0) && has_children {
+            // Whether the depth was lowered to fit, from all of it or from `p.depth`.
+            let lowered = depth != p.depth;
+            if export.html.len() > OUTPUT_LIMIT || (lowered && depth == Some(0)) {
                 // Not even the children fit, so list them instead.
                 let full = html::export_with(doc, &p.node_id, &options)?;
                 return Some(cut(
@@ -525,10 +527,10 @@ impl FiniteMcp {
             }
             let mut out = export.html;
             if export.collapsed > 0 {
-                let reason = if p.depth.is_some() {
-                    String::new()
+                let reason = if lowered {
+                    format!("The HTML asked for is more than the {OUTPUT_LIMIT} characters a call returns, so this ")
                 } else {
-                    format!("The whole subtree is more than the {OUTPUT_LIMIT} characters a call returns, so this ")
+                    String::new()
                 };
                 let levels = depth.unwrap_or(0);
                 out.push_str(&format!(

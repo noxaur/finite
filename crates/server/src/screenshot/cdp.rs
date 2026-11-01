@@ -51,7 +51,7 @@ impl Browser {
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|e| e.to_string())?;
-        let mut child = Command::new(chrome)
+        let spawned = Command::new(chrome)
             .arg("--headless")
             .arg("--disable-gpu")
             .arg("--hide-scrollbars")
@@ -69,8 +69,14 @@ impl Browser {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| format!("couldn't start the browser: {e}"))?;
+            .spawn();
+        let mut child = match spawned {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = tokio::fs::remove_dir_all(&dir).await;
+                return Err(format!("couldn't start the browser: {error}"));
+            }
+        };
         let stderr = child.stderr.take().expect("stderr is piped");
         let browser = Self { child, dir };
         let mut lines = BufReader::new(stderr).lines();

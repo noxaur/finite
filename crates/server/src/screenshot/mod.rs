@@ -523,6 +523,8 @@ struct Layout {
     /// How far the board's content reaches, as scroll width and height.
     scroll: [f64; 2],
     client: [f64; 2],
+    /// The board's untransformed size.
+    offset: [f64; 2],
     animated: bool,
     elements: BTreeMap<String, Option<[f64; 4]>>,
 }
@@ -584,9 +586,15 @@ async fn render(
     };
 
     let board = rect(layout.board);
+    // Scroll sizes are in the artboard's own pixels; its box on the page
+    // includes any transform, such as `scale(2)`.
+    let (scale_x, scale_y) = (
+        board.width / layout.offset[0].max(1.0),
+        board.height / layout.offset[1].max(1.0),
+    );
     let overflow = Overflow {
-        right: (layout.scroll[0] - layout.client[0]).max(0.0),
-        bottom: (layout.scroll[1] - layout.client[1]).max(0.0),
+        right: (layout.scroll[0] - layout.client[0]).max(0.0) * scale_x,
+        bottom: (layout.scroll[1] - layout.client[1]).max(0.0) * scale_y,
     };
     // Revealed only now: an artboard that doesn't clip its content has no
     // scroll size to measure the overflow by.
@@ -651,6 +659,7 @@ async fn measure(tab: &mut cdp::Tab, artboard: &str, ids: &[&str]) -> Result<Lay
     board: box(board),
     scroll: [board.scrollWidth, board.scrollHeight],
     client: [board.clientWidth, board.clientHeight],
+    offset: [board.offsetWidth, board.offsetHeight],
     animated: document.scripts.length > 0 || document.getAnimations().length > 0,
     elements,
   }};
