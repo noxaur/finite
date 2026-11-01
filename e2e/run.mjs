@@ -537,6 +537,9 @@ try {
     html: "<i></i>".repeat(6000),
   });
   await page.until(`document.body.textContent.includes("6,001 nodes, too many to preview")`);
+  // A preview fetch from before the write can still be landing, more so
+  // through the router, so let it finish before counting.
+  await page.sleep(500);
   const hugeFetches = `performance.getEntriesByType("resource").filter((e) => e.name.endsWith("/api/designs/${huge}")).length`;
   const hugeBefore = await page.eval(hugeFetches);
   for (let i = 0; i < 3; i++) {
