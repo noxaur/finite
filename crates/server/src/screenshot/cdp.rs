@@ -74,17 +74,34 @@ impl Browser {
         let stderr = child.stderr.take().expect("stderr is piped");
         let browser = Self { child, dir };
         let mut lines = BufReader::new(stderr).lines();
-        let endpoint = tokio::time::timeout(STARTUP, async {
+        // Chrome's last lines, to say why it failed if it does.
+        let mut log = std::collections::VecDeque::new();
+        let started = tokio::time::timeout(STARTUP, async {
             while let Ok(Some(line)) = lines.next_line().await {
                 if let Some(url) = line.strip_prefix("DevTools listening on ") {
                     return Some(url.trim().to_owned());
                 }
+                if log.len() == 5 {
+                    log.pop_front();
+                }
+                log.push_back(line);
             }
             None
         })
-        .await
-        .map_err(|_| "the browser took too long to start".to_string())?
-        .ok_or("the browser exited before it was ready")?;
+        .await;
+        let said = || {
+            let lines: Vec<_> = log.iter().map(|l| l.trim()).collect();
+            if lines.is_empty() {
+                String::new()
+            } else {
+                format!(". It said: {}", lines.join(" | "))
+            }
+        };
+        let endpoint = match started {
+            Ok(Some(endpoint)) => endpoint,
+            Ok(None) => return Err(format!("the browser exited before it was ready{}", said())),
+            Err(_) => return Err(format!("the browser took too long to start{}", said())),
+        };
         // Keep reading Chrome's log so a full pipe never blocks it.
         tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
 
@@ -118,6 +135,14 @@ impl Browser {
             .ok_or("no session id")?
             .to_owned();
         Ok((browser, tab))
+    }
+
+    /// Asks Chrome to quit, and waits a moment for it to. Chrome then stops
+    /// its helper processes too; killing only the main process can leave
+    /// them running on Linux.
+    pub async fn close(mut self, mut tab: Tab) {
+        let _ = tab.browser_call("Browser.close", json!({})).await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await;
     }
 }
 

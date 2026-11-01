@@ -477,7 +477,17 @@ pub async fn capture(plan: Plan) -> Result<Vec<Result<Image, String>>, String> {
         .await
         .map_err(|_| "screenshots are shutting down")?;
     let dir = std::env::temp_dir().join(format!("finite-shot-{}", random_id(10)));
-    let (_browser, mut tab) = cdp::Browser::launch(&chrome, dir.clone()).await?;
+    let (browser, mut tab) = cdp::Browser::launch(&chrome, dir.clone()).await?;
+    let results = capture_pages(&mut tab, &dir, plan).await;
+    browser.close(tab).await;
+    results
+}
+
+async fn capture_pages(
+    tab: &mut cdp::Tab,
+    dir: &std::path::Path,
+    plan: Plan,
+) -> Result<Vec<Result<Image, String>>, String> {
     tab.call("Page.enable", json!({})).await?;
     let mut results: Vec<Option<Result<Image, String>>> = (0..plan.shots).map(|_| None).collect();
     for (n, page) in plan.pages.iter().enumerate() {
@@ -485,7 +495,7 @@ pub async fn capture(plan: Plan) -> Result<Vec<Result<Image, String>>, String> {
         tokio::fs::write(&path, &page.html)
             .await
             .map_err(|e| e.to_string())?;
-        let rendered = render(&mut tab, &path, page, &plan.options).await;
+        let rendered = render(tab, &path, page, &plan.options).await;
         match rendered {
             Ok(images) => {
                 for (index, image) in images {
