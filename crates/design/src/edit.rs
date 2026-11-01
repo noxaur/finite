@@ -664,8 +664,10 @@ mod tests {
                 (refused, started.elapsed())
             });
             assert!(refused.0.0.contains("256 levels"), "{}", refused.0.0);
+            // It takes about 0.2 s here, and 2.2 s in a debug build on CI's
+            // two cores. The limit only has to tell that apart from minutes.
             assert!(
-                refused.1 < std::time::Duration::from_secs(2),
+                refused.1 < std::time::Duration::from_secs(20),
                 "{levels}: {:?}",
                 refused.1
             );
