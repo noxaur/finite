@@ -12,6 +12,8 @@ extraMetadata:
 npmRebuild: false
 directories:
   output: release
+# Signs the Mac app, before the zip and the disk image are made.
+afterPack: scripts/sign-mac.cjs
 # main.cjs bundles every dependency but Electron, so the app needs no node_modules.
 files:
   - dist/**
@@ -27,9 +29,9 @@ mac:
   category: public.app-category.graphics-design
   # The disk image is for the first install. The updater downloads the zip.
   target: [dmg, zip]
-  # Signed with CSC_LINK and notarized with APPLE_API_KEY when they're set,
-  # as in the release workflow. Without them, the build is unsigned.
-  hardenedRuntime: true
+  # electron-builder only signs with a certificate macOS trusts, and ours is
+  # self-signed, so afterPack signs the app.
+  identity: null
 win:
   target: nsis
 nsis:

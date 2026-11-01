@@ -138,13 +138,19 @@ git tag v0.2.0 && git push origin v0.2.0
 
 Releases go to `noxaur/finite-releases`, not this repo. This repo is private, and the updater downloads without a token. The workflow needs these secrets:
 
-| Secret                                                  | What it is                                                                                         |
-| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `RELEASES_TOKEN`                                        | A fine-grained token with Contents: read and write on `noxaur/finite-releases`                     |
-| `MAC_CERTIFICATE`, `MAC_CERTIFICATE_PASSWORD`           | A "Developer ID Application" certificate, exported as `.p12` and base64-encoded, and its password  |
-| `APPLE_API_KEY`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER` | An App Store Connect API key (the `.p8` file's text), its key ID and its issuer ID, for notarizing |
+| Secret                     | What it is                                                                     |
+| -------------------------- | ------------------------------------------------------------------------------ |
+| `RELEASES_TOKEN`           | A fine-grained token with Contents: read and write on `noxaur/finite-releases` |
+| `MAC_CERTIFICATE`          | The self-signed code signing certificate, as a base64 `.p12`                   |
+| `MAC_CERTIFICATE_PASSWORD` | Its password                                                                   |
 
-`noxaur/finite-releases` has to be public and have at least one commit, because GitHub tags a published release on a commit. The Mac build fails if its secrets are missing. macOS only installs an update signed by the same developer, so an unsigned Mac build could never update. Windows builds are unsigned for now. They update fine, but SmartScreen warns on the first install.
+`noxaur/finite-releases` has to be public and have at least one commit, because GitHub tags a published release on a commit.
+
+Mac builds are signed with a self-signed certificate, not an Apple Developer ID. Squirrel.Mac, which installs updates on a Mac, only checks that an update is signed with the same certificate as the running app. Apple doesn't have to issue it. `apps/desktop/scripts/sign-mac.cjs` signs the app, because electron-builder only signs with certificates macOS trusts. The Mac build fails without `MAC_CERTIFICATE`, because an unsigned build could never update.
+
+Without a Developer ID, the app isn't notarized, so Gatekeeper blocks the first launch with "Apple could not verify Finite". Open System Settings, then Privacy & Security, and click Open Anyway. You only do this once. Updates don't come from a browser, so macOS doesn't quarantine them, and they open without asking. Windows builds are unsigned too, so SmartScreen warns on the first install, and updates install without a warning.
+
+Keep the certificate. The original is in `~/.config/finite-signing/` on the machine that made it, with its password. If you lose it and sign with a new one, every Mac install stops updating, and people have to download the app again. The same goes for moving to an Apple Developer ID later.
 
 Two other details. On a Mac, an app run from the disk image or from Downloads is read-only, so it can't replace itself. At launch the app offers to move itself to Applications. And `apps/desktop/scripts/stage-server.mjs` builds `finite-server` for each architecture and copies it into `apps/desktop/server/<arch>/`. electron-builder copies it from there, with `apps/web/out` as `web/`, into the app's resources folder, where `main.ts` finds them.
 
@@ -157,4 +163,4 @@ The preload script exposes `window.finite` (platform and versions) to the render
 - If the server exits with `another Finite server is using …`, a second server is pointed at the same data folder. Stop the other one, or give this one its own `FINITE_DATA_DIR`.
 - With a shared database, a request can get `503` with "the design is moving" for up to one lease after the servers change. The old owner is saving its last snapshot first. Browsers and agents just try again. A server that logs `another live Finite server is using the URL …` shares its `FINITE_NODE_URL` with a running one, and stays out of the cluster until you fix that.
 - If Electron crashes with `Cannot read properties of undefined (reading 'whenReady')`, your shell has `ELECTRON_RUN_AS_NODE=1` set. Electron-based terminals and editors often export it. Run `unset ELECTRON_RUN_AS_NODE` first.
-- A Mac build made without signing secrets is unsigned, and it can't update itself. `vp run package:desktop` makes one, which is fine for trying a package. Squirrel.Mac refuses the download with `Code signature … did not pass validation`.
+- A Mac build made without `MAC_CERTIFICATE` is unsigned, and it can't update itself. `vp run package:desktop` makes one, which is fine for trying a package. Squirrel.Mac refuses the download with `Code signature … did not pass validation`.
