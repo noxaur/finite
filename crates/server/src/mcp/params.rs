@@ -128,31 +128,76 @@ impl ChildrenParams {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct NodeParams {
+pub struct HtmlParams {
     pub(super) design_id: String,
     pub(super) node_id: String,
+    /// How many levels below the node to show. Omit to show as much as fits.
+    #[serde(default)]
+    pub(super) depth: Option<usize>,
+    /// Include inline styles. Defaults to true; false shows structure only.
+    #[serde(default)]
+    pub(super) include_styles: Option<bool>,
+    /// Also show the artboard's <style> blocks, whose rules may style the node.
+    #[serde(default)]
+    pub(super) include_stylesheets: bool,
+    /// Cut attribute values, text and code longer than this many characters.
+    #[serde(default)]
+    pub(super) max_value_length: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ScreenshotParams {
     pub(super) design_id: String,
-    /// An artboard, or any node inside one (the whole artboard is captured).
+    /// An artboard, or a node inside one. The image is cropped to its box.
     #[serde(default)]
     pub(super) node_id: Option<String>,
-    /// Several artboards (or nodes inside them) to capture in one call, at most 6.
-    #[serde(default, deserialize_with = "lenient_opt")]
-    pub(super) node_ids: Option<Vec<String>>,
-    /// Device pixel ratio, from 0.25 to 2. Defaults to 1. Use 0.5 to see
-    /// several large artboards cheaply.
+    /// Several nodes to capture in one call, at most 10. One image each.
+    #[serde(default, deserialize_with = "lenient")]
+    pub(super) node_ids: Vec<String>,
+    /// Part of the node to capture, relative to its top-left corner.
+    #[serde(default)]
+    pub(super) region: Option<RegionParam>,
+    /// CSS pixels of surroundings to include on every side.
+    #[serde(default)]
+    pub(super) padding: Option<f64>,
+    /// Device pixel ratio, 0.25 to 3. Defaults to 1.
     #[serde(default)]
     pub(super) scale: Option<f64>,
+    #[serde(default)]
+    pub(super) format: ImageFormat,
+    /// JPEG or WebP quality, 1 to 100. Defaults to 80.
+    #[serde(default)]
+    pub(super) quality: Option<u8>,
+    /// Nodes to render invisible, keeping their space.
+    #[serde(default)]
+    pub(super) hide_node_ids: Vec<String>,
+    /// Nodes to outline, to see their boxes.
+    #[serde(default)]
+    pub(super) highlight_node_ids: Vec<String>,
+    /// Leave out the backgrounds behind the node. PNG or WebP only.
+    #[serde(default)]
+    pub(super) transparent: bool,
+    /// Show content that overflows the artboard instead of cutting it off.
+    #[serde(default)]
+    pub(super) reveal_overflow: bool,
 }
 
-impl ScreenshotParams {
-    /// Each image costs the agent context, and a request with more than 20
-    /// images gets a stricter size limit, so a call returns a handful.
-    pub(super) const MAX_ARTBOARDS: usize = 6;
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+pub struct RegionParam {
+    pub(super) x: f64,
+    pub(super) y: f64,
+    pub(super) width: f64,
+    pub(super) height: f64,
+}
+
+#[derive(Deserialize, JsonSchema, Clone, Copy, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageFormat {
+    #[default]
+    Png,
+    Jpeg,
+    Webp,
 }
 
 #[derive(Deserialize, JsonSchema)]

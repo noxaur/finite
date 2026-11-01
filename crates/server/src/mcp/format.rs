@@ -224,6 +224,65 @@ pub(super) fn comments_json<'a>(
         .collect()
 }
 
+/// What a screenshot shows, after its image: where it is in the artboard,
+/// and anything the agent should know about it.
+pub(super) fn shot(image: &crate::screenshot::Image) -> String {
+    let px = |v: f64| format!("{}", (v * 10.0).round() / 10.0);
+    let a = &image.area;
+    let b = &image.bounds;
+    let mut out = format!(
+        "#{} in artboard #{}: shows {}×{} at ({}, {}); the node's box is {}×{} at ({}, {}). {}×{} pixels.",
+        image.node,
+        image.artboard,
+        px(a.width),
+        px(a.height),
+        px(a.x),
+        px(a.y),
+        px(b.width),
+        px(b.height),
+        px(b.x),
+        px(b.y),
+        image.pixel_width,
+        image.pixel_height,
+    );
+    if image.element != image.node {
+        let _ = write!(out, " A text node: captured its parent #{}.", image.element);
+    }
+    if image.scale < image.requested_scale {
+        let _ = write!(
+            out,
+            " Captured at {:.2}× instead of {}×, so its longer side fits in {} pixels.",
+            image.scale,
+            image.requested_scale,
+            crate::screenshot::MAX_OUTPUT_SIDE
+        );
+    }
+    if image.cut_off {
+        out.push_str(" Part of it is past the artboard's edge and isn't shown.");
+    }
+    if image.overflow.any() {
+        let _ = write!(
+            out,
+            " The artboard's content overflows it by {}px right and {}px down",
+            px(image.overflow.right),
+            px(image.overflow.bottom)
+        );
+        out.push_str(if image.overflow_shown {
+            ", shown here."
+        } else {
+            ", and is cut off there; pass revealOverflow to see it."
+        });
+    }
+    if let Some(settled) = image.settled {
+        let _ = write!(
+            out,
+            " It has scripts or animations, captured {:.1}s after load.",
+            settled.as_secs_f64()
+        );
+    }
+    out
+}
+
 /// How many elements a layout note names before it says how many more.
 const LAYOUT_NAMED: usize = 8;
 
@@ -234,10 +293,10 @@ const LAYOUT_NAMED: usize = 8;
 pub(super) fn layout_notes(
     doc: &Document,
     artboard: &str,
-    boxes: &[crate::screenshot::Box],
+    boxes: &[crate::screenshot::ElementBox],
 ) -> String {
     use std::collections::{HashMap, HashSet};
-    let by_id: HashMap<&str, &crate::screenshot::Box> =
+    let by_id: HashMap<&str, &crate::screenshot::ElementBox> =
         boxes.iter().map(|b| (b.id.as_str(), b)).collect();
     let Some(board) = by_id.get(artboard) else {
         return String::new();
@@ -305,7 +364,7 @@ pub(super) fn layout_notes(
         }
         notes.push(text);
     }
-    let spilling: Vec<&crate::screenshot::Box> = boxes
+    let spilling: Vec<&crate::screenshot::ElementBox> = boxes
         .iter()
         // Down, a few pixels is a tall glyph, like an emoji, in a tight line height.
         .filter(|b| b.text_overflow.0 > 2.0 || b.text_overflow.1 > 8.0)
