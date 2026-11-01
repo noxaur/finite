@@ -480,7 +480,7 @@ async function daemon(dir, options) {
       const images = [];
       const parts = result.content.map((c) => {
         if (c.type === "image") {
-          const ext = c.mimeType === "image/jpeg" ? "jpg" : "png";
+          const ext = { "image/jpeg": "jpg", "image/webp": "webp" }[c.mimeType] ?? "png";
           const file = path.join(shots, `${tool}-${Date.now()}-${images.length}.${ext}`);
           fs.writeFileSync(file, Buffer.from(c.data, "base64"));
           images.push(file);
