@@ -2,9 +2,10 @@
 //! classes and CSS variables shared across screens. It lives in the document
 //! (`Op::Css`), so it's saved, synced to viewers and undoable like any edit.
 //!
-//! The tools ship only when `FINITE_MCP_EXTRA` includes `shared-styles`, as
-//! they did while they were a demo, so AX runs (`e2e/ax`) stay comparable.
-//! See https://github.com/noxaur/finite/issues/8.
+//! Every agent gets these tools. They shipped behind `FINITE_MCP_EXTRA`
+//! until AX runs (`e2e/ax`) showed agents use them: changing a top bar on
+//! three screens took 2 calls instead of 3 to 5. See
+//! https://github.com/noxaur/finite/issues/8.
 
 use finite_design::edit;
 use rmcp::{

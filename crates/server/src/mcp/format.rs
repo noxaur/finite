@@ -405,3 +405,176 @@ pub(super) fn layout_notes(
     }
     notes.join("\n")
 }
+
+/// How many text elements the overlap check compares, so a huge artboard
+/// stays fast. It compares every pair, so this is at most about 2 million.
+const OVERLAP_CHECKED: usize = 2_000;
+
+/// The subtree at `root` as an outline with where each element rendered,
+/// relative to its artboard, then what the layout check found in it:
+/// content cut off by the artboard's edge, text overflowing its box, and
+/// text overlapping other text.
+pub(super) fn rendered_outline(
+    doc: &Document,
+    root: &str,
+    max_depth: usize,
+    boxes: &[crate::screenshot::ElementBox],
+) -> String {
+    use std::collections::HashMap;
+    let by_id: HashMap<&str, &crate::screenshot::ElementBox> =
+        boxes.iter().map(|b| (b.id.as_str(), b)).collect();
+    let Some(board) = boxes.first() else {
+        return "The page couldn't be measured.".into();
+    };
+    let mut out = String::new();
+    let mut ids = Vec::new();
+    rendered_into(doc, root, 0, max_depth, &by_id, board, &mut out, &mut ids);
+
+    let mut notes = Vec::new();
+    // Cut-off content and spilling text, for the elements shown.
+    let shown: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+    let in_scope: Vec<crate::screenshot::ElementBox> = boxes
+        .iter()
+        .filter(|b| {
+            b.id == board.id || shown.contains(b.id.as_str()) || doc.is_ancestor(root, &b.id)
+        })
+        .cloned()
+        .collect();
+    let checked = layout_notes(doc, &board.id, &in_scope);
+    if !checked.starts_with("Layout: nothing is cut off") {
+        notes.push(checked);
+    }
+    let text: Vec<&crate::screenshot::ElementBox> = in_scope
+        .iter()
+        .filter(|b| b.has_text && b.width > 0.0 && b.height > 0.0)
+        .take(OVERLAP_CHECKED)
+        .collect();
+    let mut pairs = Vec::new();
+    for (i, a) in text.iter().enumerate() {
+        for b in &text[i + 1..] {
+            let (w, h) = (
+                (a.x + a.width).min(b.x + b.width) - a.x.max(b.x),
+                (a.y + a.height).min(b.y + b.height) - a.y.max(b.y),
+            );
+            if w > 2.0
+                && h > 2.0
+                && !doc.is_ancestor(&a.id, &b.id)
+                && !doc.is_ancestor(&b.id, &a.id)
+            {
+                pairs.push((a.id.as_str(), b.id.as_str(), w, h));
+            }
+        }
+    }
+    if !pairs.is_empty() {
+        let line = |id: &str| {
+            outline(doc, id, 0)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_owned()
+        };
+        let mut text = format!(
+            "Layout: {} pair{} of text elements overlap. Check that's intended, like a badge over a card:",
+            pairs.len(),
+            if pairs.len() == 1 { "" } else { "s" }
+        );
+        for (a, b, w, h) in pairs.iter().take(LAYOUT_NAMED) {
+            let _ = write!(text, "\n  {} and {} ({w:.0} × {h:.0} px)", line(a), line(b));
+        }
+        if pairs.len() > LAYOUT_NAMED {
+            let _ = write!(text, "\n  … and {} more", pairs.len() - LAYOUT_NAMED);
+        }
+        notes.push(text);
+    }
+    if notes.is_empty() {
+        out.push_str("Layout: nothing is cut off, no text overflows its box, and no text overlaps other text.\n");
+    } else {
+        out.push_str(&notes.join("\n"));
+        out.push('\n');
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rendered_into(
+    doc: &Document,
+    id: &str,
+    depth: usize,
+    max_depth: usize,
+    boxes: &std::collections::HashMap<&str, &crate::screenshot::ElementBox>,
+    board: &crate::screenshot::ElementBox,
+    out: &mut String,
+    ids: &mut Vec<String>,
+) {
+    let Some(node) = doc.get(id) else { return };
+    let NodeKind::Element { tag } = &node.kind else {
+        return;
+    };
+    ids.push(id.to_owned());
+    let pad = "  ".repeat(depth);
+    let _ = write!(out, "{pad}{tag}");
+    if let Some(name) = &node.name {
+        let _ = write!(out, " {name:?}");
+    }
+    let _ = write!(out, " #{}", node.id);
+    let children = doc.children(Some(id));
+    let own_text: String = children
+        .iter()
+        .filter(|c| c.kind == NodeKind::Text)
+        .filter_map(|c| c.text.as_deref())
+        .collect::<String>();
+    let own_text = own_text.trim();
+    if !own_text.is_empty() && !RAW_TEXT.contains(&tag.to_ascii_lowercase().as_str()) {
+        let mut snippet: String = own_text.chars().take(40).collect();
+        if snippet.len() < own_text.len() {
+            snippet.push('…');
+        }
+        let _ = write!(out, " {snippet:?}");
+    }
+    match boxes.get(id) {
+        Some(b) => {
+            let _ = write!(
+                out,
+                " @ {:.0},{:.0} {:.0}×{:.0}",
+                b.x - board.x,
+                b.y - board.y,
+                b.width,
+                b.height
+            );
+            // A block's text can sit in a small part of its box, so say
+            // where the text itself is when it's much smaller.
+            if let Some(t) = b.text
+                && (t.width < b.width * 0.8 || t.height < b.height * 0.6)
+            {
+                let _ = write!(
+                    out,
+                    " (text @ {:.0},{:.0} {:.0}×{:.0})",
+                    t.x - board.x,
+                    t.y - board.y,
+                    t.width,
+                    t.height
+                );
+            }
+        }
+        None if RAW_TEXT.contains(&tag.to_ascii_lowercase().as_str()) => {}
+        None => out.push_str(" (not rendered: hidden or empty)"),
+    }
+    let elements: Vec<_> = children
+        .iter()
+        .filter(|c| c.kind != NodeKind::Text)
+        .collect();
+    if elements.is_empty() {
+        out.push('\n');
+    } else if depth >= max_depth {
+        let _ = writeln!(out, " … {} children", elements.len());
+    } else {
+        out.push('\n');
+        for child in elements {
+            rendered_into(doc, &child.id, depth + 1, max_depth, boxes, board, out, ids);
+        }
+    }
+}
+
+/// Elements whose content is code, not text.
+const RAW_TEXT: &[&str] = &["style", "script"];

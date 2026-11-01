@@ -273,6 +273,11 @@ pub struct ElementBox {
     pub height: f64,
     /// How far the element's own text runs past its box, across and down.
     pub text_overflow: (f64, f64),
+    /// Whether the element holds text of its own, not just in children.
+    pub has_text: bool,
+    /// Where that text itself rendered, which can be much smaller than the
+    /// element's box: a heading's text in a full-width block, say.
+    pub text: Option<Rect>,
 }
 
 /// A capture, decided from the document and ready to render.
@@ -551,7 +556,108 @@ struct Layout {
     /// Every element in the artboard with a size: `[id, x, y, width, height,
     /// overflowX, overflowY]`, the overflow being how far its own text runs
     /// past its box.
-    nodes: Vec<(String, f64, f64, f64, f64, f64, f64)>,
+    nodes: Vec<RawBox>,
+}
+
+type RawBox = (String, f64, f64, f64, f64, f64, f64, bool, Option<[f64; 4]>);
+
+fn element_box((id, x, y, width, height, ox, oy, has_text, text): &RawBox) -> ElementBox {
+    ElementBox {
+        id: id.clone(),
+        x: *x,
+        y: *y,
+        width: *width,
+        height: *height,
+        text_overflow: (*ox, *oy),
+        has_text: *has_text,
+        text: text.map(rect),
+    }
+}
+
+/// An artboard's page, ready to measure without taking a picture.
+pub struct Measurement {
+    artboard: NodeId,
+    html: String,
+    width: f64,
+    height: f64,
+    settle: Duration,
+}
+
+/// Prepares to measure the artboard holding `node`, or fails if it's not in
+/// the document.
+pub fn plan_measurement(
+    doc: &Document,
+    node: &str,
+    options: Options,
+) -> Result<Measurement, String> {
+    let artboard = doc
+        .artboard_of(node)
+        .ok_or_else(|| format!("node {node:?} not found"))?
+        .id
+        .clone();
+    let (html, width, height) =
+        page_html(doc, &artboard, &options).expect("the artboard is in the document");
+    Ok(Measurement {
+        artboard,
+        html,
+        width,
+        height,
+        settle: options.settle,
+    })
+}
+
+/// Where every element of an artboard rendered, in CSS pixels from the
+/// page's top left corner, the artboard first. It renders the page as a
+/// screenshot would, but takes no picture, so it's cheap to call after
+/// every edit.
+pub async fn layout(m: Measurement) -> Result<Vec<ElementBox>, String> {
+    let chrome = chrome().ok_or(
+        "no Chrome, Chromium or Edge found to lay out the page; set FINITE_CHROME to a browser binary",
+    )?;
+    let _turn = browsers()
+        .acquire()
+        .await
+        .map_err(|_| "layout is shutting down")?;
+    let dir = std::env::temp_dir().join(format!("finite-layout-{}", random_id(10)));
+    let (browser, mut tab) = cdp::Browser::launch(&chrome, dir.clone()).await?;
+    let result = measure_page(&mut tab, &dir, &m).await;
+    browser.close(tab).await;
+    result
+}
+
+async fn measure_page(
+    tab: &mut cdp::Tab,
+    dir: &std::path::Path,
+    m: &Measurement,
+) -> Result<Vec<ElementBox>, String> {
+    tab.call("Page.enable", json!({})).await?;
+    let path = dir.join("page.html");
+    tokio::fs::write(&path, &m.html)
+        .await
+        .map_err(|e| e.to_string())?;
+    tab.call(
+        "Emulation.setDeviceMetricsOverride",
+        json!({
+            "width": m.width.ceil() as u64,
+            "height": m.height.ceil() as u64,
+            "deviceScaleFactor": 1,
+            "mobile": false,
+        }),
+    )
+    .await?;
+    tab.clear_events();
+    let url = format!("file://{}", path.display());
+    tab.call("Page.navigate", json!({ "url": url })).await?;
+    tab.wait_for("Page.loadEventFired", LOAD).await?;
+    tab.evaluate("document.fonts.ready.then(() => true)")
+        .await?;
+    let mut layout = measure(tab, &m.artboard, &[]).await?;
+    let settle = m.settle.min(MAX_SETTLE);
+    if layout.animated && !settle.is_zero() {
+        tokio::time::sleep(settle).await;
+        layout = measure(tab, &m.artboard, &[]).await?;
+    }
+    Ok(layout.nodes.iter().map(element_box).collect())
 }
 
 fn rect([x, y, width, height]: [f64; 4]) -> Rect {
@@ -700,10 +806,25 @@ async fn measure(tab: &mut cdp::Tab, artboard: &str, ids: &[&str]) -> Result<Lay
     for (const c of el.childNodes) if (c.nodeType === 3 && c.textContent.trim()) text = true;
     const inline = getComputedStyle(el).display === "inline";
     const spill = text && !inline;
+    // The union of the element's own text runs.
+    let ink = null;
+    if (text) {{
+      const range = document.createRange();
+      for (const c of el.childNodes) {{
+        if (c.nodeType !== 3 || !c.textContent.trim()) continue;
+        range.selectNodeContents(c);
+        for (const r of range.getClientRects()) {{
+          if (!r.width || !r.height) continue;
+          const [l, t, rr, b] = [r.left + scrollX, r.top + scrollY, r.right + scrollX, r.bottom + scrollY];
+          ink = ink ? [Math.min(ink[0], l), Math.min(ink[1], t), Math.max(ink[2], rr), Math.max(ink[3], b)] : [l, t, rr, b];
+        }}
+      }}
+    }}
     nodes.push([el.getAttribute("{VIEWER_ID_ATTR}"), x, y, w, h,
-      spill ? el.scrollWidth - el.clientWidth : 0, spill ? el.scrollHeight - el.clientHeight : 0]);
+      spill ? el.scrollWidth - el.clientWidth : 0, spill ? el.scrollHeight - el.clientHeight : 0, text,
+      ink ? [ink[0], ink[1], ink[2] - ink[0], ink[3] - ink[1]] : null]);
   }}
-  nodes.unshift([{board}, ...box(board), 0, 0]);
+  nodes.unshift([{board}, ...box(board), 0, 0, false, null]);
   return {{
     nodes,
     board: box(board),
@@ -833,20 +954,8 @@ async fn shoot(
         overflow,
         overflow_shown: options.reveal_overflow,
         settled,
-        boxes: (planned.element == page.artboard).then(|| {
-            layout
-                .nodes
-                .iter()
-                .map(|(id, x, y, width, height, ox, oy)| ElementBox {
-                    id: id.clone(),
-                    x: *x,
-                    y: *y,
-                    width: *width,
-                    height: *height,
-                    text_overflow: (*ox, *oy),
-                })
-                .collect()
-        }),
+        boxes: (planned.element == page.artboard)
+            .then(|| layout.nodes.iter().map(element_box).collect()),
     })
 }
 

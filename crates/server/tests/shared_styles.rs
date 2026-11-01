@@ -1,5 +1,4 @@
-//! The shared-styles tools, which ship behind `FINITE_MCP_EXTRA`. The server
-//! reads it once per process, so this file is its own test binary.
+//! The shared-styles tools, which every agent gets.
 
 mod agent;
 
@@ -8,8 +7,6 @@ use serde_json::json;
 
 #[tokio::test]
 async fn an_agent_shares_css_across_artboards_and_undoes_it() {
-    // SAFETY: this binary's only test sets it before the server reads it.
-    unsafe { std::env::set_var("FINITE_MCP_EXTRA", "shared-styles") };
     let app = test_app();
     let mut agent = Agent::connect(&app, "Alice").await;
 

@@ -226,6 +226,10 @@ pub struct CreateArtboardParams {
     /// Extra CSS for the artboard, like {"background-color": "#0b0b0b", "padding": "48px"}.
     #[serde(default)]
     pub(super) styles: BTreeMap<String, String>,
+    /// Class names for the artboard's own element, like "screen dark", so
+    /// a <style> block or the shared CSS can style the artboard itself.
+    #[serde(default)]
+    pub(super) class: Option<String>,
     /// Content to write into the new artboard, as write_html would, so a
     /// screen takes one call. Omit for an empty artboard.
     #[serde(default)]
@@ -539,4 +543,16 @@ pub struct SharedCssParams {
     pub(super) design_id: String,
     /// The whole stylesheet, like ":root { --brand: #f97316 } .btn { padding: 12px 20px; border-radius: 999px }". Replaces the current one; pass "" to clear it.
     pub(super) css: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LayoutParams {
+    pub(super) design_id: String,
+    /// An artboard, or a node inside one to see just its part. Omit for every artboard (up to 10).
+    #[serde(default)]
+    pub(super) node_id: Option<String>,
+    /// How many levels below the node to list. Defaults to 4.
+    #[serde(default)]
+    pub(super) depth: Option<usize>,
 }

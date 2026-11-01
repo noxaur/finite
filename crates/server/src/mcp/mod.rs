@@ -61,9 +61,10 @@ const INSTRUCTIONS: &str = include_str!("instructions.md");
 const SEARCH_INSTRUCTIONS: &str = "Search: find_nodes finds elements by text, name, tag, CSS or attribute, across artboards and <style> blocks. replace_values changes a value everywhere in one call, like a brand color in any notation. Use them instead of reading whole artboards.";
 
 /// Whether `FINITE_MCP_EXTRA` (a comma-separated list) turns on a group of
-/// experimental tools, like `shared-styles`. AX experiments
-/// (`e2e/ax`) compare agents with and without a group before it ships to
-/// everyone, as the search tools did.
+/// experimental tools. AX experiments (`e2e/ax`) compare agents with and
+/// without a group before it ships to everyone, as the search and shared
+/// styles tools did. No group is experimental right now.
+#[allow(dead_code, reason = "kept for the next experimental group")]
 pub(crate) fn extra(group: &str) -> bool {
     static EXTRA: OnceLock<Vec<String>> = OnceLock::new();
     EXTRA
@@ -86,10 +87,8 @@ pub(crate) fn instructions() -> &'static str {
         let mut text = INSTRUCTIONS.trim_end().to_owned();
         text.push_str("\n\n");
         text.push_str(SEARCH_INSTRUCTIONS);
-        if extra("shared-styles") {
-            text.push_str("\n\n");
-            text.push_str(styles::INSTRUCTIONS);
-        }
+        text.push_str("\n\n");
+        text.push_str(styles::INSTRUCTIONS);
         text.push('\n');
         text
     })
@@ -277,9 +276,7 @@ impl FiniteMcp {
     fn tools() -> ToolRouter<Self> {
         let mut router = Self::tool_router();
         router.merge(Self::search_router());
-        if extra("shared-styles") {
-            router.merge(Self::styles_router());
-        }
+        router.merge(Self::styles_router());
         router
     }
 
@@ -413,6 +410,18 @@ fn show_working(handle: &DesignHandle, actor: &Actor, change: &Change) {
     }
 }
 
+/// `error` with a hint when the agent passed the design's id where a node's
+/// goes, which AX runs saw agents do on every read tool.
+fn node_hint(error: String, design_id: &str) -> String {
+    if error.contains(&format!("{design_id:?}")) {
+        format!(
+            "{error}: {design_id:?} is the designId. Pass an artboard's id (get_basic_info lists them) or a node's."
+        )
+    } else {
+        error
+    }
+}
+
 macro_rules! design {
     ($self:ident, $id:expr) => {
         match $self.design($id).await {
@@ -521,10 +530,8 @@ impl FiniteMcp {
             })
         });
         let mut info = info;
-        if extra("shared-styles") {
-            // So agents needn't call get_shared_css to find out there's none.
-            info["sharedCssChars"] = handle.read(|d| d.doc().css().map_or(0, str::len)).into();
-        }
+        // So agents needn't call get_shared_css to find out there's none.
+        info["sharedCssChars"] = handle.read(|d| d.doc().css().map_or(0, str::len)).into();
         let count = info["artboardCount"].as_u64().unwrap_or(0) as usize;
         Ok(CallToolResult::success(with_note(
             ContentBlock::text(serde_json::to_string_pretty(&info).expect("json values serialize")),
@@ -647,11 +654,7 @@ impl FiniteMcp {
         // The HTML leaves out the shared CSS its classes and variables may
         // need, so say it's there: HTML copied elsewhere would lose it.
         let shared = handle.read(|d| d.doc().css().map(str::len)).map(|chars| {
-            let from = if extra("shared-styles") {
-                ", from get_shared_css"
-            } else {
-                ""
-            };
+            let from = ", from get_shared_css";
             format!(
                 "This design also has shared CSS ({chars} characters{from}) that every artboard uses. \
                  The HTML above leaves it out, so copy it too if you use this HTML outside this design."
@@ -736,17 +739,35 @@ impl FiniteMcp {
                 ContentBlock::text(html),
                 shared,
             ))),
-            None => fail(format!("node {:?} not found", p.node_id)),
+            None => fail(node_hint(
+                format!("node {:?} not found", p.node_id),
+                &p.design_id,
+            )),
         }
     }
 
     #[tool(
-        description = "Render artboards, or nodes inside them, to images to check how they look. Each image is cropped to its node's box. A whole artboard also gets a layout check that names anything cut off by its edge and text that overflows its box.",
+        description = "Render artboards, or nodes inside them, to images to check how they look. Each image is cropped to its node's box; with no node, it captures every artboard (up to 10). A whole artboard also gets a layout check that names anything cut off by its edge and text that overflows its box.",
         annotations(read_only_hint = true)
     )]
     async fn get_screenshot(&self, Parameters(p): Parameters<ScreenshotParams>) -> ToolResult {
         let handle = design!(self, &p.design_id);
-        let nodes: Vec<String> = p.node_id.into_iter().chain(p.node_ids).collect();
+        let mut nodes: Vec<String> = p.node_id.into_iter().chain(p.node_ids).collect();
+        // Agents often ask with just a designId, meaning the design as a
+        // whole, so capture its artboards.
+        if nodes.is_empty() {
+            nodes = handle.read(|d| {
+                d.doc()
+                    .artboards()
+                    .iter()
+                    .take(screenshot::MAX_SHOTS)
+                    .map(|a| a.id.clone())
+                    .collect()
+            });
+            if nodes.is_empty() {
+                return fail("This design has no artboards yet. Create one with create_artboard.");
+            }
+        }
         let shots = nodes
             .into_iter()
             .map(|node| screenshot::Shot {
@@ -773,7 +794,7 @@ impl FiniteMcp {
         };
         let plan = match handle.read(|d| screenshot::plan(d.doc(), shots, options)) {
             Ok(plan) => plan,
-            Err(error) => return fail(error),
+            Err(error) => return fail(node_hint(error, &p.design_id)),
         };
         let images = match screenshot::capture(plan).await {
             Ok(images) => images,
@@ -810,6 +831,58 @@ impl FiniteMcp {
     }
 
     #[tool(
+        description = "Where everything rendered, without a screenshot: the node's subtree (or every artboard) as an outline with each element's position and size in px from its artboard's top-left corner (x,y width×height), and where its text sits when that's much smaller than its box. Then a layout check: content cut off by the artboard's edge, text overflowing its box, and text overlapping other text. Use it to place things over content, like pins or badges, and to check a layout cheaply after an edit.",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_layout(&self, Parameters(p): Parameters<LayoutParams>) -> ToolResult {
+        let handle = design!(self, &p.design_id);
+        let depth = p.depth.unwrap_or(4);
+        // No node, or an empty one, means the design as a whole.
+        let roots: Vec<String> = match p.node_id.filter(|id| !id.trim().is_empty()) {
+            Some(id) => vec![id],
+            None => handle.read(|d| {
+                d.doc()
+                    .artboards()
+                    .iter()
+                    .take(screenshot::MAX_SHOTS)
+                    .map(|a| a.id.clone())
+                    .collect()
+            }),
+        };
+        if roots.is_empty() {
+            return fail("This design has no artboards yet. Create one with create_artboard.");
+        }
+        let mut parts = Vec::new();
+        for node_id in roots {
+            let options = screenshot::Options::default();
+            let measurement =
+                match handle.read(|d| screenshot::plan_measurement(d.doc(), &node_id, options)) {
+                    Ok(m) => m,
+                    Err(error) => return fail(node_hint(error, &p.design_id)),
+                };
+            let boxes = match screenshot::layout(measurement).await {
+                Ok(boxes) => boxes,
+                Err(error) => return fail(error),
+            };
+            parts.push(handle.read(|d| {
+                let doc = d.doc();
+                // A text node's layout is its element's.
+                let root = match doc.get(&node_id) {
+                    Some(n) if n.kind == NodeKind::Text => {
+                        n.parent.clone().unwrap_or_else(|| node_id.clone())
+                    }
+                    _ => node_id.clone(),
+                };
+                format::rendered_outline(doc, &root, depth, &boxes)
+            }));
+        }
+        ok(cut(
+            parts.join("\n"),
+            "Pass the nodeId of one part, or a smaller depth, to see the rest.",
+        ))
+    }
+
+    #[tool(
         description = "Where create_artboard would put a new artboard: to the right of every existing one, top-aligned with them. Returns x and y. create_artboard already does this when you omit x and y.",
         annotations(read_only_hint = true)
     )]
@@ -820,7 +893,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Create an artboard: a fixed-size frame on the canvas that holds a screen or component. Pass html to fill it in the same call (same rules as write_html). Omit x and y to place it beside the existing artboards. Returns its id, position and size, and the content's outline with ids."
+        description = "Create an artboard: a fixed-size frame on the canvas that holds a screen or component. Pass html to fill it in the same call (same rules as write_html), and class to style the artboard itself from CSS. Omit x and y to place it beside the existing artboards. Returns its id, position and size, and the content's outline with ids."
     )]
     async fn create_artboard(
         &self,
@@ -829,6 +902,7 @@ impl FiniteMcp {
     ) -> ToolResult {
         let position = p.x.zip(p.y);
         let label = format!("Create artboard {:?}", p.name);
+        let class = p.class.filter(|c| !c.trim().is_empty());
         let fragments = match p.html {
             Some(html) => {
                 match tokio::task::spawn_blocking(move || edit::parse_html(&html)).await {
@@ -853,8 +927,11 @@ impl FiniteMcp {
             |doc| {
                 let mut new_id = id_in(doc);
                 let id = new_id();
-                let (ops, roots) =
+                let (mut ops, roots) =
                     edit::create_artboard_with(doc, id.clone(), spec, fragments, &mut new_id)?;
+                if let (Some(class), Some(Op::Create { node })) = (&class, ops.first_mut()) {
+                    node.attrs.insert("class".into(), class.trim().to_owned());
+                }
                 Ok((ops, (id, roots)))
             },
             |handle, (id, roots), _| {

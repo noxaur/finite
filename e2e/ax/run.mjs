@@ -75,6 +75,9 @@ function serverEnv() {
   );
 }
 
+// The checks render designs in Chrome too (tasks.mjs), through e2e/cdp.mjs.
+if (!process.env.FINITE_CHROME && defaultChrome()) process.env.FINITE_CHROME = defaultChrome();
+
 async function startServer(bin) {
   const port = await freePort();
   const data = fs.mkdtempSync(path.join(os.tmpdir(), "finite-ax-data-"));
@@ -241,8 +244,45 @@ async function runOnce(taskName, index, outDir) {
       cwd,
       transcript,
     );
-    const seconds = Math.round((Date.now() - started) / 1000);
+    let seconds = Math.round((Date.now() - started) / 1000);
     const metrics = analyze(transcript);
+
+    // A follow-up in the same session, like a change to what it built.
+    // It's measured on its own too, since that's what some tools are for.
+    let last = result;
+    let change = null;
+    if (task.followUp && result?.session_id) {
+      const file = path.join(dir, "transcript-change.jsonl");
+      const changeStarted = Date.now();
+      last = await claude(
+        [
+          "-p",
+          task.followUp(ctx),
+          "--resume",
+          result.session_id,
+          ...common,
+          "--max-budget-usd",
+          opts.budget,
+        ],
+        cwd,
+        file,
+      );
+      const changed = analyze(file);
+      change = {
+        ...changed,
+        cost: last?.total_cost_usd ?? null,
+        seconds: Math.round((Date.now() - changeStarted) / 1000),
+        stop: last?.api_error ? `api error: ${last.api_error}` : (last?.subtype ?? "no result"),
+      };
+      seconds += change.seconds;
+      for (const [name, n] of Object.entries(changed.calls))
+        metrics.calls[name] = (metrics.calls[name] ?? 0) + n;
+      metrics.total += changed.total;
+      metrics.errors.push(...changed.errors);
+      metrics.outside.push(...changed.outside);
+      metrics.resultChars += changed.resultChars;
+      metrics.screenshots += changed.screenshots;
+    }
 
     const checker = await connect(server.base, "Checker");
     let check;
@@ -264,9 +304,9 @@ async function runOnce(taskName, index, outDir) {
     }
 
     let feedback = "";
-    if (!opts["no-feedback"] && result?.session_id) {
+    if (!opts["no-feedback"] && last?.session_id) {
       const fb = await claude(
-        ["-p", FEEDBACK, "--resume", result.session_id, ...common, "--max-budget-usd", "1"],
+        ["-p", FEEDBACK, "--resume", last.session_id, ...common, "--max-budget-usd", "1"],
         cwd,
         path.join(dir, "feedback.jsonl"),
       );
@@ -281,17 +321,25 @@ async function runOnce(taskName, index, outDir) {
       model: opts.model,
       effort: opts.effort,
       seconds,
-      cost: result?.total_cost_usd ?? null,
+      cost: (result?.total_cost_usd ?? 0) + (change?.cost ?? 0) || null,
       turns: result?.num_turns ?? null,
       // A usage limit or outage ends a run early but still reports success,
       // so name it, and report.mjs leaves the run out.
-      stop: result?.api_error ? `api error: ${result.api_error}` : (result?.subtype ?? "no result"),
+      stop: result?.api_error
+        ? `api error: ${result.api_error}`
+        : change?.stop?.startsWith("api error")
+          ? change.stop
+          : (result?.subtype ?? "no result"),
       check,
       ...metrics,
+      // The follow-up on its own: calls, errors and cost for the change.
+      change,
     };
     fs.writeFileSync(path.join(dir, "metrics.json"), JSON.stringify(summary, null, 2));
     console.log(
-      `${opts.label} ${taskName}#${index}: ${check.passed}/${check.total} checks, ${metrics.total} calls, ` +
+      `${opts.label} ${taskName}#${index}: ${check.passed}/${check.total} checks, ${metrics.total} calls` +
+        (change ? ` (${change.total} for the change)` : "") +
+        ", " +
         `${metrics.errors.length} errors, ${metrics.outside.length} outside MCP, $${summary.cost?.toFixed(2)}, ${seconds}s`,
     );
     return summary;
