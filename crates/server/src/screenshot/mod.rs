@@ -523,9 +523,8 @@ struct Layout {
     /// How far the board's content reaches, as scroll width and height.
     scroll: [f64; 2],
     client: [f64; 2],
-    /// The board's untransformed size: its computed CSS width and height,
-    /// which keep fractions, unlike `offsetWidth`. With `box-sizing:
-    /// border-box` (see `BASE_CSS`), the same box as `board`.
+    /// The board's untransformed border box, from its computed CSS sizes,
+    /// which keep fractions, unlike `offsetWidth`.
     offset: [f64; 2],
     animated: bool,
     elements: BTreeMap<String, Option<[f64; 4]>>,
@@ -651,6 +650,18 @@ async fn measure(tab: &mut cdp::Tab, artboard: &str, ids: &[&str]) -> Result<Lay
     const r = el.getBoundingClientRect();
     return [r.x + scrollX, r.y + scrollY, r.width, r.height];
   }};
+  // The untransformed border box. Computed sizes keep fractions, unlike
+  // offsetWidth, but follow box-sizing, which an artboard may set.
+  const borderBox = (el) => {{
+    const s = getComputedStyle(el);
+    const px = (...names) => names.reduce((sum, n) => sum + (parseFloat(s[n]) || 0), 0);
+    const [w, h] = [px("width"), px("height")];
+    if (s.boxSizing === "border-box") return [w, h];
+    return [
+      w + px("paddingLeft", "paddingRight", "borderLeftWidth", "borderRightWidth"),
+      h + px("paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"),
+    ];
+  }};
   const board = find({board});
   const elements = {{}};
   for (const id of {ids}) {{
@@ -661,7 +672,7 @@ async fn measure(tab: &mut cdp::Tab, artboard: &str, ids: &[&str]) -> Result<Lay
     board: box(board),
     scroll: [board.scrollWidth, board.scrollHeight],
     client: [board.clientWidth, board.clientHeight],
-    offset: [parseFloat(getComputedStyle(board).width), parseFloat(getComputedStyle(board).height)],
+    offset: borderBox(board),
     animated: document.scripts.length > 0 || document.getAnimations().length > 0,
     elements,
   }};

@@ -317,11 +317,21 @@ async fn revealed_overflow_follows_a_scaled_artboard() {
         reveal_overflow: true,
         ..Default::default()
     };
-    let images = shoot(&doc, vec![Shot::node(&names["Board"])], options)
+    let images = shoot(&doc, vec![Shot::node(&names["Board"])], options.clone())
         .await
         .unwrap();
     let shown = images[0].as_ref().unwrap();
     assert_eq!(shown.area.height, 5000.0);
+
+    // Nor is padding on a content-box artboard: 120px tall, content reaching 320px.
+    let (doc, names) = design(
+        r#"<div data-name="Board" style="width: 200px; height: 100px; padding: 10px; box-sizing: content-box; overflow: hidden"><div style="height: 300px; flex-shrink: 0"></div></div>"#,
+    );
+    let images = shoot(&doc, vec![Shot::node(&names["Board"])], options)
+        .await
+        .unwrap();
+    let shown = images[0].as_ref().unwrap();
+    assert_eq!(shown.area.height, 320.0);
 }
 
 #[tokio::test]
