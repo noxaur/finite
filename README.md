@@ -88,6 +88,7 @@ vp install              # install deps (also downloads the Electron binary)
 vp run dev              # web on http://localhost:5310, Rust API on :4100
 vp run dev:desktop      # same, plus an Electron window pointed at the dev server
 vp run start:desktop    # release build of everything, then Electron with the Rust sidecar
+vp run package:desktop  # package the desktop app for this machine into apps/desktop/release
 vp run test             # cargo test for both crates, plus the web app's Vitest suite
 vp run e2e              # build, start a server, and drive the app in headless Chrome
 vp run e2e:router       # the same checks through a router in front of two servers
@@ -125,6 +126,30 @@ The server saves each design in `FINITE_DATA_DIR/designs/` (default `./data`, so
 
 StyleX compiles through Babel (`apps/web/babel.config.js`) and the StyleX PostCSS plugin (`apps/web/postcss.config.js`). The PostCSS plugin replaces the `@stylex;` line in `src/app/globals.css` with the collected rules. This setup follows StyleX's official Next.js example.
 
+## Releases and updates
+
+The desktop app updates itself, with no prompts. electron-updater looks for a new version at launch, every four hours and when the computer wakes. It downloads the new version in the background and installs it the next time the app quits. It never restarts the app on its own, because agents would lose their MCP sessions. On Windows and Linux, closing the last window quits. On a Mac it doesn't, but choosing Quit, logging out or restarting does. `apps/desktop/src/updates.ts` does all this, and it only runs in a packaged app.
+
+To ship a version, push a tag:
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+`.github/workflows/release.yml` then builds the app on three runners. The Mac runner builds for Apple silicon and Intel, Windows gets an NSIS installer, and Linux gets an AppImage. The tag sets the version, and `apps/desktop/package.json` stays at `0.0.0`. electron-builder (`apps/desktop/electron-builder.yml`) uploads each build, with the `latest*.yml` files the updater reads, to a draft release. Once every platform has uploaded, the last job publishes the draft. So the updater never sees a release with one platform's files missing.
+
+Releases go to `noxaur/finite-releases`, not this repo. This repo is private, and the updater downloads without a token. The workflow needs these secrets:
+
+| Secret                                                  | What it is                                                                                         |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `RELEASES_TOKEN`                                        | A fine-grained token with Contents: read and write on `noxaur/finite-releases`                     |
+| `MAC_CERTIFICATE`, `MAC_CERTIFICATE_PASSWORD`           | A "Developer ID Application" certificate, exported as `.p12` and base64-encoded, and its password  |
+| `APPLE_API_KEY`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER` | An App Store Connect API key (the `.p8` file's text), its key ID and its issuer ID, for notarizing |
+
+`noxaur/finite-releases` has to be public and have at least one commit, because GitHub tags a published release on a commit. The Mac build fails if its secrets are missing. macOS only installs an update signed by the same developer, so an unsigned Mac build could never update. Windows builds are unsigned for now. They update fine, but SmartScreen warns on the first install.
+
+Two other details. On a Mac, an app run from the disk image or from Downloads is read-only, so it can't replace itself. At launch the app offers to move itself to Applications. And `apps/desktop/scripts/stage-server.mjs` builds `finite-server` for each architecture and copies it into `apps/desktop/server/<arch>/`. electron-builder copies it from there, with `apps/web/out` as `web/`, into the app's resources folder, where `main.ts` finds them.
+
 The preload script exposes `window.finite` (platform and versions) to the renderer. Its type lives in `apps/web/src/global.d.ts`. Update both files together.
 
 ## Gotchas
@@ -134,4 +159,4 @@ The preload script exposes `window.finite` (platform and versions) to the render
 - If the server exits with `another Finite server is using …`, a second server is pointed at the same data folder. Stop the other one, or give this one its own `FINITE_DATA_DIR`.
 - With a shared database, a request can get `503` with "the design is moving" for up to one lease after the servers change. The old owner is saving its last snapshot first. Browsers and agents just try again. A server that logs `another live Finite server is using the URL …` shares its `FINITE_NODE_URL` with a running one, and stays out of the cluster until you fix that.
 - If Electron crashes with `Cannot read properties of undefined (reading 'whenReady')`, your shell has `ELECTRON_RUN_AS_NODE=1` set. Electron-based terminals and editors often export it. Run `unset ELECTRON_RUN_AS_NODE` first.
-- Packaging into a `.app`/`.exe` isn't set up yet. When you add electron-builder or Forge, copy `target/release/finite-server` and `apps/web/out` (as `web/`) into the app's resources directory. `apps/desktop/src/main.ts` looks for them there.
+- A Mac build made without signing secrets is unsigned, and it can't update itself. `vp run package:desktop` makes one, which is fine for trying a package. Squirrel.Mac refuses the download with `Code signature … did not pass validation`.

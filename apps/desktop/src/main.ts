@@ -3,6 +3,7 @@ import { createServer } from "node:net";
 import path from "node:path";
 import { app, BrowserWindow, dialog, shell } from "electron";
 import { afterStop } from "./restarts.js";
+import { keepUpToDate, offerMoveToApplications } from "./updates.js";
 
 // `electron . --dev` loads the Next.js dev server; the Rust server runs separately via `vp run dev`.
 const isDev = process.argv.includes("--dev");
@@ -150,6 +151,8 @@ async function createWindow() {
 app
   .whenReady()
   .then(async () => {
+    await offerMoveToApplications();
+    keepUpToDate();
     await createWindow();
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) void createWindow();

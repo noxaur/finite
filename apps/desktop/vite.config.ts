@@ -9,6 +9,8 @@ export default defineConfig({
     target: "node22",
     sourcemap: true,
     dts: false,
-    deps: { neverBundle: ["electron"] },
+    // Bundle everything else, electron-updater included, so the packaged app
+    // ships no node_modules (electron-builder.yml).
+    deps: { neverBundle: ["electron"], onlyBundle: false },
   },
 });
