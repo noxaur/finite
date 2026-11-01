@@ -1,6 +1,6 @@
 # How Finite works
 
-Finite is a design canvas that only agents edit. An agent connects over MCP and sends tool calls like "write this HTML into that artboard". The Rust server turns each call into a few small edits and applies them to the one true copy of the design. Then it streams those edits to every browser that has the design open. Each browser keeps its own copy, applies the same edits, and patches the page.
+Finite is a design canvas that only agents edit. An agent connects over MCP and sends tool calls like "write this HTML into that artboard". The Rust server turns each call into a few small edits and applies them to the one true copy of the design. Then it streams those edits to every browser that has the design open. Each browser keeps its own copy, applies the same edits with the same Rust code compiled to WebAssembly, and patches the page.
 
 If you remember two ideas, make it these. The rest of this guide builds on them.
 
@@ -34,19 +34,21 @@ How far you read depends on what you want:
  ┌─────────── finite-design (Rust, no I/O) ───────────┐
  │  node, document, design, history, edit, html, …    │
  └────────────────────────────────────────────────────┘
+        compiled to WebAssembly by crates/wasm, so the browser runs it too
 ```
 
 That's one server, which is the default. With several, a router sits in front, and each server holds a share of the designs (see "Running more than one server").
 
 You can think of the code as three layers:
 
-| Layer          | Where                 | What it knows                                                        |
-| -------------- | --------------------- | -------------------------------------------------------------------- |
-| Document model | `crates/design`       | Nodes, ops, undo stacks, edit rules, HTML. No network, no disk.      |
-| Server         | `crates/server`       | Who is calling, locking, broadcasting, saving, screenshots.          |
-| Viewer         | `apps/web/src/design` | A copy of the document, the DOM it draws, and the pan-and-zoom view. |
+| Layer          | Where                 | What it knows                                                         |
+| -------------- | --------------------- | --------------------------------------------------------------------- |
+| Document model | `crates/design`       | Nodes, ops, undo stacks, edit rules, HTML. No network, no disk.       |
+| Browser build  | `crates/wasm`         | The document model as `finite.wasm`, with a small API for the viewer. |
+| Server         | `crates/server`       | Who is calling, locking, broadcasting, saving, screenshots.           |
+| Viewer         | `apps/web/src/design` | A copy of the document, the DOM it draws, and the pan-and-zoom view.  |
 
-The document model has no I/O on purpose. You can test it with plain function calls, and it could later compile to WebAssembly so a browser runs the exact same rules.
+The document model has no I/O on purpose. You can test it with plain function calls, and it compiles to WebAssembly, so the browser runs the exact same rules. "One set of rules for server and browser" explains how.
 
 ## A design is a flat map of nodes
 
@@ -121,23 +123,31 @@ Say Alice and Bob are both agents on one design:
 
 The test `undo_only_reverses_own_changes` in `design.rs` runs exactly this.
 
-### The same rules in two languages
+### One set of rules for server and browser
 
-The browser applies ops too, in `Replica` (`apps/web/src/design/replica.ts`), so the rules exist twice: once in Rust and once in TypeScript. A shared **golden file** keeps them in step. `crates/design/fixtures/apply.json` lists cases: starting nodes, a list of ops, and the expected result. The Rust test (`crates/design/tests/conformance.rs`) and the TypeScript test (`apps/web/src/design/conformance.test.ts`) both run every case.
+The browser applies ops too, and it used to do that with a TypeScript copy of the rules. The copies drifted. The first test that compared them found three ways the browser disagreed. It cleared `x` when an op set it to the string `"10"`. It also accepted invalid indexes like `"V0"`, and moves to where a node already was. HTML export drifted too. Screenshots used the indented export, so `<b>Bold</b><i>Italic</i>` showed as "Bold Italic" in a screenshot but "BoldItalic" in the browser.
 
-The expected results come from the Rust rules. To change a rule, you change `document.rs`, add or edit a case in the fixture, and regenerate:
+Now there's one copy. `crates/wasm` compiles `finite-design` to WebAssembly, and the viewer loads it as `finite.wasm`.
+
+`Replica` applies ops by calling the Rust `Document::apply`. Sandboxed artboards render `html::export_for_viewer`, which is the screenshot export plus each element's node id. The renderer checks attributes with `html::is_safe_attr`, and it takes the base CSS and the content policy from `html.rs`. "The viewer" below covers how a call into WebAssembly works.
+
+To change a rule, you change the Rust code. When you run `vp test`, it rebuilds `finite.wasm` before the web tests run, so they test the code you just wrote.
+
+A **golden file** records expected results, and a test compares against it. Once the browser ran the Rust code, comparing two copies of a rule proved nothing, so each golden file now has a narrower job:
+
+- **`crates/design/fixtures/apply.json`** lists op cases: starting nodes, a list of ops, and the expected nodes and sibling order. `crates/design/tests/conformance.rs` checks the Rust rules against it, so a change that alters a result shows up as a diff. `apps/web/src/design/conformance.test.ts` runs the same cases through WebAssembly, one op at a time and as one change. It checks that the viewer's cache of nodes and sibling order ends up where the Rust side does. No Rust test can see that cache.
+- **`crates/design/fixtures/export.json`** records the HTML that screenshots render. `html.test.ts` runs it through the module. One case uses text outside ASCII, so it also checks that text survives the trip as UTF-8.
+- **`crates/design/fixtures/limits.json`** holds the comment limits: 4,000 characters for a comment or reply, and 48 for a person's name. `crates/design/tests/limits.rs` records the Rust constants, and `apps/web/src/lib/limits.test.ts` checks the web app's copies. Those copies are still TypeScript, so this file still guards a real copy. The comment box stops at the same length the server accepts. Before, a longer comment just failed to post.
+
+Two golden files are gone. The attribute cases are a plain table in `crates/design/tests/attributes.rs` now, because there's no second copy to compare. And `export.json` no longer records the base CSS and content policy, because the browser reads them from Rust.
+
+To regenerate a file after you change a rule, run its test with `FINITE_UPDATE_FIXTURES=1`:
 
 ```bash
 FINITE_UPDATE_FIXTURES=1 cargo test -p finite-design --test conformance
 ```
 
-Then `vp test` tells you whether `Replica` agrees. On its first run, it caught three ways it didn't: the browser cleared `x` when an op set it to the string `"10"` (Rust rejects it), and it accepted invalid indexes like `"V0"` and moves to where a node already was.
-
 The formatter skips `crates/*/fixtures`, so a regenerated file only changes where the results did.
-
-The same goes for how an artboard becomes HTML. Screenshots render `html::export_compact` from the Rust side, and sandboxed artboards in the browser render `exportHtml` from `html.ts`. They also share the base CSS and the content policy, which now live in `crates/design/src/html.rs`. `crates/design/fixtures/export.json` holds export cases and both constants, and both test suites check against it. Writing it found a real difference. Screenshots used the indented export that `get_html` shows agents, and the indentation became whitespace between elements. So `<b>Bold</b><i>Italic</i>` showed as "Bold Italic" in a screenshot but "BoldItalic" in the browser. Screenshots now use the compact export.
-
-Another, smaller golden file holds the comment limits: 4,000 characters for a comment or reply, and 48 for a person's name. `crates/design/tests/limits.rs` records the Rust constants in `crates/design/fixtures/limits.json`, and `apps/web/src/lib/limits.test.ts` checks the web app's copies against it. The comment box stops at the same length the server accepts. Before, a longer comment just failed to post.
 
 ## Edit commands: from a tool call to ops
 
@@ -147,7 +157,7 @@ Some of the work these commands do:
 
 - `write_html` parses HTML with `html.rs`, drops anything unsafe (`on*` attributes, `javascript:` URLs, `<iframe>` and the like), and emits one `create` per node. `set_attributes` refuses the same attributes using the same rule (`html::is_safe_attr`). It also refuses names that aren't valid attribute names, because exports write names as they are, and a name like `x" onload="…` would break out of its tag.
 
-A script URL is refused anywhere in a value, not just at its start. SVG animation can set an `href` while the page runs, from a list like `<animate attributeName="href" values="0;javascript:…">`, and an artboard without a script renders in a shadow root on the app's own origin. So a check that only looked at the start of the value let that through, and a click would have run the script as the app. The viewer's renderer checks attributes again before it sets them (`isSafeAttr` in `apps/web/src/design/attributes.ts`). Both sides read the same golden file of cases (`crates/design/fixtures/attributes.json`), and the end-to-end test writes that SVG and checks the attribute never reaches the page.
+A script URL is refused anywhere in a value, not just at its start. SVG animation can set an `href` while the page runs, from a list like `<animate attributeName="href" values="0;javascript:…">`, and an artboard without a script renders in a shadow root on the app's own origin. So a check that only looked at the start of the value let that through, and a click would have run the script as the app. The viewer's renderer checks attributes again before it sets them, with the same function through WebAssembly. The end-to-end test writes that SVG and checks the attribute never reaches the page.
 
 - `update_styles` accepts `backgroundColor` or `background-color`. When you set a shorthand like `padding`, it also clears `padding-top` and friends. Styles are stored as a map, not as ordered CSS, so a leftover longhand would otherwise win.
 - `move_nodes` and `duplicate` pick free canvas space for anything that becomes a new artboard.
@@ -304,7 +314,7 @@ update_styles({ "designId": "k7jo11y14e",
    ```
 
 5. 250 ms later, the change is appended to the design's journal on disk.
-6. In each browser, `Replica` applies the op, and `Renderer` calls `style.setProperty("background-color", "#ff5a1f")` on that one button.
+6. In each browser, `Replica` applies the op through WebAssembly, and `Renderer` calls `style.setProperty("background-color", "#ff5a1f")` on that one button.
 
 ## The viewer
 
@@ -312,11 +322,30 @@ The browser side lives in `apps/web/src/design`. It's plain TypeScript classes, 
 
 - **`socket.ts`** opens the WebSocket, decodes each message with the Effect schemas in `schema.ts`, pings the server to check the connection still works, and reconnects with backoff. A new connection starts with a snapshot. A reconnect asks to resume and usually gets only what it missed (see "Reconnecting without starting over" below).
 - **`DesignSession`** (`session.ts`) owns one open design. It feeds each socket message to the replica, hands every applied op to the renderer, and keeps what the page shows around the canvas: the design's name, presence badges, comments, the activity list and the connection status. It holds all of that in one immutable state object, and `DesignCanvas` re-renders when it changes. The renderer plugs in through a three-method interface (`DesignView`), so `session.test.ts` runs it in Node with a fake renderer.
-- **`Replica`** (`replica.ts`) is the browser's copy of the document. Its `apply` follows the same rules as the Rust `Document::apply`, op for op. Like the Rust child index, it keeps each parent's children sorted, here as a list of ids it updates with a binary search. Before, it sorted the siblings on every call. The renderer asks once per created node, to find where the node's element goes, so writing N siblings cost about N² log N on the page's main thread. A write of 10,000 cards took 1.5 seconds just for those lookups, and the biggest write allowed, 33,000, would have frozen the tab for about 16. Now the 10,000 take 5 ms. `replica.test.ts` adds 10,000 siblings in a shuffled order, deletes and moves some, and checks the order against a plain sort. It returns what it touched, for the renderer.
+- **`Replica`** (`replica.ts`) is the browser's copy of the document. The document itself lives in the module, so `apply` runs the Rust `Document::apply`. Next to it, `Replica` keeps a read cache for the renderer: each node by id, and each parent's children in sibling order. It changes the cache only as the Rust side reports. Loading returns the sibling order, and a create or move says which sibling the node now sits before, so the cache never compares indexes.
+
+  A whole change goes into the module in one call (`applyAll`), however many ops it holds. Then the cache catches up one op at a time. The renderer patches the DOM after each op, so it sees the tree as it was right after that op.
+
+  Finding where a node goes used to be slow. The renderer asks once per created node, to find where its element goes. When the cache sorted the siblings on every call, writing N siblings cost about N² log N. A write of 10,000 cards took 1.5 seconds just for those lookups.
+
+  Now the Rust side says where each node goes. The cache finds that sibling by searching forward from where it last looked, because a write works through siblings in order. `replica.test.ts` adds 10,000 siblings in a shuffled order, deletes and moves some, and checks the order against a plain sort.
+
+- **`wasm.ts`** loads `finite.wasm` and wraps its exports, which are a plain C ABI. To call one, it writes the inputs as UTF-8 into a buffer in the module's memory. Then it calls it with their byte lengths and reads the result from an output buffer. Most inputs and results are JSON. A Rust panic aborts the call, so the wrapper reads the panic message and refuses any later call.
+
+  `wasm.test.ts` checks the boundary: long text outside ASCII, two inputs in one buffer, errors, and freeing a document. Each `Replica` owns a document in the module's memory, which isn't garbage collected, so the canvas and thumbnails free theirs when they close.
+
+  It doesn't use wasm-bindgen, the usual tool for calling Rust from JavaScript. Every call passes strings, so its generated bindings would add little. Its command-line tool must match the crate's version exactly. It also generates the JavaScript and TypeScript, so on a fresh checkout `vp check` would fail until a build ran. Here the only build output is the `.wasm` file, and the glue is one TypeScript file written by hand.
+
+  To add a call, say an edit command for when people can edit, you add an export in `crates/wasm/src/lib.rs` and a method in `wasm.ts`. The inputs are JSON, so that's all the glue a new command needs.
+
 - **`Renderer`** (`renderer.ts`) draws each artboard and patches only the DOM nodes an op touched. An artboard normally renders inside a **shadow root**, which scopes its `<style>` blocks to it and keeps the app's CSS out. An artboard that contains a `<script>` renders in a **sandboxed iframe** instead (`sandbox="allow-scripts"`), with a content security policy that blocks network requests. Iframes can't be patched from outside, so they reload 150 ms after a burst of edits. Designs are view-only, so the renderer cancels clicks and submits on the whole canvas, and a design's links and forms do nothing. One case needs more: `submit` doesn't cross a shadow root's boundary, and a form with a single text field and no button submits on Enter without a click. So each shadow root cancels `submit` itself. The end-to-end test presses Enter in such a form and checks that nothing navigates.
 - **`Camera`** (`camera.ts`) handles pan and zoom with one CSS transform on the canvas. It also converts page coordinates to canvas coordinates (`toWorld`).
 
-How big a design the canvas handles: in headless Chrome on a Mac, a design of 90,000 nodes across 240 artboards opened in 2.5 seconds and panned at about 31 frames per second, the same as one of 30,000 nodes. So the canvas still draws every artboard, including those off screen. Skipping off-screen ones with CSS `content-visibility` would also break "fit to view" for artboards without a fixed height, because the camera measures each artboard's rendered size.
+How big a design the canvas handles: `vp run bench` measures it in headless Chrome against a release server. On a Mac, a design of 90,480 nodes across 240 artboards draws in about 640 ms and pans at about 59 frames per second. So the canvas still draws every artboard, including those off screen. Skipping off-screen ones with CSS `content-visibility` would also break "fit to view" for artboards without a fixed height, because the camera measures each artboard's rendered size.
+
+Running the rules in WebAssembly costs time, because the document now exists twice: in the module and in the cache. With the old TypeScript rules, that design drew in 526 ms, so it's about 115 ms slower now. Most of that is the Rust side reading 14 MB of node JSON and building its document, about 85 ms. Copying the JSON into the module takes another 25 ms.
+
+A `write_html` of 30,000 nodes went from 249 ms to 316 ms, and a 5,000-node thumbnail from 28 ms to 33 ms of main-thread time. The module adds 239 KB to the download, 94 KB gzipped. Panning didn't change. One fix along the way helped the server too. The code serde derives for tagged and flattened types reads each op twice, so `Op` and `Node` now read their fields by hand. That made parsing a change's ops a third faster.
 
 `components/DesignCanvas.tsx` wires these together and adds what's specific to the page: the comment tool, hover outlines, the zoom controls and keyboard shortcuts.
 
@@ -456,7 +485,7 @@ A hub test edits as a named agent. It checks that the design unloads and comes b
 
 The unit tests and golden files check each side on its own. `vp run e2e` checks what a person sees. `vp run e2e:router` runs the same checks through a router in front of two servers, so relayed sockets, the merged design list and refusals passing through the router are covered too. CI runs both. The script lives in `e2e/run.mjs` and has three parts:
 
-1. It builds the server and the web app (`E2E_SKIP_BUILD=1` reuses the last builds), then starts the server on a free port with a throwaway data folder.
+1. It builds the server, `finite.wasm` and the web app. `E2E_SKIP_BUILD=1` reuses the last builds. Then it starts the server on a free port with a throwaway data folder.
 2. It connects an agent over MCP (`e2e/mcp.mjs`) and builds a design: one plain artboard and one with a script, so it renders in a sandbox.
 3. It opens the design in headless Chrome and drives it with the Chrome DevTools Protocol (`e2e/cdp.mjs`): it moves the mouse, clicks, types and reads the page.
 
@@ -555,23 +584,25 @@ The guide explains each limit where it applies. This is the list in one place. M
 
 ## Words used in the code
 
-| Word       | Meaning                                                                          |
-| ---------- | -------------------------------------------------------------------------------- |
-| Design     | One canvas. Also called a canvas in the MCP tools.                               |
-| Artboard   | A top-level node: a fixed-size frame placed on the canvas.                       |
-| Node       | One element or text node.                                                        |
-| Op         | The smallest edit: `create`, `delete`, `set` or `move`.                          |
-| Change     | The ops from one commit, undo or redo, with a `seq`, actor and label.            |
-| Actor      | Whoever made a change: an agent, by its `X-Finite-Agent` name or its session.    |
-| Snapshot   | Everything needed to rebuild a design. Saved to disk and sent on connect.        |
-| Journal    | The records appended to `<id>.log` since the last snapshot.                      |
-| Compaction | Writing a fresh snapshot and deleting the journal, every 1,000 records or 16 MB. |
-| Replica    | The browser's copy of a design.                                                  |
-| Presence   | "Agent X is working on these nodes", shown as a badge.                           |
-| Hub        | The server's index of designs, with the ones in use loaded in memory.            |
-| Room       | The model for loading: a design is in memory only while someone uses it.         |
-| Long poll  | A request that stays open until there's news, like `wait_for_comments`.          |
-| Epoch      | One load of a design on a server. A viewer can resume only within the same one.  |
-| Revision   | A comment's `rev`: it goes up with each change, so the higher copy is newer.     |
-| Owner      | The one server that holds a design, picked by hashing its id.                    |
-| Router     | `finite-server router`: the front door that sends requests to each owner.        |
+| Word        | Meaning                                                                          |
+| ----------- | -------------------------------------------------------------------------------- |
+| Design      | One canvas. Also called a canvas in the MCP tools.                               |
+| Artboard    | A top-level node: a fixed-size frame placed on the canvas.                       |
+| Node        | One element or text node.                                                        |
+| Op          | The smallest edit: `create`, `delete`, `set` or `move`.                          |
+| Change      | The ops from one commit, undo or redo, with a `seq`, actor and label.            |
+| Actor       | Whoever made a change: an agent, by its `X-Finite-Agent` name or its session.    |
+| Snapshot    | Everything needed to rebuild a design. Saved to disk and sent on connect.        |
+| Journal     | The records appended to `<id>.log` since the last snapshot.                      |
+| Compaction  | Writing a fresh snapshot and deleting the journal, every 1,000 records or 16 MB. |
+| Replica     | The browser's copy of a design: the Rust document in WebAssembly, plus a cache.  |
+| WebAssembly | A binary format browsers run. `crates/wasm` compiles the document model to it.   |
+| Golden file | A recorded expected result that a test compares against, like `apply.json`.      |
+| Presence    | "Agent X is working on these nodes", shown as a badge.                           |
+| Hub         | The server's index of designs, with the ones in use loaded in memory.            |
+| Room        | The model for loading: a design is in memory only while someone uses it.         |
+| Long poll   | A request that stays open until there's news, like `wait_for_comments`.          |
+| Epoch       | One load of a design on a server. A viewer can resume only within the same one.  |
+| Revision    | A comment's `rev`: it goes up with each change, so the higher copy is newer.     |
+| Owner       | The one server that holds a design, picked by hashing its id.                    |
+| Router      | `finite-server router`: the front door that sends requests to each owner.        |
