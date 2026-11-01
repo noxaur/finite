@@ -487,6 +487,11 @@ async fn relay_lobby(mut client: WebSocket, mut upstreams: Vec<Upstream>, mut co
         return;
     }
     let mut heartbeat = Heartbeat::new();
+    // Servers ping every `PING_EVERY`. One that's silent for `SILENT_FOR`
+    // is gone without having closed, like a machine that lost power, and its
+    // designs would stop updating while the browser saw nothing wrong. Then
+    // the socket closes, and the browser reconnects to a fresh list.
+    let mut heard = vec![tokio::time::Instant::now(); lists.len()];
     let retry = async {
         if complete {
             std::future::pending::<()>().await;
@@ -498,6 +503,7 @@ async fn relay_lobby(mut client: WebSocket, mut upstreams: Vec<Upstream>, mut co
         tokio::select! {
             next = streams.next() => {
                 let Some((at, message)) = next else { return };
+                heard[at] = tokio::time::Instant::now();
                 // Servers ping too; tungstenite answers them.
                 if let Ok(tungstenite::Message::Ping(_) | tungstenite::Message::Pong(_)) = message {
                     continue;
@@ -526,7 +532,11 @@ async fn relay_lobby(mut client: WebSocket, mut upstreams: Vec<Upstream>, mut co
                 }
             },
             alive = heartbeat.tick() => {
-                if !alive || !heartbeat::send(&mut client, ws::Message::Ping(Default::default())).await {
+                let servers_alive = heard.iter().all(|at| at.elapsed() < heartbeat::SILENT_FOR);
+                if !alive
+                    || !servers_alive
+                    || !heartbeat::send(&mut client, ws::Message::Ping(Default::default())).await
+                {
                     return;
                 }
             }

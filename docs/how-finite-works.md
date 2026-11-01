@@ -350,6 +350,10 @@ Each send also gives up after 60 seconds. A browser that stopped reading fills t
 
 On a router, the router pings the browser itself and answers the server's pings, so the server's pings stop at the router. `tests/heartbeat.rs` runs with Tokio's clock paused, so a minute passes in an instant. Against a server and a router, it checks that a client that stops reading is closed and one that keeps reading stays open. Without the pings, the silent client stayed open. The test also caught a bug: the router's design list relay ended at the first frame that wasn't text. So the first ping from a server would have cut off every browser's design list.
 
+The server's pings also tell the router a server is still there. A design's socket doesn't need that, because the browser's own ping goes through to the server, and no answer means it reconnects. But the router answers the design list's pings itself, so a server that vanished without closing, like a machine that lost power, would leave the browser's list quietly missing its updates. So the router closes the list's socket when a server has sent nothing, pings included, for 60 seconds, and the browser reconnects to a fresh list.
+
+One trap if you write such a test: a paused clock jumps to the next timer whenever every task is waiting on a socket. Then the router's 5-second limit on connecting to a server runs out at once. So the tests connect with the clock running and pause it only for the long wait.
+
 **The browser's end.** After a laptop wakes up on another network, its socket can look open while nothing arrives, and the canvas just stops updating. Browsers answer the server's pings without telling the page, so the page can't use them. So the web app runs its own **heartbeat**, the way Phoenix channels and Socket.IO do:
 
 1. Every 20 seconds, `socket.ts` sends the message `{"type":"ping"}`.
