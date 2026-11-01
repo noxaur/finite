@@ -501,6 +501,10 @@ It needs Chrome. Set `FINITE_CHROME` to its path if it isn't in the usual place.
 
 One trap is worth knowing if you add a check. Comment mode sets `pointer-events: none` on sandboxed iframes, so the page gets the mouse. But Chrome's **input routing** hit-tests the last frame it drew to choose which frame gets the mouse. Until it draws again, the moves still go to the iframe, and the page never sees them. People move the mouse all the time, so they never notice. A script that presses `c` and moves at once does, so the test waits two animation frames first.
 
+`e2e/headless.mjs` uses the same two clients for testing by hand, one command at a time. `start` builds and starts a server on a free port with a throwaway data folder, opens headless Chrome, then leaves a background process running that holds both, along with one MCP session per agent name. It writes the process's port and a random token to `state.json` in a folder under the temp directory, named for the checkout, so agents in different worktrees never share a session. Each later command, like `call`, `click` or `screenshot`, is an HTTP request to that process. It runs the commands one at a time, so two shells can't interleave their clicks. Selectors reach into shadow roots, since that's where artboards render. After 30 minutes without a command, the process stops itself, along with the server and Chrome, so a forgotten session doesn't keep them running.
+
+The requests are plain JSON over HTTP, so other languages can send them too. `e2e/finite_headless.py` is the Python client. It runs `headless.mjs state` once to learn the port and token, then sends each command directly. Every reply carries the text the CLI prints, and commands with data to hand back, like `eval`, `query` and `call`, also send it as `value`.
+
 ## Running more than one server
 
 Each design lives on exactly one server at a time, its **owner**. The owner holds it in memory and saves it, so two servers never edit the same design at once. You can run several servers in two ways:

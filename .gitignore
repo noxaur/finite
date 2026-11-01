@@ -35,5 +35,8 @@ dist-ssr
 # Rust
 target
 
+# Python, from importing e2e/finite_headless.py
+__pycache__/
+
 # Designs saved by a local dev server
 crates/server/data

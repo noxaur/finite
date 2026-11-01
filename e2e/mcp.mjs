@@ -30,19 +30,27 @@ export async function connect(base, agent = "E2E") {
     },
   });
   await post({ jsonrpc: "2.0", method: "notifications/initialized" });
+  const request = async (method, params, label = method) => {
+    const res = await post({ jsonrpc: "2.0", id: id++, method, params });
+    if (!res) throw new Error(`${label}: no response`);
+    if (res.error) throw new Error(`${label}: ${JSON.stringify(res.error)}`);
+    return res.result;
+  };
   return {
     /** Calls a tool and returns its text. Throws if the tool reports an error. */
     async call(name, args = {}) {
-      const res = await post({
-        jsonrpc: "2.0",
-        id: id++,
-        method: "tools/call",
-        params: { name, arguments: args },
-      });
-      if (res.error) throw new Error(`${name}: ${JSON.stringify(res.error)}`);
-      const text = res.result.content.map((c) => c.text ?? "").join("\n");
-      if (res.result.isError) throw new Error(`${name}: ${text}`);
+      const result = await this.callRaw(name, args);
+      const text = result.content.map((c) => c.text ?? "").join("\n");
+      if (result.isError) throw new Error(`${name}: ${text}`);
       return text;
+    },
+    /** Calls a tool and returns its whole result: `content`, with any images, and `isError`. */
+    callRaw(name, args = {}) {
+      return request("tools/call", { name, arguments: args }, name);
+    },
+    /** Lists the server's tools, with their descriptions and input schemas. */
+    async tools() {
+      return (await request("tools/list", {})).tools;
     },
   };
 }
