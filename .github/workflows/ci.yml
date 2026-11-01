@@ -2,10 +2,22 @@
 # that need Postgres against a Postgres service.
 name: CI
 
+# Skips changes that only touch prose. The MCP server's instructions are
+# Markdown compiled into it, so Markdown under crates/ still runs.
 on:
   push:
     branches: [main]
+    paths:
+      - "**"
+      - "!**.md"
+      - "!docs/**"
+      - "crates/**.md"
   pull_request:
+    paths:
+      - "**"
+      - "!**.md"
+      - "!docs/**"
+      - "crates/**.md"
 
 # A new push to a pull request cancels the run for the push before it. Runs
 # on main queue instead, so every commit there gets a result.
@@ -40,12 +52,15 @@ jobs:
           # Pull requests read main's cache but don't save their own, which
           # would push main's out of the repository's 10 GB.
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Saved even when a test fails, so one red run doesn't send the
+          # next one back to compiling everything.
+          cache-on-failure: true
 
       # `vp run ready`, with two changes. Cargo runs directly, not under
       # `vp run`, whose file tracking left Chrome, which the screenshot test
       # starts, without a screenshot (and can't hit its cache on a fresh
       # runner anyway). And the server is built in debug, the build the
-      # end-to-end test runs, rather than in release.
+      # end-to-end test runs. The release build runs on main only.
       - run: vp check
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -56,6 +71,8 @@ jobs:
       - run: vp run -F web -F desktop test
       - run: vp run -F web... -F desktop build
       - run: cargo build -p finite-server
+      - if: github.ref == 'refs/heads/main'
+        run: cargo build --release -p finite-server
 
       - run: vp run e2e
         env:
@@ -110,6 +127,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
       - run: cargo clippy -p finite-server --all-targets --features postgres -- -D warnings
       - run: cargo test -p finite-server --features postgres
       # The end-to-end checks through a router in front of two servers that
