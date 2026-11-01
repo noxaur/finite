@@ -32,7 +32,7 @@ use rmcp::{
 };
 
 use crate::{
-    hub::{Actor, DesignHandle, Hub, SESSION_ACTOR, random_id},
+    hub::{Actor, DesignHandle, Hub, OpenError, SESSION_ACTOR, random_id},
     screenshot,
 };
 
@@ -96,8 +96,7 @@ pub(crate) fn sessions() -> LocalSessionManager {
 
 /// The MCP endpoint as a tower service, to mount at `/mcp`.
 pub fn service(hub: Arc<Hub>) -> StreamableHttpService<FiniteMcp, LocalSessionManager> {
-    let config =
-        StreamableHttpServerConfig::default().with_allowed_hosts(hub.cluster().allowed_hosts());
+    let config = StreamableHttpServerConfig::default().with_allowed_hosts(hub.allowed_hosts());
     StreamableHttpService::new(
         move || Ok(FiniteMcp::new(hub.clone())),
         Arc::new(sessions()),
@@ -223,16 +222,25 @@ impl FiniteMcp {
     async fn design(&self, id: &str) -> Result<Arc<DesignHandle>, CallToolResult> {
         if let Some(owner) = self.hub.elsewhere(id) {
             let mut meta = MetaObject::new();
-            meta.0.insert(OWNER_META.into(), owner.into());
+            meta.0.insert(OWNER_META.into(), owner.clone().into());
             return Err(CallToolResult::error(vec![ContentBlock::text(format!(
                 "design {id:?} lives on another Finite server. Connect to {owner}/mcp to work on it."
             ))])
             .with_meta(Some(meta)));
         }
-        self.hub.open(id).await.ok_or_else(|| {
-            CallToolResult::error(vec![ContentBlock::text(format!(
-                "design {id:?} not found. Call list_designs to see the available ids."
-            ))])
+        if self.hub.cluster().owner(id).is_none() {
+            return Err(CallToolResult::error(vec![ContentBlock::text(
+                "No Finite server is serving designs right now. Try again in a few seconds.",
+            )]));
+        }
+        self.hub.open(id).await.map_err(|error| {
+            let text = match error {
+                OpenError::Busy(_) => format!("design {id:?}: {error}."),
+                _ => {
+                    format!("design {id:?} not found. Call list_designs to see the available ids.")
+                }
+            };
+            CallToolResult::error(vec![ContentBlock::text(text)])
         })
     }
 
@@ -303,7 +311,14 @@ impl FiniteMcp {
 
     #[tool(description = "Create a new, empty design (canvas). Returns its designId.")]
     async fn create_design(&self, Parameters(p): Parameters<CreateDesignParams>) -> ToolResult {
-        let design = self.hub.create(&p.name);
+        let hub = self.hub.clone();
+        let created = tokio::task::spawn_blocking(move || hub.try_create(&p.name)).await;
+        let design = match created.map_err(std::io::Error::other) {
+            Ok(Ok(design)) => design,
+            Ok(Err(error)) | Err(error) => {
+                return fail(format!("Couldn't create the design: {error}"));
+            }
+        };
         ok(format!(
             "Created design {:?} with designId {:?}. Next: find_placement and create_artboard.",
             design.meta.name, design.meta.id

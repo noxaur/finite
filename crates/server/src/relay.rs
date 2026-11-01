@@ -56,7 +56,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::{
-    cluster::Cluster,
+    cluster::Members,
     mcp::params::ListParams,
     mcp::{INSTRUCTIONS, OWNER_META},
     router::UPSTREAM_TIMEOUT,
@@ -66,7 +66,8 @@ type Backend = Arc<RunningService<RoleClient, ()>>;
 
 /// One agent session's connections to the servers.
 pub struct Relay {
-    cluster: Arc<Cluster>,
+    /// The servers, as the router sees them now.
+    members: Arc<Members>,
     /// Shared by every session, so creation takes turns across all agents.
     next: Arc<AtomicUsize>,
     /// A backend session per server, by base URL, opened on first use. That
@@ -79,18 +80,17 @@ pub struct Relay {
 /// The router's MCP endpoint, to mount at `/mcp`. With `sessions`, routers
 /// that share the store can each serve any session.
 pub fn service(
-    cluster: Cluster,
+    members: Arc<Members>,
     sessions: Option<Arc<dyn SessionStore>>,
 ) -> StreamableHttpService<Relay, LocalSessionManager> {
     let mut config =
-        StreamableHttpServerConfig::default().with_allowed_hosts(cluster.allowed_hosts());
+        StreamableHttpServerConfig::default().with_allowed_hosts(members.now().allowed_hosts());
     config.session_store = sessions;
-    let cluster = Arc::new(cluster);
     let next = Arc::new(AtomicUsize::new(0));
     StreamableHttpService::new(
         move || {
             Ok(Relay {
-                cluster: cluster.clone(),
+                members: members.clone(),
                 next: next.clone(),
                 backends: Default::default(),
             })
@@ -241,8 +241,8 @@ impl Relay {
         params: CallToolRequestParams,
         ctx: &RequestContext<RoleServer>,
     ) -> CallToolResult {
-        let calls = self
-            .cluster
+        let cluster = self.members.now();
+        let calls = cluster
             .nodes()
             .iter()
             .map(|base| in_time(base, self.call(base, params.clone(), ctx)));
@@ -258,7 +258,7 @@ impl Relay {
         let mut missing = Vec::new();
         // Whether a server left some out, so the merged list is partial too.
         let mut cut = false;
-        for (base, result) in self.cluster.nodes().iter().zip(join_all(calls).await) {
+        for (base, result) in cluster.nodes().iter().zip(join_all(calls).await) {
             // A server whose call failed answers with its error, not a list.
             let Some(result) = result.ok().filter(|r| r.is_error != Some(true)) else {
                 missing.push(base.as_str());
@@ -274,7 +274,7 @@ impl Relay {
                 }
             }
         }
-        if missing.len() == self.cluster.nodes().len() {
+        if missing.len() == cluster.nodes().len() {
             return CallToolResult::error(vec![ContentBlock::text(format!(
                 "No Finite server answered: {}",
                 missing.join(", ")
@@ -317,7 +317,8 @@ impl ServerHandler for Relay {
         ctx: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let mut last = None;
-        for base in self.cluster.nodes() {
+        let cluster = self.members.now();
+        for base in cluster.nodes() {
             let listed = match self.backend(base, &ctx).await {
                 Ok(backend) => {
                     let list = async {
@@ -335,7 +336,7 @@ impl ServerHandler for Relay {
                 Err(error) => last = Some(error),
             }
         }
-        Err(last.expect("a cluster has at least one server"))
+        Err(last.unwrap_or_else(|| McpError::internal_error("no Finite server is running", None)))
     }
 
     async fn call_tool(
@@ -349,7 +350,14 @@ impl ServerHandler for Relay {
             .and_then(|args| args.get("designId"))
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let nodes = self.cluster.nodes();
+        let cluster = self.members.now();
+        let nodes = cluster.nodes();
+        if nodes.is_empty() {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "No Finite server is running. Try again in a few seconds.",
+            )])
+            .into());
+        }
         let result = match (request.name.as_ref(), design_id) {
             ("list_designs", _) => self.list_designs(request, &ctx).await,
             ("create_design", _) => {
@@ -368,8 +376,8 @@ impl ServerHandler for Relay {
                 created.expect("the last server is always tried")
             }
             (_, Some(id)) => {
-                self.call(self.cluster.owner_url(&id), request, &ctx)
-                    .await?
+                let owner = cluster.owner_url(&id).expect("some server is live");
+                self.call(owner, request, &ctx).await?
             }
             // No designId: let a server report the missing argument.
             (_, None) => self.call(&nodes[0], request, &ctx).await?,

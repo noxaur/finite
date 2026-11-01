@@ -19,9 +19,11 @@ use finite_design::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::{self, error::RecvError};
 
+use crate::cluster::Place;
 use crate::heartbeat::{self, Heartbeat};
 use crate::hub::{
-    AdoptError, DesignHandle, DesignSummary, Hub, LOBBY_LIMIT, Outgoing, Since, is_design_id,
+    AdoptError, DesignHandle, DesignSummary, Hub, LOBBY_LIMIT, OpenError, Outgoing, Since,
+    is_design_id,
 };
 
 /// The largest design another server can hand off. axum's default of 2 MB
@@ -74,8 +76,14 @@ struct CreateDesign {
 async fn create_design(
     State(hub): State<Arc<Hub>>,
     Json(body): Json<CreateDesign>,
-) -> (StatusCode, Json<DesignSummary>) {
-    (StatusCode::CREATED, Json(hub.create(&body.name)))
+) -> Result<(StatusCode, Json<DesignSummary>), ApiError> {
+    let created = tokio::task::spawn_blocking(move || hub.try_create(&body.name))
+        .await
+        .map_err(|e| ApiError::Unavailable(e.to_string()))?;
+    match created {
+        Ok(summary) => Ok((StatusCode::CREATED, Json(summary))),
+        Err(error) => Err(ApiError::Unavailable(error.to_string())),
+    }
 }
 
 /// Why a request failed, as an HTTP response.
@@ -88,6 +96,9 @@ enum ApiError {
         owner: String,
     },
     Unprocessable(String),
+    /// No server can serve the design right now, say while it moves
+    /// between servers. Worth trying again in a moment.
+    Unavailable(String),
 }
 
 impl IntoResponse for ApiError {
@@ -103,6 +114,12 @@ impl IntoResponse for ApiError {
             Self::Unprocessable(message) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, message).into_response()
             }
+            Self::Unavailable(message) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [("retry-after", "1")],
+                message,
+            )
+                .into_response(),
         }
     }
 }
@@ -116,17 +133,27 @@ impl From<CommentError> for ApiError {
     }
 }
 
-/// Opens a design this server owns.
-async fn open(hub: &Hub, id: &str) -> Result<Arc<DesignHandle>, ApiError> {
-    if let Some(owner) = hub.elsewhere(id) {
-        return Err(ApiError::Misdirected {
+/// Refuses a design another server owns, or that no server can serve now.
+fn here(hub: &Hub, id: &str) -> Result<(), ApiError> {
+    match hub.place(id) {
+        Place::Here => Ok(()),
+        Place::Elsewhere(owner) => Err(ApiError::Misdirected {
             id: id.into(),
-            owner: owner.into(),
-        });
+            owner,
+        }),
+        Place::Nowhere => Err(ApiError::Unavailable(
+            "no Finite server is serving designs right now".into(),
+        )),
     }
-    hub.open(id)
-        .await
-        .ok_or_else(|| ApiError::NotFound(format!("design {id:?} not found")))
+}
+
+/// Opens a design this server owns.
+async fn open(hub: &Arc<Hub>, id: &str) -> Result<Arc<DesignHandle>, ApiError> {
+    here(hub, id)?;
+    hub.open(id).await.map_err(|error| match error {
+        OpenError::Busy(_) => ApiError::Unavailable(error.to_string()),
+        _ => ApiError::NotFound(format!("design {id:?} not found")),
+    })
 }
 
 /// A design's snapshot. Thumbnails ask for every design in the list, so this
@@ -135,12 +162,7 @@ async fn get_design(
     State(hub): State<Arc<Hub>>,
     Path(id): Path<String>,
 ) -> Result<Json<Snapshot>, ApiError> {
-    if let Some(owner) = hub.elsewhere(&id) {
-        return Err(ApiError::Misdirected {
-            id,
-            owner: owner.into(),
-        });
-    }
+    here(&hub, &id)?;
     hub.peek(&id)
         .await
         .map(Json)
@@ -171,6 +193,11 @@ async fn adopt(
     match adopted {
         Ok(summary) => (StatusCode::CREATED, Json(summary)).into_response(),
         Err(AdoptError::NotOwner(owner)) => ApiError::Misdirected { id, owner }.into_response(),
+        Err(AdoptError::Shared) => (
+            StatusCode::CONFLICT,
+            "this server shares its store, so designs never need handing off",
+        )
+            .into_response(),
         Err(AdoptError::Exists) => (
             StatusCode::CONFLICT,
             format!("design {id:?} is already here"),
@@ -183,9 +210,9 @@ async fn adopt(
 }
 
 #[derive(Serialize)]
-struct Owner<'a> {
+struct Owner {
     /// The owner's base URL, or `null` when it's this server.
-    owner: Option<&'a str>,
+    owner: Option<String>,
 }
 
 /// Which server owns a design. Any id works, even one not created yet, so a
