@@ -740,8 +740,48 @@ impl DesignHandle {
                     .map(|s| label::clip(&s, label::STATUS))
                     .filter(|s| !s.is_empty()),
                 updated_at: now,
+                automatic: false,
             },
         );
+        let _ = state.events.send(state.presence_message());
+    }
+
+    /// Shows that `actor` is editing `node_ids` (usually artboards), unless
+    /// it already said what it's working on with [`Self::set_presence`]. An
+    /// indicator set this way lasts while the actor keeps editing, and
+    /// expires [`super::AUTO_PRESENCE_TTL`] after its last edit.
+    pub fn show_editing(&self, actor: &Actor, node_ids: Vec<NodeId>) {
+        let mut state = self.lock();
+        let now = now_ms();
+        match state.presence.get_mut(&actor.id) {
+            Some(p) if !p.automatic => return,
+            Some(p) => {
+                p.updated_at = now;
+                let mut changed = false;
+                for id in node_ids {
+                    if !p.node_ids.contains(&id) && p.node_ids.len() < super::PRESENCE_NODES {
+                        p.node_ids.push(id);
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    return;
+                }
+            }
+            None => {
+                state.presence.insert(
+                    actor.id.clone(),
+                    Presence {
+                        actor: actor.id.clone(),
+                        name: actor.name.clone(),
+                        node_ids,
+                        status: None,
+                        updated_at: now,
+                        automatic: true,
+                    },
+                );
+            }
+        }
         let _ = state.events.send(state.presence_message());
     }
 
@@ -769,10 +809,11 @@ impl DesignHandle {
         let mut state = self.raw();
         let Some(state) = state.as_mut() else { return };
         let ttl = PRESENCE_TTL.as_millis() as u64;
+        let auto_ttl = super::AUTO_PRESENCE_TTL.as_millis() as u64;
         let before = state.presence.len();
-        state
-            .presence
-            .retain(|_, p| now.saturating_sub(p.updated_at) < ttl);
+        state.presence.retain(|_, p| {
+            now.saturating_sub(p.updated_at) < if p.automatic { auto_ttl } else { ttl }
+        });
         if state.presence.len() != before {
             let _ = state.events.send(state.presence_message());
         }

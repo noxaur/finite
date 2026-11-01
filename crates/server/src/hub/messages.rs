@@ -25,6 +25,10 @@ pub struct Presence {
     pub node_ids: Vec<NodeId>,
     pub status: Option<String>,
     pub updated_at: u64,
+    /// Set by an edit rather than by start_working_on_nodes, so it expires
+    /// sooner: the agent never said it was done.
+    #[serde(skip)]
+    pub automatic: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

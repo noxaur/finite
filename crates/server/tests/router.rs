@@ -393,7 +393,7 @@ mod relay {
                 .split('#')
                 .nth(1)
                 .unwrap()
-                .split('.')
+                .split(|c: char| !c.is_ascii_alphanumeric())
                 .next()
                 .unwrap()
                 .to_owned();
@@ -638,7 +638,7 @@ mod failover {
             .split('#')
             .nth(1)
             .unwrap()
-            .split('.')
+            .split(|c: char| !c.is_ascii_alphanumeric())
             .next()
             .unwrap()
             .to_owned();
