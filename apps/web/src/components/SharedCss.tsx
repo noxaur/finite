@@ -145,11 +145,7 @@ const styles = stylex.create({
   },
   primary: {
     borderColor: colors.accent,
-    backgroundColor: {
-      default: colors.accent,
-      ":hover": colors.accent,
-      ":disabled": colors.border,
-    },
+    backgroundColor: { default: colors.accent, ":disabled": colors.border },
     color: "white",
     cursor: { default: "pointer", ":disabled": "default" },
   },
