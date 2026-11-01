@@ -489,7 +489,13 @@ The hash is FNV-1a with a final mix. It's spelled out in `cluster.rs` so you can
 
 ### A shared store
 
-Point every server and the router at the same database, and tell each server the URL the others reach it at:
+The Postgres store sits behind a cargo feature, `postgres`, which is off by default. So build the servers and the router with it:
+
+```bash
+cargo build --release -p finite-server --features postgres
+```
+
+Then point every server and the router at the same database, and tell each server the URL the others reach it at:
 
 ```bash
 export FINITE_DATABASE_URL=postgres://finite@db.internal/finite
@@ -500,7 +506,9 @@ finite-server router
 
 The server creates its three tables on first start (`crates/server/src/postgres.rs`). `finite_designs` holds each design's snapshot as JSON, plus two columns for ownership. `finite_journal` holds the journal records, one row each. `finite_nodes` holds one row per server.
 
-The file store stays the default, so the desktop app and a single server never need a database. `FINITE_NODES` and `FINITE_DATABASE_URL` don't mix, and a server refuses to start if you set both.
+The file store stays the default, so the desktop app and a single server never need a database. They don't even compile a database client, because `vp run dev` and the desktop build leave the feature off.
+
+If you set `FINITE_DATABASE_URL` for a build without the feature, it exits with `this finite-server was built without Postgres`. It won't start on a folder of its own, because its designs would never reach the other servers. `tests/no_postgres.rs` checks the server and the router. `FINITE_NODES` and `FINITE_DATABASE_URL` don't mix either, and a server refuses to start if you set both.
 
 Three mechanisms make this safe. Each has a textbook name.
 
@@ -529,9 +537,9 @@ The tests cover each case:
 - `tests/shared.rs` runs two servers in one process over the in-memory store, and over Postgres too when it's configured. It checks that two servers share designs, that a dead server's designs move with every saved edit, that a paused owner can't overwrite the new owner, and that the router follows a moved design. With the token check removed from the stores, the fencing test failed: the store kept the paused server's copy, and the new owner's edit was gone.
 - `tests/failover.rs` does the same with real processes and signals. One test sends `kill -9` to a server, and another freezes the owner with `SIGSTOP` and thaws it with `SIGCONT`. It needs Postgres. After the kill, the router served the design from the other server 1.2 seconds later, with a 1-second lease. Without the token check, the thawed server overwrote the new owner's edit here too.
 
-The Postgres tests need `FINITE_TEST_DATABASE_URL`, and without it they print a note and pass. Each test makes its own schema, so they can run at once. CI runs them against a Postgres service (`.github/workflows/ci.yml`).
+The Postgres tests need the feature and `FINITE_TEST_DATABASE_URL`. Without the variable they print a note and pass. Each test makes its own schema, so they can run at once. CI runs them against a Postgres service (`.github/workflows/ci.yml`).
 
-To run them on a Mac, `brew install postgresql@17` and start it. Then run `FINITE_TEST_DATABASE_URL=postgres://localhost/postgres cargo test -p finite-server`.
+To run them on a Mac, `brew install postgresql@17` and start it. Then run `FINITE_TEST_DATABASE_URL=postgres://localhost/postgres cargo test -p finite-server --features postgres`.
 
 The Postgres store connects without TLS. Run the database on a private network, or put a TLS proxy next to each server.
 

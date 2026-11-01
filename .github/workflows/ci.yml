@@ -42,9 +42,11 @@ jobs:
           path: ${{ runner.temp }}/finite-e2e-failure.png
           if-no-files-found: ignore
 
-  # The tests that need Postgres: the Postgres store's contract, servers that
-  # share one database, and failover with real processes. Without
-  # FINITE_TEST_DATABASE_URL they skip, so the job above doesn't run them.
+  # The Postgres store is behind the `postgres` cargo feature, which the job
+  # above leaves off, like the desktop app. This job turns it on: lint, then
+  # the tests that need Postgres (the store's contract, servers that share
+  # one database, failover with real processes), which skip without
+  # FINITE_TEST_DATABASE_URL.
   shared-store:
     runs-on: ubuntu-24.04
     services:
@@ -64,5 +66,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p finite-server
+      - run: cargo clippy -p finite-server --all-targets --features postgres -- -D warnings
+      - run: cargo test -p finite-server --features postgres

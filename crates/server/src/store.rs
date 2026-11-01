@@ -65,7 +65,8 @@ pub fn is_fenced(error: &io::Error) -> bool {
 /// however large the design is. Now and then it writes a full snapshot with
 /// [`Store::save`], which replaces the journal.
 ///
-/// Several servers can share one store, like [`crate::postgres::PgStore`].
+/// Several servers can share one store, like the Postgres store
+/// (`postgres::PgStore`, built with the `postgres` feature).
 /// Then a server takes a design's lease with [`Store::claim`] before it loads
 /// it, and every write carries the fencing token it got. A store only one
 /// server uses, like [`FileStore`], can keep the defaults: its claims always

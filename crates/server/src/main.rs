@@ -3,8 +3,7 @@ use std::{net::SocketAddr, sync::Arc};
 use finite_server::{
     Hub,
     cluster::{self, Cluster, Lease, Members},
-    postgres::PgStore,
-    store::FileStore,
+    store::{FileStore, Registry, Store},
 };
 use tracing_subscriber::EnvFilter;
 
@@ -30,13 +29,10 @@ async fn main() -> std::io::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("router") {
         let members = match &database {
             Some(url) => {
-                let store = PgStore::connect(url, "router", lease.0)
-                    .unwrap_or_else(|error| fail(format!("couldn't open the database: {error}")));
-                let store = Arc::new(store);
-                use finite_server::store::Registry;
-                let live = store.live()?;
+                let (_, registry) = shared_store(url, "router", lease);
+                let live = registry.live()?;
                 let members = Arc::new(Members::fixed(Cluster::observer(live)));
-                cluster::follow(members.clone(), store, lease.every());
+                cluster::follow(members.clone(), registry, lease.every());
                 members
             }
             None => {
@@ -76,10 +72,8 @@ async fn main() -> std::io::Result<()> {
                     "FINITE_NODE_URL must look like http://10.0.0.2:4100, not {me:?}"
                 ));
             }
-            let store = PgStore::connect(url, &me, lease.0)
-                .unwrap_or_else(|error| fail(format!("couldn't open the database: {error}")));
-            let store = Arc::new(store);
-            let hub = Hub::shared(store.clone(), store, &me, lease)?;
+            let (store, registry) = shared_store(url, &me, lease);
+            let hub = Hub::shared(store, registry, &me, lease)?;
             tracing::info!(
                 me,
                 designs = hub.list().len(),
@@ -117,6 +111,27 @@ async fn main() -> std::io::Result<()> {
         .map_err(std::io::Error::other)?;
     tracing::info!("saved every open design; bye");
     Ok(())
+}
+
+/// The Postgres store at `url`, as the server at `me`: its designs, and the
+/// heartbeats of the servers that share it.
+#[cfg(feature = "postgres")]
+fn shared_store(url: &str, me: &str, lease: Lease) -> (Arc<dyn Store>, Arc<dyn Registry>) {
+    let store = finite_server::postgres::PgStore::connect(url, me, lease.0)
+        .unwrap_or_else(|error| fail(format!("couldn't open the database: {error}")));
+    let store = Arc::new(store);
+    (store.clone(), store)
+}
+
+/// Without the `postgres` feature, there's no shared store to open. A
+/// database URL that was set on purpose must not be ignored: the server would
+/// start on its own folder, and its designs would never reach the others.
+#[cfg(not(feature = "postgres"))]
+fn shared_store(_: &str, _: &str, _: Lease) -> (Arc<dyn Store>, Arc<dyn Registry>) {
+    fail(
+        "FINITE_DATABASE_URL is set, but this finite-server was built without Postgres. \
+         Build it with `cargo build -p finite-server --features postgres`, or unset FINITE_DATABASE_URL.",
+    )
 }
 
 fn fail(error: impl std::fmt::Display) -> ! {

@@ -4,8 +4,9 @@
 //! `SIGSTOP` and thawed with `SIGCONT`, and the router keeps serving its
 //! designs from the other.
 //!
-//! These need Postgres: set `FINITE_TEST_DATABASE_URL`. Without it they skip.
-#![cfg(unix)]
+//! These need Postgres: build with `--features postgres` and set
+//! `FINITE_TEST_DATABASE_URL`. Without the variable they skip.
+#![cfg(all(unix, feature = "postgres"))]
 
 use std::{
     process::{Child, Command, Stdio},
