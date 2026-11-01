@@ -194,6 +194,10 @@ try {
     source: `const Native = WebSocket; window.__sockets = []; window.WebSocket = class extends Native { constructor(...args) { super(...args); __sockets.push(this); } };`,
   });
   await page.goto(`${base}/design/?id=${design}`);
+  // Rendering can outlast goto's wait on a busy machine.
+  await page
+    .until(`document.querySelectorAll("[data-artboard]").length === 2`, 10_000)
+    .catch(() => {});
   check(
     "both artboards render",
     (await page.eval(`document.querySelectorAll("[data-artboard]").length`)) === 2,
@@ -510,6 +514,7 @@ try {
   const fetches = `performance.getEntriesByType("resource").filter((e) => e.name.endsWith("/api/designs/${design}")).length`;
   await page.sleep(1000);
   const fetchedBefore = await page.eval(fetches);
+  const editsStarted = Date.now();
   for (let i = 0; i < 6; i++) {
     await agent.call("update_styles", {
       designId: design,
@@ -517,12 +522,15 @@ try {
     });
     await page.sleep(400);
   }
+  // About 2.4 s, longer on a busy machine: one fetch per 2 s of it, plus
+  // the first and the last.
+  const editing = Date.now() - editsStarted;
   await page.sleep(2500);
   const thumbnailFetches = (await page.eval(fetches)) - fetchedBefore;
   check(
     "a thumbnail refetches at most every 2 seconds",
-    thumbnailFetches >= 1 && thumbnailFetches <= 3,
-    `${thumbnailFetches} fetches for 6 edits over 2.4 s`,
+    thumbnailFetches >= 1 && thumbnailFetches <= Math.floor(editing / 2000) + 2,
+    `${thumbnailFetches} fetches for 6 edits over ${(editing / 1000).toFixed(1)} s`,
   );
   // A design too big to preview shows its size, and stops being fetched.
   const huge = (await agent.call("create_design", { name: "Huge" })).match(

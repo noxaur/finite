@@ -118,8 +118,10 @@ jobs:
         run: |
           e2e() {
             # Its own TMPDIR, so a failure's screenshot isn't overwritten.
-            mkdir -p "$RUNNER_TEMP/$1"
-            TMPDIR="$RUNNER_TEMP/$1" vp run "$1" > "$RUNNER_TEMP/$1.log" 2>&1
+            # Named without the colon, which artifact paths can't contain.
+            local dir="$RUNNER_TEMP/${1/:/-}"
+            mkdir -p "$dir"
+            TMPDIR="$dir" vp run "$1" > "$RUNNER_TEMP/$1.log" 2>&1
           }
           E2E_SERVER="$RUNNER_TEMP/finite-server" e2e e2e & one=$!
           E2E_SERVER="$RUNNER_TEMP/finite-server" e2e e2e:router & router=$!
