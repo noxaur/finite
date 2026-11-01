@@ -13,6 +13,7 @@ How far you read depends on what you want:
 - **To change the browser side,** read "The viewer" and "Comments". "The viewer" ends with how a browser reconnects without starting over, and how each end notices a connection that died silently.
 - **To run it for real,** read "Saving and recovering". It covers what's saved, when, and what survives a crash, undo included.
 - **To test a change the way a person sees it,** read "The end-to-end test".
+- **To look up a limit,** like how many nodes a design holds, see "Limits at a glance" near the end.
 - **To run more than one server,** read "Running more than one server" at the end. One server is the default, and you can skip that section until you need it.
 
 "Words used in the code" at the very end is a glossary for when a term isn't clear.
@@ -497,6 +498,32 @@ Those relayed sessions are the router's only state, and they can be shared. Give
 Undo has to survive that move too, so the backends must see the same actor whichever router relays the call. An agent that sends `X-Finite-Agent` keeps that name. An agent that doesn't is identified by its router session id (`relay:<id>`), which every router sees the same way, and is shown under its client's name. `tests/router.rs` moves one session from one router to another mid-conversation and undoes, on the second router, an edit made through the first. With the identity switched off, that same test finds "Nothing to undo". Without a shared directory, a second router answers `404` for a session it doesn't know, and MCP clients respond by starting a new session.
 
 MCP rejects requests whose `Host` header it doesn't know, to block **DNS rebinding**: a trick where a web page gets a browser to send requests to a server on your machine. By default it only accepts `localhost`, `127.0.0.1` and `::1`. Servers and routers also accept every host in `FINITE_NODES`, and any names you list in `FINITE_ALLOWED_HOSTS`, such as `finite.example.com`. Without that, a server at `10.0.0.2` would reject the router's calls.
+
+## Limits at a glance
+
+Each limit is explained where it applies. This is the list in one place. Most are one constant, so changing one is a one-line edit plus its test.
+
+| What                                   | Limit                                                             | Where it's set                          | Why                                                         |
+| -------------------------------------- | ----------------------------------------------------------------- | --------------------------------------- | ----------------------------------------------------------- |
+| Nodes in a design                      | 100,000                                                           | `MAX_NODES` in `document.rs`            | Every node is journaled, held in memory and sent to viewers |
+| Nesting depth                          | 256 levels                                                        | `MAX_DEPTH` in `document.rs`            | Tree walks are recursive; deeper overflowed the stack       |
+| HTML nesting before parsing            | 4,096 by a quick count                                            | `html::parse`                           | html5ever is quadratic in depth                             |
+| Undo steps per actor and stack         | 200 steps, about 32 MB                                            | `History::LIMIT`, `History::BYTE_LIMIT` | Undoing a big delete recreates every node in it             |
+| Undo for a named agent                 | 6 idle hours                                                      | `HISTORY_TTL` in `hub/mod.rs`           | Histories keep memory and snapshots busy                    |
+| Idle MCP session                       | 1 hour                                                            | `SESSION_IDLE` in `mcp/mod.rs`          | An unnamed agent's undo ends with its session               |
+| Open comments per design               | 500                                                               | `MAX_OPEN` in `comment.rs`              | Anyone who can see a design can comment                     |
+| Messages per comment thread            | 200                                                               | `MAX_MESSAGES` in `comment.rs`          | Same reason                                                 |
+| Comment length, author name            | 4,000 and 48 characters                                           | `MAX_BODY`, `MAX_NAME` in `comment.rs`  | Shared with the web app through a golden file               |
+| Layer, design and status names         | 120 characters                                                    | `label.rs`                              | Every viewer shows them; cut rather than refused            |
+| Presence                               | 100 nodes, 5 idle minutes                                         | `PRESENCE_NODES`, `PRESENCE_TTL`        | Every viewer gets the list on each update                   |
+| One tool result                        | 60,000 characters                                                 | `OUTPUT_LIMIT` in `mcp/format.rs`       | Claude Code cuts at 25,000 tokens wherever that falls       |
+| `list_designs`, `get_children` pages   | 200 entries                                                       | `ListParams`, `ChildrenParams`          | 200 always fit in one result                                |
+| Screenshot size                        | 3,000 pixels on the longer side                                   | `MAX_OUTPUT_SIDE` in `screenshot.rs`    | The Claude API's limit once a request has 20+ images        |
+| Browsers rendering screenshots at once | Half the cores, 1 to 4                                            | `browsers()` in `screenshot.rs`         | Each capture starts its own Chrome                          |
+| Journal before compaction              | 1,000 records or 16 MB                                            | `COMPACT_AFTER`, `COMPACT_BYTES`        | A load replays the whole journal                            |
+| Handoff body                           | 256 MB                                                            | `HANDOFF_LIMIT` in `api.rs`             | A handoff carries a whole design; other routes keep 2 MB    |
+| Design list in the browser             | 200 newest                                                        | `LOBBY_LIMIT`, `mergeLobby`             | The rest are a search away                                  |
+| Silent WebSocket                       | Closed after 60 s; the page gives up after 10 s without an answer | `heartbeat.rs`, `socket.ts`             | Half-open connections never close on their own              |
 
 ## Words used in the code
 
