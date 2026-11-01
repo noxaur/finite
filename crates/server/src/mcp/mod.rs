@@ -323,9 +323,10 @@ impl FiniteMcp {
         let presence = handle.presence();
         let info = handle.read(|design| {
             let doc = design.doc();
-            let artboards: Vec<_> = doc
-                .artboards()
-                .into_iter()
+            let all = doc.artboards();
+            let artboards: Vec<_> = all
+                .iter()
+                .take(ChildrenParams::PAGE)
                 .map(|a| {
                     let (w, h) = edit::pixel_size(a);
                     serde_json::json!({
@@ -343,12 +344,22 @@ impl FiniteMcp {
                 "designId": design.meta.id,
                 "name": design.meta.name,
                 "nodeCount": doc.len(),
+                "artboardCount": all.len(),
                 "artboards": artboards,
                 "agentsWorking": presence,
                 "openComments": design.comments().iter().filter(|c| !c.resolved).count(),
             })
         });
-        json(info)
+        let count = info["artboardCount"].as_u64().unwrap_or(0) as usize;
+        Ok(CallToolResult::success(with_note(
+            ContentBlock::text(serde_json::to_string_pretty(&info).expect("json values serialize")),
+            (count > ChildrenParams::PAGE).then(|| {
+                format!(
+                    "Showing {} of {count} artboards. get_children without a nodeId pages through them all.",
+                    ChildrenParams::PAGE
+                )
+            }),
+        )))
     }
 
     #[tool(

@@ -729,3 +729,36 @@ async fn the_longest_design_list_fits() {
     assert!(list.len() < 60_000, "{} chars", list.len());
     assert!(list.contains("of 250 designs"), "{}", tail(&list));
 }
+
+/// A design with hundreds of artboards lists 200 of them in its overview.
+#[tokio::test]
+async fn an_overview_lists_at_most_200_artboards() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Alice").await;
+    let created = agent.ok("create_design", json!({ "name": "Wall" })).await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .unwrap()
+        .to_owned();
+    for i in 0..250 {
+        agent
+            .ok(
+                "create_artboard",
+                json!({ "designId": design, "name": format!("Tile {i}"), "width": 100, "height": 100 }),
+            )
+            .await;
+    }
+    let info = agent
+        .ok("get_basic_info", json!({ "designId": design }))
+        .await;
+    let json_end = info.rfind('}').unwrap() + 1;
+    let overview: Value = serde_json::from_str(&info[..json_end]).unwrap();
+    assert_eq!(overview["artboardCount"], 250);
+    assert_eq!(overview["artboards"].as_array().unwrap().len(), 200);
+    assert!(
+        info.ends_with("get_children without a nodeId pages through them all."),
+        "{}",
+        tail(&info)
+    );
+}
