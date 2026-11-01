@@ -26,6 +26,13 @@ jobs:
       # First, since the server's screenshot test starts Chrome too.
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - uses: actions/checkout@v5
+      # TEMP: why the screenshot test gets no PNG.
+      - run: |
+          google-chrome --version; ls -la /usr/bin/google-chrome; readlink -f /usr/bin/google-chrome
+          d=$(mktemp -d); echo '<!doctype html><body style="margin:0;background:#000">x</body>' > $d/index.html
+          for size in 540,3000 800,600; do
+            timeout 30 google-chrome --headless --disable-gpu --hide-scrollbars --no-first-run --no-default-browser-check --mute-audio --user-data-dir=$d/profile-$size --window-size=$size --force-device-scale-factor=1 --virtual-time-budget=3000 --screenshot=$d/shot-$size.png file://$d/index.html; echo "exit $?"; ls -la $d
+          done
       - uses: voidzero-dev/setup-vp@v1.21.2
         with:
           node-version: "24"
