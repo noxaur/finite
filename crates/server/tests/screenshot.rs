@@ -173,7 +173,11 @@ async fn shots_crop_to_their_node_with_padding_and_regions() {
     assert_eq!(board.area, Rect::new(0.0, 0.0, 400.0, 300.0));
     let png = Png::of(board);
     assert_eq!((png.width, png.height), (400, 300));
-    assert_eq!(png.rgb(60, 70), RED);
+    assert_eq!(
+        png.rgb(120, 120),
+        RED,
+        "inside the red box, clear of its text"
+    );
     assert_eq!(png.rgb(10, 10), WHITE);
 
     let red = red.as_ref().unwrap();
