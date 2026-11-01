@@ -339,12 +339,14 @@ async fn two_servers_share_one_store() {
             })
             .await;
         }
+        // B answers for A's designs from the store before it adds them to
+        // its list, so the list can trail by a moment.
+        eventually("B lists every design", || async { b.hub.list().len() == 8 }).await;
         assert!(
             left.elapsed() < lease.0 / 2,
             "B took over at once, not after A's lease: {:?}",
             left.elapsed()
         );
-        assert_eq!(b.hub.list().len(), 8, "B lists every design now");
         b.kill();
     }
 }
@@ -371,7 +373,10 @@ async fn a_dead_servers_designs_move_to_the_survivor() {
                 == Some(vec!["One".into(), "Two".into(), "Three".into()])
         })
         .await;
-        assert!(b.hub.list().iter().any(|d| d.meta.id == id));
+        eventually("B lists A's design", || async {
+            b.hub.list().iter().any(|d| d.meta.id == id)
+        })
+        .await;
         b.kill();
     }
 }

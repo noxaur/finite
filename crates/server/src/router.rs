@@ -93,12 +93,30 @@ pub fn app_with_members(
     static_dir: Option<&str>,
     sessions: Option<Arc<dyn SessionStore>>,
 ) -> Router {
+    build(members, static_dir, sessions, SILENT_SERVER)
+}
+
+/// Like [`app`], with a request failing after `silence` without a byte from
+/// its server, instead of [`SILENT_SERVER`]. For tests, so a stuck server
+/// doesn't hold one up for 30 seconds.
+pub fn app_with_silence(nodes: Vec<String>, silence: std::time::Duration) -> Router {
+    assert!(!nodes.is_empty(), "the router needs at least one server");
+    let members = Arc::new(Members::fixed(Cluster::observer(nodes)));
+    build(members, None, None, silence)
+}
+
+fn build(
+    members: Arc<Members>,
+    static_dir: Option<&str>,
+    sessions: Option<Arc<dyn SessionStore>>,
+    silence: std::time::Duration,
+) -> Router {
     let allowed: Arc<[String]> = members.now().allowed_hosts().into();
     let front = Arc::new(Front {
         members: members.clone(),
         http: reqwest::Client::builder()
             .connect_timeout(UPSTREAM_TIMEOUT)
-            .read_timeout(SILENT_SERVER)
+            .read_timeout(silence)
             .build()
             .expect("the HTTP client builds"),
         next: AtomicUsize::new(0),
@@ -336,7 +354,7 @@ pub(crate) const UPSTREAM_TIMEOUT: std::time::Duration = std::time::Duration::fr
 /// new comment, waited forever. It's a limit on silence, not on the whole
 /// request, so a large design still downloads however long it takes. Opening
 /// a large design from disk can take a few seconds before the first byte.
-const SILENT_SERVER: std::time::Duration = std::time::Duration::from_secs(30);
+pub const SILENT_SERVER: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Opens a server's WebSocket. A server sends a design's snapshot as one
 /// frame, and tungstenite refuses frames over 16 MB by default, which would

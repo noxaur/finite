@@ -50,7 +50,9 @@ describe("Replica", () => {
       .map((k) => k.id);
     expect(r.children("c").map((n) => n.id)).toEqual(expected);
     expect([...r.siblingsAfter(expected[9_000]!)].map((n) => n.id)).toEqual(expected.slice(9_001));
-    expect(took).toBeLessThan(1_000);
+    // It takes about 75 ms here, and over 1 s on CI while Cargo builds
+    // alongside. Sorting per insert would take tens of seconds.
+    expect(took).toBeLessThan(5_000);
   });
 
   it("applies a whole change in one call, and the cache follows op by op", () => {
