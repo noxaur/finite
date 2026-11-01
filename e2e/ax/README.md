@@ -44,9 +44,9 @@ Sonnet 5.5 at high effort compared Finite with Paper, Figma, Pencil, Penpot, Fra
 | rebrand   | 11.3 / $0.11, read 11.8k chars | 5.7 / $0.05, read 4.0k  |
 | screens   | 14.0 / $0.11                   | 6.3 / $0.08             |
 | mobile    | 14.7 / $0.13                   | 8.3 / $0.10             |
-| ui-states | 45.3 / $0.65, 0.3 errors       | 32.0 / $0.61, no errors |
+| ui-states | 45.3 / $0.65, 0.3 errors       | 25.0 / $0.50, no errors |
 
-"After" is the final build. Its ui-states row comes from the round before the instructions fix, with the same tools. Grades stayed level, at 7 to 8 for quality. What made the difference:
+"After" is the final build. Grades stayed level, at 7 to 8 for quality. What made the difference:
 
 - **Search.** Before `find_nodes` and `replace_values`, agents read every artboard's HTML and picked out each color by eye. Every run's feedback asked for search, and nothing told them whether they'd found every use.
 - **A screen in one call.** `create_artboard` takes `html` now. Agents used to call `find_placement`, `create_artboard`, `start_working_on_nodes` and `write_html` before any content existed.
