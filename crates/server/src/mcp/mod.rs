@@ -55,7 +55,45 @@ pub(crate) fn more_designs(shown: usize, total: usize) -> String {
 
 pub const OWNER_META: &str = "finite/owner";
 
-pub(crate) const INSTRUCTIONS: &str = include_str!("instructions.md");
+const INSTRUCTIONS: &str = include_str!("instructions.md");
+
+/// What the search tools add to the instructions.
+const SEARCH_INSTRUCTIONS: &str = "Search: find_nodes finds elements by text, name, tag, CSS or attribute, across artboards and <style> blocks. replace_values changes a value everywhere in one call, like a brand color in any notation. Use them instead of reading whole artboards.";
+
+/// Whether `FINITE_MCP_EXTRA` (a comma-separated list) turns on a group of
+/// experimental tools, like the `shared-styles` demo. AX experiments
+/// (`e2e/ax`) compare agents with and without a group before it ships to
+/// everyone, as the search tools did.
+pub(crate) fn extra(group: &str) -> bool {
+    static EXTRA: OnceLock<Vec<String>> = OnceLock::new();
+    EXTRA
+        .get_or_init(|| {
+            std::env::var("FINITE_MCP_EXTRA")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .iter()
+        .any(|g| g == group)
+}
+
+/// What agents see when they connect, with a section for each extra tool group.
+pub(crate) fn instructions() -> &'static str {
+    static TEXT: OnceLock<String> = OnceLock::new();
+    TEXT.get_or_init(|| {
+        let mut text = INSTRUCTIONS.trim_end().to_owned();
+        text.push_str("\n\n");
+        text.push_str(SEARCH_INSTRUCTIONS);
+        if extra("shared-styles") {
+            text.push_str("\n\n");
+            text.push_str(demo::INSTRUCTIONS);
+        }
+        text.push('\n');
+        text
+    })
+}
 
 #[derive(Clone)]
 pub struct FiniteMcp {
@@ -84,8 +122,7 @@ impl Drop for SessionGuard {
 /// short pause for an agent waiting on a person, so allow an hour.
 pub const SESSION_IDLE: Duration = Duration::from_secs(60 * 60);
 
-/// The most nodes one agent's presence can name.
-const PRESENCE_NODES: usize = 100;
+use crate::hub::PRESENCE_NODES;
 
 /// A session manager whose sessions close after [`SESSION_IDLE`].
 pub(crate) fn sessions() -> LocalSessionManager {
@@ -163,7 +200,89 @@ fn describe(change: Option<&Change>) -> &'static str {
     }
 }
 
+/// How many changed nodes an edit's result names before it just counts them.
+const CHANGED_NAMED: usize = 12;
+
+/// What an edit changed: how many values on which nodes, with each node's
+/// outline line, so an agent can check its ids hit what it meant without
+/// reading the tree again. `requested` is how many nodes the call named.
+fn changed(handle: &DesignHandle, change: Option<&Change>, requested: usize) -> String {
+    let Some(change) = change else {
+        return describe(None).into();
+    };
+    handle.read(|d| {
+        let doc = d.doc();
+        let mut seen = std::collections::HashSet::new();
+        let mut nodes = Vec::new();
+        for op in &change.ops {
+            // A text edit changes a text node; name the element it's in.
+            let id = match doc.get(op.id()) {
+                Some(n) if n.kind == NodeKind::Text => n.parent.as_deref().unwrap_or(op.id()),
+                _ => op.id(),
+            };
+            if doc.contains(id) && seen.insert(id.to_owned()) {
+                nodes.push(id.to_owned());
+            }
+        }
+        let values = change
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Set { .. }))
+            .count();
+        let mut text = if values > 0 {
+            format!(
+                "Changed {values} value{} on {} node{}",
+                if values == 1 { "" } else { "s" },
+                nodes.len(),
+                if nodes.len() == 1 { "" } else { "s" }
+            )
+        } else {
+            format!(
+                "Changed {} node{}",
+                nodes.len(),
+                if nodes.len() == 1 { "" } else { "s" }
+            )
+        };
+        if requested > nodes.len() {
+            let _ = std::fmt::Write::write_fmt(
+                &mut text,
+                format_args!(
+                    " ({} of the {requested} you named already looked like that)",
+                    requested - nodes.len()
+                ),
+            );
+        }
+        text.push(':');
+        for id in nodes.iter().take(CHANGED_NAMED) {
+            text.push_str("\n  ");
+            text.push_str(outline(doc, id, 0).lines().next().unwrap_or("").trim());
+        }
+        if nodes.len() > CHANGED_NAMED {
+            let _ = std::fmt::Write::write_fmt(
+                &mut text,
+                format_args!("\n  … and {} more", nodes.len() - CHANGED_NAMED),
+            );
+        }
+        text
+    })
+}
+
+/// How many different nodes a batch of updates names.
+fn distinct<'a>(ids: impl Iterator<Item = &'a String>) -> usize {
+    ids.collect::<std::collections::HashSet<_>>().len()
+}
+
 impl FiniteMcp {
+    /// Every tool, with the [`extra`] groups that are turned on.
+    fn tools() -> ToolRouter<Self> {
+        let mut router = Self::tool_router();
+        router.merge(Self::search_router());
+        if extra("shared-styles") {
+            router.merge(Self::demo_router());
+        }
+        router
+    }
+
     pub fn new(hub: Arc<Hub>) -> Self {
         Self {
             session: Arc::new(SessionGuard {
@@ -171,7 +290,7 @@ impl FiniteMcp {
                 actor: OnceLock::new(),
             }),
             hub,
-            tool_router: Self::tool_router(),
+            tool_router: Self::tools(),
         }
     }
 
@@ -257,10 +376,40 @@ impl FiniteMcp {
             Ok(handle) => handle,
             Err(result) => return Ok(result),
         };
-        match handle.edit(&self.actor(ctx), label, build) {
-            Ok((output, change)) => ok(report(&handle, output, change.as_ref())),
+        let actor = self.actor(ctx);
+        match handle.edit(&actor, label, build) {
+            Ok((output, change)) => {
+                if let Some(change) = &change {
+                    show_working(&handle, &actor, change);
+                }
+                ok(report(&handle, output, change.as_ref()))
+            }
             Err(error) => fail(error.to_string()),
         }
+    }
+}
+
+/// Shows users which artboards an agent is editing, if it hasn't said with
+/// start_working_on_nodes. Most agents skipped that call, so viewers saw
+/// edits land with no one named. The indicator goes a minute after the
+/// agent's last edit, or on finish_working_on_nodes.
+fn show_working(handle: &DesignHandle, actor: &Actor, change: &Change) {
+    let boards: Vec<String> = handle.read(|d| {
+        let mut boards = Vec::new();
+        for op in &change.ops {
+            if let Some(board) = d.doc().artboard_of(op.id())
+                && !boards.contains(&board.id)
+            {
+                boards.push(board.id.clone());
+            }
+            if boards.len() >= PRESENCE_NODES {
+                break;
+            }
+        }
+        boards
+    });
+    if !boards.is_empty() {
+        handle.show_editing(actor, boards);
     }
 }
 
@@ -272,6 +421,9 @@ macro_rules! design {
         }
     };
 }
+
+mod demo;
+mod search;
 
 #[tool_router]
 impl FiniteMcp {
@@ -320,7 +472,7 @@ impl FiniteMcp {
             }
         };
         ok(format!(
-            "Created design {:?} with designId {:?}. Next: find_placement and create_artboard.",
+            "Created design {:?} with designId {:?}. Next: create_artboard.",
             design.meta.name, design.meta.id
         ))
     }
@@ -368,6 +520,13 @@ impl FiniteMcp {
                 "openComments": design.comments().iter().filter(|c| !c.resolved).count(),
             })
         });
+        let mut info = info;
+        if extra("shared-styles") {
+            // So agents needn't call get_shared_css to find out there's none.
+            info["sharedCssChars"] = demo::shared_css(&p.design_id)
+                .map_or(0, |css| css.len())
+                .into();
+        }
         let count = info["artboardCount"].as_u64().unwrap_or(0) as usize;
         Ok(CallToolResult::success(with_note(
             ContentBlock::text(serde_json::to_string_pretty(&info).expect("json values serialize")),
@@ -521,40 +680,96 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Render an artboard to a PNG image to check how it looks. Pass the artboard id or any node inside it.",
+        description = "Render artboards to PNG images to check how they look, with a layout check that names anything cut off by the artboard's edge or text that overflows its box. Pass nodeId for one artboard, or nodeIds for up to 6 in one call; any node inside an artboard captures the whole artboard.",
         annotations(read_only_hint = true)
     )]
     async fn get_screenshot(&self, Parameters(p): Parameters<ScreenshotParams>) -> ToolResult {
         let handle = design!(self, &p.design_id);
-        let page = handle.read(|d| {
-            let board = d.doc().artboard_of(&p.node_id)?;
-            screenshot::page(d.doc(), &board.id)
-        });
-        let Some((page, width, height)) = page else {
-            return fail(format!("node {:?} not found", p.node_id));
-        };
-        let requested = p.scale.unwrap_or(1.0).clamp(0.25, 2.0);
-        let scale = screenshot::output_scale(width, height, requested);
-        match screenshot::capture(&page, width, height, scale).await {
-            Ok(png) => {
-                let mut content = vec![ContentBlock::image(
-                    base64::engine::general_purpose::STANDARD.encode(png),
-                    "image/png",
-                )];
-                if scale < requested {
-                    content.push(ContentBlock::text(format!(
-                        "Captured at {scale:.2}× instead of {requested}×, so the {width}×{height} artboard's longer side fits in {} pixels, the most a screenshot returns.",
-                        screenshot::MAX_OUTPUT_SIDE
-                    )));
-                }
-                Ok(CallToolResult::success(content))
-            }
-            Err(error) => fail(error),
+        let asked: Vec<String> = p
+            .node_id
+            .iter()
+            .chain(p.node_ids.iter().flatten())
+            .cloned()
+            .collect();
+        if asked.is_empty() {
+            return fail("pass nodeId, or nodeIds for several artboards");
         }
+        // Several nodes in one artboard capture it once.
+        let pages = handle.read(|d| {
+            let mut pages = Vec::new();
+            for id in &asked {
+                let Some(board) = d.doc().artboard_of(id) else {
+                    return Err(format!("node {id:?} not found"));
+                };
+                if pages
+                    .iter()
+                    .any(|(b, _, _): &(String, String, _)| b == &board.id)
+                {
+                    continue;
+                }
+                let shared = demo::shared_css(&p.design_id);
+                let page = screenshot::page(d.doc(), &board.id, shared.as_deref())
+                    .expect("artboard exists");
+                pages.push((board.id.clone(), board.display_name(), page));
+            }
+            Ok(pages)
+        });
+        let pages = match pages {
+            Ok(pages) => pages,
+            Err(error) => return fail(error),
+        };
+        if pages.len() > ScreenshotParams::MAX_ARTBOARDS {
+            return fail(format!(
+                "pass at most {} artboards per call; these are {}",
+                ScreenshotParams::MAX_ARTBOARDS,
+                pages.len()
+            ));
+        }
+        let requested = p.scale.unwrap_or(1.0).clamp(0.25, 2.0);
+        let several = pages.len() > 1;
+        let captures = futures::future::join_all(pages.into_iter().map(
+            |(board, name, (page, width, height))| async move {
+                let scale = screenshot::output_scale(width, height, requested);
+                let capture = screenshot::capture(&page, width, height, scale).await;
+                (board, name, width, height, scale, capture)
+            },
+        ))
+        .await;
+        let mut content = Vec::new();
+        for (board, name, width, height, scale, capture) in captures {
+            if several {
+                content.push(ContentBlock::text(format!("Artboard {name:?} #{board}:")));
+            }
+            let capture = match capture {
+                Ok(capture) => capture,
+                Err(error) if !several => return fail(error),
+                Err(error) => {
+                    content.push(ContentBlock::text(format!("Couldn't capture it: {error}")));
+                    continue;
+                }
+            };
+            content.push(ContentBlock::image(
+                base64::engine::general_purpose::STANDARD.encode(capture.png),
+                "image/png",
+            ));
+            if let Some(boxes) = &capture.boxes {
+                let notes = handle.read(|d| format::layout_notes(d.doc(), &board, boxes));
+                if !notes.is_empty() {
+                    content.push(ContentBlock::text(notes));
+                }
+            }
+            if scale < requested {
+                content.push(ContentBlock::text(format!(
+                    "Captured at {scale:.2}× instead of {requested}×, so the {width}×{height} artboard's longer side fits in {} pixels, the most a screenshot returns.",
+                    screenshot::MAX_OUTPUT_SIDE
+                )));
+            }
+        }
+        Ok(CallToolResult::success(content))
     }
 
     #[tool(
-        description = "Find free canvas space for a new artboard of the given size. Returns x and y.",
+        description = "Where create_artboard would put a new artboard: to the right of every existing one, top-aligned with them. Returns x and y. create_artboard already does this when you omit x and y.",
         annotations(read_only_hint = true)
     )]
     async fn find_placement(&self, Parameters(p): Parameters<PlacementParams>) -> ToolResult {
@@ -564,7 +779,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Create an artboard: a fixed-size frame on the canvas that holds a screen or component. Returns its id."
+        description = "Create an artboard: a fixed-size frame on the canvas that holds a screen or component. Pass html to fill it in the same call (same rules as write_html). Omit x and y to place it beside the existing artboards. Returns its id, position and size, and the content's outline with ids."
     )]
     async fn create_artboard(
         &self,
@@ -573,6 +788,16 @@ impl FiniteMcp {
     ) -> ToolResult {
         let position = p.x.zip(p.y);
         let label = format!("Create artboard {:?}", p.name);
+        let fragments = match p.html {
+            Some(html) => {
+                match tokio::task::spawn_blocking(move || edit::parse_html(&html)).await {
+                    Ok(Ok(fragments)) => fragments,
+                    Ok(Err(error)) => return fail(error.to_string()),
+                    Err(error) => return fail(error.to_string()),
+                }
+            }
+            None => Vec::new(),
+        };
         let spec = NewArtboard {
             name: p.name,
             width: p.width,
@@ -585,13 +810,37 @@ impl FiniteMcp {
             &p.design_id,
             &label,
             |doc| {
-                let id = id_in(doc)();
-                Ok((edit::create_artboard(doc, id.clone(), spec)?, id))
+                let mut new_id = id_in(doc);
+                let id = new_id();
+                let (ops, roots) =
+                    edit::create_artboard_with(doc, id.clone(), spec, fragments, &mut new_id)?;
+                Ok((ops, (id, roots)))
             },
-            |_, id, _| {
-                format!(
-                    "Created artboard #{id}. Next: start_working_on_nodes, then write_html into it."
-                )
+            |handle, (id, roots), _| {
+                handle.read(|d| {
+                    let doc = d.doc();
+                    let Some(board) = doc.get(&id) else {
+                        return format!("Created artboard #{id}.");
+                    };
+                    let (w, h) = edit::pixel_size(board);
+                    let mut text = format!(
+                        "Created artboard #{id} at x {}, y {}, {} × {}.",
+                        board.x.unwrap_or(0.0),
+                        board.y.unwrap_or(0.0),
+                        w.unwrap_or(0.0),
+                        h.unwrap_or(0.0)
+                    );
+                    if roots.is_empty() {
+                        text.push_str(" Next: write_html into it.");
+                        return text;
+                    }
+                    text.push_str(&format!(" Wrote {} root node(s):\n", roots.len()));
+                    for root in &roots {
+                        text.push_str(&outline(doc, root, 3));
+                    }
+                    text.push_str("Check it with get_screenshot.");
+                    cut(text, "Call get_tree_summary on a root to see it.")
+                })
             },
         )
         .await
@@ -648,18 +897,29 @@ impl FiniteMcp {
         Parameters(p): Parameters<UpdateStylesParams>,
         ctx: RequestContext<RoleServer>,
     ) -> ToolResult {
+        let design_id = p.design_id.clone();
+        let updates = match p.all() {
+            Ok(updates) => updates,
+            Err(error) => return fail(error),
+        };
         self.edit(
             &ctx,
-            &p.design_id,
+            &design_id,
             "Update styles",
             |doc| {
                 let mut ops = Vec::new();
-                for update in &p.updates {
+                for update in &updates {
                     ops.extend(edit::update_styles(doc, &update.node_ids, &update.styles)?);
                 }
                 Ok((ops, ()))
             },
-            |_, (), change| describe(change).into(),
+            |handle, (), change| {
+                changed(
+                    handle,
+                    change,
+                    distinct(updates.iter().flat_map(|u| &u.node_ids)),
+                )
+            },
         )
         .await
     }
@@ -672,13 +932,18 @@ impl FiniteMcp {
         Parameters(p): Parameters<SetAttributesParams>,
         ctx: RequestContext<RoleServer>,
     ) -> ToolResult {
+        let design_id = p.design_id.clone();
+        let updates = match p.all() {
+            Ok(updates) => updates,
+            Err(error) => return fail(error),
+        };
         self.edit(
             &ctx,
-            &p.design_id,
+            &design_id,
             "Set attributes",
             |doc| {
                 let mut ops = Vec::new();
-                for update in &p.updates {
+                for update in &updates {
                     ops.extend(edit::update_attributes(
                         doc,
                         &update.node_ids,
@@ -687,27 +952,38 @@ impl FiniteMcp {
                 }
                 Ok((ops, ()))
             },
-            |_, (), change| describe(change).into(),
+            |handle, (), change| {
+                changed(
+                    handle,
+                    change,
+                    distinct(updates.iter().flat_map(|u| &u.node_ids)),
+                )
+            },
         )
         .await
     }
 
     #[tool(
-        description = "Replace the text of text nodes or elements. On an element, its content becomes this text."
+        description = "Replace the text of text nodes or elements. On an element, its content becomes this text. On a <style> or <script> element, it replaces the CSS or code."
     )]
     async fn set_text_content(
         &self,
         Parameters(p): Parameters<SetTextParams>,
         ctx: RequestContext<RoleServer>,
     ) -> ToolResult {
+        let design_id = p.design_id.clone();
+        let updates = match p.all() {
+            Ok(updates) => updates,
+            Err(error) => return fail(error),
+        };
         self.edit(
             &ctx,
-            &p.design_id,
+            &design_id,
             "Set text",
             |doc| {
                 let mut ops = Vec::new();
                 let mut new_id = id_in(doc);
-                for update in &p.updates {
+                for update in &updates {
                     ops.extend(edit::set_text(
                         doc,
                         &update.node_id,
@@ -717,7 +993,9 @@ impl FiniteMcp {
                 }
                 Ok((ops, ()))
             },
-            |_, (), change| describe(change).into(),
+            |handle, (), change| {
+                changed(handle, change, distinct(updates.iter().map(|u| &u.node_id)))
+            },
         )
         .await
     }
@@ -739,7 +1017,13 @@ impl FiniteMcp {
                 }
                 Ok((ops, ()))
             },
-            |_, (), change| describe(change).into(),
+            |handle, (), change| {
+                changed(
+                    handle,
+                    change,
+                    distinct(p.updates.iter().map(|u| &u.node_id)),
+                )
+            },
         )
         .await
     }
@@ -762,7 +1046,7 @@ impl FiniteMcp {
                     (),
                 ))
             },
-            |_, (), change| describe(change).into(),
+            |handle, (), change| changed(handle, change, distinct(p.node_ids.iter())),
         )
         .await
     }
@@ -784,13 +1068,19 @@ impl FiniteMcp {
                 }
                 Ok((ops, ()))
             },
-            |_, (), change| describe(change).into(),
+            |handle, (), change| {
+                changed(
+                    handle,
+                    change,
+                    distinct(p.updates.iter().map(|u| &u.node_id)),
+                )
+            },
         )
         .await
     }
 
     #[tool(
-        description = "Duplicate nodes with their whole subtrees. Each copy is placed right after its original; copied artboards go into free canvas space. Returns the new ids, for example to make a mobile variant of a desktop artboard."
+        description = "Duplicate nodes with their whole subtrees. Each copy is placed right after its original; copied artboards go into free canvas space. Returns each copy's outline with the new ids, so you can edit inside it, for example to make a mobile variant of a desktop artboard. To copy into another parent, duplicate, then move_nodes."
     )]
     async fn duplicate_nodes(
         &self,
@@ -802,13 +1092,19 @@ impl FiniteMcp {
             &p.design_id,
             "Duplicate",
             |doc| edit::duplicate(doc, &p.node_ids, &mut id_in(doc)),
-            |_, roots, _| {
-                // One per line, so a long list is cut between ids.
-                let ids: String = roots.iter().map(|r| format!("#{r}\n")).collect();
-                cut(
-                    format!("Created {} copies:\n{ids}", roots.len()),
-                    "Call get_children on their parent to list the rest.",
-                )
+            |handle, roots, _| {
+                // Each copy's outline, so the ids inside it can be edited
+                // without reading the tree again.
+                handle.read(|d| {
+                    let mut text = format!("Created {} copies:\n", roots.len());
+                    for root in &roots {
+                        text.push_str(&outline(d.doc(), root, 3));
+                    }
+                    cut(
+                        text,
+                        "Call get_children on their parent to list the rest, or get_tree_summary on a copy to see inside it.",
+                    )
+                })
             },
         )
         .await
@@ -827,8 +1123,19 @@ impl FiniteMcp {
             &ctx,
             &p.design_id,
             "Delete",
-            |doc| Ok((edit::delete(doc, &p.node_ids)?, ())),
-            |_, (), change| describe(change).into(),
+            |doc| {
+                let ops = edit::delete(doc, &p.node_ids)?;
+                let inside: usize = ops.iter().map(|op| doc.subtree(op.id()).len()).sum();
+                Ok((ops, inside))
+            },
+            |_, inside, change| match change {
+                Some(change) => format!(
+                    "Deleted {} node{}, {inside} in all with everything inside them.",
+                    change.ops.len(),
+                    if change.ops.len() == 1 { "" } else { "s" }
+                ),
+                None => describe(None).into(),
+            },
         )
         .await
     }
@@ -974,11 +1281,22 @@ impl FiniteMcp {
         };
         match handle.reply(&p.comment_id, author, &p.message, p.resolve) {
             Ok(comment) => {
-                let linked = comment.messages.last().map_or(0, |m| m.changes.len());
+                let labels: Vec<&str> = comment
+                    .messages
+                    .last()
+                    .map(|m| m.changes.iter().map(|c| c.label.as_str()).collect())
+                    .unwrap_or_default();
                 let state = if comment.resolved { "resolved" } else { "open" };
+                let linked = match labels.len() {
+                    0 => "links none of your changes".to_owned(),
+                    n => format!(
+                        "links your {n} change{} to this artboard since the thread's last message: {}",
+                        if n == 1 { "" } else { "s" },
+                        labels.join(", ")
+                    ),
+                };
                 ok(format!(
-                    "Replied. The comment is {state}, and your reply links {linked} change{}.",
-                    if linked == 1 { "" } else { "s" }
+                    "Replied. The comment is {state}, and your reply {linked}."
                 ))
             }
             Err(error) => fail(error.to_string()),
@@ -986,7 +1304,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Show users which nodes you're working on, with an optional status line. Call before editing; pair with finish_working_on_nodes."
+        description = "Show users which nodes you're working on, with a status line like \"Building the pricing section\". Your edits already show the artboards they touch, so call this to say what you're doing; pair with finish_working_on_nodes."
     )]
     async fn start_working_on_nodes(
         &self,
@@ -1032,6 +1350,32 @@ impl ServerHandler for FiniteMcp {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("finite", env!("CARGO_PKG_VERSION")))
-            .with_instructions(INSTRUCTIONS)
+            .with_instructions(instructions())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Claude Code keeps the first 4,096 characters of a server's
+    /// instructions and drops the rest without telling the agent. AX runs
+    /// found the end of these cut off, so with every extra group on, they
+    /// stay under this.
+    const INSTRUCTIONS_LIMIT: usize = 4_000;
+
+    #[test]
+    fn instructions_fit_what_clients_keep() {
+        let all = [
+            INSTRUCTIONS.trim_end(),
+            SEARCH_INSTRUCTIONS,
+            demo::INSTRUCTIONS,
+        ]
+        .join("\n\n");
+        assert!(
+            all.chars().count() <= INSTRUCTIONS_LIMIT,
+            "{} characters: Claude Code would cut the end off",
+            all.chars().count()
+        );
     }
 }

@@ -1,24 +1,24 @@
-Finite is a design canvas for agents. A design (also called a canvas) holds artboards: fixed-size frames placed on an infinite canvas. Artboards contain ordinary HTML elements styled with inline CSS. Users watch designs live and can't edit them, so all changes come from agents. Users steer agents by pinning comments to the canvas.
+Finite is a design canvas for agents. A design (a canvas) holds artboards: fixed-size frames on an infinite canvas, containing ordinary HTML and CSS. Users watch live and can't edit, so all changes come from agents. Users steer agents by pinning comments.
 
-Every tool except list_designs and create_design takes a designId. You can work on several designs at once, and other agents may be editing the same design at the same time, so re-read the tree before editing nodes you didn't create.
+Every tool except list_designs and create_design takes a designId. Other agents may edit the same design, so re-read the tree before editing nodes you didn't create.
 
 Workflow:
 
-1. Pick a design: list_designs (the 50 most recently edited; pass a query to find one by name), or create_design for a new one.
+1. Pick a design with list_designs (pass a query to find one by name), or create_design.
 2. Orient: get_basic_info (it counts open comments), then get_tree_summary.
-3. New screen: find_placement, then create_artboard (typical sizes: desktop 1440x900, tablet 768x1024, mobile 390x844).
-4. Call start_working_on_nodes with the artboard id so users see what you're doing.
-5. Build in small sections with write_html (one call per section, such as a header, a hero or a card grid), not one huge call.
-6. Check the result with get_screenshot after each section. Correct markup doesn't guarantee a correct render.
-7. Refine with update_styles, set_text_content, set_attributes, move_nodes or delete_nodes.
-8. Call finish_working_on_nodes when done.
+3. New screen: create_artboard with its first section in html (desktop 1440x900, tablet 768x1024, mobile 390x844). Without x and y it goes right of the others.
+4. Build the rest in sections with write_html, one call per section (header, hero, card grid), not one huge call.
+5. Check with get_screenshot after each section. Its layout check names content cut off by the artboard's edge and text overflowing its box. Pass nodeIds to check several artboards at once.
+6. Refine with update_styles, set_text_content, set_attributes, move_nodes or delete_nodes. Each edit lists the nodes it changed.
 
-HTML rules: style with inline style attributes, or with <style> blocks and classes. Prefer flexbox and gap for layout. Name layers with data-name="Header". box-sizing is border-box. Images use <img src="https://...">. Inline <svg> works. New artboards default to a white flex column with overflow hidden.
+Users see which artboards you edit. To say what you're doing, call start_working_on_nodes with a short status, then finish_working_on_nodes.
 
-Motion and interaction: each artboard is isolated, so a <style> or <script> inside it only affects that artboard. Put them inside the artboard, and select by class or id rather than html or body. Use CSS @keyframes and transitions for animation, and :hover for simple pointer effects. For anything that follows the cursor, use a <script> with addEventListener and requestAnimationFrame (inline on* attributes are dropped). An artboard with a script runs in a sandbox: inline code only, no network requests, remote images and fonts allowed. It restarts after every edit. get_screenshot runs scripts and captures the frame about 3 seconds after load.
+HTML: inline styles, or <style> blocks with classes. Prefer flexbox and gap. Name layers with data-name="Header". box-sizing is border-box. Images use <img src="https://...">; inline <svg> works. Artboards default to a white flex column with overflow hidden, so children shrink unless they have flex-shrink: 0. Resize an artboard with update_styles on its width or height. update_styles changes inline styles only; to change a <style> block, set_text_content on it with the whole new CSS.
 
-Comments: a comment is a request from a user, pinned to an artboard and usually to the element they clicked. When a design has open comments, call get_comments, call start_working_on_nodes on the comment's node, make the change, check it with get_screenshot, then reply_to_comment saying what you changed, with resolve: true. Your reply links the edits you made to that artboard since the thread's last message, so the user can see what changed. If a comment is unclear, reply with a question and leave it open. To keep taking feedback after you finish, call wait_for_comments: it returns as soon as a user comments or replies, so you can act on it and wait again.
+Motion: a <style> or <script> only affects its own artboard, so select by class or id, not html or body. Use @keyframes, transitions and :hover. For pointer-following effects, use a <script> with addEventListener (on* attributes are dropped). Scripts run sandboxed: inline only, no network requests, remote images and fonts allowed, restarted after every edit. get_screenshot captures about 3 seconds after load.
 
-Long results come in parts. When a result is cut short, a note at its end says how to get the rest, such as an offset to pass or a nodeId to look inside, so read it before assuming you've seen everything. Edits that pass a limit are refused, and the error says which limit and what to do instead. A design holds at most 100,000 nodes, nested at most 256 levels deep. Screenshots of very tall artboards are scaled down to fit 3,000 pixels, and a note says so.
+Comments are user requests, pinned to an artboard and usually an element. When a design has open comments, call get_comments, make the change, check it with get_screenshot, then reply_to_comment saying what you changed, with resolve: true. Your reply links your edits to that artboard since the thread's last message. If a comment is unclear, ask in a reply and leave it open. To keep taking feedback, loop on wait_for_comments.
 
-Undo: undo and redo reverse only your own changes, one tool call per step. Other agents' work is left alone. If someone else has since deleted the nodes a step touched, that step is skipped.
+Long results come in parts: a note at the end says how to get the rest. Edits past a limit are refused with what to do instead.
+
+Undo and redo reverse only your own changes, one tool call per step, and skip steps whose nodes someone else deleted.

@@ -40,7 +40,7 @@ fn outline_into(doc: &Document, id: &str, depth: usize, max_depth: usize, out: &
     let pad = "  ".repeat(depth);
     match &node.kind {
         NodeKind::Text => {
-            let _ = writeln!(out, "{pad}text #{} {:?}", node.id, node.display_name());
+            let _ = writeln!(out, "{pad}text #{} {:?}", node.id, text_snippet(node));
             return;
         }
         NodeKind::Element { tag } => {
@@ -71,7 +71,7 @@ fn outline_into(doc: &Document, id: &str, depth: usize, max_depth: usize, out: &
     match children.as_slice() {
         [] => out.push('\n'),
         [only] if only.kind == NodeKind::Text => {
-            let _ = writeln!(out, " {:?}", only.display_name());
+            let _ = writeln!(out, " {:?}", text_snippet(only));
         }
         _ if depth >= max_depth => {
             let _ = writeln!(out, " … {} children", children.len());
@@ -83,6 +83,21 @@ fn outline_into(doc: &Document, id: &str, depth: usize, max_depth: usize, out: &
             }
         }
     }
+}
+
+/// How much of a text node the outline shows. Layer names stop at 24
+/// characters, but agents read the outline to proofread and to find copy, so
+/// it shows a sentence.
+const OUTLINE_TEXT: usize = 100;
+
+/// A text node's text, trimmed and cut at [`OUTLINE_TEXT`] characters.
+fn text_snippet(node: &finite_design::Node) -> String {
+    let text = node.text.as_deref().unwrap_or("").trim();
+    let mut snippet: String = text.chars().take(OUTLINE_TEXT).collect();
+    if snippet.len() < text.len() {
+        snippet.push('…');
+    }
+    snippet
 }
 
 pub(super) fn node_json(doc: &Document, id: &str) -> serde_json::Value {
@@ -138,6 +153,10 @@ fn short(value: &str) -> String {
 
 // Tool parameters. Doc comments become the JSON Schema descriptions agents see.
 
+/// The longest element HTML a comment includes. Longer elements are
+/// usually whole sections, and get_html reads them.
+const COMMENT_NODE_HTML: usize = 2_000;
+
 /// How many of a thread's latest messages agents see, after its first.
 const THREAD_SHOWN: usize = 10;
 
@@ -180,6 +199,13 @@ pub(super) fn comments_json<'a>(
             } else {
                 "canvas"
             };
+            // The element's HTML, when it's short, so the agent can change it
+            // without reading it first.
+            let node_html = c
+                .node_id
+                .as_deref()
+                .and_then(|id| finite_design::html::export(doc, id, true))
+                .filter(|html| html.len() <= COMMENT_NODE_HTML);
             serde_json::json!({
                 "commentId": c.id,
                 "resolved": c.resolved,
@@ -189,10 +215,134 @@ pub(super) fn comments_json<'a>(
                 "artboardDeleted": c.detached_at.is_some(),
                 "nodeId": c.node_id,
                 "node": node,
+                "nodeHtml": node_html,
                 "pin": { "x": c.x.round(), "y": c.y.round(), "relativeTo": relative_to },
                 "thread": thread,
                 "messagesNotShown": skipped,
             })
         })
         .collect()
+}
+
+/// How many elements a layout note names before it says how many more.
+const LAYOUT_NAMED: usize = 8;
+
+/// What a screenshot's measurements say about an artboard's layout: content
+/// cut off at its edges, and text that runs past its own box. Agents only
+/// spotted these in the image before, and often didn't, so the note names
+/// the elements and says what to change.
+pub(super) fn layout_notes(
+    doc: &Document,
+    artboard: &str,
+    boxes: &[crate::screenshot::Box],
+) -> String {
+    use std::collections::{HashMap, HashSet};
+    let by_id: HashMap<&str, &crate::screenshot::Box> =
+        boxes.iter().map(|b| (b.id.as_str(), b)).collect();
+    let Some(board) = by_id.get(artboard) else {
+        return String::new();
+    };
+    let line = |id: &str| {
+        outline(doc, id, 0)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_owned()
+    };
+    // Elements reaching past the artboard's bottom or right edge. Only the
+    // outermost is named: its children stick out because it does.
+    let (bottom, right) = (board.y + board.height, board.x + board.width);
+    let out: HashSet<&str> = boxes
+        .iter()
+        .filter(|b| {
+            b.id != artboard && (b.y + b.height > bottom + 1.0 || b.x + b.width > right + 1.0)
+        })
+        .map(|b| b.id.as_str())
+        .collect();
+    let mut notes = Vec::new();
+    if !out.is_empty() {
+        let content_bottom = boxes.iter().map(|b| b.y + b.height).fold(bottom, f64::max) - board.y;
+        let content_right = boxes.iter().map(|b| b.x + b.width).fold(right, f64::max) - board.x;
+        let outermost: Vec<&str> = boxes
+            .iter()
+            .map(|b| b.id.as_str())
+            .filter(|id| out.contains(id))
+            .filter(|id| {
+                doc.get(id)
+                    .and_then(|n| n.parent.as_deref())
+                    .is_none_or(|p| !out.contains(p))
+            })
+            .collect();
+        let mut text = String::from("Layout: content is cut off by the artboard's edge.");
+        if content_bottom > board.height + 1.0 {
+            let _ = write!(
+                text,
+                " It is {content_bottom:.0} px tall, but the artboard is {:.0} px. If it should all show, make the artboard taller with update_styles {{\"updates\": [{{\"nodeIds\": [\"{artboard}\"], \"styles\": {{\"height\": \"{content_bottom:.0}px\"}}}}]}}.",
+                board.height
+            );
+        }
+        if content_right > board.width + 1.0 {
+            let _ = write!(
+                text,
+                " It is {content_right:.0} px wide, but the artboard is {:.0} px.",
+                board.width
+            );
+        }
+        text.push_str(" Sticking out:");
+        for id in outermost.iter().take(LAYOUT_NAMED) {
+            let b = by_id[id];
+            let _ = write!(
+                text,
+                "\n  {} (ends at x {:.0}, y {:.0})",
+                line(id),
+                b.x + b.width - board.x,
+                b.y + b.height - board.y
+            );
+        }
+        if outermost.len() > LAYOUT_NAMED {
+            let _ = write!(text, "\n  … and {} more", outermost.len() - LAYOUT_NAMED);
+        }
+        notes.push(text);
+    }
+    let spilling: Vec<&crate::screenshot::Box> = boxes
+        .iter()
+        // Down, a few pixels is a tall glyph, like an emoji, in a tight line height.
+        .filter(|b| b.text_overflow.0 > 2.0 || b.text_overflow.1 > 8.0)
+        .collect();
+    if !spilling.is_empty() {
+        let mut text =
+            String::from("Layout: text runs past its box, so it may overlap or be clipped:");
+        for b in spilling.iter().take(LAYOUT_NAMED) {
+            let _ = write!(text, "\n  {} ", line(&b.id));
+            match b.text_overflow {
+                (x, y) if x > 2.0 && y > 8.0 => {
+                    let _ = write!(text, "({x:.0} px too wide, {y:.0} px too tall)");
+                }
+                (x, _) if x > 2.0 => {
+                    let _ = write!(text, "({x:.0} px too wide)");
+                }
+                (_, y) => {
+                    let _ = write!(text, "({y:.0} px too tall)");
+                }
+            }
+        }
+        if spilling.len() > LAYOUT_NAMED {
+            let _ = write!(text, "\n  … and {} more", spilling.len() - LAYOUT_NAMED);
+        }
+        notes.push(text);
+    }
+    if notes.is_empty() {
+        let used = boxes
+            .iter()
+            .filter(|b| b.id != artboard)
+            .map(|b| b.y + b.height)
+            .fold(board.y, f64::max)
+            - board.y;
+        return format!(
+            "Layout: nothing is cut off, and no text overflows. The lowest element ends at y {used:.0}; the artboard is {:.0} px tall.",
+            board.height
+        );
+    }
+    notes.join("\n")
 }

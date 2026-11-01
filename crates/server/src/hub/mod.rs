@@ -32,6 +32,11 @@ pub use messages::{
 
 /// How long an agent's "working on" indicator lasts without activity.
 const PRESENCE_TTL: Duration = Duration::from_secs(5 * 60);
+/// How long an indicator an edit set lasts after the actor's last edit. The
+/// hub sweeps every 30 seconds, so it goes within 60 to 90 seconds.
+const AUTO_PRESENCE_TTL: Duration = Duration::from_secs(60);
+/// The most nodes one actor's indicator names.
+pub(crate) const PRESENCE_NODES: usize = 100;
 /// How long an idle actor's undo history is kept.
 const HISTORY_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 /// Edits are written to disk at most this often per design.

@@ -58,17 +58,73 @@ fn chrome() -> Option<PathBuf> {
 }
 
 /// A standalone HTML page showing just the artboard, and its pixel size.
-pub fn page(doc: &Document, artboard: &str) -> Option<(String, f64, f64)> {
+/// Every element carries its node id, and a script measures them just before
+/// the capture, so [`capture`] can report the layout too.
+///
+/// `shared_css` is design-wide CSS that applies to every artboard, which only
+/// the `shared-styles` demo tools set so far (see `mcp/demo.rs`).
+pub fn page(
+    doc: &Document,
+    artboard: &str,
+    shared_css: Option<&str>,
+) -> Option<(String, f64, f64)> {
     let node = doc.get(artboard)?;
-    // Compact, so no whitespace is added between elements: it renders like the viewer.
-    let body = html::export_compact(doc, artboard)?;
+    // Compact, so no whitespace is added between elements: it renders like the
+    // viewer, which marks elements the same way.
+    let body = html::export_for_viewer(doc, artboard)?;
     let (width, height) = pixel_size(node);
     let width = width.unwrap_or(1440.0).clamp(1.0, MAX_SIDE);
     let height = height.unwrap_or(FALLBACK_HEIGHT).clamp(1.0, MAX_SIDE);
+    let shared = shared_css.map_or(String::new(), |css| format!("<style>{css}</style>"));
     let page = format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\"><style>{BASE_CSS} html, body {{ margin: 0; }}</style></head><body>{body}</body></html>"
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\"><style>{BASE_CSS} html, body {{ margin: 0; }}</style>{shared}</head><body>{body}{MEASURE}</body></html>"
     );
     Some((page, width, height))
+}
+
+/// Measures every element 2.5 seconds after load, half a second before the
+/// capture, and leaves the boxes in the DOM for `--dump-dom` to print. Each
+/// box is `[id, left, top, width, height, overflowX, overflowY]`; the overflow
+/// is how far an element's own text runs past its box, for elements with text.
+const MEASURE: &str = r#"<script>setTimeout(function(){var out=[];document.querySelectorAll("[data-finite-id]").forEach(function(e){var r=e.getBoundingClientRect();if(!r.width&&!r.height)return;var text=false;e.childNodes.forEach(function(c){if(c.nodeType===3&&c.textContent.trim())text=true});var inline=getComputedStyle(e).display==="inline";var ox=text&&!inline?e.scrollWidth-e.clientWidth:0,oy=text&&!inline?e.scrollHeight-e.clientHeight:0;out.push([e.getAttribute("data-finite-id"),Math.round(r.left),Math.round(r.top),Math.round(r.width),Math.round(r.height),ox,oy])});var s=document.createElement("script");s.type="application/json";s.id="__finite_layout";s.textContent=JSON.stringify(out);document.body.appendChild(s)},2500)</script>"#;
+
+/// Where an element rendered, in CSS pixels from the page's top left corner.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Box {
+    pub id: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    /// How far the element's own text runs past its box, across and down.
+    pub text_overflow: (f64, f64),
+}
+
+/// What a capture produced: the PNG, and the rendered boxes when the page
+/// could be measured.
+pub struct Capture {
+    pub png: Vec<u8>,
+    pub boxes: Option<Vec<Box>>,
+}
+
+/// The boxes [`MEASURE`] left in the DOM that Chrome printed.
+fn boxes_from_dom(dom: &str) -> Option<Vec<Box>> {
+    let start = dom.find("id=\"__finite_layout\">")? + "id=\"__finite_layout\">".len();
+    let end = start + dom[start..].find("</script>")?;
+    type Raw = (String, f64, f64, f64, f64, f64, f64);
+    let raw: Vec<Raw> = serde_json::from_str(&dom[start..end]).ok()?;
+    Some(
+        raw.into_iter()
+            .map(|(id, x, y, width, height, ox, oy)| Box {
+                id,
+                x,
+                y,
+                width,
+                height,
+                text_overflow: (ox, oy),
+            })
+            .collect(),
+    )
 }
 
 /// The smallest device scale Chrome renders at.
@@ -88,7 +144,9 @@ fn zoom(page: &str, scale: f64) -> String {
 }
 
 /// Captures `page` at `width` × `height` CSS pixels, scaled by `scale`.
-pub async fn capture(page: &str, width: f64, height: f64, scale: f64) -> Result<Vec<u8>, String> {
+/// Boxes are measured only at a device scale, not when the page is zoomed to
+/// get below one, because zoom changes what the page measures.
+pub async fn capture(page: &str, width: f64, height: f64, scale: f64) -> Result<Capture, String> {
     let chrome = chrome().ok_or(
         "no Chrome, Chromium or Edge found for screenshots; set FINITE_CHROME to a browser binary",
     )?;
@@ -105,9 +163,16 @@ pub async fn capture(page: &str, width: f64, height: f64, scale: f64) -> Result<
     // the page itself with CSS zoom, in a window of the scaled size.
     let result = if scale < MIN_DEVICE_SCALE {
         let zoomed = zoom(page, scale);
-        run(&chrome, &dir, &zoomed, width * scale, height * scale, 1.0).await
+        run(&chrome, &dir, &zoomed, width * scale, height * scale, 1.0)
+            .await
+            .map(|(png, _)| Capture { png, boxes: None })
     } else {
-        run(&chrome, &dir, page, width, height, scale).await
+        run(&chrome, &dir, page, width, height, scale)
+            .await
+            .map(|(png, dom)| Capture {
+                png,
+                boxes: boxes_from_dom(&dom),
+            })
     };
     let _ = tokio::fs::remove_dir_all(&dir).await;
     result
@@ -120,13 +185,13 @@ async fn run(
     width: f64,
     height: f64,
     scale: f64,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, String), String> {
     let html_path = dir.join("index.html");
     let png_path = dir.join("shot.png");
     tokio::fs::write(&html_path, page)
         .await
         .map_err(|e| e.to_string())?;
-    let status = Command::new(chrome)
+    let output = Command::new(chrome)
         .arg("--headless")
         .arg("--disable-gpu")
         .arg("--hide-scrollbars")
@@ -138,19 +203,23 @@ async fn run(
         .arg(format!("--force-device-scale-factor={scale}"))
         .arg("--virtual-time-budget=3000")
         .arg(format!("--screenshot={}", png_path.display()))
+        // Prints the DOM as it was at the capture, with MEASURE's boxes.
+        .arg("--dump-dom")
         .arg(format!("file://{}", html_path.display()))
-        .stdout(Stdio::null())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true)
-        .status();
-    match tokio::time::timeout(Duration::from_secs(30), status).await {
+        .output();
+    let dom = match tokio::time::timeout(Duration::from_secs(30), output).await {
         Err(_) => return Err("the browser took too long to render the screenshot".into()),
         Ok(Err(error)) => return Err(format!("couldn't start the browser: {error}")),
-        Ok(Ok(_)) => {}
-    }
-    tokio::fs::read(&png_path)
+        Ok(Ok(output)) => String::from_utf8_lossy(&output.stdout).into_owned(),
+    };
+    let png = tokio::fs::read(&png_path)
         .await
-        .map_err(|_| "the browser didn't produce a screenshot".to_string())
+        .map_err(|_| "the browser didn't produce a screenshot".to_string())?;
+    Ok((png, dom))
 }
 
 #[cfg(test)]

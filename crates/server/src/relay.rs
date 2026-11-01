@@ -58,7 +58,7 @@ use tokio::sync::Mutex;
 use crate::{
     cluster::Members,
     mcp::params::ListParams,
-    mcp::{INSTRUCTIONS, OWNER_META},
+    mcp::{OWNER_META, instructions},
     router::UPSTREAM_TIMEOUT,
 };
 
@@ -307,7 +307,7 @@ impl ServerHandler for Relay {
                 "finite-router",
                 env!("CARGO_PKG_VERSION"),
             ))
-            .with_instructions(INSTRUCTIONS)
+            .with_instructions(instructions())
     }
 
     /// Every server has the same tools, so the first that answers lists them.

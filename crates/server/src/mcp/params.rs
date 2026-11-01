@@ -4,7 +4,39 @@
 use std::collections::BTreeMap;
 
 use rmcp::schemars::{self, JsonSchema};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de::DeserializeOwned};
+use serde_json::Value;
+
+/// Reads `T` the way agents tend to send it. An agent that calls a tool
+/// before its client has loaded the schema guesses: it sends lists and
+/// objects as JSON strings, and one id where a list goes. The intent is
+/// clear, so accept it rather than make the agent retry (a third of the longer
+/// AX runs in `e2e/ax` hit this).
+fn lenient<'de, D: Deserializer<'de>, T: DeserializeOwned>(d: D) -> Result<T, D::Error> {
+    let value = Value::deserialize(d)?;
+    let first = match serde_json::from_value::<T>(value.clone()) {
+        Ok(v) => return Ok(v),
+        Err(error) => error,
+    };
+    if let Value::String(text) = &value {
+        if let Ok(parsed) = serde_json::from_str::<Value>(text)
+            && let Ok(v) = serde_json::from_value(parsed)
+        {
+            return Ok(v);
+        }
+        if let Ok(v) = serde_json::from_value(Value::Array(vec![value.clone()])) {
+            return Ok(v);
+        }
+    }
+    Err(serde::de::Error::custom(first))
+}
+
+/// [`lenient`] for an optional field.
+fn lenient_opt<'de, D: Deserializer<'de>, T: DeserializeOwned>(
+    d: D,
+) -> Result<Option<T>, D::Error> {
+    lenient(d).map(Some)
+}
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -73,6 +105,7 @@ pub struct TreeParams {
 #[serde(rename_all = "camelCase")]
 pub struct NodesParams {
     pub(super) design_id: String,
+    #[serde(alias = "nodeId", deserialize_with = "lenient")]
     pub(super) node_ids: Vec<String>,
 }
 
@@ -105,10 +138,21 @@ pub struct NodeParams {
 pub struct ScreenshotParams {
     pub(super) design_id: String,
     /// An artboard, or any node inside one (the whole artboard is captured).
-    pub(super) node_id: String,
-    /// Device pixel ratio, 1 or 2. Defaults to 1.
+    #[serde(default)]
+    pub(super) node_id: Option<String>,
+    /// Several artboards (or nodes inside them) to capture in one call, at most 6.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub(super) node_ids: Option<Vec<String>>,
+    /// Device pixel ratio, from 0.25 to 2. Defaults to 1. Use 0.5 to see
+    /// several large artboards cheaply.
     #[serde(default)]
     pub(super) scale: Option<f64>,
+}
+
+impl ScreenshotParams {
+    /// Each image costs the agent context, and a request with more than 20
+    /// images gets a stricter size limit, so a call returns a handful.
+    pub(super) const MAX_ARTBOARDS: usize = 6;
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -128,7 +172,8 @@ pub struct CreateArtboardParams {
     pub(super) width: f64,
     /// Height in CSS pixels.
     pub(super) height: f64,
-    /// Canvas position. Omit x and y to place it beside the existing artboards.
+    /// Canvas position. Omit x and y to place it to the right of the existing
+    /// artboards, top-aligned with them.
     #[serde(default)]
     pub(super) x: Option<f64>,
     #[serde(default)]
@@ -136,6 +181,10 @@ pub struct CreateArtboardParams {
     /// Extra CSS for the artboard, like {"background-color": "#0b0b0b", "padding": "48px"}.
     #[serde(default)]
     pub(super) styles: BTreeMap<String, String>,
+    /// Content to write into the new artboard, as write_html would, so a
+    /// screen takes one call. Omit for an empty artboard.
+    #[serde(default)]
+    pub(super) html: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema, Clone, Copy, Default)]
@@ -168,31 +217,87 @@ pub struct WriteHtmlParams {
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StyleUpdate {
+    #[serde(alias = "nodeId", deserialize_with = "lenient")]
     pub(super) node_ids: Vec<String>,
     /// CSS properties to set (kebab-case or camelCase). A null value removes the property.
+    #[serde(deserialize_with = "lenient")]
     pub(super) styles: BTreeMap<String, Option<String>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+// `updates` has a default so a flat update parses, but the schema asks for it.
+#[schemars(extend("required" = ["designId", "updates"]))]
 pub struct UpdateStylesParams {
     pub(super) design_id: String,
+    #[serde(default, deserialize_with = "lenient")]
     pub(super) updates: Vec<StyleUpdate>,
+    /// One update given flat, as `nodeIds` and `styles`. Not in the schema.
+    #[serde(default, alias = "nodeId", deserialize_with = "lenient_opt")]
+    #[schemars(skip)]
+    pub(super) node_ids: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    #[schemars(skip)]
+    pub(super) styles: Option<BTreeMap<String, Option<String>>>,
+}
+
+impl UpdateStylesParams {
+    /// Every update, with a flat one last.
+    pub(super) fn all(self) -> Result<Vec<StyleUpdate>, String> {
+        let mut updates = self.updates;
+        match (self.node_ids, self.styles) {
+            (Some(node_ids), Some(styles)) => updates.push(StyleUpdate { node_ids, styles }),
+            (None, None) => {}
+            _ => return Err(r#"pass nodeIds with styles, like {"updates": [{"nodeIds": ["a1"], "styles": {"color": "red"}}]}"#.into()),
+        }
+        if updates.is_empty() {
+            return Err(r#"pass updates, like {"updates": [{"nodeIds": ["a1"], "styles": {"color": "red"}}]}"#.into());
+        }
+        Ok(updates)
+    }
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AttributeUpdate {
+    #[serde(alias = "nodeId", deserialize_with = "lenient")]
     pub(super) node_ids: Vec<String>,
     /// Attributes to set, like {"src": "https://…", "alt": "Logo"}. A null value removes it.
+    #[serde(deserialize_with = "lenient")]
     pub(super) attributes: BTreeMap<String, Option<String>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+// `updates` has a default so a flat update parses, but the schema asks for it.
+#[schemars(extend("required" = ["designId", "updates"]))]
 pub struct SetAttributesParams {
     pub(super) design_id: String,
+    #[serde(default, deserialize_with = "lenient")]
     pub(super) updates: Vec<AttributeUpdate>,
+    /// One update given flat, as `nodeIds` and `attributes`. Not in the schema.
+    #[serde(default, alias = "nodeId", deserialize_with = "lenient_opt")]
+    #[schemars(skip)]
+    pub(super) node_ids: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    #[schemars(skip)]
+    pub(super) attributes: Option<BTreeMap<String, Option<String>>>,
+}
+
+impl SetAttributesParams {
+    /// Every update, with a flat one last.
+    pub(super) fn all(self) -> Result<Vec<AttributeUpdate>, String> {
+        let mut updates = self.updates;
+        match (self.node_ids, self.attributes) {
+            (Some(node_ids), Some(attributes)) => updates.push(AttributeUpdate { node_ids, attributes }),
+            (None, None) => {}
+            _ => return Err(r#"pass nodeIds with attributes, like {"updates": [{"nodeIds": ["a1"], "attributes": {"alt": "Logo"}}]}"#.into()),
+        }
+        if updates.is_empty() {
+            return Err(r#"pass updates, like {"updates": [{"nodeIds": ["a1"], "attributes": {"alt": "Logo"}}]}"#.into());
+        }
+        Ok(updates)
+    }
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -205,9 +310,40 @@ pub struct TextUpdate {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+// `updates` has a default so a flat update parses, but the schema asks for it.
+#[schemars(extend("required" = ["designId", "updates"]))]
 pub struct SetTextParams {
     pub(super) design_id: String,
+    #[serde(default, deserialize_with = "lenient")]
     pub(super) updates: Vec<TextUpdate>,
+    /// One update given flat, as `nodeId` and `text`. Not in the schema.
+    #[serde(default)]
+    #[schemars(skip)]
+    pub(super) node_id: Option<String>,
+    #[serde(default)]
+    #[schemars(skip)]
+    pub(super) text: Option<String>,
+}
+
+impl SetTextParams {
+    /// Every update, with a flat one last.
+    pub(super) fn all(self) -> Result<Vec<TextUpdate>, String> {
+        let mut updates = self.updates;
+        match (self.node_id, self.text) {
+            (Some(node_id), Some(text)) => updates.push(TextUpdate { node_id, text }),
+            (None, None) => {}
+            _ => return Err(
+                r#"pass nodeId with text, like {"updates": [{"nodeId": "a1", "text": "Sign up"}]}"#
+                    .into(),
+            ),
+        }
+        if updates.is_empty() {
+            return Err(
+                r#"pass updates, like {"updates": [{"nodeId": "a1", "text": "Sign up"}]}"#.into(),
+            );
+        }
+        Ok(updates)
+    }
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -222,6 +358,7 @@ pub struct RenameUpdate {
 #[serde(rename_all = "camelCase")]
 pub struct RenameNodesParams {
     pub(super) design_id: String,
+    #[serde(deserialize_with = "lenient")]
     pub(super) updates: Vec<RenameUpdate>,
 }
 
@@ -229,6 +366,7 @@ pub struct RenameNodesParams {
 #[serde(rename_all = "camelCase")]
 pub struct MoveNodesParams {
     pub(super) design_id: String,
+    #[serde(alias = "nodeId", deserialize_with = "lenient")]
     pub(super) node_ids: Vec<String>,
     /// The new parent. Null turns the nodes into artboards on the canvas.
     pub(super) parent_id: Option<String>,
@@ -249,6 +387,7 @@ pub struct PositionUpdate {
 #[serde(rename_all = "camelCase")]
 pub struct PositionParams {
     pub(super) design_id: String,
+    #[serde(deserialize_with = "lenient")]
     pub(super) updates: Vec<PositionUpdate>,
 }
 
@@ -290,6 +429,7 @@ pub struct ReplyParams {
 pub struct WorkingParams {
     pub(super) design_id: String,
     /// The nodes (usually artboards) you're about to change.
+    #[serde(alias = "nodeId", deserialize_with = "lenient")]
     pub(super) node_ids: Vec<String>,
     /// A few words shown to users, like "Building the pricing section".
     #[serde(default)]
@@ -303,4 +443,55 @@ pub struct WaitParams {
     /// How long to wait, in seconds. Defaults to 60; at most 300.
     #[serde(default)]
     pub(super) timeout_seconds: Option<u64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FindParams {
+    pub(super) design_id: String,
+    /// Search only inside this node, such as an artboard. Omit to search every artboard.
+    #[serde(default)]
+    pub(super) within: Option<String>,
+    /// Text the element contains, ignoring case.
+    #[serde(default)]
+    pub(super) text: Option<String>,
+    /// Part of the layer name, ignoring case.
+    #[serde(default)]
+    pub(super) name: Option<String>,
+    /// The tag, like "button" or "img".
+    #[serde(default)]
+    pub(super) tag: Option<String>,
+    /// Part of a CSS declaration, like "#3b82f6", "border-radius" or "display: grid", ignoring case. Also searches the CSS in <style> blocks.
+    #[serde(default)]
+    pub(super) style: Option<String>,
+    /// Part of an attribute, like "href" or "src=\"https://", ignoring case.
+    #[serde(default)]
+    pub(super) attribute: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaceParams {
+    pub(super) design_id: String,
+    /// The value to find. A color, like "#3b82f6" or "rgb(59, 130, 246)", matches that color in any notation, including tints of it with their own alpha.
+    pub(super) find: String,
+    /// What to put in its place.
+    pub(super) replace: String,
+    /// Replace only inside this node, such as an artboard. Omit for every artboard.
+    #[serde(default)]
+    pub(super) within: Option<String>,
+    /// Also replace it in text content, like a product name. Defaults to false: styles, attributes and <style> CSS only.
+    #[serde(default)]
+    pub(super) include_text: bool,
+    /// List what would change without changing it.
+    #[serde(default)]
+    pub(super) dry_run: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedCssParams {
+    pub(super) design_id: String,
+    /// The whole stylesheet, like ":root { --brand: #f97316 } .btn { padding: 12px 20px; border-radius: 999px }". Replaces the current one; pass "" to clear it.
+    pub(super) css: String,
 }
