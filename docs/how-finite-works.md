@@ -223,12 +223,16 @@ On startup, the hub reads every stored design to build the list, then drops each
 
 ### MCP
 
-`crates/server/src/mcp/` is the agent-facing side, served at `/mcp` over Streamable HTTP with the `rmcp` crate. It has four files:
+`crates/server/src/mcp/` is the agent-facing side, served at `/mcp` over Streamable HTTP with the `rmcp` crate. It has six files:
 
-- `mod.rs` defines every tool and works out which actor is calling.
-- `params.rs` holds each tool's arguments. `rmcp` turns them into the JSON schemas agents see.
-- `format.rs` writes the compact outlines that tools like `get_tree_summary` return.
-- `instructions.md` is the text agents read when they connect. It's plain Markdown, so you can edit the workflow without touching Rust. It tells agents that long results come in parts, with a note on how to get the rest, and that refused edits say which limit they hit.
+- `mod.rs` defines most tools and works out which actor is calling.
+- `params.rs` holds each tool's arguments. `rmcp` turns them into the JSON schemas agents see. Batched edits also accept the shapes agents guess before their client loads a schema: lists and objects sent as JSON strings, a flat `nodeIds` and `styles` instead of `updates`, and `nodeId` for `nodeIds`. Before, a third of the longer AX runs hit "failed to deserialize parameters" at least once.
+- `format.rs` writes the compact outlines that tools like `get_tree_summary` return, and the layout notes under screenshots.
+- `search.rs` has `find_nodes` and `replace_values`, over `finite_design::search`. They shipped behind a flag first, until AX runs showed they help.
+- `demo.rs` demos a feature Finite doesn't have yet, a design-wide stylesheet (`set_shared_css`), behind `FINITE_MCP_EXTRA=shared-styles`. Its CSS lives in memory and only screenshots apply it.
+- `instructions.md` is the text agents read when they connect. It's plain Markdown, so you can edit the workflow without touching Rust. Keep it short: Claude Code keeps the first 4,096 characters of a server's instructions and silently drops the rest. A test checks that the instructions, with every extra group's section added, stay under 4,000.
+
+`e2e/ax` measures how real agents do with the tools (see its README). Every change to a tool's shape, description or result is worth a run there before and after.
 
 `crates/server/tests/mcp.rs` drives the endpoint the way an agent does. It opens a session, builds and styles a design, undoes, and answers a user's comment. If you change a tool, run it with `cargo test -p finite-server --test mcp`. The tool names follow [Paper's MCP server](https://paper.design/docs/mcp). Every tool except `list_designs` and `create_design` takes a `designId`. `list_designs` returns the 50 most recently edited designs, or up to 200 with a `limit`, and a `query` finds designs by name. Names are cut at 120 characters, so 200 entries always fit in one result. The maximum used to be 500, which could come to about 115,000 characters.
 
@@ -242,7 +246,7 @@ How each tool stays within it:
 
 - **`get_html`:** cut HTML would be broken HTML, so a result that's too long returns the node's outline and asks for `get_html` on a child instead. For a node with no children that's still too long, like an image with inline data, it points to `get_node_info` instead. `get_html` itself never shortens values, because an agent that wrote the HTML back would replace the real data with the shortened text.
 - **`get_basic_info`:** lists the first 200 artboards next to an `artboardCount`.
-- **`duplicate_nodes`:** lists its new ids one per line, so `cut` stops between ids.
+- **`duplicate_nodes`:** lists each copy's outline, three levels deep, so agents can edit inside a copy without reading it again. `cut` stops between lines.
 - **`get_children`:** returns 200 children at a time and says how to get the next ones: "Showing children 1 to 200 of 3000. Pass offset 200 for the next ones."
 - **`get_node_info`:** returns the first nodes that fit and says how many more were asked for. Within one node, a value longer than 2,000 characters comes back as its first 200 and its length, because an image's inline `data:` URL can be megabytes of base64. `childIds` lists the first 200 children next to a `childCount`.
 
@@ -260,7 +264,9 @@ Chrome doesn't render below a device scale of 1 here, so a smaller shot renders 
 
 `get_html` can show part of a subtree. `html::export_with` takes a depth, can leave out styles, can shorten long values, and can start with the artboard's `<style>` blocks. When the whole subtree doesn't fit in one result, `html::export_within` binary-searches for the greatest depth that fits. Elements below that depth hold a `<!-- N child elements not shown -->` comment.
 
-`start_working_on_nodes` sets **presence**: a note that an agent is busy on some nodes. Browsers show it as a badge on the artboard. It names at most 100 nodes, and repeats count once. Every viewer gets the whole list on each update, and naming a parent covers its children. Presence expires after five minutes without activity, and an actor's undo history is dropped after six idle hours or when its MCP session ends.
+When a shot is a whole artboard, the capture also measures every element in it, in the same pass that finds the shots' boxes (`measure` in `screenshot/mod.rs`). `layout_notes` in `mcp/format.rs` turns those boxes into a note: content cut off by the artboard's edge, the height that would fit it, and text wider or taller than its own box. Agents used to find clipped footers only by looking at the image, and often didn't.
+
+`start_working_on_nodes` sets **presence**: a note that an agent is busy on some nodes. Browsers show it as a badge on the artboard. It names at most 100 nodes, and repeats count once. Every viewer gets the whole list on each update, and naming a parent covers its children. Most agents skipped that call, so any edit now shows its artboards too, unless the agent set its own presence. Presence set that way expires a minute after the agent's last edit. Presence an agent set itself expires after five minutes without activity, and an actor's undo history is dropped after six idle hours or when its MCP session ends.
 
 A session ends when its agent disconnects, or after an hour without a call (`SESSION_IDLE` in `mcp/mod.rs`). An agent that sends `X-Finite-Agent` keeps its history across sessions. The server cuts its id to 64 characters, as it does people's ids, because it stores the id with every change and reply the agent makes. Before, the server copied a header of a few KB into each of them. One that doesn't is known by its session, so its undo lasts only as long as the session.
 

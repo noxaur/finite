@@ -393,7 +393,7 @@ mod relay {
                 .split('#')
                 .nth(1)
                 .unwrap()
-                .split('.')
+                .split(|c: char| !c.is_ascii_alphanumeric())
                 .next()
                 .unwrap()
                 .to_owned();
@@ -638,7 +638,7 @@ mod failover {
             .split('#')
             .nth(1)
             .unwrap()
-            .split('.')
+            .split(|c: char| !c.is_ascii_alphanumeric())
             .next()
             .unwrap()
             .to_owned();
@@ -978,15 +978,17 @@ async fn agents_get_past_a_stuck_server() {
 }
 
 /// A request for a design whose server is stuck fails with `502` once the
-/// server has been silent for 30 seconds, rather than waiting forever. This
-/// one takes those 30 seconds: with Tokio's clock paused, the 5-second
-/// connect limit could fire first, and the test couldn't tell them apart.
+/// server has been silent for a while (30 seconds, `router::SILENT_SERVER`),
+/// rather than waiting forever. This one waits 2 seconds on the real clock:
+/// with Tokio's clock paused, the 5-second connect limit could fire first,
+/// and the test couldn't tell them apart.
 #[tokio::test]
 async fn a_request_to_a_stuck_server_fails_in_the_end() {
+    let silence = std::time::Duration::from_secs(2);
     let (stuck, stuck_url) = listen().await;
     let nodes = vec![stuck_url];
     let (front, front_url) = listen().await;
-    let routes = router::app(nodes, None);
+    let routes = router::app_with_silence(nodes, silence);
     tokio::spawn(async move { axum::serve(front, routes).await });
 
     let started = std::time::Instant::now();
@@ -999,6 +1001,11 @@ async fn a_request_to_a_stuck_server_fails_in_the_end() {
         .expect("the router waited for the stuck server")
         .unwrap();
     assert_eq!(res.status(), 502);
-    assert!(started.elapsed() >= std::time::Duration::from_secs(25));
+    // The silence limit, not the 5-second connect limit, ended it.
+    let took = started.elapsed();
+    assert!(
+        took >= silence && took < std::time::Duration::from_secs(5),
+        "{took:?}"
+    );
     drop(stuck);
 }

@@ -198,6 +198,9 @@ pub struct Options {
     /// captured, up to [`MAX_SETTLE`]. Pages without either are captured as
     /// soon as their images and fonts load.
     pub settle: Duration,
+    /// Design-wide CSS that applies to every artboard, which only the
+    /// `shared-styles` demo tools set so far (see `mcp/demo.rs`).
+    pub shared_css: Option<String>,
 }
 
 impl Default for Options {
@@ -210,6 +213,7 @@ impl Default for Options {
             transparent: false,
             reveal_overflow: false,
             settle: DEFAULT_SETTLE,
+            shared_css: None,
         }
     }
 }
@@ -258,6 +262,21 @@ pub struct Image {
     pub overflow_shown: bool,
     /// The page has scripts or animations and ran for this long first.
     pub settled: Option<Duration>,
+    /// Where every element of the artboard rendered, for a shot of the
+    /// whole artboard, so the agent can be told what's cut off.
+    pub boxes: Option<Vec<ElementBox>>,
+}
+
+/// Where an element rendered, in CSS pixels from the page's top left corner.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ElementBox {
+    pub id: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    /// How far the element's own text runs past its box, across and down.
+    pub text_overflow: (f64, f64),
 }
 
 /// A capture, decided from the document and ready to render.
@@ -405,8 +424,12 @@ fn page_html(doc: &Document, artboard: &str, options: &Options) -> Option<(Strin
     if options.transparent {
         overrides.push_str("html, body { background: transparent !important; }");
     }
+    let shared = options
+        .shared_css
+        .as_deref()
+        .map_or(String::new(), |css| format!("<style>{css}</style>"));
     let page = format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\"><style>{BASE_CSS} html, body {{ margin: 0; }}</style></head><body>{body}<style>{overrides}</style></body></html>"
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\"><style>{BASE_CSS} html, body {{ margin: 0; }}</style>{shared}</head><body>{body}<style>{overrides}</style></body></html>"
     );
     Some((page, width, height))
 }
@@ -528,6 +551,10 @@ struct Layout {
     offset: [f64; 2],
     animated: bool,
     elements: BTreeMap<String, Option<[f64; 4]>>,
+    /// Every element in the artboard with a size: `[id, x, y, width, height,
+    /// overflowX, overflowY]`, the overflow being how far its own text runs
+    /// past its box.
+    nodes: Vec<(String, f64, f64, f64, f64, f64, f64)>,
 }
 
 fn rect([x, y, width, height]: [f64; 4]) -> Rect {
@@ -668,7 +695,20 @@ async fn measure(tab: &mut cdp::Tab, artboard: &str, ids: &[&str]) -> Result<Lay
     const el = find(id);
     elements[id] = el ? box(el) : null;
   }}
+  const nodes = [];
+  for (const el of board.querySelectorAll(`[{VIEWER_ID_ATTR}]`)) {{
+    const [x, y, w, h] = box(el);
+    if (!w && !h) continue;
+    let text = false;
+    for (const c of el.childNodes) if (c.nodeType === 3 && c.textContent.trim()) text = true;
+    const inline = getComputedStyle(el).display === "inline";
+    const spill = text && !inline;
+    nodes.push([el.getAttribute("{VIEWER_ID_ATTR}"), x, y, w, h,
+      spill ? el.scrollWidth - el.clientWidth : 0, spill ? el.scrollHeight - el.clientHeight : 0]);
+  }}
+  nodes.unshift([{board}, ...box(board), 0, 0]);
   return {{
+    nodes,
     board: box(board),
     scroll: [board.scrollWidth, board.scrollHeight],
     client: [board.clientWidth, board.clientHeight],
@@ -796,6 +836,20 @@ async fn shoot(
         overflow,
         overflow_shown: options.reveal_overflow,
         settled,
+        boxes: (planned.element == page.artboard).then(|| {
+            layout
+                .nodes
+                .iter()
+                .map(|(id, x, y, width, height, ox, oy)| ElementBox {
+                    id: id.clone(),
+                    x: *x,
+                    y: *y,
+                    width: *width,
+                    height: *height,
+                    text_overflow: (*ox, *oy),
+                })
+                .collect()
+        }),
     })
 }
 

@@ -602,11 +602,9 @@ async fn long_results_are_cut_with_directions() {
         "{}",
         tail(&copied)
     );
-    let last_id = copied.lines().rev().nth(1).unwrap();
-    assert!(
-        last_id.starts_with('#') && last_id.len() == 9,
-        "{last_id:?}"
-    );
+    // Each copy is an outline line, and the cut falls between them.
+    let last = copied.lines().rev().nth(1).unwrap();
+    assert!(last.starts_with("i #") && last.len() == 11, "{last:?}");
     agent.ok("undo", json!({ "designId": design })).await;
 
     // Presence names at most 100 nodes; repeats count once.
@@ -936,7 +934,15 @@ async fn agents_choose_what_html_and_screenshots_show() {
     let images = content.iter().filter(|c| c["type"] == "image").count();
     assert_eq!(images, 2, "{texts:?}");
     assert!(
-        texts[1].contains(&format!("#{body} in artboard #{board}")),
+        texts
+            .iter()
+            .any(|t| t.contains(&format!("#{body} in artboard #{board}"))),
+        "{texts:?}"
+    );
+    // The whole artboard's shot also gets a layout check; the node's doesn't.
+    assert_eq!(
+        texts.iter().filter(|t| t.starts_with("Layout:")).count(),
+        1,
         "{texts:?}"
     );
 
@@ -947,4 +953,84 @@ async fn agents_choose_what_html_and_screenshots_show() {
         )
         .await;
     assert!(is_error && refused.contains("no transparency"), "{refused}");
+}
+
+/// What the AX runs (`e2e/ax`) changed: a screen in one call, edits that say
+/// what they changed, search and replace, and the argument shapes agents guess.
+#[tokio::test]
+async fn tools_answer_what_agents_asked_for() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Ax").await;
+    let created = agent.ok("create_design", json!({ "name": "Ax" })).await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .expect("a design id")
+        .to_owned();
+
+    // One call makes the artboard and its content, and reports both.
+    let made = agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Phone", "width": 390, "height": 844,
+                    "html": "<style>.cta { color: #3B82F6 }</style><button data-name=\"CTA\" class=\"cta\" style=\"background: rgba(59, 130, 246, 0.2)\">Go</button>" }),
+        )
+        .await;
+    assert!(made.contains("at x 0, y 0, 390 × 844"), "{made}");
+    let board = id_after(&made, "Created artboard");
+    let button = id_after(&made, "\"CTA\"");
+
+    // An edit names the nodes it changed. A flat update with values sent as
+    // JSON strings, as agents send before loading a schema, works too.
+    let edited = agent
+        .ok(
+            "update_styles",
+            json!({ "designId": design, "nodeIds": format!("[\"{button}\"]"), "styles": "{\"padding\": \"12px\"}" }),
+        )
+        .await;
+    assert!(
+        edited.starts_with("Changed 1 value on 1 node:") && edited.contains("\"CTA\""),
+        "{edited}"
+    );
+
+    // Find the blue in any notation, in styles and in the <style> block.
+    let found = agent
+        .ok(
+            "find_nodes",
+            json!({ "designId": design, "style": "#3b82f6" }),
+        )
+        .await;
+    assert!(found.starts_with("2 elements match"), "{found}");
+    let replaced = agent
+        .ok(
+            "replace_values",
+            json!({ "designId": design, "find": "#3b82f6", "replace": "#f97316" }),
+        )
+        .await;
+    assert!(
+        replaced.starts_with("Replaced 2 uses on 2 nodes"),
+        "{replaced}"
+    );
+    let html = agent
+        .ok("get_html", json!({ "designId": design, "nodeId": board }))
+        .await;
+    assert!(
+        html.contains("color: #f97316") && html.contains("rgba(249, 115, 22, 0.2)"),
+        "{html}"
+    );
+    // One undo step puts it all back.
+    agent.ok("undo", json!({ "designId": design })).await;
+    let html = agent
+        .ok("get_html", json!({ "designId": design, "nodeId": board }))
+        .await;
+    assert!(html.contains("#3B82F6"), "{html}");
+
+    // The edits showed users which artboard the agent was on.
+    let info: Value = serde_json::from_str(
+        &agent
+            .ok("get_basic_info", json!({ "designId": design }))
+            .await,
+    )
+    .unwrap();
+    assert_eq!(info["agentsWorking"][0]["nodeIds"], json!([board]));
 }

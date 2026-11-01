@@ -18,6 +18,7 @@ mod history;
 pub mod html;
 pub mod label;
 mod node;
+pub mod search;
 
 pub use design::{ActorId, Change, Design, DesignMeta, Origin, Record, Snapshot};
 pub use document::{Document, Op};

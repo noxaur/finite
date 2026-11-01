@@ -401,3 +401,35 @@ fn plans_refuse_unknown_nodes_and_too_many_shots() {
             .contains("at most")
     );
 }
+
+#[tokio::test]
+async fn a_whole_artboard_shot_measures_every_element() {
+    let (doc, names) = design(
+        r#"<div data-name="Board" style="width: 300px; height: 200px; display: flex; flex-direction: column; overflow: hidden"><div data-name="Tall" style="height: 260px; flex-shrink: 0"></div><p data-name="Text" style="width: 40px; white-space: nowrap; margin: 0">Too long to fit</p></div>"#,
+    );
+    let Some(images) = shoot(&doc, vec![Shot::node(&names["Board"])], Options::default()).await
+    else {
+        return;
+    };
+    let boxes = images[0]
+        .as_ref()
+        .unwrap()
+        .boxes
+        .clone()
+        .expect("a whole artboard is measured");
+    let find = |name: &str| boxes.iter().find(|b| b.id == names[name]).unwrap();
+    assert_eq!((find("Board").width, find("Board").height), (300.0, 200.0));
+    // The tall block runs past the artboard's bottom edge…
+    assert_eq!(find("Tall").height, 260.0);
+    // …and the text past its own box.
+    let text = find("Text");
+    assert_eq!(text.y, 260.0);
+    assert!(text.text_overflow.0 > 20.0, "{text:?}");
+
+    // A node's shot doesn't carry them.
+    let Some(images) = shoot(&doc, vec![Shot::node(&names["Tall"])], Options::default()).await
+    else {
+        return;
+    };
+    assert!(images[0].as_ref().unwrap().boxes.is_none());
+}

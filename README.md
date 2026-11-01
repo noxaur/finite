@@ -27,7 +27,9 @@ claude mcp add --transport http finite http://127.0.0.1:4100/mcp
 
 The tools follow [Paper's MCP server](https://paper.design/docs/mcp): `get_basic_info` and `get_tree_summary` to orient, `create_artboard` and `write_html` to build, `update_styles` and `set_text_content` to refine, and `get_screenshot` to check the render. Every tool except `list_designs` and `create_design` takes a `designId`, which is how agents pick the canvas they edit. The server's MCP instructions (`crates/server/src/mcp/instructions.md`) explain the workflow to the agent, and `crates/server/src/mcp/mod.rs` defines every tool.
 
-`get_screenshot` renders the artboard with a local headless Chrome, Chromium or Edge. Set `FINITE_CHROME` if yours isn't in a standard location.
+`get_screenshot` renders artboards with a local headless Chrome, Chromium or Edge, and reports anything cut off by the artboard's edge. Set `FINITE_CHROME` if yours isn't in a standard location.
+
+`find_nodes` and `replace_values` search a design and change a value, like a brand color, everywhere at once. `FINITE_MCP_EXTRA` turns on experimental tool groups, as a comma-separated list. So far there's one, `shared-styles`, a demo of design-wide CSS that only screenshots apply. `e2e/ax` runs real agents against the tools to measure whether a change helps (see `e2e/ax/README.md`).
 
 ## Styles, motion and scripts
 

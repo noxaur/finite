@@ -133,6 +133,38 @@ pub fn create_artboard(doc: &Document, id: NodeId, spec: NewArtboard) -> Result<
     }])
 }
 
+/// [`create_artboard`], with `fragments` written into it, as one change.
+/// Returns the ops and the ids of the content's root nodes.
+pub fn create_artboard_with(
+    doc: &Document,
+    id: NodeId,
+    spec: NewArtboard,
+    fragments: Vec<Fragment>,
+    new_id: &mut impl FnMut() -> NodeId,
+) -> Result<(Vec<Op>, Vec<NodeId>)> {
+    let mut ops = create_artboard(doc, id.clone(), spec)?;
+    let height = fragments.iter().map(Fragment::height).max().unwrap_or(0);
+    // The artboard is at depth 0, so its content starts at depth 1.
+    if 1 + height > MAX_DEPTH {
+        return err(format!(
+            "that would nest {} levels deep; the limit is {MAX_DEPTH}",
+            1 + height
+        ));
+    }
+    room_for(
+        doc,
+        0,
+        1 + fragments.iter().map(Fragment::count).sum::<usize>(),
+    )?;
+    let indexes = fractional::keys_between(None, None, fragments.len());
+    let roots = fragments
+        .into_iter()
+        .zip(indexes)
+        .map(|(fragment, index)| fragment.create_ops(Some(&id), index, None, new_id, &mut ops))
+        .collect();
+    Ok((ops, roots))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WriteMode {
     /// Insert the HTML as children of the target, at `index` or at the end.
