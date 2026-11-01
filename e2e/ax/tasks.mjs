@@ -7,7 +7,58 @@
 //   seed(mcp)        sets up the design and returns ctx (ids the prompt and check need)
 //   check(mcp, ctx)  returns { passed, total, notes } from the design afterwards
 //   workdir          "none" (an empty folder) or "web-src" (a copy of the web app's source)
+//   followUp(ctx)    optional: a second prompt in the same session, measured on its own
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { launch } from "../cdp.mjs";
 import { idAfter } from "../mcp.mjs";
+
+/**
+ * Renders an artboard's HTML (from get_html) in Chrome and returns every
+ * element's box, relative to the artboard, with its text and computed
+ * styles, so a check can test what a person would see. It doesn't depend on
+ * the server build under test.
+ */
+async function rendered(html, width, height, css = "") {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "finite-ax-check-"));
+  const file = path.join(dir, "page.html");
+  fs.writeFileSync(
+    file,
+    `<!doctype html><html><head><meta charset="utf-8"><style>*, *::before, *::after { box-sizing: border-box; } html, body { margin: 0; }</style><style>${css}</style></head><body>${html}</body></html>`,
+  );
+  const page = await launch({ width, height });
+  try {
+    await page.goto(`file://${file}`);
+    return await page.eval(`(() => {
+      const board = document.body.firstElementChild.getBoundingClientRect();
+      return [...document.querySelectorAll("[data-id]")].map((el) => {
+        const r = el.getBoundingClientRect();
+        const s = getComputedStyle(el);
+        return { id: el.dataset.id, name: el.dataset.name ?? null, tag: el.tagName.toLowerCase(),
+          text: el.textContent.trim(), x: r.x - board.x, y: r.y - board.y, width: r.width, height: r.height,
+          position: s.position, background: s.backgroundColor, fontSize: parseFloat(s.fontSize),
+          visible: s.visibility !== "hidden" && s.display !== "none" && r.width > 0 && r.height > 0 };
+      });
+    })()`);
+  } finally {
+    await page.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const centerIn = (pin, target, slack = 4) => {
+  const cx = pin.x + pin.width / 2;
+  const cy = pin.y + pin.height / 2;
+  return (
+    cx >= target.x - slack &&
+    cx <= target.x + target.width + slack &&
+    cy >= target.y - slack &&
+    cy <= target.y + target.height + slack
+  );
+};
+const overlaps = (a, b) =>
+  a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
 
 const BLUE = "#3b82f6";
 
@@ -235,6 +286,157 @@ export const tasks = {
         total: checks.length,
         notes: [`${boards.length} artboards, ${info.nodeCount} nodes`],
         screenshot: boards[1]?.id ?? boards[0]?.id,
+      };
+    },
+  },
+
+  // Pins over content the agent didn't size: it has to find where things rendered.
+  pins: {
+    workdir: "none",
+    async seed(mcp) {
+      const ctx = await seedLanding(mcp, "Acme landing");
+      const html = await mcp.call("get_html", { designId: ctx.design, nodeId: ctx.board });
+      const before = await rendered(html, 1440, 1000);
+      const at = (text, tag) => before.find((e) => e.tag === tag && e.text === text);
+      return { ...ctx, start: at("Start free", "button"), observe: at("Observe", "h3") };
+    },
+    prompt: () =>
+      `Use the Finite MCP tools. On the Finite design "Acme landing", mark two spots for a design review. ` +
+      `Add pin 1 over the "Start free" button and pin 2 over the "Observe" card's heading. ` +
+      `A pin is a 28 px red (#ef4444) circle with its number in white, absolutely positioned inside the artboard, ` +
+      `and its center must land on its target. Don't move or change anything else. Stop when you're done.`,
+    async check(mcp, ctx) {
+      const html = await mcp.call("get_html", { designId: ctx.design, nodeId: ctx.board });
+      const after = await rendered(html, 1440, 1000);
+      const pin = (n) =>
+        after.find(
+          (e) =>
+            e.text === n &&
+            ["absolute", "fixed"].includes(e.position) &&
+            e.width >= 20 &&
+            e.width <= 40,
+        );
+      const start = after.find((e) => e.tag === "button" && e.text === "Start free");
+      const observe = after.find((e) => e.tag === "h3" && e.text === "Observe");
+      const [p1, p2] = [pin("1"), pin("2")];
+      const unmoved = [
+        [start, ctx.start],
+        [observe, ctx.observe],
+      ].every(([a, b]) => a && Math.abs(a.x - b.x) < 1 && Math.abs(a.y - b.y) < 1);
+      const checks = [
+        Boolean(p1 && centerIn(p1, start)),
+        Boolean(p2 && centerIn(p2, observe)),
+        unmoved,
+      ];
+      const where = (p, t) =>
+        p
+          ? `pin at (${Math.round(p.x + p.width / 2)}, ${Math.round(p.y + p.height / 2)}) vs target ${Math.round(t.x)},${Math.round(t.y)} ${Math.round(t.width)}×${Math.round(t.height)}`
+          : "no pin";
+      return {
+        passed: checks.filter(Boolean).length,
+        total: checks.length,
+        notes: [where(p1, start), where(p2, observe)],
+      };
+    },
+  },
+
+  // A small label overlapping the artboard name, like the bug the UI-states agent hit.
+  overlap: {
+    workdir: "none",
+    async seed(mcp) {
+      const design = (await mcp.call("create_design", { name: "Canvas mock" })).match(
+        /designId "([^"]+)"/,
+      )[1];
+      const board = idAfter(
+        await mcp.call("create_artboard", {
+          designId: design,
+          name: "Canvas",
+          width: 1200,
+          height: 700,
+          x: 0,
+          y: 0,
+          styles: { "background-color": "#f4f4f5" },
+          html: `<div data-name="Frame" style="position: relative; margin: 64px; width: 640px; height: 420px; flex-shrink: 0">
+  <div data-name="Frame title" style="position: absolute; left: 0; top: -22px; font: 500 13px Inter, sans-serif; color: #52525b">Checkout — desktop</div>
+  <div data-name="Working badge" style="position: absolute; left: 96px; top: -24px; padding: 2px 8px; border-radius: 999px; background: #7c3aed; color: white; font: 600 11px Inter, sans-serif; white-space: nowrap">An agent is working on this</div>
+  <div data-name="Frame body" style="width: 100%; height: 100%; background: white; border: 1px solid #e4e4e7; border-radius: 8px"></div>
+</div>
+<div data-name="Toolbar" style="position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); display: flex; gap: 4px; padding: 4px; background: white; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,.12)"><button style="padding: 6px 10px">Pointer</button><button style="padding: 6px 10px">Comment</button></div>`,
+        }),
+        "artboard",
+      );
+      return { design, board };
+    },
+    prompt: () =>
+      `Use the Finite MCP tools. A user reports that on the Finite design "Canvas mock", the small "An agent is working on this" badge ` +
+      `overlaps the frame's name above it. Fix it so they don't overlap and both stay readable and above the frame, ` +
+      `without changing anything else. Stop when you're done.`,
+    async check(mcp, ctx) {
+      const html = await mcp.call("get_html", { designId: ctx.design, nodeId: ctx.board });
+      const after = await rendered(html, 1200, 700);
+      const title = after.find((e) => e.text === "Checkout — desktop" && e.tag === "div");
+      const badge = after.find((e) => e.text === "An agent is working on this" && e.tag === "div");
+      const body = after.find((e) => e.name === "Frame body");
+      const checks = [
+        Boolean(title && badge && !overlaps(title, badge)),
+        Boolean(badge?.visible && title?.visible && badge.fontSize >= 10 && title.fontSize >= 12),
+        Boolean(
+          body &&
+          badge &&
+          title &&
+          badge.y + badge.height <= body.y + 2 &&
+          title.y + title.height <= body.y + 2,
+        ),
+      ];
+      return {
+        passed: checks.filter(Boolean).length,
+        total: checks.length,
+        notes: [
+          title && badge
+            ? `title ${Math.round(title.x)}–${Math.round(title.x + title.width)}, badge ${Math.round(badge.x)}–${Math.round(badge.x + badge.width)}`
+            : "missing",
+        ],
+      };
+    },
+  },
+
+  // Build three screens, then change something they share: the UI-states
+  // agent's top complaint was that this meant editing every copy.
+  "screens-change": {
+    workdir: "none",
+    seed: async (mcp) => ({
+      design: (await mcp.call("create_design", { name: "Plantpal onboarding" })).match(
+        /designId "([^"]+)"/,
+      )[1],
+    }),
+    prompt: () =>
+      `Use the Finite MCP tools. In the Finite design "Plantpal onboarding", design a three-screen mobile onboarding flow for a plant-care app: ` +
+      `Welcome, Pick your plants (a grid of at least 6 selectable plant cards, two selected), and All set. ` +
+      `The screens must share the same top bar, colors, type and button style. Check how they look. Stop when you're done.`,
+    followUp: () =>
+      `The client changed their mind: the top bar on every screen should be dark green (#14532d) with white text. ` +
+      `Make that change on all screens and check it. Stop when you're done.`,
+    async check(mcp, ctx) {
+      const info = JSON.parse(await mcp.call("get_basic_info", { designId: ctx.design }));
+      const shared = await mcp
+        .callRaw("get_shared_css", { designId: ctx.design })
+        .catch(() => null);
+      const css = shared && !shared.isError ? (shared.content?.[0]?.text ?? "") : "";
+      const sharedCss = css.startsWith("This design has no shared CSS") ? "" : css;
+      let green = 0;
+      for (const a of info.artboards) {
+        const html = await mcp.call("get_html", { designId: ctx.design, nodeId: a.id });
+        const els = await rendered(html, a.width, a.height, sharedCss);
+        const bar = els.find(
+          (e) => e.background === "rgb(20, 83, 45)" && e.y < 160 && e.width >= a.width * 0.8,
+        );
+        if (bar) green++;
+      }
+      const checks = [info.artboards.length >= 3, green >= 3 && green === info.artboards.length];
+      return {
+        passed: checks.filter(Boolean).length,
+        total: checks.length,
+        notes: [`${green}/${info.artboards.length} green top bars`],
       };
     },
   },

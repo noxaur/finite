@@ -279,7 +279,10 @@ async fn a_person_sets_the_shared_css() {
     let html = agent
         .ok("get_html", json!({ "designId": design, "nodeId": board }))
         .await;
-    assert!(html.contains("shared CSS (20 characters)"), "{html}");
+    assert!(
+        html.contains("shared CSS (20 characters, from get_shared_css)"),
+        "{html}"
+    );
     // The person's edit is theirs to undo, not the agent's.
     assert_eq!(
         agent.ok("undo", json!({ "designId": design })).await,
@@ -973,4 +976,71 @@ async fn tools_answer_what_agents_asked_for() {
     )
     .unwrap();
     assert_eq!(info["agentsWorking"][0]["nodeIds"], json!([board]));
+}
+
+/// get_layout says where things rendered and what overlaps, without an image;
+/// get_screenshot with only a designId captures every artboard; passing the
+/// designId as a node says so.
+#[tokio::test]
+async fn agents_find_where_things_rendered() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Layout").await;
+    let created = agent.ok("create_design", json!({ "name": "Layout" })).await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .expect("a design id")
+        .to_owned();
+    let made = agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Frame", "width": 400, "height": 300, "class": "frame",
+                    "html": "<div data-name=\"Title\" style=\"position: absolute; left: 10px; top: 10px\">Checkout</div><div data-name=\"Badge\" style=\"position: absolute; left: 30px; top: 12px\">Agent working</div><h3 data-name=\"Heading\" style=\"position: absolute; left: 0; right: 0; top: 100px; margin: 0\">Hi</h3>" }),
+        )
+        .await;
+    let board = id_after(&made, "Created artboard");
+    let html = agent
+        .ok("get_html", json!({ "designId": design, "nodeId": board }))
+        .await;
+    assert!(html.contains("class=\"frame\""), "{html}");
+
+    let (layout, is_error) = agent
+        .call("get_layout", json!({ "designId": design, "nodeId": board }))
+        .await;
+    if layout.contains("no Chrome") {
+        eprintln!("skipped: no browser");
+        return;
+    }
+    assert!(!is_error, "{layout}");
+    assert!(layout.contains("@ 0,0 400×300"), "{layout}");
+    assert!(
+        layout.contains("\"Title\"") && layout.contains("@ 10,10"),
+        "{layout}"
+    );
+    assert!(
+        layout.contains("1 pair of text elements overlap"),
+        "{layout}"
+    );
+
+    let result = agent
+        .rpc(
+            "tools/call",
+            Some(json!({ "name": "get_screenshot", "arguments": { "designId": design } })),
+        )
+        .await;
+    let images = result["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["type"] == "image")
+        .count();
+    assert_eq!(images, 1, "{result}");
+
+    let (refused, is_error) = agent
+        .call(
+            "get_layout",
+            json!({ "designId": design, "nodeId": design }),
+        )
+        .await;
+    assert!(is_error && refused.contains("is the designId"), "{refused}");
 }

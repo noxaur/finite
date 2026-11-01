@@ -18,14 +18,17 @@ Pass `--env FINITE_MCP_EXTRA=shared-styles` to try a tool group that's off by de
 
 `tasks.mjs` defines them. Each one has a prompt, a seed and a check.
 
-| Task        | What the agent does                                                                 | What it tests              |
-| ----------- | ----------------------------------------------------------------------------------- | -------------------------- |
-| `restyle`   | Swap a brand color on one landing page, round the buttons, fix a typo               | Finding things             |
-| `rebrand`   | Swap the color across three artboards, including a `<style>` block and an rgba tint | Finding things at scale    |
-| `mobile`    | Make a 390 px version of a desktop page                                             | Copying, layout, verifying |
-| `comments`  | Handle two pinned comments                                                          | The comment loop           |
-| `screens`   | Build a consistent three-screen mobile flow                                         | Building, reuse            |
-| `ui-states` | Draw every state of Finite's own web app, from its source                           | A long session             |
+| Task             | What the agent does                                                                 | What it tests                 |
+| ---------------- | ----------------------------------------------------------------------------------- | ----------------------------- |
+| `restyle`        | Swap a brand color on one landing page, round the buttons, fix a typo               | Finding things                |
+| `rebrand`        | Swap the color across three artboards, including a `<style>` block and an rgba tint | Finding things at scale       |
+| `mobile`         | Make a 390 px version of a desktop page                                             | Copying, layout, verifying    |
+| `comments`       | Handle two pinned comments                                                          | The comment loop              |
+| `screens`        | Build a consistent three-screen mobile flow                                         | Building, reuse               |
+| `ui-states`      | Draw every state of Finite's own web app, from its source                           | A long session                |
+| `pins`           | Put numbered pins over a button and a heading the agent didn't size                 | Finding where things rendered |
+| `overlap`        | Fix a small badge overlapping the frame name above it                               | Spotting and fixing overlaps  |
+| `screens-change` | Build three screens, then change their shared top bar in the same session           | Keeping a design up to date   |
 
 ## What the metrics mean
 
@@ -58,5 +61,22 @@ Smaller changes: edits name the nodes they changed instead of "Done.", `duplicat
 
 Agents also asked for two features Finite didn't have:
 
-- **Shared styles across artboards.** `FINITE_MCP_EXTRA=shared-styles` turns on `set_shared_css` and `get_shared_css` (`crates/server/src/mcp/styles.rs`). They started as a demo that kept the CSS in the server's memory. Now the CSS is part of the design ([issue #8](https://github.com/noxaur/finite/issues/8)), and the tool names are the same, so runs from before and after compare.
-- **Components with instances.** Agents on `screens` and `ui-states` asked for them about as often as for shared styles. There's no demo yet.
+- **Shared styles across artboards.** `set_shared_css` and `get_shared_css` (`crates/server/src/mcp/styles.rs`) started as a demo that kept the CSS in the server's memory. Now the CSS is part of the design ([issue #8](https://github.com/noxaur/finite/issues/8)), and every agent gets the tools (see below).
+- **Components with instances.** Agents on `screens` and `ui-states` asked for them about as often as for shared styles. [Issue #11](https://github.com/noxaur/finite/issues/11) tracks them.
+
+## What the second study found
+
+The agent that drew Finite's UI states listed what cost it the most. First, it had to paste the same styles into every artboard. Second, it couldn't tell where things rendered, so it guessed coordinates for pins and outlines, took a screenshot and fixed them. Three pins and one outline were wrong on its first try. The `pins`, `overlap` and `screens-change` tasks test exactly those, again 3 runs per variant with Sonnet 5.5 at medium effort.
+
+| Task                                   | Before          | After           |
+| -------------------------------------- | --------------- | --------------- |
+| `pins` calls / screenshots / fit grade | 8.0 / 2.3 / 7.7 | 6.0 / 0 / 9.0   |
+| `overlap` calls / errors / screenshots | 8.3 / 1.0 / 3.0 | 7.0 / 0 / 0.3   |
+| `screens-change`, calls for the change | 3 to 5          | 2, in every run |
+| `ui-states` cost / time                | $0.53 / 145 s   | $0.41 / 111 s   |
+
+What made the difference:
+
+- **`get_layout`.** It lists every element with where it rendered, and flags content cut off by the artboard's edge, text overflowing its box, and text overlapping other text. It takes no picture and answers in about 0.4 s. Agents used it in every `pins` and `overlap` run and stopped taking screenshots to find positions. Its first version gave only element boxes. A heading's box can span the page while its text is 70 px wide, so agents centered pins on empty space. Now it also says where an element's text sits when that's much smaller than its box.
+- **Shared CSS for every agent.** With the tools on, every `screens-change` agent put the top bar's styles in the shared CSS. The change was then one `set_shared_css` and one screenshot. Without them, agents edited each screen.
+- **Accepting what agents meant.** `get_screenshot` and `get_layout` with only a `designId` now cover every artboard, which every `overlap` agent on the old build tried, and got an error. Passing the `designId` as a `nodeId` says so. `create_artboard` takes `class`, because two agents styled `.screen` in a `<style>` block and found the artboard itself had no class.
