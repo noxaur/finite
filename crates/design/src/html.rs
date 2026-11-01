@@ -103,9 +103,7 @@ fn skip_comments(css: &str) -> usize {
         if !css[at..].starts_with("/*") {
             return at;
         }
-        at = css[at + 2..]
-            .find("*/")
-            .map_or(css.len(), |end| at + 2 + end + 2);
+        at = comment_end(css, at);
     }
 }
 
@@ -123,8 +121,16 @@ fn string_end(css: &str, start: usize) -> usize {
     bytes.len()
 }
 
+/// The end of the comment that starts at `start`, past its `*/`.
+fn comment_end(css: &str, start: usize) -> usize {
+    css[start + 2..]
+        .find("*/")
+        .map_or(css.len(), |end| start + 2 + end + 2)
+}
+
 /// The end of the statement `css` starts with, past its `;`. Semicolons in
-/// strings and parentheses, like a font URL's `wght@400;700`, don't count.
+/// strings, comments and parentheses, like a font URL's `wght@400;700`,
+/// don't count.
 fn statement_end(css: &str) -> usize {
     let bytes = css.as_bytes();
     let mut depth = 0usize;
@@ -133,6 +139,10 @@ fn statement_end(css: &str) -> usize {
         match bytes[i] {
             b'"' | b'\'' => {
                 i = string_end(css, i);
+                continue;
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i = comment_end(css, i);
                 continue;
             }
             b'(' => depth += 1,
@@ -154,7 +164,7 @@ fn layered_import(rule: &str) -> String {
     {
         return rule.to_owned();
     }
-    let url = rule.len() - rule[7..].trim_start().len();
+    let url = 7 + skip_comments(&rule[7..]);
     let rest = &rule[url..];
     let url_len = if rest.starts_with(['"', '\'']) {
         string_end(rest, 0)
@@ -162,9 +172,7 @@ fn layered_import(rule: &str) -> String {
         .get(..4)
         .is_some_and(|s| s.eq_ignore_ascii_case("url("))
     {
-        // `url(` opens a parenthesis, so the statement scan ends at its `)`.
-        let inside = &rest[4..];
-        4 + inside.find(')').map_or(inside.len(), |end| end + 1)
+        url_end(rest)
     } else {
         return rule.to_owned();
     };
@@ -183,6 +191,22 @@ fn layered_import(rule: &str) -> String {
     )
 }
 
+/// The end of the `url(…)` that `css` starts with, past its `)`. A quoted
+/// URL can hold a `)`.
+fn url_end(css: &str) -> usize {
+    let bytes = css.as_bytes();
+    let mut i = 4;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' | b'\'' => i = string_end(css, i),
+            b'\\' => i += 2,
+            b')' => return i + 1,
+            _ => i += 1,
+        }
+    }
+    bytes.len()
+}
+
 /// `css` with each `:root` selector, in any case, written as `:host`.
 /// Strings and comments stay as they are.
 fn replace_root(css: &str) -> String {
@@ -192,11 +216,7 @@ fn replace_root(css: &str) -> String {
     while i < bytes.len() {
         match bytes[i] {
             b'"' | b'\'' => i = string_end(css, i),
-            b'/' if bytes.get(i + 1) == Some(&b'*') => {
-                i = css[i + 2..]
-                    .find("*/")
-                    .map_or(bytes.len(), |end| i + 2 + end + 2);
-            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => i = comment_end(css, i),
             b':' if css
                 .get(i..i + 5)
                 .is_some_and(|s| s.eq_ignore_ascii_case(":root"))
@@ -849,6 +869,15 @@ mod tests {
                 true
             ),
             "@layer finite-shared {\n:host { --brand: red; } [title=\":root\"] {} /* :root */\n}"
+        );
+        // Comments and quoted parentheses don't confuse it.
+        assert_eq!(
+            shared_style(
+                "@import /* a */ url(\"a(b).css\") supports(display: grid) /* ; */ screen; .x {}",
+                false
+            ),
+            "@import /* a */ url(\"a(b).css\") layer(finite-shared) supports(display: grid) /* ; */ screen;\n\
+             @layer finite-shared {\n.x {}\n}"
         );
         // It can't end its <style> element, wherever it came from.
         assert!(!shared_style("a{}</style><script>x()</script>", false).contains("</style"));
