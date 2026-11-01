@@ -541,7 +541,29 @@ The Postgres tests need the feature and `FINITE_TEST_DATABASE_URL`. Without the 
 
 To run them on a Mac, `brew install postgresql@17` and start it. Then run `FINITE_TEST_DATABASE_URL=postgres://localhost/postgres cargo test -p finite-server --features postgres`.
 
-The Postgres store connects without TLS. Run the database on a private network, or put a TLS proxy next to each server.
+#### Connecting with TLS
+
+Managed databases like RDS, Cloud SQL and Supabase only take TLS. You set TLS the way you would for `psql`, with `sslmode` in the URL, and Finite reads it the way libpq does (`crates/server/src/postgres/tls.rs`):
+
+| `sslmode`         | Encrypted                  | What it checks                              |
+| ----------------- | -------------------------- | ------------------------------------------- |
+| `disable`         | Never                      | Nothing                                     |
+| `allow`, `prefer` | When the server offers TLS | Nothing                                     |
+| `require`         | Always                     | Nothing, unless you give `sslrootcert`      |
+| `verify-ca`       | Always                     | That a CA you trust signed the certificate  |
+| `verify-full`     | Always                     | That, and that it names the host you dialed |
+
+`prefer` is the default, so a local Postgres without TLS works as it did. For a managed database, use `verify-full` and point `sslrootcert` at its CA file:
+
+```bash
+FINITE_DATABASE_URL='postgres://finite@db.example.com/finite?sslmode=verify-full&sslrootcert=/etc/finite/rds-ca.pem'
+```
+
+`require` stops someone from reading the traffic, but not from posing as the database, because it takes any key. That's libpq's meaning too. Without `sslrootcert`, `verify-ca` and `verify-full` trust the Mozilla list of public CAs built into Finite. That's enough for a provider that gets its keys signed by a public CA, like Let's Encrypt. RDS and Cloud SQL sign with CAs of their own, so you need their CA file. Client certificates (`sslcert`, `sslkey`) aren't supported yet.
+
+The TLS code is rustls, through `tokio-postgres-rustls`, with the `ring` crypto backend. It's all Rust, so a build needs no OpenSSL and no C compiler. `tokio-postgres` only knows three modes and no `sslrootcert`, so Finite takes both settings out of the URL and sets up the check itself.
+
+A test in `postgres/mod.rs` runs a TLS front for the test database, the way a managed Postgres looks. It has a CA of its own, and it serves as `localhost`. The test checks each mode against it. `verify-full` refuses it as `127.0.0.1`, a name it doesn't have, and `verify-ca` takes it. A failed check says why, like `invalid peer certificate: UnknownIssuer`. With plain connections, as before this change, the TLS tests failed with `no TLS implementation configured`.
 
 ### Separate folders
 

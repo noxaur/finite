@@ -24,7 +24,10 @@
 use std::{future::Future, io, sync::Mutex, time::Duration};
 
 use finite_design::{Record, Snapshot};
-use tokio_postgres::{Client, NoTls};
+use tokio_postgres::Client;
+use tokio_postgres_rustls::MakeRustlsConnect;
+
+pub mod tls;
 
 use crate::store::{Claim, Registry, Store, Stored, Token, fenced};
 
@@ -68,9 +71,21 @@ macro_rules! query {
     };
 }
 
+/// The connection settings in `url`, and a TLS connector for its `sslmode`.
+fn open(url: &str) -> io::Result<(tokio_postgres::Config, MakeRustlsConnect)> {
+    let (url, settings) = tls::split(url)?;
+    let mut config: tokio_postgres::Config = url.parse().map_err(other)?;
+    config.connect_timeout(CALL_TIMEOUT);
+    config.ssl_mode(settings.ssl_mode());
+    Ok((config, settings.connector()?))
+}
+
 /// Designs, journals, leases and heartbeats in Postgres.
 pub struct PgStore {
     config: tokio_postgres::Config,
+    /// Encrypts connections and checks the server's certificate, as
+    /// `sslmode` says (see [`tls`]).
+    tls: MakeRustlsConnect,
     runtime: Option<tokio::runtime::Runtime>,
     /// Idle connections. A call takes one, or opens one if there's none.
     idle: Mutex<Vec<Client>>,
@@ -88,13 +103,26 @@ fn other(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
 }
 
+/// An error with the errors that caused it, like "error performing TLS
+/// handshake: invalid peer certificate: UnknownIssuer". `tokio-postgres`
+/// keeps the cause out of its message, and the cause is what says what to fix.
+fn with_causes(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut cause = error.source();
+    while let Some(next) = cause {
+        message.push_str(": ");
+        message.push_str(&next.to_string());
+        cause = next.source();
+    }
+    message
+}
+
 impl PgStore {
     /// Connects to the database at `url` as the server at `me`, and creates
     /// the tables if they're missing. A router, which only reads the list of
     /// servers, can pass any `me`.
     pub fn connect(url: &str, me: &str, lease: Duration) -> io::Result<Self> {
-        let mut config: tokio_postgres::Config = url.parse().map_err(other)?;
-        config.connect_timeout(CALL_TIMEOUT);
+        let (mut config, tls) = open(url)?;
         config.application_name("finite-server");
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -103,6 +131,7 @@ impl PgStore {
             .build()?;
         let store = Self {
             config,
+            tls,
             runtime: Some(runtime),
             idle: Mutex::new(Vec::new()),
             me: me.to_owned(),
@@ -135,12 +164,12 @@ impl PgStore {
             .as_ref()
             .expect("the runtime lives as long as the store");
         let pooled = self.idle.lock().unwrap().pop();
-        let config = self.config.clone();
+        let (config, tls) = (self.config.clone(), self.tls.clone());
         let call = runtime.spawn(async move {
             let client = match pooled.filter(|c| !c.is_closed()) {
                 Some(client) => client,
                 None => {
-                    let (client, connection) = config.connect(NoTls).await?;
+                    let (client, connection) = config.connect(tls).await?;
                     tokio::spawn(async move {
                         if let Err(error) = connection.await {
                             tracing::warn!(%error, "lost a database connection");
@@ -216,7 +245,7 @@ impl Error {
     fn into_io(self) -> io::Error {
         match self {
             Self::Io(error) => error,
-            Self::Db(error) => other(error),
+            Self::Db(error) => io::Error::other(with_causes(&error)),
         }
     }
 }
@@ -511,6 +540,13 @@ impl Registry for PgStore {
 /// uses it. Each test gets its own tables that way, so tests can run at once
 /// against one database.
 pub fn scratch_schema(url: &str) -> io::Result<String> {
+    let schema = new_schema(url)?;
+    let joiner = if url.contains('?') { '&' } else { '?' };
+    Ok(format!("{url}{joiner}options=-c%20search_path%3D{schema}"))
+}
+
+/// Creates an empty schema with a random name in the database at `url`.
+fn new_schema(url: &str) -> io::Result<String> {
     let schema = format!("finite_test_{}", crate::hub::random_id(10));
     let (base, statement) = (url.to_owned(), format!("CREATE SCHEMA {schema}"));
     // On a thread of its own, since the caller may be inside a runtime.
@@ -519,16 +555,18 @@ pub fn scratch_schema(url: &str) -> io::Result<String> {
             .enable_all()
             .build()?;
         runtime.block_on(async {
-            let (client, connection) =
-                tokio_postgres::connect(&base, NoTls).await.map_err(other)?;
+            let (config, tls) = open(&base)?;
+            let (client, connection) = config
+                .connect(tls)
+                .await
+                .map_err(|e| io::Error::other(with_causes(&e)))?;
             tokio::spawn(connection);
             client.batch_execute(&statement).await.map_err(other)
         })
     })
     .join()
     .map_err(|_| io::Error::other("creating the schema panicked"))??;
-    let joiner = if url.contains('?') { '&' } else { '?' };
-    Ok(format!("{url}{joiner}options=-c%20search_path%3D{schema}"))
+    Ok(schema)
 }
 
 /// The database tests use, from `FINITE_TEST_DATABASE_URL`, with a fresh
@@ -576,5 +614,184 @@ mod tests {
         std::thread::sleep(lease);
         second.heartbeat().unwrap();
         assert!(first.heartbeat().is_err(), "the old process lost its URL");
+    }
+
+    /// A TLS front for the test database, the way a managed Postgres
+    /// looks. It answers Postgres's request for TLS, does the handshake with
+    /// a certificate for `localhost` from a CA of its own, and passes the
+    /// rest through. It refuses a connection that doesn't ask for TLS.
+    struct TlsFront {
+        port: u16,
+        /// The front's CA, as a PEM file, for `sslrootcert`.
+        ca: std::path::PathBuf,
+        handshakes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        /// The database behind it, and a fresh schema there.
+        database: tokio_postgres::Config,
+        schema: String,
+        _runtime: tokio::runtime::Runtime,
+    }
+
+    /// The first bytes of Postgres's SSLRequest: its length and its code.
+    const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f];
+
+    impl TlsFront {
+        fn start() -> Option<Self> {
+            use rustls::pki_types::PrivateKeyDer;
+            use std::sync::{Arc, atomic::Ordering};
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let url = std::env::var("FINITE_TEST_DATABASE_URL").ok()?;
+            let schema = new_schema(&url).unwrap();
+            let (database, _) = open(&url).unwrap();
+            let upstream = match (&database.get_hosts()[0], database.get_ports()[0]) {
+                (tokio_postgres::config::Host::Tcp(host), port) => format!("{host}:{port}"),
+                _ => panic!("the test database must be reached over TCP"),
+            };
+
+            let ca_key = rcgen::KeyPair::generate().unwrap();
+            let mut ca_params = rcgen::CertificateParams::new(Vec::new()).unwrap();
+            ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+            let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+            let ca =
+                std::env::temp_dir().join(format!("finite-ca-{}.pem", crate::hub::random_id(8)));
+            std::fs::write(&ca, ca_cert.pem()).unwrap();
+            let key = rcgen::KeyPair::generate().unwrap();
+            let cert = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
+                .unwrap()
+                .signed_by(&key, &rcgen::Issuer::from_params(&ca_params, &ca_key))
+                .unwrap();
+            let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![cert.der().clone()],
+                PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+            )
+            .unwrap();
+            let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let listener = runtime
+                .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+                .unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let handshakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counted = handshakes.clone();
+            runtime.spawn(async move {
+                loop {
+                    let Ok((mut client, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let (acceptor, upstream, counted) =
+                        (acceptor.clone(), upstream.clone(), counted.clone());
+                    tokio::spawn(async move {
+                        let mut first = [0; 8];
+                        if client.read_exact(&mut first).await.is_err() || first != SSL_REQUEST {
+                            return;
+                        }
+                        client.write_all(b"S").await.unwrap();
+                        let Ok(mut tls) = acceptor.accept(client).await else {
+                            return;
+                        };
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        let mut db = tokio::net::TcpStream::connect(&upstream).await.unwrap();
+                        let _ = tokio::io::copy_bidirectional(&mut tls, &mut db).await;
+                    });
+                }
+            });
+            Some(Self {
+                port,
+                ca,
+                handshakes,
+                database,
+                schema,
+                _runtime: runtime,
+            })
+        }
+
+        /// Opens the store through the front, as `host`, with these TLS settings.
+        fn connect(&self, host: &str, tls: &str) -> io::Result<PgStore> {
+            let user = self.database.get_user().unwrap_or("postgres");
+            let password = self
+                .database
+                .get_password()
+                .map(|p| format!(":{}", String::from_utf8_lossy(p)))
+                .unwrap_or_default();
+            let db = self.database.get_dbname().unwrap_or(user);
+            let tls = tls.replace("CA", &self.ca.display().to_string());
+            let url = format!(
+                "postgres://{user}{password}@{host}:{}/{db}?options=-c%20search_path%3D{}&{tls}",
+                self.port, self.schema
+            );
+            PgStore::connect(&url, "http://a", LEASE)
+        }
+
+        fn handshakes(&self) -> usize {
+            self.handshakes.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for TlsFront {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.ca);
+        }
+    }
+
+    /// A store that connects with TLS works like any other, and its traffic
+    /// really goes through a handshake.
+    #[test]
+    fn the_store_connects_over_tls() {
+        let Some(front) = TlsFront::start() else {
+            eprintln!("skipping: set FINITE_TEST_DATABASE_URL");
+            return;
+        };
+        let store = front.connect("localhost", "sslmode=require").unwrap();
+        contract::check(&store);
+        assert!(front.handshakes() >= 1, "the connection used TLS");
+    }
+
+    /// Each `sslmode` checks what libpq's does. The front's certificate is
+    /// signed by its own CA, for `localhost` only.
+    #[test]
+    fn sslmode_decides_what_is_checked() {
+        let Some(front) = TlsFront::start() else {
+            eprintln!("skipping: set FINITE_TEST_DATABASE_URL");
+            return;
+        };
+        let works = |host: &str, tls: &str| front.connect(host, tls).map(|_| ());
+        // `prefer` and `require` encrypt, but take any certificate.
+        works("127.0.0.1", "sslmode=prefer").unwrap();
+        works("127.0.0.1", "sslmode=require").unwrap();
+        // `verify-full` needs the CA, and the name in the certificate.
+        works("localhost", "sslmode=verify-full&sslrootcert=CA").unwrap();
+        let error = works("127.0.0.1", "sslmode=verify-full&sslrootcert=CA").unwrap_err();
+        assert!(error.to_string().contains("not valid for name"), "{error}");
+        let error = works("localhost", "sslmode=verify-full").unwrap_err();
+        assert!(error.to_string().contains("UnknownIssuer"), "{error}");
+        // `verify-ca` needs the CA, whatever the name.
+        works("127.0.0.1", "sslmode=verify-ca&sslrootcert=CA").unwrap();
+        works("localhost", "sslmode=verify-ca").unwrap_err();
+        // `require` with a CA file checks the CA, as in libpq.
+        works("127.0.0.1", "sslmode=require&sslrootcert=CA").unwrap();
+        // The front refuses plain connections, so `disable` can't connect.
+        works("localhost", "sslmode=disable").unwrap_err();
+    }
+
+    /// The test database itself has no TLS, like a local Postgres. The
+    /// default, `prefer`, connects to it in plain text, and `require` refuses to.
+    #[test]
+    fn a_server_without_tls_works_unless_tls_is_required() {
+        let Some(url) = test_database() else { return };
+        PgStore::connect(&url, "http://a", LEASE).unwrap();
+        let error = PgStore::connect(&format!("{url}&sslmode=require"), "http://a", LEASE)
+            .err()
+            .expect("require refuses a server without TLS");
+        assert!(
+            error.to_string().contains("server does not support TLS"),
+            "{error}"
+        );
     }
 }
