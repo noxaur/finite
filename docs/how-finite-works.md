@@ -179,7 +179,7 @@ The hub holds a `DesignHandle` for every design. Each handle has:
 - a **mutex** around the design's state, so edits to one design run one at a time and edits to different designs never wait on each other;
 - a **save queue**: every change, comment update and rename is queued as a record, and a background task writes the queue 250 ms after the last edit.
 
-While the design is loaded, its state also holds a **broadcast channel**, which fans each change out to every open WebSocket, and the latest changes for browsers that reconnect.
+While the design is loaded, its state also holds a **broadcast channel**, which fans each change out to every open WebSocket, and the latest changes for browsers that reconnect. Each message is turned into JSON once, as reference-counted bytes (`Outgoing` in `hub/messages.rs`), so sending it to another socket copies a pointer, not the message. Before, each send copied the whole string, so a 15 MB change sent to ten viewers made ten 15 MB copies.
 
 `DesignHandle::edit` is the path almost every tool call takes:
 

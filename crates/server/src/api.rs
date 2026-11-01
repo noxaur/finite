@@ -399,5 +399,5 @@ async fn stream(
 }
 
 async fn send(socket: &mut WebSocket, message: &Outgoing) -> bool {
-    heartbeat::send(socket, Message::Text(message.json.as_ref().into())).await
+    heartbeat::send(socket, Message::Text(message.json.clone())).await
 }

@@ -1,8 +1,6 @@
 //! What the hub tells viewers: who's acting, who's working on what, and the
 //! messages sent on a design's WebSocket and on the design list's.
 
-use std::sync::Arc;
-
 use finite_design::{ActorId, Change, Design, DesignMeta, NodeId, Snapshot, comment::Comment};
 use serde::Serialize;
 
@@ -118,7 +116,10 @@ pub enum LobbyMessage<'a> {
 #[derive(Clone, Debug)]
 pub struct Outgoing {
     pub seq: Option<u64>,
-    pub json: Arc<str>,
+    /// The message as JSON, once for every socket. It's reference-counted
+    /// bytes, so sending it to a socket doesn't copy it: a 15 MB change sent
+    /// to ten viewers used to be ten 15 MB copies.
+    pub json: axum::extract::ws::Utf8Bytes,
 }
 
 impl Outgoing {
