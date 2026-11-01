@@ -37,3 +37,7 @@ target
 
 # Designs saved by a local dev server
 crates/server/data
+
+# Desktop packaging: the staged server and electron-builder's output
+apps/desktop/server
+apps/desktop/release

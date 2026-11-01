@@ -2,6 +2,7 @@
   "name": "desktop",
   "version": "0.0.0",
   "private": true,
+  "description": "A design canvas that agents edit",
   "type": "module",
   "main": "dist/main.cjs",
   "scripts": {
@@ -9,11 +10,14 @@
     "build": "vp pack",
     "dev": "vp pack && electron . --dev",
     "start": "electron .",
+    "package": "node scripts/stage-server.mjs && electron-builder --publish never",
     "test": "vp test"
   },
   "devDependencies": {
     "@types/node": "catalog:",
     "electron": "catalog:",
+    "electron-builder": "catalog:",
+    "electron-updater": "catalog:",
     "typescript": "catalog:",
     "vite-plus": "catalog:"
   }

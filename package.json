@@ -8,6 +8,7 @@
     "dev:desktop": "vp run wasm#build && vp run --parallel -F web -F server -F desktop dev",
     "build": "vp run -r build",
     "start:desktop": "vp run -r build && vp run desktop#start",
+    "package:desktop": "vp run -F web... -F desktop build && vp run desktop#package",
     "test": "vp run -r test",
     "ready": "vp check && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && vp run -r test && vp run -r build",
     "prepare": "vp config"

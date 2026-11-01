@@ -1,0 +1,49 @@
+# Packages the desktop app with electron-builder, and names the feed its
+# updater reads (src/updates.ts). `vp run desktop#package` builds one for
+# this machine; .github/workflows/release.yml builds and publishes all three.
+appId: com.noxaur.finite
+productName: Finite
+# Names the user data folder (~/Library/Application Support/Finite on a Mac)
+# and the updater's download cache.
+extraMetadata:
+  name: finite
+  productName: Finite
+# The app has no native modules to rebuild.
+npmRebuild: false
+directories:
+  output: release
+# main.cjs bundles every dependency but Electron, so the app needs no node_modules.
+files:
+  - dist/**
+  - package.json
+extraResources:
+  # Staged per architecture by scripts/stage-server.mjs; main.ts finds them here.
+  - from: server/${arch}
+    to: .
+  - from: ../web/out
+    to: web
+
+mac:
+  category: public.app-category.graphics-design
+  # The disk image is for the first install. The updater downloads the zip.
+  target: [dmg, zip]
+  # Signed with CSC_LINK and notarized with APPLE_API_KEY when they're set,
+  # as in the release workflow. Without them, the build is unsigned.
+  hardenedRuntime: true
+win:
+  target: nsis
+nsis:
+  # A per-user install, so an update never asks for an administrator.
+  oneClick: true
+  perMachine: false
+linux:
+  # The updater can only replace an AppImage.
+  target: AppImage
+  category: Graphics
+
+# The source repository is private, and electron-updater downloads without a
+# token, so releases go to a public repository that holds only the builds.
+publish:
+  provider: github
+  owner: noxaur
+  repo: finite-releases
