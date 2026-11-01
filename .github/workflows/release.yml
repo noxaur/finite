@@ -7,10 +7,8 @@
 #
 # Secrets:
 #   RELEASES_TOKEN               a token that can write releases in noxaur/finite-releases
-#   MAC_CERTIFICATE              base64 of a "Developer ID Application" .p12
+#   MAC_CERTIFICATE              base64 of the self-signed code signing .p12
 #   MAC_CERTIFICATE_PASSWORD     its password
-#   APPLE_API_KEY                an App Store Connect API key (.p8 contents), for notarizing
-#   APPLE_API_KEY_ID, APPLE_API_ISSUER  that key's ID and issuer ID
 name: Release
 
 on:
@@ -64,20 +62,14 @@ jobs:
           targets: ${{ matrix.rust-targets }}
       - uses: Swatinem/rust-cache@v2
 
-      # macOS only installs an update signed by the same developer, so an
-      # unsigned Mac build would never update. Fail instead of shipping one.
+      # macOS only installs an update signed with the same certificate as
+      # the running app, so an unsigned Mac build would never update. Fail
+      # instead of shipping one.
+      # (Actions can't read a secret in `if`, so the shell checks it.)
       - if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          for name in MAC_CERTIFICATE APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER; do
-            [ -n "${!name}" ] || { echo "::error::Secret $name is missing"; exit 1; }
-          done
-          echo "$APPLE_API_KEY" > "$RUNNER_TEMP/apple-api-key.p8"
+        run: '[ -n "$MAC_CERTIFICATE" ] || { echo "::error::Secret MAC_CERTIFICATE is missing"; exit 1; }'
         env:
           MAC_CERTIFICATE: ${{ secrets.MAC_CERTIFICATE }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
 
       - run: vp run -F web... -F desktop build
       - run: node apps/desktop/scripts/stage-server.mjs ${{ matrix.arches }}
@@ -90,13 +82,9 @@ jobs:
           -c.extraMetadata.version=${{ needs.draft.outputs.version }}
         env:
           GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
-          # electron-builder signs with CSC_LINK on every platform, so the
-          # Mac certificate goes to the Mac build only.
-          CSC_LINK: ${{ runner.os == 'macOS' && secrets.MAC_CERTIFICATE || '' }}
-          CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && secrets.MAC_CERTIFICATE_PASSWORD || '' }}
-          APPLE_API_KEY: ${{ runner.os == 'macOS' && format('{0}/apple-api-key.p8', runner.temp) || '' }}
-          APPLE_API_KEY_ID: ${{ runner.os == 'macOS' && secrets.APPLE_API_KEY_ID || '' }}
-          APPLE_API_ISSUER: ${{ runner.os == 'macOS' && secrets.APPLE_API_ISSUER || '' }}
+          # Read by apps/desktop/scripts/sign-mac.cjs, so only the Mac build needs them.
+          MAC_CERTIFICATE: ${{ runner.os == 'macOS' && secrets.MAC_CERTIFICATE || '' }}
+          MAC_CERTIFICATE_PASSWORD: ${{ runner.os == 'macOS' && secrets.MAC_CERTIFICATE_PASSWORD || '' }}
 
   publish:
     needs: build
