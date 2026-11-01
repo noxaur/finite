@@ -308,6 +308,20 @@ async fn revealed_overflow_follows_a_scaled_artboard() {
     };
     let shown = images[0].as_ref().unwrap();
     assert_eq!(shown.area, Rect::new(0.0, 0.0, 400.0, 500.0));
+
+    // A fractional height isn't mistaken for a scale.
+    let (doc, names) = design(
+        r#"<div data-name="Board" style="width: 200px; height: 100.5px; overflow: hidden"><div style="width: 200px; height: 5000px; flex-shrink: 0"></div></div>"#,
+    );
+    let options = Options {
+        reveal_overflow: true,
+        ..Default::default()
+    };
+    let images = shoot(&doc, vec![Shot::node(&names["Board"])], options)
+        .await
+        .unwrap();
+    let shown = images[0].as_ref().unwrap();
+    assert_eq!(shown.area.height, 5000.0);
 }
 
 #[tokio::test]
