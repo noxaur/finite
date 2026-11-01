@@ -155,14 +155,7 @@ pub(super) fn comments_json<'a>(
                 .node_id
                 .as_deref()
                 .filter(|id| doc.contains(id))
-                .map(|id| {
-                    // The line carries the element's text, which could be long.
-                    let line = outline(doc, id, 0).lines().next().unwrap_or("").to_owned();
-                    match line.char_indices().nth(200) {
-                        Some((end, _)) => format!("{}…", &line[..end]),
-                        None => line,
-                    }
-                });
+                .map(|id| outline(doc, id, 0).lines().next().unwrap_or("").to_owned());
             // A thread can hold 200 messages of 4,000 characters. Keep the
             // request that started it and the latest few.
             let skipped = c.messages.len().saturating_sub(THREAD_SHOWN + 1);
