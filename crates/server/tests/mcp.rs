@@ -542,6 +542,10 @@ async fn long_results_are_cut_with_directions() {
         .await;
     assert!(info.len() < 2_000, "{} chars", info.len());
     assert!(info.contains("characters in all"), "{info}");
+    let html = agent
+        .ok("get_html", json!({ "designId": design, "nodeId": photo }))
+        .await;
+    assert!(html.contains("get_node_info shows them"), "{html}");
 
     // Presence names at most 100 nodes; repeats count once.
     let ids: Vec<&str> = page.iter().map(|c| c["id"].as_str().unwrap()).collect();

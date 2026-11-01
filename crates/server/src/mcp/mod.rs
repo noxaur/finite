@@ -464,6 +464,17 @@ impl FiniteMcp {
                 return Some(html);
             }
             // Cut HTML would be broken HTML, so show the outline instead.
+            if d.doc().children(Some(&p.node_id)).is_empty() {
+                // A leaf this long is long attribute values, like an image's
+                // inline data. Shortening them here would lose them if the
+                // HTML were written back, so point to get_node_info.
+                return Some(format!(
+                    "This node's HTML is {} characters, more than the {OUTPUT_LIMIT} a call returns, \
+                     and it has no children: its attribute values are long. \
+                     get_node_info shows them, with long values shortened.",
+                    html.len()
+                ));
+            }
             Some(cut(
                 format!(
                     "This node's HTML is {} characters, more than the {OUTPUT_LIMIT} a call returns. \
