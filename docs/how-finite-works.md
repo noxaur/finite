@@ -448,7 +448,7 @@ A hub test edits as a named agent. It checks that the design unloads and comes b
 
 ## The end-to-end test
 
-The unit tests and golden files check each side on its own. `vp run e2e` checks what a person sees. The script lives in `e2e/run.mjs` and has three parts:
+The unit tests and golden files check each side on its own. `vp run e2e` checks what a person sees. `vp run e2e:router` runs the same checks through a router in front of two servers, so relayed sockets, the merged design list and refusals passing through the router are covered too. CI runs both. The script lives in `e2e/run.mjs` and has three parts:
 
 1. It builds the server and the web app (`E2E_SKIP_BUILD=1` reuses the last builds), then starts the server on a free port with a throwaway data folder.
 2. It connects an agent over MCP (`e2e/mcp.mjs`) and builds a design: one plain artboard and one with a script, so it renders in a sandbox.
@@ -505,7 +505,7 @@ FINITE_NODE=1 FINITE_PORT=4102 FINITE_DATA_DIR=data/b finite-server &
 FINITE_PORT=4100 FINITE_STATIC_DIR=apps/web/out finite-server router
 ```
 
-`crates/server/tests/router.rs` runs exactly this over real sockets. It checks that new designs spread across both servers, that every design's requests and WebSocket reach its owner, and that the list merges both. I also ran the browser smoke test through a router on a fresh build, and live edits, undo and comments all went through.
+`crates/server/tests/router.rs` runs exactly this over real sockets. It checks that new designs spread across both servers, that every design's requests and WebSocket reach its owner, and that the list merges both. `vp run e2e:router` runs the whole end-to-end test through a router in front of two servers, so live edits, undo, comments and the design list are checked there in a browser too.
 
 The router relays MCP too (`crates/server/src/relay.rs`), so you can point an agent at the router's `/mcp` and reach every design. The router is an MCP server itself. For each agent session, it opens one session on each Finite server the first time it needs it, and sends each tool call to the server that owns the call's `designId`. An agent always uses the same session on a given server, so undo there works exactly as if it had connected directly. `list_designs` asks every server at once and merges the lists, and `create_design` takes turns. `tests/router.rs` runs one agent session that creates a design on each server, then edits and undoes on both.
 

@@ -6,6 +6,9 @@
 // last builds), starts the server on a free port with a throwaway data folder,
 // and checks what a person sees while an agent works. Set FINITE_CHROME if
 // Chrome isn't in a standard place. Exits with 1 if any check fails.
+//
+// With E2E_ROUTER=1 (`vp run e2e:router`), it starts two servers and a router
+// in front of them instead, and runs every check through the router.
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
@@ -32,30 +35,69 @@ if (!process.env.E2E_SKIP_BUILD) {
   run("npx", ["next", "build"], path.join(root, "apps/web"));
 }
 
-const port = await new Promise((resolve) => {
-  const probe = net.createServer().listen(0, "127.0.0.1", () => {
-    const { port } = probe.address();
-    probe.close(() => resolve(port));
+const freePort = () =>
+  new Promise((resolve) => {
+    const probe = net.createServer().listen(0, "127.0.0.1", () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
   });
-});
-const base = `http://127.0.0.1:${port}`;
-const data = fs.mkdtempSync(path.join(os.tmpdir(), "finite-e2e-data-"));
-const server = spawn(path.join(root, "target/debug/finite-server"), [], {
-  env: {
-    ...process.env,
-    FINITE_PORT: String(port),
-    FINITE_DATA_DIR: data,
-    FINITE_STATIC_DIR: path.join(root, "apps/web/out"),
-    RUST_LOG: "warn",
-  },
-  stdio: ["ignore", "inherit", "inherit"],
-});
-for (let i = 0; i < 100; i++) {
-  try {
-    if ((await fetch(`${base}/api/health`)).ok) break;
-  } catch {}
-  await new Promise((r) => setTimeout(r, 100));
+const viaRouter = Boolean(process.env.E2E_ROUTER);
+const bin = path.join(root, "target/debug/finite-server");
+const staticDir = path.join(root, "apps/web/out");
+/** Every process this run starts, and the throwaway data folders they use. */
+const processes = [];
+const folders = [];
+const start = (args, env) => {
+  const child = spawn(bin, args, {
+    env: { ...process.env, RUST_LOG: "warn", ...env },
+    stdio: ["ignore", "inherit", "inherit"],
+  });
+  processes.push(child);
+  return child;
+};
+const healthy = async (url) => {
+  for (let i = 0; i < 100; i++) {
+    try {
+      if ((await fetch(`${url}/api/health`)).ok) return;
+    } catch {}
+    await new Promise((r) => setTimeout(r, 100));
+  }
+};
+
+let base;
+if (viaRouter) {
+  const ports = [await freePort(), await freePort()];
+  const nodes = ports.map((p) => `http://127.0.0.1:${p}`).join(",");
+  ports.forEach((p, i) => {
+    const data = fs.mkdtempSync(path.join(os.tmpdir(), "finite-e2e-data-"));
+    folders.push(data);
+    start([], {
+      FINITE_PORT: String(p),
+      FINITE_DATA_DIR: data,
+      FINITE_NODES: nodes,
+      FINITE_NODE: String(i),
+    });
+  });
+  const front = await freePort();
+  start(["router"], {
+    FINITE_PORT: String(front),
+    FINITE_NODES: nodes,
+    FINITE_STATIC_DIR: staticDir,
+  });
+  for (const p of ports) await healthy(`http://127.0.0.1:${p}`);
+  base = `http://127.0.0.1:${front}`;
+} else {
+  const port = await freePort();
+  const data = fs.mkdtempSync(path.join(os.tmpdir(), "finite-e2e-data-"));
+  folders.push(data);
+  start([], { FINITE_PORT: String(port), FINITE_DATA_DIR: data, FINITE_STATIC_DIR: staticDir });
+  base = `http://127.0.0.1:${port}`;
 }
+await healthy(base);
+console.log(
+  viaRouter ? `Through a router at ${base}, in front of two servers` : `Server at ${base}`,
+);
 
 let page;
 try {
@@ -507,13 +549,18 @@ try {
   check("the run finished", false, error.stack ?? String(error));
   if (page) await page.screenshot(path.join(os.tmpdir(), "finite-e2e-failure.png")).catch(() => {});
 } finally {
-  // SIGTERM makes the server save every open design, so let it finish
+  // SIGTERM makes a server save every open design, so let each finish
   // before its data folder goes.
-  const exited = server.exitCode === null ? new Promise((r) => server.once("exit", r)) : null;
-  server.kill();
-  await exited;
+  await Promise.all(
+    processes.map((child) => {
+      const exited =
+        child.exitCode === null ? new Promise((r) => child.once("exit", r)) : Promise.resolve();
+      child.kill();
+      return exited;
+    }),
+  );
   await page?.close().catch(() => {});
-  fs.rmSync(data, { recursive: true, force: true, maxRetries: 5 });
+  for (const data of folders) fs.rmSync(data, { recursive: true, force: true, maxRetries: 5 });
 }
 
 console.log(failures.length ? `\n${failures.length} check(s) failed` : "\nAll checks passed");

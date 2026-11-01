@@ -29,6 +29,11 @@ jobs:
         env:
           # So a failure's screenshot lands where the next step looks.
           TMPDIR: ${{ runner.temp }}
+      # The same checks through a router in front of two servers, reusing those builds.
+      - run: vp run e2e:router
+        env:
+          E2E_SKIP_BUILD: "1"
+          TMPDIR: ${{ runner.temp }}
       - if: failure()
         uses: actions/upload-artifact@v4
         with:

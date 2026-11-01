@@ -78,10 +78,11 @@ vp run dev:desktop      # same, plus an Electron window pointed at the dev serve
 vp run start:desktop    # release build of everything, then Electron with the Rust sidecar
 vp run test             # cargo test for both crates, plus the web app's Vitest suite
 vp run e2e              # build, start a server, and drive the app in headless Chrome
+vp run e2e:router       # the same checks through a router in front of two servers
 vp run ready            # format, lint and type check (web and Rust, clippy too), test, build
 ```
 
-`.github/workflows/ci.yml` runs `vp run ready` and then `vp run e2e` on pushes to `main` and on pull requests. It hasn't run yet, because the repo has no GitHub remote. If the e2e step fails, the workflow uploads the failure screenshot.
+`.github/workflows/ci.yml` runs `vp run ready`, then `vp run e2e` and `vp run e2e:router`, on pushes to `main` and on pull requests. It hasn't run yet, because the repo has no GitHub remote. If the e2e step fails, the workflow uploads the failure screenshot.
 
 Each commit runs `vp staged` from the pre-commit hook (`.vite-hooks/pre-commit`). It runs `vp check --fix` on the staged files and `rustfmt` on staged Rust files, as set in the `staged` block of `vite.config.ts`.
 
