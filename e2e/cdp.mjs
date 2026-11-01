@@ -53,15 +53,20 @@ export async function launch({ width = 1440, height = 900 } = {}) {
   let next = 1;
   const pending = new Map();
   const errors = [];
+  /** Event listeners by CDP method, added with `on`. */
+  const listeners = new Map();
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
     if (msg.id && pending.has(msg.id)) {
       pending.get(msg.id)(msg);
       pending.delete(msg.id);
-    } else if (msg.method === "Runtime.exceptionThrown") {
+      return;
+    }
+    if (msg.method === "Runtime.exceptionThrown") {
       const d = msg.params.exceptionDetails;
       errors.push(d.exception?.description ?? d.text);
     }
+    for (const fn of listeners.get(msg.method) ?? []) fn(msg.params);
   };
   const send = (method, params = {}) =>
     new Promise((resolve, reject) => {
@@ -84,6 +89,21 @@ export async function launch({ width = 1440, height = 900 } = {}) {
     errors,
     send,
     sleep,
+    /**
+     * Calls `fn` with the params of every `method` event, like
+     * `Page.loadEventFired`. Returns a function that stops it.
+     */
+    on(method, fn) {
+      if (!listeners.has(method)) listeners.set(method, []);
+      listeners.get(method).push(fn);
+      return () =>
+        listeners.set(
+          method,
+          listeners.get(method).filter((f) => f !== fn),
+        );
+    },
+    /** Resolves once Chrome exits, for whatever reason. */
+    exited: new Promise((r) => chrome.once("exit", r)),
     async goto(url) {
       await send("Page.navigate", { url });
       await sleep(2500);

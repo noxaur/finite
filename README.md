@@ -96,6 +96,8 @@ vp run bench            # time a 90,000-node design, a big write and thumbnails 
 vp run ready            # format, lint and type check (web and Rust, clippy too), test, build
 ```
 
+To try a change by hand, or let an agent try it, `node e2e/headless.mjs start` builds and starts Finite with an empty data folder and opens it in headless Chrome. Each later command does one thing to that running app: `call write_html '{…}'` calls an MCP tool, `click`, `type` and `key` drive the page, `snapshot` prints its accessibility tree, and `screenshot` saves a PNG. `node e2e/headless.mjs help` lists them all, and `.claude/skills/finite-headless/SKILL.md` shows agents how to use it. To script the same session from Python, import `Finite` from `e2e/finite_headless.py`.
+
 `.github/workflows/ci.yml` runs `vp run ready`, then `vp run e2e` and `vp run e2e:router`, on pushes to `main` and on pull requests. A second job turns on the `postgres` feature, which every other build leaves off. It runs clippy and the tests that way, with a Postgres to talk to. Then it runs `vp run e2e:shared`.
 
 If you don't set `FINITE_TEST_DATABASE_URL`, the database tests and `e2e:shared` skip on your machine. You'll find a quick way to run a Postgres for them in the guide.
