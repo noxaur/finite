@@ -79,10 +79,13 @@ vp run start:desktop    # release build of everything, then Electron with the Ru
 vp run test             # cargo test for both crates, plus the web app's Vitest suite
 vp run e2e              # build, start a server, and drive the app in headless Chrome
 vp run e2e:router       # the same checks through a router in front of two servers
+vp run e2e:shared       # the same, with both servers on one Postgres
 vp run ready            # format, lint and type check (web and Rust, clippy too), test, build
 ```
 
-`.github/workflows/ci.yml` runs `vp run ready`, then `vp run e2e` and `vp run e2e:router`, on pushes to `main` and on pull requests. A second job turns on the `postgres` feature, which every other build leaves off. It runs clippy and the tests that way, with a Postgres to talk to. If you don't set `FINITE_TEST_DATABASE_URL`, the database tests skip on your machine.
+`.github/workflows/ci.yml` runs `vp run ready`, then `vp run e2e` and `vp run e2e:router`, on pushes to `main` and on pull requests. A second job turns on the `postgres` feature, which every other build leaves off. It runs clippy and the tests that way, with a Postgres to talk to. Then it runs `vp run e2e:shared`.
+
+If you don't set `FINITE_TEST_DATABASE_URL`, the database tests and `e2e:shared` skip on your machine. You'll find a quick way to run a Postgres for them in the guide.
 
 CI hasn't run yet, because the repo has no GitHub remote. If the e2e step fails, the workflow uploads the failure screenshot.
 
@@ -101,7 +104,7 @@ If you use a managed Postgres, like RDS, add `sslmode=verify-full` to the URL, a
 
 The API client is `apps/web/src/api/Api.ts`, an Effect `Context.Service` whose responses are decoded with `Schema`. Live updates arrive over two WebSockets: `/api/designs/ws` streams the design list, and `/api/designs/{id}/ws` streams one design (a snapshot, then every change and presence update). After a dropped connection, the browser resumes with `?epoch=…&since=…` and gets only the changes it missed. `apps/web/src/design/schema.ts` defines the schemas for both. Keep them in sync with the Rust types in `crates/design` and `crates/server/src/hub/messages.rs`.
 
-The server saves each design in `FINITE_DATA_DIR/designs/` (default `./data`, so `crates/server/data` in dev) as a snapshot (`<id>.json`) plus an append-only journal of later edits (`<id>.log`). The guide explains how the journal is compacted and recovered after a crash. The desktop app sets it to Electron's user data folder. Storage goes through the `Store` trait in `crates/server/src/store.rs`. With `FINITE_DATABASE_URL`, the same snapshot and journal live in Postgres instead (`crates/server/src/postgres.rs`), and every write carries a fencing token, so a server that lost a design can't overwrite it. StyleX design tokens are in `apps/web/src/styles/tokens.stylex.ts`.
+The server saves each design in `FINITE_DATA_DIR/designs/` (default `./data`, so `crates/server/data` in dev) as a snapshot (`<id>.json`) plus an append-only journal of later edits (`<id>.log`). The guide explains how the journal is compacted and recovered after a crash. The desktop app sets it to Electron's user data folder. Storage goes through the `Store` trait in `crates/server/src/store.rs`. With `FINITE_DATABASE_URL`, the same snapshot and journal live in Postgres instead (`crates/server/src/postgres/mod.rs`), and every write carries a fencing token, so a server that lost a design can't overwrite it. StyleX design tokens are in `apps/web/src/styles/tokens.stylex.ts`.
 
 `next build` produces a static export (`output: "export"` in `apps/web/next.config.ts`), so there's no Node server to ship. That rules out Next features that need a server at request time: route handlers, server actions, middleware, and dynamic routes without `generateStaticParams`. The Rust server handles everything dynamic. Components that use Effect or `window` need `"use client"`.
 

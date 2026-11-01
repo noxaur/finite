@@ -44,9 +44,9 @@ jobs:
 
   # The Postgres store is behind the `postgres` cargo feature, which the job
   # above leaves off, like the desktop app. This job turns it on: lint, then
-  # the tests that need Postgres (the store's contract, servers that share
-  # one database, failover with real processes), which skip without
-  # FINITE_TEST_DATABASE_URL.
+  # the tests that need Postgres (the store's contract, TLS, servers that
+  # share one database, failover with real processes), which skip without
+  # FINITE_TEST_DATABASE_URL, then the end-to-end test on the shared store.
   shared-store:
     runs-on: ubuntu-24.04
     services:
@@ -65,9 +65,25 @@ jobs:
       FINITE_TEST_DATABASE_URL: postgres://postgres:finite@localhost:5432/finite_test
     steps:
       - uses: actions/checkout@v5
+      - uses: voidzero-dev/setup-vp@v1.21.2
+        with:
+          node-version: "24"
+          cache: true
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy -p finite-server --all-targets --features postgres -- -D warnings
       - run: cargo test -p finite-server --features postgres
+      # The end-to-end checks through a router in front of two servers that
+      # share this Postgres. It builds the server with the feature itself.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: vp run e2e:shared
+        env:
+          TMPDIR: ${{ runner.temp }}
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-shared-failure
+          path: ${{ runner.temp }}/finite-e2e-failure.png
+          if-no-files-found: ignore

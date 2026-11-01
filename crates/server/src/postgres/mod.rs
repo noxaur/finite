@@ -71,6 +71,16 @@ macro_rules! query {
     };
 }
 
+/// Whether `name` can be a schema without quoting: Postgres folds unquoted
+/// names to lowercase, and this keeps them out of SQL injection's reach.
+fn is_schema_name(name: &str) -> bool {
+    (1..=63).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        && !name.as_bytes()[0].is_ascii_digit()
+}
+
 /// The connection settings in `url`, and a TLS connector for its `sslmode`.
 fn open(url: &str) -> io::Result<(tokio_postgres::Config, MakeRustlsConnect)> {
     let (url, settings) = tls::split(url)?;
@@ -122,8 +132,39 @@ impl PgStore {
     /// the tables if they're missing. A router, which only reads the list of
     /// servers, can pass any `me`.
     pub fn connect(url: &str, me: &str, lease: Duration) -> io::Result<Self> {
+        Self::connect_in(url, None, me, lease)
+    }
+
+    /// Like [`PgStore::connect`], with the tables in `schema`
+    /// (`FINITE_DATABASE_SCHEMA`), which is created if it's missing. Several
+    /// Finite deployments, or test runs, can then share one database
+    /// without seeing each other's designs.
+    pub fn connect_in(
+        url: &str,
+        schema: Option<&str>,
+        me: &str,
+        lease: Duration,
+    ) -> io::Result<Self> {
         let (mut config, tls) = open(url)?;
         config.application_name("finite-server");
+        let create_schema = match schema {
+            None => String::new(),
+            Some(schema) => {
+                if !is_schema_name(schema) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "a schema name is 1 to 63 lowercase letters, digits and _, starting with a letter or _, not {schema:?}"
+                        ),
+                    ));
+                }
+                // Every connection looks there first, so the tables and
+                // every query go to this schema.
+                let options = config.get_options().unwrap_or_default();
+                config.options(format!("{options} -c search_path={schema}").trim());
+                format!("CREATE SCHEMA IF NOT EXISTS {schema};")
+            }
+        };
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("finite-postgres")
@@ -143,6 +184,7 @@ impl PgStore {
             // Two servers starting at once would race to create the tables.
             tx.execute("SELECT pg_advisory_xact_lock(4100)", &[])
                 .await?;
+            tx.batch_execute(&create_schema).await?;
             tx.batch_execute(SCHEMA).await?;
             tx.commit().await?;
             Ok(())
@@ -598,6 +640,45 @@ mod tests {
         let a = PgStore::connect(&url, "http://a", LEASE).unwrap();
         let b = PgStore::connect(&url, "http://b", LEASE).unwrap();
         contract::check_shared(&a, "http://a", &b, "http://b");
+    }
+
+    /// Two deployments in two schemas of one database don't see each
+    /// other's designs, or each other's servers.
+    #[test]
+    fn a_schema_keeps_a_deployment_to_itself() {
+        let Ok(url) = std::env::var("FINITE_TEST_DATABASE_URL") else {
+            eprintln!("skipping: set FINITE_TEST_DATABASE_URL");
+            return;
+        };
+        let name = |n| format!("finite_test_{}_{n}", crate::hub::random_id(8));
+        let (one, two) = (name(1), name(2));
+        let a = PgStore::connect_in(&url, Some(&one), "http://a", LEASE).unwrap();
+        let b = PgStore::connect_in(&url, Some(&two), "http://b", LEASE).unwrap();
+        let snapshot = |id: &str| Snapshot {
+            meta: finite_design::DesignMeta {
+                id: id.into(),
+                name: id.into(),
+                created_at: 0,
+                updated_at: 0,
+            },
+            seq: 0,
+            nodes: Vec::new(),
+            comments: Vec::new(),
+            histories: None,
+            log: None,
+        };
+        a.create(&snapshot("d")).unwrap().unwrap();
+        b.create(&snapshot("e")).unwrap().unwrap();
+        assert_eq!(a.ids().unwrap(), ["d"]);
+        assert_eq!(b.ids().unwrap(), ["e"]);
+        a.heartbeat().unwrap();
+        b.heartbeat().unwrap();
+        assert_eq!(a.live().unwrap(), ["http://a"]);
+        // Reopening the same schema finds the design again.
+        let again = PgStore::connect_in(&url, Some(&one), "http://a", LEASE).unwrap();
+        assert_eq!(again.ids().unwrap(), ["d"]);
+        let refused = PgStore::connect_in(&url, Some("x; DROP TABLE y"), "http://a", LEASE);
+        assert_eq!(refused.err().unwrap().kind(), io::ErrorKind::InvalidInput);
     }
 
     /// A second process can't share a live server's URL, but a server that

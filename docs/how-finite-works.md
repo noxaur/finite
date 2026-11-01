@@ -456,7 +456,11 @@ A hub test edits as a named agent. It checks that the design unloads and comes b
 
 ## The end-to-end test
 
-The unit tests and golden files check each side on its own. `vp run e2e` checks what a person sees. `vp run e2e:router` runs the same checks through a router in front of two servers, so relayed sockets, the merged design list and refusals passing through the router are covered too. CI runs both. The script lives in `e2e/run.mjs` and has three parts:
+The unit tests and golden files check each side on its own. `vp run e2e` checks what a person sees. `vp run e2e:router` runs the same checks through a router in front of two servers, so relayed sockets, the merged design list and refusals passing through the router are covered too. `vp run e2e:shared` runs them through a router in front of two servers that share one Postgres. CI runs all three.
+
+`e2e:shared` takes the database from `E2E_DATABASE_URL` or `FINITE_TEST_DATABASE_URL`. Without either, it prints `SKIP` and passes. Each run keeps its tables in a new schema named `finite_e2e_…` and leaves it there, so give it a test database.
+
+It first waits until the router sees both servers. When I switched that list off in the router, this check failed, and so did the agent's first call. `vp run` never caches the task, which `vite.config.ts` sets up. A cached task only gets the variables it lists, so it wouldn't see the URL. The script lives in `e2e/run.mjs` and has three parts:
 
 1. It builds the server and the web app (`E2E_SKIP_BUILD=1` reuses the last builds), then starts the server on a free port with a throwaway data folder.
 2. It connects an agent over MCP (`e2e/mcp.mjs`) and builds a design: one plain artboard and one with a script, so it renders in a sandbox.
@@ -504,7 +508,9 @@ FINITE_NODE_URL=http://10.0.0.2:4100 finite-server   # on the second
 finite-server router
 ```
 
-The server creates its three tables on first start (`crates/server/src/postgres.rs`). `finite_designs` holds each design's snapshot as JSON, plus two columns for ownership. `finite_journal` holds the journal records, one row each. `finite_nodes` holds one row per server.
+The server creates its three tables on first start (`crates/server/src/postgres/mod.rs`). `finite_designs` holds each design's snapshot as JSON, plus two columns for ownership. `finite_journal` holds the journal records, one row each. `finite_nodes` holds one row per server.
+
+The tables go in the default schema, unless you name another in `FINITE_DATABASE_SCHEMA`. Finite makes that schema if it's missing. So a test copy and the real one can share a database, and neither sees the other's designs.
 
 The file store stays the default, so the desktop app and a single server never need a database. They don't even compile a database client, because `vp run dev` and the desktop build leave the feature off.
 
@@ -520,7 +526,7 @@ Ownership is rendezvous hashing over the live servers, so when one stops heartbe
 
 **The epoch is a fencing token.** The server keeps the epoch it got, and every save and append carries it. The store refuses a write whose epoch isn't the latest, in the same transaction that would change the design. That's the guard against a server that stalled, say for a long garbage collection, a full disk or `SIGSTOP`. It wakes up still believing it owns its designs, and tries to save. Without the token, its stale copy would overwrite the new owner's edits. With it, the save fails with `Fenced`, and the server drops its copy.
 
-A claim and a stale write can't both succeed, because they touch the same row: whichever runs second sees the other's change. You can read the rule in two SQL statements in `postgres.rs`. `save` updates the row only `WHERE epoch = token`, and `claim` sets `epoch = epoch + 1`.
+A claim and a stale write can't both succeed, because they touch the same row: whichever runs second sees the other's change. You can read the rule in two SQL statements in `postgres/mod.rs`. `save` updates the row only `WHERE epoch = token`, and `claim` sets `epoch = epoch + 1`.
 
 Here's what happens in each case:
 
