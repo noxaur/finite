@@ -425,6 +425,8 @@ A new design's id is 10 random letters and digits, and the server makes sure no 
 
 On Ctrl-C or SIGTERM, the server stops accepting connections and writes every loaded design as a full snapshot before it exits. SIGTERM is how Docker, systemd and the desktop app stop it. Until this was handled, the desktop app could lose the last moment of edits when it quit. The app now also waits for the server to exit, up to 5 seconds, before it quits itself.
 
+In the desktop app, Electron runs the server as a child process and acts as its **supervisor**, the way systemd's `Restart=` setting does with a rate limit. If the server stops on its own, say the system killed it to free memory, Electron starts it again on the same port. Open pages reconnect there and resume, and the journal brings back anything not yet in a snapshot. If it stops three times within a minute, a restart won't fix it, so the app shows an error and quits (`afterStop` in `apps/desktop/src/restarts.ts`). Before, a server that crashed made the app quit without a word, and one that was killed left the window saying "Retrying…" forever. Killing the app's server with `kill -9` brought a new one up on port 4100 within a second, and quitting the app afterwards still saved and stopped it.
+
 The hub only calls five methods on the `Store` trait in `store.rs`: `ids`, `load`, `save`, `append` and `remove`. A database could replace the files behind them. To check a new store, run `store::contract::check` on it. It's a **contract test**: the same suite of rules every store must follow, such as "the journal keeps append order" and "save clears the journal". The file store and the memory store both run it in `cargo test`.
 
 ### Undo across restarts

@@ -1,7 +1,8 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { createServer } from "node:net";
 import path from "node:path";
-import { app, BrowserWindow, shell } from "electron";
+import { app, BrowserWindow, dialog, shell } from "electron";
+import { afterStop } from "./restarts.js";
 
 // `electron . --dev` loads the Next.js dev server; the Rust server runs separately via `vp run dev`.
 const isDev = process.argv.includes("--dev");
@@ -12,6 +13,10 @@ let server: ChildProcess | undefined;
 let origin: Promise<string> | undefined;
 /** How long quitting waits for the server to save and exit. */
 const SHUTDOWN_MS = 5_000;
+/** Set once quitting starts, so the server's exit isn't taken for a crash. */
+let quitting = false;
+/** When the server last stopped on its own; see `afterStop`. */
+let stops: number[] = [];
 
 /** Locates the Rust binary and built frontend: app resources when packaged, the repo otherwise. */
 function resources() {
@@ -72,8 +77,20 @@ function serverOrigin(): Promise<string> {
 }
 
 async function startServer(): Promise<string> {
-  const { serverBin, staticDir } = resources();
   const port = await freePort();
+  spawnServer(port);
+  const url = `http://127.0.0.1:${port}`;
+  await waitFor(`${url}/api/health`);
+  return url;
+}
+
+/**
+ * Runs the server on `port`. If it stops on its own, say it crashed or the
+ * system killed it, it starts again on the same port: open pages reconnect
+ * there and resume, and the journal brings back the latest edits.
+ */
+function spawnServer(port: number) {
+  const { serverBin, staticDir } = resources();
   server = spawn(serverBin, [], {
     env: {
       ...process.env,
@@ -83,13 +100,22 @@ async function startServer(): Promise<string> {
     },
     stdio: "inherit",
   });
-  server.once("exit", (code) => {
+  server.once("exit", (code, signal) => {
     server = undefined;
-    if (code !== 0 && code !== null) app.quit();
+    if (quitting) return;
+    const next = afterStop(stops, Date.now());
+    stops = next.stops;
+    if (next.restart) {
+      console.error(`finite-server stopped (code ${code}, signal ${signal}); restarting it`);
+      spawnServer(port);
+      return;
+    }
+    dialog.showErrorBox(
+      "Finite's server keeps stopping",
+      `It stopped ${stops.length} times in a minute (last exit: code ${code}, signal ${signal}). Your designs are saved. Finite will quit; try opening it again.`,
+    );
+    app.quit();
   });
-  const url = `http://127.0.0.1:${port}`;
-  await waitFor(`${url}/api/health`);
-  return url;
 }
 
 async function createWindow() {
@@ -141,6 +167,7 @@ app.on("window-all-closed", () => {
 // The server saves pending edits when it gets SIGTERM, so let it finish
 // before the app exits.
 app.on("before-quit", (event) => {
+  quitting = true;
   const running = server;
   if (!running) return;
   event.preventDefault();

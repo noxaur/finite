@@ -8,7 +8,8 @@
     "postinstall": "install-electron",
     "build": "vp pack",
     "dev": "vp pack && electron . --dev",
-    "start": "electron ."
+    "start": "electron .",
+    "test": "vp test"
   },
   "devDependencies": {
     "@types/node": "catalog:",
