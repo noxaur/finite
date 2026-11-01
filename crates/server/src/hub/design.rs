@@ -22,7 +22,7 @@ use super::{
     Missed, Outgoing, PRESENCE_TTL, Presence, RESUME_BYTES, RESUME_LIMIT, SESSION_ACTOR,
     UNLOAD_AFTER, now_ms, random_id,
 };
-use crate::store::{Store, Stored};
+use crate::store::{Claim, Store, Stored, Token};
 
 pub(super) struct DesignState {
     pub(super) design: Design,
@@ -48,12 +48,54 @@ pub(super) struct DesignState {
     events: broadcast::Sender<Outgoing>,
     /// When the design was last opened through [`super::Hub::get`].
     last_used: u64,
+    /// The fencing token from this server's claim on the design. Every write carries it.
+    pub(super) token: Token,
+    pub(super) life: Life,
 }
 
-/// What the save task writes next.
+/// Where a loaded design is in its life on this server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Life {
+    /// Served and saved as usual.
+    Live,
+    /// Another server owns it now. Its viewers were sent away, and its last
+    /// snapshot is being saved before its lease is released.
+    Retiring,
+    /// Saved and released, or fenced off: this copy is out of date.
+    Gone,
+}
+
+/// What the save task writes next, with the token to write it with.
 pub(super) enum Save {
-    Snapshot(Snapshot),
-    Append(String, Vec<Record>),
+    Snapshot(Snapshot, Token),
+    Append(String, Vec<Record>, Token),
+    /// The last snapshot before this server lets the design go. The lease
+    /// is released once it's saved.
+    Last(Snapshot, Token),
+}
+
+/// The error a load gets while another server still holds the design's lease.
+#[derive(Debug)]
+pub struct Busy(pub String);
+
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.is_empty() {
+            f.write_str("the design is moving between servers")
+        } else {
+            write!(f, "{} still holds the design", self.0)
+        }
+    }
+}
+
+impl std::error::Error for Busy {}
+
+pub(super) fn is_busy(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|e| e.is::<Busy>())
+}
+
+fn busy(holder: String) -> io::Error {
+    io::Error::new(io::ErrorKind::WouldBlock, Busy(holder))
 }
 
 impl DesignState {
@@ -70,7 +112,14 @@ impl DesignState {
             recent: Recent::default(),
             events: broadcast::channel(EVENT_BUFFER).0,
             last_used: now_ms(),
+            token: 0,
+            life: Life::Live,
         }
+    }
+
+    /// Ends every viewer's socket, so they reconnect, by then to the new owner.
+    fn send_viewers_away(&mut self) {
+        self.events = broadcast::channel(1).0;
     }
 
     /// Rebuilds a stored design. A replayed journal is compacted on the next save.
@@ -290,13 +339,34 @@ impl DesignHandle {
     }
 
     /// Loads the state from the store if it isn't in memory.
+    ///
+    /// Loading takes the design's lease first, and only then reads it. From
+    /// the claim on, no other server's write can land, so what's read is the
+    /// latest. While another live server holds the lease, this fails with
+    /// [`Busy`].
     pub(super) fn load(&self) -> io::Result<()> {
         let mut state = self.raw();
+        if state.as_ref().is_some_and(|s| s.life != Life::Live) {
+            return Err(busy(String::new()));
+        }
         if state.is_none() {
-            let stored = self.store.load(&self.id)?.ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "design missing from the store")
-            })?;
-            let restored = DesignState::restore(stored);
+            let missing =
+                || io::Error::new(io::ErrorKind::NotFound, "design missing from the store");
+            let token = match self.store.claim(&self.id)? {
+                Claim::Granted(token) => token,
+                Claim::Held(holder) => return Err(busy(holder)),
+                Claim::Missing => return Err(missing()),
+            };
+            let stored = match self.store.load(&self.id) {
+                Ok(Some(stored)) => stored,
+                failed => {
+                    // Don't sit on a lease without serving the design.
+                    let _ = self.store.release(&self.id, token);
+                    return Err(failed.err().unwrap_or_else(missing));
+                }
+            };
+            let mut restored = DesignState::restore(stored);
+            restored.token = token;
             if restored.needs_snapshot {
                 self.dirty.send_replace(());
             }
@@ -312,7 +382,9 @@ impl DesignHandle {
     /// else holds this handle.
     pub(super) fn unload_if_idle(&self, now: u64) -> bool {
         let mut state = self.raw();
-        let idle = state.as_ref().is_some_and(|s| s.is_idle(now));
+        let idle = state
+            .as_ref()
+            .is_some_and(|s| s.life == Life::Live && s.is_idle(now));
         if idle
             && state
                 .as_ref()
@@ -326,6 +398,39 @@ impl DesignHandle {
 
     pub(super) fn is_loaded(&self) -> bool {
         self.raw().is_some()
+    }
+
+    /// The token and life of a loaded design.
+    pub(super) fn lease(&self) -> Option<(Token, Life)> {
+        self.raw().as_ref().map(|s| (s.token, s.life))
+    }
+
+    /// Starts letting the design go to another server: sends its viewers
+    /// away and asks the save task for a last snapshot. Returns `false` if it
+    /// isn't loaded, so there's nothing to save.
+    pub(super) fn retire(&self) -> bool {
+        let mut state = self.raw();
+        let Some(state) = state.as_mut() else {
+            return false;
+        };
+        if state.life == Life::Live {
+            state.life = Life::Retiring;
+            state.send_viewers_away();
+            self.comments.notify_waiters();
+            self.dirty.send_replace(());
+        }
+        true
+    }
+
+    /// Marks this copy out of date, after its last save or after another
+    /// server fenced it off. Nothing about it is saved again.
+    pub(super) fn end(&self) {
+        if let Some(state) = self.raw().as_mut() {
+            state.life = Life::Gone;
+            state.pending.clear();
+            state.send_viewers_away();
+        }
+        self.comments.notify_waiters();
     }
 
     pub fn read<T>(&self, f: impl FnOnce(&Design) -> T) -> T {
@@ -446,6 +551,15 @@ impl DesignHandle {
     pub(super) fn take_save(&self) -> Option<Save> {
         let mut state = self.raw();
         let state = state.as_mut()?;
+        match state.life {
+            Life::Gone => return None,
+            Life::Retiring => {
+                state.pending.clear();
+                state.needs_snapshot = false;
+                return Some(Save::Last(state.snapshot_to_save(), state.token));
+            }
+            Life::Live => {}
+        }
         if state.pending.is_empty() && !state.needs_snapshot {
             return None;
         }
@@ -462,9 +576,13 @@ impl DesignHandle {
             state.needs_snapshot = false;
             state.journaled = 0;
             state.journal_bytes = 0;
-            return Some(Save::Snapshot(state.snapshot_to_save()));
+            return Some(Save::Snapshot(state.snapshot_to_save(), state.token));
         }
-        Some(Save::Append(state.design.meta.id.clone(), records))
+        Some(Save::Append(
+            state.design.meta.id.clone(),
+            records,
+            state.token,
+        ))
     }
 
     /// After a failed write, the next save rewrites the snapshot so nothing is lost.
@@ -476,14 +594,14 @@ impl DesignHandle {
 
     /// A full snapshot, with the pending records counted as saved. `None` when
     /// the design isn't loaded, which means it's already saved.
-    pub(super) fn compact(&self) -> Option<Snapshot> {
+    pub(super) fn compact(&self) -> Option<(Snapshot, Token)> {
         let mut state = self.raw();
-        let state = state.as_mut()?;
+        let state = state.as_mut().filter(|s| s.life != Life::Gone)?;
         state.pending.clear();
         state.journaled = 0;
         state.journal_bytes = 0;
         state.needs_snapshot = false;
-        Some(state.snapshot_to_save())
+        Some((state.snapshot_to_save(), state.token))
     }
 
     /// Builds ops from the current document with `build`, then commits them as

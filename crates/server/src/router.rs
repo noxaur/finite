@@ -42,7 +42,7 @@ use tower_http::{
 use rmcp::transport::streamable_http_server::session::store::SessionStore;
 
 use crate::{
-    cluster::Cluster,
+    cluster::{Cluster, Members},
     heartbeat::{self, Heartbeat},
     hub::LOBBY_LIMIT,
 };
@@ -51,7 +51,8 @@ use crate::{
 const MAX_BODY: usize = 8 << 20;
 
 struct Front {
-    cluster: Cluster,
+    /// The servers, fixed or kept current from the shared store's heartbeats.
+    members: Arc<Members>,
     http: reqwest::Client,
     /// Which server creates the next design.
     next: AtomicUsize,
@@ -79,9 +80,22 @@ pub fn app_with_sessions(
     static_dir: Option<&str>,
     sessions: Option<Arc<dyn SessionStore>>,
 ) -> Router {
-    let cluster = Cluster::new(nodes, 0).expect("the router needs at least one server");
+    assert!(!nodes.is_empty(), "the router needs at least one server");
+    let members = Arc::new(Members::fixed(Cluster::observer(nodes)));
+    app_with_members(members, static_dir, sessions)
+}
+
+/// Like [`app_with_sessions`], for servers that come and go: `members` is
+/// kept current, say by [`crate::cluster::follow`], and each request goes by
+/// the list as it is then.
+pub fn app_with_members(
+    members: Arc<Members>,
+    static_dir: Option<&str>,
+    sessions: Option<Arc<dyn SessionStore>>,
+) -> Router {
+    let allowed: Arc<[String]> = members.now().allowed_hosts().into();
     let front = Arc::new(Front {
-        cluster,
+        members: members.clone(),
         http: reqwest::Client::builder()
             .connect_timeout(UPSTREAM_TIMEOUT)
             .read_timeout(SILENT_SERVER)
@@ -102,17 +116,14 @@ pub fn app_with_sessions(
         .route("/api/owner/{id}", get(owner))
         .with_state(front.clone())
         .route_layer(axum::middleware::from_fn_with_state(
-            std::sync::Arc::<[String]>::from(front.cluster.allowed_hosts()),
+            allowed.clone(),
             crate::guard::known_hosts,
         ))
         .merge(
             Router::new()
-                .nest_service(
-                    "/mcp",
-                    crate::relay::service(front.cluster.clone(), sessions),
-                )
+                .nest_service("/mcp", crate::relay::service(members, sessions))
                 .layer(axum::middleware::from_fn_with_state(
-                    std::sync::Arc::<[String]>::from(front.cluster.allowed_hosts()),
+                    allowed,
                     crate::guard::known_hosts,
                 )),
         );
@@ -128,6 +139,16 @@ pub fn app_with_sessions(
 
 fn bad_gateway(error: impl std::fmt::Display) -> Response {
     (StatusCode::BAD_GATEWAY, error.to_string()).into_response()
+}
+
+/// The answer while no server is live, as when they all restart at once.
+fn no_servers() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [("retry-after", "1")],
+        "no Finite server is running",
+    )
+        .into_response()
 }
 
 impl Front {
@@ -203,7 +224,9 @@ async fn forward(
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     };
     let path = parts.uri.path_and_query().map_or("/", |p| p.as_str());
-    let base = front.cluster.owner_url(&id).to_owned();
+    let Some(base) = front.members.now().owner_url(&id).map(String::from) else {
+        return no_servers();
+    };
     pass_on(send(&front, &base, &parts.method, path, &parts.headers, &body).await).await
 }
 
@@ -213,7 +236,11 @@ async fn forward(
 /// `UPSTREAM_TIMEOUT` may have created it, so that's a `504` instead, and
 /// the next try goes to the next server.
 async fn create(State(front): State<Arc<Front>>, headers: HeaderMap, body: Bytes) -> Response {
-    let nodes = front.cluster.nodes();
+    let cluster = front.members.now();
+    let nodes = cluster.nodes();
+    if nodes.is_empty() {
+        return no_servers();
+    }
     let turn = front.next.fetch_add(1, Ordering::Relaxed);
     for i in 0..nodes.len() {
         let base = &nodes[(turn + i) % nodes.len()];
@@ -250,7 +277,8 @@ async fn list(State(front): State<Arc<Front>>, RawQuery(query): RawQuery) -> Res
         .unwrap_or(LOBBY_LIMIT)
         .clamp(1, 1000);
     let query = query.map(|q| format!("?{q}")).unwrap_or_default();
-    let requests = front.cluster.nodes().iter().map(|base| {
+    let cluster = front.members.now();
+    let requests = cluster.nodes().iter().map(|base| {
         let http = front.http.clone();
         let url = format!("{base}/api/designs{query}");
         async move {
@@ -265,8 +293,7 @@ async fn list(State(front): State<Arc<Front>>, RawQuery(query): RawQuery) -> Res
     });
     let mut designs = Vec::new();
     let mut answered = false;
-    for (base, result) in front
-        .cluster
+    for (base, result) in cluster
         .nodes()
         .iter()
         .zip(futures::future::join_all(requests).await)
@@ -294,7 +321,7 @@ fn sort_newest_first(designs: &mut [Value]) {
 }
 
 async fn owner(State(front): State<Arc<Front>>, Path(id): Path<String>) -> Json<Value> {
-    Json(json!({ "owner": front.cluster.owner_url(&id) }))
+    Json(json!({ "owner": front.members.now().owner_url(&id) }))
 }
 
 /// How long the router waits to connect to a server, for a server to accept
@@ -341,11 +368,13 @@ async fn design_socket(
     // The query carries where a reconnecting viewer left off.
     let query = query.map(|q| format!("?{q}")).unwrap_or_default();
     let path = format!("/api/designs/{id}/ws{query}");
-    let base = front.cluster.owner_url(&id);
-    let mut connected = connect_ws(Front::ws_url(base, &path)).await;
+    let Some(base) = front.members.now().owner_url(&id).map(String::from) else {
+        return no_servers();
+    };
+    let mut connected = connect_ws(Front::ws_url(&base, &path)).await;
     // As in `relay`: follow a server that says another one owns the design.
     if let Err(tungstenite::Error::Http(res)) = &connected
-        && let Some(owner) = Front::redirect(res.status(), res.headers(), base)
+        && let Some(owner) = Front::redirect(res.status(), res.headers(), &base)
     {
         connected = connect_ws(Front::ws_url(&owner, &path)).await;
     }
@@ -411,8 +440,14 @@ type Upstream =
 /// A server that's down is left out, as in [`list`], rather than failing the
 /// whole list. Then the socket closes after `LOBBY_RETRY`, so the browser
 /// reconnects and the router tries that server again.
+///
+/// When the list of servers changes, the socket closes too, so the browser
+/// reconnects to a list that includes a server that joined, and has each
+/// design that moved under its new owner.
 async fn lobby(State(front): State<Arc<Front>>, upgrade: WebSocketUpgrade) -> Response {
-    let connects = front.cluster.nodes().iter().map(|base| async move {
+    let changes = front.members.subscribe();
+    let cluster = front.members.now();
+    let connects = cluster.nodes().iter().map(|base| async move {
         let url = Front::ws_url(base, "/api/designs/ws");
         (base, connect_ws(url).await)
     });
@@ -426,8 +461,8 @@ async fn lobby(State(front): State<Arc<Front>>, upgrade: WebSocketUpgrade) -> Re
     if upstreams.is_empty() {
         return bad_gateway("no Finite server answered");
     }
-    let complete = upstreams.len() == front.cluster.len();
-    upgrade.on_upgrade(move |client| relay_lobby(client, upstreams, complete))
+    let complete = upstreams.len() == cluster.len();
+    upgrade.on_upgrade(move |client| relay_lobby(client, upstreams, complete, changes))
 }
 
 /// A server's `designs` message as its list and total.
@@ -469,7 +504,12 @@ async fn first_list(upstream: &mut Upstream) -> Option<Value> {
         .flatten()
 }
 
-async fn relay_lobby(mut client: WebSocket, mut upstreams: Vec<Upstream>, mut complete: bool) {
+async fn relay_lobby(
+    mut client: WebSocket,
+    mut upstreams: Vec<Upstream>,
+    mut complete: bool,
+    mut changes: tokio::sync::watch::Receiver<Arc<Cluster>>,
+) {
     let text = |m: Option<Result<tungstenite::Message, tungstenite::Error>>| match m {
         Some(Ok(tungstenite::Message::Text(text))) => {
             serde_json::from_str::<Value>(text.as_str()).ok()
@@ -549,6 +589,10 @@ async fn relay_lobby(mut client: WebSocket, mut upstreams: Vec<Upstream>, mut co
                 }
             }
             () = &mut retry => {
+                let _ = client.send(ws::Message::Close(None)).await;
+                return;
+            }
+            Ok(()) = changes.changed() => {
                 let _ = client.send(ws::Message::Close(None)).await;
                 return;
             }

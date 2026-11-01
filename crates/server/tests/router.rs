@@ -378,7 +378,7 @@ mod relay {
             ));
         }
         let cluster = Cluster::new(nodes.clone(), 0).unwrap();
-        let mut owners: Vec<usize> = ids.iter().map(|id| cluster.owner(id)).collect();
+        let mut owners: Vec<usize> = ids.iter().map(|id| cluster.owner(id).unwrap()).collect();
         owners.sort();
         assert_eq!(owners, [0, 1]);
 
@@ -496,7 +496,7 @@ mod relay {
         // Creation takes turns: the first design is A's, the second B's.
         let on_a = design_id(&call(&client, "create_design", json!({ "name": "On A" })).await);
         let on_b = design_id(&call(&client, "create_design", json!({ "name": "On B" })).await);
-        assert_eq!(cluster(0).owner(&on_b), 1);
+        assert_eq!(cluster(0).owner(&on_b), Some(1));
         call(&client, "get_basic_info", json!({ "designId": on_b })).await;
 
         // While B is down, its designs fail, but the list still shows A's.

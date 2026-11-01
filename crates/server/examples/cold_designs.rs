@@ -30,7 +30,7 @@ async fn main() {
             created_at: 0,
             updated_at: 0,
         });
-        store.save(&design.snapshot()).unwrap();
+        store.save(&design.snapshot(), 0).unwrap();
     }
     let before = rss_kb();
     let hub = Hub::new(store).unwrap();

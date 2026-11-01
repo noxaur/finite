@@ -13,6 +13,8 @@ pub mod guard;
 pub mod heartbeat;
 pub mod hub;
 pub mod mcp;
+#[cfg(feature = "postgres")]
+pub mod postgres;
 pub mod relay;
 pub mod router;
 pub mod screenshot;
@@ -39,7 +41,7 @@ async fn health() -> Json<Health> {
 /// - `/mcp` for agents (MCP over Streamable HTTP)
 /// - the built frontend, when `static_dir` is set
 pub fn app(hub: Arc<Hub>, static_dir: Option<&str>) -> Router {
-    let allowed: std::sync::Arc<[String]> = hub.cluster().allowed_hosts().into();
+    let allowed: std::sync::Arc<[String]> = hub.allowed_hosts().into();
     let api = Router::new()
         .route("/health", get(health))
         .merge(api::routes())

@@ -52,7 +52,7 @@ fn main() {
             )
             .unwrap();
             design.commit("agent", "cards", &ops, 2);
-            store.save(&design.snapshot_to_save()).unwrap();
+            store.save(&design.snapshot_to_save(), 0).unwrap();
         }
     }
     let bytes: u64 = std::fs::read_dir(dir.join("designs"))

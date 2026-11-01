@@ -14,7 +14,7 @@ How far you read depends on what you want:
 - **To run it for real,** read "Saving and recovering". It covers what's saved, when, and what survives a crash, undo included.
 - **To test a change the way a person sees it,** read "The end-to-end test".
 - **To look up a limit,** like how many nodes a design holds, see "Limits at a glance" near the end.
-- **To run more than one server,** read "Running more than one server" at the end. One server is the default, and you can skip that section until you need it.
+- **To run more than one server,** read "Running more than one server" at the end. It covers servers that share a Postgres database and fail over to each other. One server is the default, and you can skip that section until you need it.
 
 "Words used in the code" at the very end is a glossary for when a term isn't clear.
 
@@ -433,7 +433,9 @@ On Ctrl-C or SIGTERM, the server stops accepting connections and writes every lo
 
 In the desktop app, Electron runs the server as a child process and acts as its **supervisor**, the way systemd's `Restart=` setting does with a rate limit. If the server stops on its own, say the system killed it to free memory, Electron starts it again on the same port. Open pages reconnect there and resume, and the journal brings back anything not yet in a snapshot. If it stops three times within a minute, a restart won't fix it, so the app shows an error and quits (`afterStop` in `apps/desktop/src/restarts.ts`). Before, a server that crashed made the app quit without a word, and one that was killed left the window saying "Retrying…" forever. Killing the app's server with `kill -9` brought a new one up on port 4100 within a second, and quitting the app afterwards still saved and stopped it.
 
-The hub only calls five methods on the `Store` trait in `store.rs`: `ids`, `load`, `save`, `append` and `remove`. A database could replace the files behind them. To check a new store, run `store::contract::check` on it. It's a **contract test**: the same suite of rules every store must follow, such as "the journal keeps append order" and "save clears the journal". The file store and the memory store both run it in `cargo test`.
+The hub saves through the `Store` trait in `store.rs`. Five methods read and write designs: `ids`, `load`, `save`, `append` and `remove`. Four more let several servers share one store: `create`, `claim`, `release` and `held` (see "A shared store"). They hand out a **fencing token** that every `save` and `append` carries. The file store keeps the defaults: a claim always succeeds, and it ignores the token, because the folder lock already keeps other servers out.
+
+Three stores implement the trait. `FileStore` is the default. `PgStore` keeps the same snapshot and journal in Postgres, when you set `FINITE_DATABASE_URL`. `MemoryStore` is for tests. To check a new store, run `store::contract::check` on it. It's a **contract test**: the same suite of rules every store must follow, such as "the journal keeps append order" and "save clears the journal". A store that servers share must also pass `store::contract::check_shared`. Every store runs the contracts it needs in `cargo test`.
 
 ### Undo across restarts
 
@@ -454,7 +456,11 @@ A hub test edits as a named agent. It checks that the design unloads and comes b
 
 ## The end-to-end test
 
-The unit tests and golden files check each side on its own. `vp run e2e` checks what a person sees. `vp run e2e:router` runs the same checks through a router in front of two servers, so relayed sockets, the merged design list and refusals passing through the router are covered too. CI runs both. The script lives in `e2e/run.mjs` and has three parts:
+The unit tests and golden files check each side on its own. `vp run e2e` checks what a person sees. `vp run e2e:router` runs the same checks through a router in front of two servers, so relayed sockets, the merged design list and refusals passing through the router are covered too. `vp run e2e:shared` runs them through a router in front of two servers that share one Postgres. CI runs all three.
+
+`e2e:shared` takes the database from `E2E_DATABASE_URL` or `FINITE_TEST_DATABASE_URL`. Without either, it prints `SKIP` and passes. Each run keeps its tables in a new schema named `finite_e2e_…` and leaves it there, so give it a test database.
+
+It first waits until the router sees both servers. When I switched that list off in the router, this check failed, and so did the agent's first call. `vp run` never caches the task, which `vite.config.ts` sets up. A cached task only gets the variables it lists, so it wouldn't see the URL. The script lives in `e2e/run.mjs` and has three parts:
 
 1. It builds the server and the web app (`E2E_SKIP_BUILD=1` reuses the last builds), then starts the server on a free port with a throwaway data folder.
 2. It connects an agent over MCP (`e2e/mcp.mjs`) and builds a design: one plain artboard and one with a script, so it renders in a sandbox.
@@ -468,16 +474,14 @@ One trap is worth knowing if you add a check. Comment mode sets `pointer-events:
 
 ## Running more than one server
 
-Each design lives on exactly one server. That server holds it in memory and saves it to its own data folder, so two servers can't overwrite each other's edits. `crates/server/src/cluster.rs` decides which server that is.
+Each design lives on exactly one server at a time, its **owner**. The owner holds it in memory and saves it, so two servers never edit the same design at once. You can run several servers in two ways:
 
-It uses **rendezvous hashing** (also called highest random weight). Every server scores the design id, and the highest score wins. The answer depends only on the id and the list of servers, so any server, proxy or load balancer that has the list gets the same answer, with nothing shared between them. Adding a fifth server to four moves only the designs the new server wins, about a fifth of them. Plain `hash % n` would move almost all of them.
+- **With a shared store.** Every server keeps its designs in one Postgres database. A design can move to another server without copying anything, and the list of servers follows which ones are alive. If you can, use this one.
+- **With separate folders.** Each server keeps its designs in its own data folder, and you give every server the same fixed list. To move a design, the old owner sends it to the new one over HTTP.
 
-To run three servers, give each the same list and its own position:
+### Who owns a design
 
-```bash
-FINITE_NODES=http://10.0.0.1:4100,http://10.0.0.2:4100,http://10.0.0.3:4100 \
-FINITE_NODE=0 FINITE_DATA_DIR=/data/finite finite-server
-```
+`crates/server/src/cluster.rs` decides, the same way in both setups. It uses **rendezvous hashing** (also called highest random weight). Every server scores the design id, and the highest score wins. The answer depends only on the id and the list of servers, so any server, proxy or load balancer that has the list gets the same answer. Adding a fifth server to four moves only the designs the new server wins, about a fifth of them. Plain `hash % n` would move almost all of them.
 
 Each server then behaves like this:
 
@@ -485,13 +489,102 @@ Each server then behaves like this:
 - **Wrong server:** a request for a design another server owns gets `421 Misdirected Request` with a `Finite-Owner` header naming the owner. An MCP tool call gets an error telling the agent which `/mcp` endpoint to use.
 - **Asking:** `GET /api/owner/{id}` on any server returns `{"owner": "http://…"}`, or `null` when it's that server.
 
-### Adding or removing a server
+The hash is FNV-1a with a final mix. It's spelled out in `cluster.rs` so you can port it. A test pins one score, which a Python version reproduces exactly. With neither a shared store nor `FINITE_NODES`, there's one server, and it owns everything.
 
-When the list changes, some designs get a new owner, but their files are still in the old owner's data folder. So on startup, each server checks its stored designs. It sends each one it no longer owns to the new owner with `PUT /api/designs/{id}/handoff`. The new owner saves it before it answers `201 Created`, and only then does the old server delete its copy. A crash at any point leaves a copy on at least one server.
+### A shared store
+
+The Postgres store sits behind a cargo feature, `postgres`, which is off by default. So build the servers and the router with it:
+
+```bash
+cargo build --release -p finite-server --features postgres
+```
+
+Then point every server and the router at the same database, and tell each server the URL the others reach it at:
+
+```bash
+export FINITE_DATABASE_URL=postgres://finite@db.internal/finite
+FINITE_NODE_URL=http://10.0.0.1:4100 finite-server   # on the first machine
+FINITE_NODE_URL=http://10.0.0.2:4100 finite-server   # on the second
+finite-server router
+```
+
+The server creates its three tables on first start (`crates/server/src/postgres/mod.rs`). `finite_designs` holds each design's snapshot as JSON, plus two columns for ownership. `finite_journal` holds the journal records, one row each. `finite_nodes` holds one row per server.
+
+The tables go in the default schema, unless you name another in `FINITE_DATABASE_SCHEMA`. Finite makes that schema if it's missing. So a test copy and the real one can share a database, and neither sees the other's designs.
+
+The file store stays the default, so the desktop app and a single server never need a database. They don't even compile a database client, because `vp run dev` and the desktop build leave the feature off.
+
+If you set `FINITE_DATABASE_URL` for a build without the feature, it exits with `this finite-server was built without Postgres`. It won't start on a folder of its own, because its designs would never reach the other servers. `tests/no_postgres.rs` checks the server and the router. `FINITE_NODES` and `FINITE_DATABASE_URL` don't mix either, and a server refuses to start if you set both.
+
+Three mechanisms make this safe. Each has a textbook name.
+
+**Heartbeats decide who's alive.** Each server writes the time into its row in `finite_nodes` every 2 seconds. That's its **heartbeat**. A server counts as alive while its last heartbeat is younger than the **lease**, 10 seconds by default (`FINITE_LEASE_MS`). The database's clock does the comparing, so the servers' clocks don't have to agree.
+
+Ownership is rendezvous hashing over the live servers, so when one stops heartbeating, its designs belong to the others. Each server reads the list again after every heartbeat.
+
+**A lease on each design says who may write it.** Before a server loads a design, it claims the design's lease: it writes its own URL in the `holder` column and raises the `epoch` column by one, in one statement. The claim only succeeds if nobody holds the lease, the server holds it already, or the holder's heartbeat is out of date. Otherwise the server waits for the holder to let go, for up to one lease. After that it answers `503 Service Unavailable`, and the browser or agent tries again.
+
+**The epoch is a fencing token.** The server keeps the epoch it got, and every save and append carries it. The store refuses a write whose epoch isn't the latest, in the same transaction that would change the design. That's the guard against a server that stalled, say for a long garbage collection, a full disk or `SIGSTOP`. It wakes up still believing it owns its designs, and tries to save. Without the token, its stale copy would overwrite the new owner's edits. With it, the save fails with `Fenced`, and the server drops its copy.
+
+A claim and a stale write can't both succeed, because they touch the same row: whichever runs second sees the other's change. You can read the rule in two SQL statements in `postgres/mod.rs`. `save` updates the row only `WHERE epoch = token`, and `claim` sets `epoch = epoch + 1`.
+
+Here's what happens in each case:
+
+- **A server dies.** Its heartbeat stops. Once its lease runs out, the survivors drop it from their lists, and each design it owned now hashes to one of them. The first request for a design makes its new owner claim it, which works because the holder is gone, and load it from the database. No server copies anything. The edits the dead server hadn't saved yet are lost, which is at most the last 250 ms, the same as a crash with one server.
+- **A server joins, or comes back.** The others see it on their next read, about 2 seconds later. Each one lets go of the designs the newcomer now owns. Letting go means sending the design's viewers away, saving a last snapshot, and releasing the lease. Viewers reconnect through the router and land on the new owner, which loads what was just saved. No edits are lost.
+- **A server pauses past its lease.** The others take its designs over, as if it had died. When it wakes, the store fences off every save it tries. It also knows its own lease lapsed, because it times its heartbeats. Until it renews, it counts itself out of the list, so it serves nothing and answers `421`. Then it lets go of every design it had loaded, because the copies may be out of date, and loads them again on the next request.
+- **A server shuts down cleanly.** On SIGTERM it saves every design, releases its leases and deletes its heartbeat row. The others take over on their next read, without waiting for the lease.
+
+The router follows the same heartbeats. With `FINITE_DATABASE_URL`, it reads the list of live servers every 2 seconds and sends each request to the owner on that list. For the moment when the router's list lags behind, servers' `421` answers point it to the right one, as below. When the list changes, the router closes every browser's design list socket, so the browser reconnects to a list with each design under its new owner.
+
+The tests cover each case:
+
+- `store::contract::check_shared` is the contract a shared store must pass. Both the Postgres store and the in-memory store pass it. It checks that only one server can create a given id, that nobody can take a live server's lease, and that the store refuses a write with an old token.
+- `tests/shared.rs` runs two servers in one process over the in-memory store, and over Postgres too when it's configured. It checks that two servers share designs, that a dead server's designs move with every saved edit, that a paused owner can't overwrite the new owner, and that the router follows a moved design. With the token check removed from the stores, the fencing test failed: the store kept the paused server's copy, and the new owner's edit was gone.
+- `tests/failover.rs` does the same with real processes and signals. One test sends `kill -9` to a server, and another freezes the owner with `SIGSTOP` and thaws it with `SIGCONT`. It needs Postgres. After the kill, the router served the design from the other server 1.2 seconds later, with a 1-second lease. Without the token check, the thawed server overwrote the new owner's edit here too.
+
+The Postgres tests need the feature and `FINITE_TEST_DATABASE_URL`. Without the variable they print a note and pass. Each test makes its own schema, so they can run at once. CI runs them against a Postgres service (`.github/workflows/ci.yml`).
+
+To run them on a Mac, `brew install postgresql@17` and start it. Then run `FINITE_TEST_DATABASE_URL=postgres://localhost/postgres cargo test -p finite-server --features postgres`.
+
+#### Connecting with TLS
+
+Managed databases like RDS, Cloud SQL and Supabase only take TLS. You set TLS the way you would for `psql`, with `sslmode` in the URL, and Finite reads it the way libpq does (`crates/server/src/postgres/tls.rs`):
+
+| `sslmode`         | Encrypted                  | What it checks                              |
+| ----------------- | -------------------------- | ------------------------------------------- |
+| `disable`         | Never                      | Nothing                                     |
+| `allow`, `prefer` | When the server offers TLS | Nothing                                     |
+| `require`         | Always                     | Nothing, unless you give `sslrootcert`      |
+| `verify-ca`       | Always                     | That a CA you trust signed the certificate  |
+| `verify-full`     | Always                     | That, and that it names the host you dialed |
+
+`prefer` is the default, so a local Postgres without TLS works as it did. For a managed database, use `verify-full` and point `sslrootcert` at its CA file:
+
+```bash
+FINITE_DATABASE_URL='postgres://finite@db.example.com/finite?sslmode=verify-full&sslrootcert=/etc/finite/rds-ca.pem'
+```
+
+`require` stops someone from reading the traffic, but not from posing as the database, because it takes any key. That's libpq's meaning too. Without `sslrootcert`, `verify-ca` and `verify-full` trust the Mozilla list of public CAs built into Finite. That's enough for a provider that gets its keys signed by a public CA, like Let's Encrypt. RDS and Cloud SQL sign with CAs of their own, so you need their CA file. Client certificates (`sslcert`, `sslkey`) aren't supported yet.
+
+The TLS code is rustls, through `tokio-postgres-rustls`, with the `ring` crypto backend. It's all Rust, so a build needs no OpenSSL and no C compiler. `tokio-postgres` only knows three modes and no `sslrootcert`, so Finite takes both settings out of the URL and sets up the check itself.
+
+A test in `postgres/mod.rs` runs a TLS front for the test database, the way a managed Postgres looks. It has a CA of its own, and it serves as `localhost`. The test checks each mode against it. `verify-full` refuses it as `127.0.0.1`, a name it doesn't have, and `verify-ca` takes it. A failed check says why, like `invalid peer certificate: UnknownIssuer`. With plain connections, as before this change, the TLS tests failed with `no TLS implementation configured`.
+
+### Separate folders
+
+To run three servers that each keep their own data folder, give each the same list and its own position:
+
+```bash
+FINITE_NODES=http://10.0.0.1:4100,http://10.0.0.2:4100,http://10.0.0.3:4100 \
+FINITE_NODE=0 FINITE_DATA_DIR=/data/finite finite-server
+```
+
+The list doesn't change on its own, so a server that dies takes its designs with it until you bring it back.
+
+When you change the list, some designs get a new owner, but their files are still in the old owner's data folder. So on startup, each server checks its stored designs. It sends each one it no longer owns to the new owner with `PUT /api/designs/{id}/handoff`. The new owner saves it before it answers `201 Created`, and only then does the old server delete its copy. A crash at any point leaves a copy on at least one server. Servers that share a store never hand off, and refuse a handoff with `409 Conflict`.
 
 If the new owner is down, the old server keeps the design and tries again every 30 seconds. If the new owner already has a design with that id, it answers `409 Conflict`. The old server then keeps its copy and logs a warning, because deleting it could lose edits the owner doesn't have. The handoff carries the whole design, undo histories included, so it takes bodies up to 256 MB. Other API routes keep axum's default limit of 2 MB, which is plenty for a comment or a new design's name. Before, the handoff had that limit too, so a design that had grown past 2 MB got `413 Payload Too Large` and could never move. One MCP call alone can add 4 MB. `tests/cluster.rs` covers a second server joining, an owner that can't be reached, and a design of more than 3 MB moving.
-
-The hash is FNV-1a with a final mix. It's spelled out in `cluster.rs` so you can port it. A test pins one score, which a Python version reproduces exactly. Without `FINITE_NODES`, there's one server, and it owns everything.
 
 ### The router
 
@@ -499,7 +592,7 @@ The hash is FNV-1a with a final mix. It's spelled out in `cluster.rs` so you can
 
 - **One design:** anything under `/api/designs/{id}` goes to the design's owner. That includes the design's WebSocket, which the router relays in both directions. A server sends a design's snapshot as one WebSocket frame. tungstenite, the WebSocket library the router uses to connect to servers, refuses frames over 16 MB by default, so a larger design couldn't open through the router. Browsers have no such limit, so the router lifts it for its connections to servers. A test opens a design of more than 18 MB through the router. With the default limit, the router dropped the connection.
 - **New designs:** `POST /api/designs` takes turns between servers. Each server picks an id it owns, so the design lands where the hash says it belongs. If the server whose turn it is refuses the connection, the next one takes the design. A refused connection never reached the server, so nothing is created twice. The relay's `create_design` does the same when it can't open a session with a server.
-- **A server that says it's elsewhere:** when you add a server, you update the servers' `FINITE_NODES` and the router's, and for a moment the router may lag behind. Then it sends a design that now belongs to the new server to an old one, which answers `421 Misdirected Request` with a `Finite-Owner` header. The router follows that header once, for requests and design sockets alike. The relay does the same for tool calls: the server's error carries the owner in its `_meta` (`finite/owner`), and the call didn't run, so sending it to the owner is safe. The owner comes from a server the router trusts, but it must still be a plain `http(s)://host:port` (`cluster::is_base_url`).
+- **A server that says it's elsewhere:** when the servers change, the router's list may lag behind for a moment. That happens when you update `FINITE_NODES`, or with a shared store, when a server joins or dies. Then it sends a design that now belongs to the new server to an old one, which answers `421 Misdirected Request` with a `Finite-Owner` header. The router follows that header once, for requests and design sockets alike. The relay does the same for tool calls: the server's error carries the owner in its `_meta` (`finite/owner`), and the call didn't run, so sending it to the owner is safe. The owner comes from a server the router trusts, but it must still be a plain `http(s)://host:port` (`cluster::is_base_url`).
 - **The design list:** `GET /api/designs` asks every server and merges the answers, newest first. The list's WebSocket subscribes to every server's list and relays their updates. The router keeps each server's latest full list. A server whose socket fell behind sends its whole list again, and that replaces only its own part of the merge. Before, the router passed it on as it was, and the browser, which replaces its list on a full list, lost every other server's designs until it reconnected. A test in `tests/router.rs` uses two scripted servers, one of which resends, and checks the other's design stays. If one server drops, the router closes the socket, and the browser reconnects and gets a fresh merged list. A server that's down is left out of both, so the others' designs still show. If no server answers, `GET /api/designs` fails with `502 Bad Gateway`. It used to answer an empty list, which said there were no designs at all. A socket that's missing a server closes after 15 seconds, so the browser reconnects and the router tries that server again.
 - **A stuck server:** a server that's paused or too busy to answer still accepts connections, because the operating system queues them. The router gives each server 5 seconds (`UPSTREAM_TIMEOUT`) to connect, accept a WebSocket and send its design list, then leaves it out like a server that's down. Creating a design on a stuck server's turn answers `504 Gateway Timeout` after those 5 seconds. The router can't send that create to the next server, because the stuck one may have created the design. The next try goes to the next server. Before, one stuck server held up every browser's design list for good, and every create on its turn. A test in `tests/router.rs` puts a listener that never accepts in front as a server. Any other request the router passes on fails with `502` once the server has sent nothing for 30 seconds. That's a limit on silence, not on the whole request (reqwest's **read timeout**), so a large design still downloads however long it takes. Before, a new comment on a stuck server's design waited forever.
 
@@ -512,7 +605,7 @@ FINITE_NODE=1 FINITE_PORT=4102 FINITE_DATA_DIR=data/b finite-server &
 FINITE_PORT=4100 FINITE_STATIC_DIR=apps/web/out finite-server router
 ```
 
-`crates/server/tests/router.rs` runs exactly this over real sockets. It checks that new designs spread across both servers, that every design's requests and WebSocket reach its owner, and that the list merges both. `vp run e2e:router` runs the whole end-to-end test through a router in front of two servers, so live edits, undo, comments and the design list are checked there in a browser too.
+With a shared store, the router takes `FINITE_DATABASE_URL` instead of `FINITE_NODES`, and the servers drop `FINITE_NODES` and `FINITE_NODE`. `crates/server/tests/router.rs` runs the fixed-list setup over real sockets. It checks that new designs spread across both servers, that every design's requests and WebSocket reach its owner, and that the list merges both. `vp run e2e:router` runs the whole end-to-end test through a router in front of two servers, so live edits, undo, comments and the design list are checked there in a browser too.
 
 The router relays MCP too (`crates/server/src/relay.rs`), so you can point an agent at the router's `/mcp` and reach every design. The router is an MCP server itself. For each agent session, it opens one session on each Finite server the first time it needs it, and sends each tool call to the server that owns the call's `designId`. An agent always uses the same session on a given server, so undo there works exactly as if it had connected directly. `list_designs` asks every server at once and merges the lists, and `create_design` takes turns. `tests/router.rs` runs one agent session that creates a design on each server, then edits and undoes on both.
 
@@ -530,48 +623,55 @@ MCP rejects requests whose `Host` header it doesn't know, to block **DNS rebindi
 
 The guide explains each limit where it applies. This is the list in one place. Most are one constant, so changing one is a one-line edit plus its test.
 
-| What                                   | Limit                                                             | Where it's set                          | Why                                                         |
-| -------------------------------------- | ----------------------------------------------------------------- | --------------------------------------- | ----------------------------------------------------------- |
-| Nodes in a design                      | 100,000                                                           | `MAX_NODES` in `document.rs`            | Every node is journaled, held in memory and sent to viewers |
-| Nesting depth                          | 256 levels                                                        | `MAX_DEPTH` in `document.rs`            | Tree walks are recursive; deeper overflowed the stack       |
-| HTML nesting before parsing            | 4,096 by a quick count                                            | `html::parse`                           | html5ever is quadratic in depth                             |
-| Undo steps per actor and stack         | 200 steps, about 32 MB                                            | `History::LIMIT`, `History::BYTE_LIMIT` | Undoing a big delete recreates every node in it             |
-| Undo for a named agent                 | 6 idle hours                                                      | `HISTORY_TTL` in `hub/mod.rs`           | Histories keep memory and snapshots busy                    |
-| Idle MCP session                       | 1 hour                                                            | `SESSION_IDLE` in `mcp/mod.rs`          | An unnamed agent's undo ends with its session               |
-| Open comments per design               | 500                                                               | `MAX_OPEN` in `comment.rs`              | Anyone who can see a design can comment                     |
-| Messages per comment thread            | 200                                                               | `MAX_MESSAGES` in `comment.rs`          | Same reason                                                 |
-| Comment length, author name            | 4,000 and 48 characters                                           | `MAX_BODY`, `MAX_NAME` in `comment.rs`  | Shared with the web app through a golden file               |
-| Agent id from `X-Finite-Agent`         | 64 characters                                                     | `MAX_USER_ID` in `comment.rs`           | Stored with every change and reply the agent makes          |
-| Layer, design and status names         | 120 characters                                                    | `label.rs`                              | Every viewer shows them; cut rather than refused            |
-| Presence                               | 100 nodes, 5 idle minutes                                         | `PRESENCE_NODES`, `PRESENCE_TTL`        | Every viewer gets the list on each update                   |
-| One tool result                        | 60,000 characters                                                 | `OUTPUT_LIMIT` in `mcp/format.rs`       | Claude Code cuts at 25,000 tokens wherever that falls       |
-| `list_designs`, `get_children` pages   | 200 entries                                                       | `ListParams`, `ChildrenParams`          | 200 always fit in one result                                |
-| Screenshot size                        | 3,000 pixels on the longer side                                   | `MAX_OUTPUT_SIDE` in `screenshot.rs`    | The Claude API's limit once a request has 20+ images        |
-| Browsers rendering screenshots at once | Half the cores, 1 to 4                                            | `browsers()` in `screenshot.rs`         | Each capture starts its own Chrome                          |
-| Journal before compaction              | 1,000 records or 16 MB                                            | `COMPACT_AFTER`, `COMPACT_BYTES`        | A load replays the whole journal                            |
-| Handoff body                           | 256 MB                                                            | `HANDOFF_LIMIT` in `api.rs`             | A handoff carries a whole design; other routes keep 2 MB    |
-| Design list in the browser             | 200 newest                                                        | `LOBBY_LIMIT`, `mergeLobby`             | The rest are a search away                                  |
-| Silent WebSocket                       | Closed after 60 s; the page gives up after 10 s without an answer | `heartbeat.rs`, `socket.ts`             | Half-open connections never close on their own              |
+| What                                   | Limit                                                             | Where it's set                             | Why                                                         |
+| -------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------ | ----------------------------------------------------------- |
+| Nodes in a design                      | 100,000                                                           | `MAX_NODES` in `document.rs`               | Every node is journaled, held in memory and sent to viewers |
+| Nesting depth                          | 256 levels                                                        | `MAX_DEPTH` in `document.rs`               | Tree walks are recursive; deeper overflowed the stack       |
+| HTML nesting before parsing            | 4,096 by a quick count                                            | `html::parse`                              | html5ever is quadratic in depth                             |
+| Undo steps per actor and stack         | 200 steps, about 32 MB                                            | `History::LIMIT`, `History::BYTE_LIMIT`    | Undoing a big delete recreates every node in it             |
+| Undo for a named agent                 | 6 idle hours                                                      | `HISTORY_TTL` in `hub/mod.rs`              | Histories keep memory and snapshots busy                    |
+| Idle MCP session                       | 1 hour                                                            | `SESSION_IDLE` in `mcp/mod.rs`             | An unnamed agent's undo ends with its session               |
+| Open comments per design               | 500                                                               | `MAX_OPEN` in `comment.rs`                 | Anyone who can see a design can comment                     |
+| Messages per comment thread            | 200                                                               | `MAX_MESSAGES` in `comment.rs`             | Same reason                                                 |
+| Comment length, author name            | 4,000 and 48 characters                                           | `MAX_BODY`, `MAX_NAME` in `comment.rs`     | Shared with the web app through a golden file               |
+| Agent id from `X-Finite-Agent`         | 64 characters                                                     | `MAX_USER_ID` in `comment.rs`              | Stored with every change and reply the agent makes          |
+| Layer, design and status names         | 120 characters                                                    | `label.rs`                                 | Every viewer shows them; cut rather than refused            |
+| Presence                               | 100 nodes, 5 idle minutes                                         | `PRESENCE_NODES`, `PRESENCE_TTL`           | Every viewer gets the list on each update                   |
+| One tool result                        | 60,000 characters                                                 | `OUTPUT_LIMIT` in `mcp/format.rs`          | Claude Code cuts at 25,000 tokens wherever that falls       |
+| `list_designs`, `get_children` pages   | 200 entries                                                       | `ListParams`, `ChildrenParams`             | 200 always fit in one result                                |
+| Screenshot size                        | 3,000 pixels on the longer side                                   | `MAX_OUTPUT_SIDE` in `screenshot.rs`       | The Claude API's limit once a request has 20+ images        |
+| Browsers rendering screenshots at once | Half the cores, 1 to 4                                            | `browsers()` in `screenshot.rs`            | Each capture starts its own Chrome                          |
+| Journal before compaction              | 1,000 records or 16 MB                                            | `COMPACT_AFTER`, `COMPACT_BYTES`           | A load replays the whole journal                            |
+| Handoff body                           | 256 MB                                                            | `HANDOFF_LIMIT` in `api.rs`                | A handoff carries a whole design; other routes keep 2 MB    |
+| Server lease, with a shared store      | 10 s, renewed every 2 s                                           | `FINITE_LEASE_MS`, `Lease` in `cluster.rs` | How long a silent server keeps its designs                  |
+| Waiting for a design that's moving     | Up to one lease, then `503`                                       | `Hub::open`                                | The old owner saves a last snapshot before it lets go       |
+| Design list in the browser             | 200 newest                                                        | `LOBBY_LIMIT`, `mergeLobby`                | The rest are a search away                                  |
+| Silent WebSocket                       | Closed after 60 s; the page gives up after 10 s without an answer | `heartbeat.rs`, `socket.ts`                | Half-open connections never close on their own              |
 
 ## Words used in the code
 
-| Word       | Meaning                                                                          |
-| ---------- | -------------------------------------------------------------------------------- |
-| Design     | One canvas. Also called a canvas in the MCP tools.                               |
-| Artboard   | A top-level node: a fixed-size frame placed on the canvas.                       |
-| Node       | One element or text node.                                                        |
-| Op         | The smallest edit: `create`, `delete`, `set` or `move`.                          |
-| Change     | The ops from one commit, undo or redo, with a `seq`, actor and label.            |
-| Actor      | Whoever made a change: an agent, by its `X-Finite-Agent` name or its session.    |
-| Snapshot   | Everything needed to rebuild a design. Saved to disk and sent on connect.        |
-| Journal    | The records appended to `<id>.log` since the last snapshot.                      |
-| Compaction | Writing a fresh snapshot and deleting the journal, every 1,000 records or 16 MB. |
-| Replica    | The browser's copy of a design.                                                  |
-| Presence   | "Agent X is working on these nodes", shown as a badge.                           |
-| Hub        | The server's index of designs, with the ones in use loaded in memory.            |
-| Room       | The model for loading: a design is in memory only while someone uses it.         |
-| Long poll  | A request that stays open until there's news, like `wait_for_comments`.          |
-| Epoch      | One load of a design on a server. A viewer can resume only within the same one.  |
-| Revision   | A comment's `rev`: it goes up with each change, so the higher copy is newer.     |
-| Owner      | The one server that holds a design, picked by hashing its id.                    |
-| Router     | `finite-server router`: the front door that sends requests to each owner.        |
+| Word          | Meaning                                                                          |
+| ------------- | -------------------------------------------------------------------------------- |
+| Design        | One canvas. Also called a canvas in the MCP tools.                               |
+| Artboard      | A top-level node: a fixed-size frame placed on the canvas.                       |
+| Node          | One element or text node.                                                        |
+| Op            | The smallest edit: `create`, `delete`, `set` or `move`.                          |
+| Change        | The ops from one commit, undo or redo, with a `seq`, actor and label.            |
+| Actor         | Whoever made a change: an agent, by its `X-Finite-Agent` name or its session.    |
+| Snapshot      | Everything needed to rebuild a design. Saved to disk and sent on connect.        |
+| Journal       | The records appended to `<id>.log` since the last snapshot.                      |
+| Compaction    | Writing a fresh snapshot and deleting the journal, every 1,000 records or 16 MB. |
+| Replica       | The browser's copy of a design.                                                  |
+| Presence      | "Agent X is working on these nodes", shown as a badge.                           |
+| Hub           | The server's index of designs, with the ones in use loaded in memory.            |
+| Room          | The model for loading: a design is in memory only while someone uses it.         |
+| Long poll     | A request that stays open until there's news, like `wait_for_comments`.          |
+| Epoch         | One load of a design on a server. A viewer can resume only within the same one.  |
+| Revision      | A comment's `rev`: it goes up with each change, so the higher copy is newer.     |
+| Owner         | The one server that holds a design, picked by hashing its id over the servers.   |
+| Heartbeat     | The time a server writes to the shared store every 2 s, to show it's alive.      |
+| Lease         | How long a heartbeat, or a claim on a design, counts. 10 s by default.           |
+| Claim         | Taking a design's lease before loading it. It raises the design's fencing token. |
+| Fencing token | The design's `epoch`. The store refuses a write with an older one.               |
+| Fenced        | What a stale server's write gets: another server took the design over.           |
+| Router        | `finite-server router`: the front door that sends requests to each owner.        |

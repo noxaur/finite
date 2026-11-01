@@ -17,5 +17,11 @@ export default defineConfig({
   },
   run: {
     cache: true,
+    tasks: {
+      // The end-to-end test through a router in front of two servers that
+      // share Postgres. Never cached: it checks live processes, and it needs
+      // the database URL, which a cached task wouldn't get.
+      "e2e:shared": { command: "E2E_SHARED=1 node e2e/run.mjs", cache: false },
+    },
   },
 });

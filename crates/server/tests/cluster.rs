@@ -101,7 +101,10 @@ async fn designs_move_to_their_new_owner() {
     let old_hub = Hub::with_cluster(old_store.clone(), cluster(0)).unwrap();
     tokio::spawn(async move { axum::serve(a, app(old_hub, None)).await });
 
-    let moving: Vec<&String> = ids.iter().filter(|id| cluster(0).owner(id) == 1).collect();
+    let moving: Vec<&String> = ids
+        .iter()
+        .filter(|id| cluster(0).owner(id) == Some(1))
+        .collect();
     assert!(!moving.is_empty(), "some designs hash to the new server");
     let http = reqwest::Client::new();
     for _ in 0..50 {
@@ -112,7 +115,7 @@ async fn designs_move_to_their_new_owner() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     for id in &ids {
-        let owner = &nodes[cluster(0).owner(id)];
+        let owner = &nodes[cluster(0).owner(id).unwrap()];
         let res = http
             .get(format!("{owner}/api/designs/{id}"))
             .send()
@@ -161,7 +164,7 @@ async fn large_designs_move_too() {
     let solo = Hub::new(Arc::new(MemoryStore::default())).unwrap();
     let to_b = Cluster::new(NODES.map(String::from).to_vec(), 0).unwrap();
     let id = std::iter::repeat_with(|| solo.create("Big").meta.id)
-        .find(|id| to_b.owner(id) == 1)
+        .find(|id| to_b.owner(id) == Some(1))
         .unwrap();
     let design = solo.get(&id).unwrap();
     let agent = Actor {

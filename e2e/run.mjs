@@ -9,6 +9,12 @@
 //
 // With E2E_ROUTER=1 (`vp run e2e:router`), it starts two servers and a router
 // in front of them instead, and runs every check through the router.
+//
+// With E2E_SHARED=1 (`vp run e2e:shared`), the two servers and the router
+// share one Postgres database, as in a failover setup. It takes the database
+// from E2E_DATABASE_URL or FINITE_TEST_DATABASE_URL, and skips with a note if
+// neither is set. Each run keeps its tables in a new schema, finite_e2e_*,
+// which it leaves behind, so point it at a database for tests.
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
@@ -25,13 +31,22 @@ const check = (label, ok, detail = "") => {
   if (!ok) failures.push(label);
 };
 
+const shared = Boolean(process.env.E2E_SHARED);
+const database = process.env.E2E_DATABASE_URL || process.env.FINITE_TEST_DATABASE_URL;
+if (shared && !database) {
+  console.log("SKIP e2e:shared needs E2E_DATABASE_URL or FINITE_TEST_DATABASE_URL");
+  process.exit(0);
+}
+
 if (!process.env.E2E_SKIP_BUILD) {
   const run = (cmd, args, cwd) => {
     console.log(`$ ${cmd} ${args.join(" ")}`);
     const result = spawnSync(cmd, args, { cwd, stdio: "inherit" });
     if (result.status !== 0) process.exit(1);
   };
-  run("cargo", ["build", "-q", "-p", "finite-server"], root);
+  // The shared store is behind a cargo feature.
+  const features = shared ? ["--features", "postgres"] : [];
+  run("cargo", ["build", "-q", "-p", "finite-server", ...features], root);
   run("npx", ["next", "build"], path.join(root, "apps/web"));
 }
 
@@ -42,7 +57,7 @@ const freePort = () =>
       probe.close(() => resolve(port));
     });
   });
-const viaRouter = Boolean(process.env.E2E_ROUTER);
+const viaRouter = Boolean(process.env.E2E_ROUTER) || shared;
 const bin = path.join(root, "target/debug/finite-server");
 const staticDir = path.join(root, "apps/web/out");
 /** Every process this run starts, and the throwaway data folders they use. */
@@ -66,7 +81,34 @@ const healthy = async (url) => {
 };
 
 let base;
-if (viaRouter) {
+if (shared) {
+  const schema = `finite_e2e_${Math.random().toString(36).slice(2, 10)}`;
+  const db = { FINITE_DATABASE_URL: database, FINITE_DATABASE_SCHEMA: schema };
+  const ports = [await freePort(), await freePort()];
+  const servers = ports.map((p) => `http://127.0.0.1:${p}`);
+  ports.forEach((p, i) => {
+    start([], { ...db, FINITE_PORT: String(p), FINITE_NODE_URL: servers[i] });
+  });
+  const front = await freePort();
+  start(["router"], { ...db, FINITE_PORT: String(front), FINITE_STATIC_DIR: staticDir });
+  for (const url of servers) await healthy(url);
+  base = `http://127.0.0.1:${front}`;
+  await healthy(base);
+  // The router reads the live servers from the database every 2 seconds.
+  // Each server owns about half the ids, so 20 ids reach both once it sees them.
+  let seen = 0;
+  for (let i = 0; i < 100 && seen < 2; i++) {
+    const owners = await Promise.all(
+      Array.from({ length: 20 }, async (_, n) => {
+        const res = await fetch(`${base}/api/owner/probe${n}`).catch(() => null);
+        return res?.ok ? (await res.json()).owner : null;
+      }),
+    );
+    seen = new Set(owners.filter((o) => servers.includes(o))).size;
+    if (seen < 2) await new Promise((r) => setTimeout(r, 100));
+  }
+  check("the router sees both servers in the database", seen === 2, `schema ${schema}`);
+} else if (viaRouter) {
   const ports = [await freePort(), await freePort()];
   const nodes = ports.map((p) => `http://127.0.0.1:${p}`).join(",");
   ports.forEach((p, i) => {
@@ -96,7 +138,11 @@ if (viaRouter) {
 }
 await healthy(base);
 console.log(
-  viaRouter ? `Through a router at ${base}, in front of two servers` : `Server at ${base}`,
+  shared
+    ? `Through a router at ${base}, in front of two servers sharing Postgres`
+    : viaRouter
+      ? `Through a router at ${base}, in front of two servers`
+      : `Server at ${base}`,
 );
 
 let page;
