@@ -539,7 +539,7 @@ finite-server router
 
 The server creates its three tables on first start (`crates/server/src/postgres/mod.rs`). `finite_designs` holds each design's snapshot as JSON, plus two columns for ownership. `finite_journal` holds the journal records, one row each. `finite_nodes` holds one row per server.
 
-The tables go in the default schema, unless you name another in `FINITE_DATABASE_SCHEMA`. Finite makes that schema if it's missing. So a test copy and the real one can share a database, and neither sees the other's designs.
+The tables go in the database's default schema. In a development build, `FINITE_DATABASE_SCHEMA` names another, which Finite makes if it's missing. Each `vp run e2e:shared` uses it to get empty tables in the shared test database. A release build refuses the setting and stops, so a deployment's tables can't quietly end up somewhere its operator didn't mean.
 
 The file store stays the default, so the desktop app and a single server never need a database. They don't even compile a database client, because `vp run dev` and the desktop build leave the feature off.
 

@@ -23,8 +23,7 @@ async fn main() -> std::io::Result<()> {
     let static_dir = std::env::var("FINITE_STATIC_DIR").ok();
     // With a shared store, servers find each other through its heartbeats.
     let database = std::env::var("FINITE_DATABASE_URL").ok();
-    // Where in that database Finite keeps its tables, if not the default schema.
-    let schema = std::env::var("FINITE_DATABASE_SCHEMA").ok();
+    let schema = database_schema();
     let lease = Lease::from_env().unwrap_or_else(|error| fail(error));
     // `finite-server router` runs the front door for the servers in
     // FINITE_NODES, or for the live ones in FINITE_DATABASE_URL.
@@ -144,6 +143,19 @@ fn shared_store(
         "FINITE_DATABASE_URL is set, but this finite-server was built without Postgres. \
          Build it with `cargo build -p finite-server --features postgres`, or unset FINITE_DATABASE_URL.",
     )
+}
+
+/// Where in the database Finite keeps its tables, if not the default schema:
+/// `FINITE_DATABASE_SCHEMA`. It's for development, so each test run, like
+/// `vp run e2e:shared`, gets empty tables in one shared database. A release
+/// build refuses it rather than ignore it, which would quietly put a
+/// deployment's tables somewhere else than its operator meant.
+fn database_schema() -> Option<String> {
+    let schema = std::env::var("FINITE_DATABASE_SCHEMA").ok()?;
+    if !cfg!(debug_assertions) {
+        fail("FINITE_DATABASE_SCHEMA is only for development builds; unset it");
+    }
+    Some(schema)
 }
 
 fn fail(error: impl std::fmt::Display) -> ! {

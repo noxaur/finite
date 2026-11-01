@@ -136,9 +136,9 @@ impl PgStore {
     }
 
     /// Like [`PgStore::connect`], with the tables in `schema`
-    /// (`FINITE_DATABASE_SCHEMA`), which is created if it's missing. Several
-    /// Finite deployments, or test runs, can then share one database
-    /// without seeing each other's designs.
+    /// (`FINITE_DATABASE_SCHEMA` in development builds), which is created if
+    /// it's missing. Test runs can then share one database without seeing
+    /// each other's designs.
     pub fn connect_in(
         url: &str,
         schema: Option<&str>,
