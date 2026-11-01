@@ -426,10 +426,12 @@ impl SessionStore for DirSessionStore {
     }
 
     /// Writes to a temporary file, syncs it, then renames it into place, so
-    /// a session file is always whole.
+    /// a session file is always whole. The temporary name is random, since
+    /// routers share the directory: with one name, two routers saving the
+    /// same session would write into the same file.
     async fn store(&self, session_id: &str, state: &SessionState) -> Result<(), SessionStoreError> {
         let path = self.path(session_id);
-        let tmp = path.with_extension("json.tmp");
+        let tmp = path.with_extension(format!("{}.tmp", crate::hub::random_id(8)));
         let bytes = serde_json::to_vec(state)?;
         let written = tmp.clone();
         tokio::task::spawn_blocking(move || -> std::io::Result<()> {
