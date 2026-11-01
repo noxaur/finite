@@ -49,6 +49,56 @@ pub const BASE_CSS: &str = "*, *::before, *::after { box-sizing: border-box; }";
 /// Shared by screenshots and the viewer's sandboxed iframes.
 pub const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https:; img-src https: http: data: blob:; font-src https: data:; media-src https: data: blob:";
 
+/// The cascade layer the design's shared CSS goes in. Styles outside any
+/// layer beat layered ones whatever their specificity, so an artboard's own
+/// `<style>` blocks and inline styles override the shared CSS.
+pub const SHARED_LAYER: &str = "finite-shared";
+
+/// The design's shared CSS as the text of a `<style>` element: in
+/// [`SHARED_LAYER`], after any `@import` and `@charset` it starts with, which
+/// can't go inside a layer block, and with `</style` broken up so it can't
+/// end the element early. For a shadow root, where `:root` matches nothing,
+/// `:root` becomes `:host`, so variables defined there reach the artboard.
+pub fn shared_style(css: &str, shadow: bool) -> String {
+    let mut rest = css.trim_start();
+    let mut head = String::new();
+    while ["@import", "@charset"].iter().any(|at| {
+        rest.get(..at.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(at))
+    }) {
+        let end = rest.find(';').map_or(rest.len(), |i| i + 1);
+        head.push_str(&rest[..end]);
+        head.push('\n');
+        rest = rest[end..].trim_start();
+    }
+    let mut body = rest.to_owned();
+    if shadow {
+        body = replace_root(&body);
+    }
+    raw_text(
+        &format!("{head}@layer {SHARED_LAYER} {{\n{body}\n}}"),
+        "style",
+    )
+}
+
+/// `css` with each `:root` selector, in any case, written as `:host`.
+fn replace_root(css: &str) -> String {
+    let lower = css.to_ascii_lowercase();
+    let mut out = String::with_capacity(css.len());
+    let mut last = 0;
+    for (at, _) in lower.match_indices(":root") {
+        let next = lower[at + 5..].chars().next();
+        if next.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            continue;
+        }
+        out.push_str(&css[last..at]);
+        out.push_str(":host");
+        last = at + 5;
+    }
+    out.push_str(&css[last..]);
+    out
+}
+
 /// Names a node when written as an attribute (`<div data-name="Header">`).
 pub const NAME_ATTR: &str = "data-name";
 /// Identifies a node in exported HTML.
@@ -660,5 +710,20 @@ mod tests {
             export_compact(&doc, &root).unwrap(),
             r#"<div class="box"><b>Hi</b></div>"#
         );
+    }
+
+    #[test]
+    fn shared_css_goes_in_its_layer_after_its_imports() {
+        let css = "@import url(https://fonts.example/a.css);\n:root { --brand: red; } :root-ish {}";
+        assert_eq!(
+            shared_style(css, false),
+            "@import url(https://fonts.example/a.css);\n@layer finite-shared {\n:root { --brand: red; } :root-ish {}\n}"
+        );
+        assert_eq!(
+            shared_style(":ROOT { --brand: red; }", true),
+            "@layer finite-shared {\n:host { --brand: red; }\n}"
+        );
+        // It can't end its <style> element, wherever it came from.
+        assert!(!shared_style("a{}</style><script>x()</script>", false).contains("</style"));
     }
 }

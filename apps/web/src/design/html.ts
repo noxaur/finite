@@ -47,12 +47,14 @@ const RUNTIME = `(() => {
 
 /**
  * A standalone page that shows one artboard, for a sandboxed iframe's
- * `srcdoc`. The design's shared CSS comes before the artboard, so the
- * artboard's own `<style>` blocks override it, as in screenshots.
+ * `srcdoc`. The design's shared CSS comes before the artboard, in a layer
+ * the artboard's own styles override, as in screenshots.
  */
 export function artboardDocument(replica: Replica, id: string): string {
-  const { csp, baseCss } = designModel();
-  const shared = replica.css === null ? "" : `<style>${replica.css}</style>`;
+  const model = designModel();
+  const { csp, baseCss } = model;
+  const shared =
+    replica.css === null ? "" : `<style>${model.sharedStyle(replica.css, false)}</style>`;
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>${baseCss} html, body { margin: 0; }</style>${shared}<script>${RUNTIME}</script></head><body>${replica.exportHtml(id, true)}</body></html>`;
 }
 

@@ -22,6 +22,7 @@ interface Exports {
   replica_apply(handle: number, len: number): number;
   replica_export(handle: number, len: number, ids: number): number;
   is_safe_attr(nameLen: number, valueLen: number): number;
+  shared_style(len: number, shadow: number): number;
   base_css(): number;
   csp(): number;
 }
@@ -51,6 +52,15 @@ export class DesignModel {
   isSafeAttr(name: string, value: string): boolean {
     const [nameLen, valueLen] = this.put([name, value]);
     return this.run(() => this.exports.is_safe_attr(nameLen!, valueLen!)) === 1;
+  }
+
+  /**
+   * `html::shared_style`: the design's shared CSS as a `<style>` element's
+   * text, in a layer the artboard's own styles override. With `shadow`,
+   * `:root` becomes `:host`, since `:root` matches nothing in a shadow root.
+   */
+  sharedStyle(css: string, shadow: boolean): string {
+    return this.callWith(css, (e, len) => e.shared_style(len, shadow ? 1 : 0));
   }
 
   /** A new, empty document. Free it when done; otherwise it's freed once garbage collected. */

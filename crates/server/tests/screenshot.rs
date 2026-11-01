@@ -94,7 +94,8 @@ async fn shared_css_applies_and_the_artboard_overrides_it() {
         styles: Default::default(),
     };
     doc.apply_all(&edit::create_artboard(&doc, "board".into(), spec).unwrap());
-    doc.apply_all(&edit::set_css(".a, .b { width: 50px; height: 10px; }").unwrap());
+    // More specific than the artboard's own rule, which still wins.
+    doc.apply_all(&edit::set_css(".a, div.b { width: 50px; height: 10px; }").unwrap());
     let mut n = 0;
     let html = r#"<style>.b { width: 70px; }</style><div class="a"></div><div class="b"></div>"#;
     let (ops, roots) = edit::write_html(&doc, "board", html, WriteMode::Append, None, &mut || {

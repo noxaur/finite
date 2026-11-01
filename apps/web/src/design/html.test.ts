@@ -39,11 +39,13 @@ describe("artboardDocument", () => {
     expect(r.exportHtml("a")).toBe('<div class="x"></div>');
   });
 
-  it("puts the shared CSS before the artboard, so the artboard's own styles win", () => {
+  it("puts the shared CSS before the artboard, in a layer its own styles override", () => {
     const r = replica([el("a", null, "div")]);
-    r.apply({ op: "css", css: ".btn { color: red; }" });
+    r.apply({ op: "css", css: ".btn { color: red; }</style>" });
     const page = artboardDocument(r, "a");
-    const shared = page.indexOf("<style>.btn { color: red; }</style>");
+    const shared = page.indexOf(
+      "<style>@layer finite-shared {\n.btn { color: red; }<\\/style>\n}</style>",
+    );
     expect(shared).toBeGreaterThan(page.indexOf(designModel().baseCss));
     expect(shared).toBeLessThan(page.indexOf("<body>"));
   });

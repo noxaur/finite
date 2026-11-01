@@ -157,8 +157,9 @@ export class Renderer {
   apply(applied: Applied) {
     if (applied.op === "css") {
       // Every artboard uses it: restyle shadow roots, reload sandboxed ones.
+      const css = this.sharedCss();
       for (const [id, frame] of this.frames) {
-        if (frame.sharedStyle) frame.sharedStyle.textContent = applied.css ?? "";
+        if (frame.sharedStyle) frame.sharedStyle.textContent = css;
         else this.scheduleReload(id, frame);
       }
       return;
@@ -482,11 +483,12 @@ export class Renderer {
     shadow.addEventListener("submit", (event) => event.preventDefault(), {
       signal: this.abort.signal,
     });
+    // In a layer, so the shared CSS can set what `HOST_CSS` resets, like
+    // the font on `:root`.
     const base = document.createElement("style");
-    base.textContent = `${HOST_CSS} ${designModel().baseCss}`;
-    // The artboard's own `<style>` blocks come after it, so they override it.
+    base.textContent = `@layer finite-base { ${HOST_CSS} ${designModel().baseCss} }`;
     const sharedStyle = document.createElement("style");
-    sharedStyle.textContent = this.replica.css ?? "";
+    sharedStyle.textContent = this.sharedCss();
     const commentStyle = document.createElement("style");
     shadow.append(base, sharedStyle, commentStyle);
     content.append(host);
@@ -502,6 +504,12 @@ export class Renderer {
       rects: new Map(),
       pendingRects: new Set(),
     };
+  }
+
+  /** The shared CSS as a shadow root's `<style>` text, or nothing. */
+  private sharedCss(): string {
+    const { css } = this.replica;
+    return css === null ? "" : designModel().sharedStyle(css, true);
   }
 
   private scheduleReload(id: string, frame: Frame) {

@@ -328,7 +328,7 @@ try {
   await page.until(panel);
   const cssBox = await rectOf(`${panel}.querySelector("textarea")`);
   await page.click(cssBox.x + 10, cssBox.y + 10);
-  await page.type("button { color: rgb(0, 128, 0); width: 300px; }");
+  await page.type(":root { --ok: rgb(0, 128, 0); } button { color: var(--ok); width: 300px; }");
   const save = await rectOf(`${panel}.querySelector('button[type="submit"]')`);
   await page.click(save.x + save.w / 2, save.y + save.h / 2);
   const ctaStyle = `getComputedStyle(${shadow}.querySelector("button"))`;

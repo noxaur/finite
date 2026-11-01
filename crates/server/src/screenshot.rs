@@ -60,8 +60,8 @@ fn chrome() -> Option<PathBuf> {
 /// A standalone HTML page showing just the artboard, and its pixel size.
 /// Every element carries its node id, and a script measures them just before
 /// the capture, so [`capture`] can report the layout too. The design's
-/// shared CSS comes after the base CSS and before the artboard, so the
-/// artboard's own `<style>` blocks override it, as in the viewer.
+/// shared CSS comes after the base CSS, in a layer the artboard's own
+/// styles override (see [`html::shared_style`]), as in the viewer.
 pub fn page(doc: &Document, artboard: &str) -> Option<(String, f64, f64)> {
     let node = doc.get(artboard)?;
     // Compact, so no whitespace is added between elements: it renders like the
@@ -70,9 +70,9 @@ pub fn page(doc: &Document, artboard: &str) -> Option<(String, f64, f64)> {
     let (width, height) = pixel_size(node);
     let width = width.unwrap_or(1440.0).clamp(1.0, MAX_SIDE);
     let height = height.unwrap_or(FALLBACK_HEIGHT).clamp(1.0, MAX_SIDE);
-    let shared = doc
-        .css()
-        .map_or(String::new(), |css| format!("<style>{css}</style>"));
+    let shared = doc.css().map_or(String::new(), |css| {
+        format!("<style>{}</style>", html::shared_style(css, false))
+    });
     let page = format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\"><style>{BASE_CSS} html, body {{ margin: 0; }}</style>{shared}</head><body>{body}{MEASURE}</body></html>"
     );

@@ -125,6 +125,15 @@ pub extern "C" fn is_safe_attr(name_len: usize, value_len: usize) -> u32 {
     )
 }
 
+/// [`html::shared_style`] for the CSS in the first `len` input bytes, for a
+/// shadow root when `shadow` is 1.
+#[unsafe(no_mangle)]
+pub extern "C" fn shared_style(len: usize, shadow: u32) -> i32 {
+    respond(with_input(|input| {
+        Ok(html::shared_style(text(input, 0, len)?, shadow != 0))
+    }))
+}
+
 /// [`html::BASE_CSS`], the styles every artboard renders with.
 #[unsafe(no_mangle)]
 pub extern "C" fn base_css() -> i32 {

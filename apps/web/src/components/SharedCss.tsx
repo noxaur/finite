@@ -30,8 +30,10 @@ export function SharedCssPanel({
   const save = async () => {
     if (draft === null || saving) return;
     setSaving(true);
-    const failure = await onSave(draft);
-    if (failure === undefined) setDraft(null);
+    const sent = draft;
+    const failure = await onSave(sent);
+    // Keep anything typed while it saved.
+    if (failure === undefined) setDraft((now) => (now === sent ? null : now));
     setFailed(failure);
     setSaving(false);
   };
