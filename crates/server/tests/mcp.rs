@@ -511,6 +511,38 @@ async fn long_results_are_cut_with_directions() {
         tail(&info)
     );
 
+    // The artboard's own details list 200 child ids and the full count.
+    let info = agent
+        .ok(
+            "get_node_info",
+            json!({ "designId": design, "nodeIds": [board] }),
+        )
+        .await;
+    let info: Vec<Value> = serde_json::from_str(&info).unwrap();
+    assert_eq!(info[0]["childCount"], 3000);
+    assert_eq!(info[0]["childIds"].as_array().unwrap().len(), 200);
+
+    // A megabyte of inline image data comes back as its start and its length.
+    let image = format!(
+        r#"<img data-name="Photo" src="data:image/png;base64,{}">"#,
+        "A".repeat(1 << 20)
+    );
+    let wrote = agent
+        .ok(
+            "write_html",
+            json!({ "designId": design, "targetId": board, "html": image, "index": 0 }),
+        )
+        .await;
+    let photo = id_after(&wrote, "\"Photo\"");
+    let info = agent
+        .ok(
+            "get_node_info",
+            json!({ "designId": design, "nodeIds": [photo] }),
+        )
+        .await;
+    assert!(info.len() < 2_000, "{} chars", info.len());
+    assert!(info.contains("characters in all"), "{info}");
+
     // Presence names at most 100 nodes; repeats count once.
     let ids: Vec<&str> = page.iter().map(|c| c["id"].as_str().unwrap()).collect();
     let repeated: Vec<&str> = ids.iter().cycle().take(5_000).copied().collect();

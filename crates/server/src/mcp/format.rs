@@ -89,11 +89,17 @@ pub(super) fn node_json(doc: &Document, id: &str) -> serde_json::Value {
     let Some(node) = doc.get(id) else {
         return serde_json::json!({ "id": id, "error": "not found" });
     };
-    let children: Vec<&str> = doc
-        .children(Some(id))
+    let children = doc.children(Some(id));
+    let child_ids: Vec<&str> = children
         .iter()
+        .take(CHILD_IDS)
         .map(|c| c.id.as_str())
         .collect();
+    let shorten = |map: &std::collections::BTreeMap<String, String>| {
+        map.iter()
+            .map(|(k, v)| (k.clone(), short(v)))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
     serde_json::json!({
         "id": node.id,
         "type": if node.kind == NodeKind::Text { "text" } else { "element" },
@@ -103,11 +109,31 @@ pub(super) fn node_json(doc: &Document, id: &str) -> serde_json::Value {
         "artboardId": doc.artboard_of(id).map(|a| &a.id),
         "x": node.x,
         "y": node.y,
-        "text": node.text,
-        "styles": node.styles,
-        "attributes": node.attrs,
-        "childIds": children,
+        "text": node.text.as_deref().map(short),
+        "styles": shorten(&node.styles),
+        "attributes": shorten(&node.attrs),
+        "childCount": children.len(),
+        "childIds": child_ids,
     })
+}
+
+/// How many child ids `get_node_info` lists; `get_children` pages through the rest.
+const CHILD_IDS: usize = 200;
+/// Values longer than this are shortened in `get_node_info`.
+const VALUE_LIMIT: usize = 2_000;
+
+/// `value`, or its start and its length if it's longer than [`VALUE_LIMIT`].
+/// An image's inline `data:` URL can be megabytes of base64 that an agent
+/// has no use for in full.
+fn short(value: &str) -> String {
+    if value.len() <= VALUE_LIMIT {
+        return value.to_owned();
+    }
+    let mut end = 200;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}… ({} characters in all)", &value[..end], value.len())
 }
 
 // Tool parameters. Doc comments become the JSON Schema descriptions agents see.
