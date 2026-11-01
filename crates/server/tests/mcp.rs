@@ -617,6 +617,7 @@ async fn long_comment_lists_come_in_parts() {
 
     let mut offset = 0;
     let mut seen = Vec::new();
+    let mut seen_ids: Vec<String> = Vec::new();
     loop {
         let text = agent
             .ok(
@@ -630,6 +631,10 @@ async fn long_comment_lists_come_in_parts() {
         seen.extend(
             page.iter()
                 .map(|c| c["thread"][0]["message"].as_str().unwrap()[..2].to_owned()),
+        );
+        seen_ids.extend(
+            page.iter()
+                .map(|c| c["commentId"].as_str().unwrap().to_owned()),
         );
         offset += page.len();
         let Some(next) = text.split("Pass offset ").nth(1) else {
@@ -649,6 +654,30 @@ async fn long_comment_lists_come_in_parts() {
         "{}",
         tail(&waiting)
     );
+
+    // A long thread shows its first message and its latest ten.
+    let first_comment = seen_ids[0].clone();
+    for i in 0..50 {
+        let req = Request::post(format!(
+            "/api/designs/{design}/comments/{first_comment}/replies"
+        ))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({ "author": { "id": "u1", "name": "Guest" }, "body": format!("reply {i}") })
+                .to_string(),
+        ))
+        .unwrap();
+        assert_eq!(app.clone().oneshot(req).await.unwrap().status(), 201);
+    }
+    let text = agent
+        .ok("get_comments", json!({ "designId": design }))
+        .await;
+    let json_end = text.rfind(']').unwrap() + 1;
+    let page: Vec<Value> = serde_json::from_str(&text[..json_end]).unwrap();
+    let thread = &page[0]["thread"];
+    assert_eq!(thread.as_array().unwrap().len(), 11);
+    assert_eq!(page[0]["messagesNotShown"], 40);
+    assert_eq!(thread[10]["message"], "reply 49");
 }
 
 /// An agent that doesn't name itself is known by its MCP session, so its undo

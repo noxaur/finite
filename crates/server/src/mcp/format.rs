@@ -138,6 +138,9 @@ fn short(value: &str) -> String {
 
 // Tool parameters. Doc comments become the JSON Schema descriptions agents see.
 
+/// How many of a thread's latest messages agents see, after its first.
+const THREAD_SHOWN: usize = 10;
+
 /// Comments as agents see them: what was asked, where, and the thread so far.
 pub(super) fn comments_json<'a>(
     design: &Design,
@@ -152,10 +155,23 @@ pub(super) fn comments_json<'a>(
                 .node_id
                 .as_deref()
                 .filter(|id| doc.contains(id))
-                .map(|id| outline(doc, id, 0).lines().next().unwrap_or("").to_owned());
-            let thread: Vec<_> = c
+                .map(|id| {
+                    // The line carries the element's text, which could be long.
+                    let line = outline(doc, id, 0).lines().next().unwrap_or("").to_owned();
+                    match line.char_indices().nth(200) {
+                        Some((end, _)) => format!("{}…", &line[..end]),
+                        None => line,
+                    }
+                });
+            // A thread can hold 200 messages of 4,000 characters. Keep the
+            // request that started it and the latest few.
+            let skipped = c.messages.len().saturating_sub(THREAD_SHOWN + 1);
+            let shown = c
                 .messages
                 .iter()
+                .take(1)
+                .chain(c.messages.iter().skip(1 + skipped));
+            let thread: Vec<_> = shown
                 .map(|m| {
                     serde_json::json!({
                         "author": m.author.name,
@@ -182,6 +198,7 @@ pub(super) fn comments_json<'a>(
                 "node": node,
                 "pin": { "x": c.x.round(), "y": c.y.round(), "relativeTo": relative_to },
                 "thread": thread,
+                "messagesNotShown": skipped,
             })
         })
         .collect()
