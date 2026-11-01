@@ -785,13 +785,11 @@ impl FiniteMcp {
             "Duplicate",
             |doc| edit::duplicate(doc, &p.node_ids, &mut id_in(doc)),
             |_, roots, _| {
-                format!(
-                    "Created copies: {}",
-                    roots
-                        .iter()
-                        .map(|r| format!("#{r}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                // One per line, so a long list is cut between ids.
+                let ids: String = roots.iter().map(|r| format!("#{r}\n")).collect();
+                cut(
+                    format!("Created {} copies:\n{ids}", roots.len()),
+                    "Call get_children on their parent to list the rest.",
                 )
             },
         )

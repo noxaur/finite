@@ -547,6 +547,55 @@ async fn long_results_are_cut_with_directions() {
         .await;
     assert!(html.contains("get_node_info shows them"), "{html}");
 
+    // Copying 6,000 nodes lists their ids up to the budget, whole ids only.
+    let strip = agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Strip", "width": 400, "height": 300 }),
+        )
+        .await;
+    let strip = id_after(&strip, "Created artboard");
+    agent
+        .ok(
+            "write_html",
+            json!({ "designId": design, "targetId": strip, "html": "<i></i>".repeat(6_000) }),
+        )
+        .await;
+    let mut dots: Vec<String> = Vec::new();
+    while dots.len() < 6_000 {
+        let text = agent
+            .ok(
+                "get_children",
+                json!({ "designId": design, "nodeId": strip, "offset": dots.len() }),
+            )
+            .await;
+        let page: Vec<Value> = serde_json::from_str(&text[..text.rfind(']').unwrap() + 1]).unwrap();
+        dots.extend(page.iter().map(|c| c["id"].as_str().unwrap().to_owned()));
+    }
+    let copied = agent
+        .ok(
+            "duplicate_nodes",
+            json!({ "designId": design, "nodeIds": dots }),
+        )
+        .await;
+    assert!(copied.len() < limit, "{} chars", copied.len());
+    assert!(
+        copied.starts_with("Created 6000 copies:"),
+        "{}",
+        &copied[..40]
+    );
+    assert!(
+        copied.contains("Call get_children on their parent"),
+        "{}",
+        tail(&copied)
+    );
+    let last_id = copied.lines().rev().nth(1).unwrap();
+    assert!(
+        last_id.starts_with('#') && last_id.len() == 9,
+        "{last_id:?}"
+    );
+    agent.ok("undo", json!({ "designId": design })).await;
+
     // Presence names at most 100 nodes; repeats count once.
     let ids: Vec<&str> = page.iter().map(|c| c["id"].as_str().unwrap()).collect();
     let repeated: Vec<&str> = ids.iter().cycle().take(5_000).copied().collect();
