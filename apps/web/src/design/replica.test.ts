@@ -28,6 +28,30 @@ const replica = () => {
 };
 
 describe("Replica", () => {
+  it("keeps thousands of siblings in order without sorting per node", () => {
+    const r = replica();
+    // 10,000 siblings arriving in a shuffled order, some sharing an index.
+    const keys = Array.from({ length: 10_000 }, (_, i) => ({
+      id: `n${i}`,
+      index: `V${((i * 7919) % 5000).toString(36).padStart(3, "0")}1`,
+    }));
+    const started = performance.now();
+    for (const { id, index } of keys) r.apply({ op: "create", node: node(id, "c", index) });
+    // Delete a few and move one, so removals keep the order too.
+    for (const { id } of keys.slice(0, 100)) r.apply({ op: "delete", id });
+    r.apply({ op: "move", id: "n500", parent: "c", index: "V0001" });
+    const took = performance.now() - started;
+
+    const expected = keys
+      .slice(100)
+      .map((k) => (k.id === "n500" ? { ...k, index: "V0001" } : k))
+      .sort((a, b) => (a.index < b.index ? -1 : a.index > b.index ? 1 : a.id < b.id ? -1 : 1))
+      .map((k) => k.id);
+    expect(r.children("c").map((n) => n.id)).toEqual(expected);
+    expect([...r.siblingsAfter(expected[9_000]!)].map((n) => n.id)).toEqual(expected.slice(9_001));
+    expect(took).toBeLessThan(1_000);
+  });
+
   it("orders children by fractional index", () => {
     const r = replica();
     r.apply({ op: "create", node: node("e", "a", "G") });

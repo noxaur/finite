@@ -353,9 +353,8 @@ export class Renderer {
   }
 
   private nextSiblingElement(node: Node): ChildNode | null {
-    const siblings = this.replica.children(node.parent);
-    for (let i = siblings.findIndex((s) => s.id === node.id) + 1; i < siblings.length; i++) {
-      const el = this.elements.get(siblings[i]!.id);
+    for (const sibling of this.replica.siblingsAfter(node.id)) {
+      const el = this.elements.get(sibling.id);
       if (el) return el;
     }
     return null;

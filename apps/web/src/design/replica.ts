@@ -15,9 +15,6 @@ export type Applied =
 /** Base-62 digits, as in `crates/design/src/fractional.rs`. Keys never end in `0`. */
 const INDEX_RE = /^[0-9A-Za-z]*[1-9A-Za-z]$/;
 
-const byIndex = (a: Node, b: Node) =>
-  a.index < b.index ? -1 : a.index > b.index ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
-
 /**
  * A client-side copy of a design's node tree. It applies the server's ops in
  * `seq` order with the same rules as `crates/design/src/document.rs`, so it
@@ -28,7 +25,13 @@ const byIndex = (a: Node, b: Node) =>
  */
 export class Replica {
   readonly nodes = new Map<string, Node>();
-  private readonly childIds = new Map<string | null, Set<string>>();
+  /**
+   * Each parent's children (`null` for artboards), kept sorted by
+   * `(index, id)` as on the server. Inserts and removals find their place by
+   * binary search, so writing thousands of siblings doesn't sort the list
+   * once per node, which froze the page for seconds.
+   */
+  private readonly childIds = new Map<string | null, string[]>();
   seq = 0;
 
   load(snapshot: Snapshot) {
@@ -44,14 +47,17 @@ export class Replica {
 
   /** Children in sibling order, or the artboards for `null`. */
   children(parent: string | null): Node[] {
-    const ids = this.childIds.get(parent);
-    if (!ids) return [];
-    const nodes: Node[] = [];
-    for (const id of ids) {
-      const node = this.nodes.get(id);
-      if (node) nodes.push(node);
+    return (this.childIds.get(parent) ?? []).map((id) => this.nodes.get(id)!);
+  }
+
+  /** The siblings after `id`, in order. */
+  *siblingsAfter(id: string): Generator<Node> {
+    const node = this.nodes.get(id);
+    if (!node) return;
+    const siblings = this.childIds.get(node.parent) ?? [];
+    for (let i = this.position(siblings, node.index, node.id) + 1; i < siblings.length; i++) {
+      yield this.nodes.get(siblings[i]!)!;
     }
-    return nodes.sort(byIndex);
   }
 
   artboards(): Node[] {
@@ -128,18 +134,36 @@ export class Replica {
     return false;
   }
 
+  /** Where `(index, id)` goes in `siblings`, which is sorted by `(index, id)`. */
+  private position(siblings: ReadonlyArray<string>, index: string, id: string): number {
+    let lo = 0;
+    let hi = siblings.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      const other = this.nodes.get(siblings[mid]!)!;
+      if (other.index < index || (other.index === index && other.id < id)) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
   private insert(node: Node) {
-    this.nodes.set(node.id, node);
     let siblings = this.childIds.get(node.parent);
-    if (!siblings) this.childIds.set(node.parent, (siblings = new Set()));
-    siblings.add(node.id);
+    if (!siblings) this.childIds.set(node.parent, (siblings = []));
+    siblings.splice(this.position(siblings, node.index, node.id), 0, node.id);
+    this.nodes.set(node.id, node);
   }
 
   private remove(id: string) {
     const node = this.nodes.get(id);
     if (!node) return;
+    const siblings = this.childIds.get(node.parent);
+    if (siblings) {
+      const at = this.position(siblings, node.index, node.id);
+      if (siblings[at] === id) siblings.splice(at, 1);
+      if (siblings.length === 0) this.childIds.delete(node.parent);
+    }
     this.nodes.delete(id);
-    this.childIds.get(node.parent)?.delete(id);
   }
 }
 
