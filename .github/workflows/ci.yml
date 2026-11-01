@@ -21,11 +21,12 @@ on:
       - "!docs/**"
       - "crates/**.md"
 
-# A new push to a pull request cancels the run for the push before it. Runs
-# on main queue instead, so every commit there gets a result.
+# A new push to a pull request cancels the run for the push before it. Each
+# commit on main is a group of its own, so none is cancelled: a shared group
+# would drop a waiting run when the next push arrives.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: true
 
 env:
   # Line numbers in backtraces, without the rest of the debug info, which
