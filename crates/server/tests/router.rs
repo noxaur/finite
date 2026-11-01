@@ -976,3 +976,29 @@ async fn agents_get_past_a_stuck_server() {
     client.cancel().await.unwrap();
     drop(stuck);
 }
+
+/// A request for a design whose server is stuck fails with `502` once the
+/// server has been silent for 30 seconds, rather than waiting forever. This
+/// one takes those 30 seconds: with Tokio's clock paused, the 5-second
+/// connect limit could fire first, and the test couldn't tell them apart.
+#[tokio::test]
+async fn a_request_to_a_stuck_server_fails_in_the_end() {
+    let (stuck, stuck_url) = listen().await;
+    let nodes = vec![stuck_url];
+    let (front, front_url) = listen().await;
+    let routes = router::app(nodes, None);
+    tokio::spawn(async move { axum::serve(front, routes).await });
+
+    let started = std::time::Instant::now();
+    let comment = reqwest::Client::new()
+        .post(format!("{front_url}/api/designs/abc/comments"))
+        .json(&json!({ "body": "Hello" }))
+        .send();
+    let res = tokio::time::timeout(std::time::Duration::from_secs(60), comment)
+        .await
+        .expect("the router waited for the stuck server")
+        .unwrap();
+    assert_eq!(res.status(), 502);
+    assert!(started.elapsed() >= std::time::Duration::from_secs(25));
+    drop(stuck);
+}

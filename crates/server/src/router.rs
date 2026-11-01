@@ -84,6 +84,7 @@ pub fn app_with_sessions(
         cluster,
         http: reqwest::Client::builder()
             .connect_timeout(UPSTREAM_TIMEOUT)
+            .read_timeout(SILENT_SERVER)
             .build()
             .expect("the HTTP client builds"),
         next: AtomicUsize::new(0),
@@ -302,6 +303,13 @@ async fn owner(State(front): State<Arc<Front>>, Path(id): Path<String>) -> Json<
 /// stuck server held up every browser's design list. A server's list takes
 /// milliseconds, so this is generous. The MCP relay uses it too.
 pub(crate) const UPSTREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long a request the router passes on may go without a byte from the
+/// server. Without it, a request for a design on a stuck server, such as a
+/// new comment, waited forever. It's a limit on silence, not on the whole
+/// request, so a large design still downloads however long it takes. Opening
+/// a large design from disk can take a few seconds before the first byte.
+const SILENT_SERVER: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Opens a server's WebSocket. A server sends a design's snapshot as one
 /// frame, and tungstenite refuses frames over 16 MB by default, which would
