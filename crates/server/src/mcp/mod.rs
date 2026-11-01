@@ -532,12 +532,14 @@ impl FiniteMcp {
                 };
                 let levels = depth.unwrap_or(0);
                 out.push_str(&format!(
-                        "\n{}{}shows {levels} level{} below the node. {} element{} marked \"not shown\" hold more: call get_html on their data-id.",
+                        "\n{}{}shows {levels} level{} below the node. {} element{} marked \"not shown\" {}: call get_html on {} data-id.",
                         reason,
                         if reason.is_empty() { "This " } else { "" },
                         if levels == 1 { "" } else { "s" },
                         export.collapsed,
                         if export.collapsed == 1 { "" } else { "s" },
+                        if export.collapsed == 1 { "holds more" } else { "hold more" },
+                        if export.collapsed == 1 { "its" } else { "their" },
                 ));
             }
             if export.shortened > 0 {
