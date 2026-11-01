@@ -22,10 +22,17 @@ export default defineConfig({
   run: {
     cache: true,
     tasks: {
-      // The end-to-end test through a router in front of two servers that
-      // share Postgres. Never cached: it checks live processes, and it needs
-      // the database URL, which a cached task wouldn't get.
+      // The end-to-end tests and the benchmark drive live processes, so
+      // they're never cached: a cached run would replay an old pass without
+      // opening a browser. A cached task also gets only the environment
+      // variables it lists, so E2E_SKIP_BUILD, FINITE_CHROME and the
+      // database URL wouldn't reach it.
+      e2e: { command: "node e2e/run.mjs", cache: false },
+      // The same checks through a router in front of two servers.
+      "e2e:router": { command: "E2E_ROUTER=1 node e2e/run.mjs", cache: false },
+      // The same, with both servers sharing one Postgres.
       "e2e:shared": { command: "E2E_SHARED=1 node e2e/run.mjs", cache: false },
+      bench: { command: "node e2e/bench.mjs", cache: false },
     },
   },
 });
