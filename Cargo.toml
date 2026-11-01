@@ -5,3 +5,13 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+
+# The browser build of crates/wasm (see crates/wasm/build.mjs). Link-time
+# optimization across crates, in one codegen unit, makes the .wasm smaller
+# and faster; it would only slow down the server's release builds.
+[profile.wasm]
+inherits = "release"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -269,20 +269,37 @@ impl Document {
         false
     }
 
-    /// The sibling index right after `id`, before its next sibling.
+    /// The sibling right after `id`, or `None` if it's the last one.
     /// A range lookup in the child index, so duplicating many siblings
     /// doesn't scan the sibling list once per node.
-    pub fn index_after(&self, id: &str) -> Option<String> {
+    pub fn next_sibling(&self, id: &str) -> Option<&Node> {
         use std::ops::Bound::{Excluded, Unbounded};
         let node = self.nodes.get(id)?;
         let me = (node.index.clone(), node.id.clone());
-        let next = self
-            .child_index
+        self.child_index
             .get(&node.parent)?
             .range((Excluded(me), Unbounded))
             .next()
-            .map(|(index, _)| index.as_str());
+            .and_then(|(_, next)| self.nodes.get(next))
+    }
+
+    /// The sibling index right after `id`, before its next sibling.
+    pub fn index_after(&self, id: &str) -> Option<String> {
+        let node = self.nodes.get(id)?;
+        let next = self.next_sibling(id).map(|n| n.index.as_str());
         Some(crate::fractional::key_between(Some(&node.index), next))
+    }
+
+    /// Every parent's children ids in sibling order, artboards under `None`.
+    /// The web viewer reads this once after loading a snapshot, to learn
+    /// sibling order without sorting by index itself.
+    pub fn child_lists(&self) -> impl Iterator<Item = (Option<&str>, impl Iterator<Item = &str>)> {
+        self.child_index.iter().map(|(parent, children)| {
+            (
+                parent.as_deref(),
+                children.iter().map(|(_, id)| id.as_str()),
+            )
+        })
     }
 
     /// `n` sibling indexes for inserting under `parent` at `position` (append when `None`).
@@ -539,5 +556,29 @@ mod tests {
         assert!(ids(&d, Some("a")).is_empty());
         assert!(ids(&d, Some("b")).is_empty());
         assert_eq!(ids(&d, None), ["a"]);
+    }
+
+    #[test]
+    fn next_sibling_and_child_lists_follow_sibling_order() {
+        let mut d = doc();
+        d.apply(&Op::Create {
+            node: child("e", "a", "F"),
+        });
+        assert_eq!(d.next_sibling("e").map(|n| n.id.as_str()), Some("b"));
+        assert_eq!(d.next_sibling("b"), None);
+        assert_eq!(d.next_sibling("missing"), None);
+        let mut lists: Vec<(Option<&str>, Vec<&str>)> = d
+            .child_lists()
+            .map(|(parent, ids)| (parent, ids.collect()))
+            .collect();
+        lists.sort();
+        assert_eq!(
+            lists,
+            [
+                (None, vec!["a"]),
+                (Some("a"), vec!["e", "b"]),
+                (Some("b"), vec!["c"]),
+            ]
+        );
     }
 }
