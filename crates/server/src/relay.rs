@@ -13,7 +13,8 @@
 //! another router mid-conversation and keep its undo history.
 //!
 //! - `list_designs` asks every server at once and merges the lists. A server
-//!   that doesn't answer is named at the end instead of failing the call.
+//!   that doesn't answer, or answers with an error, is named at the end
+//!   instead of failing the call. Only when none answers does the call fail.
 //! - `create_design` takes turns between servers, like `POST /api/designs`.
 //! - Every other tool goes to the owner of its `designId`.
 //!
@@ -242,7 +243,8 @@ impl Relay {
         // Whether a server left some out, so the merged list is partial too.
         let mut cut = false;
         for (base, result) in self.cluster.nodes().iter().zip(join_all(calls).await) {
-            let Ok(result) = result else {
+            // A server whose call failed answers with its error, not a list.
+            let Some(result) = result.ok().filter(|r| r.is_error != Some(true)) else {
                 missing.push(base.as_str());
                 continue;
             };
@@ -255,6 +257,12 @@ impl Relay {
                     _ => cut = true,
                 }
             }
+        }
+        if missing.len() == self.cluster.nodes().len() {
+            return CallToolResult::error(vec![ContentBlock::text(format!(
+                "No Finite server answered: {}",
+                missing.join(", ")
+            ))]);
         }
         designs.sort_by_key(|d| std::cmp::Reverse(d["updatedAt"].as_u64().unwrap_or(0)));
         cut |= designs.len() > limit;

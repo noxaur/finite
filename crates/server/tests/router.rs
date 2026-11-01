@@ -842,3 +842,27 @@ async fn the_design_list_fails_when_no_server_answers() {
         .unwrap();
     assert_eq!(res.status(), 502);
 }
+
+/// With every server down, `list_designs` through the router is an error,
+/// not an empty list that would say there are no designs.
+#[tokio::test]
+async fn list_designs_fails_when_no_server_answers() {
+    use rmcp::{
+        ServiceExt,
+        transport::{
+            StreamableHttpClientTransport,
+            streamable_http_client::StreamableHttpClientTransportConfig,
+        },
+    };
+    let (front, front_url) = listen().await;
+    let routes = router::app(vec!["http://127.0.0.1:9".to_owned()], None);
+    tokio::spawn(async move { axum::serve(front, routes).await });
+    let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp"));
+    let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
+    let result = client
+        .call_tool(rmcp::model::CallToolRequestParams::new("list_designs"))
+        .await
+        .unwrap();
+    assert_eq!(result.is_error, Some(true));
+    client.cancel().await.unwrap();
+}
