@@ -801,3 +801,31 @@ async fn a_server_resending_its_list_keeps_the_others() {
     assert_eq!(ids(&again), ["a2", "b1", "a1"], "b1 is still there");
     assert_eq!(again["total"], 3);
 }
+
+/// Every server has the same tools, so an agent can list them while the
+/// first server is down.
+#[tokio::test]
+async fn tools_are_listed_while_the_first_server_is_down() {
+    use rmcp::{
+        ServiceExt,
+        transport::{
+            StreamableHttpClientTransport,
+            streamable_http_client::StreamableHttpClientTransportConfig,
+        },
+    };
+    let (up, up_url) = listen().await;
+    // Port 9 (discard) refuses connections on a normal machine.
+    let nodes = vec!["http://127.0.0.1:9".to_owned(), up_url];
+    let cluster = Cluster::new(nodes.clone(), 1).unwrap();
+    let hub = Hub::with_cluster(Arc::new(MemoryStore::default()), cluster).unwrap();
+    tokio::spawn(async move { axum::serve(up, app(hub, None)).await });
+    let (front, front_url) = listen().await;
+    let routes = router::app(nodes, None);
+    tokio::spawn(async move { axum::serve(front, routes).await });
+
+    let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp"));
+    let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
+    let tools = client.list_all_tools().await.unwrap();
+    assert!(tools.iter().any(|t| t.name == "write_html"));
+    client.cancel().await.unwrap();
+}

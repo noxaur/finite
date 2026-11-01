@@ -292,13 +292,22 @@ impl ServerHandler for Relay {
         _request: Option<PaginatedRequestParams>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let base = &self.cluster.nodes()[0];
-        let backend = self.backend(base, &ctx).await?;
-        let tools = backend
-            .list_all_tools()
-            .await
-            .map_err(|e| unreachable(base, e))?;
-        Ok(ListToolsResult::with_all_items(tools))
+        // Every server has the same tools, so the first that answers will do.
+        let mut last = None;
+        for base in self.cluster.nodes() {
+            let listed = match self.backend(base, &ctx).await {
+                Ok(backend) => backend
+                    .list_all_tools()
+                    .await
+                    .map_err(|e| unreachable(base, e)),
+                Err(error) => Err(error),
+            };
+            match listed {
+                Ok(tools) => return Ok(ListToolsResult::with_all_items(tools)),
+                Err(error) => last = Some(error),
+            }
+        }
+        Err(last.expect("a cluster has at least one server"))
     }
 
     async fn call_tool(
