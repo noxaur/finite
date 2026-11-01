@@ -32,6 +32,12 @@ pub enum Op {
         parent: Option<NodeId>,
         index: String,
     },
+    /// Replaces the design's shared stylesheet, the CSS every artboard
+    /// renders with, or removes it when `css` is `None`.
+    Css {
+        #[serde(default)]
+        css: Option<String>,
+    },
 }
 
 /// Reads an op field by field. A derived `Deserialize` for an internally
@@ -47,6 +53,7 @@ impl<'de> Deserialize<'de> for Op {
             Delete,
             Set,
             Move,
+            Css,
         }
         #[derive(Deserialize)]
         struct Wire {
@@ -58,6 +65,8 @@ impl<'de> Deserialize<'de> for Op {
             value: Option<Value>,
             parent: Option<NodeId>,
             index: Option<String>,
+            #[serde(default)]
+            css: Option<String>,
         }
         let wire = Wire::deserialize(deserializer)?;
         let need = |field: &'static str| D::Error::missing_field(field);
@@ -78,6 +87,7 @@ impl<'de> Deserialize<'de> for Op {
                 parent: wire.parent,
                 index: wire.index.ok_or_else(|| need("index"))?,
             },
+            Kind::Css => Op::Css { css: wire.css },
         })
     }
 }
@@ -106,14 +116,17 @@ impl Op {
                 BASE + id.len() + value.as_ref().and_then(Value::as_str).map_or(16, str::len)
             }
             Op::Move { id, index, .. } => BASE + id.len() + index.len(),
+            Op::Css { css } => BASE + css.as_ref().map_or(0, String::len),
         }
     }
 
-    /// The node this op creates, deletes or changes.
+    /// The node this op creates, deletes or changes. Empty for [`Op::Css`],
+    /// which changes the design rather than a node.
     pub fn id(&self) -> &str {
         match self {
             Op::Create { node } => &node.id,
             Op::Delete { id } | Op::Set { id, .. } | Op::Move { id, .. } => id,
+            Op::Css { .. } => "",
         }
     }
 }
@@ -130,12 +143,15 @@ pub const MAX_DEPTH: usize = 256;
 pub const MAX_NODES: usize = 100_000;
 
 /// The node tree of one design, stored flat by id, with an index from each
-/// parent to its children in sibling order.
+/// parent to its children in sibling order, and the design's shared CSS.
 #[derive(Clone, Debug, Default)]
 pub struct Document {
     nodes: HashMap<NodeId, Node>,
     /// Children of each parent (`None` for artboards), sorted by `(index, id)`.
     child_index: HashMap<Option<NodeId>, BTreeSet<(String, NodeId)>>,
+    /// The shared stylesheet: CSS every artboard renders with, before its own
+    /// `<style>` blocks and inline styles, so those still override it.
+    css: Option<String>,
 }
 
 impl Document {
@@ -147,6 +163,17 @@ impl Document {
             doc.insert(node);
         }
         doc
+    }
+
+    /// The document with `css` as its shared stylesheet.
+    pub fn with_css(mut self, css: Option<String>) -> Self {
+        self.css = css.filter(|css| !css.is_empty());
+        self
+    }
+
+    /// The shared stylesheet, if the design has one.
+    pub fn css(&self) -> Option<&str> {
+        self.css.as_deref()
     }
 
     /// Adds or replaces a node, keeping the child index current.
@@ -391,6 +418,14 @@ impl Document {
                 self.insert(node);
                 Some(vec![inverse])
             }
+            Op::Css { css } => {
+                let css = css.clone().filter(|css| !css.is_empty());
+                if css == self.css {
+                    return None;
+                }
+                let previous = std::mem::replace(&mut self.css, css);
+                Some(vec![Op::Css { css: previous }])
+            }
         }
     }
 
@@ -580,5 +615,32 @@ mod tests {
                 (Some("b"), vec!["c"]),
             ]
         );
+    }
+
+    #[test]
+    fn css_ops_replace_the_stylesheet_and_undo() {
+        let mut d = doc();
+        let set = Op::Css {
+            css: Some(".btn { color: red; }".into()),
+        };
+        let inverse = d.apply(&set).unwrap();
+        assert_eq!(d.css(), Some(".btn { color: red; }"));
+        assert_eq!(inverse, [Op::Css { css: None }]);
+        // The same stylesheet again changes nothing.
+        assert_eq!(d.apply(&set), None);
+        // Empty CSS is no stylesheet.
+        assert_eq!(
+            d.apply(&Op::Css {
+                css: Some(String::new())
+            }),
+            Some(vec![set.clone()])
+        );
+        assert_eq!(d.css(), None);
+
+        let wire = serde_json::to_value(&set).unwrap();
+        assert_eq!(wire, json!({ "op": "css", "css": ".btn { color: red; }" }));
+        assert_eq!(serde_json::from_value::<Op>(wire).unwrap(), set);
+        let cleared: Op = serde_json::from_value(json!({ "op": "css" })).unwrap();
+        assert_eq!(cleared, Op::Css { css: None });
     }
 }

@@ -22,7 +22,7 @@ use base64::Engine;
 use finite_design::{
     Document, NodeId, NodeKind,
     edit::pixel_size,
-    html::{self, BASE_CSS, CSP, VIEWER_ID_ATTR},
+    html::{self, BASE_CSS, BASE_LAYER, CSP, VIEWER_ID_ATTR},
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -198,9 +198,6 @@ pub struct Options {
     /// captured, up to [`MAX_SETTLE`]. Pages without either are captured as
     /// soon as their images and fonts load.
     pub settle: Duration,
-    /// Design-wide CSS that applies to every artboard, which only the
-    /// `shared-styles` demo tools set so far (see `mcp/demo.rs`).
-    pub shared_css: Option<String>,
 }
 
 impl Default for Options {
@@ -213,7 +210,6 @@ impl Default for Options {
             transparent: false,
             reveal_overflow: false,
             settle: DEFAULT_SETTLE,
-            shared_css: None,
         }
     }
 }
@@ -424,12 +420,13 @@ fn page_html(doc: &Document, artboard: &str, options: &Options) -> Option<(Strin
     if options.transparent {
         overrides.push_str("html, body { background: transparent !important; }");
     }
-    let shared = options
-        .shared_css
-        .as_deref()
-        .map_or(String::new(), |css| format!("<style>{css}</style>"));
+    // The design's shared CSS, in a layer the artboard's own styles
+    // override (see `html::shared_style`), after the base styles' layer.
+    let shared = doc.css().map_or(String::new(), |css| {
+        format!("<style>{}</style>", html::shared_style(css, false))
+    });
     let page = format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\"><style>{BASE_CSS} html, body {{ margin: 0; }}</style>{shared}</head><body>{body}<style>{overrides}</style></body></html>"
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\"><style>@layer {BASE_LAYER} {{ {BASE_CSS} html, body {{ margin: 0; }} }}</style>{shared}</head><body>{body}<style>{overrides}</style></body></html>"
     );
     Some((page, width, height))
 }

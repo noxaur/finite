@@ -61,7 +61,7 @@ const INSTRUCTIONS: &str = include_str!("instructions.md");
 const SEARCH_INSTRUCTIONS: &str = "Search: find_nodes finds elements by text, name, tag, CSS or attribute, across artboards and <style> blocks. replace_values changes a value everywhere in one call, like a brand color in any notation. Use them instead of reading whole artboards.";
 
 /// Whether `FINITE_MCP_EXTRA` (a comma-separated list) turns on a group of
-/// experimental tools, like the `shared-styles` demo. AX experiments
+/// experimental tools, like `shared-styles`. AX experiments
 /// (`e2e/ax`) compare agents with and without a group before it ships to
 /// everyone, as the search tools did.
 pub(crate) fn extra(group: &str) -> bool {
@@ -88,7 +88,7 @@ pub(crate) fn instructions() -> &'static str {
         text.push_str(SEARCH_INSTRUCTIONS);
         if extra("shared-styles") {
             text.push_str("\n\n");
-            text.push_str(demo::INSTRUCTIONS);
+            text.push_str(styles::INSTRUCTIONS);
         }
         text.push('\n');
         text
@@ -278,7 +278,7 @@ impl FiniteMcp {
         let mut router = Self::tool_router();
         router.merge(Self::search_router());
         if extra("shared-styles") {
-            router.merge(Self::demo_router());
+            router.merge(Self::styles_router());
         }
         router
     }
@@ -422,8 +422,8 @@ macro_rules! design {
     };
 }
 
-mod demo;
 mod search;
+mod styles;
 
 #[tool_router]
 impl FiniteMcp {
@@ -523,9 +523,7 @@ impl FiniteMcp {
         let mut info = info;
         if extra("shared-styles") {
             // So agents needn't call get_shared_css to find out there's none.
-            info["sharedCssChars"] = demo::shared_css(&p.design_id)
-                .map_or(0, |css| css.len())
-                .into();
+            info["sharedCssChars"] = handle.read(|d| d.doc().css().map_or(0, str::len)).into();
         }
         let count = info["artboardCount"].as_u64().unwrap_or(0) as usize;
         Ok(CallToolResult::success(with_note(
@@ -646,6 +644,19 @@ impl FiniteMcp {
     )]
     async fn get_html(&self, Parameters(p): Parameters<HtmlParams>) -> ToolResult {
         let handle = design!(self, &p.design_id);
+        // The HTML leaves out the shared CSS its classes and variables may
+        // need, so say it's there: HTML copied elsewhere would lose it.
+        let shared = handle.read(|d| d.doc().css().map(str::len)).map(|chars| {
+            let from = if extra("shared-styles") {
+                ", from get_shared_css"
+            } else {
+                ""
+            };
+            format!(
+                "This design also has shared CSS ({chars} characters{from}) that every artboard uses. \
+                 The HTML above leaves it out, so copy it too if you use this HTML outside this design."
+            )
+        });
         let options = html::ExportOptions {
             ids: true,
             styles: p.include_styles.unwrap_or(true),
@@ -721,7 +732,10 @@ impl FiniteMcp {
             Some(out)
         });
         match html {
-            Some(html) => ok(html),
+            Some(html) => Ok(CallToolResult::success(with_note(
+                ContentBlock::text(html),
+                shared,
+            ))),
             None => fail(format!("node {:?} not found", p.node_id)),
         }
     }
@@ -755,7 +769,6 @@ impl FiniteMcp {
             highlight: p.highlight_node_ids,
             transparent: p.transparent,
             reveal_overflow: p.reveal_overflow,
-            shared_css: demo::shared_css(&p.design_id),
             ..Default::default()
         };
         let plan = match handle.read(|d| screenshot::plan(d.doc(), shots, options)) {
@@ -1397,7 +1410,7 @@ mod tests {
         let all = [
             INSTRUCTIONS.trim_end(),
             SEARCH_INSTRUCTIONS,
-            demo::INSTRUCTIONS,
+            styles::INSTRUCTIONS,
         ]
         .join("\n\n");
         assert!(

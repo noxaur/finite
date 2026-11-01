@@ -1,6 +1,6 @@
 import * as stylex from "@stylexjs/stylex";
 import { colors } from "@/styles/tokens.stylex";
-import { artboardDocument, pixelSize } from "./html";
+import { artboardDocument, BASE_LAYER, pixelSize } from "./html";
 import type { Applied, Replica } from "./replica";
 import type { Node } from "./schema";
 import { designModel } from "./wasm";
@@ -47,6 +47,8 @@ interface Frame {
   readonly shadow: ShadowRoot | null;
   /** Holds `COMMENTING_CSS` while in comment mode. */
   readonly commentStyle: HTMLStyleElement | null;
+  /** Holds the design's shared CSS, before the artboard's own styles. */
+  readonly sharedStyle: HTMLStyleElement | null;
   /** Set for artboards with scripts, rendered in a sandboxed iframe. */
   readonly iframe: HTMLIFrameElement | null;
   reload?: ReturnType<typeof setTimeout>;
@@ -153,6 +155,15 @@ export class Renderer {
   }
 
   apply(applied: Applied) {
+    if (applied.op === "css") {
+      // Every artboard uses it: restyle shadow roots, reload sandboxed ones.
+      const css = this.sharedCss();
+      for (const [id, frame] of this.frames) {
+        if (frame.sharedStyle) frame.sharedStyle.textContent = css;
+        else this.scheduleReload(id, frame);
+      }
+      return;
+    }
     const boards = this.touchedBoards(applied);
     if (applied.op === "create" && isScript(applied.node)) this.scripts.add(applied.node.id);
     if (applied.op === "delete") for (const id of applied.removed) this.scripts.delete(id);
@@ -294,7 +305,7 @@ export class Renderer {
   }
 
   /** Artboards an op changed: where its node is now, and where it was before. */
-  private touchedBoards(applied: Applied): Set<string> {
+  private touchedBoards(applied: Exclude<Applied, { op: "css" }>): Set<string> {
     const boards = new Set<string>();
     const add = (id: string | null) => {
       const board = id === null ? undefined : this.replica.artboardOf(id);
@@ -306,7 +317,7 @@ export class Renderer {
     return boards;
   }
 
-  private patch(applied: Applied) {
+  private patch(applied: Exclude<Applied, { op: "css" }>) {
     switch (applied.op) {
       case "create":
         this.mount(applied.node);
@@ -455,6 +466,7 @@ export class Renderer {
         content,
         shadow: null,
         commentStyle: null,
+        sharedStyle: null,
         iframe,
         rects: new Map(),
         pendingRects: new Set(),
@@ -471,10 +483,14 @@ export class Renderer {
     shadow.addEventListener("submit", (event) => event.preventDefault(), {
       signal: this.abort.signal,
     });
+    // In a layer, so the shared CSS can set what `HOST_CSS` resets, like
+    // the font on `:root`.
     const base = document.createElement("style");
-    base.textContent = `${HOST_CSS} ${designModel().baseCss}`;
+    base.textContent = `@layer ${BASE_LAYER} { ${HOST_CSS} ${designModel().baseCss} }`;
+    const sharedStyle = document.createElement("style");
+    sharedStyle.textContent = this.sharedCss();
     const commentStyle = document.createElement("style");
-    shadow.append(base, commentStyle);
+    shadow.append(base, sharedStyle, commentStyle);
     content.append(host);
     return {
       root,
@@ -483,10 +499,17 @@ export class Renderer {
       content,
       shadow,
       commentStyle,
+      sharedStyle,
       iframe: null,
       rects: new Map(),
       pendingRects: new Set(),
     };
+  }
+
+  /** The shared CSS as a shadow root's `<style>` text, or nothing. */
+  private sharedCss(): string {
+    const { css } = this.replica;
+    return css === null ? "" : designModel().sharedStyle(css, true);
   }
 
   private scheduleReload(id: string, frame: Frame) {

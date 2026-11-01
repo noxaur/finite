@@ -80,14 +80,19 @@ Next to the map, `Document` keeps a **child index**: for each parent, its childr
 
 ## Ops and their inverses
 
-There are only four ops:
+There are only five ops:
 
-| Op       | What it does                           | Its inverse                    |
-| -------- | -------------------------------------- | ------------------------------ |
-| `create` | Inserts one node                       | `delete` that node             |
-| `delete` | Removes a node and its whole subtree   | `create` every removed node    |
-| `set`    | Sets or clears one property            | `set` it back to the old value |
-| `move`   | Gives a node a new parent and/or index | `move` it back                 |
+| Op       | What it does                               | Its inverse                    |
+| -------- | ------------------------------------------ | ------------------------------ |
+| `create` | Inserts one node                           | `delete` that node             |
+| `delete` | Removes a node and its whole subtree       | `create` every removed node    |
+| `set`    | Sets or clears one property                | `set` it back to the old value |
+| `move`   | Gives a node a new parent and/or index     | `move` it back                 |
+| `css`    | Replaces or clears the design's shared CSS | `css` with the old stylesheet  |
+
+The **shared CSS** is one stylesheet for the whole design, so agents define classes like `.btn` and variables like `--brand` once instead of in every artboard. It's the only op that targets the design rather than a node, so `Op::id` is empty for it. The document holds it next to the nodes, and snapshots carry it as `css`, so it's saved, sent to viewers and undone like any edit. Every artboard renders with it inside a **cascade layer**, `finite-shared`. Styles outside any layer beat layered ones whatever their specificity, so an artboard's own `<style>` blocks and inline styles override the shared CSS, even a more specific shared selector. The cascade reverses that for `!important`, so a shared `!important` beats the artboard's. Leading `@import`s can't go inside a layer block, so they get `layer(finite-shared)` instead. The base styles sit in an earlier layer, `finite-base`, so the shared CSS can override them, like the font a shadow root's `all: initial` resets.
+
+`html::shared_style` writes the stylesheet out, and screenshots, the viewer's shadow roots and sandboxed iframes, and thumbnails all use it, the viewer through WebAssembly. It breaks up any `</style` so the CSS can't end its element, whichever way it reached the document. In a shadow root, `:root` matches nothing, so there it writes `:root` selectors as `:host`, and variables like `--brand` still reach the artboard. `set_shared_css` and the web API refuse CSS over 100,000 characters or with `</style` in it (`edit::set_css`).
 
 `Document::apply` runs one op and returns its inverse, read from the document at that moment. This is the **command pattern**.
 
@@ -229,7 +234,7 @@ On startup, the hub reads every stored design to build the list, then drops each
 - `params.rs` holds each tool's arguments. `rmcp` turns them into the JSON schemas agents see. Batched edits also accept the shapes agents guess before their client loads a schema: lists and objects sent as JSON strings, a flat `nodeIds` and `styles` instead of `updates`, and `nodeId` for `nodeIds`. Before, a third of the longer AX runs hit "failed to deserialize parameters" at least once.
 - `format.rs` writes the compact outlines that tools like `get_tree_summary` return, and the layout notes under screenshots.
 - `search.rs` has `find_nodes` and `replace_values`, over `finite_design::search`. They shipped behind a flag first, until AX runs showed they help.
-- `demo.rs` demos a feature Finite doesn't have yet, a design-wide stylesheet (`set_shared_css`), behind `FINITE_MCP_EXTRA=shared-styles`. Its CSS lives in memory and only screenshots apply it.
+- `styles.rs` has `set_shared_css` and `get_shared_css`, for the design's shared CSS. They ship behind `FINITE_MCP_EXTRA=shared-styles`, as they did while they were a demo, so AX runs with and without them stay comparable. `get_html` notes when a design has shared CSS, since HTML copied elsewhere would lose it.
 - `instructions.md` is the text agents read when they connect. It's plain Markdown, so you can edit the workflow without touching Rust. Keep it short: Claude Code keeps the first 4,096 characters of a server's instructions and silently drops the rest. A test checks that the instructions, with every extra group's section added, stay under 4,000.
 
 `e2e/ax` measures how real agents do with the tools (see its README). Every change to a tool's shape, description or result is worth a run there before and after.
@@ -286,6 +291,7 @@ Every viewer shows the names and notes agents write, so they're cut to a fixed l
 | `GET /api/designs/{id}/ws`                               | WebSocket: one design's snapshot, then every change |
 | `GET /api/designs/{id}/ws?epoch=…&since=…`               | The same socket, resuming after a reconnect         |
 | `POST …/comments`, `…/replies`, `PATCH …/comments/{cid}` | Comment, reply, resolve                             |
+| `PUT /api/designs/{id}/css`                              | Replace the shared CSS, as the person's own edit    |
 
 The messages on these sockets are Rust types on the server and Effect schemas in `apps/web/src/design/schema.ts`. Another golden file keeps those in step. `crates/server/tests/wire.rs` drives a real hub through an edit, an undo, presence, a comment, an agent reply and a rename, and records every message it broadcasts in `crates/server/fixtures/messages.json`. Then `apps/web/src/design/wire.test.ts` decodes each one with the web schemas. If you rename a field on the Rust side, `cargo test` fails until you regenerate the file, and then `vp test` fails until you update the schema.
 

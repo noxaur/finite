@@ -31,6 +31,8 @@ export interface SessionState {
   /** Recent changes, newest first. */
   readonly activity: ReadonlyArray<Activity>;
   readonly artboardCount: number;
+  /** The design's shared CSS, or `null` when it has none. */
+  readonly css: string | null;
   /** Bumps after every snapshot or change, so anything positioned on the design can follow it. */
   readonly version: number;
 }
@@ -46,6 +48,7 @@ export const initialSessionState: SessionState = {
   comments: new Map(),
   activity: [],
   artboardCount: 0,
+  css: null,
   version: 0,
 };
 
@@ -169,6 +172,7 @@ export class DesignSession {
   private synced() {
     return {
       artboardCount: this.replica.artboards().length,
+      css: this.replica.css,
       version: this.current.version + 1,
     };
   }

@@ -151,6 +151,11 @@ async fn wire_messages_match_the_fixture() {
             Ok((edit::delete(doc, &["scratch".into()])?, ()))
         })
         .unwrap();
+    handle
+        .edit(&agent, "Set shared CSS", |_| {
+            Ok((edit::set_css(":root { --brand: orange; }")?, ()))
+        })
+        .unwrap();
     handle.rename("Landing v2".into());
 
     let first = |o: Outgoing| serde_json::from_str::<Value>(&o.json).unwrap();
@@ -165,6 +170,8 @@ async fn wire_messages_match_the_fixture() {
     let mut design = vec![design_first];
     design.extend(drain(&mut events));
     design.push(first(resumed));
+    // A viewer that joins now gets the shared CSS in its snapshot.
+    design.push(first(handle.subscribe().0));
     let mut lobby_messages = vec![first(lobby_first)];
     lobby_messages.extend(drain(&mut lobby));
     let mut messages = json!({

@@ -31,6 +31,9 @@ pub struct Snapshot {
     pub meta: DesignMeta,
     pub seq: u64,
     pub nodes: Vec<Node>,
+    /// The shared stylesheet (see [`Document::css`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub css: Option<String>,
     #[serde(default)]
     pub comments: Vec<Comment>,
     /// Each actor's undo and redo stacks. Only in saved snapshots: the ones
@@ -122,7 +125,7 @@ impl Design {
     pub fn from_snapshot(snapshot: Snapshot) -> Self {
         Self {
             meta: snapshot.meta,
-            doc: Document::from_nodes(snapshot.nodes),
+            doc: Document::from_nodes(snapshot.nodes).with_css(snapshot.css),
             seq: snapshot.seq,
             comments: snapshot.comments,
             histories: snapshot.histories.unwrap_or_default(),
@@ -138,6 +141,7 @@ impl Design {
             meta: self.meta.clone(),
             seq: self.seq,
             nodes,
+            css: self.doc.css().map(str::to_owned),
             comments: self.comments.clone(),
             histories: None,
             log: None,
@@ -699,6 +703,32 @@ mod tests {
         assert!(!reopened.resolved);
         assert!(reopened.messages.last().unwrap().changes.is_empty());
         assert_eq!(d.snapshot().comments.len(), 1);
+    }
+
+    #[test]
+    fn shared_css_is_undoable_and_saved() {
+        let mut d = design();
+        let css = |css: &str| Op::Css {
+            css: Some(css.into()),
+        };
+        d.commit("alice", "css", &[css(":root { --brand: red; }")], 1);
+        d.commit("alice", "css", &[css(":root { --brand: blue; }")], 2);
+        d.undo("alice", 3).unwrap();
+        assert_eq!(d.doc().css(), Some(":root { --brand: red; }"));
+        d.redo("alice", 4).unwrap();
+        let saved = serde_json::to_string(&d.snapshot_to_save()).unwrap();
+        let mut back = Design::from_snapshot(serde_json::from_str(&saved).unwrap());
+        assert_eq!(back.doc().css(), Some(":root { --brand: blue; }"));
+        back.undo("alice", 5).unwrap();
+        back.undo("alice", 6).unwrap();
+        assert_eq!(back.doc().css(), None);
+        // A design without shared CSS doesn't mention it.
+        assert!(
+            serde_json::to_value(back.snapshot())
+                .unwrap()
+                .get("css")
+                .is_none()
+        );
     }
 
     #[test]

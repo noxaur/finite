@@ -15,6 +15,7 @@ use axum::{
 use finite_design::{
     Snapshot,
     comment::{self, Anchor, Author, AuthorKind, Comment, CommentError},
+    edit,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::{self, error::RecvError};
@@ -22,7 +23,7 @@ use tokio::sync::broadcast::{self, error::RecvError};
 use crate::cluster::Place;
 use crate::heartbeat::{self, Heartbeat};
 use crate::hub::{
-    AdoptError, DesignHandle, DesignSummary, Hub, LOBBY_LIMIT, OpenError, Outgoing, Since,
+    Actor, AdoptError, DesignHandle, DesignSummary, Hub, LOBBY_LIMIT, OpenError, Outgoing, Since,
     is_design_id,
 };
 
@@ -48,6 +49,7 @@ pub fn routes() -> Router<Arc<Hub>> {
             "/designs/{id}/comments/{comment}/replies",
             post(reply_to_comment),
         )
+        .route("/designs/{id}/css", put(set_css))
 }
 
 /// `?q=…&limit=…` on the design list: a name to search for, and how many.
@@ -313,6 +315,41 @@ async fn update_comment(
         .await?
         .set_resolved(&comment, body.resolved)?;
     Ok((StatusCode::OK, Json(comment)))
+}
+
+#[derive(Deserialize)]
+struct SetCss {
+    author: UserAuthor,
+    css: String,
+}
+
+/// What a change made: its `seq`, or `null` when it changed nothing.
+#[derive(Serialize)]
+struct Changed {
+    seq: Option<u64>,
+}
+
+/// Replaces the design's shared CSS, as one undoable change by the person
+/// who sent it. Viewers get it as a change like any other.
+async fn set_css(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    Json(body): Json<SetCss>,
+) -> Result<Json<Changed>, ApiError> {
+    let author = body.author.into_author();
+    let actor = Actor {
+        id: author.id,
+        name: author.name,
+    };
+    let (_, change) = open(&hub, &id)
+        .await?
+        .edit(&actor, "Set shared CSS", |_| {
+            Ok((edit::set_css(&body.css)?, ()))
+        })
+        .map_err(|error| ApiError::Unprocessable(error.to_string()))?;
+    Ok(Json(Changed {
+        seq: change.map(|c| c.seq),
+    }))
 }
 
 /// Streams the design list: every design once, then each design as it changes.

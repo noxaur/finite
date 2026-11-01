@@ -3,7 +3,7 @@
 
 use std::{collections::BTreeMap, time::Duration};
 
-use finite_design::{Document, html};
+use finite_design::{Document, edit, html};
 use finite_server::screenshot::{
     Format, Image, MAX_OUTPUT_SIDE, Options, Rect, Shot, capture, plan,
 };
@@ -432,4 +432,27 @@ async fn a_whole_artboard_shot_measures_every_element() {
         return;
     };
     assert!(images[0].as_ref().unwrap().boxes.is_none());
+}
+
+#[tokio::test]
+async fn shared_css_applies_and_the_artboard_overrides_it() {
+    let (mut doc, names) = design(
+        r#"<div data-name="Board" style="width: 300px; height: 200px"><style>.b { width: 70px; }</style><div data-name="A" class="a"></div><div data-name="B" class="b"></div></div>"#,
+    );
+    // More specific than the artboard's own rule, which still wins.
+    // It overrides the base styles' box-sizing, too.
+    doc.apply_all(
+        &edit::set_css(
+            ".a, div.b { width: 50px; height: 10px; } .a { box-sizing: content-box; padding-left: 10px; }",
+        )
+        .unwrap(),
+    );
+    let Some(images) = shoot(&doc, vec![Shot::node(&names["Board"])], Options::default()).await
+    else {
+        return;
+    };
+    let boxes = images[0].as_ref().unwrap().boxes.clone().unwrap();
+    let width = |name: &str| boxes.iter().find(|b| b.id == names[name]).unwrap().width;
+    assert_eq!(width("A"), 60.0);
+    assert_eq!(width("B"), 70.0);
 }

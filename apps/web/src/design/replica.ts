@@ -11,7 +11,8 @@ export type Applied =
       readonly removed: ReadonlyArray<string>;
     }
   | { readonly op: "set"; readonly node: Node; readonly key: string }
-  | { readonly op: "move"; readonly node: Node; readonly from: string | null };
+  | { readonly op: "move"; readonly node: Node; readonly from: string | null }
+  | { readonly op: "css"; readonly css: string | null };
 
 /** What the Rust `Replica` in `crates/wasm` says an op touched (`null`: it didn't apply). */
 type Touched =
@@ -24,6 +25,7 @@ type Touched =
       readonly from: string | null;
       readonly before: string | null;
     }
+  | { readonly op: "css"; readonly css: string | null }
   | null;
 
 /**
@@ -52,6 +54,8 @@ export class Replica {
   private lastFound = 0;
   private readonly doc: WasmDocument = designModel().newDocument();
   seq = 0;
+  /** The design's shared CSS, which every artboard renders with. */
+  css: string | null = null;
 
   load(snapshot: Snapshot) {
     const order = JSON.parse(this.doc.load(JSON.stringify(snapshot.nodes))) as ReadonlyArray<
@@ -62,6 +66,9 @@ export class Replica {
     for (const node of snapshot.nodes) this.nodes.set(node.id, node);
     for (const [parent, ids] of order) this.childIds.set(parent, ids);
     this.seq = snapshot.seq;
+    // Loading clears the stylesheet, so set it as the server would.
+    this.css = null;
+    this.applyAll([{ op: "css", css: snapshot.css ?? null }]);
   }
 
   /** Frees the WebAssembly side. The replica can't be used afterwards. */
@@ -166,6 +173,9 @@ export class Replica {
         this.nodes.set(touched.node.id, touched.node);
         this.link(touched.node, touched.before);
         return { op: "move", node: touched.node, from: touched.from };
+      case "css":
+        this.css = touched.css;
+        return { op: "css", css: touched.css };
     }
   }
 

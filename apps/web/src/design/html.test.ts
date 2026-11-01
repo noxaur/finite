@@ -38,6 +38,17 @@ describe("artboardDocument", () => {
     expect(page).toContain('<body><div data-finite-id="a" class="x"></div></body>');
     expect(r.exportHtml("a")).toBe('<div class="x"></div>');
   });
+
+  it("puts the shared CSS before the artboard, in a layer its own styles override", () => {
+    const r = replica([el("a", null, "div")]);
+    r.apply({ op: "css", css: ".btn { color: red; }</style>" });
+    const page = artboardDocument(r, "a");
+    const shared = page.indexOf(
+      "<style>@layer finite-shared {\n.btn { color: red; }<\\/style>\n}</style>",
+    );
+    expect(shared).toBeGreaterThan(page.indexOf(designModel().baseCss));
+    expect(shared).toBeLessThan(page.indexOf("<body>"));
+  });
 });
 
 describe("pixelSize", () => {

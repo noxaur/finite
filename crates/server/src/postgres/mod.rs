@@ -663,6 +663,7 @@ mod tests {
             },
             seq: 0,
             nodes: Vec::new(),
+            css: None,
             comments: Vec::new(),
             histories: None,
             log: None,

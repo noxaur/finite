@@ -45,10 +45,23 @@ const RUNTIME = `(() => {
   }, { passive: false });
 })();`;
 
-/** A standalone page that shows one artboard, for a sandboxed iframe's `srcdoc`. */
+/**
+ * The cascade layer for base styles, before the shared CSS's, so the shared
+ * CSS overrides them (`html::BASE_LAYER`).
+ */
+export const BASE_LAYER = "finite-base";
+
+/**
+ * A standalone page that shows one artboard, for a sandboxed iframe's
+ * `srcdoc`. The design's shared CSS comes before the artboard, in a layer
+ * the artboard's own styles override, as in screenshots.
+ */
 export function artboardDocument(replica: Replica, id: string): string {
-  const { csp, baseCss } = designModel();
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>${baseCss} html, body { margin: 0; }</style><script>${RUNTIME}</script></head><body>${replica.exportHtml(id, true)}</body></html>`;
+  const model = designModel();
+  const { csp, baseCss } = model;
+  const shared =
+    replica.css === null ? "" : `<style>${model.sharedStyle(replica.css, false)}</style>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>@layer ${BASE_LAYER} { ${baseCss} html, body { margin: 0; } }</style>${shared}<script>${RUNTIME}</script></head><body>${replica.exportHtml(id, true)}</body></html>`;
 }
 
 /** An element's `width` and `height` styles, when they're plain pixels. */

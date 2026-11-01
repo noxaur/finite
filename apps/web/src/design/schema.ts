@@ -39,6 +39,8 @@ export const Op = Schema.Union([
     parent: Schema.NullOr(Schema.String),
     index: Schema.String,
   }),
+  /** Replaces the design's shared CSS, or removes it when `null`. */
+  Schema.Struct({ op: Schema.Literal("css"), css: Schema.NullOr(Schema.String) }),
 ]);
 export type Op = typeof Op.Type;
 
@@ -97,6 +99,8 @@ export const Snapshot = Schema.Struct({
   meta: DesignMeta,
   seq: Schema.Number,
   nodes: Schema.Array(Node),
+  /** CSS every artboard renders with, before its own styles. Absent when there's none. */
+  css: Schema.optionalKey(Schema.String),
   comments: Schema.Array(Comment),
 });
 export type Snapshot = typeof Snapshot.Type;
