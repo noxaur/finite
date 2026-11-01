@@ -1,3 +1,4 @@
+import "./wasm.node";
 import { describe, expect, it } from "vite-plus/test";
 import type { Applied } from "./replica";
 import type { Comment, DesignMessage, Node, Presence } from "./schema";

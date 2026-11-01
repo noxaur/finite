@@ -1,4 +1,5 @@
 import type { Node, Op, Snapshot } from "./schema";
+import { designModel, type WasmDocument } from "./wasm";
 
 /** What applying an op touched, for the renderer to patch the DOM. */
 export type Applied =
@@ -12,33 +13,60 @@ export type Applied =
   | { readonly op: "set"; readonly node: Node; readonly key: string }
   | { readonly op: "move"; readonly node: Node; readonly from: string | null };
 
-/** Base-62 digits, as in `crates/design/src/fractional.rs`. Keys never end in `0`. */
-const INDEX_RE = /^[0-9A-Za-z]*[1-9A-Za-z]$/;
+/** What the Rust `Replica` in `crates/wasm` says an op touched (`null`: it didn't apply). */
+type Touched =
+  | { readonly op: "create"; readonly before: string | null }
+  | { readonly op: "delete"; readonly parent: string | null; readonly removed: string[] }
+  | { readonly op: "set"; readonly node: Node }
+  | {
+      readonly op: "move";
+      readonly node: Node;
+      readonly from: string | null;
+      readonly before: string | null;
+    }
+  | null;
 
 /**
- * A client-side copy of a design's node tree. It applies the server's ops in
- * `seq` order with the same rules as `crates/design/src/document.rs`, so it
- * always matches the server's document.
+ * A client-side copy of a design's node tree. The document itself lives in
+ * WebAssembly: `crates/wasm` runs the server's own `Document::apply`, so
+ * every op follows the same rules as on the server.
+ *
+ * Next to it, this class keeps a read cache for the renderer: each node by
+ * id, and each parent's children ids in sibling order. It changes the cache
+ * only as the Rust side reports: loading returns the sibling order, and a
+ * create or move says which sibling the node now sits before. So the cache
+ * never compares indexes itself.
+ *
+ * A whole change crosses into WebAssembly in one call (`applyAll`). The
+ * cache then catches up one op at a time, so a caller that patches the DOM
+ * after each op reads the tree as it was right after that op.
  *
  * When users can edit, local ops will apply here first (optimistically) and be
  * rebased on the server's changes.
  */
 export class Replica {
   readonly nodes = new Map<string, Node>();
-  /**
-   * Each parent's children (`null` for artboards), kept sorted by
-   * `(index, id)` as on the server. Inserts and removals find their place by
-   * binary search, so writing thousands of siblings doesn't sort the list
-   * once per node, which froze the page for seconds.
-   */
+  /** Each parent's children (`null` for artboards), for parents that have any. */
   private readonly childIds = new Map<string | null, string[]>();
+  /** Where `find` last found an id, so a run of nearby edits doesn't rescan the list. */
+  private lastFound = 0;
+  private readonly doc: WasmDocument = designModel().newDocument();
   seq = 0;
 
   load(snapshot: Snapshot) {
+    const order = JSON.parse(this.doc.load(JSON.stringify(snapshot.nodes))) as ReadonlyArray<
+      [string | null, string[]]
+    >;
     this.nodes.clear();
     this.childIds.clear();
-    for (const node of snapshot.nodes) this.insert(node);
+    for (const node of snapshot.nodes) this.nodes.set(node.id, node);
+    for (const [parent, ids] of order) this.childIds.set(parent, ids);
     this.seq = snapshot.seq;
+  }
+
+  /** Frees the WebAssembly side. The replica can't be used afterwards. */
+  free() {
+    this.doc.free();
   }
 
   get(id: string): Node | undefined {
@@ -53,9 +81,9 @@ export class Replica {
   /** The siblings after `id`, in order. */
   *siblingsAfter(id: string): Generator<Node> {
     const node = this.nodes.get(id);
-    if (!node) return;
-    const siblings = this.childIds.get(node.parent) ?? [];
-    for (let i = this.position(siblings, node.index, node.id) + 1; i < siblings.length; i++) {
+    const siblings = node && this.childIds.get(node.parent);
+    if (!siblings) return;
+    for (let i = this.find(siblings, id) + 1; i < siblings.length; i++) {
       yield this.nodes.get(siblings[i]!)!;
     }
   }
@@ -71,43 +99,6 @@ export class Replica {
     return node;
   }
 
-  /** Applies one op. Returns `null` when it doesn't apply, as on the server. */
-  apply(op: Op): Applied | null {
-    switch (op.op) {
-      case "create": {
-        if (this.nodes.has(op.node.id) || !this.canParent(op.node.parent)) return null;
-        this.insert(op.node);
-        return { op: "create", node: op.node };
-      }
-      case "delete": {
-        const parent = this.nodes.get(op.id)?.parent ?? null;
-        const removed = this.subtree(op.id);
-        if (removed.length === 0) return null;
-        for (const id of removed) this.remove(id);
-        return { op: "delete", parent, removed };
-      }
-      case "set": {
-        const node = this.nodes.get(op.id);
-        if (!node) return null;
-        const next = withProp(node, op.key, op.value);
-        if (!next) return null;
-        this.nodes.set(node.id, next);
-        return { op: "set", node: next, key: op.key };
-      }
-      case "move": {
-        const node = this.nodes.get(op.id);
-        if (!node || !INDEX_RE.test(op.index) || !this.canParent(op.parent)) return null;
-        if (op.parent === op.id || (op.parent && this.isAncestor(op.id, op.parent))) return null;
-        if (node.parent === op.parent && node.index === op.index) return null;
-        const from = node.parent;
-        this.remove(node.id);
-        const moved = { ...node, parent: op.parent, index: op.index };
-        this.insert(moved);
-        return { op: "move", node: moved, from };
-      }
-    }
-  }
-
   /** `id` and its descendants, parents first. */
   subtree(id: string): string[] {
     if (!this.nodes.has(id)) return [];
@@ -116,90 +107,96 @@ export class Replica {
     while (stack.length > 0) {
       const next = stack.pop()!;
       out.push(next);
-      for (const child of this.childIds.get(next) ?? []) stack.push(child);
+      for (const child of this.children(next)) stack.push(child.id);
     }
     return out;
   }
 
-  private canParent(parent: string | null) {
-    return parent === null || this.nodes.get(parent)?.type === "element";
+  /** The subtree at `id` as HTML, as screenshots render it. With `ids`, elements carry `data-finite-id`. */
+  exportHtml(id: string, ids = false): string {
+    return this.doc.exportHtml(id, ids);
   }
 
-  private isAncestor(ancestor: string, id: string) {
-    let current = this.nodes.get(id)?.parent ?? null;
-    while (current !== null) {
-      if (current === ancestor) return true;
-      current = this.nodes.get(current)?.parent ?? null;
+  /** Applies one op. Returns `null` when it doesn't apply, as on the server. */
+  apply(op: Op): Applied | null {
+    return this.applyAll([op])[0] ?? null;
+  }
+
+  /**
+   * Applies `ops` in order in one call into WebAssembly, then brings the
+   * cache up to date op by op. `each` runs after each op that applied, with
+   * the cache as it was right then. Returns what each op touched.
+   */
+  applyAll(ops: ReadonlyArray<Op>, each?: (applied: Applied) => void): Array<Applied | null> {
+    if (ops.length === 0) return [];
+    const touched = JSON.parse(this.doc.apply(JSON.stringify(ops))) as ReadonlyArray<Touched>;
+    return ops.map((op, i) => {
+      const applied = this.follow(op, touched[i] ?? null);
+      if (applied) each?.(applied);
+      return applied;
+    });
+  }
+
+  /** Updates the cache for one op the Rust side applied. */
+  private follow(op: Op, touched: Touched): Applied | null {
+    if (touched === null) return null;
+    if (touched.op !== op.op) throw new Error(`finite.wasm answered ${touched.op} for ${op.op}`);
+    switch (touched.op) {
+      case "create": {
+        // The op's node is what Rust inserted.
+        const { node } = op as Extract<Op, { op: "create" }>;
+        this.nodes.set(node.id, node);
+        this.link(node, touched.before);
+        return { op: "create", node };
+      }
+      case "delete": {
+        const [root] = touched.removed;
+        if (root !== undefined) this.unlink(root);
+        for (const id of touched.removed) {
+          this.nodes.delete(id);
+          this.childIds.delete(id);
+        }
+        return { op: "delete", parent: touched.parent, removed: touched.removed };
+      }
+      case "set":
+        this.nodes.set(touched.node.id, touched.node);
+        return { op: "set", node: touched.node, key: (op as Extract<Op, { op: "set" }>).key };
+      case "move":
+        this.unlink(touched.node.id);
+        this.nodes.set(touched.node.id, touched.node);
+        this.link(touched.node, touched.before);
+        return { op: "move", node: touched.node, from: touched.from };
     }
-    return false;
   }
 
-  /** Where `(index, id)` goes in `siblings`, which is sorted by `(index, id)`. */
-  private position(siblings: ReadonlyArray<string>, index: string, id: string): number {
-    let lo = 0;
-    let hi = siblings.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >>> 1;
-      const other = this.nodes.get(siblings[mid]!)!;
-      if (other.index < index || (other.index === index && other.id < id)) lo = mid + 1;
-      else hi = mid;
-    }
-    return lo;
-  }
-
-  private insert(node: Node) {
+  /** Puts `node` among its siblings, before `before` or last. */
+  private link(node: Node, before: string | null) {
     let siblings = this.childIds.get(node.parent);
     if (!siblings) this.childIds.set(node.parent, (siblings = []));
-    siblings.splice(this.position(siblings, node.index, node.id), 0, node.id);
-    this.nodes.set(node.id, node);
+    const at = before === null ? siblings.length : this.find(siblings, before);
+    siblings.splice(at < 0 ? siblings.length : at, 0, node.id);
+    this.lastFound = at < 0 ? siblings.length - 1 : at;
   }
 
-  private remove(id: string) {
+  /** Takes `id` out of its siblings. */
+  private unlink(id: string) {
     const node = this.nodes.get(id);
-    if (!node) return;
-    const siblings = this.childIds.get(node.parent);
-    if (siblings) {
-      const at = this.position(siblings, node.index, node.id);
-      if (siblings[at] === id) siblings.splice(at, 1);
-      if (siblings.length === 0) this.childIds.delete(node.parent);
-    }
-    this.nodes.delete(id);
+    const siblings = node && this.childIds.get(node.parent);
+    if (!siblings) return;
+    const at = this.find(siblings, id);
+    if (at >= 0) siblings.splice(at, 1);
+    if (siblings.length === 0) this.childIds.delete(node.parent);
   }
-}
 
-/**
- * A copy of `node` with one property changed, or `null` if it already had that
- * value or the value has the wrong type (`x` and `y` take numbers, the rest strings).
- */
-function withProp(node: Node, key: string, raw: string | number | null): Node | null {
-  const numeric = key === "x" || key === "y";
-  if (raw !== null && typeof raw !== (numeric ? "number" : "string")) return null;
-  const str = typeof raw === "string" ? raw : null;
-  const num = typeof raw === "number" ? raw : null;
-  const record = (map: Readonly<Record<string, string>>, name: string) => {
-    if ((map[name] ?? null) === str) return null;
-    const next = { ...map };
-    if (str === null) delete next[name];
-    else next[name] = str;
-    return next;
-  };
-  switch (key) {
-    case "name":
-      return node.name === str ? null : { ...node, name: str };
-    case "text":
-      return node.text === str ? null : { ...node, text: str };
-    case "x":
-      return node.x === num ? null : { ...node, x: num };
-    case "y":
-      return node.y === num ? null : { ...node, y: num };
+  /**
+   * Where `id` is in `siblings`, or -1. Writes and deletes tend to work
+   * through siblings in order, so it searches forward from the last hit
+   * first: writing thousands of siblings doesn't scan the list each time.
+   */
+  private find(siblings: ReadonlyArray<string>, id: string): number {
+    let at = siblings.indexOf(id, Math.max(0, this.lastFound - 1));
+    if (at < 0) at = siblings.indexOf(id);
+    if (at >= 0) this.lastFound = at;
+    return at;
   }
-  if (key.startsWith("style:")) {
-    const styles = record(node.styles, key.slice(6));
-    return styles && { ...node, styles };
-  }
-  if (key.startsWith("attr:")) {
-    const attrs = record(node.attrs, key.slice(5));
-    return attrs && { ...node, attrs };
-  }
-  return null;
 }

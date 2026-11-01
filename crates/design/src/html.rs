@@ -41,7 +41,7 @@ const VOID_TAGS: &[&str] = &[
 ];
 
 /// Base styles for rendering an artboard. Screenshots and the web viewer both
-/// use them (the viewer's copy is checked against `fixtures/export.json`).
+/// use them; the viewer reads them through WebAssembly.
 pub const BASE_CSS: &str = "*, *::before, *::after { box-sizing: border-box; }";
 
 /// The content policy for artboards that run scripts: inline code, remote
@@ -203,8 +203,8 @@ pub fn is_attr_name(name: &str) -> bool {
 /// SVG animation can set an `href` at runtime from a list such as
 /// `<animate attributeName="href" values="0;javascript:…">`. Browsers ignore
 /// whitespace and control characters inside a URL scheme, so they're
-/// ignored here too. The viewer's `isSafeAttr` applies the same rules
-/// (checked against `fixtures/attributes.json`).
+/// ignored here too. The web viewer checks attributes again before it sets
+/// them, by calling this function through WebAssembly.
 pub fn is_safe_attr(name: &str, value: &str) -> bool {
     let name = name.to_ascii_lowercase();
     let value: String = value
@@ -396,7 +396,7 @@ fn write_node(doc: &Document, node: &Node, ids: bool, depth: usize, out: &mut St
 /// The subtree at `id` exactly as the document holds it: no added whitespace,
 /// no layer names. This is what renders, so screenshots use it. The indented
 /// [`export`] would add whitespace text between siblings, which shows up as a
-/// space between inline elements. The web viewer's `exportHtml` matches this.
+/// space between inline elements.
 pub fn export_compact(doc: &Document, id: &str) -> Option<String> {
     let mut out = String::new();
     write_compact(doc, doc.get(id)?, false, &mut out);

@@ -1,6 +1,10 @@
-//! Runs the op cases in `fixtures/apply.json`. The web app's `Replica` runs the
-//! same file (`apps/web/src/design/conformance.test.ts`), so the Rust and
-//! TypeScript op rules can't drift apart.
+//! Runs the op cases in `fixtures/apply.json`, a record of what the op rules
+//! do. A change to `Document::apply` that alters a result fails here first.
+//!
+//! The browser runs these same rules through WebAssembly (`crates/wasm`).
+//! `apps/web/src/design/conformance.test.ts` runs the same cases through
+//! that boundary and checks that the viewer's cache of nodes and sibling
+//! order ends up where the document does.
 //!
 //! The expected results are generated from these Rust rules. To change a case,
 //! edit its inputs and run with `FINITE_UPDATE_FIXTURES=1` to regenerate them.
@@ -31,6 +35,9 @@ struct Expect {
     applied: Vec<bool>,
     /// The document afterwards, sorted by id.
     nodes: Vec<Node>,
+    /// Each parent's children in sibling order (`None` for artboards), sorted by parent.
+    #[serde(default)]
+    children: Vec<(Option<String>, Vec<String>)>,
 }
 
 fn run(case: &Case) -> Expect {
@@ -38,7 +45,16 @@ fn run(case: &Case) -> Expect {
     let applied = case.ops.iter().map(|op| doc.apply(op).is_some()).collect();
     let mut nodes: Vec<Node> = doc.nodes().cloned().collect();
     nodes.sort_by(|a, b| a.id.cmp(&b.id));
-    Expect { applied, nodes }
+    let mut children: Vec<(Option<String>, Vec<String>)> = doc
+        .child_lists()
+        .map(|(parent, ids)| (parent.map(Into::into), ids.map(Into::into).collect()))
+        .collect();
+    children.sort();
+    Expect {
+        applied,
+        nodes,
+        children,
+    }
 }
 
 #[test]

@@ -1,58 +1,34 @@
-//! Records which attributes are safe to set in `fixtures/attributes.json`.
-//! The viewer's `isSafeAttr` must agree on every case
-//! (`apps/web/src/design/attributes.test.ts`), because it guards the same
-//! shadow roots the server's checks do.
-//!
-//! Regenerate with `FINITE_UPDATE_FIXTURES=1` after changing a rule.
-
-use std::{fs, path::PathBuf};
+//! Which attributes may be set. `write_html` drops the unsafe ones and
+//! `set_attributes` refuses them. The web viewer checks again before it sets
+//! an attribute, by calling this same function through WebAssembly.
 
 use finite_design::html;
-use serde_json::{Value, json};
 
-const CASES: &[(&str, &str)] = &[
-    ("href", "https://example.com"),
-    ("href", "#section"),
-    ("title", "Checkout"),
-    ("onclick", "alert(1)"),
-    ("OnMouseOver", "alert(1)"),
-    ("srcdoc", "<p>hi</p>"),
-    ("href", "javascript:alert(1)"),
-    ("href", " JaVaScRiPt:alert(1)"),
-    ("href", "java\tscript:alert(1)"),
-    ("href", "java\u{1}script:alert(1)"),
-    ("href", "vbscript:msgbox(1)"),
+/// Each attribute, and whether it's safe.
+const CASES: &[(&str, &str, bool)] = &[
+    ("href", "https://example.com", true),
+    ("href", "#section", true),
+    ("title", "Checkout", true),
+    ("onclick", "alert(1)", false),
+    ("OnMouseOver", "alert(1)", false),
+    ("srcdoc", "<p>hi</p>", false),
+    ("href", "javascript:alert(1)", false),
+    ("href", " JaVaScRiPt:alert(1)", false),
+    ("href", "java\tscript:alert(1)", false),
+    ("href", "java\u{1}script:alert(1)", false),
+    ("href", "vbscript:msgbox(1)", false),
     // SVG animation sets `href` from a list at runtime.
-    ("values", "0;javascript:alert(1)"),
-    ("to", "javascript:alert(1)"),
-    ("xlink:href", "javascript:alert(1)"),
-    ("src", "data:image/png;base64,AAAA"),
+    ("values", "0;javascript:alert(1)", false),
+    ("to", "javascript:alert(1)", false),
+    ("xlink:href", "javascript:alert(1)", false),
+    ("src", "data:image/png;base64,AAAA", true),
 ];
 
 #[test]
-fn attribute_rules_match_the_shared_fixture() {
-    let cases: Vec<Value> = CASES
-        .iter()
-        .map(|(name, value)| json!({ "name": name, "value": value, "safe": html::is_safe_attr(name, value) }))
-        .collect();
-    let fixture = json!({
-        "about": "Which attributes may be set, recorded from crates/design/tests/attributes.rs. apps/web/src/design/attributes.test.ts checks the viewer's isSafeAttr against it.",
-        "cases": cases,
-    });
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/attributes.json");
-    if std::env::var_os("FINITE_UPDATE_FIXTURES").is_some() {
-        fs::write(
-            &path,
-            serde_json::to_string_pretty(&fixture).unwrap() + "\n",
-        )
-        .unwrap();
-        return;
+fn attribute_rules() {
+    for &(name, value, safe) in CASES {
+        assert_eq!(html::is_safe_attr(name, value), safe, "{name}={value:?}");
     }
-    let stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    assert_eq!(
-        fixture, stored,
-        "an attribute rule changed; regenerate the fixture"
-    );
 }
 
 /// The SVG case end to end: the parser drops the attribute, so the stored

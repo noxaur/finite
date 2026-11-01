@@ -34,6 +34,7 @@ if (!process.env.BENCH_SKIP_BUILD) {
     if (spawnSync(cmd, args, { cwd: root, stdio: "inherit" }).status !== 0) process.exit(1);
   };
   run("cargo", ["build", "-q", "--release", "-p", "finite-server"]);
+  run("vp", ["run", "wasm#build"]);
   run("vp", ["run", "web#build"]);
 }
 

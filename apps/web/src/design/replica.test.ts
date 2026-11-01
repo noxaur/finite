@@ -1,5 +1,6 @@
+import "./wasm.node";
 import { describe, expect, it } from "vite-plus/test";
-import { Replica } from "./replica";
+import { type Applied, Replica } from "./replica";
 import type { Node } from "./schema";
 
 const node = (id: string, parent: string | null, index = "V"): Node => ({
@@ -50,6 +51,48 @@ describe("Replica", () => {
     expect(r.children("c").map((n) => n.id)).toEqual(expected);
     expect([...r.siblingsAfter(expected[9_000]!)].map((n) => n.id)).toEqual(expected.slice(9_001));
     expect(took).toBeLessThan(1_000);
+  });
+
+  it("applies a whole change in one call, and the cache follows op by op", () => {
+    const r = replica();
+    const seen: string[] = [];
+    const applied = r.applyAll(
+      [
+        { op: "create", node: node("e", "a", "G") },
+        { op: "create", node: node("f", "e") },
+        { op: "set", id: "f", key: "style:color", value: "red" },
+        { op: "set", id: "missing", key: "name", value: "x" },
+        { op: "move", id: "f", parent: "c", index: "V" },
+        { op: "delete", id: "e" },
+      ],
+      (a: Applied) => {
+        // Each callback sees the tree right after its own op.
+        const where = a.op === "delete" ? a.parent : a.node.id;
+        seen.push(
+          `${a.op} ${r
+            .children("a")
+            .map((n) => n.id)
+            .join("")} ${where}`,
+        );
+      },
+    );
+    expect(applied.map((a) => a?.op ?? null)).toEqual([
+      "create",
+      "create",
+      "set",
+      null,
+      "move",
+      "delete",
+    ]);
+    expect(seen).toEqual([
+      "create ebc e",
+      "create ebc f",
+      "set ebc f",
+      "move ebc f",
+      "delete bc a",
+    ]);
+    expect(r.get("f")).toMatchObject({ parent: "c", styles: { color: "red" } });
+    expect(applied[4]).toMatchObject({ op: "move", from: "e" });
   });
 
   it("orders children by fractional index", () => {

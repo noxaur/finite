@@ -32,6 +32,7 @@ if (!process.env.E2E_SKIP_BUILD) {
     if (result.status !== 0) process.exit(1);
   };
   run("cargo", ["build", "-q", "-p", "finite-server"], root);
+  run("node", ["crates/wasm/build.mjs"], root);
   run("npx", ["next", "build"], path.join(root, "apps/web"));
 }
 

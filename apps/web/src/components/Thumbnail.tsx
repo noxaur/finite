@@ -6,6 +6,7 @@ import { Api } from "@/api/Api";
 import { fit, union } from "@/design/camera";
 import { Renderer } from "@/design/renderer";
 import { Replica } from "@/design/replica";
+import { loadDesignModel } from "@/design/wasm";
 import { runtime } from "@/runtime";
 import { colors } from "@/styles/tokens.stylex";
 
@@ -63,6 +64,7 @@ function Preview({ id, seq }: { id: string; seq: number }) {
     if (!visible || !frame || !world) return;
     const controller = new AbortController();
     let renderer: Renderer | undefined;
+    let replica: Replica | undefined;
     const wait = Math.max(PAUSE_MS, lastFetch.current + MIN_INTERVAL_MS - Date.now());
     const timer = setTimeout(() => {
       lastFetch.current = Date.now();
@@ -71,9 +73,12 @@ function Preview({ id, seq }: { id: string; seq: number }) {
           Api.use((api) => api.getDesign(id)),
           { signal: controller.signal },
         )
+        // The document rules run in WebAssembly, so wait for the module too.
+        .then((snapshot) => loadDesignModel().then(() => snapshot))
         .then(
           (snapshot) => {
-            const replica = new Replica();
+            if (controller.signal.aborted) return;
+            replica = new Replica();
             replica.load(snapshot);
             // Not live: thumbnails never run an artboard's scripts.
             renderer = new Renderer(world, replica);
@@ -93,6 +98,8 @@ function Preview({ id, seq }: { id: string; seq: number }) {
       clearTimeout(timer);
       controller.abort();
       renderer?.dispose();
+      // The document lives in WebAssembly memory, which isn't garbage collected.
+      replica?.free();
     };
   }, [id, seq, visible]);
 

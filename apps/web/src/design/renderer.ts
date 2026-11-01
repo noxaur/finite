@@ -1,9 +1,9 @@
 import * as stylex from "@stylexjs/stylex";
 import { colors } from "@/styles/tokens.stylex";
-import { artboardDocument, BASE_CSS, pixelSize } from "./html";
+import { artboardDocument, pixelSize } from "./html";
 import type { Applied, Replica } from "./replica";
 import type { Node } from "./schema";
-import { isSafeAttr } from "./attributes";
+import { designModel } from "./wasm";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -472,7 +472,7 @@ export class Renderer {
       signal: this.abort.signal,
     });
     const base = document.createElement("style");
-    base.textContent = `${HOST_CSS} ${BASE_CSS}`;
+    base.textContent = `${HOST_CSS} ${designModel().baseCss}`;
     const commentStyle = document.createElement("style");
     shadow.append(base, commentStyle);
     content.append(host);
@@ -603,8 +603,9 @@ function setStyle(el: Element, name: string, value: string) {
   );
 }
 
+/** Sets an attribute the server's own check (`html::is_safe_attr`) allows. */
 function setAttr(el: Element, name: string, value: string) {
-  if (!isSafeAttr(name, value)) return;
+  if (!designModel().isSafeAttr(name, value)) return;
   try {
     el.setAttribute(name, value);
   } catch {

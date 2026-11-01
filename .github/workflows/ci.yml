@@ -18,6 +18,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          # The browser's copy of the document model (crates/wasm).
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
 
       # Format, lint and type check (web and Rust), test, build.
