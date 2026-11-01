@@ -1,5 +1,5 @@
 {
-  "about": "Op rules shared by crates/design (Document::apply) and apps/web (Replica.apply). Each case starts from `nodes`, applies `ops` in order, and must end with `expect`. Edit the inputs, then run `FINITE_UPDATE_FIXTURES=1 cargo test -p finite-design --test conformance` to regenerate `expect` from the Rust rules.",
+  "about": "Op rules (Document::apply), checked by crates/design/tests/conformance.rs. apps/web/src/design/conformance.test.ts runs the same cases through WebAssembly and checks the viewer's cache against `expect`. Each case starts from `nodes`, applies `ops` in order, and must end with `expect`. Edit the inputs, then run `FINITE_UPDATE_FIXTURES=1 cargo test -p finite-design --test conformance` to regenerate `expect` from the Rust rules.",
   "cases": [
     {
       "name": "create inserts nodes in sibling order",
@@ -155,6 +155,28 @@
             "styles": {},
             "attrs": {}
           }
+        ],
+        "children": [
+          [
+            null,
+            [
+              "a"
+            ]
+          ],
+          [
+            "a",
+            [
+              "d",
+              "b",
+              "c"
+            ]
+          ],
+          [
+            "d",
+            [
+              "t"
+            ]
+          ]
         ]
       }
     },
@@ -377,6 +399,34 @@
             "styles": {},
             "attrs": {}
           }
+        ],
+        "children": [
+          [
+            null,
+            [
+              "a",
+              "z"
+            ]
+          ],
+          [
+            "a",
+            [
+              "b",
+              "c"
+            ]
+          ],
+          [
+            "b",
+            [
+              "t"
+            ]
+          ],
+          [
+            "z",
+            [
+              "w"
+            ]
+          ]
         ]
       }
     },
@@ -487,6 +537,14 @@
             "styles": {},
             "attrs": {}
           }
+        ],
+        "children": [
+          [
+            null,
+            [
+              "z"
+            ]
+          ]
         ]
       }
     },
@@ -700,6 +758,28 @@
             "styles": {},
             "attrs": {}
           }
+        ],
+        "children": [
+          [
+            null,
+            [
+              "a",
+              "z"
+            ]
+          ],
+          [
+            "a",
+            [
+              "b",
+              "c"
+            ]
+          ],
+          [
+            "b",
+            [
+              "t"
+            ]
+          ]
         ]
       }
     },
@@ -876,6 +956,28 @@
             "styles": {},
             "attrs": {}
           }
+        ],
+        "children": [
+          [
+            null,
+            [
+              "a",
+              "z"
+            ]
+          ],
+          [
+            "a",
+            [
+              "b",
+              "c"
+            ]
+          ],
+          [
+            "b",
+            [
+              "t"
+            ]
+          ]
         ]
       }
     },
@@ -1045,6 +1147,28 @@
             "styles": {},
             "attrs": {}
           }
+        ],
+        "children": [
+          [
+            null,
+            [
+              "a",
+              "b"
+            ]
+          ],
+          [
+            "a",
+            [
+              "z"
+            ]
+          ],
+          [
+            "b",
+            [
+              "t",
+              "c"
+            ]
+          ]
         ]
       }
     },
@@ -1242,6 +1366,28 @@
             "styles": {},
             "attrs": {}
           }
+        ],
+        "children": [
+          [
+            null,
+            [
+              "a",
+              "z"
+            ]
+          ],
+          [
+            "a",
+            [
+              "b",
+              "c"
+            ]
+          ],
+          [
+            "b",
+            [
+              "t"
+            ]
+          ]
         ]
       }
     }

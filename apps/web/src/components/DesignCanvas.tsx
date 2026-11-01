@@ -9,6 +9,7 @@ import { Camera, union } from "@/design/camera";
 import { type Hit, Renderer } from "@/design/renderer";
 import { Replica } from "@/design/replica";
 import { DesignSession, initialSessionState, type SessionState } from "@/design/session";
+import { loadDesignModel } from "@/design/wasm";
 import { mcpUrl } from "@/lib/mcp";
 import { localUser } from "@/lib/user";
 import { timeAgo } from "@/lib/time";
@@ -40,6 +41,27 @@ function unsent(cause: Cause.Cause<unknown>): string {
   }
   return "Couldn’t send. Check the connection and try again.";
 }
+/**
+ * Waits for finite.wasm, which holds the document rules. Returns `"ready"`,
+ * `"loading"`, or why it failed. It starts loading with the page's code, so
+ * it's usually ready by the time the canvas mounts.
+ */
+function useDesignModel(): "ready" | "loading" | Error {
+  const [state, setState] = useState<"ready" | "loading" | Error>("loading");
+  useEffect(() => {
+    let cancelled = false;
+    loadDesignModel().then(
+      () => !cancelled && setState("ready"),
+      (error: unknown) =>
+        !cancelled && setState(error instanceof Error ? error : new Error(String(error))),
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return state;
+}
+
 export function DesignCanvas({ id }: { id: string }) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const worldRef = useRef<HTMLDivElement>(null);
@@ -57,6 +79,7 @@ export function DesignCanvas({ id }: { id: string }) {
   const { meta, presence, status, activity, comments, working } = session;
   const [zoom, setZoom] = useState(1);
   const [missing, setMissing] = useState(false);
+  const model = useDesignModel();
   const [, setTick] = useState(0);
   const [mode, setMode] = useState<Mode>("pointer");
   const [openId, setOpenId] = useState<string | null>(null);
@@ -72,7 +95,7 @@ export function DesignCanvas({ id }: { id: string }) {
     const viewport = viewportRef.current;
     const world = worldRef.current;
     const frames = framesRef.current;
-    if (!viewport || !world || !frames) return;
+    if (!viewport || !world || !frames || model !== "ready") return;
 
     const camera = new Camera(viewport, world);
     const replica = new Replica();
@@ -149,12 +172,14 @@ export function DesignCanvas({ id }: { id: string }) {
       controller.abort();
       camera.dispose();
       renderer.dispose();
+      // The document lives in WebAssembly memory, which isn't garbage collected.
+      replica.free();
       window.removeEventListener("keydown", onKey);
       clearInterval(ticker);
       cancelAnimationFrame(hoverFrame.current);
       frames.replaceChildren();
     };
-  }, [id]);
+  }, [id, model]);
 
   // In comment mode the left button places comments instead of panning.
   useEffect(() => {
@@ -273,6 +298,17 @@ export function DesignCanvas({ id }: { id: string }) {
     const renderer = rendererRef.current;
     if (renderer) cameraRef.current?.fitTo(union(renderer.artboardBounds().values()));
   };
+
+  if (model instanceof Error) {
+    return (
+      <main {...stylex.props(styles.notFound)}>
+        <p>The viewer couldn’t start: {model.message}</p>
+        <Link href="/" {...stylex.props(styles.link)}>
+          Back to designs
+        </Link>
+      </main>
+    );
+  }
 
   if (missing) {
     return (

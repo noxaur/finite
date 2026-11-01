@@ -4,7 +4,18 @@ Finite is a design canvas that agents edit. Agents connect over MCP and build de
 
 For a guided tour of the internals, read [How Finite works](docs/how-finite-works.md).
 
-The frontend is Next.js (React), styled with StyleX, and talks to the backend through an Effect HTTP client and WebSockets. The backend is a Rust server built on axum. Vite+ (`vp`) runs the JavaScript side, and Cargo builds the Rust side.
+The frontend is Next.js (React), styled with StyleX, and talks to the backend through an Effect HTTP client and WebSockets. The backend is a Rust server built on axum. The document rules are Rust too, and the browser runs them compiled to WebAssembly. Vite+ (`vp`) runs the JavaScript side, and Cargo builds the Rust side.
+
+## Setup
+
+You need Node 22.18 or later, Vite+ (`vp`) and a Rust toolchain from [rustup](https://rustup.rs). The browser runs the Rust rules as WebAssembly, so add that target once:
+
+```bash
+rustup target add wasm32-unknown-unknown
+vp install
+```
+
+`vp run ready`, `vp test` and `vp run dev` build `crates/wasm/dist/finite.wasm` when they need it. To build it yourself, run `vp run wasm#build`.
 
 ## Connect an agent
 
@@ -52,7 +63,7 @@ The history belongs to an actor, per design. Today an actor is an MCP session, o
 1. An MCP tool call, like `update_styles`, runs an edit command from `crates/design/src/edit.rs`. The command validates the request and turns it into ops: `create`, `delete`, `set` (one property) or `move`.
 2. `Design::commit` applies the ops to the server's document, pushes the inverse onto the actor's undo stack, and assigns the change a sequence number. Each design has its own lock, so edits to one design are applied in a single order, and edits to different designs never wait on each other.
 3. The hub broadcasts the change to every viewer's WebSocket and saves the design to disk a moment later.
-4. In the browser, `Replica` applies the same ops with the same rules, and `Renderer` patches only the DOM nodes they touched.
+4. In the browser, `Replica` applies the same ops with the same Rust code, built as WebAssembly. `Renderer` patches only the DOM nodes they touched.
 
 Sibling order uses fractional indexes, so inserting or moving a node rewrites only that node. That keeps concurrent edits from conflicting and is what multiplayer editing will build on.
 
@@ -64,10 +75,11 @@ Sibling order uses fractional indexes, so inserting or moving a node rewrites on
 | `apps/web/src/design` | The canvas client: schemas, `Replica` (document copy), `Renderer` (DOM), `Camera` (pan/zoom)            |
 | `apps/desktop`        | Electron main and preload processes, bundled with `vp pack`                                             |
 | `crates/design`       | The document model with no I/O: nodes, ops and inverses, history, edit commands, HTML import/export     |
+| `crates/wasm`         | The same model built as WebAssembly (`dist/finite.wasm`), which the web app loads                       |
 | `crates/server`       | Rust server (axum). Serves `/api/*`, the MCP endpoint at `/mcp`, and the built frontend in release mode |
 | `Cargo.toml`          | Cargo workspace for everything in `crates/`                                                             |
 
-`crates/server/package.json` and `crates/design/package.json` wrap the Cargo commands, so `vp run` can start, test and build the Rust crates along with the JS packages.
+`crates/server/package.json`, `crates/design/package.json` and `crates/wasm/package.json` wrap the Cargo commands, so `vp run` can start, test and build the Rust crates along with the JS packages. The web app lists `wasm` as a dependency, so `vp run -r build` builds `finite.wasm` before the web app.
 
 ## Commands
 
@@ -80,6 +92,7 @@ vp run test             # cargo test for both crates, plus the web app's Vitest 
 vp run e2e              # build, start a server, and drive the app in headless Chrome
 vp run e2e:router       # the same checks through a router in front of two servers
 vp run e2e:shared       # the same, with both servers on one Postgres
+vp run bench            # time a 90,000-node design, a big write and thumbnails in headless Chrome
 vp run ready            # format, lint and type check (web and Rust, clippy too), test, build
 ```
 

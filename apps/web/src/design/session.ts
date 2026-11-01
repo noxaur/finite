@@ -156,10 +156,8 @@ export class DesignSession {
   /** Applies a change we haven't seen, and returns its activity entry (none if we had). */
   private applyChange(change: Change, actor: string): Activity[] {
     if (change.seq <= this.replica.seq) return [];
-    for (const op of change.ops) {
-      const applied = this.replica.apply(op);
-      if (applied) this.view.apply(applied);
-    }
+    // One call into WebAssembly for the whole change; the view patches op by op.
+    this.replica.applyAll(change.ops, (applied) => this.view.apply(applied));
     this.replica.seq = change.seq;
     const label =
       change.origin === "edit"

@@ -19,6 +19,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          # The browser's copy of the document model (crates/wasm).
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
 
       # Format, lint and type check (web and Rust), test, build.
@@ -72,6 +74,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          # e2e:shared builds the web app, which needs crates/wasm.
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy -p finite-server --all-targets --features postgres -- -D warnings
       - run: cargo test -p finite-server --features postgres

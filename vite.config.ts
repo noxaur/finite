@@ -15,6 +15,10 @@ export default defineConfig({
     rules: { "vite-plus/prefer-vite-plus-imports": "error" },
     options: { typeAware: true, typeCheck: true },
   },
+  test: {
+    // Builds finite.wasm, which the web app's tests load.
+    globalSetup: ["apps/web/src/design/wasm.setup.ts"],
+  },
   run: {
     cache: true,
     tasks: {

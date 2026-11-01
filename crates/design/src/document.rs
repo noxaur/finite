@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 
 use crate::node::{Node, NodeId, NodeKind, PropKey};
@@ -10,7 +10,9 @@ use crate::node::{Node, NodeId, NodeKind, PropKey};
 /// Applying an op returns its inverse, captured from the state at that moment.
 /// Undo replays inverses (the command pattern), so it never restores a whole
 /// snapshot and can't erase other actors' work.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// Serialized with its kind in `op`, as in `{"op": "delete", "id": "4biyjm26"}`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
 pub enum Op {
     /// Inserts one node. Children are separate `Create` ops that follow their parent.
@@ -30,6 +32,54 @@ pub enum Op {
         parent: Option<NodeId>,
         index: String,
     },
+}
+
+/// Reads an op field by field. A derived `Deserialize` for an internally
+/// tagged enum first buffers the whole op, node and all, to find `op`, and
+/// then reads it again: parsing a 30,000-node `write_html` change took half
+/// as long again. Missing and unknown fields are handled as the derive would.
+impl<'de> Deserialize<'de> for Op {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        enum Kind {
+            Create,
+            Delete,
+            Set,
+            Move,
+        }
+        #[derive(Deserialize)]
+        struct Wire {
+            op: Kind,
+            node: Option<Node>,
+            id: Option<NodeId>,
+            key: Option<PropKey>,
+            #[serde(default)]
+            value: Option<Value>,
+            parent: Option<NodeId>,
+            index: Option<String>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let need = |field: &'static str| D::Error::missing_field(field);
+        Ok(match wire.op {
+            Kind::Create => Op::Create {
+                node: wire.node.ok_or_else(|| need("node"))?,
+            },
+            Kind::Delete => Op::Delete {
+                id: wire.id.ok_or_else(|| need("id"))?,
+            },
+            Kind::Set => Op::Set {
+                id: wire.id.ok_or_else(|| need("id"))?,
+                key: wire.key.ok_or_else(|| need("key"))?,
+                value: wire.value,
+            },
+            Kind::Move => Op::Move {
+                id: wire.id.ok_or_else(|| need("id"))?,
+                parent: wire.parent,
+                index: wire.index.ok_or_else(|| need("index"))?,
+            },
+        })
+    }
 }
 
 impl Op {
@@ -90,7 +140,9 @@ pub struct Document {
 
 impl Document {
     pub fn from_nodes(nodes: impl IntoIterator<Item = Node>) -> Self {
+        let nodes = nodes.into_iter();
         let mut doc = Self::default();
+        doc.nodes.reserve(nodes.size_hint().0);
         for node in nodes {
             doc.insert(node);
         }
@@ -100,10 +152,18 @@ impl Document {
     /// Adds or replaces a node, keeping the child index current.
     fn insert(&mut self, node: Node) {
         self.remove(&node.id);
-        self.child_index
-            .entry(node.parent.clone())
-            .or_default()
-            .insert((node.index.clone(), node.id.clone()));
+        let key = (node.index.clone(), node.id.clone());
+        // Look up before inserting, so the parent's id is copied only for
+        // its first child. Loading a snapshot inserts every node.
+        match self.child_index.get_mut(&node.parent) {
+            Some(siblings) => {
+                siblings.insert(key);
+            }
+            None => {
+                self.child_index
+                    .insert(node.parent.clone(), BTreeSet::from([key]));
+            }
+        }
         self.nodes.insert(node.id.clone(), node);
     }
 
@@ -209,20 +269,37 @@ impl Document {
         false
     }
 
-    /// The sibling index right after `id`, before its next sibling.
+    /// The sibling right after `id`, or `None` if it's the last one.
     /// A range lookup in the child index, so duplicating many siblings
     /// doesn't scan the sibling list once per node.
-    pub fn index_after(&self, id: &str) -> Option<String> {
+    pub fn next_sibling(&self, id: &str) -> Option<&Node> {
         use std::ops::Bound::{Excluded, Unbounded};
         let node = self.nodes.get(id)?;
         let me = (node.index.clone(), node.id.clone());
-        let next = self
-            .child_index
+        self.child_index
             .get(&node.parent)?
             .range((Excluded(me), Unbounded))
             .next()
-            .map(|(index, _)| index.as_str());
+            .and_then(|(_, next)| self.nodes.get(next))
+    }
+
+    /// The sibling index right after `id`, before its next sibling.
+    pub fn index_after(&self, id: &str) -> Option<String> {
+        let node = self.nodes.get(id)?;
+        let next = self.next_sibling(id).map(|n| n.index.as_str());
         Some(crate::fractional::key_between(Some(&node.index), next))
+    }
+
+    /// Every parent's children ids in sibling order, artboards under `None`.
+    /// The web viewer reads this once after loading a snapshot, to learn
+    /// sibling order without sorting by index itself.
+    pub fn child_lists(&self) -> impl Iterator<Item = (Option<&str>, impl Iterator<Item = &str>)> {
+        self.child_index.iter().map(|(parent, children)| {
+            (
+                parent.as_deref(),
+                children.iter().map(|(_, id)| id.as_str()),
+            )
+        })
     }
 
     /// `n` sibling indexes for inserting under `parent` at `position` (append when `None`).
@@ -407,6 +484,37 @@ mod tests {
     }
 
     #[test]
+    fn ops_parse_in_any_field_order_and_say_what_is_missing() {
+        let op: Op = serde_json::from_value(
+            json!({ "id": "a", "index": "V", "parent": null, "op": "move" }),
+        )
+        .unwrap();
+        assert_eq!(
+            op,
+            Op::Move {
+                id: "a".into(),
+                parent: None,
+                index: "V".into()
+            }
+        );
+        // `value: null` and no value both clear the property.
+        for set in [
+            json!({ "op": "set", "id": "a", "key": "name", "value": null }),
+            json!({ "op": "set", "id": "a", "key": "name" }),
+        ] {
+            let op: Op = serde_json::from_value(set).unwrap();
+            assert!(matches!(op, Op::Set { value: None, .. }));
+        }
+        let err = serde_json::from_value::<Op>(json!({ "op": "create" })).unwrap_err();
+        assert_eq!(err.to_string(), "missing field `node`");
+        let err = serde_json::from_value::<Op>(json!({ "op": "nope", "id": "a" })).unwrap_err();
+        assert!(err.to_string().contains("unknown variant `nope`"), "{err}");
+        let node = json!({ "id": "e", "parent": null, "index": "V", "type": "element" });
+        let err = serde_json::from_value::<Node>(node).unwrap_err();
+        assert_eq!(err.to_string(), "missing field `tag`");
+    }
+
+    #[test]
     fn ops_round_trip_through_json() {
         let op = Op::Set {
             id: "a".into(),
@@ -448,5 +556,29 @@ mod tests {
         assert!(ids(&d, Some("a")).is_empty());
         assert!(ids(&d, Some("b")).is_empty());
         assert_eq!(ids(&d, None), ["a"]);
+    }
+
+    #[test]
+    fn next_sibling_and_child_lists_follow_sibling_order() {
+        let mut d = doc();
+        d.apply(&Op::Create {
+            node: child("e", "a", "F"),
+        });
+        assert_eq!(d.next_sibling("e").map(|n| n.id.as_str()), Some("b"));
+        assert_eq!(d.next_sibling("b"), None);
+        assert_eq!(d.next_sibling("missing"), None);
+        let mut lists: Vec<(Option<&str>, Vec<&str>)> = d
+            .child_lists()
+            .map(|(parent, ids)| (parent, ids.collect()))
+            .collect();
+        lists.sort();
+        assert_eq!(
+            lists,
+            [
+                (None, vec!["a"]),
+                (Some("a"), vec!["e", "b"]),
+                (Some("b"), vec!["c"]),
+            ]
+        );
     }
 }

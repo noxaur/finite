@@ -266,8 +266,15 @@ importers:
       typescript:
         specifier: 'catalog:'
         version: 7.0.2
+      wasm:
+        specifier: workspace:*
+        version: link:../../crates/wasm
+
+  crates/design: {}
 
   crates/server: {}
+
+  crates/wasm: {}
 
 packages:
 

@@ -1,7 +1,7 @@
-//! Runs the export cases in `fixtures/export.json` and records the shared CSS
-//! and content policy. The web viewer checks its `exportHtml`, `BASE_CSS` and
-//! `CSP` against the same file (`apps/web/src/design/html.test.ts`), so a
-//! screenshot and the live view render an artboard from the same HTML.
+//! Runs the export cases in `fixtures/export.json`, a record of the HTML
+//! screenshots render (`html::export_compact`). The web viewer exports with
+//! this same code through WebAssembly; `apps/web/src/design/html.test.ts`
+//! runs the cases through that boundary, so text survives the trip as UTF-8.
 //!
 //! Regenerate with `FINITE_UPDATE_FIXTURES=1` after changing the export.
 
@@ -14,10 +14,6 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 struct Fixture {
     about: String,
-    #[serde(default)]
-    base_css: String,
-    #[serde(default)]
-    csp: String,
     cases: Vec<Case>,
 }
 
@@ -40,8 +36,6 @@ fn export_matches_the_shared_fixture() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/export.json");
     let mut fixture: Fixture = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     if std::env::var_os("FINITE_UPDATE_FIXTURES").is_some() {
-        fixture.base_css = html::BASE_CSS.into();
-        fixture.csp = html::CSP.into();
         for case in &mut fixture.cases {
             case.expect = Some(run(case));
         }
@@ -52,8 +46,6 @@ fn export_matches_the_shared_fixture() {
         .unwrap();
         return;
     }
-    assert_eq!(fixture.base_css, html::BASE_CSS, "regenerate the fixture");
-    assert_eq!(fixture.csp, html::CSP, "regenerate the fixture");
     for case in &fixture.cases {
         assert_eq!(Some(run(case)), case.expect, "case {:?}", case.name);
     }

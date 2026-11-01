@@ -1,13 +1,15 @@
+import "./wasm.node";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vite-plus/test";
-import { artboardDocument, BASE_CSS, CSP, exportHtml, pixelSize } from "./html";
+import { artboardDocument, pixelSize } from "./html";
 import { Replica } from "./replica";
 import type { Node } from "./schema";
+import { designModel } from "./wasm";
 
 const el = (id: string, parent: string | null, tag: string, extra: Partial<Node> = {}): Node => ({
   id,
   parent,
-  index: id,
+  index: "V",
   type: "element",
   tag,
   name: null,
@@ -19,48 +21,22 @@ const el = (id: string, parent: string | null, tag: string, extra: Partial<Node>
   ...extra,
 });
 
-const text = (id: string, parent: string, value: string): Node => ({
-  ...el(id, parent, ""),
-  type: "text",
-  text: value,
-});
-
 const replica = (nodes: ReadonlyArray<Node>) => {
   const r = new Replica();
   r.load({ meta: { id: "d", name: "D", createdAt: 0, updatedAt: 0 }, seq: 0, nodes, comments: [] });
   return r;
 };
 
-describe("exportHtml", () => {
-  it("writes styles, attributes and escaped text", () => {
-    const r = replica([
-      el("a", null, "div", { styles: { width: "390px", color: "red" }, attrs: { class: "x" } }),
-      el("b", "a", "p"),
-      text("c", "b", '1 < 2 & "ok"'),
-      el("d", "a", "img", { attrs: { src: "a.png" } }),
-    ]);
-    expect(exportHtml(r, "a")).toBe(
-      '<div class="x" style="width: 390px; color: red"><p>1 &lt; 2 &amp; "ok"</p><img src="a.png" /></div>',
-    );
-  });
-
-  it("leaves script and style code unescaped but can't be closed early", () => {
-    const r = replica([
-      el("a", null, "div"),
-      el("b", "a", "script"),
-      text("c", "b", "if (a < b) x('</SCRIPT>')"),
-    ]);
-    expect(exportHtml(r, "a")).toBe("<div><script>if (a < b) x('<\\/SCRIPT>')</script></div>");
-  });
-
-  it("wraps an artboard in a page with a content policy", () => {
-    const r = replica([el("a", null, "div")]);
+describe("artboardDocument", () => {
+  it("wraps an artboard in a page with the server's content policy and base CSS", () => {
+    const r = replica([el("a", null, "div", { attrs: { class: "x" } })]);
     const page = artboardDocument(r, "a");
-    expect(page).toContain("Content-Security-Policy");
-    expect(page).toContain("default-src 'none'");
+    expect(page).toContain(`content="${designModel().csp}"`);
+    expect(designModel().csp).toContain("default-src 'none'");
+    expect(page).toContain(designModel().baseCss);
     // Each element carries its node id, so comments can point inside the sandbox.
-    expect(page).toMatch(/<body><div data-finite-id="a"><\/div><\/body>/);
-    expect(exportHtml(r, "a")).toBe("<div></div>");
+    expect(page).toContain('<body><div data-finite-id="a" class="x"></div></body>');
+    expect(r.exportHtml("a")).toBe('<div class="x"></div>');
   });
 });
 
@@ -75,18 +51,17 @@ describe("pixelSize", () => {
   });
 });
 
-// The cases in crates/design/fixtures/export.json, generated from the Rust
-// export that screenshots use. The viewer must produce the same HTML and use
-// the same base CSS and content policy, or screenshots won't match what people see.
-describe("the viewer renders artboards like screenshots do", () => {
+// The cases in crates/design/fixtures/export.json, recorded from the Rust
+// export that screenshots use. The viewer calls that same export through
+// WebAssembly, so these check the boundary: the nodes go in as JSON, and
+// the HTML, escaped text and all, comes back unchanged.
+describe("the viewer exports artboards with the screenshot code", () => {
   const fixture = JSON.parse(
     readFileSync(
       new URL("../../../../crates/design/fixtures/export.json", import.meta.url),
       "utf8",
     ),
   ) as {
-    readonly baseCss: string;
-    readonly csp: string;
     readonly cases: ReadonlyArray<{
       readonly name: string;
       readonly root: string;
@@ -95,12 +70,11 @@ describe("the viewer renders artboards like screenshots do", () => {
     }>;
   };
 
-  it("uses the same base CSS and content policy", () => {
-    expect(BASE_CSS).toBe(fixture.baseCss);
-    expect(CSP).toBe(fixture.csp);
+  it.each(fixture.cases.map((c) => [c.name, c] as const))("%s", (_, c) => {
+    expect(replica(c.nodes).exportHtml(c.root)).toBe(c.expect);
   });
 
-  it.each(fixture.cases.map((c) => [c.name, c] as const))("%s", (_, c) => {
-    expect(exportHtml(replica(c.nodes), c.root)).toBe(c.expect);
+  it("returns nothing for a node that isn't there", () => {
+    expect(replica([]).exportHtml("missing")).toBe("");
   });
 });

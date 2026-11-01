@@ -1,7 +1,5 @@
 {
-  "about": "HTML export shared by crates/design (html::export_compact, used for screenshots) and apps/web (exportHtml, used for sandboxed artboards), plus the base CSS and content policy both apply. Regenerate with `FINITE_UPDATE_FIXTURES=1 cargo test -p finite-design --test export`.",
-  "baseCss": "*, *::before, *::after { box-sizing: border-box; }",
-  "csp": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https:; img-src https: http: data: blob:; font-src https: data:; media-src https: data: blob:",
+  "about": "HTML export as screenshots render it (html::export_compact), checked by crates/design/tests/export.rs. apps/web/src/design/html.test.ts runs the same cases through WebAssembly. Regenerate with `FINITE_UPDATE_FIXTURES=1 cargo test -p finite-design --test export`.",
   "cases": [
     {
       "name": "inline siblings get no whitespace between them",
@@ -303,6 +301,40 @@
         }
       ],
       "expect": "<svg viewBox=\"0 0 10 10\" width=\"10\"><path d=\"M0 0L10 10\" stroke=\"red\"></path></svg>"
+    },
+    {
+      "name": "text outside ASCII comes through unchanged",
+      "root": "p",
+      "nodes": [
+        {
+          "id": "p",
+          "parent": null,
+          "index": "V",
+          "type": "element",
+          "tag": "p",
+          "name": null,
+          "text": null,
+          "x": null,
+          "y": null,
+          "styles": {},
+          "attrs": {
+            "title": "Grüße — 日本語"
+          }
+        },
+        {
+          "id": "t",
+          "parent": "p",
+          "index": "V",
+          "type": "text",
+          "name": null,
+          "text": "Hej 👋 Ünïcödé, “quotes” & 中文",
+          "x": null,
+          "y": null,
+          "styles": {},
+          "attrs": {}
+        }
+      ],
+      "expect": "<p title=\"Grüße — 日本語\">Hej 👋 Ünïcödé, “quotes” &amp; 中文</p>"
     }
   ]
 }

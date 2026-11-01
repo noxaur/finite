@@ -47,6 +47,7 @@ if (!process.env.E2E_SKIP_BUILD) {
   // The shared store is behind a cargo feature.
   const features = shared ? ["--features", "postgres"] : [];
   run("cargo", ["build", "-q", "-p", "finite-server", ...features], root);
+  run("node", ["crates/wasm/build.mjs"], root);
   run("npx", ["next", "build"], path.join(root, "apps/web"));
 }
 

@@ -41,7 +41,7 @@ const VOID_TAGS: &[&str] = &[
 ];
 
 /// Base styles for rendering an artboard. Screenshots and the web viewer both
-/// use them (the viewer's copy is checked against `fixtures/export.json`).
+/// use them; the viewer reads them through WebAssembly.
 pub const BASE_CSS: &str = "*, *::before, *::after { box-sizing: border-box; }";
 
 /// The content policy for artboards that run scripts: inline code, remote
@@ -184,9 +184,6 @@ fn convert(
     })
 }
 
-/// Whether an attribute is allowed on a node: no event handlers, no
-/// `srcdoc`, no `javascript:` or `vbscript:` URLs. `write_html` drops the
-/// ones that fail, and `set_attributes` refuses them.
 /// Whether `name` can be written as an attribute name. Exports write names
 /// as they are, so anything else could break out of the tag. Allows SVG's
 /// `viewBox` and namespaced names like `xlink:href`.
@@ -198,13 +195,16 @@ pub fn is_attr_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '.' | '-'))
 }
 
+/// Whether an attribute is allowed on a node: no event handlers, no
+/// `srcdoc`, no `javascript:` or `vbscript:` URLs. `write_html` drops the
+/// ones that fail, and `set_attributes` refuses them.
 ///
 /// A script URL is refused anywhere in the value, not just at the start:
 /// SVG animation can set an `href` at runtime from a list such as
 /// `<animate attributeName="href" values="0;javascript:…">`. Browsers ignore
 /// whitespace and control characters inside a URL scheme, so they're
-/// ignored here too. The viewer's `isSafeAttr` applies the same rules
-/// (checked against `fixtures/attributes.json`).
+/// ignored here too. The web viewer checks attributes again before it sets
+/// them, by calling this function through WebAssembly.
 pub fn is_safe_attr(name: &str, value: &str) -> bool {
     let name = name.to_ascii_lowercase();
     let value: String = value
@@ -396,14 +396,27 @@ fn write_node(doc: &Document, node: &Node, ids: bool, depth: usize, out: &mut St
 /// The subtree at `id` exactly as the document holds it: no added whitespace,
 /// no layer names. This is what renders, so screenshots use it. The indented
 /// [`export`] would add whitespace text between siblings, which shows up as a
-/// space between inline elements. The web viewer's `exportHtml` matches this.
+/// space between inline elements.
 pub fn export_compact(doc: &Document, id: &str) -> Option<String> {
     let mut out = String::new();
-    write_compact(doc, doc.get(id)?, &mut out);
+    write_compact(doc, doc.get(id)?, false, &mut out);
     Some(out)
 }
 
-fn write_compact(doc: &Document, node: &Node, out: &mut String) {
+/// Marks each element with its node id in the HTML the web viewer renders
+/// in a sandboxed iframe, so a comment can point at an element inside it.
+pub const VIEWER_ID_ATTR: &str = "data-finite-id";
+
+/// [`export_compact`] with every element's node id in [`VIEWER_ID_ATTR`].
+/// The web viewer renders artboards that run scripts from this, through
+/// WebAssembly, so they match screenshots.
+pub fn export_for_viewer(doc: &Document, id: &str) -> Option<String> {
+    let mut out = String::new();
+    write_compact(doc, doc.get(id)?, true, &mut out);
+    Some(out)
+}
+
+fn write_compact(doc: &Document, node: &Node, ids: bool, out: &mut String) {
     let tag = match &node.kind {
         NodeKind::Text => {
             out.push_str(&escape(node.text.as_deref().unwrap_or(""), false));
@@ -412,6 +425,9 @@ fn write_compact(doc: &Document, node: &Node, out: &mut String) {
         NodeKind::Element { tag } => tag,
     };
     let _ = write!(out, "<{tag}");
+    if ids {
+        let _ = write!(out, " {VIEWER_ID_ATTR}=\"{}\"", escape(&node.id, true));
+    }
     for (name, value) in &node.attrs {
         let _ = write!(out, " {name}=\"{}\"", escape(value, true));
     }
@@ -433,7 +449,7 @@ fn write_compact(doc: &Document, node: &Node, out: &mut String) {
         out.push_str(&raw_text(&code, tag));
     } else {
         for child in children {
-            write_compact(doc, child, out);
+            write_compact(doc, child, ids, out);
         }
     }
     let _ = write!(out, "</{tag}>");
@@ -616,6 +632,33 @@ mod tests {
         assert_eq!(
             parse(&html)[0],
             Fragment::from_document(&doc, &root).unwrap()
+        );
+    }
+
+    #[test]
+    fn the_viewer_export_marks_every_element_with_its_id() {
+        let mut ops = Vec::new();
+        let mut n = 0;
+        let fragment = parse(r#"<div class="box"><b>Hi</b></div>"#).remove(0);
+        let root = fragment.create_ops(
+            None,
+            "V".into(),
+            None,
+            &mut || {
+                n += 1;
+                format!("n{n}")
+            },
+            &mut ops,
+        );
+        let mut doc = Document::default();
+        doc.apply_all(&ops);
+        assert_eq!(
+            export_for_viewer(&doc, &root).unwrap(),
+            r#"<div data-finite-id="n1" class="box"><b data-finite-id="n2">Hi</b></div>"#
+        );
+        assert_eq!(
+            export_compact(&doc, &root).unwrap(),
+            r#"<div class="box"><b>Hi</b></div>"#
         );
     }
 }
