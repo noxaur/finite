@@ -1,4 +1,5 @@
-# Runs the same checks as `vp run ready`, then the end-to-end test.
+# Runs the same checks as `vp run ready`, then the end-to-end test, and the
+# tests that need Postgres against a Postgres service.
 name: CI
 
 on:
@@ -40,3 +41,28 @@ jobs:
           name: e2e-failure
           path: ${{ runner.temp }}/finite-e2e-failure.png
           if-no-files-found: ignore
+
+  # The tests that need Postgres: the Postgres store's contract, servers that
+  # share one database, and failover with real processes. Without
+  # FINITE_TEST_DATABASE_URL they skip, so the job above doesn't run them.
+  shared-store:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: finite
+          POSTGRES_DB: finite_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      FINITE_TEST_DATABASE_URL: postgres://postgres:finite@localhost:5432/finite_test
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p finite-server

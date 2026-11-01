@@ -1,9 +1,11 @@
 //! Servers that share one store: designs live in the store, ownership follows
 //! the servers' heartbeats, and a server that lost a design can't write it.
 //!
-//! Each test runs against the in-memory store. Servers run in this process,
-//! over real sockets. A server is "killed" or "paused" by cutting it off from
-//! the store: it can't heartbeat or save, as a crashed or frozen process can't.
+//! Each test runs against the in-memory store, and against Postgres too when
+//! `FINITE_TEST_DATABASE_URL` is set. Servers run in this process, over real
+//! sockets. A server is "killed" or "paused" by cutting it off from the
+//! store: it can't heartbeat or save, as a crashed or frozen process can't.
+//! `tests/failover.rs` does the same with real processes and signals.
 
 use std::{
     io,
@@ -18,6 +20,7 @@ use finite_design::{Record, Snapshot};
 use finite_server::{
     Hub, app,
     cluster::{self, Cluster, Lease, Members},
+    postgres::{PgStore, test_database},
     router,
     store::{Claim, MemoryStore, Registry, Store, Stored, Token},
 };
@@ -107,27 +110,33 @@ impl Registry for Cut {
 /// Where the shared designs live, and how long a heartbeat counts there.
 enum Backend {
     Memory(MemoryStore, Lease),
+    Postgres(String, Lease),
 }
 
 impl Backend {
-    /// Every store to run the tests against.
+    /// The in-memory store, and Postgres if it's configured.
     fn all() -> Vec<Backend> {
         Self::all_with(LEASE)
     }
 
     fn all_with(lease: Lease) -> Vec<Backend> {
-        vec![Backend::Memory(MemoryStore::with_lease(lease.0), lease)]
+        let mut all = vec![Backend::Memory(MemoryStore::with_lease(lease.0), lease)];
+        if let Some(url) = test_database() {
+            all.push(Backend::Postgres(url, lease));
+        }
+        all
     }
 
     fn lease(&self) -> Lease {
         match self {
-            Self::Memory(_, lease) => *lease,
+            Self::Memory(_, lease) | Self::Postgres(_, lease) => *lease,
         }
     }
 
     fn name(&self) -> &'static str {
         match self {
             Self::Memory(..) => "memory",
+            Self::Postgres(..) => "postgres",
         }
     }
 
@@ -135,6 +144,7 @@ impl Backend {
     fn connect(&self, url: &str) -> Arc<Cut> {
         let inner: Box<dyn Both> = match self {
             Self::Memory(store, _) => Box::new(store.node(url)),
+            Self::Postgres(db, lease) => Box::new(PgStore::connect(db, url, lease.0).unwrap()),
         };
         Arc::new(Cut {
             inner,
