@@ -82,7 +82,10 @@ pub fn app_with_sessions(
     let cluster = Cluster::new(nodes, 0).expect("the router needs at least one server");
     let front = Arc::new(Front {
         cluster,
-        http: reqwest::Client::new(),
+        http: reqwest::Client::builder()
+            .connect_timeout(UPSTREAM_TIMEOUT)
+            .build()
+            .expect("the HTTP client builds"),
         next: AtomicUsize::new(0),
     });
     let router = Router::new()
@@ -205,13 +208,27 @@ async fn forward(
 
 /// Creates a design on the server whose turn it is. If that server can't be
 /// reached, the next one takes it: a refused connection never reached the
-/// server, so nothing was created twice.
+/// server, so nothing was created twice. A server that doesn't answer in
+/// `UPSTREAM_TIMEOUT` may have created it, so that's a `504` instead, and
+/// the next try goes to the next server.
 async fn create(State(front): State<Arc<Front>>, headers: HeaderMap, body: Bytes) -> Response {
     let nodes = front.cluster.nodes();
     let turn = front.next.fetch_add(1, Ordering::Relaxed);
     for i in 0..nodes.len() {
         let base = &nodes[(turn + i) % nodes.len()];
-        match send(&front, base, &Method::POST, "/api/designs", &headers, &body).await {
+        let created = send(&front, base, &Method::POST, "/api/designs", &headers, &body);
+        let Ok(created) = tokio::time::timeout(UPSTREAM_TIMEOUT, created).await else {
+            tracing::warn!(
+                base,
+                "a server didn't answer in time; the design may not exist"
+            );
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                "the server didn't answer in time",
+            )
+                .into_response();
+        };
+        match created {
             Err(error) if error.is_connect() && i + 1 < nodes.len() => {
                 tracing::warn!(base, %error, "a server is down; creating the design on the next");
             }
@@ -237,6 +254,7 @@ async fn list(State(front): State<Arc<Front>>, RawQuery(query): RawQuery) -> Res
         let url = format!("{base}/api/designs{query}");
         async move {
             http.get(&url)
+                .timeout(UPSTREAM_TIMEOUT)
                 .send()
                 .await?
                 .error_for_status()?
@@ -278,6 +296,13 @@ async fn owner(State(front): State<Arc<Front>>, Path(id): Path<String>) -> Json<
     Json(json!({ "owner": front.cluster.owner_url(&id) }))
 }
 
+/// How long the router waits to connect to a server, for a server to accept
+/// a WebSocket, and for its design list. A server that's stuck, rather than
+/// down, still accepts connections and never answers. Without a limit, one
+/// stuck server held up every browser's design list. A server's list takes
+/// milliseconds, so this is generous. The MCP relay uses it too.
+pub(crate) const UPSTREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Opens a server's WebSocket. A server sends a design's snapshot as one
 /// frame, and tungstenite refuses frames over 16 MB by default, which would
 /// leave a large design unable to open through the router. Browsers have no
@@ -288,7 +313,14 @@ async fn connect_ws(
     let config = tungstenite::protocol::WebSocketConfig::default()
         .max_message_size(None)
         .max_frame_size(None);
-    tokio_tungstenite::connect_async_with_config(url, Some(config), false).await
+    let connect = tokio_tungstenite::connect_async_with_config(url, Some(config), false);
+    tokio::time::timeout(UPSTREAM_TIMEOUT, connect)
+        .await
+        .unwrap_or_else(|_| {
+            let late =
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "the server didn't answer");
+            Err(tungstenite::Error::Io(late))
+        })
 }
 
 /// Relays a design's WebSocket to its owner, both ways, until either side closes.
@@ -408,7 +440,28 @@ fn merged(lists: &[(Vec<Value>, u64)]) -> String {
     json!({ "type": "designs", "designs": designs, "total": total }).to_string()
 }
 
-async fn relay_lobby(mut client: WebSocket, upstreams: Vec<Upstream>, mut complete: bool) {
+/// A server's first message, its full list. Pings before it are skipped.
+/// `None` if the server sends anything else, closes, or takes longer than
+/// `UPSTREAM_TIMEOUT`.
+async fn first_list(upstream: &mut Upstream) -> Option<Value> {
+    let first = async {
+        loop {
+            match upstream.next().await? {
+                Ok(tungstenite::Message::Ping(_) | tungstenite::Message::Pong(_)) => continue,
+                Ok(tungstenite::Message::Text(text)) => {
+                    return serde_json::from_str(text.as_str()).ok();
+                }
+                _ => return None,
+            }
+        }
+    };
+    tokio::time::timeout(UPSTREAM_TIMEOUT, first)
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn relay_lobby(mut client: WebSocket, mut upstreams: Vec<Upstream>, mut complete: bool) {
     let text = |m: Option<Result<tungstenite::Message, tungstenite::Error>>| match m {
         Some(Ok(tungstenite::Message::Text(text))) => {
             serde_json::from_str::<Value>(text.as_str()).ok()
@@ -420,8 +473,9 @@ async fn relay_lobby(mut client: WebSocket, upstreams: Vec<Upstream>, mut comple
     // behind, and that replaces only that server's part of the merge.
     let mut streams: SelectAll<_> = SelectAll::new();
     let mut lists: Vec<(Vec<Value>, u64)> = Vec::new();
-    for mut upstream in upstreams {
-        let Some(first) = text(upstream.next().await) else {
+    let firsts = futures::future::join_all(upstreams.iter_mut().map(first_list)).await;
+    for (upstream, first) in upstreams.into_iter().zip(firsts) {
+        let Some(first) = first else {
             complete = false;
             continue;
         };

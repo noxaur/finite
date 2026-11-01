@@ -866,3 +866,113 @@ async fn list_designs_fails_when_no_server_answers() {
     assert_eq!(result.is_error, Some(true));
     client.cancel().await.unwrap();
 }
+
+/// A server that's stuck, rather than down, still accepts connections but
+/// never answers. The design list leaves it out after a few seconds, over
+/// HTTP and over its socket, and creating a design on its turn fails rather
+/// than waiting for it forever.
+#[tokio::test]
+async fn the_router_gets_past_a_stuck_server() {
+    let (a, a_url) = listen().await;
+    // Never accepted: the OS queues the connections, and nothing answers.
+    let (stuck, stuck_url) = listen().await;
+    let nodes = vec![a_url, stuck_url];
+    let hub = Hub::with_cluster(
+        Arc::new(MemoryStore::default()),
+        Cluster::new(nodes.clone(), 0).unwrap(),
+    )
+    .unwrap();
+    let id = hub.create("Still here").meta.id;
+    tokio::spawn(async move { axum::serve(a, app(hub, None)).await });
+    let (front, front_url) = listen().await;
+    let routes = router::app(nodes, None);
+    tokio::spawn(async move { axum::serve(front, routes).await });
+
+    let lobby_url = format!("{front_url}/api/designs/ws");
+    let http = reqwest::Client::new();
+    let create = || async {
+        let res = http
+            .post(format!("{front_url}/api/designs"))
+            .json(&json!({ "name": "New" }))
+            .send()
+            .await
+            .unwrap();
+        res.status().as_u16()
+    };
+    let all = async {
+        tokio::join!(
+            async {
+                let res = reqwest::get(format!("{front_url}/api/designs"))
+                    .await
+                    .unwrap();
+                res.json::<Vec<Value>>().await.unwrap()
+            },
+            first_text(&lobby_url),
+            create(),
+            create(),
+        )
+    };
+    let (listed, first, one, two) = tokio::time::timeout(std::time::Duration::from_secs(15), all)
+        .await
+        .expect("the router waited for the stuck server");
+    // The design created alongside may be in the lists too.
+    assert!(listed.iter().any(|d| d["id"] == id.as_str()));
+    let lobby = first["designs"].as_array().unwrap();
+    assert!(lobby.iter().any(|d| d["id"] == id.as_str()));
+    let mut created = [one, two];
+    created.sort();
+    assert_eq!(created, [201, 504]);
+    drop(stuck);
+}
+
+/// Through the router, an agent still lists tools and designs while a server
+/// is stuck: accepting connections and never answering.
+#[tokio::test]
+async fn agents_get_past_a_stuck_server() {
+    use rmcp::{
+        ServiceExt,
+        transport::{
+            StreamableHttpClientTransport,
+            streamable_http_client::StreamableHttpClientTransportConfig,
+        },
+    };
+    let (stuck, stuck_url) = listen().await;
+    let (up, up_url) = listen().await;
+    let nodes = vec![stuck_url, up_url];
+    let hub = Hub::with_cluster(
+        Arc::new(MemoryStore::default()),
+        Cluster::new(nodes.clone(), 1).unwrap(),
+    )
+    .unwrap();
+    let id = hub.create("Still here").meta.id;
+    tokio::spawn(async move { axum::serve(up, app(hub, None)).await });
+    let (front, front_url) = listen().await;
+    let routes = router::app(nodes, None);
+    tokio::spawn(async move { axum::serve(front, routes).await });
+
+    let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp"));
+    let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
+    let both = async {
+        let tools = client.list_all_tools().await.unwrap();
+        let listed = client
+            .call_tool(rmcp::model::CallToolRequestParams::new("list_designs"))
+            .await
+            .unwrap();
+        (tools, listed)
+    };
+    let (tools, listed) = tokio::time::timeout(std::time::Duration::from_secs(20), both)
+        .await
+        .expect("the relay waited for the stuck server");
+    assert!(tools.iter().any(|t| t.name == "write_html"));
+    assert_ne!(listed.is_error, Some(true));
+    let text: Vec<&str> = listed
+        .content
+        .iter()
+        .filter_map(|c| c.as_text())
+        .map(|t| t.text.as_str())
+        .collect();
+    assert!(text[0].contains(id.as_str()), "{text:?}");
+    assert!(text.iter().any(|t| t.contains("didn't answer")), "{text:?}");
+    client.cancel().await.unwrap();
+    drop(stuck);
+}

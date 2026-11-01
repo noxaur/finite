@@ -59,6 +59,7 @@ use crate::{
     cluster::Cluster,
     mcp::params::ListParams,
     mcp::{INSTRUCTIONS, OWNER_META},
+    router::UPSTREAM_TIMEOUT,
 };
 
 type Backend = Arc<RunningService<RoleClient, ()>>;
@@ -143,6 +144,19 @@ fn unreachable(base: &str, error: impl std::fmt::Display) -> McpError {
     McpError::internal_error(format!("Finite server {base} didn't answer: {error}"), None)
 }
 
+/// Waits at most `UPSTREAM_TIMEOUT` for `work` on `base`. A server that's
+/// stuck, rather than down, accepts connections and never answers, and
+/// without a limit it held up `list_designs` for every agent. Only for quick
+/// steps: a tool call like `wait_for_comments` can rightly take minutes.
+async fn in_time<T>(
+    base: &str,
+    work: impl Future<Output = Result<T, McpError>>,
+) -> Result<T, McpError> {
+    tokio::time::timeout(UPSTREAM_TIMEOUT, work)
+        .await
+        .unwrap_or_else(|_| Err(unreachable(base, "it took too long")))
+}
+
 impl Relay {
     /// The session on the server at `base`, opening one if there's none or
     /// the last one closed.
@@ -167,10 +181,12 @@ impl Relay {
         }
         let config = StreamableHttpClientTransportConfig::with_uri(format!("{base}/mcp"))
             .custom_headers(identity(ctx));
-        let backend =
+        let connect = async {
             ().serve(StreamableHttpClientTransport::from_config(config))
                 .await
-                .map_err(|e| unreachable(base, e))?;
+                .map_err(|e| unreachable(base, e))
+        };
+        let backend = in_time(base, connect).await?;
         Ok(slot.insert(Arc::new(backend)).clone())
     }
 
@@ -229,7 +245,7 @@ impl Relay {
             .cluster
             .nodes()
             .iter()
-            .map(|base| self.call(base, params.clone(), ctx));
+            .map(|base| in_time(base, self.call(base, params.clone(), ctx)));
         let limit = params
             .arguments
             .as_ref()
@@ -294,20 +310,24 @@ impl ServerHandler for Relay {
             .with_instructions(INSTRUCTIONS)
     }
 
-    /// Every server has the same tools, so the first one lists them.
+    /// Every server has the same tools, so the first that answers lists them.
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        // Every server has the same tools, so the first that answers will do.
         let mut last = None;
         for base in self.cluster.nodes() {
             let listed = match self.backend(base, &ctx).await {
-                Ok(backend) => backend
-                    .list_all_tools()
-                    .await
-                    .map_err(|e| unreachable(base, e)),
+                Ok(backend) => {
+                    let list = async {
+                        backend
+                            .list_all_tools()
+                            .await
+                            .map_err(|e| unreachable(base, e))
+                    };
+                    in_time(base, list).await
+                }
                 Err(error) => Err(error),
             };
             match listed {
