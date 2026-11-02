@@ -4,11 +4,12 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{
         DefaultBodyLimit, Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::StatusCode,
+    http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, patch, post, put},
 };
@@ -16,10 +17,12 @@ use finite_design::{
     Snapshot,
     comment::{self, Anchor, Author, AuthorKind, Comment, CommentError},
     edit,
+    version::{self, VersionError},
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::{self, error::RecvError};
 
+use crate::blob::{self, BlobHash};
 use crate::cluster::Place;
 use crate::heartbeat::{self, Heartbeat};
 use crate::hub::{
@@ -57,6 +60,12 @@ pub fn routes() -> Router<Arc<Hub>> {
             post(reply_to_comment),
         )
         .route("/designs/{id}/css", put(set_css))
+        .route(
+            "/designs/{id}/assets/{hash}",
+            get(get_asset)
+                .put(put_asset)
+                .layer(DefaultBodyLimit::max(blob::MAX_BLOB)),
+        )
 }
 
 /// `?q=…&limit=…` on the design list: a name to search for, and how many.
@@ -180,12 +189,16 @@ async fn get_design(
 
 /// Takes over a design another server is handing off, after the list of
 /// servers changed. Only the new owner accepts it, and only if it doesn't
-/// already have that design.
-async fn adopt(
-    State(hub): State<Arc<Hub>>,
-    Path(id): Path<String>,
-    Json(snapshot): Json<Snapshot>,
-) -> Response {
+/// already have that design. A snapshot from a newer version is refused with
+/// `409`, so the sender keeps its copy.
+async fn adopt(State(hub): State<Arc<Hub>>, Path(id): Path<String>, body: String) -> Response {
+    let snapshot: Snapshot = match version::SNAPSHOT.decode(&body) {
+        Ok(snapshot) => snapshot,
+        Err(error @ VersionError::Newer { .. }) => {
+            return (StatusCode::CONFLICT, error.to_string()).into_response();
+        }
+        Err(error) => return ApiError::Unprocessable(error.to_string()).into_response(),
+    };
     if snapshot.meta.id != id {
         return ApiError::Unprocessable("the snapshot is for another design".into())
             .into_response();
@@ -231,6 +244,78 @@ async fn owner_of(State(hub): State<Arc<Hub>>, Path(id): Path<String>) -> Respon
         owner: hub.elsewhere(&id),
     })
     .into_response()
+}
+
+/// A blob, by the hash of its bytes. A hash always names the same bytes, so
+/// browsers may keep the answer forever.
+///
+/// Anyone can store bytes that claim to be an image, so every answer is
+/// locked down: the type comes from the bytes, `nosniff` stops a browser
+/// from guessing another, and `sandbox` keeps a script in an SVG from running
+/// when someone opens the URL itself.
+async fn get_asset(
+    State(hub): State<Arc<Hub>>,
+    Path((id, hash)): Path<(String, String)>,
+) -> Response {
+    let mut response = match asset(&hub, &id, &hash).await {
+        Ok(response) => response,
+        Err(error) => error.into_response(),
+    };
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("sandbox"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
+}
+
+async fn asset(hub: &Hub, id: &str, hash: &str) -> Result<Response, ApiError> {
+    here(hub, id)?;
+    let hash = BlobHash::parse(hash).map_err(|e| ApiError::Unprocessable(e.to_string()))?;
+    let store = hub.store();
+    let key = hash.clone();
+    let bytes = tokio::task::spawn_blocking(move || store.get_blob(&key))
+        .await
+        .map_err(|e| ApiError::Unavailable(e.to_string()))?
+        .map_err(|e| ApiError::Unavailable(e.to_string()))?
+        .ok_or_else(|| ApiError::NotFound(format!("blob {hash} not found")))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, blob::content_type(&bytes)),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+/// Stores a blob a server is handing off along with its design. Only a
+/// handoff calls this: an import stores its own bytes. The hash in the path
+/// must match the body, so a handoff can't plant bytes under another name.
+async fn put_asset(
+    State(hub): State<Arc<Hub>>,
+    Path((id, hash)): Path<(String, String)>,
+    body: Bytes,
+) -> Result<StatusCode, ApiError> {
+    here(&hub, &id)?;
+    let hash = BlobHash::parse(&hash).map_err(|e| ApiError::Unprocessable(e.to_string()))?;
+    let store = hub.store();
+    tokio::task::spawn_blocking(move || {
+        let actual = BlobHash::of(&body);
+        if actual != hash {
+            return Ok(Err(ApiError::Unprocessable(format!(
+                "those bytes hash to {actual}, not {hash}"
+            ))));
+        }
+        store.put_blob(&body).map(|_| Ok(StatusCode::CREATED))
+    })
+    .await
+    .map_err(|e| ApiError::Unavailable(e.to_string()))?
+    .map_err(|e| ApiError::Unavailable(e.to_string()))?
 }
 
 /// Who is commenting. Users have no accounts yet, so the browser picks an id

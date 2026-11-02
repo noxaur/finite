@@ -11,16 +11,17 @@ mod design;
 mod messages;
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     io,
     sync::{Arc, RwLock, Weak},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use finite_design::{Design, DesignMeta, Snapshot};
+use finite_design::{Design, DesignMeta, Snapshot, version};
 use tokio::sync::{broadcast, watch};
 
 use crate::{
+    blob::BlobHash,
     cluster::{Cluster, Lease, Members, Place},
     store::{Claim, Registry, Store, Token, is_fenced},
 };
@@ -392,6 +393,11 @@ impl Hub {
         designs
     }
 
+    /// The store designs and blobs persist in.
+    pub fn store(&self) -> Arc<dyn Store> {
+        self.store.clone()
+    }
+
     /// The servers as this one sees them now.
     pub fn cluster(&self) -> Arc<Cluster> {
         self.members.now()
@@ -538,7 +544,9 @@ impl Hub {
     }
 
     /// Sends one stored design to the server that owns it now, and deletes
-    /// the local copy once that server has saved it.
+    /// the local copy once that server has saved it. The blobs its imports
+    /// point at go first, so the new owner never has a record without its
+    /// bytes. A blob that fails fails the handoff, and the local copy stays.
     async fn hand_off_one(&self, http: &reqwest::Client, id: &str) -> Result<(), String> {
         let Some(owner) = self.elsewhere(id) else {
             return Ok(());
@@ -551,9 +559,31 @@ impl Hub {
             .map_err(|e| e.to_string())?;
         let Some(stored) = stored else { return Ok(()) };
         let snapshot = DesignState::restore(stored).snapshot_to_save();
+        for hash in referenced_blobs(&snapshot) {
+            let store = self.store.clone();
+            let key = hash.clone();
+            let bytes = tokio::task::spawn_blocking(move || store.get_blob(&key))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+            let Some(bytes) = bytes else { continue };
+            let res = http
+                .put(format!("{owner}/api/designs/{id}/assets/{hash}"))
+                .body(bytes)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            if !res.status().is_success() {
+                return Err(format!("{owner} answered {} for blob {hash}", res.status()));
+            }
+        }
+        let body = version::SNAPSHOT
+            .encode(&snapshot)
+            .map_err(|e| e.to_string())?;
         let res = http
             .put(format!("{owner}/api/designs/{id}/handoff"))
-            .json(&snapshot)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
             .send()
             .await
             .map_err(|e| e.to_string())?;
@@ -565,10 +595,12 @@ impl Hub {
             }
             409 => {
                 // Never delete a copy the owner might not have; keep ours for a person to check.
+                let reason = res.text().await.unwrap_or_default();
                 tracing::warn!(
                     id,
                     owner,
-                    "the owner already has this design; keeping the local copy"
+                    reason,
+                    "the owner didn't take this design; keeping the local copy"
                 );
                 Ok(())
             }
@@ -838,6 +870,17 @@ fn summaries(store: &dyn Store, ids: &[String], shared: bool) -> io::Result<Vec<
     })
 }
 
+/// The blobs a snapshot's imports point at: each artifact and each fetched
+/// dependency, once.
+fn referenced_blobs(snapshot: &Snapshot) -> BTreeSet<BlobHash> {
+    let mut hashes = BTreeSet::new();
+    for import in &snapshot.imports {
+        hashes.insert(import.artifact.clone());
+        hashes.extend(import.dependencies.iter().filter_map(|d| d.blob.clone()));
+    }
+    hashes
+}
+
 /// Hands off stored designs this server no longer owns, retrying every 30
 /// seconds for any whose owner can't be reached yet.
 async fn hand_off(hub: Weak<Hub>, mut ids: Vec<String>) {
@@ -952,7 +995,7 @@ mod tests {
     use finite_design::comment::{Anchor, Author};
 
     use super::*;
-    use crate::store::MemoryStore;
+    use crate::{blob::BlobHash, store::MemoryStore};
     use finite_design::comment::AuthorKind;
 
     /// Every viewer shows design names and statuses, so long ones are cut.
@@ -1196,6 +1239,15 @@ mod tests {
         }
         fn claim(&self, id: &str) -> io::Result<Claim> {
             self.inner.claim(id)
+        }
+        fn put_blob(&self, bytes: &[u8]) -> io::Result<BlobHash> {
+            self.inner.put_blob(bytes)
+        }
+        fn get_blob(&self, hash: &BlobHash) -> io::Result<Option<Vec<u8>>> {
+            self.inner.get_blob(hash)
+        }
+        fn has_blob(&self, hash: &BlobHash) -> io::Result<bool> {
+            self.inner.has_blob(hash)
         }
     }
 

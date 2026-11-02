@@ -142,6 +142,40 @@ pub const MAX_DEPTH: usize = 256;
 /// without a limit an agent stuck in a loop could grow a design forever.
 pub const MAX_NODES: usize = 100_000;
 
+/// What [`Document::try_apply`] did with an op that applies.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Applied {
+    /// The op changed the document. These ops undo it.
+    Changed(Vec<Op>),
+    /// The document already looked like that, like a style set to its current value.
+    Unchanged,
+}
+
+/// Why an op couldn't apply. Each names the node it was about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Rejected {
+    /// The op changes or deletes a node that isn't there.
+    Missing(NodeId),
+    /// The op creates a node whose id is taken.
+    Exists(NodeId),
+    /// The op creates a node under a parent that's gone or is text.
+    NoParent(NodeId),
+    /// The value doesn't fit the property, or a move would make a cycle or
+    /// use a bad index.
+    Invalid(NodeId),
+}
+
+impl std::fmt::Display for Rejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing(id) => write!(f, "node {id:?} doesn't exist"),
+            Self::Exists(id) => write!(f, "node {id:?} already exists"),
+            Self::NoParent(id) => write!(f, "node {id:?} has no parent to go under"),
+            Self::Invalid(id) => write!(f, "the change to node {id:?} isn't valid"),
+        }
+    }
+}
+
 /// The node tree of one design, stored flat by id, with an index from each
 /// parent to its children in sibling order, and the design's shared CSS.
 #[derive(Clone, Debug, Default)]
@@ -358,73 +392,95 @@ impl Document {
     /// unchanged, ...). Skipping stale ops is how undo stays safe when other
     /// actors have changed the document in the meantime.
     pub fn apply(&mut self, op: &Op) -> Option<Vec<Op>> {
+        match self.try_apply(op) {
+            Ok(Applied::Changed(inverse)) => Some(inverse),
+            Ok(Applied::Unchanged) | Err(_) => None,
+        }
+    }
+
+    /// [`Document::apply`], saying why an op didn't apply. An import uses
+    /// this to refuse the whole import instead of skipping a stale op.
+    pub fn try_apply(&mut self, op: &Op) -> Result<Applied, Rejected> {
+        use Applied::{Changed, Unchanged};
         match op {
             Op::Create { node } => {
-                if self.nodes.contains_key(&node.id) || !self.can_parent(node.parent.as_deref()) {
-                    return None;
+                if self.nodes.contains_key(&node.id) {
+                    return Err(Rejected::Exists(node.id.clone()));
+                }
+                if !self.can_parent(node.parent.as_deref()) {
+                    return Err(Rejected::NoParent(node.id.clone()));
                 }
                 self.insert(node.clone());
-                Some(vec![Op::Delete {
+                Ok(Changed(vec![Op::Delete {
                     id: node.id.clone(),
-                }])
+                }]))
             }
             Op::Delete { id } => {
                 let removed: Vec<Node> = self.subtree(id).into_iter().cloned().collect();
                 if removed.is_empty() {
-                    return None;
+                    return Err(Rejected::Missing(id.clone()));
                 }
                 for node in &removed {
                     self.remove(&node.id);
                 }
-                Some(
+                Ok(Changed(
                     removed
                         .into_iter()
                         .map(|node| Op::Create { node })
                         .collect(),
-                )
+                ))
             }
             Op::Set { id, key, value } => {
-                let node = self.nodes.get_mut(id)?;
+                let node = self
+                    .nodes
+                    .get_mut(id)
+                    .ok_or_else(|| Rejected::Missing(id.clone()))?;
                 let value = value.clone().filter(|v| !v.is_null());
                 let previous = node.get(key);
                 if previous == value {
-                    return None;
+                    return Ok(Unchanged);
                 }
-                node.set(key, value).ok()?;
-                Some(vec![Op::Set {
+                node.set(key, value)
+                    .map_err(|_| Rejected::Invalid(id.clone()))?;
+                Ok(Changed(vec![Op::Set {
                     id: id.clone(),
                     key: key.clone(),
                     value: previous,
-                }])
+                }]))
             }
             Op::Move { id, parent, index } => {
-                let node = self.nodes.get(id)?;
+                let node = self
+                    .nodes
+                    .get(id)
+                    .ok_or_else(|| Rejected::Missing(id.clone()))?;
+                if node.parent == *parent && node.index == *index {
+                    return Ok(Unchanged);
+                }
                 if !crate::fractional::is_valid(index)
                     || !self.can_parent(parent.as_deref())
                     || parent.as_deref() == Some(id.as_str())
                     || parent.as_deref().is_some_and(|p| self.is_ancestor(id, p))
-                    || (node.parent == *parent && node.index == *index)
                 {
-                    return None;
+                    return Err(Rejected::Invalid(id.clone()));
                 }
                 let inverse = Op::Move {
                     id: id.clone(),
                     parent: node.parent.clone(),
                     index: node.index.clone(),
                 };
-                let mut node = self.remove(id)?;
+                let mut node = self.remove(id).expect("checked above");
                 node.parent = parent.clone();
                 node.index = index.clone();
                 self.insert(node);
-                Some(vec![inverse])
+                Ok(Changed(vec![inverse]))
             }
             Op::Css { css } => {
                 let css = css.clone().filter(|css| !css.is_empty());
                 if css == self.css {
-                    return None;
+                    return Ok(Unchanged);
                 }
                 let previous = std::mem::replace(&mut self.css, css);
-                Some(vec![Op::Css { css: previous }])
+                Ok(Changed(vec![Op::Css { css: previous }]))
             }
         }
     }

@@ -8,6 +8,7 @@ async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.23.1"
 finite-design = { version = "0.0.2", path = "../design" }
+finite-transfer = { version = "0.0.2", path = "../transfer" }
 futures = "0.3.34"
 http = "1"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "stream"] }

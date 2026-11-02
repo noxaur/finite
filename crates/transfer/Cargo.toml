@@ -1,0 +1,9 @@
+[package]
+name = "finite-transfer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+finite-design = { version = "0.0.2", path = "../design" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

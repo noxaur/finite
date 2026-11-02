@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     NodeId,
     comment::{self, Anchor, Author, AuthorKind, ChangeLog, Comment, CommentError, Message, Point},
-    document::{Document, Op},
+    document::{Applied, Document, Op, Rejected},
     history::{Entry, History},
+    import::ImportRecord,
     node::Node,
 };
 
@@ -43,6 +44,10 @@ pub struct Snapshot {
     /// Recent changes, for linking replies to edits. Only in saved snapshots, like `histories`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log: Option<ChangeLog>,
+    /// Every import into the design, oldest first. Only in saved snapshots,
+    /// like `histories`: viewers don't need them to draw the design.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imports: Vec<ImportRecord>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +94,14 @@ pub enum Record {
     Meta {
         meta: DesignMeta,
     },
+    /// An import and the change that added its nodes, in one record, so a
+    /// crash can't keep one without the other. `change` is `None` when the
+    /// import added nothing, like a file whose content was all quarantined.
+    Import {
+        import: ImportRecord,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        change: Option<Change>,
+    },
 }
 
 /// A design (one canvas): its document, change counter, per-actor histories,
@@ -111,6 +124,43 @@ pub struct Design {
     log: ChangeLog,
     /// Ids of comments that a change updated, for [`Design::take_comment_updates`].
     comment_updates: Vec<String>,
+    /// Every import, oldest first. See [`Design::import`].
+    imports: Vec<ImportRecord>,
+}
+
+/// An edit being staged by [`Design::import`]. Ops apply as soon as they're
+/// added, so each step sees the ones before it, and they're rolled back if
+/// the import fails.
+pub struct Transaction<'a> {
+    doc: &'a mut Document,
+    applied: Vec<Op>,
+    /// Each applied op's inverse, in the order the ops applied.
+    inverse: Vec<Vec<Op>>,
+}
+
+impl Transaction<'_> {
+    /// The document with every op so far applied.
+    pub fn doc(&self) -> &Document {
+        self.doc
+    }
+
+    /// Applies `ops` in order, or fails at the first one that doesn't apply.
+    /// The ops before it stay applied until the import finishes or fails.
+    pub fn apply(&mut self, ops: &[Op]) -> Result<(), Rejected> {
+        for op in ops {
+            if let Applied::Changed(inverse) = self.doc.try_apply(op)? {
+                self.applied.push(op.clone());
+                self.inverse.push(inverse);
+            }
+        }
+        Ok(())
+    }
+
+    fn roll_back(self) {
+        for inverse in self.inverse.into_iter().rev() {
+            self.doc.apply_all(&inverse);
+        }
+    }
 }
 
 impl Design {
@@ -123,6 +173,7 @@ impl Design {
             comments: Vec::new(),
             log: ChangeLog::default(),
             comment_updates: Vec::new(),
+            imports: Vec::new(),
         }
     }
 
@@ -135,6 +186,7 @@ impl Design {
             histories: snapshot.histories.unwrap_or_default(),
             log: snapshot.log.unwrap_or_default(),
             comment_updates: Vec::new(),
+            imports: snapshot.imports,
         }
     }
 
@@ -149,6 +201,7 @@ impl Design {
             comments: self.comments.clone(),
             histories: None,
             log: None,
+            imports: Vec::new(),
         }
     }
 
@@ -158,6 +211,7 @@ impl Design {
         Snapshot {
             histories: (!self.histories.is_empty()).then(|| self.histories.clone()),
             log: Some(self.log.clone()),
+            imports: self.imports.clone(),
             ..self.snapshot()
         }
     }
@@ -217,6 +271,51 @@ impl Design {
             &places,
         );
         Some(self.finish(actor, Origin::Edit, label, applied, before, now))
+    }
+
+    /// Imports into the design as one all-or-nothing change. `build` stages
+    /// ops through the [`Transaction`], each against the document as the
+    /// ops before it left it, and returns the import's record. If `build`
+    /// fails, the document is put back as it was and nothing is recorded.
+    /// Otherwise the ops become one undo step for `actor`, and the record is
+    /// kept for good: undoing the change doesn't remove it.
+    pub fn import<T, E>(
+        &mut self,
+        actor: &str,
+        label: &str,
+        now: u64,
+        build: impl FnOnce(&mut Transaction<'_>) -> Result<(ImportRecord, T), E>,
+    ) -> Result<(Option<Change>, T), E> {
+        let mut tx = Transaction {
+            doc: &mut self.doc,
+            applied: Vec::new(),
+            inverse: Vec::new(),
+        };
+        let (import, output) = match build(&mut tx) {
+            Ok(built) => built,
+            Err(error) => {
+                tx.roll_back();
+                return Err(error);
+            }
+        };
+        let Transaction {
+            applied, inverse, ..
+        } = tx;
+        self.imports.push(import);
+        if applied.is_empty() {
+            return Ok((None, output));
+        }
+        let inverse = inverse.into_iter().rev().flatten().collect();
+        self.history_mut(actor).record(label.to_owned(), inverse);
+        // An import only adds nodes, so no comment needs to move, and no
+        // artboard was touched before it.
+        let change = self.finish(actor, Origin::Edit, label, applied, BTreeSet::new(), now);
+        Ok((Some(change), output))
+    }
+
+    /// Every import, oldest first.
+    pub fn imports(&self) -> &[ImportRecord] {
+        &self.imports
     }
 
     /// Reverses `actor`'s most recent change that still applies. Entries whose
@@ -290,18 +389,13 @@ impl Design {
     /// undo keeps working after a crash.
     pub fn replay(&mut self, record: Record) {
         match record {
-            Record::Change { change } => {
-                if change.seq > self.seq {
-                    let before = comment::artboards_of(&self.doc, &change.ops);
-                    if !self.replay_with_history(&change) {
-                        self.doc.apply_all(&change.ops);
-                        // The saved undo steps don't explain this change, so
-                        // they may no longer fit the document. Drop them
-                        // rather than undo the wrong thing.
-                        self.histories.clear();
-                    }
-                    self.seq = change.seq;
-                    self.log.record(&change, &self.doc, before);
+            Record::Change { change } => self.replay_change(change),
+            Record::Import { import, change } => {
+                if !self.imports.iter().any(|i| i.id == import.id) {
+                    self.imports.push(import);
+                }
+                if let Some(change) = change {
+                    self.replay_change(change);
                 }
             }
             Record::Comment { comment } => {
@@ -312,6 +406,21 @@ impl Design {
             }
             Record::CommentDeleted { id } => self.comments.retain(|c| c.id != id),
             Record::Meta { meta } => self.meta = meta,
+        }
+    }
+
+    fn replay_change(&mut self, change: Change) {
+        if change.seq > self.seq {
+            let before = comment::artboards_of(&self.doc, &change.ops);
+            if !self.replay_with_history(&change) {
+                self.doc.apply_all(&change.ops);
+                // The saved undo steps don't explain this change, so
+                // they may no longer fit the document. Drop them
+                // rather than undo the wrong thing.
+                self.histories.clear();
+            }
+            self.seq = change.seq;
+            self.log.record(&change, &self.doc, before);
         }
     }
 

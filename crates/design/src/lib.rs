@@ -16,11 +16,13 @@ pub mod edit;
 pub mod fractional;
 mod history;
 pub mod html;
+pub mod import;
 pub mod label;
 mod node;
 pub mod search;
+pub mod version;
 
-pub use design::{ActorId, Change, Design, DesignMeta, Origin, Record, Snapshot};
-pub use document::{Document, Op};
+pub use design::{ActorId, Change, Design, DesignMeta, Origin, Record, Snapshot, Transaction};
+pub use document::{Applied, Document, Op, Rejected};
 pub use history::{Entry, History};
 pub use node::{Node, NodeId, NodeKind, PropError, PropKey};

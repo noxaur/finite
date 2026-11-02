@@ -7,9 +7,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use finite_design::{Record, Snapshot};
+use finite_design::{
+    Record, Snapshot,
+    version::{self, VersionError},
+};
 
-use crate::hub::is_design_id;
+use crate::{
+    blob::{self, BlobHash},
+    hub::is_design_id,
+};
 
 /// A design as stored: its last snapshot, plus the journal of records since.
 /// Replay the journal onto the snapshot with `Design::replay`.
@@ -58,6 +64,40 @@ pub fn is_fenced(error: &io::Error) -> bool {
     error.get_ref().is_some_and(|e| e.is::<Fenced>())
 }
 
+/// A snapshot as stored, with its version first (see [`finite_design::version`]).
+pub fn encode_snapshot(snapshot: &Snapshot) -> io::Result<String> {
+    Ok(version::SNAPSHOT.encode(snapshot)?)
+}
+
+/// A journal record as stored, with its version first.
+pub fn encode_record(record: &Record) -> io::Result<String> {
+    Ok(version::RECORD.encode(record)?)
+}
+
+/// Reads a stored snapshot. `Ok(None)` when it isn't JSON a snapshot could
+/// be, which the store skips as before. A snapshot from a newer server, or
+/// one an upgrade refused, is an error instead: skipping it would let this
+/// server treat the design as missing and write over it.
+pub fn decode_snapshot(json: &str) -> io::Result<Option<Snapshot>> {
+    match version::SNAPSHOT.decode(json) {
+        Ok(snapshot) => Ok(Some(snapshot)),
+        Err(VersionError::Json(_)) => Ok(None),
+        Err(error) => Err(io::Error::other(error)),
+    }
+}
+
+/// Reads a stored journal record. `Ok(None)` for a torn or garbled record,
+/// where reading stops. A record from a newer server is an error, for the
+/// same reason as in [`decode_snapshot`]: stopping there would lose it at
+/// the next compaction.
+pub fn decode_record(json: &str) -> io::Result<Option<Record>> {
+    match version::RECORD.decode(json) {
+        Ok(record) => Ok(Some(record)),
+        Err(VersionError::Json(_)) => Ok(None),
+        Err(error) => Err(io::Error::other(error)),
+    }
+}
+
 /// Where designs persist. The hub only ever calls these methods.
 ///
 /// Saving is a write-ahead journal with compaction. After each burst of edits
@@ -84,6 +124,18 @@ pub trait Store: Send + Sync + 'static {
     fn append(&self, id: &str, records: &[Record], token: Token) -> io::Result<()>;
     /// Deletes a design's snapshot and journal, after it moved to another server.
     fn remove(&self, id: &str) -> io::Result<()>;
+
+    /// Stores a blob and returns its hash. Putting bytes that are already
+    /// stored changes nothing. The blob is durable when this returns. Fails
+    /// with `InvalidInput` for more than [`blob::MAX_BLOB`] bytes.
+    ///
+    /// Blobs belong to no design and are shared by all of them. They never
+    /// change, so they need no fencing token, and nothing deletes them yet.
+    fn put_blob(&self, bytes: &[u8]) -> io::Result<BlobHash>;
+    /// A blob's bytes, or `None` if it isn't stored.
+    fn get_blob(&self, hash: &BlobHash) -> io::Result<Option<Vec<u8>>>;
+    /// Whether a blob is stored.
+    fn has_blob(&self, hash: &BlobHash) -> io::Result<bool>;
 
     /// Reserves a new design's id and takes its lease, or `None` if a design
     /// already has that id. The snapshot may not be stored until the first
@@ -121,10 +173,11 @@ pub trait Registry: Send + Sync + 'static {
 }
 
 /// Two files per design in `<dir>/designs/`: `<id>.json` is the last snapshot,
-/// and `<id>.log` is the journal since, one JSON record per line.
+/// and `<id>.log` is the journal since, one JSON record per line. A blob is
+/// one file, `<dir>/blobs/<first two digits of its hash>/<hash>`.
 ///
 /// Snapshots go to a temporary file first and are renamed into place, so a
-/// crash never leaves a half-written snapshot. A crash mid-append can leave a
+/// crash never leaves a half-written snapshot, and blobs the same way. A crash mid-append can leave a
 /// torn last line; loading stops there, and the hub compacts on startup.
 ///
 /// Only one server may use a data folder at a time. Two servers writing the
@@ -132,8 +185,18 @@ pub trait Registry: Send + Sync + 'static {
 /// exclusive lock on `<dir>/lock` for as long as it's open.
 pub struct FileStore {
     dir: PathBuf,
+    blobs: PathBuf,
     /// Held for the store's lifetime; the OS releases it if the process dies.
     _lock: fs::File,
+}
+
+/// [`FileStore::sync_dir`] for any directory.
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    fs::File::open(dir)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
 }
 
 impl FileStore {
@@ -141,6 +204,8 @@ impl FileStore {
     pub fn new(dir: impl AsRef<Path>) -> io::Result<Self> {
         let root = dir.as_ref();
         fs::create_dir_all(root.join("designs"))?;
+        fs::create_dir_all(root.join("blobs"))?;
+        sync_dir(root)?;
         let lock = fs::File::create(root.join("lock"))?;
         if let Err(error) = lock.try_lock() {
             return Err(match error {
@@ -156,20 +221,30 @@ impl FileStore {
         }
         let store = Self {
             dir: root.join("designs"),
+            blobs: root.join("blobs"),
             _lock: lock,
         };
         store.remove_leftovers()?;
         Ok(store)
     }
 
-    /// Deletes temporary snapshots a crash left mid-save. Holding the lock
-    /// means no other server is writing one right now.
+    /// Deletes temporary snapshots and blobs a crash left mid-save. Holding
+    /// the lock means no other server is writing one right now.
     fn remove_leftovers(&self) -> io::Result<()> {
         for entry in fs::read_dir(&self.dir)? {
             let path = entry?.path();
             if path.to_str().is_some_and(|p| p.ends_with(".json.tmp")) {
                 tracing::info!(?path, "removing a snapshot left half-written by a crash");
                 fs::remove_file(path)?;
+            }
+        }
+        for shard in fs::read_dir(&self.blobs)? {
+            for entry in fs::read_dir(shard?.path())? {
+                let path = entry?.path();
+                if path.extension().is_some_and(|ext| ext == "tmp") {
+                    tracing::info!(?path, "removing a blob left half-written by a crash");
+                    fs::remove_file(path)?;
+                }
             }
         }
         Ok(())
@@ -180,9 +255,13 @@ impl FileStore {
     /// points to, or not at all. Windows can't open a directory as a file and
     /// doesn't need this, so it's a no-op there.
     fn sync_dir(&self) -> io::Result<()> {
-        #[cfg(unix)]
-        fs::File::open(&self.dir)?.sync_all()?;
-        Ok(())
+        sync_dir(&self.dir)
+    }
+
+    /// The file a blob is kept in. A hash is only hex digits, so it can't
+    /// name a file outside the store.
+    fn blob_path(&self, hash: &BlobHash) -> PathBuf {
+        self.blobs.join(&hash.as_str()[..2]).join(hash.as_str())
     }
 
     /// The file `id` keeps with this extension. Ids come from requests, so
@@ -210,10 +289,10 @@ impl FileStore {
         };
         let mut records = Vec::new();
         for line in io::BufReader::new(file).lines() {
-            match serde_json::from_str(&line?) {
-                Ok(record) => records.push(record),
-                Err(error) => {
-                    tracing::warn!(id, %error, "journal ends in a torn record; ignoring the rest");
+            match decode_record(&line?)? {
+                Some(record) => records.push(record),
+                None => {
+                    tracing::warn!(id, "journal ends in a torn record; ignoring the rest");
                     break;
                 }
             }
@@ -243,12 +322,14 @@ impl Store for FileStore {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
-        let snapshot: Snapshot = match serde_json::from_slice(&bytes) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                tracing::warn!(?path, %error, "skipping unreadable design");
-                return Ok(None);
-            }
+        let Some(snapshot) = std::str::from_utf8(&bytes)
+            .ok()
+            .map(decode_snapshot)
+            .transpose()?
+            .flatten()
+        else {
+            tracing::warn!(?path, "skipping unreadable design");
+            return Ok(None);
         };
         let journal = self.read_journal(id)?;
         Ok(Some(Stored { snapshot, journal }))
@@ -262,7 +343,7 @@ impl Store for FileStore {
         let path = self.path(&snapshot.meta.id, "json")?;
         let tmp = path.with_extension("json.tmp");
         let mut file = fs::File::create(&tmp)?;
-        file.write_all(&serde_json::to_vec(snapshot)?)?;
+        file.write_all(encode_snapshot(snapshot)?.as_bytes())?;
         file.sync_all()?;
         fs::rename(tmp, path)?;
         self.sync_dir()?;
@@ -277,7 +358,7 @@ impl Store for FileStore {
     fn append(&self, id: &str, records: &[Record], _token: Token) -> io::Result<()> {
         let mut out = Vec::new();
         for record in records {
-            serde_json::to_writer(&mut out, record)?;
+            out.extend_from_slice(encode_record(record)?.as_bytes());
             out.push(b'\n');
         }
         if !self.path(id, "json")?.exists() {
@@ -314,6 +395,39 @@ impl Store for FileStore {
         }
         Ok(())
     }
+
+    /// Written like a snapshot: to a temporary file, synced, renamed into
+    /// place, and then the folders synced. A file that's there already was
+    /// written that way, so it's whole, but another thread may have renamed it
+    /// a moment ago, so the folder is synced either way.
+    fn put_blob(&self, bytes: &[u8]) -> io::Result<BlobHash> {
+        let hash = blob::accept(bytes)?;
+        let path = self.blob_path(&hash);
+        let shard = path.parent().expect("a blob is in a folder");
+        if !path.try_exists()? {
+            fs::create_dir_all(shard)?;
+            let tmp = shard.join(format!("{hash}.{}.tmp", uuid::Uuid::new_v4()));
+            let mut file = fs::File::create(&tmp)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            fs::rename(tmp, &path)?;
+        }
+        sync_dir(shard)?;
+        sync_dir(&self.blobs)?;
+        Ok(hash)
+    }
+
+    fn get_blob(&self, hash: &BlobHash) -> io::Result<Option<Vec<u8>>> {
+        match fs::read(self.blob_path(hash)) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn has_blob(&self, hash: &BlobHash) -> io::Result<bool> {
+        self.blob_path(hash).try_exists()
+    }
 }
 
 /// Keeps designs in memory. Used by tests.
@@ -331,6 +445,7 @@ pub struct MemoryStore {
 
 struct Shared {
     designs: HashMap<String, Entry>,
+    blobs: HashMap<BlobHash, Vec<u8>>,
     heartbeats: HashMap<String, Instant>,
     /// How long a heartbeat counts.
     lease: Duration,
@@ -354,6 +469,7 @@ impl MemoryStore {
     pub fn with_lease(lease: Duration) -> Self {
         let shared = Shared {
             designs: HashMap::new(),
+            blobs: HashMap::new(),
             heartbeats: HashMap::new(),
             lease,
         };
@@ -450,6 +566,23 @@ impl Store for MemoryStore {
         Ok(())
     }
 
+    fn put_blob(&self, bytes: &[u8]) -> io::Result<BlobHash> {
+        let hash = blob::accept(bytes)?;
+        self.lock()?
+            .blobs
+            .entry(hash.clone())
+            .or_insert_with(|| bytes.to_vec());
+        Ok(hash)
+    }
+
+    fn get_blob(&self, hash: &BlobHash) -> io::Result<Option<Vec<u8>>> {
+        Ok(self.lock()?.blobs.get(hash).cloned())
+    }
+
+    fn has_blob(&self, hash: &BlobHash) -> io::Result<bool> {
+        Ok(self.lock()?.blobs.contains_key(hash))
+    }
+
     fn create(&self, snapshot: &Snapshot) -> io::Result<Option<Token>> {
         let mut shared = self.lock()?;
         if shared.designs.contains_key(&snapshot.meta.id) {
@@ -535,6 +668,7 @@ pub mod contract {
     use finite_design::{DesignMeta, Record, Snapshot};
 
     use super::{Claim, Registry, Store, is_fenced};
+    use crate::blob::{BlobHash, MAX_BLOB};
 
     fn snapshot(id: &str, seq: u64) -> Snapshot {
         Snapshot {
@@ -550,6 +684,7 @@ pub mod contract {
             comments: Vec::new(),
             histories: None,
             log: None,
+            imports: Vec::new(),
         }
     }
 
@@ -625,6 +760,50 @@ pub mod contract {
         );
         assert_eq!(store.ids().unwrap(), ["b"], "and no longer listed");
         store.remove("a").unwrap();
+
+        check_blobs(store);
+    }
+
+    fn check_blobs(store: &dyn Store) {
+        let bytes = b"\x89PNG not really".as_slice();
+        let hash = BlobHash::of(bytes);
+        assert!(!store.has_blob(&hash).unwrap(), "a new blob isn't stored");
+        assert_eq!(
+            store.get_blob(&hash).unwrap(),
+            None,
+            "a missing blob reads as None"
+        );
+
+        assert_eq!(store.put_blob(bytes).unwrap(), hash, "put returns the hash");
+        assert!(store.has_blob(&hash).unwrap(), "a stored blob is there");
+        assert_eq!(
+            store.get_blob(&hash).unwrap().as_deref(),
+            Some(bytes),
+            "get returns the bytes"
+        );
+        assert_eq!(
+            store.put_blob(bytes).unwrap(),
+            hash,
+            "putting a blob twice is fine"
+        );
+        assert_eq!(store.get_blob(&hash).unwrap().as_deref(), Some(bytes));
+        let empty = store.put_blob(b"").unwrap();
+        assert_eq!(
+            store.get_blob(&empty).unwrap(),
+            Some(Vec::new()),
+            "even empty"
+        );
+
+        for bad in ["", "../../etc/passwd", "ABC", &hash.as_str().to_uppercase()] {
+            assert!(BlobHash::parse(bad).is_err(), "{bad:?} isn't a blob hash");
+        }
+        let error = store.put_blob(&vec![0; MAX_BLOB + 1]).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "too big");
+        assert!(
+            !store
+                .has_blob(&BlobHash::of(&vec![0; MAX_BLOB + 1]))
+                .unwrap()
+        );
     }
 
     /// Panics with the first rule a shared store breaks. `a` and `b` are two
@@ -686,6 +865,13 @@ pub mod contract {
         };
         assert!(t4 > t3, "which raises the token too");
         a.leave().unwrap();
+
+        let hash = a.put_blob(b"shared").unwrap();
+        assert_eq!(
+            b.get_blob(&hash).unwrap().as_deref(),
+            Some(b"shared".as_slice()),
+            "every server sees the same blobs"
+        );
     }
 }
 
@@ -708,6 +894,7 @@ mod tests {
             comments: Vec::new(),
             histories: None,
             log: None,
+            imports: Vec::new(),
         }
     }
 
@@ -804,6 +991,30 @@ mod tests {
             .unwrap();
         log.write_all(br#"{"type":"me"#).unwrap();
         assert_eq!(load().journal.len(), 2);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Data a newer server wrote fails to load instead of being skipped, so
+    /// this server can't take the design for missing and write over it.
+    #[test]
+    fn file_store_refuses_data_from_a_newer_server() {
+        let dir = temp_dir();
+        let store = FileStore::new(&dir).unwrap();
+        store.save(&snapshot(), 0).unwrap();
+        let saved = fs::read_to_string(dir.join("designs/d.json")).unwrap();
+        assert!(saved.starts_with(r#"{"v":1,"#), "{saved}");
+
+        fs::write(dir.join("designs/d.log"), "{\"v\":99,\"type\":\"meta\"}\n").unwrap();
+        let error = store.load("d").err().unwrap();
+        assert!(error.to_string().contains("version 99"), "{error}");
+
+        fs::remove_file(dir.join("designs/d.log")).unwrap();
+        fs::write(
+            dir.join("designs/d.json"),
+            saved.replacen("\"v\":1", "\"v\":99", 1),
+        )
+        .unwrap();
+        assert!(store.load("d").is_err());
         fs::remove_dir_all(dir).unwrap();
     }
 }

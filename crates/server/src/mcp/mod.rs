@@ -191,6 +191,19 @@ fn id_in(doc: &Document) -> impl FnMut() -> String + '_ {
     }
 }
 
+/// Says what HTML parsing left out, so the agent isn't surprised by a missing
+/// handler or iframe. Empty when nothing was.
+fn left_out(dropped: &[html::Dropped]) -> String {
+    if dropped.is_empty() {
+        return String::new();
+    }
+    let mut text = format!("\nLeft out {} thing(s) that can't run here:", dropped.len());
+    for d in dropped {
+        text.push_str(&format!("\n- {} at {}: {}", d.what, d.path, d.reason));
+    }
+    text
+}
+
 fn describe(change: Option<&Change>) -> &'static str {
     if change.is_some() {
         "Done."
@@ -903,15 +916,15 @@ impl FiniteMcp {
         let position = p.x.zip(p.y);
         let label = format!("Create artboard {:?}", p.name);
         let class = p.class.filter(|c| !c.trim().is_empty());
-        let fragments = match p.html {
+        let (fragments, dropped) = match p.html {
             Some(html) => {
-                match tokio::task::spawn_blocking(move || edit::parse_html(&html)).await {
-                    Ok(Ok(fragments)) => fragments,
+                match tokio::task::spawn_blocking(move || edit::parse_html_reporting(&html)).await {
+                    Ok(Ok(parsed)) => (parsed.fragments, parsed.dropped),
                     Ok(Err(error)) => return fail(error.to_string()),
                     Err(error) => return fail(error.to_string()),
                 }
             }
-            None => Vec::new(),
+            None => (Vec::new(), Vec::new()),
         };
         let spec = NewArtboard {
             name: p.name,
@@ -957,6 +970,7 @@ impl FiniteMcp {
                         text.push_str(&outline(doc, root, 3));
                     }
                     text.push_str("Check it with get_screenshot.");
+                    text.push_str(&left_out(&dropped));
                     cut(text, "Call get_tree_summary on a root to see it.")
                 })
             },
@@ -980,9 +994,9 @@ impl FiniteMcp {
         // Parse on the blocking pool, before taking the design's lock: for a
         // few MB of HTML, parsing is most of the work.
         let html = p.html;
-        let parsed = tokio::task::spawn_blocking(move || edit::parse_html(&html)).await;
-        let fragments = match parsed {
-            Ok(Ok(fragments)) => fragments,
+        let parsed = tokio::task::spawn_blocking(move || edit::parse_html_reporting(&html)).await;
+        let (fragments, dropped) = match parsed {
+            Ok(Ok(parsed)) => (parsed.fragments, parsed.dropped),
             Ok(Err(error)) => return fail(error.to_string()),
             Err(error) => return fail(error.to_string()),
         };
@@ -1000,6 +1014,7 @@ impl FiniteMcp {
                     for root in &roots {
                         text.push_str(&outline(d.doc(), root, 3));
                     }
+                    text.push_str(&left_out(&dropped));
                     cut(text, "Call get_tree_summary on a root to see it.")
                 })
             },

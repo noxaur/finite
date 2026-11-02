@@ -250,6 +250,44 @@ pub const ID_ATTR: &str = "data-id";
 /// Fails if elements nest more than [`MAX_DEPTH`] levels deep. Converting
 /// is recursive, so it stops there rather than overflow the stack.
 pub fn parse(html: &str) -> Result<Vec<Fragment>, TooDeep> {
+    parse_with(html, Policy::Authoring).map(|parsed| parsed.fragments)
+}
+
+/// Who wrote the HTML, which decides what may run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Policy {
+    /// An agent writing a design. Inline scripts are kept: they run in the
+    /// artboard's sandbox because the author chose to write them.
+    Authoring,
+    /// A file someone imported. Nobody chose its scripts, so they're dropped too.
+    Import,
+}
+
+/// HTML parsed with [`parse_with`]: the subtrees, and what was left out
+/// because it could run code or reach outside the artboard.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Parsed {
+    pub fragments: Vec<Fragment>,
+    pub dropped: Vec<Dropped>,
+}
+
+/// Something [`parse_with`] left out of the fragments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Dropped {
+    /// The nearest fragment that was kept, numbered in the order
+    /// [`Fragment::create_ops`] creates nodes (parents first, then each
+    /// child in order, across all fragments), or `None` at the top level.
+    pub anchor: Option<usize>,
+    /// Where it was in the parsed source: the child index at each level,
+    /// as in `/0/3/1`.
+    pub path: String,
+    /// What it was, like `<iframe>` or `onclick`.
+    pub what: String,
+    pub reason: &'static str,
+}
+
+/// [`parse`], saying what it dropped, under `policy`.
+pub fn parse_with(html: &str, policy: Policy) -> Result<Parsed, TooDeep> {
     // html5ever's tree builder takes time quadratic in the nesting depth:
     // 100,000 levels took 10 seconds in a release build. So refuse HTML that
     // can't possibly fit before handing it over.
@@ -257,7 +295,16 @@ pub fn parse(html: &str) -> Result<Vec<Fragment>, TooDeep> {
         return Err(TooDeep);
     }
     let doc = Html::parse_fragment(html);
-    convert_children(doc.root_element().children(), 0)
+    let mut walk = Walk {
+        policy,
+        dropped: Vec::new(),
+        kept: 0,
+    };
+    let fragments = walk.children(doc.root_element().children(), 0, "", None)?;
+    Ok(Parsed {
+        fragments,
+        dropped: walk.dropped,
+    })
 }
 
 /// How deeply `html` could nest, at most, counted in one pass: start tags
@@ -310,65 +357,110 @@ impl std::fmt::Display for TooDeep {
     }
 }
 
-fn convert_children<'a>(
-    children: impl Iterator<Item = ego_tree::NodeRef<'a, HtmlNode>>,
-    depth: usize,
-) -> Result<Vec<Fragment>, TooDeep> {
-    if depth > MAX_DEPTH {
-        return Err(TooDeep);
-    }
-    let mut out = Vec::new();
-    for child in children {
-        if let Some(fragment) = convert(child, depth)? {
-            out.push(fragment);
-        }
-    }
-    Ok(out)
+/// The state of one [`parse_with`] call as it walks the parsed tree.
+struct Walk {
+    policy: Policy,
+    dropped: Vec<Dropped>,
+    /// How many fragments have been kept so far, which numbers the next one.
+    kept: usize,
 }
 
-fn convert(
-    node: ego_tree::NodeRef<'_, HtmlNode>,
-    depth: usize,
-) -> Result<Option<Fragment>, TooDeep> {
-    Ok(match node.value() {
-        HtmlNode::Text(text) => {
-            let text: &str = text;
-            if text.trim().is_empty() && text.contains('\n') {
-                return Ok(None);
-            }
-            Some(Fragment {
-                text: Some(text.to_owned()),
-                ..Fragment::empty(NodeKind::Text)
-            })
+impl Walk {
+    fn children<'a>(
+        &mut self,
+        children: impl Iterator<Item = ego_tree::NodeRef<'a, HtmlNode>>,
+        depth: usize,
+        path: &str,
+        anchor: Option<usize>,
+    ) -> Result<Vec<Fragment>, TooDeep> {
+        if depth > MAX_DEPTH {
+            return Err(TooDeep);
         }
-        HtmlNode::Element(el) => {
-            let tag = el.name();
-            if BLOCKED_TAGS.contains(&tag.to_ascii_lowercase().as_str()) {
-                return Ok(None);
+        let mut out = Vec::new();
+        for (i, child) in children.enumerate() {
+            let path = format!("{path}/{i}");
+            if let Some(fragment) = self.convert(child, depth, path, anchor)? {
+                out.push(fragment);
             }
-            let mut fragment = Fragment::empty(NodeKind::Element {
-                tag: tag.to_owned(),
-            });
-            let is_script = tag.eq_ignore_ascii_case("script");
-            for (name, value) in el.attrs() {
-                match name {
-                    "style" => fragment.styles.extend(parse_style(value)),
-                    NAME_ATTR => fragment.name = Some(label::clip(value, label::LAYER_NAME)),
-                    // Node ids come from the document. Scripts must be inline:
-                    // the sandbox doesn't load anything that runs.
-                    ID_ATTR => {}
-                    "src" if is_script => {}
-                    _ if is_safe_attr(name, value) => {
-                        fragment.attrs.insert(name.to_owned(), value.to_owned());
-                    }
-                    _ => {}
+        }
+        Ok(out)
+    }
+
+    fn drop(&mut self, anchor: Option<usize>, path: &str, what: String, reason: &'static str) {
+        self.dropped.push(Dropped {
+            anchor,
+            path: path.to_owned(),
+            what,
+            reason,
+        });
+    }
+
+    fn convert(
+        &mut self,
+        node: ego_tree::NodeRef<'_, HtmlNode>,
+        depth: usize,
+        path: String,
+        anchor: Option<usize>,
+    ) -> Result<Option<Fragment>, TooDeep> {
+        Ok(match node.value() {
+            HtmlNode::Text(text) => {
+                let text: &str = text;
+                if text.trim().is_empty() && text.contains('\n') {
+                    return Ok(None);
                 }
+                self.kept += 1;
+                Some(Fragment {
+                    text: Some(text.to_owned()),
+                    ..Fragment::empty(NodeKind::Text)
+                })
             }
-            fragment.children = convert_children(node.children(), depth + 1)?;
-            Some(fragment)
-        }
-        _ => None,
-    })
+            HtmlNode::Element(el) => {
+                let tag = el.name();
+                let lower = tag.to_ascii_lowercase();
+                if BLOCKED_TAGS.contains(&lower.as_str()) {
+                    let reason =
+                        "it loads another document or changes the page outside the artboard";
+                    self.drop(anchor, &path, format!("<{lower}>"), reason);
+                    return Ok(None);
+                }
+                let is_script = lower == "script";
+                if is_script && self.policy == Policy::Import {
+                    self.drop(
+                        anchor,
+                        &path,
+                        "<script>".into(),
+                        "scripts in imported files don't run",
+                    );
+                    return Ok(None);
+                }
+                let me = self.kept;
+                self.kept += 1;
+                let mut fragment = Fragment::empty(NodeKind::Element {
+                    tag: tag.to_owned(),
+                });
+                for (name, value) in el.attrs() {
+                    match name {
+                        "style" => fragment.styles.extend(parse_style(value)),
+                        NAME_ATTR => fragment.name = Some(label::clip(value, label::LAYER_NAME)),
+                        // Node ids come from the document.
+                        ID_ATTR => {}
+                        // Scripts must be inline: the sandbox doesn't load anything that runs.
+                        "src" if is_script => {
+                            let reason = "scripts must be inline";
+                            self.drop(Some(me), &path, "src on <script>".into(), reason);
+                        }
+                        _ if is_safe_attr(name, value) => {
+                            fragment.attrs.insert(name.to_owned(), value.to_owned());
+                        }
+                        _ => self.drop(Some(me), &path, name.to_owned(), "it could run code"),
+                    }
+                }
+                fragment.children = self.children(node.children(), depth + 1, &path, Some(me))?;
+                Some(fragment)
+            }
+            _ => None,
+        })
+    }
 }
 
 /// Whether `name` can be written as an attribute name. Exports write names
@@ -899,7 +991,7 @@ fn raw_text(code: &str, tag: &str) -> String {
     out
 }
 
-fn escape(s: &str, attr: bool) -> String {
+pub fn escape(s: &str, attr: bool) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
