@@ -664,6 +664,7 @@ mod tests {
             seq: 0,
             nodes: Vec::new(),
             css: None,
+            pages: Default::default(),
             comments: Vec::new(),
             histories: None,
             log: None,

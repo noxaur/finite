@@ -5,7 +5,7 @@
 //! op touched, which is all the viewer needs to keep its own read cache of
 //! nodes and sibling order in step without knowing the rules.
 
-use finite_design::{Document, Node, Op, html};
+use finite_design::{Document, Node, Op, Page, html};
 use serde::Serialize;
 
 /// What applying one op touched. The viewer's `Applied` type in
@@ -35,6 +35,11 @@ enum Applied<'a> {
     /// The shared stylesheet is now `css`.
     Css {
         css: Option<&'a str>,
+    },
+    /// The page `id` is now `page`, or was removed when it's `None`.
+    Page {
+        id: &'a str,
+        page: Option<&'a Page>,
     },
 }
 
@@ -85,6 +90,26 @@ impl Replica {
         Ok(String::from_utf8(out).expect("serde_json writes UTF-8"))
     }
 
+    /// The design's pages in order, as a JSON array of `{id, name}`. Never
+    /// empty: a design without pages has its implicit first page.
+    pub fn pages(&self) -> String {
+        #[derive(Serialize)]
+        struct Listed<'a> {
+            id: &'a str,
+            name: &'a str,
+        }
+        let pages: Vec<Listed> = self
+            .doc
+            .pages()
+            .into_iter()
+            .map(|(id, page)| Listed {
+                id,
+                name: &page.name,
+            })
+            .collect();
+        serde_json::to_string(&pages).expect("pages serialize")
+    }
+
     /// The subtree at `id` as compact HTML, as screenshots render it. With
     /// `ids`, every element carries its node id, for sandboxed artboards.
     /// Empty when there's no such node.
@@ -125,6 +150,10 @@ fn describe<'a>(doc: &'a Document, op: &'a Op, inverse: &'a [Op]) -> Applied<'a>
             before: next(id),
         },
         Op::Css { .. } => Applied::Css { css: doc.css() },
+        Op::Page { id, .. } => Applied::Page {
+            id,
+            page: doc.page_map().get(id),
+        },
     }
 }
 
@@ -217,6 +246,41 @@ mod tests {
         );
         assert_eq!(results[1], Value::Null);
         assert_eq!(results[2], json!({ "op": "css", "css": null }));
+    }
+
+    #[test]
+    fn page_results_hold_the_new_page() {
+        let mut r = replica();
+        let page = json!({ "name": "Components", "index": "V" });
+        let results = apply(
+            &mut r,
+            json!([
+                { "op": "page", "id": "p", "page": page },
+                { "op": "page", "id": "p", "page": page },
+                { "op": "page", "id": "p", "page": null },
+            ]),
+        );
+        assert_eq!(results[0], json!({ "op": "page", "id": "p", "page": page }));
+        assert_eq!(results[1], Value::Null);
+        assert_eq!(results[2], json!({ "op": "page", "id": "p", "page": null }));
+    }
+
+    #[test]
+    fn pages_are_listed_in_order_with_the_implicit_first_page() {
+        let mut r = replica();
+        let listed = |r: &Replica| serde_json::from_str::<Value>(&r.pages()).unwrap();
+        assert_eq!(listed(&r), json!([{ "id": "page-1", "name": "Page 1" }]));
+        apply(
+            &mut r,
+            json!([
+                { "op": "page", "id": "b", "page": { "name": "Second", "index": "k" } },
+                { "op": "page", "id": "a", "page": { "name": "First", "index": "F" } },
+            ]),
+        );
+        assert_eq!(
+            listed(&r),
+            json!([{ "id": "a", "name": "First" }, { "id": "b", "name": "Second" }])
+        );
     }
 
     #[test]

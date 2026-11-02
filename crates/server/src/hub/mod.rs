@@ -1035,8 +1035,9 @@ mod tests {
                 let spec = NewArtboard {
                     name: "Home".into(),
                     width: 100.0,
-                    height: 100.0,
+                    height: Some(100.0),
                     position: None,
+                    page: None,
                     styles: BTreeMap::new(),
                 };
                 Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
@@ -1097,8 +1098,9 @@ mod tests {
                         let spec = NewArtboard {
                             name: "Home".into(),
                             width: 100.0,
-                            height: 100.0,
+                            height: Some(100.0),
                             position: None,
+                            page: None,
                             styles: BTreeMap::new(),
                         };
                         edit::create_artboard(doc, "board".into(), spec)?
@@ -1243,8 +1245,9 @@ mod tests {
                 let spec = NewArtboard {
                     name: "Home".into(),
                     width: 100.0,
-                    height: 100.0,
+                    height: Some(100.0),
                     position: None,
+                    page: None,
                     styles: BTreeMap::new(),
                 };
                 Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
@@ -1305,8 +1308,9 @@ mod tests {
                 let spec = NewArtboard {
                     name: "Home".into(),
                     width: 100.0,
-                    height: 100.0,
+                    height: Some(100.0),
                     position: None,
+                    page: None,
                     styles: BTreeMap::new(),
                 };
                 Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
@@ -1364,8 +1368,9 @@ mod tests {
                 let spec = NewArtboard {
                     name: "Home".into(),
                     width: 100.0,
-                    height: 100.0,
+                    height: Some(100.0),
                     position: None,
+                    page: None,
                     styles: BTreeMap::new(),
                 };
                 Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
@@ -1426,8 +1431,9 @@ mod tests {
                 let spec = NewArtboard {
                     name: "Home".into(),
                     width: 100.0,
-                    height: 100.0,
+                    height: Some(100.0),
                     position: None,
+                    page: None,
                     styles: BTreeMap::new(),
                 };
                 Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
@@ -1482,8 +1488,9 @@ mod tests {
                 let spec = NewArtboard {
                     name: "Home".into(),
                     width: 100.0,
-                    height: 100.0,
+                    height: Some(100.0),
                     position: None,
+                    page: None,
                     styles: BTreeMap::new(),
                 };
                 Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
@@ -1522,8 +1529,9 @@ mod tests {
                     let spec = edit::NewArtboard {
                         name: board.into(),
                         width: 100.0,
-                        height: 100.0,
+                        height: Some(100.0),
                         position: None,
+                        page: None,
                         styles: BTreeMap::new(),
                     };
                     Ok((edit::create_artboard(doc, board.into(), spec)?, ()))
@@ -1559,8 +1567,9 @@ mod tests {
                 let spec = edit::NewArtboard {
                     name: "Home".into(),
                     width: 100.0,
-                    height: 100.0,
+                    height: Some(100.0),
                     position: None,
+                    page: None,
                     styles: BTreeMap::new(),
                 };
                 Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))

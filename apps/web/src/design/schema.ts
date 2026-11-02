@@ -16,13 +16,23 @@ export const Node = Schema.Struct({
   text: Schema.NullOr(Schema.String),
   x: Schema.NullOr(Schema.Number),
   y: Schema.NullOr(Schema.Number),
+  /** The artboard's page. Absent, or a page that's gone, means the first page. */
+  page: Schema.optionalKey(Schema.String),
   styles: Schema.Record(Schema.String, Schema.String),
   attrs: Schema.Record(Schema.String, Schema.String),
 });
 export type Node = typeof Node.Type;
 
-/** `name`, `text`, `x`, `y`, `style:<css-property>` or `attr:<attribute>`. */
+/** `name`, `text`, `x`, `y`, `page`, `style:<css-property>` or `attr:<attribute>`. */
 export type PropKey = string;
+
+/** A named group of artboards; the viewer shows one page at a time. */
+export const Page = Schema.Struct({
+  name: Schema.String,
+  /** Fractional index: pages sort by this string. */
+  index: Schema.String,
+});
+export type Page = typeof Page.Type;
 
 export const Op = Schema.Union([
   Schema.Struct({ op: Schema.Literal("create"), node: Node }),
@@ -41,6 +51,12 @@ export const Op = Schema.Union([
   }),
   /** Replaces the design's shared CSS, or removes it when `null`. */
   Schema.Struct({ op: Schema.Literal("css"), css: Schema.NullOr(Schema.String) }),
+  /** Creates, renames or reorders a page, or removes it when `page` is `null`. */
+  Schema.Struct({
+    op: Schema.Literal("page"),
+    id: Schema.String,
+    page: Schema.NullOr(Page),
+  }),
 ]);
 export type Op = typeof Op.Type;
 
@@ -105,6 +121,8 @@ export const Snapshot = Schema.Struct({
   nodes: Schema.Array(Node),
   /** CSS every artboard renders with, before its own styles. Absent when there's none. */
   css: Schema.optionalKey(Schema.String),
+  /** Pages by id. Absent when the design has only its implicit first page. */
+  pages: Schema.optionalKey(Schema.Record(Schema.String, Page)),
   comments: Schema.Array(Comment),
 });
 export type Snapshot = typeof Snapshot.Type;
