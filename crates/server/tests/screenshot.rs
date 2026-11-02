@@ -293,6 +293,24 @@ async fn overflow_is_reported_and_can_be_revealed() {
 }
 
 #[tokio::test]
+async fn overflow_of_a_collapsed_auto_height_artboard_can_be_revealed() {
+    // Only positioned children, so the artboard is 0px tall.
+    let (doc, names) = design(
+        r#"<div data-name="Board" style="width: 200px; height: auto; position: relative; overflow: hidden"><div style="position: absolute; left: 0; top: 0; width: 100px; height: 200px; background: #00f"></div></div>"#,
+    );
+    let options = Options {
+        reveal_overflow: true,
+        ..Default::default()
+    };
+    let Some(images) = shoot(&doc, vec![Shot::node(&names["Board"])], options).await else {
+        return;
+    };
+    let shown = images[0].as_ref().expect("something to capture");
+    assert_eq!(shown.area.height, 200.0);
+    assert_eq!(Png::of(shown).rgb(50, 100), BLUE);
+}
+
+#[tokio::test]
 async fn revealed_overflow_follows_a_scaled_artboard() {
     // Scaled 2× from its top-left corner: 400×200 on the page, with 150px
     // of overflow that shows as 300px.
