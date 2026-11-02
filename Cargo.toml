@@ -6,6 +6,11 @@ members = ["crates/*"]
 version = "0.0.2"
 edition = "2024"
 
+# Line tables keep file and line numbers in backtraces and panics but drop
+# the variable and type info, which is most of a debug build's size.
+[profile.dev]
+debug = "line-tables-only"
+
 # The browser build of crates/wasm (see crates/wasm/build.mjs). Link-time
 # optimization across crates, in one codegen unit, makes the .wasm smaller
 # and faster; it would only slow down the server's release builds.
