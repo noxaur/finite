@@ -479,7 +479,7 @@ mod tests {
             NewArtboard {
                 name: "B".into(),
                 width: 400.0,
-                height: 400.0,
+                height: Some(400.0),
                 position: None,
                 page: None,
                 styles: Default::default(),

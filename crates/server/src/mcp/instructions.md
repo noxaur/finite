@@ -6,7 +6,7 @@ Workflow:
 
 1. Pick a design with list_designs (pass a query to find one by name or id), or create_design.
 2. Orient: get_basic_info (it counts open comments), then get_tree_summary.
-3. New screen: create_artboard with its first section in html (desktop 1440x900, tablet 768x1024, mobile 390x844). Without x and y it goes right of the others.
+3. New screen: create_artboard with its first section in html (desktop 1440x900, tablet 768x1024, mobile 390x844). Without x and y it goes right of the others. Omit the height and the artboard grows to fit its content.
 4. Build the rest in sections with write_html, one call per section (header, hero, card grid), not one huge call.
 5. Check with get_screenshot after each section. An artboard's shot has a layout check naming content cut off by its edge and text overflowing its box. A node's shot is cropped to it: add padding, or scale 2, to read small text. nodeIds takes up to 10.
 6. To know where things rendered (to place pins or badges over content) or to check a layout without an image, call get_layout: each element's box, plus cut-off, overflowing and overlapping text.

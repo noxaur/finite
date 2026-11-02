@@ -32,7 +32,7 @@ fn main() {
             let spec = NewArtboard {
                 name: "Home".into(),
                 width: 1440.0,
-                height: 900.0,
+                height: Some(900.0),
                 position: None,
                 page: None,
                 styles: BTreeMap::new(),

@@ -22,7 +22,7 @@ fn artboard(design: &mut Design, id: &str, page: Option<&str>) {
     let spec = NewArtboard {
         name: id.into(),
         width: 100.0,
-        height: 100.0,
+        height: Some(100.0),
         position: None,
         page: page.map(Into::into),
         styles: BTreeMap::new(),
@@ -81,7 +81,7 @@ fn artboards_on_a_new_page_are_placed_apart_from_the_first() {
     let unknown = NewArtboard {
         name: "x".into(),
         width: 1.0,
-        height: 1.0,
+        height: Some(1.0),
         position: None,
         page: Some("nope".into()),
         styles: BTreeMap::new(),

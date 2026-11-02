@@ -55,6 +55,16 @@ async fn an_agent_builds_refines_and_undoes() {
         )
         .await;
     let board = id_after(&board, "Created artboard");
+
+    // Without a height the artboard fits its content, and the result says so.
+    let fitting = agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Fits", "width": 390 }),
+        )
+        .await;
+    assert!(fitting.contains("390 × auto height"), "{fitting}");
+
     let wrote = agent
         .ok(
             "write_html",

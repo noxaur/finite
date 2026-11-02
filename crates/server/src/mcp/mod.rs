@@ -953,7 +953,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Create an artboard: a fixed-size frame on the canvas that holds a screen or component. Pass html to fill it in the same call (same rules as write_html), and class to style the artboard itself from CSS. Omit x and y to place it beside the existing artboards. Pass pageId to put it on another page. Returns its id, position and size, and the content's outline with ids."
+        description = "Create an artboard: a frame on the canvas that holds a screen or component. Give a height for a fixed size, or omit it to grow with the content. Pass html to fill it in the same call (same rules as write_html), and class to style the artboard itself from CSS. Omit x and y to place it beside the existing artboards. Pass pageId to put it on another page. Returns its id, position and size, and the content's outline with ids."
     )]
     async fn create_artboard(
         &self,
@@ -1002,12 +1002,13 @@ impl FiniteMcp {
                         return format!("Created artboard #{id}.");
                     };
                     let (w, h) = edit::pixel_size(board);
+                    let height = h.map_or_else(|| "auto height".to_owned(), |h| format!("{h}"));
                     let mut text = format!(
                         "Created artboard #{id} at x {}, y {}, {} × {}.",
                         board.x.unwrap_or(0.0),
                         board.y.unwrap_or(0.0),
                         w.unwrap_or(0.0),
-                        h.unwrap_or(0.0)
+                        height
                     );
                     if roots.is_empty() {
                         text.push_str(" Next: write_html into it.");
