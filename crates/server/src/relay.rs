@@ -283,6 +283,23 @@ impl Relay {
             ))]);
         }
         designs.sort_by_key(|d| std::cmp::Reverse(d["updatedAt"].as_u64().unwrap_or(0)));
+        // Judged on every design the servers sent, before the cut below. A
+        // server that cut its own list may have left a name match out, so
+        // then the relay says nothing rather than something wrong.
+        let query = ListParams::with_query(
+            params
+                .arguments
+                .as_ref()
+                .and_then(|args| args.get("query"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        );
+        let only_by_id = !cut
+            && query.only_by_id(
+                designs
+                    .iter()
+                    .filter_map(|d| Some((d["designId"].as_str()?, d["name"].as_str()?))),
+            );
         cut |= designs.len() > limit;
         designs.truncate(limit);
         let text = serde_json::to_string_pretty(&designs).expect("json values serialize");
@@ -292,18 +309,7 @@ impl Relay {
                 "Showing the {limit} most recently edited designs; there are more. Pass a query to find one by name, or a larger limit."
             )));
         }
-        let query = ListParams::with_query(
-            params
-                .arguments
-                .as_ref()
-                .and_then(|args| args.get("query"))
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-        );
-        let entries = designs
-            .iter()
-            .filter_map(|d| Some((d["designId"].as_str()?, d["name"].as_str()?)));
-        if query.only_by_id(entries) {
+        if only_by_id {
             content.push(ContentBlock::text(ID_MATCH_NOTE));
         }
         if !missing.is_empty() {
