@@ -2,13 +2,11 @@ use std::sync::Arc;
 
 use axum::{Json, Router, routing::get};
 use serde::Serialize;
-use tower_http::{
-    services::{ServeDir, ServeFile},
-    trace::TraceLayer,
-};
+use tower_http::trace::TraceLayer;
 
 pub mod api;
 pub mod cluster;
+pub mod frontend;
 pub mod guard;
 pub mod heartbeat;
 pub mod hub;
@@ -58,11 +56,7 @@ pub fn app(hub: Arc<Hub>, static_dir: Option<&str>) -> Router {
     let router = Router::new().nest("/api", api).merge(mcp);
 
     let router = match static_dir {
-        // A Next.js static export: one HTML file per route, plus `404.html`.
-        Some(dir) => {
-            let not_found = format!("{dir}/404.html");
-            router.fallback_service(ServeDir::new(dir).not_found_service(ServeFile::new(not_found)))
-        }
+        Some(dir) => frontend::serve(router, dir),
         None => router,
     };
 
