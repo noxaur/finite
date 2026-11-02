@@ -12,7 +12,15 @@ export type Applied =
     }
   | { readonly op: "set"; readonly node: Node; readonly key: string }
   | { readonly op: "move"; readonly node: Node; readonly from: string | null }
-  | { readonly op: "css"; readonly css: string | null };
+  | { readonly op: "css"; readonly css: string | null }
+  /** A page was added, renamed, reordered or removed; `Replica.pages` has the new list. */
+  | { readonly op: "page" };
+
+/** A page as the viewer lists it. */
+export interface PageEntry {
+  readonly id: string;
+  readonly name: string;
+}
 
 /** What the Rust `Replica` in `crates/wasm` says an op touched (`null`: it didn't apply). */
 type Touched =
@@ -26,6 +34,7 @@ type Touched =
       readonly before: string | null;
     }
   | { readonly op: "css"; readonly css: string | null }
+  | { readonly op: "page" }
   | null;
 
 /**
@@ -56,6 +65,8 @@ export class Replica {
   seq = 0;
   /** The design's shared CSS, which every artboard renders with. */
   css: string | null = null;
+  /** The pages in order, never empty: a design without pages has its implicit first page. */
+  pages: ReadonlyArray<PageEntry> = [];
 
   load(snapshot: Snapshot) {
     const order = JSON.parse(this.doc.load(JSON.stringify(snapshot.nodes))) as ReadonlyArray<
@@ -66,9 +77,23 @@ export class Replica {
     for (const node of snapshot.nodes) this.nodes.set(node.id, node);
     for (const [parent, ids] of order) this.childIds.set(parent, ids);
     this.seq = snapshot.seq;
-    // Loading clears the stylesheet, so set it as the server would.
+    // Loading clears the stylesheet and pages, so set them as the server would.
     this.css = null;
-    this.applyAll([{ op: "css", css: snapshot.css ?? null }]);
+    this.applyAll([
+      { op: "css", css: snapshot.css ?? null },
+      ...Object.entries(snapshot.pages ?? {}).map(([id, page]) => ({
+        op: "page" as const,
+        id,
+        page,
+      })),
+    ]);
+    this.pages = JSON.parse(this.doc.pages()) as PageEntry[];
+  }
+
+  /** The id of the page an artboard is on: its own page if that exists, else the first page. */
+  pageOf(board: Node): string {
+    const { page } = board;
+    return page !== undefined && this.pages.some((p) => p.id === page) ? page : this.pages[0]!.id;
   }
 
   /** Frees the WebAssembly side. The replica can't be used afterwards. */
@@ -176,6 +201,9 @@ export class Replica {
       case "css":
         this.css = touched.css;
         return { op: "css", css: touched.css };
+      case "page":
+        this.pages = JSON.parse(this.doc.pages()) as PageEntry[];
+        return { op: "page" };
     }
   }
 

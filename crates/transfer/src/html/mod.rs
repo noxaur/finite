@@ -84,6 +84,7 @@ impl Codec for Html {
         let dependencies = dependencies(&board);
         diagnostics.extend(parsed.dropped.into_iter().map(quarantine));
         Ok(Imported {
+            pages: Vec::new(),
             format: self.name(),
             input_kind: "html".into(),
             boards: vec![board],
@@ -341,6 +342,7 @@ mod tests {
 
     fn receipt() -> Receipt {
         Receipt {
+            page: None,
             id: "i1".into(),
             design: "d".into(),
             artifact: BlobHash::of(b"<p>hi</p>"),

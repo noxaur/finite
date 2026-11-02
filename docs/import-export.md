@@ -98,6 +98,8 @@ The payload uses the Plugin API's names and units, so the plugin never converts.
 
 Import artifacts, images and other files live in a content-addressed blob store keyed by sha256, next to the designs in `FileStore` and `PgStore`, and served at `/api/designs/{id}/assets/{hash}`. A blob never changes, so it needs no version, and the same bytes stored twice are stored once. A blob is on disk before `put_blob` returns, so a record never points at bytes that a crash could lose. When servers keep separate folders and a design moves to a new owner, its blobs move first, then its snapshot.
 
+New artboards go on the page the import names (the web UI passes the page you're looking at; `page` over HTTP, `pageId` over MCP), or the first page. A bundle carries its design's pages by name: importing it creates the ones the design doesn't have, empty ones too, and puts each artboard back on its page.
+
 A `.finite` bundle uses its own wire types, not `Snapshot`, which also carries server state like seq numbers and undo history. Its manifest lists every blob it references with its hash. Import checks the manifest against every reference in the decoded bundle, then checks every hash, before it accepts anything.
 
 ## Changing stored formats

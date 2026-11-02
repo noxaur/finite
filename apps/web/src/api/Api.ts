@@ -136,6 +136,8 @@ export class Api extends Context.Service<
     importFile(
       designId: string,
       file: { readonly name: string; readonly format: TransferFormat; readonly bytes: Uint8Array },
+      /** The page the new artboards go on. */
+      page?: string,
     ): Effect.Effect<ImportResult, ApiError | Refused>;
     /** Replaces the CSS every artboard shares, as an edit by `author`. Blank CSS removes it. */
     setSharedCss(
@@ -282,11 +284,13 @@ export class Api extends Context.Service<
           readonly format: TransferFormat;
           readonly bytes: Uint8Array;
         },
+        page?: string,
       ) {
+        const params = { format: file.format, name: file.name, ...(page ? { page } : {}) };
         const request = HttpClientRequest.post(
           `/designs/${encodeURIComponent(designId)}/import`,
         ).pipe(
-          HttpClientRequest.setUrlParams({ format: file.format, name: file.name }),
+          HttpClientRequest.setUrlParams(params),
           HttpClientRequest.bodyUint8Array(file.bytes, "application/octet-stream"),
         );
         // A `404` or `500` carries its message as text too, and the person should see it.

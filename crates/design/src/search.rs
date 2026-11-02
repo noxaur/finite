@@ -481,6 +481,7 @@ mod tests {
                 width: 400.0,
                 height: Some(400.0),
                 position: None,
+                page: None,
                 styles: Default::default(),
             },
         )

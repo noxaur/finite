@@ -80,7 +80,7 @@ Next to the map, `Document` keeps a **child index**: for each parent, its childr
 
 ## Ops and their inverses
 
-There are only five ops:
+There are only six ops:
 
 | Op       | What it does                               | Its inverse                    |
 | -------- | ------------------------------------------ | ------------------------------ |
@@ -89,10 +89,13 @@ There are only five ops:
 | `set`    | Sets or clears one property                | `set` it back to the old value |
 | `move`   | Gives a node a new parent and/or index     | `move` it back                 |
 | `css`    | Replaces or clears the design's shared CSS | `css` with the old stylesheet  |
+| `page`   | Sets or removes one page                   | `page` with the old page       |
 
-The **shared CSS** is one stylesheet for the whole design, so agents define classes like `.btn` and variables like `--brand` once instead of in every artboard. It's the only op that targets the design rather than a node, so `Op::id` is empty for it. The document holds it next to the nodes, and snapshots carry it as `css`, so it's saved, sent to viewers and undone like any edit. Every artboard renders with it inside a **cascade layer**, `finite-shared`. Styles outside any layer beat layered ones whatever their specificity, so an artboard's own `<style>` blocks and inline styles override the shared CSS, even a more specific shared selector. The cascade reverses that for `!important`, so a shared `!important` beats the artboard's. Leading `@import`s can't go inside a layer block, so they get `layer(finite-shared)` instead. The base styles sit in an earlier layer, `finite-base`, so the shared CSS can override them, like the font a shadow root's `all: initial` resets.
+The **shared CSS** is one stylesheet for the whole design, so agents define classes like `.btn` and variables like `--brand` once instead of in every artboard. It and `page` are the only ops that target the design rather than a node, so `Op::id` is empty for them. The document holds it next to the nodes, and snapshots carry it as `css`, so it's saved, sent to viewers and undone like any edit. Every artboard renders with it inside a **cascade layer**, `finite-shared`. Styles outside any layer beat layered ones whatever their specificity, so an artboard's own `<style>` blocks and inline styles override the shared CSS, even a more specific shared selector. The cascade reverses that for `!important`, so a shared `!important` beats the artboard's. Leading `@import`s can't go inside a layer block, so they get `layer(finite-shared)` instead. The base styles sit in an earlier layer, `finite-base`, so the shared CSS can override them, like the font a shadow root's `all: initial` resets.
 
 `html::shared_style` writes the stylesheet out, and screenshots, the viewer's shadow roots and sandboxed iframes, and thumbnails all use it, the viewer through WebAssembly. It breaks up any `</style` so the CSS can't end its element, whichever way it reached the document. In a shadow root, `:root` matches nothing, so there it writes `:root` selectors as `:host`, and variables like `--brand` still reach the artboard. `set_shared_css` and the web API refuse CSS over 100,000 characters or with `</style` in it (`edit::set_css`).
+
+**Pages** group artboards, and the viewer shows one page at a time, so a design can keep components or drafts away from its screens. A page is a name and a fractional index, keyed by id; the document holds them next to the shared CSS, and snapshots carry them as `pages`. An artboard's `page` property names its page. A design without pages has one implicit page, `page-1` ("Page 1"), so older designs need no migration, and `create_page` first saves that page for real so its artboards stay on it. An artboard whose `page` is missing or names a page that's gone is on the first page (`Document::page_of`), so undoing someone's `create_page` never hides artboards. Each `page` op touches one page, so two agents adding pages at once don't undo each other's. `delete_page` deletes the page's artboards with it, and a design keeps at least one page. Placing an artboard automatically (`find_placement`, `duplicate`, `move_nodes` to the canvas, `move_to_page`) looks only at the artboards on its page. The viewer's renderer mounts only the shown page's artboards, and the pages sidebar on the left switches between them. Comment pins on other pages' artboards are hidden; picking one in the comments list switches to its page.
 
 `Document::apply` runs one op and returns its inverse, read from the document at that moment. This is the **command pattern**.
 
@@ -691,6 +694,7 @@ The guide explains each limit where it applies. This is the list in one place. M
 | What                                   | Limit                                                             | Where it's set                             | Why                                                              |
 | -------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------ | ---------------------------------------------------------------- |
 | Nodes in a design                      | 100,000                                                           | `MAX_NODES` in `document.rs`               | Every node is journaled, held in memory and sent to viewers      |
+| Pages in a design                      | 100                                                               | `MAX_PAGES` in `document.rs`               | Every page shows in the sidebar and in `get_basic_info`          |
 | Nesting depth                          | 256 levels                                                        | `MAX_DEPTH` in `document.rs`               | Tree walks are recursive; deeper overflowed the stack            |
 | HTML nesting before parsing            | 4,096 by a quick count                                            | `html::parse`                              | html5ever is quadratic in depth                                  |
 | Undo steps per actor and stack         | 200 steps, about 32 MB                                            | `History::LIMIT`, `History::BYTE_LIMIT`    | Undoing a big delete recreates every node in it                  |

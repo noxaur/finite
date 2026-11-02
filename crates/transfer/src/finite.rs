@@ -50,6 +50,9 @@ pub struct Bundle {
     /// The shared CSS.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub css: Option<String>,
+    /// The design's pages, by name, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pages: Vec<String>,
     pub artboards: Vec<Layer>,
     /// Every file a layer or the CSS refers to, as base64, by its sha256.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -66,6 +69,9 @@ pub struct Layer {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// The name of the page an artboard is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<String>,
     /// Canvas position, for artboards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub x: Option<f64>,
@@ -138,6 +144,7 @@ impl Codec for Finite {
             })
             .collect();
         Ok(Imported {
+            pages: bundle.pages,
             format: self.name(),
             input_kind: format!("finite-bundle v{}", BUNDLE.version),
             boards,
@@ -158,8 +165,23 @@ impl Codec for Finite {
         let artboards = revision
             .artboards(scope)?
             .into_iter()
-            .map(|board| layer(revision, board, &mut portable))
+            .map(|board| {
+                let page = revision.doc.page(revision.doc.page_of(board));
+                Layer {
+                    page: page.map(|p| p.name.clone()),
+                    ..layer(revision, board, &mut portable)
+                }
+            })
             .collect();
+        let pages = match scope {
+            Scope::Design => revision
+                .doc
+                .pages()
+                .into_iter()
+                .map(|(_, page)| page.name.clone())
+                .collect(),
+            Scope::Artboard(_) => Vec::new(),
+        };
         let css = revision.doc.css().map(&mut portable);
         let mut blobs = BTreeMap::new();
         let mut diagnostics = Vec::new();
@@ -201,6 +223,7 @@ impl Codec for Finite {
             kind: KIND.into(),
             name: revision.name.to_owned(),
             css,
+            pages,
             artboards,
             blobs,
         };
@@ -308,6 +331,7 @@ fn board(i: usize, layer: Layer, diagnostics: &mut Vec<(Anchor, Diagnostic)>) ->
     walk.attrs(&mut attrs, None, &path);
     let content = walk.children(layer.children, &path, None);
     Board {
+        page: layer.page,
         name: layer.name.unwrap_or_else(|| format!("Artboard {}", i + 1)),
         width,
         height,
@@ -447,6 +471,7 @@ fn layer(revision: &Revision<'_>, node: &Node, portable: &mut impl FnMut(&str) -
         text => text.clone(),
     };
     Layer {
+        page: None,
         tag: node.tag().map(str::to_owned),
         name: node.name.clone(),
         text,
@@ -509,6 +534,7 @@ mod tests {
 
     fn place(design: &mut Design, imported: Imported) -> (ImportRecord, Placed) {
         let receipt = Receipt {
+            page: None,
             id: "i1".into(),
             design: design.meta.id.clone(),
             artifact: BlobHash::of(b"bundle"),
@@ -722,5 +748,127 @@ mod tests {
         let newer = r#"{"v":2,"kind":"finite-bundle","name":"x","artboards":[]}"#;
         let error = read(newer).unwrap_err();
         assert!(error.0.contains("version 2"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod page_tests {
+    use finite_design::{Design, DesignMeta, edit};
+
+    use super::*;
+    use crate::{NoBlobs, Receipt};
+
+    fn design(id: &str) -> Design {
+        Design::new(DesignMeta {
+            id: id.into(),
+            name: "Pages".into(),
+            created_at: 0,
+            updated_at: 0,
+        })
+    }
+
+    fn import(design: &mut Design, html: &str, page: Option<String>) -> Result<NodeIdList, Error> {
+        let imported = crate::html::Html.read(&Input {
+            bytes: html.as_bytes(),
+            file_name: Some("a.html"),
+        })?;
+        let receipt = Receipt {
+            page,
+            id: format!("i{}", design.imports().len()),
+            design: design.meta.id.clone(),
+            artifact: BlobHash::of(html.as_bytes()),
+            file_name: None,
+            received_at: 0,
+        };
+        let mut n = design.doc().len();
+        let mut new_id = move || {
+            n += 1;
+            format!("n{n}")
+        };
+        let (_, placed) = design.import("agent", "Import", 1, |tx| {
+            let (record, placed) = imported.place(tx, receipt, &mut new_id)?;
+            Ok::<_, Error>((record, placed))
+        })?;
+        Ok(placed.artboards)
+    }
+
+    type NodeIdList = Vec<String>;
+
+    #[test]
+    fn imports_land_on_the_page_asked_for() {
+        let mut source = design("d");
+        let ops = edit::create_page(source.doc(), "drafts".into(), "Drafts").unwrap();
+        source.commit("agent", "Page", &ops, 1);
+        let board = import(&mut source, "<p>Hi</p>", Some("drafts".into())).unwrap();
+        let node = source.doc().get(&board[0]).unwrap();
+        assert_eq!(source.doc().page_of(node), "drafts");
+        let error = import(&mut source, "<p>Hi</p>", Some("nope".into())).unwrap_err();
+        assert!(error.0.contains("no page"), "{error}");
+    }
+
+    #[test]
+    fn a_bundle_keeps_its_pages() {
+        let mut source = design("old");
+        let ops = edit::create_page(source.doc(), "drafts".into(), "Drafts").unwrap();
+        source.commit("agent", "Page", &ops, 1);
+        let ops = edit::create_page(source.doc(), "empty".into(), "Empty").unwrap();
+        source.commit("agent", "Page", &ops, 1);
+        import(&mut source, "<p>Home</p>", None).unwrap();
+        import(&mut source, "<p>Draft</p>", Some("drafts".into())).unwrap();
+
+        let revision = Revision {
+            name: "Pages",
+            doc: source.doc(),
+            imports: source.imports(),
+            blobs: &NoBlobs,
+            measure: &crate::scene::NoMeasure,
+        };
+        let json = Finite.write(&revision, &Scope::Design).unwrap().bytes;
+        let imported = Finite
+            .read(&Input {
+                bytes: &json,
+                file_name: None,
+            })
+            .unwrap();
+        assert_eq!(imported.pages, ["Page 1", "Drafts", "Empty"]);
+
+        let mut target = design("new");
+        let receipt = Receipt {
+            page: None,
+            id: "b".into(),
+            design: "new".into(),
+            artifact: BlobHash::of(&json),
+            file_name: None,
+            received_at: 0,
+        };
+        let mut n = 0;
+        let mut new_id = move || {
+            n += 1;
+            format!("m{n}")
+        };
+        target
+            .import("agent", "Import", 1, |tx| {
+                let (record, _) = imported.place(tx, receipt, &mut new_id)?;
+                Ok::<_, Error>((record, ()))
+            })
+            .unwrap();
+        let names: Vec<_> = target
+            .doc()
+            .pages()
+            .into_iter()
+            .map(|(_, p)| p.name.clone())
+            .collect();
+        assert_eq!(names, ["Page 1", "Drafts", "Empty"]);
+        let on = |page: &str| {
+            let doc = target.doc();
+            let id = doc
+                .pages()
+                .into_iter()
+                .find(|(_, p)| p.name == page)
+                .unwrap()
+                .0;
+            doc.artboards_on(id).len()
+        };
+        assert_eq!((on("Page 1"), on("Drafts"), on("Empty")), (1, 1, 0));
     }
 }

@@ -1080,6 +1080,7 @@ mod tests {
                     width: 100.0,
                     height: Some(100.0),
                     position: None,
+                    page: None,
                     styles: BTreeMap::new(),
                 };
                 Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
@@ -1142,6 +1143,7 @@ mod tests {
                             width: 100.0,
                             height: Some(100.0),
                             position: None,
+                            page: None,
                             styles: BTreeMap::new(),
                         };
                         edit::create_artboard(doc, "board".into(), spec)?
@@ -1297,6 +1299,7 @@ mod tests {
                     width: 100.0,
                     height: Some(100.0),
                     position: None,
+                    page: None,
                     styles: BTreeMap::new(),
                 };
                 Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
@@ -1359,6 +1362,7 @@ mod tests {
                     width: 100.0,
                     height: Some(100.0),
                     position: None,
+                    page: None,
                     styles: BTreeMap::new(),
                 };
                 Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
@@ -1418,6 +1422,7 @@ mod tests {
                     width: 100.0,
                     height: Some(100.0),
                     position: None,
+                    page: None,
                     styles: BTreeMap::new(),
                 };
                 Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
@@ -1480,6 +1485,7 @@ mod tests {
                     width: 100.0,
                     height: Some(100.0),
                     position: None,
+                    page: None,
                     styles: BTreeMap::new(),
                 };
                 Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
@@ -1536,6 +1542,7 @@ mod tests {
                     width: 100.0,
                     height: Some(100.0),
                     position: None,
+                    page: None,
                     styles: BTreeMap::new(),
                 };
                 Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
@@ -1576,6 +1583,7 @@ mod tests {
                         width: 100.0,
                         height: Some(100.0),
                         position: None,
+                        page: None,
                         styles: BTreeMap::new(),
                     };
                     Ok((edit::create_artboard(doc, board.into(), spec)?, ()))
@@ -1613,6 +1621,7 @@ mod tests {
                     width: 100.0,
                     height: Some(100.0),
                     position: None,
+                    page: None,
                     styles: BTreeMap::new(),
                 };
                 Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))

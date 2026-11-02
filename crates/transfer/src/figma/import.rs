@@ -74,6 +74,7 @@ pub fn read(input: &Input<'_>) -> Result<Imported, Error> {
         })
         .collect();
     Ok(Imported {
+        pages: Vec::new(),
         format: "figma",
         input_kind: format!("figma-plugin-payload v{}", PAYLOAD.version),
         boards,
@@ -199,6 +200,7 @@ impl Walk<'_> {
             styles.insert("background-color".into(), "transparent".into());
         }
         Board {
+            page: None,
             name,
             width,
             height,
@@ -508,6 +510,7 @@ mod tests {
             updated_at: 0,
         });
         let receipt = Receipt {
+            page: None,
             id: "i1".into(),
             design: "d".into(),
             artifact: BlobHash::of(b"payload"),

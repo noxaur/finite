@@ -34,6 +34,7 @@ fn request(strict: Vec<Axis>) -> ImportRequest {
         format: Format::Html,
         bytes: PAGE.as_bytes().to_vec(),
         file_name: Some("card.html".into()),
+        page: None,
         strict,
     }
 }
@@ -259,6 +260,7 @@ async fn a_figma_export_is_measured_in_a_browser() {
             format: Format::Html,
             bytes: page.as_bytes().to_vec(),
             file_name: Some("row.html".into()),
+            page: None,
             strict: Vec::new(),
         },
     )
@@ -313,6 +315,7 @@ async fn a_deep_figma_payload_doesnt_crash_the_server() {
             format: Format::Figma,
             bytes: payload.into_bytes(),
             file_name: None,
+            page: None,
             strict: Vec::new(),
         };
         let result = transfer::import(&hub, &id, &agent(), request).await;

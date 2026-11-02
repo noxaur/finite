@@ -160,6 +160,9 @@ pub struct Imported {
     /// Precisely what the bytes were, like `html` or `figma-plugin-payload v1`.
     pub input_kind: String,
     pub boards: Vec<Board>,
+    /// Pages the import brings, by name, in order. Each one the design
+    /// doesn't have by that name is created, even if no board goes on it.
+    pub pages: Vec<String>,
     /// Shared CSS to add after the design's own.
     pub css: Option<String>,
     /// Files the import carries, like a bundle's images. The caller stores
@@ -179,6 +182,8 @@ pub struct Board {
     pub height: f64,
     /// Where on the canvas, or `None` to place it beside the others.
     pub position: Option<(f64, f64)>,
+    /// The name of the page it goes on, or `None` for the import's page.
+    pub page: Option<String>,
     /// The artboard's own styles, over the defaults every artboard starts with.
     pub styles: BTreeMap<String, String>,
     pub attrs: BTreeMap<String, String>,
@@ -204,6 +209,8 @@ pub struct Receipt {
     pub id: String,
     /// The design it goes into, for the URLs of its blobs.
     pub design: String,
+    /// The page boards go on unless they name their own, or `None` for the first page.
+    pub page: Option<String>,
     /// Where the caller stored the bytes. They must be durable before
     /// [`Imported::place`] runs, since the record will point at them.
     pub artifact: BlobHash,
@@ -229,6 +236,14 @@ impl Imported {
         receipt: Receipt,
         new_id: &mut impl FnMut() -> NodeId,
     ) -> Result<(ImportRecord, Placed), Error> {
+        if let Some(page) = &receipt.page
+            && tx.doc().page(page).is_none()
+        {
+            return Err(Error(format!("the design has no page {page:?}")));
+        }
+        for name in &self.pages {
+            page_named(tx, name, new_id)?;
+        }
         let mut boards: Vec<(NodeId, Vec<NodeId>)> = Vec::new();
         let mut nodes = BTreeMap::new();
         let resolve = |value: &mut String| {
@@ -241,6 +256,10 @@ impl Imported {
             board.styles.values_mut().for_each(&mut resolve);
             board.attrs.values_mut().for_each(&mut resolve);
             assets::for_each_value(&mut board.content, &mut resolve);
+            let page = match board.page.take() {
+                Some(name) => Some(page_named(tx, &name, new_id)?),
+                None => receipt.page.clone(),
+            };
             let id = new_id();
             let mut content = Vec::new();
             let mut numbered = || {
@@ -253,6 +272,7 @@ impl Imported {
                 width: board.width,
                 height: Some(board.height),
                 position: board.position,
+                page,
                 styles: board.styles,
             };
             let (mut ops, _) = edit::create_artboard_with(
@@ -322,6 +342,22 @@ impl Imported {
             },
         ))
     }
+}
+
+/// The id of the page named `name`, created after the others if the design
+/// has none by that name.
+fn page_named(
+    tx: &mut Transaction<'_>,
+    name: &str,
+    new_id: &mut impl FnMut() -> NodeId,
+) -> Result<String, Error> {
+    if let Some((id, _)) = tx.doc().pages().into_iter().find(|(_, p)| p.name == name) {
+        return Ok(id.to_owned());
+    }
+    let id = format!("page-{}", new_id());
+    let ops = edit::create_page(tx.doc(), id.clone(), name)?;
+    tx.apply(&ops)?;
+    Ok(id)
 }
 
 /// Why an import or export failed. Nothing was changed.

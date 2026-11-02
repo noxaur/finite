@@ -8,10 +8,6 @@
 # commits on main: 0.0.152 for the 152nd commit. Pushes that skip CI (only
 # Markdown or docs/) don't release.
 #
-# A push releases at most once every 6 hours: when the last release is
-# newer than that, the push is skipped, and the next push after the 6 hours
-# releases everything since. Starting the workflow by hand always releases.
-#
 # The updater reads latest*.yml, which are uploaded after every build, so it
 # never sees a version with one platform's files missing. Before uploading,
 # the oldest versions are deleted from the bucket to keep it under 10 GB.
@@ -47,36 +43,10 @@ env:
   SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
 
 jobs:
-  gate:
+  version:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
-    runs-on: ubuntu-24.04
-    outputs:
-      release: ${{ steps.gate.outputs.release }}
-    steps:
-      # Compares the last GitHub release's time with 6 hours ago. A push
-      # that waited for a release in progress checks after it, so it sees
-      # that release.
-      - id: gate
-        run: |
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
-            echo "release=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          last=$(gh release list -R "$GITHUB_REPOSITORY" --limit 1 --json createdAt --jq '.[0].createdAt // empty')
-          if [ -n "$last" ] && [ "$(date -d "$last" +%s)" -gt "$(date -d '6 hours ago' +%s)" ]; then
-            echo "::notice::The last release was at $last, less than 6 hours ago, so this push doesn't release"
-            echo "release=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "release=true" >> "$GITHUB_OUTPUT"
-          fi
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-  version:
-    needs: gate
-    if: needs.gate.outputs.release == 'true'
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}

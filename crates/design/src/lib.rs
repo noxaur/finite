@@ -23,6 +23,6 @@ pub mod search;
 pub mod version;
 
 pub use design::{ActorId, Change, Design, DesignMeta, Origin, Record, Snapshot, Transaction};
-pub use document::{Applied, Document, MAX_DEPTH, Op, Rejected};
+pub use document::{Applied, Document, FIRST_PAGE, MAX_DEPTH, MAX_PAGES, Op, Page, Rejected};
 pub use history::{Entry, History};
 pub use node::{Node, NodeId, NodeKind, PropError, PropKey};

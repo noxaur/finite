@@ -1333,3 +1333,85 @@ async fn agents_choose_when_the_screenshot_is_taken() {
     let at = (20 * info.width as usize + 20) * info.color_type.samples();
     assert_eq!(&buf[at..at + 3], &[0, 0, 255], "the box turned blue");
 }
+
+#[tokio::test]
+async fn agents_keep_components_on_their_own_page() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Alice").await;
+    let created = agent.ok("create_design", json!({ "name": "Kit" })).await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .expect("a design id")
+        .to_owned();
+    let home = agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Home", "width": 400, "height": 300 }),
+        )
+        .await;
+    let home = id_after(&home, "Created artboard");
+
+    let page = agent
+        .ok(
+            "create_page",
+            json!({ "designId": design, "name": "Components" }),
+        )
+        .await;
+    let page = page.split('"').nth(1).expect("a pageId").to_owned();
+    let button = agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Button", "width": 200, "height": 80,
+                    "pageId": page }),
+        )
+        .await;
+    // Placed on its own page, not beside Home.
+    assert!(button.contains("at x 0, y 0"), "{button}");
+
+    let info: Value = serde_json::from_str(
+        &agent
+            .ok("get_basic_info", json!({ "designId": design }))
+            .await,
+    )
+    .unwrap();
+    assert_eq!(
+        info["pages"],
+        json!([
+            { "id": "page-1", "name": "Page 1", "artboardCount": 1 },
+            { "id": page, "name": "Components", "artboardCount": 1 },
+        ])
+    );
+    assert_eq!(info["artboards"][0]["pageId"], "page-1");
+
+    let tree = agent
+        .ok("get_tree_summary", json!({ "designId": design }))
+        .await;
+    assert!(
+        tree.contains(&format!("Page \"Components\" (pageId {page})")),
+        "{tree}"
+    );
+
+    agent
+        .ok(
+            "move_to_page",
+            json!({ "designId": design, "artboardIds": [home], "pageId": page }),
+        )
+        .await;
+    let deleted = agent
+        .ok("delete_page", json!({ "designId": design, "pageId": page }))
+        .await;
+    assert_eq!(deleted, "Deleted the page and its 2 artboards.");
+    let (refused, is_error) = agent
+        .call(
+            "delete_page",
+            json!({ "designId": design, "pageId": "page-1" }),
+        )
+        .await;
+    assert!(is_error && refused.contains("only page"), "{refused}");
+    agent.ok("undo", json!({ "designId": design })).await;
+    let info = agent
+        .ok("get_basic_info", json!({ "designId": design }))
+        .await;
+    assert!(info.contains("\"artboardCount\": 2"), "{info}");
+}

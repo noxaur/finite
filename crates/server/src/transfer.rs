@@ -25,6 +25,8 @@ pub struct ImportRequest {
     pub format: Format,
     pub bytes: Vec<u8>,
     pub file_name: Option<String>,
+    /// The page the new artboards go on, or `None` for the first page.
+    pub page: Option<String>,
     /// Strict mode: refuse the import if any diagnostic scores anything but
     /// yes on one of these axes. Empty accepts everything.
     pub strict: Vec<Axis>,
@@ -140,6 +142,7 @@ pub async fn import(
         format,
         bytes,
         file_name,
+        page,
         strict,
     } = request;
     let bytes = Arc::new(bytes);
@@ -189,6 +192,7 @@ pub async fn import(
     let receipt = Receipt {
         id: random_id(12),
         design: id.to_owned(),
+        page,
         artifact,
         file_name,
         received_at: now_ms(),

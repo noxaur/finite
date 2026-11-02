@@ -77,6 +77,7 @@ async fn wire_messages_match_the_fixture() {
                 width: 1440.0,
                 height: Some(900.0),
                 position: None,
+                page: None,
                 styles: BTreeMap::new(),
             };
             Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
@@ -129,6 +130,7 @@ async fn wire_messages_match_the_fixture() {
                 width: 300.0,
                 height: Some(200.0),
                 position: Some((2000.0, 0.0)),
+                page: None,
                 styles: BTreeMap::new(),
             };
             Ok((edit::create_artboard(doc, "scratch".into(), spec)?, ()))

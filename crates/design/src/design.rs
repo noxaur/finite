@@ -1,11 +1,11 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
     NodeId,
     comment::{self, Anchor, Author, AuthorKind, ChangeLog, Comment, CommentError, Message, Point},
-    document::{Applied, Document, Op, Rejected},
+    document::{Applied, Document, Op, Page, Rejected},
     history::{Entry, History},
     import::ImportRecord,
     node::Node,
@@ -35,6 +35,10 @@ pub struct Snapshot {
     /// The shared stylesheet (see [`Document::css`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub css: Option<String>,
+    /// The design's pages by id (see [`Page`]). Absent when it has only its
+    /// implicit first page.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pages: BTreeMap<String, Page>,
     #[serde(default)]
     pub comments: Vec<Comment>,
     /// Each actor's undo and redo stacks. Only in saved snapshots: the ones
@@ -180,7 +184,9 @@ impl Design {
     pub fn from_snapshot(snapshot: Snapshot) -> Self {
         Self {
             meta: snapshot.meta,
-            doc: Document::from_nodes(snapshot.nodes).with_css(snapshot.css),
+            doc: Document::from_nodes(snapshot.nodes)
+                .with_css(snapshot.css)
+                .with_pages(snapshot.pages),
             seq: snapshot.seq,
             comments: snapshot.comments,
             histories: snapshot.histories.unwrap_or_default(),
@@ -198,6 +204,7 @@ impl Design {
             seq: self.seq,
             nodes,
             css: self.doc.css().map(str::to_owned),
+            pages: self.doc.page_map().clone(),
             comments: self.comments.clone(),
             histories: None,
             log: None,

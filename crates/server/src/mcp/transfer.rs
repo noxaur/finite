@@ -69,6 +69,7 @@ impl FiniteMcp {
                 format,
                 bytes,
                 file_name: p.file_name,
+                page: p.page_id,
                 strict,
             },
             (Err(error), _) | (_, Err(error)) => return fail(error.to_string()),

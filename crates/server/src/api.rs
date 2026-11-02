@@ -512,6 +512,8 @@ async fn set_css(
 struct ImportQuery {
     format: String,
     name: Option<String>,
+    /// The page the artboards go on. Omitted: the first page.
+    page: Option<String>,
     #[serde(default)]
     strict: String,
 }
@@ -529,6 +531,7 @@ async fn import(
         format: transfer::format_named(&query.format)?,
         bytes: body.to_vec(),
         file_name: query.name,
+        page: query.page,
         strict: transfer::strict_named([query.strict.as_str()])?,
     };
     let result = transfer::import(&hub, &id, &browser(), request).await?;
