@@ -1035,7 +1035,7 @@ mod tests {
                 let spec = NewArtboard {
                     name: "Home".into(),
                     width: 100.0,
-                    height: 100.0,
+                    height: Some(100.0),
                     position: None,
                     styles: BTreeMap::new(),
                 };
@@ -1097,7 +1097,7 @@ mod tests {
                         let spec = NewArtboard {
                             name: "Home".into(),
                             width: 100.0,
-                            height: 100.0,
+                            height: Some(100.0),
                             position: None,
                             styles: BTreeMap::new(),
                         };
@@ -1243,7 +1243,7 @@ mod tests {
                 let spec = NewArtboard {
                     name: "Home".into(),
                     width: 100.0,
-                    height: 100.0,
+                    height: Some(100.0),
                     position: None,
                     styles: BTreeMap::new(),
                 };
@@ -1305,7 +1305,7 @@ mod tests {
                 let spec = NewArtboard {
                     name: "Home".into(),
                     width: 100.0,
-                    height: 100.0,
+                    height: Some(100.0),
                     position: None,
                     styles: BTreeMap::new(),
                 };
@@ -1364,7 +1364,7 @@ mod tests {
                 let spec = NewArtboard {
                     name: "Home".into(),
                     width: 100.0,
-                    height: 100.0,
+                    height: Some(100.0),
                     position: None,
                     styles: BTreeMap::new(),
                 };
@@ -1426,7 +1426,7 @@ mod tests {
                 let spec = NewArtboard {
                     name: "Home".into(),
                     width: 100.0,
-                    height: 100.0,
+                    height: Some(100.0),
                     position: None,
                     styles: BTreeMap::new(),
                 };
@@ -1482,7 +1482,7 @@ mod tests {
                 let spec = NewArtboard {
                     name: "Home".into(),
                     width: 100.0,
-                    height: 100.0,
+                    height: Some(100.0),
                     position: None,
                     styles: BTreeMap::new(),
                 };
@@ -1522,7 +1522,7 @@ mod tests {
                     let spec = edit::NewArtboard {
                         name: board.into(),
                         width: 100.0,
-                        height: 100.0,
+                        height: Some(100.0),
                         position: None,
                         styles: BTreeMap::new(),
                     };
@@ -1559,7 +1559,7 @@ mod tests {
                 let spec = edit::NewArtboard {
                     name: "Home".into(),
                     width: 100.0,
-                    height: 100.0,
+                    height: Some(100.0),
                     position: None,
                     styles: BTreeMap::new(),
                 };
