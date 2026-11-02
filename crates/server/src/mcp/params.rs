@@ -164,6 +164,10 @@ pub struct ScreenshotParams {
     /// Device pixel ratio, 0.25 to 3. Defaults to 1.
     #[serde(default)]
     pub(super) scale: Option<f64>,
+    /// Milliseconds after load when the image is taken, for pages with
+    /// scripts or animations. Defaults to 3000; at most 10000.
+    #[serde(default)]
+    pub(super) settle_ms: Option<u64>,
     #[serde(default)]
     pub(super) format: ImageFormat,
     /// JPEG or WebP quality, 1 to 100. Defaults to 80.
