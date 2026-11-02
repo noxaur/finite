@@ -9,7 +9,8 @@
 # Markdown or docs/) don't release.
 #
 # The updater reads latest*.yml, which are uploaded after every build, so it
-# never sees a version with one platform's files missing.
+# never sees a version with one platform's files missing. Before uploading,
+# the oldest versions are deleted from the bucket to keep it under 10 GB.
 #
 # Secrets:
 #   UPDATES_ACCESS_KEY_ID        an S3 key that can write to the bucket
@@ -21,6 +22,7 @@
 #   UPDATES_ENDPOINT             its S3 API endpoint (empty for AWS S3)
 #   UPDATES_REGION               its region (empty for Cloudflare R2, which takes "auto")
 #   UPDATES_URL                  the public URL the updater downloads from
+#   UPDATES_LIMIT_BYTES          the most the bucket may hold (default 10 GB)
 name: Release
 
 on:
@@ -153,11 +155,44 @@ jobs:
           gh release upload "v$VERSION" -R "$GITHUB_REPOSITORY" --clobber release/*
         env:
           GH_TOKEN: ${{ github.token }}
-      # The builds first, then latest*.yml, which is what the updater reads.
-      # Those are never cached, so a new version reaches the updater at once.
+      # Deletes the oldest versions' builds until the bucket, with this
+      # version added, stays under UPDATES_LIMIT_BYTES. The newest version
+      # already there stays, because latest*.yml points at it until this
+      # upload replaces them. Then the builds, then latest*.yml, which is
+      # what the updater reads. Those are never cached, so a new version
+      # reaches the updater at once.
       - run: |
           endpoint=()
           [ -z "$UPDATES_ENDPOINT" ] || endpoint=(--endpoint-url "$UPDATES_ENDPOINT")
+          aws s3api list-objects-v2 --bucket "$UPDATES_BUCKET" "${endpoint[@]}" --output json > objects.json
+          python3 - > delete.txt <<'EOF'
+          import json, os, re, sys
+
+          limit = int(os.environ["UPDATES_LIMIT_BYTES"])
+          new = {name: os.path.getsize(f"release/{name}") for name in os.listdir("release")}
+          # An empty bucket prints nothing.
+          objects = json.load(open("objects.json")) if os.path.getsize("objects.json") else {}
+          # A rerun replaces this version's files, so they don't count twice.
+          existing = [o for o in objects.get("Contents") or [] if o["Key"] not in new]
+          total = sum(new.values()) + sum(o["Size"] for o in existing)
+
+          versions = {}
+          for o in existing:
+              match = re.search(r"(\d+)\.(\d+)\.(\d+)", o["Key"])
+              if match:
+                  versions.setdefault(tuple(map(int, match.groups())), []).append(o)
+          for version in sorted(versions)[:-1]:
+              if total <= limit:
+                  break
+              for o in versions[version]:
+                  print(o["Key"])
+                  total -= o["Size"]
+          if total > limit:
+              sys.exit(f"::error::The bucket would hold {total} bytes, over the {limit} limit")
+          EOF
+          while IFS= read -r key; do
+            aws s3 rm "s3://$UPDATES_BUCKET/$key" "${endpoint[@]}"
+          done < delete.txt
           aws s3 cp release/ "s3://$UPDATES_BUCKET/" "${endpoint[@]}" --recursive --exclude "latest*.yml"
           aws s3 cp release/ "s3://$UPDATES_BUCKET/" "${endpoint[@]}" --recursive --exclude "*" --include "latest*.yml" --cache-control no-cache
         env:
@@ -166,3 +201,5 @@ jobs:
           AWS_DEFAULT_REGION: ${{ vars.UPDATES_REGION || 'auto' }}
           UPDATES_BUCKET: ${{ vars.UPDATES_BUCKET }}
           UPDATES_ENDPOINT: ${{ vars.UPDATES_ENDPOINT }}
+          # 10 GB, Cloudflare R2's free storage.
+          UPDATES_LIMIT_BYTES: ${{ vars.UPDATES_LIMIT_BYTES || '10000000000' }}

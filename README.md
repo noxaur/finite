@@ -150,8 +150,11 @@ The workflow needs these secrets and variables:
 | `UPDATES_ENDPOINT`          | variable | Its S3 API endpoint. Leave it unset for AWS S3               |
 | `UPDATES_REGION`            | variable | Its region. Leave it unset for R2, which uses `auto`         |
 | `UPDATES_URL`               | variable | The bucket's public URL, which the updater downloads from    |
+| `UPDATES_LIMIT_BYTES`       | variable | The most the bucket may hold. Leave it unset for 10 GB       |
 
 The bucket has to be publicly readable. Don't change `UPDATES_URL` once apps are installed: they keep reading the URL they were built with.
+
+The bucket stays under 10 GB. Before each upload, the workflow deletes the oldest versions' builds until the bucket, with the new version added, fits. A release is about 730 MB, so the bucket holds the newest 12 or so. It never deletes the newest version already there, because `latest*.yml` points at it until the upload replaces them. If even that doesn't fit, the release fails before it deletes or uploads anything. The GitHub releases keep every version.
 
 Mac builds are signed with a self-signed certificate, not an Apple Developer ID. Squirrel.Mac, which installs updates on a Mac, only checks that an update is signed with the same certificate as the running app. Apple doesn't have to issue it. `apps/desktop/scripts/sign-mac.cjs` signs the app, because electron-builder only signs with certificates macOS trusts. The Mac build fails without `MAC_CERTIFICATE`, because an unsigned build could never update.
 
