@@ -120,7 +120,7 @@ pub fn find(doc: &Document, within: Option<&str>, query: &Query) -> Vec<Found> {
 pub struct Places {
     pub styles: bool,
     pub attributes: bool,
-    /// The CSS in `<style>` blocks.
+    /// The code in `<style>` and `<script>` blocks.
     pub css: bool,
     pub text: bool,
 }
@@ -138,13 +138,16 @@ pub struct Replaced {
 /// or in every artboard. When `from` is a color, it matches the color in any
 /// notation (`#3B82F6`, `#3b82f6cc`, `rgb(59 130 246)`, `rgba(59, 130, 246,
 /// 0.2)`), and keeps each use's transparency. Otherwise it matches the exact
-/// text. Returns the ops and what they change.
+/// text. A match that isn't a color, in a `<style>` or `<script>`, is refused
+/// when there's more than one, unless `all` is set: `300ms` in one rule is
+/// rarely meant to change in every rule. Returns the ops and what they change.
 pub fn replace(
     doc: &Document,
     within: Option<&str>,
     from: &str,
     to: &str,
     places: Places,
+    all: bool,
 ) -> Result<(Vec<Op>, Vec<Replaced>), EditError> {
     if from.is_empty() {
         return Err(EditError("find can't be empty".into()));
@@ -163,6 +166,7 @@ pub fn replace(
     };
     let mut ops = Vec::new();
     let mut report = Vec::new();
+    let mut in_code = false;
     for node in scope(doc, within) {
         let mut changes = Vec::new();
         let mut count = 0;
@@ -196,15 +200,21 @@ pub fn replace(
                         }
                     }
                 }
-                if places.css && tag.eq_ignore_ascii_case("style") {
+                if places.css && is_raw_text(tag) {
+                    let label = if tag.eq_ignore_ascii_case("style") {
+                        "css"
+                    } else {
+                        "script"
+                    };
                     for child in doc.children(Some(&node.id)) {
                         let Some(code) = &child.text else { continue };
                         let (new, n) = swap(code);
                         if n > 0 && new != *code {
                             count += n;
+                            in_code = true;
                             let lines: Vec<String> = css_lines(code)
                                 .filter(|line| swap(line).1 > 0)
-                                .map(|line| format!("css: {line} → {}", swap(&line).0))
+                                .map(|line| format!("{label}: {line} → {}", swap(&line).0))
                                 .collect();
                             changes.extend(lines);
                             ops.push(Op::Set {
@@ -247,6 +257,19 @@ pub fn replace(
             };
             report.push(Replaced { id, changes, count });
         }
+    }
+    let total: usize = report.iter().map(|r| r.count).sum();
+    if in_code && colors.is_none() && total > 1 && !all {
+        let lines: Vec<&str> = report
+            .iter()
+            .flat_map(|r| r.changes.iter().map(String::as_str))
+            .collect();
+        return Err(EditError(format!(
+            "{from:?} matches {total} times, and not only in colors, so nothing changed. \
+             Narrow it with within or a longer find, or pass all: true to replace every one. \
+             It would change:\n  {}",
+            lines.join("\n  ")
+        )));
     }
     Ok((ops, report))
 }
@@ -446,7 +469,8 @@ mod tests {
             css: true,
             text: false,
         };
-        let (ops, report) = replace(&doc, Some(&board), "#3b82f6", "#f97316", places).unwrap();
+        let (ops, report) =
+            replace(&doc, Some(&board), "#3b82f6", "#f97316", places, false).unwrap();
         assert_eq!(ops.len(), 3, "{report:?}");
         assert_eq!(report.iter().map(|r| r.count).sum::<usize>(), 4);
         // Text is left alone unless asked for.
@@ -460,6 +484,45 @@ mod tests {
         let html = html::export(&doc, &board, false).unwrap();
         assert!(!html.to_lowercase().contains("#3b82f6\""), "{html}");
         assert!(html.contains("Go #3b82f6"));
+    }
+
+    #[test]
+    fn replace_reaches_scripts_and_refuses_ambiguous_code_matches() {
+        let (doc, board) = design(
+            r##"<style>.a { transition: opacity 300ms } .b { animation: spin 300ms }</style>
+<div class="a">300ms</div>
+<script>setTimeout(tick, 1500); setTimeout(done, 200)</script>"##,
+        );
+        let places = Places {
+            styles: true,
+            attributes: true,
+            css: true,
+            text: false,
+        };
+        let run =
+            |from: &str, to: &str, all: bool| replace(&doc, Some(&board), from, to, places, all);
+        // One match in a script is reached.
+        let (ops, report) = run("1500", "3000", false).unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(
+            report[0].changes,
+            ["script: setTimeout(tick, 1500) → setTimeout(tick, 3000)"]
+        );
+        // Two matches are refused, with the count and the lines.
+        let err = run("300ms", "500ms", false).unwrap_err().0;
+        assert!(
+            err.contains("matches 2 times") && err.contains("css: transition: opacity 300ms"),
+            "{err}"
+        );
+        // all, or a narrower find, goes through.
+        assert_eq!(run("300ms", "500ms", true).unwrap().0.len(), 1);
+        assert_eq!(
+            run("opacity 300ms", "opacity 500ms", false)
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
     }
 
     #[test]

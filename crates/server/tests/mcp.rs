@@ -1047,6 +1047,48 @@ async fn tools_answer_what_agents_asked_for() {
     )
     .unwrap();
     assert_eq!(info["agentsWorking"][0]["nodeIds"], json!([board]));
+
+    // Part of a <style> or <script> is found and replaced; an ambiguous match
+    // is refused unless it's narrowed or `all` is set.
+    let made = agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Motion", "width": 300, "height": 200,
+                    "html": "<style>.a { transition: opacity 300ms } .b { animation: spin 300ms }</style><div class=\"a\">Hi</div><script>setTimeout(tick, 1500)</script>" }),
+        )
+        .await;
+    let motion = id_after(&made, "Created artboard");
+    let one = agent
+        .ok(
+            "replace_values",
+            json!({ "designId": design, "within": motion, "find": "1500", "replace": "3000" }),
+        )
+        .await;
+    assert!(one.contains("script: setTimeout(tick, 1500)"), "{one}");
+    let (refused, is_error) = agent
+        .call(
+            "replace_values",
+            json!({ "designId": design, "within": motion, "find": "300ms", "replace": "500ms" }),
+        )
+        .await;
+    assert!(
+        is_error && refused.contains("matches 2 times") && refused.contains("all: true"),
+        "{refused}"
+    );
+    let dry = agent
+        .ok(
+            "replace_values",
+            json!({ "designId": design, "within": motion, "find": "300ms", "replace": "500ms", "dryRun": true }),
+        )
+        .await;
+    assert!(dry.starts_with("Would replace 2 uses"), "{dry}");
+    let all = agent
+        .ok(
+            "replace_values",
+            json!({ "designId": design, "within": motion, "find": "300ms", "replace": "500ms", "all": true }),
+        )
+        .await;
+    assert!(all.starts_with("Replaced 2 uses"), "{all}");
 }
 
 /// get_layout says where things rendered and what overlaps, without an image;
