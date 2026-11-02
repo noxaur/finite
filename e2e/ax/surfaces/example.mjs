@@ -1,9 +1,7 @@
 // One of each kind of mock tool, to copy from. Every other real tool passes
 // through unchanged.
 export default {
-  instructions: (real) =>
-    real.replaceAll("find_nodes", "search") +
-    "\nTo read one artboard, call get_artboard: its HTML and where everything rendered.\n",
+  instructions: (real) => real.replaceAll("find_nodes", "search"),
   drop: ["find_nodes"],
   tools: {
     // A rename, with a shorter description and the reply relabeled.
