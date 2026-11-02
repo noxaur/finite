@@ -10,7 +10,7 @@ use finite_server::{
     store::{FileStore, MemoryStore, Store},
     transfer::{self, ImportRequest, TransferError},
 };
-use finite_transfer::{Axis, Format};
+use finite_transfer::{Axis, Format, Scope};
 
 const PAGE: &str = "<div data-name=\"Card\"><button onclick=\"steal()\">Go</button></div>";
 
@@ -50,9 +50,14 @@ async fn an_import_keeps_its_bytes_and_survives_a_restart() {
     assert_eq!(record, result.import);
     assert_eq!(bytes, PAGE.as_bytes());
 
-    let exported = transfer::export(&hub, &id, Format::Html, &result.artboards[0])
-        .await
-        .unwrap();
+    let exported = transfer::export(
+        &hub,
+        &id,
+        Format::Html,
+        Scope::Artboard(result.artboards[0].clone()),
+    )
+    .await
+    .unwrap();
     assert_eq!(exported.file_name, "card.html");
     let page = String::from_utf8(exported.bytes).unwrap();
     assert!(page.contains("data-name=\"Card\""), "{page}");
@@ -100,8 +105,8 @@ async fn strict_mode_refuses_before_anything_is_stored() {
 async fn exporting_something_that_isnt_an_artboard_fails() {
     let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
     let id = hub.create("Empty").meta.id;
-    let error = transfer::export(&hub, &id, Format::Html, "nope")
+    let error = transfer::export(&hub, &id, Format::Html, Scope::Artboard("nope".into()))
         .await
         .unwrap_err();
-    assert!(matches!(error, TransferError::NotFound(_)), "{error}");
+    assert!(matches!(error, TransferError::Invalid(_)), "{error}");
 }

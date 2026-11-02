@@ -22,12 +22,15 @@
 //!
 //! [`Design::import`]: finite_design::Design::import
 
+pub mod assets;
 mod feature;
 mod html;
 mod report;
 
+use std::collections::BTreeMap;
+
 use finite_design::{
-    Document, NodeId, Rejected, Transaction,
+    Document, NodeId, Op, Rejected, Transaction,
     edit::{self, EditError, NewArtboard},
     html::Fragment,
     import::{BlobHash, Dependency, ImportRecord, Quarantined},
@@ -70,8 +73,17 @@ pub trait Codec: Sync {
     /// Parses the bytes of an import.
     fn read(&self, input: &Input<'_>) -> Result<Imported, Error>;
 
-    /// Writes one artboard of `revision` in this format.
-    fn write(&self, revision: &Revision<'_>, artboard: &str) -> Result<Exported, Error>;
+    /// Writes `scope` of `revision` in this format.
+    fn write(&self, revision: &Revision<'_>, scope: &Scope) -> Result<Exported, Error>;
+}
+
+/// What an export covers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Scope {
+    /// The whole design.
+    Design,
+    /// One artboard, by id.
+    Artboard(NodeId),
 }
 
 /// The bytes of an import, as received.
@@ -80,11 +92,44 @@ pub struct Input<'a> {
     pub file_name: Option<&'a str>,
 }
 
-/// A design at one moment, for an export to read. The caller takes it
-/// under the design's lock, so everything in it agrees.
+/// A design at one moment, for an export to read. The caller copies it
+/// under the design's lock, so everything in it agrees, and the export runs
+/// without the lock.
 pub struct Revision<'a> {
+    pub name: &'a str,
     pub doc: &'a Document,
     pub imports: &'a [ImportRecord],
+    /// Where to read the files the design's nodes point to.
+    pub blobs: &'a dyn Blobs,
+}
+
+/// Reads blobs for an export. The server's store implements it.
+pub trait Blobs: Sync {
+    fn get(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>, Error>;
+}
+
+/// No blobs at all, for designs that point at none.
+pub struct NoBlobs;
+
+impl Blobs for NoBlobs {
+    fn get(&self, _hash: &BlobHash) -> Result<Option<Vec<u8>>, Error> {
+        Ok(None)
+    }
+}
+
+impl Revision<'_> {
+    /// The artboards `scope` covers, in canvas order.
+    pub fn artboards(&self, scope: &Scope) -> Result<Vec<&finite_design::Node>, Error> {
+        match scope {
+            Scope::Design => Ok(self.doc.artboards()),
+            Scope::Artboard(id) => self
+                .doc
+                .get(id)
+                .filter(|n| n.is_artboard())
+                .map(|board| vec![board])
+                .ok_or_else(|| Error(format!("{id:?} isn't an artboard"))),
+        }
+    }
 }
 
 /// An export: one file, and what didn't carry over.
@@ -104,18 +149,34 @@ pub struct Imported {
     /// Precisely what the bytes were, like `html` or `figma-plugin-payload v1`.
     pub input_kind: String,
     pub boards: Vec<Board>,
+    /// Shared CSS to add after the design's own.
+    pub css: Option<String>,
+    /// Files the import carries, like a bundle's images. The caller stores
+    /// them before placing, and the content refers to them as
+    /// [`assets::SCHEME`] references.
+    pub blobs: Vec<Vec<u8>>,
     pub dependencies: Vec<Dependency>,
     /// Each with where it belongs, which [`Imported::place`] turns into a node.
     pub diagnostics: Vec<(Anchor, Diagnostic)>,
 }
 
 /// One artboard to create, with its content.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Board {
     pub name: String,
     pub width: f64,
     pub height: f64,
+    /// Where on the canvas, or `None` to place it beside the others.
+    pub position: Option<(f64, f64)>,
+    /// The artboard's own styles, over the defaults every artboard starts with.
+    pub styles: BTreeMap<String, String>,
+    pub attrs: BTreeMap<String, String>,
     pub content: Vec<Fragment>,
+    /// Where the board came from in the source, in the codec's notation,
+    /// if it came from anything.
+    pub source: Option<String>,
+    /// Where each content node came from, numbered like [`Anchor::node`].
+    pub paths: Vec<String>,
 }
 
 /// Where a diagnostic belongs before its nodes have ids: a board, and a node
@@ -130,6 +191,8 @@ pub struct Anchor {
 /// What the caller knows about an import that the codec doesn't.
 pub struct Receipt {
     pub id: String,
+    /// The design it goes into, for the URLs of its blobs.
+    pub design: String,
     /// Where the caller stored the bytes. They must be durable before
     /// [`Imported::place`] runs, since the record will point at them.
     pub artifact: BlobHash,
@@ -156,7 +219,17 @@ impl Imported {
         new_id: &mut impl FnMut() -> NodeId,
     ) -> Result<(ImportRecord, Placed), Error> {
         let mut boards: Vec<(NodeId, Vec<NodeId>)> = Vec::new();
-        for board in self.boards {
+        let mut nodes = BTreeMap::new();
+        let resolve = |value: &mut String| {
+            if value.contains(assets::SCHEME) {
+                *value = assets::resolve(value, &receipt.design);
+            }
+        };
+        for mut board in self.boards {
+            let mut resolve = resolve;
+            board.styles.values_mut().for_each(&mut resolve);
+            board.attrs.values_mut().for_each(&mut resolve);
+            assets::for_each_value(&mut board.content, &mut resolve);
             let id = new_id();
             let mut content = Vec::new();
             let mut numbered = || {
@@ -168,18 +241,32 @@ impl Imported {
                 name: board.name,
                 width: board.width,
                 height: board.height,
-                position: None,
-                styles: Default::default(),
+                position: board.position,
+                styles: board.styles,
             };
-            let (ops, _) = edit::create_artboard_with(
+            let (mut ops, _) = edit::create_artboard_with(
                 tx.doc(),
                 id.clone(),
                 spec,
                 board.content,
                 &mut numbered,
             )?;
+            if let Some(Op::Create { node }) = ops.first_mut() {
+                node.attrs.extend(board.attrs);
+            }
             tx.apply(&ops)?;
+            if let Some(source) = board.source {
+                nodes.insert(id.clone(), source);
+            }
+            nodes.extend(content.iter().cloned().zip(board.paths));
             boards.push((id, content));
+        }
+        if let Some(css) = self.css.filter(|css| !css.trim().is_empty()) {
+            let mut css = assets::resolve(&css, &receipt.design);
+            if let Some(existing) = tx.doc().css() {
+                css = format!("{existing}\n\n{css}");
+            }
+            tx.apply(&edit::set_css(&css)?)?;
         }
         let mut quarantined = Vec::new();
         let diagnostics: Vec<Diagnostic> = self
@@ -211,7 +298,7 @@ impl Imported {
             input_kind: self.input_kind,
             file_name: receipt.file_name,
             received_at: receipt.received_at,
-            nodes: Default::default(),
+            nodes,
             dependencies: self.dependencies,
             quarantined,
         };

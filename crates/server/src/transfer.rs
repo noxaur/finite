@@ -9,10 +9,15 @@
 
 use std::sync::Arc;
 
-use finite_design::import::ImportRecord;
-use finite_transfer::{Axis, Diagnostic, Exported, Format, Input, Receipt, Revision, violations};
+use finite_design::import::{BlobHash, ImportRecord};
+use finite_transfer::{
+    Axis, Blobs, Diagnostic, Exported, Format, Input, Receipt, Revision, Scope, violations,
+};
 
-use crate::hub::{Actor, Hub, OpenError, now_ms, random_id};
+use crate::{
+    hub::{Actor, Hub, OpenError, now_ms, random_id},
+    store::Store,
+};
 
 /// What an import is asked to do.
 pub struct ImportRequest {
@@ -93,7 +98,7 @@ pub async fn import(
             .await,
         )?
     };
-    let imported = imported.map_err(|e| TransferError::Invalid(e.0))?;
+    let mut imported = imported.map_err(|e| TransferError::Invalid(e.0))?;
     // Every score is known before placing, so strict mode refuses before
     // anything is stored.
     let pending: Vec<Diagnostic> = imported
@@ -107,15 +112,27 @@ pub async fn import(
             first.what, first.path, first.reason
         )));
     }
+    // The bytes and every file the import carries are durable before any
+    // node or record points at them.
     let store = hub.store();
-    let artifact = joined(tokio::task::spawn_blocking(move || store.put_blob(&bytes)).await)?
-        .map_err(TransferError::Io)?;
+    let carried = std::mem::take(&mut imported.blobs);
+    let artifact = joined(
+        tokio::task::spawn_blocking(move || {
+            for blob in &carried {
+                store.put_blob(blob)?;
+            }
+            store.put_blob(&bytes)
+        })
+        .await,
+    )?
+    .map_err(TransferError::Io)?;
     let label = match &file_name {
         Some(name) => format!("Import {name}"),
         None => format!("Import {}", format.codec().name()),
     };
     let receipt = Receipt {
         id: random_id(12),
+        design: id.to_owned(),
         artifact,
         file_name,
         received_at: now_ms(),
@@ -133,29 +150,47 @@ pub async fn import(
     })
 }
 
-/// Writes artboard `artboard` of design `id` as `format`. The design's lock
-/// is held while the codec writes, so the export reads one revision.
+/// Writes `scope` of design `id` as `format`. The design is copied under
+/// its lock, so the export reads one revision, and written without it.
 pub async fn export(
     hub: &Arc<Hub>,
     id: &str,
     format: Format,
-    artboard: &str,
+    scope: Scope,
 ) -> Result<Exported, TransferError> {
     let handle = hub.open(id).await?;
-    let artboard = artboard.to_owned();
+    let (name, doc, imports) = handle.read(|design| {
+        (
+            design.meta.name.clone(),
+            design.doc().clone(),
+            design.imports().to_vec(),
+        )
+    });
+    let blobs = StoreBlobs(hub.store());
     joined(
         tokio::task::spawn_blocking(move || {
-            handle.read(|design| {
-                let revision = Revision {
-                    doc: design.doc(),
-                    imports: design.imports(),
-                };
-                format.codec().write(&revision, &artboard)
-            })
+            let revision = Revision {
+                name: &name,
+                doc: &doc,
+                imports: &imports,
+                blobs: &blobs,
+            };
+            format.codec().write(&revision, &scope)
         })
         .await,
     )?
-    .map_err(|e| TransferError::NotFound(e.0))
+    .map_err(|e| TransferError::Invalid(e.0))
+}
+
+/// The store, as the codecs read blobs.
+struct StoreBlobs(Arc<dyn Store>);
+
+impl Blobs for StoreBlobs {
+    fn get(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>, finite_transfer::Error> {
+        self.0
+            .get_blob(hash)
+            .map_err(|e| finite_transfer::Error(format!("couldn't read a stored file: {e}")))
+    }
 }
 
 /// The exact bytes import `import_id` received, with its record.

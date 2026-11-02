@@ -285,7 +285,7 @@ async fn asset(hub: &Hub, id: &str, hash: &str) -> Result<Response, ApiError> {
         .ok_or_else(|| ApiError::NotFound(format!("blob {hash} not found")))?;
     Ok((
         [
-            (header::CONTENT_TYPE, blob::content_type(&bytes)),
+            (header::CONTENT_TYPE, blob::media_type(&bytes)),
             (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
         ],
         bytes,

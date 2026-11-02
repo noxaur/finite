@@ -3,11 +3,17 @@
 //! this module adds what a file needs on top: a page around the artboard on
 //! the way out, and on the way in, a record of everything left out.
 
-use finite_design::html::{self, Dropped, ExportOptions, Policy};
+use std::collections::BTreeSet;
+
+use base64::{Engine, engine::general_purpose::STANDARD};
+use finite_design::{
+    html::{self, Dropped, ExportOptions, Fragment, Policy},
+    import::Dependency,
+};
 
 use crate::{
     Anchor, Board, Codec, Diagnostic, Direction, Error, Exported, Feature, Imported, Input,
-    Revision, Score, Support, file_stem,
+    Revision, Scope, Score, Support, assets, file_stem,
 };
 
 /// The size of the artboard an HTML file goes into: a desktop screen.
@@ -44,39 +50,61 @@ impl Codec for Html {
     fn read(&self, input: &Input<'_>) -> Result<Imported, Error> {
         let source = std::str::from_utf8(input.bytes)
             .map_err(|_| Error("the file isn't UTF-8 text, so it can't be HTML".into()))?;
-        let parsed = html::parse_with(source, Policy::Import).map_err(|e| Error(e.to_string()))?;
-        let name = input
+        let file_stem = input
             .file_name
             .map(|name| name.rsplit_once('.').map_or(name, |(stem, _)| stem))
-            .filter(|name| !name.is_empty())
-            .unwrap_or("Imported HTML");
+            .filter(|name| !name.is_empty());
+        let mut board = Board {
+            name: file_stem.unwrap_or("Imported HTML").to_owned(),
+            width: WIDTH,
+            height: HEIGHT,
+            ..Board::default()
+        };
+        let mut diagnostics = Vec::new();
+        let parsed = if is_page(source) {
+            // The <html> and <body> become the artboard: their styles, like
+            // a background, and attributes, like `class` and `lang`.
+            let page =
+                html::parse_page(source, Policy::Import).map_err(|e| Error(e.to_string()))?;
+            if file_stem.is_none() {
+                board.name = page.title.unwrap_or(board.name);
+            }
+            board.styles = page.styles;
+            board.attrs = page.attrs;
+            board.source = Some("/1".into());
+            diagnostics.extend(page_selectors(&page.content.fragments));
+            page.content
+        } else {
+            html::parse_with(source, Policy::Import).map_err(|e| Error(e.to_string()))?
+        };
+        board.content = parsed.fragments;
+        board.paths = parsed.paths;
+        let dependencies = dependencies(&board);
+        diagnostics.extend(parsed.dropped.into_iter().map(quarantine));
         Ok(Imported {
             format: self.name(),
             input_kind: "html".into(),
-            boards: vec![Board {
-                name: name.to_owned(),
-                width: WIDTH,
-                height: HEIGHT,
-                content: parsed.fragments,
-            }],
-            dependencies: Vec::new(),
-            diagnostics: parsed.dropped.into_iter().map(quarantine).collect(),
+            boards: vec![board],
+            css: None,
+            blobs: Vec::new(),
+            dependencies,
+            diagnostics,
         })
     }
 
-    fn write(&self, revision: &Revision<'_>, artboard: &str) -> Result<Exported, Error> {
+    fn write(&self, revision: &Revision<'_>, scope: &Scope) -> Result<Exported, Error> {
+        let Scope::Artboard(_) = scope else {
+            return Err(Error("an HTML file holds one artboard; pick one".into()));
+        };
+        let board = revision.artboards(scope)?[0];
         let doc = revision.doc;
-        let board = doc
-            .get(artboard)
-            .filter(|n| n.is_artboard())
-            .ok_or_else(|| Error(format!("{artboard:?} isn't an artboard")))?;
         let options = ExportOptions {
             names: true,
             ..ExportOptions::default()
         };
-        let body = html::export_with(doc, artboard, &options)
+        let body = html::export_with(doc, &board.id, &options)
             .map(|e| e.html)
-            .ok_or_else(|| Error(format!("{artboard:?} isn't an artboard")))?;
+            .ok_or_else(|| Error(format!("{:?} isn't an artboard", board.id)))?;
         let shared = doc.css().map_or(String::new(), |css| {
             format!("\n<style>{}</style>", html::shared_style(css, false))
         });
@@ -88,13 +116,58 @@ impl Codec for Html {
             layer = html::BASE_LAYER,
             base = html::BASE_CSS,
         );
+        // Files the design stores, like imported images, go inline: their
+        // URLs only work on this server.
+        let mut diagnostics = Vec::new();
+        let mut failed = None;
+        let page = assets::rewrite_urls(&page, |hash| match revision.blobs.get(hash) {
+            Ok(Some(bytes)) => Some(format!(
+                "data:{};base64,{}",
+                assets::media_type(&bytes),
+                STANDARD.encode(&bytes)
+            )),
+            Ok(None) => {
+                diagnostics.push(Diagnostic {
+                    node: None,
+                    path: assets::url("…", hash),
+                    what: "an image".into(),
+                    feature: Feature::Image,
+                    reason: "the design points at a file its store doesn't have".into(),
+                    preserved: Score::No,
+                    visual: Score::No,
+                    editable: Score::No,
+                    quarantined: false,
+                });
+                None
+            }
+            Err(error) => {
+                failed.get_or_insert(error);
+                None
+            }
+        });
+        if let Some(error) = failed {
+            return Err(error);
+        }
         Ok(Exported {
             file_name: format!("{}.html", file_stem(&title)),
             media_type: "text/html; charset=utf-8",
             bytes: page.into_bytes(),
-            diagnostics: Vec::new(),
+            diagnostics,
         })
     }
+}
+
+/// Whether `source` is a whole page rather than a fragment: it starts with
+/// a doctype, or has `<html>`, `<head>` or `<body>` near the top.
+fn is_page(source: &str) -> bool {
+    let head: String = source
+        .chars()
+        .take(2048)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    ["<!doctype", "<html", "<head", "<body"]
+        .iter()
+        .any(|tag| head.contains(tag))
 }
 
 /// A diagnostic for content the parser left out. All of it stays in the
@@ -126,6 +199,117 @@ fn quarantine(dropped: Dropped) -> (Anchor, Diagnostic) {
     (anchor, diagnostic)
 }
 
+/// A page's `<style>` blocks may select `html` or `body`, which became the
+/// artboard, so those rules may no longer match anything.
+fn page_selectors(fragments: &[Fragment]) -> Vec<(Anchor, Diagnostic)> {
+    let mut out = Vec::new();
+    let mut ordinal = 0;
+    for fragment in fragments {
+        if fragment.tag() == Some("style") {
+            let css = fragment.inner_text().to_ascii_lowercase();
+            if css.contains("body") || css.contains("html") {
+                let anchor = Anchor {
+                    board: 0,
+                    node: Some(ordinal),
+                };
+                out.push((
+                    anchor,
+                    Diagnostic {
+                        node: None,
+                        path: String::new(),
+                        what: "<style>".into(),
+                        feature: Feature::Frame,
+                        reason: "it styles <html> or <body>, which became the artboard".into(),
+                        preserved: Score::Yes,
+                        visual: Score::Unknown,
+                        editable: Score::Yes,
+                        quarantined: false,
+                    },
+                ));
+            }
+        }
+        ordinal += fragment.count();
+    }
+    out
+}
+
+/// Every resource the board points to outside itself, like a remote image
+/// or a stylesheet's `@import`. v1 doesn't fetch them; the record lists them
+/// so it's clear the import isn't self-contained.
+fn dependencies(board: &Board) -> Vec<Dependency> {
+    let mut urls = BTreeSet::new();
+    let mut values: Vec<&str> = Vec::new();
+    values.extend(board.styles.values().map(String::as_str));
+    fn walk<'a>(fragments: &'a [Fragment], values: &mut Vec<&'a str>, urls: &mut BTreeSet<String>) {
+        for fragment in fragments {
+            for (name, value) in &fragment.attrs {
+                match name.as_str() {
+                    "src" | "poster" => {
+                        urls.insert(value.trim().to_owned());
+                    }
+                    "srcset" => urls.extend(
+                        value
+                            .split(',')
+                            .filter_map(|c| c.split_whitespace().next())
+                            .map(str::to_owned),
+                    ),
+                    "href" | "xlink:href"
+                        if matches!(fragment.tag(), Some("image" | "use" | "feImage")) =>
+                    {
+                        urls.insert(value.trim().to_owned());
+                    }
+                    _ => {}
+                }
+            }
+            values.extend(fragment.styles.values().map(String::as_str));
+            if fragment.tag() == Some("style")
+                && let Some(text) = fragment.children.first().and_then(|c| c.text.as_deref())
+            {
+                values.push(text);
+            }
+            walk(&fragment.children, values, urls);
+        }
+    }
+    walk(&board.content, &mut values, &mut urls);
+    for value in values {
+        urls.extend(css_urls(value));
+    }
+    urls.into_iter()
+        .filter(|url| is_external(url))
+        .map(|url| Dependency { url, blob: None })
+        .collect()
+}
+
+/// The URLs in CSS: each `url(…)`, and each `@import "…"`.
+fn css_urls(css: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    let lower = css.to_ascii_lowercase();
+    for (marker, close) in [("url(", ")"), ("@import \"", "\""), ("@import '", "'")] {
+        let mut from = 0;
+        while let Some(at) = lower[from..].find(marker) {
+            let start = from + at + marker.len();
+            let Some(len) = css[start..].find(close) else {
+                break;
+            };
+            let url = css[start..start + len].trim().trim_matches(['"', '\'']);
+            urls.push(url.to_owned());
+            from = start + len;
+        }
+    }
+    urls
+}
+
+/// Whether `url` names something outside the file: not inline data, not a
+/// fragment of the page, not one of the design's own blobs.
+fn is_external(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    !url.is_empty()
+        && !url.starts_with('#')
+        && !["data:", "blob:", "about:", assets::SCHEME]
+            .iter()
+            .any(|scheme| lower.starts_with(scheme))
+}
+
 #[cfg(test)]
 mod tests {
     use finite_design::{
@@ -134,7 +318,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::{Format, Placed, Receipt};
+    use crate::{Blobs, Format, NoBlobs, Placed, Receipt};
 
     fn design() -> Design {
         Design::new(DesignMeta {
@@ -156,6 +340,7 @@ mod tests {
     fn receipt() -> Receipt {
         Receipt {
             id: "i1".into(),
+            design: "d".into(),
             artifact: BlobHash::of(b"<p>hi</p>"),
             file_name: Some("page.html".into()),
             received_at: 7,
@@ -257,18 +442,21 @@ mod tests {
         let source = "<div data-name=\"Card\" style=\"display: flex; gap: 8px\"><p>One</p><img src=\"https://x/a.png\"></div>";
         let (_, placed) = import(&mut design, source).unwrap();
         let revision = Revision {
+            name: "Test",
             doc: design.doc(),
             imports: design.imports(),
+            blobs: &NoBlobs,
         };
-        let exported = Html.write(&revision, &placed.artboards[0]).unwrap();
+        let board = Scope::Artboard(placed.artboards[0].clone());
+        let exported = Html.write(&revision, &board).unwrap();
         assert_eq!(exported.file_name, "page.html");
         let page = String::from_utf8(exported.bytes).unwrap();
         assert!(page.starts_with("<!doctype html>"), "{page}");
         assert!(page.contains("<title>page</title>"), "{page}");
 
         // Importing the page gives back the artboard, as a <div> in a new one,
-        // after the page's base <style>. The page's <meta> and <title> act on
-        // the page, so they're quarantined.
+        // after the page's base <style>. The page's <meta>s act on the page,
+        // so they're quarantined.
         let mut again = Design::new(design.meta.clone());
         let (record, placed_again) = import(&mut again, &page).unwrap();
         let copy = again
@@ -284,6 +472,88 @@ mod tests {
             html::export(design.doc(), &placed.artboards[0], false)
         );
         let quarantined: Vec<_> = record.quarantined.iter().map(|q| q.what.as_str()).collect();
-        assert_eq!(quarantined, ["<meta>", "<meta>", "<title>"]);
+        assert_eq!(quarantined, ["<meta>", "<meta>"]);
+    }
+
+    #[test]
+    fn a_whole_page_keeps_what_its_body_carried() {
+        let mut design = design();
+        let source = "<!doctype html><html lang=\"sv\"><head><title>Home</title><style>body { margin: 0 }</style></head><body class=\"page\" style=\"background: red\" onload=\"x()\"><p>Hej</p></body></html>";
+        let input = Input {
+            bytes: source.as_bytes(),
+            file_name: None,
+        };
+        let imported = Html.read(&input).unwrap();
+        let mut new_id = ids();
+        let (_, (record, placed)) = design
+            .import("agent", "Import", 1, |tx| {
+                let (record, placed) = imported.place(tx, receipt(), &mut new_id)?;
+                Ok::<_, Error>((record.clone(), (record, placed)))
+            })
+            .unwrap();
+        let board = design.doc().get(&placed.artboards[0]).unwrap();
+        assert_eq!(board.name.as_deref(), Some("Home"));
+        assert_eq!(board.styles["background"], "red");
+        assert_eq!(board.attrs["class"], "page");
+        assert_eq!(board.attrs["lang"], "sv");
+        assert!(!board.attrs.contains_key("onload"));
+        let what: Vec<_> = placed.diagnostics.iter().map(|d| d.what.as_str()).collect();
+        assert_eq!(what, ["<style>", "onload"]);
+        // Every node remembers where it came from.
+        let paths: Vec<_> = record.nodes.values().map(String::as_str).collect();
+        assert_eq!(paths, ["/1", "/0/1", "/0/1/0", "/1/0", "/1/0/0"]);
+    }
+
+    #[test]
+    fn resources_outside_the_file_are_listed() {
+        let mut design = design();
+        let source = "<style>@import \"https://fonts.example/a.css\"; .x { background: url('/bg.png') }</style><img src=\"https://img.example/a.png\" srcset=\"a.png 1x, b.png 2x\"><img src=\"data:image/png;base64,AA\"><a href=\"https://not.a.resource\">x</a>";
+        let (record, _) = import(&mut design, source).unwrap();
+        let urls: Vec<_> = record.dependencies.iter().map(|d| d.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            [
+                "/bg.png",
+                "a.png",
+                "b.png",
+                "https://fonts.example/a.css",
+                "https://img.example/a.png"
+            ]
+        );
+        assert!(record.dependencies.iter().all(|d| d.blob.is_none()));
+    }
+
+    struct OneBlob(Vec<u8>);
+
+    impl Blobs for OneBlob {
+        fn get(&self, hash: &BlobHash) -> Result<Option<Vec<u8>>, Error> {
+            Ok((*hash == BlobHash::of(&self.0)).then(|| self.0.clone()))
+        }
+    }
+
+    #[test]
+    fn stored_images_export_inline() {
+        let mut design = design();
+        let png = b"\x89PNG\r\n\x1a\nrest".to_vec();
+        let stored = assets::url("d", &BlobHash::of(&png));
+        let missing = assets::url("d", &BlobHash::of(b"gone"));
+        let source = format!("<img src=\"{stored}\"><img src=\"{missing}\">");
+        let (_, placed) = import(&mut design, &source).unwrap();
+        let revision = Revision {
+            name: "Test",
+            doc: design.doc(),
+            imports: design.imports(),
+            blobs: &OneBlob(png),
+        };
+        let exported = Html
+            .write(&revision, &Scope::Artboard(placed.artboards[0].clone()))
+            .unwrap();
+        let page = String::from_utf8(exported.bytes).unwrap();
+        assert!(page.contains("src=\"data:image/png;base64,"), "{page}");
+        assert!(page.contains(&missing), "{page}");
+        assert_eq!(exported.diagnostics.len(), 1);
+        assert_eq!(exported.diagnostics[0].preserved, Score::No);
+        // A whole design doesn't fit in one HTML file.
+        assert!(Html.write(&revision, &Scope::Design).is_err());
     }
 }

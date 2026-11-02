@@ -5,6 +5,7 @@
 use std::io;
 
 pub use finite_design::import::{BlobHash, NotAHash};
+pub use finite_transfer::assets::media_type;
 
 /// The largest blob a store accepts. A design holds many, and a viewer
 /// downloads each one whole.
@@ -20,41 +21,6 @@ pub fn accept(bytes: &[u8]) -> io::Result<BlobHash> {
         ));
     }
     Ok(BlobHash::of(bytes))
-}
-
-/// The content type a blob is served as, from its first bytes. A blob has no
-/// name or type of its own, and one that claims to be an image mustn't be
-/// served as a page.
-pub fn content_type(bytes: &[u8]) -> &'static str {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        "image/png"
-    } else if bytes.starts_with(b"\xff\xd8\xff") {
-        "image/jpeg"
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        "image/gif"
-    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        "image/webp"
-    } else if is_svg(bytes) {
-        "image/svg+xml"
-    } else {
-        "application/octet-stream"
-    }
-}
-
-/// An SVG is text, so it has no magic bytes: it's XML-ish text, after an
-/// optional byte order mark and spaces, that has an `<svg` tag near the top.
-fn is_svg(bytes: &[u8]) -> bool {
-    let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
-    let start = bytes
-        .iter()
-        .position(|b| !b.is_ascii_whitespace())
-        .unwrap_or(bytes.len());
-    let bytes = &bytes[start..];
-    let head = &bytes[..bytes.len().min(1024)];
-    let lower = head.to_ascii_lowercase();
-    let opens = [&b"<svg"[..], b"<?xml", b"<!--", b"<!doctype"];
-    opens.iter().any(|open| lower.starts_with(open))
-        && lower.windows(4).any(|window| window == b"<svg")
 }
 
 #[cfg(test)]
@@ -95,29 +61,5 @@ mod tests {
         assert!(accept(&vec![0; MAX_BLOB]).is_ok());
         let error = accept(&vec![0; MAX_BLOB + 1]).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-    }
-
-    #[test]
-    fn content_types_come_from_the_bytes() {
-        let cases: [(&[u8], &str); 9] = [
-            (b"\x89PNG\r\n\x1a\n....", "image/png"),
-            (b"\xff\xd8\xff\xe0....", "image/jpeg"),
-            (b"GIF89a....", "image/gif"),
-            (b"RIFF\x10\0\0\0WEBPVP8 ", "image/webp"),
-            (
-                b"<svg xmlns='http://www.w3.org/2000/svg'/>",
-                "image/svg+xml",
-            ),
-            (
-                b"\xef\xbb\xbf \n<?xml version='1.0'?><svg/>",
-                "image/svg+xml",
-            ),
-            (b"<html><svg></svg></html>", "application/octet-stream"),
-            (b"RIFF\x10\0\0\0WAVEfmt ", "application/octet-stream"),
-            (b"", "application/octet-stream"),
-        ];
-        for (bytes, expected) in cases {
-            assert_eq!(content_type(bytes), expected, "{bytes:?}");
-        }
     }
 }
