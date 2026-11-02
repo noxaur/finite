@@ -487,15 +487,12 @@ const styles = stylex.create({
     position: "absolute",
     inset: 0,
     overflow: "hidden",
-    cursor: "grab",
+    cursor: "var(--cursor-grab, grab)",
     touchAction: "none",
     userSelect: "none",
   },
-  // A comment bubble, with its tip as the hotspot.
-  commenting: {
-    cursor:
-      "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Cpath d='M12 2a9 9 0 1 1-4.5 16.8L2 22l1.4-5.4A9 9 0 0 1 12 2z' fill='white' stroke='black' stroke-width='1.5'/%3E%3C/svg%3E\") 2 22, crosshair",
-  },
+  // The draft pin, with its tail tip as the hotspot.
+  commenting: { cursor: "var(--cursor-comment, crosshair)" },
   world: {
     position: "absolute",
     left: 0,
@@ -607,7 +604,7 @@ const styles = stylex.create({
     backgroundColor: { default: "transparent", ":hover": colors.bg },
     color: "inherit",
     font: "inherit",
-    cursor: "pointer",
+    cursor: "var(--cursor-pointer, pointer)",
   },
   percent: {
     minWidth: 48,

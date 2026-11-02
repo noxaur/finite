@@ -212,7 +212,7 @@ const styles = stylex.create({
     color: colors.bg,
     font: "inherit",
     fontSize: 14,
-    cursor: "pointer",
+    cursor: "var(--cursor-pointer, pointer)",
     opacity: { default: 1, ":hover": 0.85, ":disabled": 0.5 },
   },
   search: { display: "flex", flexDirection: "column", gap: space.xs, marginBottom: space.md },

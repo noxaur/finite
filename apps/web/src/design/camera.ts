@@ -150,7 +150,7 @@ export class Camera {
     e.preventDefault();
     const start = { px: e.clientX, py: e.clientY, x: this.view.x, y: this.view.y };
     this.viewport.setPointerCapture(e.pointerId);
-    this.viewport.style.cursor = "grabbing";
+    this.viewport.style.cursor = "var(--cursor-grabbing, grabbing)";
     const move = (ev: PointerEvent) =>
       this.set({
         ...this.view,

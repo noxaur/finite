@@ -3,10 +3,11 @@
 import * as stylex from "@stylexjs/stylex";
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Replica } from "@/design/replica";
-import type { Comment, CommentMessage } from "@/design/schema";
+import type { Comment } from "@/design/schema";
 import { COMMENT_LIMIT, NAME_LIMIT } from "@/lib/limits";
 import { isLocalUser, useLocalName } from "@/lib/user";
 import { timeAgo } from "@/lib/time";
+import { PinFilters, PinIcon } from "./PinIcon";
 
 /** How far right of its pin a popover starts, in pixels. */
 const POPOVER_GAP = 36;
@@ -94,8 +95,12 @@ interface LayerProps {
  */
 export function CommentLayer(props: LayerProps) {
   const { replica, comments, openId, draft, working } = props;
+  const busyAny = [...comments.values()].some(
+    (c) => !c.resolved && c.artboardId !== null && working.has(c.artboardId),
+  );
   return (
     <div {...stylex.props(styles.layer)}>
+      <PinFilters boiling={busyAny} />
       {[...comments.values()].map((comment) => {
         const at = pinPosition(replica, comment);
         if (!at) return null;
@@ -112,14 +117,20 @@ export function CommentLayer(props: LayerProps) {
               type="button"
               aria-label={`Comment: ${comment.messages[0]?.body ?? ""}`}
               onClick={() => props.onOpen(open ? null : comment.id)}
-              {...stylex.props(
-                styles.pin,
-                comment.resolved && styles.pinResolved,
-                open && styles.pinOpen,
-                busy && styles.pinBusy,
-              )}
+              {...stylex.props(styles.pin)}
             >
-              {comment.resolved ? "✓" : initial(comment.messages[0])}
+              <PinIcon
+                state={
+                  comment.resolved
+                    ? "resolved"
+                    : busy
+                      ? "working"
+                      : comment.messages.at(-1)?.author.kind === "agent"
+                        ? "replied"
+                        : "waiting"
+                }
+                selected={open}
+              />
             </button>
             {open && (
               <Thread
@@ -144,7 +155,9 @@ function DraftPin({ replica, draft, onPost, onCancelDraft }: LayerProps & { draf
   if (!at) return null;
   return (
     <div data-camera-ignore {...stylex.props(styles.anchor(at.x, at.y), styles.raised)}>
-      <div {...stylex.props(styles.pin, styles.pinOpen)} />
+      <div {...stylex.props(styles.pin)}>
+        <PinIcon state="draft" selected />
+      </div>
       <Popover>
         <NameLine />
         <Composer
@@ -392,9 +405,6 @@ function Composer({
   );
 }
 
-const initial = (message: CommentMessage | undefined) =>
-  message && isLocalUser(message.author) ? "Y" : (message?.author.name[0]?.toUpperCase() ?? "?");
-
 const pulse = stylex.keyframes({
   "0%": { boxShadow: `0 0 0 0 rgba(194, 65, 12, 0.5)` },
   "100%": { boxShadow: `0 0 0 10px rgba(194, 65, 12, 0)` },
@@ -425,7 +435,7 @@ const styles = stylex.create({
     borderRadius: 999,
     backgroundColor: { default: "transparent", ":hover": colors.bg },
     color: colors.text,
-    cursor: "pointer",
+    cursor: "var(--cursor-pointer, pointer)",
   },
   pillActive: {
     backgroundColor: { default: colors.accent, ":hover": colors.accent },
@@ -452,28 +462,14 @@ const styles = stylex.create({
   raised: { zIndex: 1 },
   pin: {
     position: "absolute",
-    left: 0,
-    bottom: 0,
-    display: "grid",
-    placeItems: "center",
-    width: 28,
-    height: 28,
+    left: -3,
+    bottom: -2,
+    display: "block",
     padding: 0,
-    borderWidth: 2,
-    borderStyle: "solid",
-    borderColor: "white",
-    borderRadius: "14px 14px 14px 2px",
-    backgroundColor: colors.accent,
-    color: "white",
-    fontSize: 12,
-    fontWeight: 600,
-    fontFamily: "inherit",
-    boxShadow: "0 1px 4px rgba(0, 0, 0, 0.25)",
-    cursor: "pointer",
+    borderWidth: 0,
+    backgroundColor: "transparent",
+    cursor: "var(--cursor-pointer, pointer)",
   },
-  pinResolved: { backgroundColor: colors.ok },
-  pinOpen: { outline: `2px solid ${colors.accent}`, outlineOffset: 1 },
-  pinBusy: { animationName: pulse, animationDuration: "1.2s", animationIterationCount: "infinite" },
   popover: {
     position: "absolute",
     left: POPOVER_GAP,
@@ -507,7 +503,7 @@ const styles = stylex.create({
     textDecoration: "underline",
     textDecorationStyle: "dotted",
     textUnderlineOffset: 2,
-    cursor: "pointer",
+    cursor: "var(--cursor-pointer, pointer)",
   },
   nameInput: {
     height: 24,
@@ -530,7 +526,7 @@ const styles = stylex.create({
     color: "inherit",
     font: "inherit",
     fontSize: 12,
-    cursor: "pointer",
+    cursor: "var(--cursor-pointer, pointer)",
   },
   messages: {
     display: "flex",
@@ -557,7 +553,7 @@ const styles = stylex.create({
     color: "inherit",
     font: "inherit",
     fontSize: 12,
-    cursor: "pointer",
+    cursor: "var(--cursor-pointer, pointer)",
   },
   working: {
     display: "flex",
@@ -601,6 +597,6 @@ const styles = stylex.create({
     backgroundColor: { default: colors.accent, ":disabled": colors.border },
     color: "white",
     fontSize: 14,
-    cursor: { default: "pointer", ":disabled": "default" },
+    cursor: { default: "var(--cursor-pointer, pointer)", ":disabled": "default" },
   },
 });
