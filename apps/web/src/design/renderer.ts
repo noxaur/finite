@@ -123,6 +123,8 @@ export class Renderer {
   private readonly scripts = new Set<string>();
   private working: ReadonlyMap<string, string> = new Map();
   private commenting = false;
+  /** The page shown, or `null` for the first page. Only its artboards are mounted. */
+  private page: string | null = null;
   private readonly abort = new AbortController();
 
   constructor(
@@ -156,7 +158,42 @@ export class Renderer {
     for (const board of this.replica.artboards()) this.mount(board);
   }
 
+  /** Shows only the artboards on `page` (`null`: the first page). */
+  setPage(page: string | null) {
+    this.page = page;
+    this.syncPage();
+  }
+
+  /** The page shown: the one asked for, or the first page if it's gone. */
+  shownPage(): string {
+    const { pages } = this.replica;
+    return pages.some((p) => p.id === this.page) ? this.page! : pages[0]!.id;
+  }
+
+  /** Mounts the shown page's artboards and unmounts the rest. */
+  private syncPage() {
+    const page = this.shownPage();
+    for (const board of this.replica.artboards()) this.syncBoard(board, page);
+  }
+
+  /** Mounts or unmounts one artboard, by whether it's on `page`. */
+  private syncBoard(board: Node, page: string) {
+    const shown = this.replica.pageOf(board) === page;
+    if (shown && !this.frames.has(board.id)) this.mount(board);
+    else if (!shown && this.frames.has(board.id))
+      for (const id of this.replica.subtree(board.id)) this.unmount(id);
+  }
+
   apply(applied: Applied) {
+    if (applied.op === "page") {
+      // Removing a page moves its artboards to the first page.
+      this.syncPage();
+      return;
+    }
+    if (applied.op === "set" && applied.key === "page") {
+      if (applied.node.parent === null) this.syncBoard(applied.node, this.shownPage());
+      return;
+    }
     if (applied.op === "css") {
       // Every artboard uses it: restyle shadow roots, reload sandboxed ones.
       const css = this.sharedCss();
@@ -307,7 +344,7 @@ export class Renderer {
   }
 
   /** Artboards an op changed: where its node is now, and where it was before. */
-  private touchedBoards(applied: Exclude<Applied, { op: "css" }>): Set<string> {
+  private touchedBoards(applied: Exclude<Applied, { op: "css" | "page" }>): Set<string> {
     const boards = new Set<string>();
     const add = (id: string | null) => {
       const board = id === null ? undefined : this.replica.artboardOf(id);
@@ -319,7 +356,7 @@ export class Renderer {
     return boards;
   }
 
-  private patch(applied: Exclude<Applied, { op: "css" }>) {
+  private patch(applied: Exclude<Applied, { op: "css" | "page" }>) {
     switch (applied.op) {
       case "create":
         this.mount(applied.node);
@@ -345,7 +382,7 @@ export class Renderer {
   /** Builds `node` and its subtree, and inserts it in sibling order. */
   private mount(node: Node) {
     if (node.parent === null) {
-      if (node.type !== "element") return;
+      if (node.type !== "element" || this.replica.pageOf(node) !== this.shownPage()) return;
       const frame = this.createFrame(node, this.isLive(node.id));
       this.frames.set(node.id, frame);
       this.world.append(frame.root);

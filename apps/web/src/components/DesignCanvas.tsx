@@ -17,6 +17,7 @@ import { runtime } from "@/runtime";
 import { colors, radii, space } from "@/styles/tokens.stylex";
 import { CommentLayer, type Draft, type Mode, pinPosition, ToolPill } from "./Comments";
 import { CommentsPanel } from "./CommentsPanel";
+import { PagesSidebar } from "./PagesSidebar";
 import { SharedCssPanel } from "./SharedCss";
 
 /** How long "show what changed" outlines stay up. */
@@ -74,12 +75,14 @@ export function DesignCanvas({ id }: { id: string }) {
   const pointerRef = useRef<{ x: number; y: number } | null>(null);
   const refreshHover = useRef(() => {});
   const cameraRef = useRef<Camera | null>(null);
+  // The view the camera framed the artboards with, until the person moves it.
+  const framedRef = useRef<View | null>(null);
   const rendererRef = useRef<Renderer | null>(null);
   const sessionRef = useRef<DesignSession | null>(null);
 
   // Re-rendering on every session update also moves pins with their artboards.
   const [session, setSession] = useState<SessionState>(initialSessionState);
-  const { meta, presence, status, activity, comments, working } = session;
+  const { meta, presence, status, activity, comments, working, pages } = session;
   const [zoom, setZoom] = useState(1);
   const [missing, setMissing] = useState(false);
   const model = useDesignModel();
@@ -89,6 +92,10 @@ export function DesignCanvas({ id }: { id: string }) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [hover, setHover] = useState<Hit | null>(null);
   const [flash, setFlash] = useState<ReadonlyArray<string>>([]);
+  // The page picked in the sidebar, or `null` for the first. A page that's
+  // gone shows the first page, as the renderer does.
+  const [pickedPage, setPickedPage] = useState<string | null>(null);
+  const page = pages.find((p) => p.id === pickedPage) ?? pages[0];
   // The shared CSS and the comments list open in the same place, one at a time.
   const [panel, setPanel] = useState<"css" | "comments" | null>(null);
   const togglePanel = (name: "css" | "comments") =>
@@ -106,8 +113,7 @@ export function DesignCanvas({ id }: { id: string }) {
 
     const camera = new Camera(viewport, world);
     const replica = new Replica();
-    // The view the camera framed the artboards with, until the person moves it.
-    let framed: View | null = null;
+    framedRef.current = null;
     const renderer = new Renderer(frames, replica, {
       live: true,
       onWheel: (event) => camera.wheel(event),
@@ -116,13 +122,14 @@ export function DesignCanvas({ id }: { id: string }) {
       // unless the person has already panned or zoomed.
       onResize: () => {
         const view = camera.view;
+        const framed = framedRef.current;
         if (!framed || framed.x !== view.x || framed.y !== view.y || framed.zoom !== view.zoom) {
           return;
         }
         const bounds = union(renderer.artboardBounds().values());
         if (!bounds) return;
         camera.fitTo(bounds);
-        framed = camera.view;
+        framedRef.current = camera.view;
       },
       // A sandboxed artboard answered: redo the hover test and redraw outlines.
       onLayout: () => {
@@ -135,15 +142,17 @@ export function DesignCanvas({ id }: { id: string }) {
     rendererRef.current = renderer;
     cameraRef.current = camera;
     camera.subscribe((view) => setZoom(view.zoom));
+    // A new renderer starts on the first page.
+    setPickedPage(null);
 
     // Frame the artboards once, when the first ones appear.
     const unsubscribe = session.subscribe(() => {
       setSession(session.state);
-      if (framed) return;
+      if (framedRef.current) return;
       const bounds = union(renderer.artboardBounds().values());
       if (bounds) {
         camera.fitTo(bounds);
-        framed = camera.view;
+        framedRef.current = camera.view;
       }
     });
     const close = session.connect(id);
@@ -304,10 +313,32 @@ export function DesignCanvas({ id }: { id: string }) {
     });
   };
 
-  // From the comments list: open the thread and bring its pin into view.
+  /** Shows the artboards on one page, framed in the viewport. */
+  const showPage = (pageId: string) => {
+    setPickedPage(pageId);
+    const renderer = rendererRef.current;
+    if (!renderer) return;
+    renderer.setPage(pageId);
+    const bounds = union(renderer.artboardBounds().values());
+    if (bounds) cameraRef.current?.fitTo(bounds);
+    // So auto-height artboards reframe it as they grow, and an empty page
+    // frames its first artboard when one arrives.
+    framedRef.current = bounds ? (cameraRef.current?.view ?? null) : null;
+    setDraft(null);
+    setOpenId(null);
+    setHover(null);
+  };
+
+  // From the comments list: open the thread and bring its pin into view,
+  // on its artboard's page.
   const showComment = (commentId: string) => {
     const comment = comments.get(commentId);
     const replica = sessionRef.current?.replica;
+    const board = comment?.artboardId ? replica?.get(comment.artboardId) : undefined;
+    if (board?.parent === null && replica && replica.pageOf(board) !== page?.id) {
+      setPickedPage(replica.pageOf(board));
+      rendererRef.current?.setPage(replica.pageOf(board));
+    }
     const at = comment && replica ? pinPosition(replica, comment) : null;
     if (at) cameraRef.current?.centerOn(at.x, at.y);
     setDraft(null);
@@ -404,9 +435,10 @@ export function DesignCanvas({ id }: { id: string }) {
                 />
               ),
           )}
-          {sessionRef.current && (
+          {sessionRef.current && page && (
             <CommentLayer
               replica={sessionRef.current.replica}
+              page={page.id}
               comments={comments}
               openId={openId}
               draft={draft}
@@ -465,6 +497,17 @@ export function DesignCanvas({ id }: { id: string }) {
         />
       </header>
 
+      {pages.length > 0 && page && (
+        <PagesSidebar pages={pages} current={page.id} onSelect={showPage} />
+      )}
+
+      {meta && session.artboardCount > 0 && page?.artboardCount === 0 && (
+        <div {...stylex.props(styles.empty)}>
+          <p {...stylex.props(styles.emptyTitle)}>No artboards on this page</p>
+          <p {...stylex.props(styles.muted)}>Ask an agent to add some, or pick another page.</p>
+        </div>
+      )}
+
       {meta && session.artboardCount === 0 && (
         <div {...stylex.props(styles.empty)}>
           <p {...stylex.props(styles.emptyTitle)}>No artboards yet</p>
@@ -476,7 +519,7 @@ export function DesignCanvas({ id }: { id: string }) {
       )}
 
       {activity.length > 0 && (
-        <ol {...stylex.props(styles.bar, styles.activity)}>
+        <ol aria-label="Recent changes" {...stylex.props(styles.bar, styles.activity)}>
           {activity.map((a) => (
             <li key={a.seq} {...stylex.props(styles.activityItem)}>
               <span {...stylex.props(styles.actor)}>{a.actor}</span> {a.label}{" "}

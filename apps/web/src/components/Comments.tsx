@@ -114,6 +114,8 @@ export function ToolPill({ mode, onMode }: { mode: Mode; onMode: (mode: Mode) =>
 
 interface LayerProps {
   readonly replica: Replica;
+  /** The page shown. Pins on artboards on other pages are hidden. */
+  readonly page: string;
   readonly comments: ReadonlyMap<string, Comment>;
   readonly openId: string | null;
   readonly draft: Draft | null;
@@ -163,6 +165,8 @@ export function CommentLayer(props: LayerProps) {
         if (age !== null && age >= DECAY_MS && !open) return null;
         const at = pinPosition(replica, comment);
         if (!at) return null;
+        const board = comment.artboardId === null ? undefined : replica.get(comment.artboardId);
+        if (board?.parent === null && replica.pageOf(board) !== props.page) return null;
         const busy =
           !comment.resolved && comment.artboardId !== null && working.has(comment.artboardId);
         return (

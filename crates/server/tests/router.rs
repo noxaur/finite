@@ -724,6 +724,7 @@ async fn the_router_relays_large_designs() {
         width: 800.0,
         height: Some(600.0),
         position: None,
+        page: None,
         styles: Default::default(),
     };
     design

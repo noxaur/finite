@@ -69,7 +69,8 @@ describe("Replica", () => {
       ],
       (a: Applied) => {
         // Each callback sees the tree right after its own op.
-        const where = a.op === "delete" ? a.parent : a.op === "css" ? null : a.node.id;
+        const where =
+          a.op === "delete" ? a.parent : a.op === "css" || a.op === "page" ? null : a.node.id;
         seen.push(
           `${a.op} ${r
             .children("a")
@@ -152,5 +153,35 @@ describe("Replica", () => {
     r.apply({ op: "css", css: ":root { --brand: blue; }" });
     r.load(snapshot);
     expect(r.css).toBeNull();
+  });
+
+  it("lists pages and which page each artboard is on", () => {
+    const r = new Replica();
+    const snapshot = {
+      meta: { id: "d", name: "D", createdAt: 0, updatedAt: 0 },
+      seq: 0,
+      nodes: [node("a", null), { ...node("b", null), page: "kit" }],
+      comments: [],
+    };
+    // Without pages, every artboard is on the implicit first page.
+    r.load(snapshot);
+    expect(r.pages).toEqual([{ id: "page-1", name: "Page 1" }]);
+    expect(r.pageOf(r.get("b")!)).toBe("page-1");
+
+    r.load({
+      ...snapshot,
+      pages: {
+        kit: { name: "Components", index: "k" },
+        "page-1": { name: "Screens", index: "V" },
+      },
+    });
+    expect(r.pages.map((p) => p.name)).toEqual(["Screens", "Components"]);
+    expect(r.pageOf(r.get("a")!)).toBe("page-1");
+    expect(r.pageOf(r.get("b")!)).toBe("kit");
+
+    // Removing a page moves its artboards to the first page.
+    expect(r.apply({ op: "page", id: "kit", page: null })).toEqual({ op: "page" });
+    expect(r.pages.map((p) => p.id)).toEqual(["page-1"]);
+    expect(r.pageOf(r.get("b")!)).toBe("page-1");
   });
 });

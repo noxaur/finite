@@ -34,6 +34,7 @@ fn main() {
                 width: 1440.0,
                 height: Some(900.0),
                 position: None,
+                page: None,
                 styles: BTreeMap::new(),
             };
             let ops = edit::create_artboard(design.doc(), "board".into(), spec).unwrap();
