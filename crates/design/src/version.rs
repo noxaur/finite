@@ -61,6 +61,11 @@ pub enum VersionError {
         from: u32,
         reason: String,
     },
+    /// Nested deeper than the caller allows. See [`Schema::decode_nested`].
+    TooDeep {
+        schema: &'static str,
+        limit: usize,
+    },
     Json(serde_json::Error),
 }
 
@@ -83,6 +88,9 @@ impl std::fmt::Display for VersionError {
                 f,
                 "couldn't upgrade a {schema} from version {from}: {reason}"
             ),
+            Self::TooDeep { schema, limit } => {
+                write!(f, "this {schema} nests more than {limit} levels deep")
+            }
             Self::Json(e) => write!(f, "{e}"),
         }
     }
@@ -122,6 +130,40 @@ impl Schema {
         Ok(serde_json::from_value(value)?)
     }
 
+    /// [`Schema::decode`] for formats that nest as deep as a design does,
+    /// like a bundle's layers. serde_json stops at 128 levels to protect the
+    /// stack, which is less than a design's [`crate::document::MAX_DEPTH`].
+    /// So this counts the nesting first, cheaply, refuses anything deeper
+    /// than `limit`, and then parses without serde_json's limit.
+    pub fn decode_nested<T: DeserializeOwned>(
+        &self,
+        json: &str,
+        limit: usize,
+    ) -> Result<T, VersionError> {
+        if nesting(json) > limit {
+            return Err(VersionError::TooDeep {
+                schema: self.name,
+                limit,
+            });
+        }
+        fn parse<T: DeserializeOwned>(json: &str) -> serde_json::Result<T> {
+            let mut de = serde_json::Deserializer::from_str(json);
+            de.disable_recursion_limit();
+            let value = T::deserialize(&mut de)?;
+            de.end()?;
+            Ok(value)
+        }
+        let found = version_of(json)?;
+        if found > self.version {
+            return Err(self.newer(found));
+        }
+        if found == self.version {
+            return Ok(parse(json)?);
+        }
+        let value = self.upgrade(parse(json)?, found)?;
+        Ok(serde_json::from_value(value)?)
+    }
+
     /// Runs the upgrade steps from `found` to the current version.
     fn upgrade(&self, mut value: Value, found: u32) -> Result<Value, VersionError> {
         for from in found.max(1)..self.version {
@@ -146,6 +188,33 @@ impl Schema {
             known: self.version,
         }
     }
+}
+
+/// How deeply `json` nests objects and arrays, counted in one pass that
+/// skips strings.
+fn nesting(json: &str) -> usize {
+    let (mut depth, mut deepest, mut in_string, mut escaped) = (0usize, 0usize, false, false);
+    for b in json.bytes() {
+        if in_string {
+            match b {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest
 }
 
 /// The version of a stored object. [`Schema::encode`] writes it first, so
@@ -228,6 +297,34 @@ mod tests {
             err.to_string(),
             "couldn't upgrade a pet from version 1: no feet"
         );
+    }
+
+    #[test]
+    fn deep_data_parses_up_to_the_limit() {
+        #[derive(Debug, Deserialize)]
+        struct Tree {
+            #[serde(default)]
+            children: Vec<Tree>,
+        }
+        const TREE: Schema = Schema {
+            name: "tree",
+            version: 1,
+            upgrades: &[],
+        };
+        let deep = |levels: usize| {
+            let mut json = String::from("{}");
+            for _ in 0..levels {
+                json = format!("{{\"children\":[{json}]}}");
+            }
+            json
+        };
+        // Past serde_json's own limit, and with a `]` inside a string.
+        let json = deep(300).replacen("{}", r#"{"x":"]]"}"#, 1);
+        assert!(TREE.decode::<Tree>(&json).is_err());
+        let tree: Tree = TREE.decode_nested(&json, 700).unwrap();
+        assert_eq!(tree.children.len(), 1);
+        let err = TREE.decode_nested::<Tree>(&json, 500).unwrap_err();
+        assert_eq!(err.to_string(), "this tree nests more than 500 levels deep");
     }
 
     #[test]

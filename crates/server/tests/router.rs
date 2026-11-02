@@ -1009,3 +1009,61 @@ async fn a_request_to_a_stuck_server_fails_in_the_end() {
     );
     drop(stuck);
 }
+
+/// Headers that keep downloads safe reach the browser through the router: a
+/// stored SVG keeps `sandbox`, and an original file keeps its attachment.
+#[tokio::test]
+async fn the_router_passes_on_what_keeps_downloads_safe() {
+    let (front, _) = deployment().await;
+    let http = reqwest::Client::new();
+    let created: Value = http
+        .post(format!("{front}/api/designs"))
+        .json(&json!({ "name": "Assets" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap();
+
+    let svg = b"<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>";
+    let hash = finite_server::blob::BlobHash::of(svg);
+    let put = http
+        .put(format!("{front}/api/designs/{id}/assets/{hash}"))
+        .body(svg.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), 201);
+    let got = http
+        .get(format!("{front}/api/designs/{id}/assets/{hash}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.headers()["content-security-policy"], "sandbox");
+    assert_eq!(got.headers()["x-content-type-options"], "nosniff");
+
+    let imported: Value = http
+        .post(format!("{front}/api/designs/{id}/import?format=html&name=a.html"))
+        .body("<p onclick=\"x()\">Hi</p>")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let import = imported["import"]["id"].as_str().unwrap();
+    let original = http
+        .get(format!("{front}/api/designs/{id}/imports/{import}/original"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(original.headers()["content-security-policy"], "sandbox");
+    assert!(
+        original.headers()["content-disposition"]
+            .to_str()
+            .unwrap()
+            .starts_with("attachment")
+    );
+}

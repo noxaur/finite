@@ -29,13 +29,24 @@ pub fn portable(value: &str) -> (String, Vec<BlobHash>) {
 
 /// `value` with each blob URL, for any design, replaced by what `f` returns
 /// for its hash. A URL `f` returns `None` for stays as it is.
+///
+/// Only a whole URL counts: one that starts where a URL can, like after a
+/// quote or `url(`. So `https://example.com/api/designs/…` is someone
+/// else's server and stays as it is.
 pub fn rewrite_urls(value: &str, mut f: impl FnMut(&BlobHash) -> Option<String>) -> String {
     const PREFIX: &str = "/api/designs/";
     let mut out = String::with_capacity(value.len());
     let mut rest = value;
     while let Some(at) = rest.find(PREFIX) {
+        let before = rest[..at].chars().last().or_else(|| out.chars().last());
+        let starts_url = is_url_start(before);
         out.push_str(&rest[..at]);
         let tail = &rest[at + PREFIX.len()..];
+        if !starts_url {
+            out.push_str(PREFIX);
+            rest = tail;
+            continue;
+        }
         let matched = tail.split_once('/').and_then(|(design, after)| {
             let is_design = !design.is_empty()
                 && design
@@ -58,6 +69,12 @@ pub fn rewrite_urls(value: &str, mut f: impl FnMut(&BlobHash) -> Option<String>)
     }
     out.push_str(rest);
     out
+}
+
+/// Whether a URL can start right after `before`: at the start of a value,
+/// after a quote or bracket, or after a space, a comma or an `=`.
+fn is_url_start(before: Option<char>) -> bool {
+    before.is_none_or(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | ',' | '='))
 }
 
 /// The blobs `value` refers to with [`SCHEME`].
@@ -95,12 +112,18 @@ pub fn resolve(value: &str, design: &str) -> String {
     out
 }
 
-/// Runs `f` on every attribute and style value in `fragments`, which is
-/// where blob references can be: an `<img src>`, a `background-image`.
+/// Runs `f` on every value in `fragments` where blob references can be: an
+/// attribute like `<img src>`, a style like `background-image`, and the
+/// text of a `<style>` element.
 pub fn for_each_value(fragments: &mut [Fragment], f: &mut impl FnMut(&mut String)) {
     for fragment in fragments {
         fragment.attrs.values_mut().for_each(&mut *f);
         fragment.styles.values_mut().for_each(&mut *f);
+        if fragment.tag() == Some("style") {
+            for child in &mut fragment.children {
+                child.text.iter_mut().for_each(&mut *f);
+            }
+        }
         for_each_value(&mut fragment.children, f);
     }
 }
@@ -165,6 +188,7 @@ mod tests {
             "/api/designs/abc/thumbnail",
             "/api/designs/abc/assets/short",
             "finite-asset:nothex",
+            "https://example.com/api/designs/abc/assets/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         ] {
             assert_eq!(portable(value), (value.to_owned(), Vec::new()));
             assert_eq!(resolve(value, "d"), value);

@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use finite_design::{
-    Node, NodeKind,
+    MAX_DEPTH, Node, NodeKind,
     edit::pixel_size,
     html::{self, Fragment},
     import::{BlobHash, Dependency},
@@ -110,7 +110,9 @@ impl Codec for Finite {
     fn read(&self, input: &Input<'_>) -> Result<Imported, Error> {
         let json = std::str::from_utf8(input.bytes)
             .map_err(|_| Error("the file isn't UTF-8 text, so it can't be a bundle".into()))?;
-        let bundle: Bundle = BUNDLE.decode(json).map_err(|e| match e {
+        // Each layer nests an object and its children's array.
+        let limit = 2 * MAX_DEPTH + 8;
+        let bundle: Bundle = BUNDLE.decode_nested(json, limit).map_err(|e| match e {
             VersionError::Json(e) => Error(format!("this isn't a Finite bundle: {e}")),
             other => Error(other.to_string()),
         })?;
@@ -226,6 +228,12 @@ fn verified_blobs(bundle: &Bundle) -> Result<Vec<(BlobHash, Vec<u8>)>, Error> {
     fn walk(layer: &Layer, out: &mut Vec<BlobHash>) {
         for value in layer.styles.values().chain(layer.attrs.values()) {
             out.extend(assets::referenced(value));
+        }
+        // A stylesheet's text can point at files too.
+        if layer.tag.as_deref() == Some("style") {
+            for child in &layer.children {
+                out.extend(child.text.iter().flat_map(|t| assets::referenced(t)));
+            }
         }
         layer.children.iter().for_each(|child| walk(child, out));
     }
@@ -428,10 +436,20 @@ fn layer(revision: &Revision<'_>, node: &Node, portable: &mut impl FnMut(&str) -
             .map(|(k, v)| (k.clone(), portable(v)))
             .collect()
     };
+    // A stylesheet's text can point at files, like any style.
+    let in_style = node
+        .parent
+        .as_deref()
+        .and_then(|p| revision.doc.get(p))
+        .is_some_and(|p| p.tag() == Some("style"));
+    let text = match &node.text {
+        Some(text) if in_style => Some(portable(text)),
+        text => text.clone(),
+    };
     Layer {
         tag: node.tag().map(str::to_owned),
         name: node.name.clone(),
-        text: node.text.clone(),
+        text,
         x: node.x,
         y: node.y,
         styles: map(&node.styles, portable),
@@ -454,6 +472,8 @@ mod tests {
     use crate::{Blobs, Placed, Receipt};
 
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\nfake";
+    /// Only a `<style>` element refers to this one.
+    const GIF: &[u8] = b"GIF89a fake";
 
     struct Store(Vec<Vec<u8>>);
 
@@ -509,7 +529,8 @@ mod tests {
     fn source() -> Design {
         let mut source = design("old");
         let html = format!(
-            "<!doctype html><body class=\"page\" style=\"background: #eee\"><img src=\"{}\" data-name=\"Logo\"><p>Hi</p></body>",
+            "<!doctype html><body class=\"page\" style=\"background: #eee\"><style>.x {{ background: url({}) }}</style><img src=\"{}\" data-name=\"Logo\"><p>Hi</p></body>",
+            assets::url("old", &BlobHash::of(GIF)),
             assets::url("old", &BlobHash::of(PNG))
         );
         let imported = crate::html::Html
@@ -539,7 +560,7 @@ mod tests {
             name: "Home",
             doc: source.doc(),
             imports: source.imports(),
-            blobs: &Store(vec![PNG.to_vec()]),
+            blobs: &Store(vec![PNG.to_vec(), GIF.to_vec()]),
             measure: &crate::scene::NoMeasure,
         };
         let exported = Finite.write(&revision, &Scope::Design).unwrap();
@@ -554,10 +575,12 @@ mod tests {
         assert_eq!(exported.diagnostics[0].feature, Feature::ImportHistory);
 
         let imported = read(&json).unwrap();
-        assert_eq!(imported.blobs, [PNG.to_vec()]);
+        let mut carried = imported.blobs.clone();
+        carried.sort();
+        assert_eq!(carried, [GIF.to_vec(), PNG.to_vec()]);
         let mut target = design("new");
         let (record, placed) = place(&mut target, imported);
-        assert_eq!(record.dependencies[0].blob, Some(BlobHash::of(PNG)));
+        assert_eq!(record.dependencies.len(), 2);
         let old = source.doc().artboards()[0];
         let new = target.doc().get(&placed.artboards[0]).unwrap();
         assert_eq!((new.x, new.y, &new.attrs), (old.x, old.y, &old.attrs));
@@ -636,6 +659,13 @@ mod tests {
         });
         let error = read(&refers.to_string()).unwrap_err();
         assert!(error.0.contains("doesn't contain"), "{error}");
+        let in_stylesheet = json!({
+            "kind": "finite-bundle", "name": "x",
+            "artboards": [{ "styles": { "width": "1px", "height": "1px" },
+                "children": [{ "tag": "style", "children": [{ "text": format!(".a {{ background: url(finite-asset:{hash}) }}") }] }] }]
+        });
+        let error = read(&in_stylesheet.to_string()).unwrap_err();
+        assert!(error.0.contains("doesn't contain"), "{error}");
 
         let mut wrong = refers.clone();
         wrong["blobs"] = json!({ hash.as_str(): STANDARD.encode(b"other bytes") });
@@ -645,6 +675,44 @@ mod tests {
         let mut right = refers;
         right["blobs"] = json!({ hash.as_str(): STANDARD.encode(PNG) });
         assert!(read(&right.to_string()).is_ok());
+    }
+
+    /// A design as deep as Finite allows exports and imports again, on a
+    /// thread with the stack Tokio gives its blocking pool.
+    #[test]
+    fn the_deepest_design_round_trips() {
+        let run = || {
+            let deepest = MAX_DEPTH - 1;
+            let html = "<div>".repeat(deepest) + &"</div>".repeat(deepest);
+            let mut source = design("old");
+            let imported = crate::html::Html
+                .read(&Input {
+                    bytes: html.as_bytes(),
+                    file_name: None,
+                })
+                .unwrap();
+            place(&mut source, imported);
+            let revision = Revision {
+                name: "Deep",
+                doc: source.doc(),
+                imports: source.imports(),
+                blobs: &Store(Vec::new()),
+                measure: &crate::scene::NoMeasure,
+            };
+            let json = Finite.write(&revision, &Scope::Design).unwrap().bytes;
+            let mut target = design("new");
+            place(
+                &mut target,
+                read(std::str::from_utf8(&json).unwrap()).unwrap(),
+            );
+            assert_eq!(target.doc().len(), source.doc().len());
+        };
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(run)
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
