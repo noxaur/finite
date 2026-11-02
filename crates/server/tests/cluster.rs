@@ -176,6 +176,7 @@ async fn large_designs_move_too() {
         width: 800.0,
         height: 600.0,
         position: None,
+        page: None,
         styles: Default::default(),
     };
     design

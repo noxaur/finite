@@ -38,7 +38,38 @@ pub enum Op {
         #[serde(default)]
         css: Option<String>,
     },
+    /// Creates, renames or reorders one page, or removes it when `page` is
+    /// `None`. Removing a page leaves its artboards, which fall back to the
+    /// first page.
+    Page {
+        id: String,
+        #[serde(default)]
+        page: Option<Page>,
+    },
 }
+
+/// A named group of artboards. The viewer shows one page at a time, so a
+/// design can keep components or drafts away from its screens.
+///
+/// A design with no pages has one implicit page, [`FIRST_PAGE`], so designs
+/// from before pages existed need no migration. An artboard's
+/// [`Node::page`] says which page it's on; a missing or unknown page means
+/// the first one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Page {
+    pub name: String,
+    /// Fractional index among pages (see [`crate::fractional`]).
+    pub index: String,
+}
+
+/// The id of a design's implicit first page, before it has any pages.
+pub const FIRST_PAGE: &str = "page-1";
+
+/// The implicit first page.
+static IMPLICIT_PAGE: std::sync::LazyLock<Page> = std::sync::LazyLock::new(|| Page {
+    name: "Page 1".into(),
+    index: "V".into(),
+});
 
 /// Reads an op field by field. A derived `Deserialize` for an internally
 /// tagged enum first buffers the whole op, node and all, to find `op`, and
@@ -54,6 +85,7 @@ impl<'de> Deserialize<'de> for Op {
             Set,
             Move,
             Css,
+            Page,
         }
         #[derive(Deserialize)]
         struct Wire {
@@ -67,6 +99,8 @@ impl<'de> Deserialize<'de> for Op {
             index: Option<String>,
             #[serde(default)]
             css: Option<String>,
+            #[serde(default)]
+            page: Option<Page>,
         }
         let wire = Wire::deserialize(deserializer)?;
         let need = |field: &'static str| D::Error::missing_field(field);
@@ -88,6 +122,10 @@ impl<'de> Deserialize<'de> for Op {
                 index: wire.index.ok_or_else(|| need("index"))?,
             },
             Kind::Css => Op::Css { css: wire.css },
+            Kind::Page => Op::Page {
+                id: wire.id.ok_or_else(|| need("id"))?,
+                page: wire.page,
+            },
         })
     }
 }
@@ -117,16 +155,19 @@ impl Op {
             }
             Op::Move { id, index, .. } => BASE + id.len() + index.len(),
             Op::Css { css } => BASE + css.as_ref().map_or(0, String::len),
+            Op::Page { id, page } => {
+                BASE + id.len() + page.as_ref().map_or(0, |p| p.name.len() + p.index.len())
+            }
         }
     }
 
-    /// The node this op creates, deletes or changes. Empty for [`Op::Css`],
-    /// which changes the design rather than a node.
+    /// The node this op creates, deletes or changes. Empty for [`Op::Css`]
+    /// and [`Op::Page`], which change the design rather than a node.
     pub fn id(&self) -> &str {
         match self {
             Op::Create { node } => &node.id,
             Op::Delete { id } | Op::Set { id, .. } | Op::Move { id, .. } => id,
-            Op::Css { .. } => "",
+            Op::Css { .. } | Op::Page { .. } => "",
         }
     }
 }
@@ -143,7 +184,8 @@ pub const MAX_DEPTH: usize = 256;
 pub const MAX_NODES: usize = 100_000;
 
 /// The node tree of one design, stored flat by id, with an index from each
-/// parent to its children in sibling order, and the design's shared CSS.
+/// parent to its children in sibling order, the design's shared CSS and its
+/// pages.
 #[derive(Clone, Debug, Default)]
 pub struct Document {
     nodes: HashMap<NodeId, Node>,
@@ -152,7 +194,13 @@ pub struct Document {
     /// The shared stylesheet: CSS every artboard renders with, before its own
     /// `<style>` blocks and inline styles, so those still override it.
     css: Option<String>,
+    /// Pages by id. Empty for a design with only its implicit first page.
+    pages: BTreeMap<String, Page>,
 }
+
+/// How many pages a design can have. Every page shows in the viewer's
+/// sidebar and in `get_basic_info`.
+pub const MAX_PAGES: usize = 100;
 
 impl Document {
     pub fn from_nodes(nodes: impl IntoIterator<Item = Node>) -> Self {
@@ -174,6 +222,65 @@ impl Document {
     /// The shared stylesheet, if the design has one.
     pub fn css(&self) -> Option<&str> {
         self.css.as_deref()
+    }
+
+    /// The document with `pages` as its pages.
+    pub fn with_pages(mut self, pages: BTreeMap<String, Page>) -> Self {
+        self.pages = pages;
+        self
+    }
+
+    /// Pages by id, as saved. Empty when the design has only its implicit first page.
+    pub fn page_map(&self) -> &BTreeMap<String, Page> {
+        &self.pages
+    }
+
+    /// Pages in order, sorted by `(index, id)`. Never empty: a design
+    /// without pages has its implicit [`FIRST_PAGE`].
+    pub fn pages(&self) -> Vec<(&str, &Page)> {
+        if self.pages.is_empty() {
+            return vec![(FIRST_PAGE, &IMPLICIT_PAGE)];
+        }
+        let mut pages: Vec<(&str, &Page)> =
+            self.pages.iter().map(|(id, p)| (id.as_str(), p)).collect();
+        pages.sort_by(|a, b| (&a.1.index, a.0).cmp(&(&b.1.index, b.0)));
+        pages
+    }
+
+    /// The page with this id, including the implicit first page.
+    pub fn page(&self, id: &str) -> Option<&Page> {
+        match self.pages.get(id) {
+            None if self.pages.is_empty() && id == FIRST_PAGE => Some(&IMPLICIT_PAGE),
+            page => page,
+        }
+    }
+
+    /// The id of the first page.
+    pub fn first_page(&self) -> &str {
+        self.pages
+            .iter()
+            .min_by(|a, b| (&a.1.index, a.0).cmp(&(&b.1.index, b.0)))
+            .map_or(FIRST_PAGE, |(id, _)| id)
+    }
+
+    /// The page an artboard is on: its own page if that exists, else the first page.
+    pub fn page_of<'a>(&'a self, artboard: &'a Node) -> &'a str {
+        match &artboard.page {
+            Some(page) if self.pages.contains_key(page) => page,
+            _ => self.first_page(),
+        }
+    }
+
+    /// The artboards on `page`, in sibling order.
+    pub fn artboards_on(&self, page: &str) -> Vec<&Node> {
+        let first = self.first_page();
+        self.artboards()
+            .into_iter()
+            .filter(|board| match &board.page {
+                Some(p) if self.pages.contains_key(p) => p == page,
+                _ => first == page,
+            })
+            .collect()
     }
 
     /// Adds or replaces a node, keeping the child index current.
@@ -425,6 +532,24 @@ impl Document {
                 }
                 let previous = std::mem::replace(&mut self.css, css);
                 Some(vec![Op::Css { css: previous }])
+            }
+            Op::Page { id, page } => {
+                let previous = self.pages.get(id).cloned();
+                if previous == *page
+                    || page
+                        .as_ref()
+                        .is_some_and(|p| !crate::fractional::is_valid(&p.index))
+                {
+                    return None;
+                }
+                match page {
+                    Some(page) => self.pages.insert(id.clone(), page.clone()),
+                    None => self.pages.remove(id),
+                };
+                Some(vec![Op::Page {
+                    id: id.clone(),
+                    page: previous,
+                }])
             }
         }
     }

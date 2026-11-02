@@ -2,12 +2,15 @@
 //! into ops. Nothing here mutates; the caller commits the ops through
 //! [`crate::Design::commit`] so they land on the right actor's history.
 
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt,
+};
 
 use serde_json::Value;
 
 use crate::{
-    document::{Document, MAX_DEPTH, MAX_NODES, Op},
+    document::{Document, FIRST_PAGE, MAX_DEPTH, MAX_NODES, MAX_PAGES, Op, Page},
     fractional,
     html::{self, Fragment},
     label,
@@ -46,6 +49,14 @@ fn element<'a>(doc: &'a Document, id: &str) -> Result<&'a Node> {
     }
 }
 
+fn page<'a>(doc: &'a Document, id: &str) -> Result<&'a Page> {
+    doc.page(id).ok_or_else(|| {
+        EditError(format!(
+            "page {id:?} not found. get_basic_info lists the pages."
+        ))
+    })
+}
+
 /// Space left between artboards placed automatically.
 pub const ARTBOARD_GAP: f64 = 120.0;
 
@@ -63,10 +74,10 @@ pub fn pixel_size(node: &Node) -> (Option<f64>, Option<f64>) {
     (px("width"), px("height"))
 }
 
-/// A free canvas position for a new `width` × `height` artboard: to the right
-/// of everything, aligned with the top of the existing artboards.
-pub fn find_placement(doc: &Document, _width: f64, _height: f64) -> (f64, f64) {
-    let boards = doc.artboards();
+/// A free canvas position for a new `width` × `height` artboard on `page`:
+/// to the right of everything there, aligned with the top of its artboards.
+pub fn find_placement(doc: &Document, page: &str, _width: f64, _height: f64) -> (f64, f64) {
+    let boards = doc.artboards_on(page);
     if boards.is_empty() {
         return (0.0, 0.0);
     }
@@ -81,11 +92,40 @@ pub fn find_placement(doc: &Document, _width: f64, _height: f64) -> (f64, f64) {
     (right + ARTBOARD_GAP, top)
 }
 
+/// Free canvas spots for artboards placed one after another, to the right
+/// of what's on each page.
+struct Placer<'a> {
+    doc: &'a Document,
+    next: HashMap<String, (f64, f64)>,
+}
+
+impl<'a> Placer<'a> {
+    fn new(doc: &'a Document) -> Self {
+        Self {
+            doc,
+            next: HashMap::new(),
+        }
+    }
+
+    /// A spot on `page` for `board`, and moves the next spot past it.
+    fn place(&mut self, page: &str, board: &Node) -> (f64, f64) {
+        let spot = self
+            .next
+            .entry(page.to_owned())
+            .or_insert_with(|| find_placement(self.doc, page, 0.0, 0.0));
+        let at = *spot;
+        spot.0 += pixel_size(board).0.unwrap_or(400.0) + ARTBOARD_GAP;
+        at
+    }
+}
+
 pub struct NewArtboard {
     pub name: String,
     pub width: f64,
     pub height: f64,
     pub position: Option<(f64, f64)>,
+    /// The page to put it on. `None`: the first page.
+    pub page: Option<String>,
     pub styles: BTreeMap<String, String>,
 }
 
@@ -107,9 +147,13 @@ pub fn create_artboard(doc: &Document, id: NodeId, spec: NewArtboard) -> Result<
     if !(spec.width > 0.0 && spec.height > 0.0) {
         return err("artboard width and height must be positive");
     }
+    if let Some(id) = &spec.page {
+        page(doc, id)?;
+    }
+    let on = spec.page.as_deref().unwrap_or_else(|| doc.first_page());
     let (x, y) = spec
         .position
-        .unwrap_or_else(|| find_placement(doc, spec.width, spec.height));
+        .unwrap_or_else(|| find_placement(doc, on, spec.width, spec.height));
     let mut styles = default_artboard_styles();
     for (name, value) in normalize_styles(spec.styles) {
         for longhand in longhands(&name) {
@@ -127,6 +171,7 @@ pub fn create_artboard(doc: &Document, id: NodeId, spec: NewArtboard) -> Result<
             name: Some(label::clip(&spec.name, label::LAYER_NAME)),
             x: Some(x),
             y: Some(y),
+            page: spec.page,
             styles,
             ..Node::element(id, "div")
         },
@@ -538,6 +583,100 @@ pub fn set_css(css: &str) -> Result<Vec<Op>> {
     Ok(vec![Op::Css { css }])
 }
 
+/// Adds a page named `name` after the others, with the id `id`. A design
+/// without pages first gets its implicit first page as a real one.
+pub fn create_page(doc: &Document, id: String, name: &str) -> Result<Vec<Op>> {
+    let pages = doc.pages();
+    if pages.len() >= MAX_PAGES {
+        return err(format!("a design can have at most {MAX_PAGES} pages"));
+    }
+    if name.trim().is_empty() {
+        return err("give the page a name");
+    }
+    let mut ops = Vec::new();
+    if doc.page_map().is_empty() {
+        ops.push(Op::Page {
+            id: FIRST_PAGE.into(),
+            page: Some(pages[0].1.clone()),
+        });
+    }
+    let last = pages.last().map(|(_, p)| p.index.as_str());
+    ops.push(Op::Page {
+        id,
+        page: Some(Page {
+            name: label::clip(name.trim(), label::LAYER_NAME),
+            index: fractional::key_between(last, None),
+        }),
+    });
+    Ok(ops)
+}
+
+pub fn rename_page(doc: &Document, id: &str, name: &str) -> Result<Vec<Op>> {
+    let index = page(doc, id)?.index.clone();
+    if name.trim().is_empty() {
+        return err("give the page a name");
+    }
+    Ok(vec![Op::Page {
+        id: id.to_owned(),
+        page: Some(Page {
+            name: label::clip(name.trim(), label::LAYER_NAME),
+            index,
+        }),
+    }])
+}
+
+/// Deletes a page and every artboard on it. A design keeps at least one page.
+pub fn delete_page(doc: &Document, id: &str) -> Result<Vec<Op>> {
+    page(doc, id)?;
+    if doc.pages().len() == 1 {
+        return err("that's the design's only page, and a design keeps at least one");
+    }
+    let mut ops: Vec<Op> = doc
+        .artboards_on(id)
+        .into_iter()
+        .map(|board| Op::Delete {
+            id: board.id.clone(),
+        })
+        .collect();
+    ops.push(Op::Page {
+        id: id.to_owned(),
+        page: None,
+    });
+    Ok(ops)
+}
+
+/// Moves artboards to page `to`, into free space to the right of what's
+/// there. Artboards already on it stay where they are.
+pub fn move_to_page(doc: &Document, ids: &[NodeId], to: &str) -> Result<Vec<Op>> {
+    page(doc, to)?;
+    let mut placer = Placer::new(doc);
+    let mut ops = Vec::new();
+    for id in ids {
+        let board = node(doc, id)?;
+        if !board.is_artboard() {
+            return err(format!(
+                "node {id:?} isn't an artboard; only artboards are on pages"
+            ));
+        }
+        if doc.page_of(board) == to {
+            continue;
+        }
+        let (x, y) = placer.place(to, board);
+        for (key, value) in [
+            (PropKey::Page, Value::from(to)),
+            (PropKey::X, Value::from(x)),
+            (PropKey::Y, Value::from(y)),
+        ] {
+            ops.push(Op::Set {
+                id: id.clone(),
+                key,
+                value: Some(value),
+            });
+        }
+    }
+    Ok(ops)
+}
+
 /// Drops ids nested inside other ids in the list, so a subtree is handled once.
 /// The ids in `ids` with none of their ancestors in `ids`, in order, each
 /// once. Each node walks up its ancestors (at most `MAX_DEPTH`) instead of
@@ -599,41 +738,40 @@ pub fn move_nodes(
     let ids = top_level(doc, ids);
     let indexes = doc.insertion_indexes(parent, index, ids.len());
     let mut ops = Vec::new();
-    let (mut x, y) = find_placement(doc, 0.0, 0.0);
+    let mut placer = Placer::new(doc);
     for (id, index) in ids.into_iter().zip(indexes) {
         let n = node(doc, id)?;
+        let board = doc.artboard_of(id).expect("node exists");
         ops.push(Op::Move {
             id: id.clone(),
             parent: parent.map(Into::into),
             index,
         });
         match (n.is_artboard(), parent.is_none()) {
-            // Leaving the canvas: canvas positions no longer apply.
+            // Leaving the canvas: canvas positions and pages no longer apply.
             (true, false) => {
-                ops.push(Op::Set {
-                    id: id.clone(),
-                    key: PropKey::X,
-                    value: None,
-                });
-                ops.push(Op::Set {
-                    id: id.clone(),
-                    key: PropKey::Y,
-                    value: None,
-                });
+                for key in [PropKey::X, PropKey::Y, PropKey::Page] {
+                    ops.push(Op::Set {
+                        id: id.clone(),
+                        key,
+                        value: None,
+                    });
+                }
             }
-            // Becoming an artboard: give it a free spot.
+            // Becoming an artboard: give it a free spot on its old artboard's page.
             (false, true) => {
-                ops.push(Op::Set {
-                    id: id.clone(),
-                    key: PropKey::X,
-                    value: Some(Value::from(x)),
-                });
-                ops.push(Op::Set {
-                    id: id.clone(),
-                    key: PropKey::Y,
-                    value: Some(Value::from(y)),
-                });
-                x += pixel_size(n).0.unwrap_or(400.0) + ARTBOARD_GAP;
+                let (x, y) = placer.place(doc.page_of(board), n);
+                let mut keys = vec![(PropKey::X, Value::from(x)), (PropKey::Y, Value::from(y))];
+                if let Some(page) = &board.page {
+                    keys.push((PropKey::Page, Value::from(page.as_str())));
+                }
+                for (key, value) in keys {
+                    ops.push(Op::Set {
+                        id: id.clone(),
+                        key,
+                        value: Some(value),
+                    });
+                }
             }
             _ => {}
         }
@@ -650,17 +788,23 @@ pub fn duplicate(
 ) -> Result<(Vec<Op>, Vec<NodeId>)> {
     let mut ops = Vec::new();
     let mut roots = Vec::new();
-    let (mut x, y) = find_placement(doc, 0.0, 0.0);
+    let mut placer = Placer::new(doc);
     for id in top_level(doc, ids) {
         let original = node(doc, id)?;
         let fragment = Fragment::from_document(doc, id).expect("node exists");
         let index = doc.index_after(id).expect("node exists");
-        let position = original.is_artboard().then_some((x, y));
-        if original.is_artboard() {
-            x += pixel_size(original).0.unwrap_or(400.0) + ARTBOARD_GAP;
-        }
+        let position = original
+            .is_artboard()
+            .then(|| placer.place(doc.page_of(original), original));
         let parent = original.parent.clone();
+        let first = ops.len();
         roots.push(fragment.create_ops(parent.as_deref(), index, position, new_id, &mut ops));
+        // A copied artboard goes on its original's page.
+        if let Some(Op::Create { node }) = ops.get_mut(first)
+            && original.is_artboard()
+        {
+            node.page = original.page.clone();
+        }
     }
     room_for(doc, 0, ops.len())?;
     Ok((ops, roots))
@@ -698,6 +842,7 @@ mod tests {
                 width: 1440.0,
                 height: 900.0,
                 position: None,
+                page: None,
                 styles: BTreeMap::from([("backgroundColor".into(), "#000".into())]),
             },
         )
@@ -943,7 +1088,7 @@ mod tests {
         assert_eq!(node.styles["background-color"], "#000");
         assert_eq!(pixel_size(node), (Some(1440.0), Some(900.0)));
         assert_eq!(
-            find_placement(&doc, 100.0, 100.0),
+            find_placement(&doc, FIRST_PAGE, 100.0, 100.0),
             (1440.0 + ARTBOARD_GAP, 0.0)
         );
     }
@@ -959,6 +1104,7 @@ mod tests {
                 width: 10.0,
                 height: 10.0,
                 position: None,
+                page: None,
                 styles: BTreeMap::from([("background".into(), "#fef3c7".into())]),
             },
         )

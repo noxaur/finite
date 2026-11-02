@@ -9,8 +9,8 @@ pub type NodeId = String;
 /// styles and attributes, and text nodes hold a string.
 ///
 /// Top-level nodes (`parent: None`) are artboards. They are the only nodes with
-/// a canvas position (`x`, `y`). Their size comes from their `width` and
-/// `height` styles.
+/// a canvas position (`x`, `y`) and a `page`. Their size comes from their
+/// `width` and `height` styles.
 ///
 /// Serialized flat, as in `{"id": …, "type": "element", "tag": "div", …}`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -30,6 +30,10 @@ pub struct Node {
     pub x: Option<f64>,
     #[serde(default)]
     pub y: Option<f64>,
+    /// The page an artboard is on (see [`crate::Page`]). `None`, or a page
+    /// that no longer exists, means the design's first page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<String>,
     #[serde(default)]
     pub styles: BTreeMap<String, String>,
     #[serde(default)]
@@ -72,6 +76,8 @@ impl<'de> Deserialize<'de> for Node {
             #[serde(default)]
             y: Option<f64>,
             #[serde(default)]
+            page: Option<String>,
+            #[serde(default)]
             styles: BTreeMap<String, String>,
             #[serde(default)]
             attrs: BTreeMap<String, String>,
@@ -92,6 +98,7 @@ impl<'de> Deserialize<'de> for Node {
             text: wire.text,
             x: wire.x,
             y: wire.y,
+            page: wire.page,
             styles: wire.styles,
             attrs: wire.attrs,
         })
@@ -120,6 +127,7 @@ impl Node {
             text: None,
             x: None,
             y: None,
+            page: None,
             styles: BTreeMap::new(),
             attrs: BTreeMap::new(),
         }
@@ -161,6 +169,7 @@ impl Node {
             PropKey::Text => self.text.clone().map(Value::String),
             PropKey::X => self.x.map(Value::from),
             PropKey::Y => self.y.map(Value::from),
+            PropKey::Page => self.page.clone().map(Value::String),
             PropKey::Style(k) => self.styles.get(k).cloned().map(Value::String),
             PropKey::Attr(k) => self.attrs.get(k).cloned().map(Value::String),
         }
@@ -193,6 +202,7 @@ impl Node {
             PropKey::Text => self.text = string(value)?,
             PropKey::X => self.x = number(value)?,
             PropKey::Y => self.y = number(value)?,
+            PropKey::Page => self.page = string(value)?,
             PropKey::Style(k) => put(&mut self.styles, k, string(value)?),
             PropKey::Attr(k) => put(&mut self.attrs, k, string(value)?),
         }
@@ -210,7 +220,8 @@ pub enum PropError {
 /// concurrent writes to the same property resolve last-writer-wins, and writes
 /// to different properties of the same node both survive.
 ///
-/// Serialized as `name`, `text`, `x`, `y`, `style:<css-property>` or `attr:<attribute>`.
+/// Serialized as `name`, `text`, `x`, `y`, `page`, `style:<css-property>` or
+/// `attr:<attribute>`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub enum PropKey {
@@ -218,6 +229,7 @@ pub enum PropKey {
     Text,
     X,
     Y,
+    Page,
     Style(String),
     Attr(String),
 }
@@ -229,6 +241,7 @@ impl fmt::Display for PropKey {
             Self::Text => f.write_str("text"),
             Self::X => f.write_str("x"),
             Self::Y => f.write_str("y"),
+            Self::Page => f.write_str("page"),
             Self::Style(k) => write!(f, "style:{k}"),
             Self::Attr(k) => write!(f, "attr:{k}"),
         }
@@ -250,6 +263,7 @@ impl TryFrom<String> for PropKey {
             "text" => Self::Text,
             "x" => Self::X,
             "y" => Self::Y,
+            "page" => Self::Page,
             _ => match s.split_once(':') {
                 Some(("style", k)) if !k.is_empty() => Self::Style(k.to_owned()),
                 Some(("attr", k)) if !k.is_empty() => Self::Attr(k.to_owned()),

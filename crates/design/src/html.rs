@@ -502,6 +502,7 @@ impl Fragment {
                 text: self.text,
                 x: position.map(|p| p.0),
                 y: position.map(|p| p.1),
+                page: None,
                 styles: self.styles,
                 attrs: self.attrs,
             },

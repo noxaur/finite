@@ -213,7 +213,7 @@ try {
     page.eval(
       `(() => { const r = (${js}).getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; })()`,
     );
-  const activity = `[...document.querySelectorAll("ol li")].map((l) => l.textContent)[0] ?? ""`;
+  const activity = `[...document.querySelectorAll('ol[aria-label="Recent changes"] li')].map((l) => l.textContent)[0] ?? ""`;
 
   // Live edits and undo.
   await agent.call("update_styles", {

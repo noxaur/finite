@@ -21,6 +21,7 @@ interface Exports {
   replica_load(handle: number, len: number): number;
   replica_apply(handle: number, len: number): number;
   replica_export(handle: number, len: number, ids: number): number;
+  replica_pages(handle: number): number;
   is_safe_attr(nameLen: number, valueLen: number): number;
   shared_style(len: number, shadow: number): number;
   base_css(): number;
@@ -75,6 +76,11 @@ export class DesignModel {
   free(doc: WasmDocument, handle: number) {
     this.freeHandle.unregister(doc);
     if (!this.broken) this.exports.replica_free(handle);
+  }
+
+  /** @internal Calls a function that returns a string. */
+  callNoArgs(f: (exports: Exports) => number): string {
+    return this.call(() => f(this.exports));
   }
 
   /** @internal Calls a function that takes one string argument and returns a string. */
@@ -165,6 +171,11 @@ export class WasmDocument {
   /** The subtree at `id` as compact HTML; with `ids`, elements carry `data-finite-id`. */
   exportHtml(id: string, ids: boolean): string {
     return this.model.callWith(id, (e, len) => e.replica_export(this.handle, len, ids ? 1 : 0));
+  }
+
+  /** JSON: the pages in order, as `{id, name}`, with the implicit first page when there are none. */
+  pages(): string {
+    return this.model.callNoArgs((e) => e.replica_pages(this.handle));
   }
 
   free() {

@@ -93,6 +93,8 @@ pub(crate) fn instructions() -> &'static str {
         text.push_str(SEARCH_INSTRUCTIONS);
         text.push_str("\n\n");
         text.push_str(styles::INSTRUCTIONS);
+        text.push_str("\n\n");
+        text.push_str(pages::INSTRUCTIONS);
         text.push('\n');
         text
     })
@@ -281,6 +283,7 @@ impl FiniteMcp {
         let mut router = Self::tool_router();
         router.merge(Self::search_router());
         router.merge(Self::styles_router());
+        router.merge(Self::pages_router());
         router
     }
 
@@ -435,6 +438,7 @@ macro_rules! design {
     };
 }
 
+mod pages;
 mod search;
 mod styles;
 
@@ -505,7 +509,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Overview of a design: its name, its artboards (id, name, position, size) and which agents are working on what.",
+        description = "Overview of a design: its name, its pages, its artboards (id, name, position, size, page) and which agents are working on what.",
         annotations(read_only_hint = true)
     )]
     async fn get_basic_info(&self, Parameters(p): Parameters<DesignParams>) -> ToolResult {
@@ -514,12 +518,13 @@ impl FiniteMcp {
         let info = handle.read(|design| {
             let doc = design.doc();
             let all = doc.artboards();
+            let pages = doc.pages();
             let artboards: Vec<_> = all
                 .iter()
                 .take(ChildrenParams::PAGE)
                 .map(|a| {
                     let (w, h) = edit::pixel_size(a);
-                    serde_json::json!({
+                    let mut board = serde_json::json!({
                         "id": a.id,
                         "name": a.display_name(),
                         "x": a.x,
@@ -527,6 +532,21 @@ impl FiniteMcp {
                         "width": w,
                         "height": h,
                         "childCount": doc.children(Some(&a.id)).len(),
+                    });
+                    // With one page, every artboard is on it.
+                    if pages.len() > 1 {
+                        board["pageId"] = doc.page_of(a).into();
+                    }
+                    board
+                })
+                .collect();
+            let pages: Vec<_> = pages
+                .iter()
+                .map(|(id, page)| {
+                    serde_json::json!({
+                        "id": id,
+                        "name": page.name,
+                        "artboardCount": doc.artboards_on(id).len(),
                     })
                 })
                 .collect();
@@ -534,6 +554,7 @@ impl FiniteMcp {
                 "designId": design.meta.id,
                 "name": design.meta.name,
                 "nodeCount": doc.len(),
+                "pages": pages,
                 "artboardCount": all.len(),
                 "artboards": artboards,
                 "agentsWorking": presence,
@@ -575,7 +596,24 @@ impl FiniteMcp {
                                 .into(),
                         );
                     }
-                    Ok(boards.iter().map(|b| outline(doc, &b.id, depth)).collect())
+                    let pages = doc.pages();
+                    if pages.len() == 1 {
+                        return Ok(boards.iter().map(|b| outline(doc, &b.id, depth)).collect());
+                    }
+                    let mut text = String::new();
+                    for (id, page) in pages {
+                        let boards = doc.artboards_on(id);
+                        text.push_str(&format!("Page {:?} (pageId {id})", page.name));
+                        if boards.is_empty() {
+                            text.push_str(": no artboards\n");
+                            continue;
+                        }
+                        text.push('\n');
+                        for board in boards {
+                            text.push_str(&outline(doc, &board.id, depth));
+                        }
+                    }
+                    Ok(text)
                 }
             }
         });
@@ -896,17 +934,26 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Where create_artboard would put a new artboard: to the right of every existing one, top-aligned with them. Returns x and y. create_artboard already does this when you omit x and y.",
+        description = "Where create_artboard would put a new artboard: to the right of every existing one on its page, top-aligned with them. Returns x and y. create_artboard already does this when you omit x and y.",
         annotations(read_only_hint = true)
     )]
     async fn find_placement(&self, Parameters(p): Parameters<PlacementParams>) -> ToolResult {
         let handle = design!(self, &p.design_id);
-        let (x, y) = handle.read(|d| edit::find_placement(d.doc(), p.width, p.height));
-        json(serde_json::json!({ "x": x, "y": y }))
+        let placed = handle.read(|d| {
+            let doc = d.doc();
+            let page = p.page_id.as_deref().unwrap_or_else(|| doc.first_page());
+            doc.page(page)
+                .map(|_| edit::find_placement(doc, page, p.width, p.height))
+                .ok_or_else(|| format!("page {page:?} not found. get_basic_info lists the pages."))
+        });
+        match placed {
+            Ok((x, y)) => json(serde_json::json!({ "x": x, "y": y })),
+            Err(error) => fail(error),
+        }
     }
 
     #[tool(
-        description = "Create an artboard: a fixed-size frame on the canvas that holds a screen or component. Pass html to fill it in the same call (same rules as write_html), and class to style the artboard itself from CSS. Omit x and y to place it beside the existing artboards. Returns its id, position and size, and the content's outline with ids."
+        description = "Create an artboard: a fixed-size frame on the canvas that holds a screen or component. Pass html to fill it in the same call (same rules as write_html), and class to style the artboard itself from CSS. Omit x and y to place it beside the existing artboards. Pass pageId to put it on another page. Returns its id, position and size, and the content's outline with ids."
     )]
     async fn create_artboard(
         &self,
@@ -931,6 +978,7 @@ impl FiniteMcp {
             width: p.width,
             height: p.height,
             position,
+            page: p.page_id,
             styles: p.styles,
         };
         self.edit(

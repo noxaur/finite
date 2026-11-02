@@ -113,6 +113,12 @@ pub extern "C" fn replica_export(handle: u32, len: usize, ids: u32) -> i32 {
     })
 }
 
+/// [`Replica::pages`].
+#[unsafe(no_mangle)]
+pub extern "C" fn replica_pages(handle: u32) -> i32 {
+    with_replica(handle, |replica| Ok(replica.pages()))
+}
+
 /// [`html::is_safe_attr`] for a name in the first `name_len` input bytes
 /// and a value in the `value_len` bytes after it. Returns 1 or 0.
 #[unsafe(no_mangle)]

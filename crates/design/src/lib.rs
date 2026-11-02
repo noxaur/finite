@@ -21,6 +21,6 @@ mod node;
 pub mod search;
 
 pub use design::{ActorId, Change, Design, DesignMeta, Origin, Record, Snapshot};
-pub use document::{Document, Op};
+pub use document::{Document, FIRST_PAGE, MAX_PAGES, Op, Page};
 pub use history::{Entry, History};
 pub use node::{Node, NodeId, NodeKind, PropError, PropKey};

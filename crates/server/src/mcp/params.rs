@@ -241,6 +241,9 @@ pub struct PlacementParams {
     pub(super) design_id: String,
     pub(super) width: f64,
     pub(super) height: f64,
+    /// The page to place it on. Omit for the first page.
+    #[serde(default)]
+    pub(super) page_id: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -258,6 +261,9 @@ pub struct CreateArtboardParams {
     pub(super) x: Option<f64>,
     #[serde(default)]
     pub(super) y: Option<f64>,
+    /// The page to put it on, from get_basic_info or create_page. Omit for the first page.
+    #[serde(default)]
+    pub(super) page_id: Option<String>,
     /// Extra CSS for the artboard, like {"background-color": "#0b0b0b", "padding": "48px"}.
     #[serde(default)]
     pub(super) styles: BTreeMap<String, String>,
@@ -593,4 +599,36 @@ pub struct LayoutParams {
     /// How many levels below the node to list. Defaults to 4.
     #[serde(default)]
     pub(super) depth: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatePageParams {
+    pub(super) design_id: String,
+    /// Like "Components".
+    pub(super) name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RenamePageParams {
+    pub(super) design_id: String,
+    pub(super) page_id: String,
+    pub(super) name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PageParams {
+    pub(super) design_id: String,
+    pub(super) page_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveToPageParams {
+    pub(super) design_id: String,
+    #[serde(alias = "nodeIds", alias = "artboardId", deserialize_with = "lenient")]
+    pub(super) artboard_ids: Vec<String>,
+    pub(super) page_id: String,
 }

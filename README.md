@@ -31,7 +31,7 @@ The tools follow [Paper's MCP server](https://paper.design/docs/mcp): `get_basic
 
 `get_screenshot` renders artboards with a local headless Chrome, Chromium or Edge, and reports anything cut off by the artboard's edge. Set `FINITE_CHROME` if yours isn't in a standard location.
 
-`find_nodes` and `replace_values` search a design and change a value, like a brand color, everywhere at once. `set_shared_css` and `get_shared_css` hold CSS that every artboard in a design uses, and `get_layout` says where everything rendered without a screenshot. `FINITE_MCP_EXTRA` turns on experimental tool groups, as a comma-separated list, while AX runs decide whether they ship. `e2e/ax` runs real agents against the tools to measure whether a change helps (see `e2e/ax/README.md`).
+`find_nodes` and `replace_values` search a design and change a value, like a brand color, everywhere at once. `set_shared_css` and `get_shared_css` hold CSS that every artboard in a design uses. `create_page`, `rename_page`, `delete_page` and `move_to_page` split a design into pages, which people switch between in the sidebar on the canvas, and `get_layout` says where everything rendered without a screenshot. `FINITE_MCP_EXTRA` turns on experimental tool groups, as a comma-separated list, while AX runs decide whether they ship. `e2e/ax` runs real agents against the tools to measure whether a change helps (see `e2e/ax/README.md`).
 
 ## Styles, motion and scripts
 
