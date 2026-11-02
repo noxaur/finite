@@ -57,7 +57,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     cluster::Members,
-    mcp::params::ListParams,
+    mcp::{ID_MATCH_NOTE, params::ListParams},
     mcp::{OWNER_META, instructions},
     router::UPSTREAM_TIMEOUT,
 };
@@ -270,6 +270,8 @@ impl Relay {
                 };
                 match serde_json::from_str(&text.text) {
                     Ok(Value::Array(list)) => designs.extend(list),
+                    // A server's own note about its list, which is redone below.
+                    _ if text.text.starts_with("The query matched") => {}
                     _ => cut = true,
                 }
             }
@@ -289,6 +291,20 @@ impl Relay {
             content.push(ContentBlock::text(format!(
                 "Showing the {limit} most recently edited designs; there are more. Pass a query to find one by name, or a larger limit."
             )));
+        }
+        let query = ListParams::with_query(
+            params
+                .arguments
+                .as_ref()
+                .and_then(|args| args.get("query"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        );
+        let entries = designs
+            .iter()
+            .filter_map(|d| Some((d["designId"].as_str()?, d["name"].as_str()?)));
+        if query.only_by_id(entries) {
+            content.push(ContentBlock::text(ID_MATCH_NOTE));
         }
         if !missing.is_empty() {
             content.push(ContentBlock::text(format!(

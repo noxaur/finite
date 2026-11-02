@@ -4,7 +4,7 @@ Every tool except list_designs and create_design takes a designId. Other agents 
 
 Workflow:
 
-1. Pick a design with list_designs (pass a query to find one by name), or create_design.
+1. Pick a design with list_designs (pass a query to find one by name or id), or create_design.
 2. Orient: get_basic_info (it counts open comments), then get_tree_summary.
 3. New screen: create_artboard with its first section in html (desktop 1440x900, tablet 768x1024, mobile 390x844). Without x and y it goes right of the others.
 4. Build the rest in sections with write_html, one call per section (header, hero, card grid), not one huge call.

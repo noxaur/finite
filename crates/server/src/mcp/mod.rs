@@ -53,6 +53,10 @@ pub(crate) fn more_designs(shown: usize, total: usize) -> String {
     )
 }
 
+/// The note after a `list_designs` result whose query matched ids, not names.
+pub(crate) const ID_MATCH_NOTE: &str =
+    "The query matched the designId, not the name. Pass this designId to the other tools.";
+
 pub const OWNER_META: &str = "finite/owner";
 
 const INSTRUCTIONS: &str = include_str!("instructions.md");
@@ -437,7 +441,7 @@ mod styles;
 #[tool_router]
 impl FiniteMcp {
     #[tool(
-        description = "List designs (canvases), most recently edited first, with each one's id, name, artboard count and last edit time. Returns 50 unless you pass a limit; pass a query to find one by name.",
+        description = "List designs (canvases), most recently edited first, with each one's id, name, artboard count and last edit time. Returns 50 unless you pass a limit; pass a query to find one by name or id.",
         annotations(read_only_hint = true)
     )]
     async fn list_designs(&self, Parameters(p): Parameters<ListParams>) -> ToolResult {
@@ -445,7 +449,7 @@ impl FiniteMcp {
             .hub
             .list()
             .into_iter()
-            .filter(|d| p.matches(&d.meta.name))
+            .filter(|d| p.matches(&d.meta.id, &d.meta.name))
             .collect();
         let limit = p.limit();
         let designs: Vec<_> = matching
@@ -464,6 +468,13 @@ impl FiniteMcp {
         let mut content = vec![ContentBlock::text(
             serde_json::to_string_pretty(&designs).expect("json values serialize"),
         )];
+        if p.only_by_id(
+            matching
+                .iter()
+                .map(|d| (d.meta.id.as_str(), d.meta.name.as_str())),
+        ) {
+            content.push(ContentBlock::text(ID_MATCH_NOTE));
+        }
         if matching.len() > limit {
             content.push(ContentBlock::text(more_designs(limit, matching.len())));
         }
