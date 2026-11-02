@@ -173,12 +173,15 @@ export class Renderer {
   /** Mounts the shown page's artboards and unmounts the rest. */
   private syncPage() {
     const page = this.shownPage();
-    for (const board of this.replica.artboards()) {
-      const shown = this.replica.pageOf(board) === page;
-      if (shown && !this.frames.has(board.id)) this.mount(board);
-      else if (!shown && this.frames.has(board.id))
-        for (const id of this.replica.subtree(board.id)) this.unmount(id);
-    }
+    for (const board of this.replica.artboards()) this.syncBoard(board, page);
+  }
+
+  /** Mounts or unmounts one artboard, by whether it's on `page`. */
+  private syncBoard(board: Node, page: string) {
+    const shown = this.replica.pageOf(board) === page;
+    if (shown && !this.frames.has(board.id)) this.mount(board);
+    else if (!shown && this.frames.has(board.id))
+      for (const id of this.replica.subtree(board.id)) this.unmount(id);
   }
 
   apply(applied: Applied) {
@@ -188,7 +191,7 @@ export class Renderer {
       return;
     }
     if (applied.op === "set" && applied.key === "page") {
-      this.syncPage();
+      if (applied.node.parent === null) this.syncBoard(applied.node, this.shownPage());
       return;
     }
     if (applied.op === "css") {

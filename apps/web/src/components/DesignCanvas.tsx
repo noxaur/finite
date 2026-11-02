@@ -75,6 +75,8 @@ export function DesignCanvas({ id }: { id: string }) {
   const pointerRef = useRef<{ x: number; y: number } | null>(null);
   const refreshHover = useRef(() => {});
   const cameraRef = useRef<Camera | null>(null);
+  // The view the camera framed the artboards with, until the person moves it.
+  const framedRef = useRef<View | null>(null);
   const rendererRef = useRef<Renderer | null>(null);
   const sessionRef = useRef<DesignSession | null>(null);
 
@@ -111,8 +113,7 @@ export function DesignCanvas({ id }: { id: string }) {
 
     const camera = new Camera(viewport, world);
     const replica = new Replica();
-    // The view the camera framed the artboards with, until the person moves it.
-    let framed: View | null = null;
+    framedRef.current = null;
     const renderer = new Renderer(frames, replica, {
       live: true,
       onWheel: (event) => camera.wheel(event),
@@ -121,13 +122,14 @@ export function DesignCanvas({ id }: { id: string }) {
       // unless the person has already panned or zoomed.
       onResize: () => {
         const view = camera.view;
+        const framed = framedRef.current;
         if (!framed || framed.x !== view.x || framed.y !== view.y || framed.zoom !== view.zoom) {
           return;
         }
         const bounds = union(renderer.artboardBounds().values());
         if (!bounds) return;
         camera.fitTo(bounds);
-        framed = camera.view;
+        framedRef.current = camera.view;
       },
       // A sandboxed artboard answered: redo the hover test and redraw outlines.
       onLayout: () => {
@@ -146,11 +148,11 @@ export function DesignCanvas({ id }: { id: string }) {
     // Frame the artboards once, when the first ones appear.
     const unsubscribe = session.subscribe(() => {
       setSession(session.state);
-      if (framed) return;
+      if (framedRef.current) return;
       const bounds = union(renderer.artboardBounds().values());
       if (bounds) {
         camera.fitTo(bounds);
-        framed = camera.view;
+        framedRef.current = camera.view;
       }
     });
     const close = session.connect(id);
@@ -319,6 +321,9 @@ export function DesignCanvas({ id }: { id: string }) {
     renderer.setPage(pageId);
     const bounds = union(renderer.artboardBounds().values());
     if (bounds) cameraRef.current?.fitTo(bounds);
+    // So auto-height artboards reframe it as they grow, and an empty page
+    // frames its first artboard when one arrives.
+    framedRef.current = bounds ? (cameraRef.current?.view ?? null) : null;
     setDraft(null);
     setOpenId(null);
     setHover(null);
