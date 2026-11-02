@@ -1,6 +1,6 @@
 {
   "name": "design",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "private": true,
   "scripts": {
     "test": "cargo test -p finite-design"
