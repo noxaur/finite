@@ -650,7 +650,7 @@ const styles = stylex.create({
     borderColor: colors.border,
     backgroundColor: colors.surface,
     boxShadow: "0 8px 24px rgba(0, 0, 0, 0.12)",
-    cursor: "auto",
+    cursor: "var(--cursor-arrow, default)",
     userSelect: "text",
   },
   // Mirror the default placement: to the pin's left, or hanging below it.
@@ -764,6 +764,9 @@ const styles = stylex.create({
     backgroundColor: { default: colors.accent, ":disabled": colors.border },
     color: colors.onAccent,
     fontSize: 14,
-    cursor: { default: "var(--cursor-pointer, pointer)", ":disabled": "default" },
+    cursor: {
+      default: "var(--cursor-pointer, pointer)",
+      ":disabled": "var(--cursor-not-allowed, not-allowed)",
+    },
   },
 });
