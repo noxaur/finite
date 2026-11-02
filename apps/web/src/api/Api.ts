@@ -21,6 +21,62 @@ export interface NewComment {
 /** What an edit made: its change's `seq`, or `null` when nothing changed. */
 const Changed = Schema.Struct({ seq: Schema.NullOr(Schema.Number) });
 
+/** The formats an import reads, chosen by the file's extension. */
+export type TransferFormat = "html" | "finite";
+
+const Score = Schema.Literals(["yes", "no", "unknown"]);
+
+/** One thing an import couldn't carry over exactly; see `docs/import-export.md`. */
+export const ImportDiagnostic = Schema.Struct({
+  /** The nearest node the import kept. */
+  node: Schema.optionalKey(Schema.String),
+  /** Where it was in the source. */
+  path: Schema.String,
+  /** What it was, like `onclick`. */
+  what: Schema.String,
+  feature: Schema.String,
+  reason: Schema.String,
+  preserved: Score,
+  visual: Score,
+  editable: Score,
+  /** Kept out of the design because it could run code. It's still in the original file. */
+  quarantined: Schema.optionalKey(Schema.Boolean),
+});
+export type ImportDiagnostic = typeof ImportDiagnostic.Type;
+
+export const ImportRecord = Schema.Struct({
+  id: Schema.String,
+  /** Hash of the exact bytes received. */
+  artifact: Schema.String,
+  format: Schema.String,
+  inputKind: Schema.String,
+  fileName: Schema.optionalKey(Schema.String),
+  receivedAt: Schema.Number,
+  nodes: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+  dependencies: Schema.optionalKey(
+    Schema.Array(Schema.Struct({ url: Schema.String, blob: Schema.optionalKey(Schema.String) })),
+  ),
+  quarantined: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        node: Schema.optionalKey(Schema.String),
+        path: Schema.String,
+        what: Schema.String,
+        reason: Schema.String,
+      }),
+    ),
+  ),
+});
+export type ImportRecord = typeof ImportRecord.Type;
+
+export const ImportResult = Schema.Struct({
+  import: ImportRecord,
+  /** The ids of the artboards the import made. */
+  artboards: Schema.Array(Schema.String),
+  diagnostics: Schema.Array(ImportDiagnostic),
+});
+export type ImportResult = typeof ImportResult.Type;
+
 export class Health extends Schema.Class<Health>("Health")({
   status: Schema.Literal("ok"),
   version: Schema.String,
@@ -34,7 +90,7 @@ export class ApiError extends Schema.TaggedError<ApiError>()("ApiError", {
  * The server understood a request and refused it, with a reason a person can
  * read, like "this design has 500 open comments, the most it can have;
  * resolve some first". It answers such requests with `422` and the reason
- * as plain text.
+ * as plain text. An import also reports `404` and `500` that way.
  */
 export class Refused extends Schema.TaggedError<Refused>()("Refused", {
   reason: Schema.String,
@@ -73,6 +129,14 @@ export class Api extends Context.Service<
       edit: { readonly author: CommentAuthor; readonly body: string },
     ): Effect.Effect<Comment, ApiError | Refused>;
     deleteComment(designId: string, commentId: string): Effect.Effect<void, ApiError>;
+    /**
+     * Sends a `.html` or `.finite` file's bytes to be imported as new artboards. They reach
+     * every viewer over the socket; the result says what the import left out.
+     */
+    importFile(
+      designId: string,
+      file: { readonly name: string; readonly format: TransferFormat; readonly bytes: Uint8Array },
+    ): Effect.Effect<ImportResult, ApiError | Refused>;
     /** Replaces the CSS every artboard shares, as an edit by `author`. Blank CSS removes it. */
     setSharedCss(
       designId: string,
@@ -129,15 +193,15 @@ export class Api extends Context.Service<
       });
 
       // A `422` says why the server refused, so that reaches the person as `Refused`.
-      const send = <A>(
+      const execute = <A>(
         request: HttpClientRequest.HttpClientRequest,
-        body: unknown,
         schema: Schema.Codec<A, unknown>,
+        explains: (status: number) => boolean = (status) => status === 422,
       ) =>
-        client.execute(request.pipe(HttpClientRequest.bodyJsonUnsafe(body))).pipe(
+        client.execute(request).pipe(
           Effect.flatMap(HttpClientResponse.schemaBodyJson(schema)),
           Effect.catchTag("HttpClientError", (error) =>
-            error.reason._tag === "StatusCodeError" && error.reason.response.status === 422
+            error.reason._tag === "StatusCodeError" && explains(error.reason.response.status)
               ? error.reason.response.text.pipe(
                   Effect.flatMap((reason) => Effect.fail(new Refused({ reason }))),
                 )
@@ -147,6 +211,12 @@ export class Api extends Context.Service<
             error instanceof Refused ? error : new ApiError({ cause: error }),
           ),
         );
+
+      const send = <A>(
+        request: HttpClientRequest.HttpClientRequest,
+        body: unknown,
+        schema: Schema.Codec<A, unknown>,
+      ) => execute(request.pipe(HttpClientRequest.bodyJsonUnsafe(body)), schema);
 
       const sendComment = (request: HttpClientRequest.HttpClientRequest, body: unknown) =>
         send(request, body, Comment);
@@ -204,6 +274,25 @@ export class Api extends Context.Service<
         yield* send(HttpClientRequest.put(path), { author, css }, Changed);
       });
 
+      // The body is the file itself, so the file's name and format ride in the query.
+      const importFile = Effect.fn("Api.importFile")(function* (
+        designId: string,
+        file: {
+          readonly name: string;
+          readonly format: TransferFormat;
+          readonly bytes: Uint8Array;
+        },
+      ) {
+        const request = HttpClientRequest.post(
+          `/designs/${encodeURIComponent(designId)}/import`,
+        ).pipe(
+          HttpClientRequest.setUrlParams({ format: file.format, name: file.name }),
+          HttpClientRequest.bodyUint8Array(file.bytes, "application/octet-stream"),
+        );
+        // A `404` or `500` carries its message as text too, and the person should see it.
+        return yield* execute(request, ImportResult, (status) => status >= 400);
+      });
+
       return Api.of({
         health,
         searchDesigns,
@@ -214,6 +303,7 @@ export class Api extends Context.Service<
         setCommentResolved,
         editLastMessage,
         deleteComment,
+        importFile,
         setSharedCss,
       });
     }),

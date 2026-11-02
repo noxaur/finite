@@ -47,8 +47,9 @@ use crate::{
     hub::LOBBY_LIMIT,
 };
 
-/// Bodies larger than this aren't forwarded.
-const MAX_BODY: usize = 8 << 20;
+/// Bodies larger than this aren't forwarded: an import's file, the largest
+/// body a design route takes.
+const MAX_BODY: usize = crate::api::IMPORT_LIMIT;
 
 struct Front {
     /// The servers, fixed or kept current from the shared store's heartbeats.

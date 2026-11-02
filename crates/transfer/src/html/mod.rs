@@ -44,6 +44,8 @@ impl Codec for Html {
             // Finite never holds embeds, so there are none to export.
             (Feature::Embed, Import) => Opaque,
             (Feature::Embed, Export) => Unsupported,
+            // A page is the design, not how it got there.
+            (Feature::ImportHistory, Import | Export) => Unsupported,
         }
     }
 

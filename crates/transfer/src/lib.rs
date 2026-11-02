@@ -24,6 +24,8 @@
 
 pub mod assets;
 mod feature;
+pub mod figma;
+pub mod finite;
 mod html;
 mod report;
 
@@ -44,14 +46,17 @@ pub use report::{Axis, Diagnostic, Score, violations};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
     Html,
+    /// A `.finite` bundle.
+    Finite,
 }
 
 impl Format {
-    pub const ALL: [Format; 1] = [Format::Html];
+    pub const ALL: [Format; 2] = [Format::Html, Format::Finite];
 
     pub fn codec(self) -> &'static dyn Codec {
         match self {
             Format::Html => &html::Html,
+            Format::Finite => &finite::Finite,
         }
     }
 

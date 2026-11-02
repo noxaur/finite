@@ -32,6 +32,12 @@ const BLOCKED_TAGS: &[&str] = &[
     "noscript", "template", "slot",
 ];
 
+/// Whether `tag` is an element that's dropped with its whole subtree: one that
+/// loads another document or changes the page outside the artboard.
+pub fn is_blocked_tag(tag: &str) -> bool {
+    BLOCKED_TAGS.contains(&tag.to_ascii_lowercase().as_str())
+}
+
 /// Elements whose text is code, written without HTML escaping.
 const RAW_TEXT_TAGS: &[&str] = &["script", "style"];
 

@@ -290,6 +290,7 @@ impl FiniteMcp {
         let mut router = Self::tool_router();
         router.merge(Self::search_router());
         router.merge(Self::styles_router());
+        router.merge(Self::transfer_router());
         router
     }
 
@@ -446,6 +447,7 @@ macro_rules! design {
 
 mod search;
 mod styles;
+mod transfer;
 
 #[tool_router]
 impl FiniteMcp {

@@ -21,11 +21,13 @@ pub enum Feature {
     Script,
     /// Content from somewhere else: `<iframe>`, `<object>`, `<link>`.
     Embed,
+    /// The design's import records, and the original files behind them.
+    ImportHistory,
 }
 
 impl Feature {
     /// Every feature, in the order [`Feature::position`] gives.
-    pub const ALL: [Feature; 7] = [
+    pub const ALL: [Feature; 8] = [
         Feature::Frame,
         Feature::Text,
         Feature::SolidFill,
@@ -33,6 +35,7 @@ impl Feature {
         Feature::FlexLayout,
         Feature::Script,
         Feature::Embed,
+        Feature::ImportHistory,
     ];
 
     /// Where the feature is in [`Feature::ALL`]. An exhaustive match, so a
@@ -47,6 +50,7 @@ impl Feature {
             Feature::FlexLayout => 4,
             Feature::Script => 5,
             Feature::Embed => 6,
+            Feature::ImportHistory => 7,
         }
     }
 
@@ -59,6 +63,7 @@ impl Feature {
             Feature::FlexLayout => "flex layout",
             Feature::Script => "script",
             Feature::Embed => "embed",
+            Feature::ImportHistory => "import history",
         }
     }
 }

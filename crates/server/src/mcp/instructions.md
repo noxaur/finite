@@ -23,3 +23,5 @@ Comments are user requests, pinned to an artboard and usually an element. When a
 Long results come in parts: a note at the end says how to get the rest. Edits past a limit are refused with what to do instead.
 
 Undo and redo reverse only your own changes, one tool call per step, and skip steps whose nodes someone else deleted.
+
+Import and export: import_design turns a file (an HTML page) into new artboards and lists what didn't convert exactly; scripts stay out of the design, in the kept original. export_design writes the design or an artboard as a file.

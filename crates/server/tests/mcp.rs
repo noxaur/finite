@@ -1115,3 +1115,78 @@ async fn agents_find_where_things_rendered() {
         .await;
     assert!(is_error && refused.contains("is the designId"), "{refused}");
 }
+
+#[tokio::test]
+async fn an_agent_imports_and_exports_a_file() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Importer").await;
+    let created = agent
+        .ok("create_design", json!({ "name": "Imports" }))
+        .await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .unwrap()
+        .to_owned();
+    let page = "<div data-name=\"Card\"><button onclick=\"steal()\">Go</button></div>";
+
+    let imported = agent
+        .ok(
+            "import_design",
+            json!({ "designId": design, "format": "html", "content": page,
+                    "fileName": "card.html" }),
+        )
+        .await;
+    assert!(
+        imported.contains("onclick at") && imported.contains("editable no"),
+        "{imported}"
+    );
+    assert!(imported.contains("keeps the original"), "{imported}");
+    let board = id_after(&imported, "Imported");
+    let tree = agent
+        .ok(
+            "get_tree_summary",
+            json!({ "designId": design, "nodeId": board }),
+        )
+        .await;
+    assert!(tree.contains("Card"), "{tree}");
+
+    let exported = agent
+        .ok(
+            "export_design",
+            json!({ "designId": design, "format": "html", "artboardId": board }),
+        )
+        .await;
+    assert!(exported.contains("data-name=\"Card\""), "{exported}");
+    assert!(!exported.contains("steal()"), "{exported}");
+
+    // Base64 works too, and strict mode refuses what isn't editable.
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(page);
+    let (refused, is_error) = agent
+        .call(
+            "import_design",
+            json!({ "designId": design, "format": "html", "contentBase64": encoded,
+                    "strict": ["editable"] }),
+        )
+        .await;
+    assert!(
+        is_error && refused.contains("strict import refused"),
+        "{refused}"
+    );
+    let (refused, is_error) = agent
+        .call(
+            "import_design",
+            json!({ "designId": design, "format": "html", "content": page,
+                    "contentBase64": encoded }),
+        )
+        .await;
+    assert!(is_error && refused.contains("exactly one"), "{refused}");
+    let (refused, is_error) = agent
+        .call(
+            "export_design",
+            json!({ "designId": design, "format": "docx" }),
+        )
+        .await;
+    assert!(is_error && refused.contains("no format"), "{refused}");
+}

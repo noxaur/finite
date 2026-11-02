@@ -556,3 +556,34 @@ pub struct LayoutParams {
     #[serde(default)]
     pub(super) depth: Option<usize>,
 }
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportParams {
+    pub(super) design_id: String,
+    /// The file's format, like "html".
+    pub(super) format: String,
+    /// The file as text. Pass this or contentBase64, not both.
+    #[serde(default)]
+    pub(super) content: Option<String>,
+    /// The file's bytes in base64, for a file that isn't text.
+    #[serde(default)]
+    pub(super) content_base64: Option<String>,
+    /// The file's name, like "landing.html". Names the undo step and the download of the original.
+    #[serde(default)]
+    pub(super) file_name: Option<String>,
+    /// Refuse the import if anything scores no or unknown on these axes: "preserved", "visual", "editable".
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub(super) strict: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportParams {
+    pub(super) design_id: String,
+    /// The format to write, like "html".
+    pub(super) format: String,
+    /// One artboard to export. Omit for the whole design.
+    #[serde(default)]
+    pub(super) artboard_id: Option<String>,
+}

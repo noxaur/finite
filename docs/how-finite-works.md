@@ -293,6 +293,9 @@ Every viewer shows the names and notes agents write, so they're cut to a fixed l
 | `POST …/comments`, `…/replies`, `PATCH …/comments/{cid}`          | Comment, reply, resolve                             |
 | `PATCH …/comments/{cid}/messages/last`, `DELETE …/comments/{cid}` | Edit your newest message, delete a comment          |
 | `PUT /api/designs/{id}/css`                                       | Replace the shared CSS, as the person's own edit    |
+| `POST /api/designs/{id}/import?format=…&name=…&strict=…`          | Import a file as new artboards                      |
+| `GET /api/designs/{id}/export?format=…&artboard=…`                | Download the design, or one artboard, as a file     |
+| `GET /api/designs/{id}/imports`, `…/imports/{iid}/original`       | The import records, and an import's exact bytes     |
 
 The messages on these sockets are Rust types on the server and Effect schemas in `apps/web/src/design/schema.ts`. Another golden file keeps those in step. `crates/server/tests/wire.rs` drives a real hub through an edit, an undo, presence, a comment, an agent reply and a rename, and records every message it broadcasts in `crates/server/fixtures/messages.json`. Then `apps/web/src/design/wire.test.ts` decodes each one with the web schemas. If you rename a field on the Rust side, `cargo test` fails until you regenerate the file, and then `vp test` fails until you update the schema.
 
@@ -427,6 +430,8 @@ Here's what happened in the demo you saw:
 5. Your reply reopens a resolved comment, so you can keep steering in one thread.
 
 A resolved pin fades out and leaves the canvas a minute after it was resolved (`DECAY_MS` in `components/Comments.tsx`). The server stamps `resolvedAt` when a comment goes from open to resolved, and the viewer fades the pin with a CSS animation whose negative delay is that age. The delay is read once, when the pin mounts. Setting it again on a later render would shift the running animation by the time already passed, and an early version faded twice as fast for that reason. A comment resolved before `resolvedAt` existed counts as long ago, so it's hidden at once. The **Comments** button in the top bar opens a side panel that lists every comment, open and resolved, newest first. Picking one centers its pin and opens the thread, even after the pin has left the canvas.
+
+Next to it, **Import** takes an `.html` or `.finite` file and **Export** downloads one artboard as HTML or the whole design as a `.finite` bundle (`components/Transfer.tsx`). Both go through the routes in [Import and export](import-export.md); the new artboards arrive over the WebSocket like any other change.
 
 You can edit your own message while it's the newest in its thread (`Design::edit_message`). Once an agent answers, the message is part of the record and stays as it was. `get_comments` marks an edited message with `edited: true`. Anyone can delete a comment with its whole thread (`Design::delete_comment`). The hub broadcasts `commentDeleted` and journals a `CommentDeleted` record. A REST answer for that comment can still arrive after the delete, so `DesignSession` remembers deleted ids and ignores late copies.
 
@@ -683,31 +688,32 @@ MCP rejects requests whose `Host` header it doesn't know, to block **DNS rebindi
 
 The guide explains each limit where it applies. This is the list in one place. Most are one constant, so changing one is a one-line edit plus its test.
 
-| What                                   | Limit                                                             | Where it's set                             | Why                                                         |
-| -------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------ | ----------------------------------------------------------- |
-| Nodes in a design                      | 100,000                                                           | `MAX_NODES` in `document.rs`               | Every node is journaled, held in memory and sent to viewers |
-| Nesting depth                          | 256 levels                                                        | `MAX_DEPTH` in `document.rs`               | Tree walks are recursive; deeper overflowed the stack       |
-| HTML nesting before parsing            | 4,096 by a quick count                                            | `html::parse`                              | html5ever is quadratic in depth                             |
-| Undo steps per actor and stack         | 200 steps, about 32 MB                                            | `History::LIMIT`, `History::BYTE_LIMIT`    | Undoing a big delete recreates every node in it             |
-| Undo for a named agent                 | 6 idle hours                                                      | `HISTORY_TTL` in `hub/mod.rs`              | Histories keep memory and snapshots busy                    |
-| Idle MCP session                       | 1 hour                                                            | `SESSION_IDLE` in `mcp/mod.rs`             | An unnamed agent's undo ends with its session               |
-| Open comments per design               | 500                                                               | `MAX_OPEN` in `comment.rs`                 | Anyone who can see a design can comment                     |
-| Messages per comment thread            | 200                                                               | `MAX_MESSAGES` in `comment.rs`             | Same reason                                                 |
-| Comment length, author name            | 4,000 and 48 characters                                           | `MAX_BODY`, `MAX_NAME` in `comment.rs`     | Shared with the web app through a golden file               |
-| Agent id from `X-Finite-Agent`         | 64 characters                                                     | `MAX_USER_ID` in `comment.rs`              | Stored with every change and reply the agent makes          |
-| Layer, design and status names         | 120 characters                                                    | `label.rs`                                 | Every viewer shows them; cut rather than refused            |
-| Presence                               | 100 nodes, 5 idle minutes                                         | `PRESENCE_NODES`, `PRESENCE_TTL`           | Every viewer gets the list on each update                   |
-| One tool result                        | 60,000 characters                                                 | `OUTPUT_LIMIT` in `mcp/format.rs`          | Claude Code cuts at 25,000 tokens wherever that falls       |
-| `list_designs`, `get_children` pages   | 200 entries                                                       | `ListParams`, `ChildrenParams`             | 200 always fit in one result                                |
-| Screenshot size                        | 3,000 pixels on the longer side                                   | `MAX_OUTPUT_SIDE` in `screenshot.rs`       | The Claude API's limit once a request has 20+ images        |
-| Browsers rendering screenshots at once | Half the cores, 1 to 4                                            | `browsers()` in `screenshot.rs`            | Each capture starts its own Chrome                          |
-| Journal before compaction              | 1,000 records or 16 MB                                            | `COMPACT_AFTER`, `COMPACT_BYTES`           | A load replays the whole journal                            |
-| Handoff body                           | 256 MB                                                            | `HANDOFF_LIMIT` in `api.rs`                | A handoff carries a whole design; other routes keep 2 MB    |
-| Blob                                   | 32 MB                                                             | `MAX_BLOB` in `blob.rs`                    | A store reads and writes a blob whole, in memory            |
-| Server lease, with a shared store      | 10 s, renewed every 2 s                                           | `FINITE_LEASE_MS`, `Lease` in `cluster.rs` | How long a silent server keeps its designs                  |
-| Waiting for a design that's moving     | Up to one lease, then `503`                                       | `Hub::open`                                | The old owner saves a last snapshot before it lets go       |
-| Design list in the browser             | 200 newest                                                        | `LOBBY_LIMIT`, `mergeLobby`                | The rest are a search away                                  |
-| Silent WebSocket                       | Closed after 60 s; the page gives up after 10 s without an answer | `heartbeat.rs`, `socket.ts`                | Half-open connections never close on their own              |
+| What                                   | Limit                                                             | Where it's set                             | Why                                                              |
+| -------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------ | ---------------------------------------------------------------- |
+| Nodes in a design                      | 100,000                                                           | `MAX_NODES` in `document.rs`               | Every node is journaled, held in memory and sent to viewers      |
+| Nesting depth                          | 256 levels                                                        | `MAX_DEPTH` in `document.rs`               | Tree walks are recursive; deeper overflowed the stack            |
+| HTML nesting before parsing            | 4,096 by a quick count                                            | `html::parse`                              | html5ever is quadratic in depth                                  |
+| Undo steps per actor and stack         | 200 steps, about 32 MB                                            | `History::LIMIT`, `History::BYTE_LIMIT`    | Undoing a big delete recreates every node in it                  |
+| Undo for a named agent                 | 6 idle hours                                                      | `HISTORY_TTL` in `hub/mod.rs`              | Histories keep memory and snapshots busy                         |
+| Idle MCP session                       | 1 hour                                                            | `SESSION_IDLE` in `mcp/mod.rs`             | An unnamed agent's undo ends with its session                    |
+| Open comments per design               | 500                                                               | `MAX_OPEN` in `comment.rs`                 | Anyone who can see a design can comment                          |
+| Messages per comment thread            | 200                                                               | `MAX_MESSAGES` in `comment.rs`             | Same reason                                                      |
+| Comment length, author name            | 4,000 and 48 characters                                           | `MAX_BODY`, `MAX_NAME` in `comment.rs`     | Shared with the web app through a golden file                    |
+| Agent id from `X-Finite-Agent`         | 64 characters                                                     | `MAX_USER_ID` in `comment.rs`              | Stored with every change and reply the agent makes               |
+| Layer, design and status names         | 120 characters                                                    | `label.rs`                                 | Every viewer shows them; cut rather than refused                 |
+| Presence                               | 100 nodes, 5 idle minutes                                         | `PRESENCE_NODES`, `PRESENCE_TTL`           | Every viewer gets the list on each update                        |
+| One tool result                        | 60,000 characters                                                 | `OUTPUT_LIMIT` in `mcp/format.rs`          | Claude Code cuts at 25,000 tokens wherever that falls            |
+| `list_designs`, `get_children` pages   | 200 entries                                                       | `ListParams`, `ChildrenParams`             | 200 always fit in one result                                     |
+| Screenshot size                        | 3,000 pixels on the longer side                                   | `MAX_OUTPUT_SIDE` in `screenshot.rs`       | The Claude API's limit once a request has 20+ images             |
+| Browsers rendering screenshots at once | Half the cores, 1 to 4                                            | `browsers()` in `screenshot.rs`            | Each capture starts its own Chrome                               |
+| Journal before compaction              | 1,000 records or 16 MB                                            | `COMPACT_AFTER`, `COMPACT_BYTES`           | A load replays the whole journal                                 |
+| Handoff body                           | 256 MB                                                            | `HANDOFF_LIMIT` in `api.rs`                | A handoff carries a whole design; other routes keep 2 MB         |
+| Import body                            | 32 MB                                                             | `IMPORT_LIMIT` in `api.rs`                 | The file is kept whole as one blob; the router forwards up to it |
+| Blob                                   | 32 MB                                                             | `MAX_BLOB` in `blob.rs`                    | A store reads and writes a blob whole, in memory                 |
+| Server lease, with a shared store      | 10 s, renewed every 2 s                                           | `FINITE_LEASE_MS`, `Lease` in `cluster.rs` | How long a silent server keeps its designs                       |
+| Waiting for a design that's moving     | Up to one lease, then `503`                                       | `Hub::open`                                | The old owner saves a last snapshot before it lets go            |
+| Design list in the browser             | 200 newest                                                        | `LOBBY_LIMIT`, `mergeLobby`                | The rest are a search away                                       |
+| Silent WebSocket                       | Closed after 60 s; the page gives up after 10 s without an answer | `heartbeat.rs`, `socket.ts`                | Half-open connections never close on their own                   |
 
 ## Words used in the code
 

@@ -11,6 +11,7 @@ import { Replica } from "@/design/replica";
 import { DesignSession, initialSessionState, type SessionState } from "@/design/session";
 import { loadDesignModel } from "@/design/wasm";
 import { mcpUrl } from "@/lib/mcp";
+import { formatOf } from "@/lib/transfer";
 import { localUser } from "@/lib/user";
 import { timeAgo } from "@/lib/time";
 import { runtime } from "@/runtime";
@@ -18,6 +19,7 @@ import { colors, radii, space } from "@/styles/tokens.stylex";
 import { CommentLayer, type Draft, type Mode, pinPosition, ToolPill } from "./Comments";
 import { CommentsPanel } from "./CommentsPanel";
 import { SharedCssPanel } from "./SharedCss";
+import { ExportMenu, ImportButton, ImportResultCard, type ImportState } from "./Transfer";
 
 /** How long "show what changed" outlines stay up. */
 const FLASH_MS = 1800;
@@ -89,10 +91,12 @@ export function DesignCanvas({ id }: { id: string }) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [hover, setHover] = useState<Hit | null>(null);
   const [flash, setFlash] = useState<ReadonlyArray<string>>([]);
-  // The shared CSS and the comments list open in the same place, one at a time.
-  const [panel, setPanel] = useState<"css" | "comments" | null>(null);
-  const togglePanel = (name: "css" | "comments") =>
+  // The shared CSS, the comments list, the export menu and an import's result open in the
+  // same place, one at a time.
+  const [panel, setPanel] = useState<"css" | "comments" | "export" | "import" | null>(null);
+  const togglePanel = (name: "css" | "comments" | "export") =>
     setPanel((open) => (open === name ? null : name));
+  const [imported, setImported] = useState<ImportState | null>(null);
 
   // Whether a draft or thread is open, for the window key handler.
   const popupRef = useRef(false);
@@ -307,6 +311,27 @@ export function DesignCanvas({ id }: { id: string }) {
     return Exit.isFailure(exit) ? unsent(exit.cause) : undefined;
   };
 
+  // The new artboards arrive over the socket, so all this shows is how the import went.
+  const importFile = async (file: File) => {
+    const format = formatOf(file.name);
+    if (!format) {
+      setImported({ status: "failed", message: "Pick an .html, .htm or .finite file." });
+      setPanel("import");
+      return;
+    }
+    setImported({ status: "working" });
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const exit = await runtime.runPromiseExit(
+      Api.use((api) => api.importFile(id, { name: file.name, format, bytes })),
+    );
+    setImported(
+      Exit.isSuccess(exit)
+        ? { status: "done", result: exit.value }
+        : { status: "failed", message: unsent(exit.cause) },
+    );
+    setPanel("import");
+  };
+
   const resolve = (commentId: string, resolved: boolean) => {
     void runtime
       .runPromiseExit(Api.use((api) => api.setCommentResolved(id, commentId, resolved)))
@@ -440,6 +465,19 @@ export function DesignCanvas({ id }: { id: string }) {
         >
           Comments{openCount > 0 && <span {...stylex.props(styles.count)}>{openCount}</span>}
         </button>
+        <ImportButton
+          busy={imported?.status === "working"}
+          onFile={(file) => void importFile(file)}
+        />
+        <button
+          type="button"
+          aria-pressed={panel === "export"}
+          onClick={() => togglePanel("export")}
+          {...stylex.props(styles.tool)}
+          title="Download an artboard or the whole design"
+        >
+          Export
+        </button>
         {presence.map((p) => (
           <span key={p.actor} {...stylex.props(styles.chip)} title={p.status ?? undefined}>
             {p.name}
@@ -482,6 +520,24 @@ export function DesignCanvas({ id }: { id: string }) {
           working={working}
           openId={openId}
           onSelect={showComment}
+          onClose={() => setPanel(null)}
+        />
+      )}
+
+      {panel === "export" && sessionRef.current && (
+        <ExportMenu
+          designId={id}
+          artboards={sessionRef.current.replica
+            .artboards()
+            .map((board) => ({ id: board.id, name: board.name ?? "Artboard" }))}
+          onClose={() => setPanel(null)}
+        />
+      )}
+      {panel === "import" && imported && (
+        <ImportResultCard
+          designId={id}
+          state={imported}
+          nameOf={(nodeId) => sessionRef.current?.replica.get(nodeId)?.name ?? undefined}
           onClose={() => setPanel(null)}
         />
       )}

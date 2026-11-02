@@ -30,7 +30,7 @@ pub struct ImportRequest {
 }
 
 /// What an import did.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct ImportResult {
     pub import: ImportRecord,
     pub artboards: Vec<String>,
@@ -64,6 +64,41 @@ impl From<OpenError> for TransferError {
             busy @ OpenError::Busy(_) => Self::Io(std::io::Error::other(busy.to_string())),
         }
     }
+}
+
+/// The format named `name`, as a route or tool names it.
+pub fn format_named(name: &str) -> Result<Format, TransferError> {
+    Format::named(name).ok_or_else(|| {
+        let known: Vec<&str> = Format::ALL.iter().map(|f| f.codec().name()).collect();
+        TransferError::Invalid(format!(
+            "no format {name:?}; use one of {}",
+            known.join(", ")
+        ))
+    })
+}
+
+/// The axes strict mode holds, from names like `preserved,editable`.
+pub fn strict_named<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+) -> Result<Vec<Axis>, TransferError> {
+    let mut axes = Vec::new();
+    for name in names.into_iter().flat_map(|n| n.split(',')) {
+        let axis = match name.trim() {
+            "" => continue,
+            "preserved" => Axis::Preserved,
+            "visual" => Axis::Visual,
+            "editable" => Axis::Editable,
+            other => {
+                return Err(TransferError::Invalid(format!(
+                    "no strict axis {other:?}; use preserved, visual or editable"
+                )));
+            }
+        };
+        if !axes.contains(&axis) {
+            axes.push(axis);
+        }
+    }
+    Ok(axes)
 }
 
 fn joined<T>(result: Result<T, tokio::task::JoinError>) -> Result<T, TransferError> {

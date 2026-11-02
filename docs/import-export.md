@@ -112,6 +112,8 @@ To change a stored format, bump its version, add the upgrade step, and add a fix
 
 `crates/server/src/transfer.rs` has the three operations: `import`, `export` and `original`. The HTTP API, the MCP tools, the Figma plugin and the web UI are thin layers over them, and none of them holds conversion logic.
 
+Over HTTP, `POST /api/designs/{id}/import?format=html&name=…&strict=preserved,editable` takes the file's bytes as the body, up to 32 MB (the largest blob, since the file is kept whole), and answers `201` with the record, the new artboards and the diagnostics. `GET /api/designs/{id}/export?format=html&artboard=…` downloads the design, or one artboard, and its `Finite-Diagnostics` header counts the diagnostics. `GET /api/designs/{id}/imports` lists the records, and `GET /api/designs/{id}/imports/{import}/original` downloads the exact bytes, always as `application/octet-stream` with `nosniff` and `Content-Security-Policy: sandbox`, so a hostile page can't render. An unknown format or strict axis, bad input and a strict refusal all answer `422`. Agents have `import_design`, which takes the file as `content` or `contentBase64`, and `export_design`, which returns the file as text.
+
 ## Not in v1
 
 v1 converts frames, text, solid fills, images and basic flex layout. Everything else is archived and reported. The design leaves room for these, but we're deliberately not building them yet:

@@ -17,6 +17,7 @@ use finite_design::{
     Snapshot,
     comment::{self, Anchor, Author, AuthorKind, Comment, CommentError},
     edit,
+    import::ImportRecord,
     version::{self, VersionError},
 };
 use serde::{Deserialize, Serialize};
@@ -29,11 +30,25 @@ use crate::hub::{
     Actor, AdoptError, DesignHandle, DesignSummary, Hub, LOBBY_LIMIT, OpenError, Outgoing, Since,
     is_design_id,
 };
+use crate::transfer::{self, ImportRequest, ImportResult, TransferError};
 
 /// The largest design another server can hand off. axum's default of 2 MB
 /// suits API calls, but a handoff carries a whole design with its undo
 /// histories, and one MCP call alone can add 4 MB.
 const HANDOFF_LIMIT: usize = 256 << 20;
+
+/// The largest file an import accepts: the largest blob, since the file is
+/// kept whole as one. The codecs parse it all in memory.
+pub const IMPORT_LIMIT: usize = crate::blob::MAX_BLOB;
+
+/// Who imports over HTTP. The body is the file itself, so unlike
+/// [`set_css`] there's no room for the person's own id and name.
+fn browser() -> Actor {
+    Actor {
+        id: "web".into(),
+        name: "Someone in the browser".into(),
+    }
+}
 
 pub fn routes() -> Router<Arc<Hub>> {
     Router::new()
@@ -60,6 +75,13 @@ pub fn routes() -> Router<Arc<Hub>> {
             post(reply_to_comment),
         )
         .route("/designs/{id}/css", put(set_css))
+        .route(
+            "/designs/{id}/import",
+            post(import).layer(DefaultBodyLimit::max(IMPORT_LIMIT)),
+        )
+        .route("/designs/{id}/export", get(export))
+        .route("/designs/{id}/imports", get(list_imports))
+        .route("/designs/{id}/imports/{import}/original", get(original))
         .route(
             "/designs/{id}/assets/{hash}",
             get(get_asset)
@@ -114,6 +136,8 @@ enum ApiError {
         owner: String,
     },
     Unprocessable(String),
+    /// Something broke on this server, like storage.
+    Failed(String),
     /// No server can serve the design right now, say while it moves
     /// between servers. Worth trying again in a moment.
     Unavailable(String),
@@ -132,6 +156,7 @@ impl IntoResponse for ApiError {
             Self::Unprocessable(message) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, message).into_response()
             }
+            Self::Failed(message) => (StatusCode::INTERNAL_SERVER_ERROR, message).into_response(),
             Self::Unavailable(message) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 [("retry-after", "1")],
@@ -147,6 +172,16 @@ impl From<CommentError> for ApiError {
         match error {
             CommentError::NotFound(_) => Self::NotFound(error.to_string()),
             _ => Self::Unprocessable(error.to_string()),
+        }
+    }
+}
+
+impl From<TransferError> for ApiError {
+    fn from(error: TransferError) -> Self {
+        match error {
+            TransferError::NotFound(message) => Self::NotFound(message),
+            TransferError::Invalid(message) => Self::Unprocessable(message),
+            TransferError::Io(_) => Self::Failed(error.to_string()),
         }
     }
 }
@@ -469,6 +504,135 @@ async fn set_css(
     Ok(Json(Changed {
         seq: change.map(|c| c.seq),
     }))
+}
+
+/// `?format=…&name=…&strict=…` on an import: the format, the file's name,
+/// and the axes strict mode holds, like `preserved,editable`.
+#[derive(Deserialize)]
+struct ImportQuery {
+    format: String,
+    name: Option<String>,
+    #[serde(default)]
+    strict: String,
+}
+
+/// Imports the body, the file's exact bytes, as new artboards in one undo
+/// step. See `docs/import-export.md`.
+async fn import(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    Query(query): Query<ImportQuery>,
+    body: Bytes,
+) -> Result<(StatusCode, Json<ImportResult>), ApiError> {
+    here(&hub, &id)?;
+    let request = ImportRequest {
+        format: transfer::format_named(&query.format)?,
+        bytes: body.to_vec(),
+        file_name: query.name,
+        strict: transfer::strict_named([query.strict.as_str()])?,
+    };
+    let result = transfer::import(&hub, &id, &browser(), request).await?;
+    Ok((StatusCode::CREATED, Json(result)))
+}
+
+/// `?format=…&artboard=…` on an export. Without an artboard it's the whole design.
+#[derive(Deserialize)]
+struct ExportQuery {
+    format: String,
+    artboard: Option<String>,
+}
+
+/// The design, or one artboard, as a file to download. `Finite-Diagnostics`
+/// counts what didn't convert exactly.
+async fn export(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    Query(query): Query<ExportQuery>,
+) -> Result<Response, ApiError> {
+    here(&hub, &id)?;
+    let format = transfer::format_named(&query.format)?;
+    let scope = match query.artboard {
+        Some(artboard) => finite_transfer::Scope::Artboard(artboard),
+        None => finite_transfer::Scope::Design,
+    };
+    let exported = transfer::export(&hub, &id, format, scope).await?;
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static(exported.media_type),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                attachment(Some(&exported.file_name)),
+            ),
+            (
+                header::HeaderName::from_static("finite-diagnostics"),
+                HeaderValue::from(exported.diagnostics.len()),
+            ),
+        ],
+        exported.bytes,
+    )
+        .into_response())
+}
+
+/// A `Content-Disposition` that downloads the file as `name`. Characters a
+/// header can't carry, and quotes, become `_`.
+fn attachment(name: Option<&str>) -> HeaderValue {
+    let Some(name) = name else {
+        return HeaderValue::from_static("attachment");
+    };
+    let name: String = name
+        .chars()
+        .map(|c| match c {
+            ' ' | '!' | '#'..='[' | ']'..='~' => c,
+            _ => '_',
+        })
+        .collect();
+    HeaderValue::from_str(&format!("attachment; filename=\"{name}\""))
+        .expect("only visible ASCII is left")
+}
+
+/// Every import into the design, oldest first, with what each one kept out.
+async fn list_imports(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<ImportRecord>>, ApiError> {
+    let imports = open(&hub, &id).await?.read(|d| d.imports().to_vec());
+    Ok(Json(imports))
+}
+
+/// The exact bytes an import received. They can be hostile HTML, so they're
+/// only ever downloaded: the type says nothing, `nosniff` stops a browser
+/// from guessing one, and `sandbox` stops a script if it renders anyway.
+async fn original(
+    State(hub): State<Arc<Hub>>,
+    Path((id, import)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    here(&hub, &id)?;
+    let (record, bytes) = transfer::original(&hub, &id, &import).await?;
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                attachment(record.file_name.as_deref()),
+            ),
+            (
+                header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            ),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                HeaderValue::from_static("sandbox"),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 /// Streams the design list: every design once, then each design as it changes.
