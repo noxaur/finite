@@ -8,11 +8,13 @@ import { COMMENT_LIMIT, NAME_LIMIT } from "@/lib/limits";
 import { isLocalUser, useLocalName } from "@/lib/user";
 import { timeAgo } from "@/lib/time";
 import { PIN_PATH } from "@/lib/cursors";
-import { PinFilters, PinIcon } from "./PinIcon";
+import { PinFilters, PinIcon, type PinState } from "./PinIcon";
+import { colors, radii, space } from "@/styles/tokens.stylex";
 
 /** How far right of its pin a popover starts, in pixels. */
 const POPOVER_GAP = 36;
-import { colors, radii, space } from "@/styles/tokens.stylex";
+/** How long a resolved pin stays on the canvas, fading, before it goes. The comments panel keeps it. */
+export const DECAY_MS = 60_000;
 
 export type Mode = "pointer" | "comment";
 
@@ -35,6 +37,22 @@ export function pinPosition(
   if (board?.parent === null) return { x: (board.x ?? 0) + pin.x, y: (board.y ?? 0) + pin.y };
   // The artboard is gone: the pin stays where it was when it went.
   return pin.detachedAt ?? null;
+}
+
+/**
+ * How long ago `comment` was resolved, or `null` while it's open. A comment
+ * resolved before the server recorded when counts as long ago.
+ */
+function resolvedFor(comment: Comment, now: number): number | null {
+  if (!comment.resolved) return null;
+  return comment.resolvedAt === undefined ? Infinity : now - comment.resolvedAt;
+}
+
+/** What a comment's pin shows. `working` is the agent label on its artboard, if any. */
+export function pinState(comment: Comment, working: string | undefined): PinState {
+  if (comment.resolved) return "resolved";
+  if (working) return "working";
+  return comment.messages.at(-1)?.author.kind === "agent" ? "replied" : "waiting";
 }
 
 /** The pointer and comment tools, in a pill at the bottom of the screen. */
@@ -107,6 +125,9 @@ interface LayerProps {
   readonly onCancelDraft: () => void;
   readonly onReply: (id: string, body: string) => Promise<string | undefined>;
   readonly onResolve: (id: string, resolved: boolean) => void;
+  /** Replaces the newest message, which must be this browser's. */
+  readonly onEdit: (id: string, body: string) => Promise<string | undefined>;
+  readonly onDelete: (id: string) => void;
   /** Outlines the nodes a linked change touched. */
   readonly onShowChange: (nodeIds: ReadonlyArray<string>) => void;
 }
@@ -114,19 +135,34 @@ interface LayerProps {
 /**
  * Comment pins and the open thread, drawn in canvas coordinates inside the
  * camera's transformed layer. Each pin keeps its screen size at any zoom.
+ * A resolved pin fades out over `DECAY_MS` and then leaves the canvas,
+ * unless its thread is open.
  */
 export function CommentLayer(props: LayerProps) {
   const { replica, comments, openId, draft, working } = props;
+  const now = Date.now();
   const busyAny = [...comments.values()].some(
     (c) => !c.resolved && c.artboardId !== null && working.has(c.artboardId),
   );
+  // Re-render when the next fading pin should go.
+  const [, setExpired] = useState(0);
+  const nextExpiry = Math.min(
+    ...[...comments.values()].map((c) => DECAY_MS - (resolvedFor(c, now) ?? Infinity)),
+  );
+  useEffect(() => {
+    if (nextExpiry <= 0 || nextExpiry === Infinity) return;
+    const timer = setTimeout(() => setExpired((n) => n + 1), nextExpiry);
+    return () => clearTimeout(timer);
+  }, [nextExpiry]);
   return (
     <div {...stylex.props(styles.layer)}>
       <PinFilters boiling={busyAny} />
       {[...comments.values()].map((comment) => {
+        const open = comment.id === openId;
+        const age = resolvedFor(comment, now);
+        if (age !== null && age >= DECAY_MS && !open) return null;
         const at = pinPosition(replica, comment);
         if (!at) return null;
-        const open = comment.id === openId;
         const busy =
           !comment.resolved && comment.artboardId !== null && working.has(comment.artboardId);
         return (
@@ -141,18 +177,22 @@ export function CommentLayer(props: LayerProps) {
               onClick={() => props.onOpen(open ? null : comment.id)}
               {...stylex.props(styles.pin)}
             >
-              <PinIcon
-                state={
-                  comment.resolved
-                    ? "resolved"
-                    : busy
-                      ? "working"
-                      : comment.messages.at(-1)?.author.kind === "agent"
-                        ? "replied"
-                        : "waiting"
-                }
-                selected={open}
-              />
+              {age !== null && !open ? (
+                // Keyed by when it was resolved, so resolving again restarts the fade.
+                <Decay key={comment.resolvedAt} age={age}>
+                  <PinIcon state="resolved" />
+                </Decay>
+              ) : (
+                <PinIcon
+                  state={pinState(
+                    comment,
+                    busy && comment.artboardId !== null
+                      ? working.get(comment.artboardId)
+                      : undefined,
+                  )}
+                  selected={open}
+                />
+              )}
             </button>
             {open && (
               <Thread
@@ -161,6 +201,8 @@ export function CommentLayer(props: LayerProps) {
                 onClose={() => props.onOpen(null)}
                 onReply={(body) => props.onReply(comment.id, body)}
                 onResolve={(resolved) => props.onResolve(comment.id, resolved)}
+                onEdit={(body) => props.onEdit(comment.id, body)}
+                onDelete={() => props.onDelete(comment.id)}
                 onShowChange={props.onShowChange}
               />
             )}
@@ -170,6 +212,16 @@ export function CommentLayer(props: LayerProps) {
       {draft && <DraftPin {...props} draft={draft} />}
     </div>
   );
+}
+
+/**
+ * Fades its children out over what's left of `DECAY_MS`. The delay is read
+ * once: changing it later would shift the running animation by the time
+ * that already passed.
+ */
+function Decay({ age, children }: { age: number; children: ReactNode }) {
+  const [delay] = useState(-age);
+  return <span {...stylex.props(styles.decaying, styles.decayFrom(delay))}>{children}</span>;
 }
 
 function DraftPin({ replica, draft, onPost, onCancelDraft }: LayerProps & { draft: Draft }) {
@@ -285,6 +337,8 @@ function Thread({
   onClose,
   onReply,
   onResolve,
+  onEdit,
+  onDelete,
   onShowChange,
 }: {
   comment: Comment;
@@ -292,13 +346,53 @@ function Thread({
   onClose: () => void;
   onReply: (body: string) => Promise<string | undefined>;
   onResolve: (resolved: boolean) => void;
+  onEdit: (body: string) => Promise<string | undefined>;
+  onDelete: () => void;
   onShowChange: (nodeIds: ReadonlyArray<string>) => void;
 }) {
+  const [confirming, setConfirming] = useState(false);
+  const [editRequested, setEditing] = useState(false);
+  const last = comment.messages.length - 1;
+  // Only your own newest message: once an agent answers, it's part of the record.
+  const editable = last >= 0 && isLocalUser(comment.messages[last]!.author);
+  const editing = editRequested && editable;
+  if (confirming) {
+    return (
+      <Popover label="Delete comment">
+        <p {...stylex.props(styles.body)}>Delete this comment and its replies?</p>
+        <div {...stylex.props(styles.threadHead)}>
+          <span {...stylex.props(styles.spacer)} />
+          <button
+            type="button"
+            autoFocus
+            onClick={() => setConfirming(false)}
+            {...stylex.props(styles.textButton)}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onDelete}
+            {...stylex.props(styles.textButton, styles.danger)}
+          >
+            Delete
+          </button>
+        </div>
+      </Popover>
+    );
+  }
   return (
     <Popover label="Comment thread">
       <div {...stylex.props(styles.threadHead)}>
         <span {...stylex.props(styles.muted)}>{comment.resolved ? "Resolved" : "Open"}</span>
         <span {...stylex.props(styles.spacer)} />
+        <button
+          type="button"
+          onClick={() => setConfirming(true)}
+          {...stylex.props(styles.textButton)}
+        >
+          Delete
+        </button>
         <button
           type="button"
           onClick={() => onResolve(!comment.resolved)}
@@ -322,9 +416,36 @@ function Thread({
               <span {...stylex.props(styles.author)}>
                 {isLocalUser(message.author) ? "You" : message.author.name}
               </span>{" "}
-              <span {...stylex.props(styles.muted)}>{timeAgo(message.at)}</span>
+              <span {...stylex.props(styles.muted)}>
+                {timeAgo(message.at)}
+                {message.editedAt !== undefined && " · edited"}
+              </span>
+              {i === last && editable && !editing && (
+                <button
+                  type="button"
+                  onClick={() => setEditing(true)}
+                  {...stylex.props(styles.textButton, styles.inlineButton)}
+                >
+                  Edit
+                </button>
+              )}
             </div>
-            <p {...stylex.props(styles.body)}>{message.body}</p>
+            {i === last && editing ? (
+              <Composer
+                placeholder="Edit your message"
+                initial={message.body}
+                autoFocus
+                label="Save"
+                onSubmit={async (body) => {
+                  const failure = await onEdit(body);
+                  if (failure === undefined) setEditing(false);
+                  return failure;
+                }}
+                onCancel={() => setEditing(false)}
+              />
+            ) : (
+              <p {...stylex.props(styles.body)}>{message.body}</p>
+            )}
             {message.changes && message.changes.length > 0 && (
               <div {...stylex.props(styles.changes)}>
                 {message.changes.map((change) => (
@@ -348,23 +469,27 @@ function Thread({
           <span {...stylex.props(styles.workingDot)} /> {working}
         </p>
       )}
-      <Composer placeholder="Reply" onSubmit={onReply} onCancel={onClose} />
+      {!editing && <Composer placeholder="Reply" onSubmit={onReply} onCancel={onClose} />}
     </Popover>
   );
 }
 
 function Composer({
   placeholder,
+  initial = "",
   autoFocus,
+  label = "Send",
   onSubmit,
   onCancel,
 }: {
   placeholder: string;
+  initial?: string;
   autoFocus?: boolean;
+  label?: string;
   onSubmit: (body: string) => Promise<string | undefined>;
   onCancel: () => void;
 }) {
-  const [body, setBody] = useState("");
+  const [body, setBody] = useState(initial);
   const [sending, setSending] = useState(false);
   const [failed, setFailed] = useState<string>();
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -403,7 +528,9 @@ function Composer({
               e.preventDefault();
               void submit();
             } else if (e.key === "Escape") {
+              // Only this composer closes, not the thread around it.
               e.preventDefault();
+              e.stopPropagation();
               onCancel();
             }
           }}
@@ -412,7 +539,7 @@ function Composer({
         <button
           type="submit"
           disabled={!body.trim() || sending}
-          aria-label="Send"
+          aria-label={label}
           {...stylex.props(styles.send)}
         >
           ↑
@@ -430,6 +557,13 @@ function Composer({
 const pulse = stylex.keyframes({
   "0%": { boxShadow: `0 0 0 0 rgba(194, 65, 12, 0.5)` },
   "100%": { boxShadow: `0 0 0 10px rgba(194, 65, 12, 0)` },
+});
+
+// Holds most of its ink, then thins out at the end.
+const decay = stylex.keyframes({
+  "0%": { opacity: 1 },
+  "70%": { opacity: 0.7 },
+  "100%": { opacity: 0 },
 });
 
 const styles = stylex.create({
@@ -482,6 +616,15 @@ const styles = stylex.create({
     transformOrigin: "0 0",
   }),
   raised: { zIndex: 1 },
+  decaying: {
+    display: "block",
+    animationName: decay,
+    animationDuration: `${DECAY_MS}ms`,
+    animationTimingFunction: "linear",
+    animationFillMode: "forwards",
+  },
+  // A negative delay starts the fade partway, so a reload doesn't restart it.
+  decayFrom: (delayMs: number) => ({ animationDelay: `${delayMs}ms` }),
   pin: {
     position: "absolute",
     left: -3,
@@ -539,6 +682,8 @@ const styles = stylex.create({
     fontSize: 12,
     fontFamily: "inherit",
   },
+  danger: { color: colors.danger },
+  inlineButton: { height: 18, marginLeft: 2, color: colors.muted },
   textButton: {
     paddingInline: 6,
     height: 22,

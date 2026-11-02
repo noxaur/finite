@@ -63,6 +63,8 @@ export class DesignSession {
   private readonly listeners = new Set<() => void>();
   /** The server's name for the load our snapshot came from, so a reconnect can resume. */
   private epoch: string | null = null;
+  /** Comments deleted while open, so a late REST answer can't bring one back. */
+  private readonly deleted = new Set<string>();
 
   /** `view` must draw from `replica`, so pass the renderer the same replica. */
   constructor(
@@ -142,6 +144,9 @@ export class DesignSession {
       case "comment":
         this.upsertComment(message.comment);
         return;
+      case "commentDeleted":
+        this.removeComment(message.id);
+        return;
     }
   }
 
@@ -152,8 +157,17 @@ export class DesignSession {
    */
   upsertComment(comment: Comment) {
     const known = this.current.comments.get(comment.id);
-    if (known && known.rev > comment.rev) return;
+    if ((known && known.rev > comment.rev) || this.deleted.has(comment.id)) return;
     this.update({ comments: new Map(this.current.comments).set(comment.id, comment) });
+  }
+
+  /** Drops a deleted comment, from the server's message or our own delete. */
+  removeComment(id: string) {
+    this.deleted.add(id);
+    if (!this.current.comments.has(id)) return;
+    const comments = new Map(this.current.comments);
+    comments.delete(id);
+    this.update({ comments });
   }
 
   /** Applies a change we haven't seen, and returns its activity entry (none if we had). */

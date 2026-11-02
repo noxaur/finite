@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast::Receiver;
 
 /// Keys whose values vary between runs.
-const TIMESTAMPS: &[&str] = &["at", "createdAt", "updatedAt"];
+const TIMESTAMPS: &[&str] = &["at", "createdAt", "updatedAt", "resolvedAt", "editedAt"];
 
 fn drain(rx: &mut Receiver<Outgoing>) -> Vec<Value> {
     std::iter::from_fn(|| rx.try_recv().ok())
@@ -147,6 +147,9 @@ async fn wire_messages_match_the_fixture() {
     };
     let scratch_comment = handle.add_comment(user, anchor, "Remove this?").unwrap();
     handle
+        .edit_message(&scratch_comment.id, "user:1", "Remove this artboard?")
+        .unwrap();
+    handle
         .edit(&agent, "Delete", |doc| {
             Ok((edit::delete(doc, &["scratch".into()])?, ()))
         })
@@ -157,6 +160,19 @@ async fn wire_messages_match_the_fixture() {
         })
         .unwrap();
     handle.rename("Landing v2".into());
+    let user = Author {
+        id: "user:1".into(),
+        name: "Guest".into(),
+        kind: AuthorKind::User,
+    };
+    let anchor = Anchor {
+        artboard_id: None,
+        node_id: None,
+        x: 0.0,
+        y: 0.0,
+    };
+    let stray = handle.add_comment(user, anchor, "Oops").unwrap();
+    handle.delete_comment(&stray.id).unwrap();
 
     let first = |o: Outgoing| serde_json::from_str::<Value>(&o.json).unwrap();
     let design_first = first(design_first);
@@ -183,6 +199,7 @@ async fn wire_messages_match_the_fixture() {
         (summary.meta.id.clone(), "design1"),
         (comment.id.clone(), "comment1"),
         (scratch_comment.id.clone(), "comment2"),
+        (stray.id.clone(), "comment3"),
         (epoch, "epoch1"),
     ];
     normalize(&mut messages, &ids);
@@ -194,7 +211,13 @@ async fn wire_messages_match_the_fixture() {
         .map(|m| m["type"].as_str().unwrap())
         .collect();
     for kind in [
-        "snapshot", "change", "presence", "comment", "meta", "resume",
+        "snapshot",
+        "change",
+        "presence",
+        "comment",
+        "commentDeleted",
+        "meta",
+        "resume",
     ] {
         assert!(types.contains(&kind), "no {kind} message recorded");
     }

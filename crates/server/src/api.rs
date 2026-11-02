@@ -44,7 +44,14 @@ pub fn routes() -> Router<Arc<Hub>> {
         )
         .route("/designs/{id}/ws", get(design_socket))
         .route("/designs/{id}/comments", post(create_comment))
-        .route("/designs/{id}/comments/{comment}", patch(update_comment))
+        .route(
+            "/designs/{id}/comments/{comment}",
+            patch(update_comment).delete(delete_comment),
+        )
+        .route(
+            "/designs/{id}/comments/{comment}/messages/last",
+            patch(edit_last_message),
+        )
         .route(
             "/designs/{id}/comments/{comment}/replies",
             post(reply_to_comment),
@@ -274,6 +281,12 @@ struct UpdateComment {
     resolved: bool,
 }
 
+#[derive(Deserialize)]
+struct EditMessage {
+    author: UserAuthor,
+    body: String,
+}
+
 type CommentResult = Result<(StatusCode, Json<Comment>), ApiError>;
 
 async fn create_comment(
@@ -315,6 +328,27 @@ async fn update_comment(
         .await?
         .set_resolved(&comment, body.resolved)?;
     Ok((StatusCode::OK, Json(comment)))
+}
+
+/// Replaces the body of the thread's newest message, if the person wrote it.
+async fn edit_last_message(
+    State(hub): State<Arc<Hub>>,
+    Path((id, comment)): Path<(String, String)>,
+    Json(body): Json<EditMessage>,
+) -> CommentResult {
+    let author = body.author.into_author();
+    let comment = open(&hub, &id)
+        .await?
+        .edit_message(&comment, &author.id, &body.body)?;
+    Ok((StatusCode::OK, Json(comment)))
+}
+
+async fn delete_comment(
+    State(hub): State<Arc<Hub>>,
+    Path((id, comment)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    open(&hub, &id).await?.delete_comment(&comment)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]

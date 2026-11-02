@@ -283,15 +283,16 @@ Every viewer shows the names and notes agents write, so they're cut to a fixed l
 
 `crates/server/src/api.rs` serves the browser:
 
-| Route                                                    | What it's for                                       |
-| -------------------------------------------------------- | --------------------------------------------------- |
-| `GET /api/designs?q=…&limit=…`, `POST /api/designs`      | Search designs by name, create an empty one         |
-| `GET /api/designs/{id}`                                  | One snapshot (used by thumbnails)                   |
-| `GET /api/designs/ws`                                    | WebSocket: the 200 newest designs, then updates     |
-| `GET /api/designs/{id}/ws`                               | WebSocket: one design's snapshot, then every change |
-| `GET /api/designs/{id}/ws?epoch=…&since=…`               | The same socket, resuming after a reconnect         |
-| `POST …/comments`, `…/replies`, `PATCH …/comments/{cid}` | Comment, reply, resolve                             |
-| `PUT /api/designs/{id}/css`                              | Replace the shared CSS, as the person's own edit    |
+| Route                                                             | What it's for                                       |
+| ----------------------------------------------------------------- | --------------------------------------------------- |
+| `GET /api/designs?q=…&limit=…`, `POST /api/designs`               | Search designs by name, create an empty one         |
+| `GET /api/designs/{id}`                                           | One snapshot (used by thumbnails)                   |
+| `GET /api/designs/ws`                                             | WebSocket: the 200 newest designs, then updates     |
+| `GET /api/designs/{id}/ws`                                        | WebSocket: one design's snapshot, then every change |
+| `GET /api/designs/{id}/ws?epoch=…&since=…`                        | The same socket, resuming after a reconnect         |
+| `POST …/comments`, `…/replies`, `PATCH …/comments/{cid}`          | Comment, reply, resolve                             |
+| `PATCH …/comments/{cid}/messages/last`, `DELETE …/comments/{cid}` | Edit your newest message, delete a comment          |
+| `PUT /api/designs/{id}/css`                                       | Replace the shared CSS, as the person's own edit    |
 
 The messages on these sockets are Rust types on the server and Effect schemas in `apps/web/src/design/schema.ts`. Another golden file keeps those in step. `crates/server/tests/wire.rs` drives a real hub through an edit, an undo, presence, a comment, an agent reply and a rename, and records every message it broadcasts in `crates/server/fixtures/messages.json`. Then `apps/web/src/design/wire.test.ts` decodes each one with the web schemas. If you rename a field on the Rust side, `cargo test` fails until you regenerate the file, and then `vp test` fails until you update the schema.
 
@@ -425,6 +426,10 @@ Here's what happened in the demo you saw:
 
 5. Your reply reopens a resolved comment, so you can keep steering in one thread.
 
+A resolved pin fades out and leaves the canvas a minute after it was resolved (`DECAY_MS` in `components/Comments.tsx`). The server stamps `resolvedAt` when a comment goes from open to resolved, and the viewer fades the pin with a CSS animation whose negative delay is that age. The delay is read once, when the pin mounts. Setting it again on a later render would shift the running animation by the time already passed, and an early version faded twice as fast for that reason. A comment resolved before `resolvedAt` existed counts as long ago, so it's hidden at once. The **Comments** button in the top bar opens a side panel that lists every comment, open and resolved, newest first. Picking one centers its pin and opens the thread, even after the pin has left the canvas.
+
+You can edit your own message while it's the newest in its thread (`Design::edit_message`). Once an agent answers, the message is part of the record and stays as it was. `get_comments` marks an edited message with `edited: true`. Anyone can delete a comment with its whole thread (`Design::delete_comment`). The hub broadcasts `commentDeleted` and journals a `CommentDeleted` record. A REST answer for that comment can still arrive after the delete, so `DesignSession` remembers deleted ids and ignores late copies.
+
 A thread opens up and to the right of its pin. Near the window's right edge it opens to the left, and near the top bar it hangs below the pin instead (`Popover` in `components/Comments.tsx`).
 
 If a comment or reply can't be sent, say the connection dropped, the box keeps the text and shows "Couldn't send" under it, so you can try again. The end-to-end test blocks the comments endpoint to check this, and does the same for creating a design.
@@ -441,9 +446,9 @@ The order of the messages matters here. A viewer draws a pin at its artboard if 
 
 Comments live beside the document, not inside it, so undo never touches them. They're saved with the design, in its snapshot and journal.
 
-Each comment carries a **revision number**, `rev`. It starts at 0 and goes up by one with every change: a reply, a resolve, or a pin moving because its artboard went or came back. A browser can get the same comment twice. The server broadcasts it on the socket, and the REST call that changed it also returns it. The two can arrive in either order, and another change can land in between. Say you reply, and an agent answers at once. The agent's reply can reach your socket before the REST answer to your own reply. So `DesignSession.upsertComment` keeps whichever copy has the higher `rev`, and drops an older copy that arrives late.
+Each comment carries a **revision number**, `rev`. It starts at 0 and goes up by one with every change: a reply, a resolve, an edit, or a pin moving because its artboard went or came back. A browser can get the same comment twice. The server broadcasts it on the socket, and the REST call that changed it also returns it. The two can arrive in either order, and another change can land in between. Say you reply, and an agent answers at once. The agent's reply can reach your socket before the REST answer to your own reply. So `DesignSession.upsertComment` keeps whichever copy has the higher `rev`, and drops an older copy that arrives late.
 
-All the thread rules live in `crates/design`: `comment.rs` defines the types and checks, and `Design::add_comment`, `reply` and `set_resolved` apply them. The hub only takes the lock, calls one of those, and broadcasts the updated comment. That means you can test a comment rule with a plain function call, like the tests at the bottom of `design.rs`.
+All the thread rules live in `crates/design`: `comment.rs` defines the types and checks, and `Design::add_comment`, `reply`, `set_resolved`, `edit_message` and `delete_comment` apply them. The hub only takes the lock, calls one of those, and broadcasts the updated comment. That means you can test a comment rule with a plain function call, like the tests at the bottom of `design.rs`.
 
 ## Saving and recovering
 
@@ -454,7 +459,7 @@ Everything above happens in memory. This section covers what reaches the disk, w
 Saving is a **write-ahead journal with compaction**, the same idea databases use. Each design has two files in `FINITE_DATA_DIR/designs/` (`crates/server/data` in dev):
 
 - `<id>.json` is the last full snapshot.
-- `<id>.log` is the journal: one JSON record per line for everything since that snapshot. A record is a change, the new state of a comment, or the design's name and timestamps (`Record` in `crates/design/src/design.rs`).
+- `<id>.log` is the journal: one JSON record per line for everything since that snapshot. A record is a change, the new state of a comment, a deleted comment's id, or the design's name and timestamps (`Record` in `crates/design/src/design.rs`).
 
 After a burst of edits, the save task appends the new records to the log. That costs the same for a ten-node design as for a ten-thousand-node one. In the demo, one style change appended 305 bytes instead of rewriting the 11 KB snapshot. Every 1,000 records, or once the log's changes add up to 16 MB, the task writes a fresh snapshot instead and deletes the log. That step is **compaction**.
 

@@ -73,6 +73,8 @@ export const CommentMessage = Schema.Struct({
   at: Schema.Number,
   seq: Schema.Number,
   changes: Schema.optionalKey(Schema.Array(ChangeRef)),
+  /** When its author last changed the body. */
+  editedAt: Schema.optionalKey(Schema.Number),
 });
 export type CommentMessage = typeof CommentMessage.Type;
 
@@ -85,6 +87,8 @@ export const Comment = Schema.Struct({
   x: Schema.Number,
   y: Schema.Number,
   resolved: Schema.Boolean,
+  /** When it was last resolved. Absent on comments resolved before this was recorded. */
+  resolvedAt: Schema.optionalKey(Schema.Number),
   createdAt: Schema.Number,
   /** The first message is the comment itself; the rest are replies. */
   messages: Schema.Array(CommentMessage),
@@ -155,6 +159,7 @@ export const DesignMessage = Schema.Union([
   Schema.Struct({ type: Schema.Literal("presence"), presence: Schema.Array(Presence) }),
   Schema.Struct({ type: Schema.Literal("meta"), meta: DesignMeta }),
   Schema.Struct({ type: Schema.Literal("comment"), comment: Comment }),
+  Schema.Struct({ type: Schema.Literal("commentDeleted"), id: Schema.String }),
 ]);
 export type DesignMessage = typeof DesignMessage.Type;
 

@@ -171,6 +171,26 @@ describe("DesignSession", () => {
     expect(calls).toBe(3);
   });
 
+  it("keeps a deleted comment gone when a late copy arrives", () => {
+    const { session: s } = session();
+    s.receive(snapshot());
+    const comment: Comment = {
+      id: "c1",
+      artboardId: null,
+      nodeId: null,
+      x: 0,
+      y: 0,
+      resolved: false,
+      createdAt: 0,
+      messages: [],
+      rev: 0,
+    };
+    s.receive({ type: "comment", comment });
+    s.receive({ type: "commentDeleted", id: "c1" });
+    s.upsertComment({ ...comment, rev: 1 });
+    expect(s.state.comments.size).toBe(0);
+  });
+
   it("keeps the newer copy of a comment when an older one arrives late", () => {
     const { session: s } = session();
     s.receive(snapshot());
