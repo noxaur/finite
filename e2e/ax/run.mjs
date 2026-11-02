@@ -3,6 +3,7 @@
 //
 //   node e2e/ax/run.mjs --task restyle --runs 3 --label baseline
 //   node e2e/ax/run.mjs --task restyle,mobile --runs 2 --label new-tools --bin /tmp/finite-server-new
+//   node e2e/ax/run.mjs --task rebrand --runs 3 --label no-search --surface e2e/ax/surfaces/no-search.mjs
 //   node e2e/ax/report.mjs                 compare every label's results
 //
 // Each run starts its own finite-server (--bin, default target/debug) with an
@@ -15,6 +16,9 @@
 // Built-in tools stay on (minus Edit and Write), so the metrics show when an
 // agent reaches past MCP: curl to the API, reading the server's code, and
 // so on. Runs cost real money; --budget caps each one (default $4).
+//
+// --surface shows the agent a mock tool surface from a spec file instead of
+// the server's own tools, answered through the same server (mock-surface.mjs).
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
@@ -36,6 +40,8 @@ const { values: opts } = parseArgs({
     model: { type: "string", default: "claude-sonnet-5-5" },
     effort: { type: "string", default: "medium" },
     budget: { type: "string", default: "4" },
+    // A spec file for mock-surface.mjs, to try a tool design before building it.
+    surface: { type: "string" },
     parallel: { type: "string", default: "4" },
     "no-feedback": { type: "boolean", default: false },
     // KEY=VALUE for the server, like FINITE_MCP_EXTRA=search. Repeatable.
@@ -205,11 +211,18 @@ async function runOnce(taskName, index, outDir) {
       config,
       JSON.stringify({
         mcpServers: {
-          finite: {
-            type: "http",
-            url: `${server.base}/mcp`,
-            headers: { "X-Finite-Agent": `ax-${taskName}-${index}` },
-          },
+          finite: opts.surface
+            ? {
+                type: "stdio",
+                command: process.execPath,
+                args: [path.join(root, "e2e/ax/mock-surface.mjs"), path.resolve(opts.surface)],
+                env: { FINITE_BASE: server.base, FINITE_AGENT: `ax-${taskName}-${index}` },
+              }
+            : {
+                type: "http",
+                url: `${server.base}/mcp`,
+                headers: { "X-Finite-Agent": `ax-${taskName}-${index}` },
+              },
         },
       }),
     );
@@ -318,6 +331,7 @@ async function runOnce(taskName, index, outDir) {
       index,
       label: opts.label,
       env: serverEnv(),
+      surface: opts.surface ?? null,
       model: opts.model,
       effort: opts.effort,
       seconds,
