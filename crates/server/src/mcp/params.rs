@@ -47,7 +47,8 @@ pub struct DesignParams {
 
 #[derive(Deserialize, JsonSchema, Default)]
 pub struct ListParams {
-    /// Only designs whose name contains this, ignoring case.
+    /// Only designs whose name contains this (ignoring case), or whose id
+    /// starts with it.
     #[serde(default)]
     pub(super) query: Option<String>,
     /// How many designs to return, most recently edited first. Defaults to
@@ -63,17 +64,47 @@ impl ListParams {
     /// ([`super::format::OUTPUT_LIMIT`]). 500 didn't.
     pub(crate) const MAX_LIMIT: usize = 200;
 
+    pub(crate) fn with_query(query: Option<String>) -> Self {
+        Self { query, limit: None }
+    }
+
     pub(super) fn limit(&self) -> usize {
         self.limit
             .unwrap_or(Self::DEFAULT_LIMIT)
             .clamp(1, Self::MAX_LIMIT)
     }
 
-    pub(super) fn matches(&self, name: &str) -> bool {
+    /// Whether a design shows up for the query: its name contains it
+    /// (ignoring case) or its id starts with it.
+    pub(crate) fn matches(&self, id: &str, name: &str) -> bool {
         self.query
             .as_deref()
-            .is_none_or(|q| name.to_lowercase().contains(&q.to_lowercase()))
+            .is_none_or(|q| name.to_lowercase().contains(&q.to_lowercase()) || id_matches(id, q))
     }
+
+    /// Whether the query found designs only through their ids, none through
+    /// a name. `designs` is every `(id, name)` that matched.
+    pub(crate) fn only_by_id<'a>(
+        &self,
+        designs: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> bool {
+        let Some(q) = self.query.as_deref().filter(|q| !q.is_empty()) else {
+            return false;
+        };
+        let q = q.to_lowercase();
+        let mut any = false;
+        for (id, name) in designs {
+            if name.to_lowercase().contains(&q) {
+                return false;
+            }
+            any |= id_matches(id, &q);
+        }
+        any
+    }
+}
+
+fn id_matches(id: &str, query: &str) -> bool {
+    !query.is_empty() && id.to_lowercase().starts_with(&query.to_lowercase())
 }
 
 #[derive(Deserialize, JsonSchema)]

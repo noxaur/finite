@@ -425,6 +425,36 @@ mod relay {
         let shown = ids.iter().filter(|id| one.contains(id.as_str())).count();
         assert_eq!(shown, 1, "{one}");
         assert!(one.contains("Showing the 1 most recently edited"), "{one}");
+
+        // One design matches the query by id, the other by name. The cut hides
+        // the name match, but the list still has one, so the relay mustn't
+        // say the query matched only ids.
+        let prefix = &ids[0][..4];
+        call(
+            &client,
+            "rename_design",
+            json!({ "designId": ids[1], "name": format!("Mixed {prefix}") }),
+        )
+        .await;
+        call(
+            &client,
+            "rename_design",
+            json!({ "designId": ids[0], "name": "Newest" }),
+        )
+        .await;
+        let mixed = call(
+            &client,
+            "list_designs",
+            json!({ "query": prefix, "limit": 1 }),
+        )
+        .await;
+        assert!(mixed.contains(ids[0].as_str()), "{mixed}");
+        assert!(!mixed.contains("matched the designId"), "{mixed}");
+        let alone = call(&client, "list_designs", json!({ "query": ids[0] })).await;
+        assert!(
+            alone.contains("matched the designId, not the name"),
+            "{alone}"
+        );
         client.cancel().await.unwrap();
     }
 

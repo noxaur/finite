@@ -426,6 +426,40 @@ async fn list_designs_filters_and_limits() {
     );
 }
 
+/// A design's id finds it too, and the result says the id matched, not the name.
+#[tokio::test]
+async fn list_designs_matches_ids() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Alice").await;
+    let created = agent
+        .ok("create_design", json!({ "name": "Checkout" }))
+        .await;
+    agent.ok("create_design", json!({ "name": "Other" })).await;
+    let id: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .unwrap()
+        .to_owned();
+    let list = |text: &str| {
+        let json = text.split("\nThe query").next().unwrap();
+        serde_json::from_str::<Vec<Value>>(json).unwrap()
+    };
+    for query in [id.clone(), id[..4].to_uppercase()] {
+        let found = agent.ok("list_designs", json!({ "query": query })).await;
+        let designs = list(&found);
+        assert_eq!(designs.len(), 1, "{found}");
+        assert_eq!(designs[0]["name"], "Checkout", "{found}");
+        assert!(
+            found.contains("matched the designId, not the name"),
+            "{found}"
+        );
+    }
+    let by_name = agent
+        .ok("list_designs", json!({ "query": "checkout" }))
+        .await;
+    assert!(!by_name.contains("matched the designId"), "{by_name}");
+}
+
 /// A big artboard's outline and HTML don't flood the agent's context: long
 /// results are cut, and say how to see the rest.
 #[tokio::test]
