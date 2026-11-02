@@ -22,7 +22,7 @@ fn score(score: Score) -> &'static str {
 /// One line per diagnostic: what, where, why, and its three scores.
 fn diagnostics(text: &mut String, diagnostics: &[Diagnostic]) {
     if diagnostics.is_empty() {
-        text.push_str("Everything converted exactly.\n");
+        text.push_str("No conversion issues reported.\n");
         return;
     }
     text.push_str(&format!("{} diagnostic(s):\n", diagnostics.len()));
@@ -42,7 +42,7 @@ fn diagnostics(text: &mut String, diagnostics: &[Diagnostic]) {
 #[tool_router(router = transfer_router, vis = "pub(super)")]
 impl FiniteMcp {
     #[tool(
-        description = "Import a file into the design as new artboards, as one undo step. Pass the file as content (text) or contentBase64 (bytes). Returns the new artboards, a diagnostic for anything that didn't convert exactly (with preserved, visual and editable scores), and the import's id. Scripts, handlers and embeds never reach the design; Finite keeps the original file. strict refuses the import, changing nothing, if anything scores no or unknown on the axes you name."
+        description = "Import a file into the design as new artboards, as one undo step. Pass the file as content (text) or contentBase64 (bytes). Returns the new artboards, a diagnostic for anything that didn't convert exactly, and the import's id. Each diagnostic scores preserved (the data is kept, maybe only in the original file), visual (it looks the same) and editable (it can be changed in Finite) as yes, no or unknown (not checked). Scripts, handlers and embeds never reach the design; Finite keeps the original file. strict refuses the import, changing nothing, if anything scores no or unknown on the axes you name."
     )]
     async fn import_design(
         &self,
@@ -94,14 +94,14 @@ impl FiniteMcp {
         });
         diagnostics(&mut text, &result.diagnostics);
         text.push_str(&format!(
-            "Import #{}. Finite keeps the original file, so nothing above is lost.",
+            "Import #{}. Finite keeps the original file's bytes.",
             result.import.id
         ));
         ok(cut(text, "Check the artboards with get_screenshot."))
     }
 
     #[tool(
-        description = "Export the design, or one artboard, as a file: html, finite (a bundle that imports back exactly) or figma (for the Finite Figma plugin). Returns the file's text, and a diagnostic for anything that didn't convert exactly.",
+        description = "Export the design, or one artboard, as a file: html, finite (a bundle that imports back exactly) or figma (for the Finite Figma plugin). Returns a diagnostic for anything that didn't convert exactly, and the file's text, cut off past 60,000 characters.",
         annotations(read_only_hint = true)
     )]
     async fn export_design(&self, Parameters(p): Parameters<ExportParams>) -> ToolResult {

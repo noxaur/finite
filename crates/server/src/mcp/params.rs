@@ -617,7 +617,7 @@ pub struct ImportParams {
     /// The file's name, like "landing.html". Names the undo step and the download of the original.
     #[serde(default)]
     pub(super) file_name: Option<String>,
-    /// The page the new artboards go on. Omit for the first page.
+    /// The id of the page the new artboards go on, unless the file names its own pages (a .finite bundle does). Omit for the first page.
     #[serde(default)]
     pub(super) page_id: Option<String>,
     /// Refuse the import if anything scores no or unknown on these axes: "preserved", "visual", "editable".
