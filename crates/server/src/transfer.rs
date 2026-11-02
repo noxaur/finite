@@ -70,8 +70,16 @@ impl From<OpenError> for TransferError {
 }
 
 /// The format named `name`, as a route or tool names it.
+/// Agents often name a format by its file's extension, like `figma.json`
+/// or `.htm`, so those count too.
 pub fn format_named(name: &str) -> Result<Format, TransferError> {
-    Format::named(name).ok_or_else(|| {
+    let lower = name.trim().trim_start_matches('.').to_ascii_lowercase();
+    let canonical = match lower.as_str() {
+        "htm" => "html",
+        "figma.json" => "figma",
+        other => other,
+    };
+    Format::named(canonical).ok_or_else(|| {
         let known: Vec<&str> = Format::ALL.iter().map(|f| f.codec().name()).collect();
         TransferError::Invalid(format!(
             "no format {name:?}; use one of {}",
@@ -277,4 +285,20 @@ pub async fn original(
             )))
         })?;
     Ok((record, bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_go_by_name_or_extension() {
+        for name in ["figma", "figma.json", ".figma.json", "FIGMA"] {
+            assert_eq!(format_named(name).unwrap(), Format::Figma, "{name}");
+        }
+        for name in ["html", "htm", ".html"] {
+            assert_eq!(format_named(name).unwrap(), Format::Html, "{name}");
+        }
+        assert!(format_named("docx").is_err());
+    }
 }

@@ -81,13 +81,14 @@ impl FiniteMcp {
             };
         let mut text = handle.read(|d| {
             let mut text = format!("Imported {} artboard(s):\n", result.artboards.len());
+            let doc = d.doc();
             for id in &result.artboards {
-                let name = d
-                    .doc()
-                    .get(id)
-                    .map(|b| b.display_name())
-                    .unwrap_or_default();
-                text.push_str(&format!("  #{id} {name:?}\n"));
+                let Some(board) = doc.get(id) else { continue };
+                let page = doc.page(doc.page_of(board)).map_or("", |p| p.name.as_str());
+                text.push_str(&format!(
+                    "  #{id} {:?} on page {page:?}\n",
+                    board.display_name()
+                ));
             }
             text
         });
@@ -100,7 +101,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Export the design, or one artboard, as a file in a format like \"html\". Returns the file's text, and a diagnostic for anything that didn't convert exactly.",
+        description = "Export the design, or one artboard, as a file: html, finite (a bundle that imports back exactly) or figma (for the Finite Figma plugin). Returns the file's text, and a diagnostic for anything that didn't convert exactly.",
         annotations(read_only_hint = true)
     )]
     async fn export_design(&self, Parameters(p): Parameters<ExportParams>) -> ToolResult {

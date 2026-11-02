@@ -473,7 +473,8 @@ fn browsers() -> &'static tokio::sync::Semaphore {
 }
 
 fn chrome() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("FINITE_CHROME") {
+    // An empty value, as a script sets when it found no browser, means unset.
+    if let Some(path) = std::env::var_os("FINITE_CHROME").filter(|p| !p.is_empty()) {
         return Some(path.into());
     }
     [

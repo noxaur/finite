@@ -89,7 +89,8 @@ async function startServer(bin) {
   const data = fs.mkdtempSync(path.join(os.tmpdir(), "finite-ax-data-"));
   const child = spawn(bin, [], {
     env: {
-      FINITE_CHROME: defaultChrome(),
+      // Only when found: otherwise the server looks in its own usual places.
+      ...(defaultChrome() ? { FINITE_CHROME: defaultChrome() } : {}),
       ...process.env,
       ...serverEnv(),
       FINITE_PORT: String(port),
@@ -189,11 +190,13 @@ function analyze(file) {
   return { calls, total, errors, outside, resultChars, screenshots };
 }
 
-function workdir(kind, dir) {
+function workdir(kind, dir, files = {}) {
   const cwd = path.join(dir, "work");
   fs.mkdirSync(cwd, { recursive: true });
   if (kind === "web-src")
     fs.cpSync(path.join(root, "apps/web/src"), path.join(cwd, "web"), { recursive: true });
+  for (const [name, content] of Object.entries(files))
+    fs.writeFileSync(path.join(cwd, name), content);
   return cwd;
 }
 
@@ -250,7 +253,9 @@ async function runOnce(taskName, index, outDir) {
       "stream-json",
       "--verbose",
     ];
-    const cwd = workdir(task.workdir, dir);
+    const cwd = workdir(task.workdir, dir, task.files);
+    // A check can look at what the agent left in its folder, like an exported file.
+    ctx.workdir = cwd;
     const started = Date.now();
     const result = await claude(
       ["-p", task.prompt(ctx), ...common, "--max-budget-usd", opts.budget],
