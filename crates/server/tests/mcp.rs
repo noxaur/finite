@@ -55,6 +55,16 @@ async fn an_agent_builds_refines_and_undoes() {
         )
         .await;
     let board = id_after(&board, "Created artboard");
+
+    // Without a height the artboard fits its content, and the result says so.
+    let fitting = agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Fits", "width": 390 }),
+        )
+        .await;
+    assert!(fitting.contains("390 × auto height"), "{fitting}");
+
     let wrote = agent
         .ok(
             "write_html",
@@ -424,6 +434,40 @@ async fn list_designs_filters_and_limits() {
         first.contains("Showing the 1 most recently edited of 3"),
         "{first}"
     );
+}
+
+/// A design's id finds it too, and the result says the id matched, not the name.
+#[tokio::test]
+async fn list_designs_matches_ids() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Alice").await;
+    let created = agent
+        .ok("create_design", json!({ "name": "Checkout" }))
+        .await;
+    agent.ok("create_design", json!({ "name": "Other" })).await;
+    let id: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .unwrap()
+        .to_owned();
+    let list = |text: &str| {
+        let json = text.split("\nThe query").next().unwrap();
+        serde_json::from_str::<Vec<Value>>(json).unwrap()
+    };
+    for query in [id.clone(), id[..4].to_uppercase()] {
+        let found = agent.ok("list_designs", json!({ "query": query })).await;
+        let designs = list(&found);
+        assert_eq!(designs.len(), 1, "{found}");
+        assert_eq!(designs[0]["name"], "Checkout", "{found}");
+        assert!(
+            found.contains("matched the designId, not the name"),
+            "{found}"
+        );
+    }
+    let by_name = agent
+        .ok("list_designs", json!({ "query": "checkout" }))
+        .await;
+    assert!(!by_name.contains("matched the designId"), "{by_name}");
 }
 
 /// A big artboard's outline and HTML don't flood the agent's context: long
@@ -1047,6 +1091,48 @@ async fn tools_answer_what_agents_asked_for() {
     )
     .unwrap();
     assert_eq!(info["agentsWorking"][0]["nodeIds"], json!([board]));
+
+    // Part of a <style> or <script> is found and replaced; an ambiguous match
+    // is refused unless it's narrowed or `all` is set.
+    let made = agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Motion", "width": 300, "height": 200,
+                    "html": "<style>.a { transition: opacity 300ms } .b { animation: spin 300ms }</style><div class=\"a\">Hi</div><script>setTimeout(tick, 1500)</script>" }),
+        )
+        .await;
+    let motion = id_after(&made, "Created artboard");
+    let one = agent
+        .ok(
+            "replace_values",
+            json!({ "designId": design, "within": motion, "find": "1500", "replace": "3000" }),
+        )
+        .await;
+    assert!(one.contains("script: setTimeout(tick, 1500)"), "{one}");
+    let (refused, is_error) = agent
+        .call(
+            "replace_values",
+            json!({ "designId": design, "within": motion, "find": "300ms", "replace": "500ms" }),
+        )
+        .await;
+    assert!(
+        is_error && refused.contains("matches 2 times") && refused.contains("all: true"),
+        "{refused}"
+    );
+    let dry = agent
+        .ok(
+            "replace_values",
+            json!({ "designId": design, "within": motion, "find": "300ms", "replace": "500ms", "dryRun": true }),
+        )
+        .await;
+    assert!(dry.starts_with("Would replace 2 uses"), "{dry}");
+    let all = agent
+        .ok(
+            "replace_values",
+            json!({ "designId": design, "within": motion, "find": "300ms", "replace": "500ms", "all": true }),
+        )
+        .await;
+    assert!(all.starts_with("Replaced 2 uses"), "{all}");
 }
 
 /// get_layout says where things rendered and what overlaps, without an image;
@@ -1189,4 +1275,61 @@ async fn an_agent_imports_and_exports_a_file() {
         )
         .await;
     assert!(is_error && refused.contains("no format"), "{refused}");
+}
+
+/// A script that changes the page after 5 seconds is only seen in an image
+/// when the agent asks for a later capture with settleMs.
+#[tokio::test]
+async fn agents_choose_when_the_screenshot_is_taken() {
+    use base64::Engine;
+
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Timer").await;
+    let created = agent.ok("create_design", json!({ "name": "Timer" })).await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .expect("a design id")
+        .to_owned();
+    let made = agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Late", "width": 40, "height": 40,
+                    "html": "<div id=\"box\" style=\"width: 40px; height: 40px; background: #f00\"></div><script>setTimeout(() => { document.getElementById('box').style.background = '#00f'; }, 5000);</script>" }),
+        )
+        .await;
+    let board = id_after(&made, "Created artboard");
+
+    let result = agent
+        .rpc(
+            "tools/call",
+            Some(json!({ "name": "get_screenshot",
+                         "arguments": { "designId": design, "nodeId": board, "settleMs": 6000 } })),
+        )
+        .await;
+    let content = result["content"].as_array().unwrap();
+    let texts: Vec<&str> = content.iter().filter_map(|c| c["text"].as_str()).collect();
+    if texts.iter().any(|t| t.contains("no Chrome")) {
+        eprintln!("skipped the screenshot: no browser");
+        return;
+    }
+    assert!(
+        texts.iter().any(|t| t.contains("captured 6.0s after load")),
+        "{texts:?}"
+    );
+    let data = content
+        .iter()
+        .find(|c| c["type"] == "image")
+        .and_then(|c| c["data"].as_str())
+        .expect("an image");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .unwrap();
+    let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
+        .read_info()
+        .unwrap();
+    let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+    let info = reader.next_frame(&mut buf).unwrap();
+    let at = (20 * info.width as usize + 20) * info.color_type.samples();
+    assert_eq!(&buf[at..at + 3], &[0, 0, 255], "the box turned blue");
 }

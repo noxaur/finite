@@ -5,7 +5,7 @@ import { Cause, Exit } from "effect";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { Api, Refused } from "@/api/Api";
-import { Camera, union } from "@/design/camera";
+import { Camera, union, type View } from "@/design/camera";
 import { type Hit, Renderer } from "@/design/renderer";
 import { Replica } from "@/design/replica";
 import { DesignSession, initialSessionState, type SessionState } from "@/design/session";
@@ -110,9 +110,24 @@ export function DesignCanvas({ id }: { id: string }) {
 
     const camera = new Camera(viewport, world);
     const replica = new Replica();
+    // The view the camera framed the artboards with, until the person moves it.
+    let framed: View | null = null;
     const renderer = new Renderer(frames, replica, {
       live: true,
       onWheel: (event) => camera.wheel(event),
+      // An auto-height artboard with a script is measured inside its iframe,
+      // so its real height arrives after the first frame. Frame it again,
+      // unless the person has already panned or zoomed.
+      onResize: () => {
+        const view = camera.view;
+        if (!framed || framed.x !== view.x || framed.y !== view.y || framed.zoom !== view.zoom) {
+          return;
+        }
+        const bounds = union(renderer.artboardBounds().values());
+        if (!bounds) return;
+        camera.fitTo(bounds);
+        framed = camera.view;
+      },
       // A sandboxed artboard answered: redo the hover test and redraw outlines.
       onLayout: () => {
         refreshHover.current();
@@ -126,14 +141,13 @@ export function DesignCanvas({ id }: { id: string }) {
     camera.subscribe((view) => setZoom(view.zoom));
 
     // Frame the artboards once, when the first ones appear.
-    let framed = false;
     const unsubscribe = session.subscribe(() => {
       setSession(session.state);
       if (framed) return;
       const bounds = union(renderer.artboardBounds().values());
       if (bounds) {
         camera.fitTo(bounds);
-        framed = true;
+        framed = camera.view;
       }
     });
     const close = session.connect(id);

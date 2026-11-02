@@ -84,7 +84,8 @@ pub fn find_placement(doc: &Document, _width: f64, _height: f64) -> (f64, f64) {
 pub struct NewArtboard {
     pub name: String,
     pub width: f64,
-    pub height: f64,
+    /// Fixed height in pixels. `None` lets the artboard grow to fit its content.
+    pub height: Option<f64>,
     pub position: Option<(f64, f64)>,
     pub styles: BTreeMap<String, String>,
 }
@@ -104,12 +105,13 @@ pub fn default_artboard_styles() -> BTreeMap<String, String> {
 }
 
 pub fn create_artboard(doc: &Document, id: NodeId, spec: NewArtboard) -> Result<Vec<Op>> {
-    if !(spec.width > 0.0 && spec.height > 0.0) {
+    let positive = |n: f64| n > 0.0;
+    if !positive(spec.width) || !spec.height.is_none_or(positive) {
         return err("artboard width and height must be positive");
     }
     let (x, y) = spec
         .position
-        .unwrap_or_else(|| find_placement(doc, spec.width, spec.height));
+        .unwrap_or_else(|| find_placement(doc, spec.width, spec.height.unwrap_or(0.0)));
     let mut styles = default_artboard_styles();
     for (name, value) in normalize_styles(spec.styles) {
         for longhand in longhands(&name) {
@@ -118,7 +120,10 @@ pub fn create_artboard(doc: &Document, id: NodeId, spec: NewArtboard) -> Result<
         styles.insert(name, value);
     }
     styles.insert("width".into(), format!("{}px", spec.width));
-    styles.insert("height".into(), format!("{}px", spec.height));
+    let height = spec
+        .height
+        .map_or_else(|| "auto".to_owned(), |h| format!("{h}px"));
+    styles.insert("height".into(), height);
     let index = doc.insertion_indexes(None, None, 1).remove(0);
     Ok(vec![Op::Create {
         node: Node {
@@ -414,6 +419,32 @@ pub fn update_attributes(
             if !html::is_attr_name(name) {
                 return err(format!("{name:?} isn't a valid attribute name"));
             }
+            // A layer's name is `Node.name`, not an attribute; write_html maps
+            // data-name the same way. Clear any stale copy left in attrs.
+            if lower == html::NAME_ATTR {
+                ops.push(Op::Set {
+                    id: id.clone(),
+                    key: PropKey::Name,
+                    value: value
+                        .as_deref()
+                        .map(|n| Value::String(label::clip(n, label::LAYER_NAME))),
+                });
+                for stale in element(doc, id)?
+                    .attrs
+                    .keys()
+                    .filter(|k| k.eq_ignore_ascii_case(html::NAME_ATTR))
+                {
+                    ops.push(Op::Set {
+                        id: id.clone(),
+                        key: PropKey::Attr(stale.clone()),
+                        value: None,
+                    });
+                }
+                continue;
+            }
+            if lower == html::ID_ATTR {
+                return err("data-id is the node id and can't be changed");
+            }
             // The same rule write_html applies when it parses HTML.
             if let Some(value) = value
                 && !html::is_safe_attr(name, value)
@@ -676,7 +707,7 @@ mod tests {
             NewArtboard {
                 name: "Home".into(),
                 width: 1440.0,
-                height: 900.0,
+                height: Some(900.0),
                 position: None,
                 styles: BTreeMap::from([("backgroundColor".into(), "#000".into())]),
             },
@@ -937,7 +968,7 @@ mod tests {
             NewArtboard {
                 name: "B".into(),
                 width: 10.0,
-                height: 10.0,
+                height: Some(10.0),
                 position: None,
                 styles: BTreeMap::from([("background".into(), "#fef3c7".into())]),
             },
@@ -957,6 +988,29 @@ mod tests {
         let styles = &doc.get("b").unwrap().styles;
         assert_eq!(styles.get("padding").map(String::as_str), Some("8px"));
         assert!(!styles.contains_key("padding-top"));
+    }
+
+    #[test]
+    fn artboard_without_height_is_auto() {
+        let mut doc = Document::default();
+        let spec = |height| NewArtboard {
+            name: "B".into(),
+            width: 320.0,
+            height,
+            position: None,
+            styles: BTreeMap::new(),
+        };
+        doc.apply_all(&create_artboard(&doc, "a".into(), spec(None)).unwrap());
+        let board = doc.get("a").unwrap();
+        assert_eq!(board.styles.get("height").map(String::as_str), Some("auto"));
+        assert_eq!(pixel_size(board), (Some(320.0), None));
+
+        doc.apply_all(&create_artboard(&doc, "b".into(), spec(Some(200.0))).unwrap());
+        assert_eq!(
+            pixel_size(doc.get("b").unwrap()),
+            (Some(320.0), Some(200.0))
+        );
+        assert!(create_artboard(&doc, "c".into(), spec(Some(0.0))).is_err());
     }
 
     #[test]
@@ -1106,5 +1160,48 @@ mod tests {
         assert!(set("onclick", "x()").is_err());
         assert!(set("x\" onload=\"alert(1)", "y").is_err());
         assert!(set("", "y").is_err());
+        assert!(set("data-id", "n9").is_err());
+    }
+
+    #[test]
+    fn set_attributes_renames_a_layer_through_data_name() {
+        let mut doc = Document::default();
+        let board = board(&mut doc);
+        let mut set = |value: Option<&str>| {
+            let attrs = BTreeMap::from([("data-name".to_owned(), value.map(str::to_owned))]);
+            let ops = update_attributes(&doc, std::slice::from_ref(&board), &attrs).unwrap();
+            assert!(ops.iter().all(|op| matches!(
+                op,
+                Op::Set {
+                    key: PropKey::Name,
+                    ..
+                }
+            )));
+            doc.apply_all(&ops);
+            doc.get(&board).unwrap().name.clone()
+        };
+        assert_eq!(set(Some("Header")).as_deref(), Some("Header"));
+        let long = "x".repeat(label::LAYER_NAME + 20);
+        assert_eq!(set(Some(&long)).unwrap().chars().count(), label::LAYER_NAME);
+        assert_eq!(set(None), None);
+        assert!(doc.get(&board).unwrap().attrs.is_empty());
+    }
+
+    #[test]
+    fn set_attributes_clears_every_stale_data_name_copy() {
+        let mut doc = Document::default();
+        let board = board(&mut doc);
+        // Older calls could leave the same attribute under two spellings.
+        for key in ["data-name", "DATA-NAME"] {
+            doc.apply_all(&[Op::Set {
+                id: board.clone(),
+                key: PropKey::Attr(key.to_owned()),
+                value: Some("Old".into()),
+            }]);
+        }
+        let attrs = BTreeMap::from([("data-name".to_owned(), None)]);
+        let ops = update_attributes(&doc, std::slice::from_ref(&board), &attrs).unwrap();
+        doc.apply_all(&ops);
+        assert!(doc.get(&board).unwrap().attrs.is_empty());
     }
 }

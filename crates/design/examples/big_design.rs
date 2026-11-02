@@ -78,7 +78,7 @@ fn main() {
         edit::NewArtboard {
             name: "Page".into(),
             width: 1440.0,
-            height: 900.0,
+            height: Some(900.0),
             position: None,
             styles: Default::default(),
         },

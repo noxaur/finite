@@ -47,7 +47,8 @@ pub struct DesignParams {
 
 #[derive(Deserialize, JsonSchema, Default)]
 pub struct ListParams {
-    /// Only designs whose name contains this, ignoring case.
+    /// Only designs whose name contains this (ignoring case), or whose id
+    /// starts with it.
     #[serde(default)]
     pub(super) query: Option<String>,
     /// How many designs to return, most recently edited first. Defaults to
@@ -63,17 +64,47 @@ impl ListParams {
     /// ([`super::format::OUTPUT_LIMIT`]). 500 didn't.
     pub(crate) const MAX_LIMIT: usize = 200;
 
+    pub(crate) fn with_query(query: Option<String>) -> Self {
+        Self { query, limit: None }
+    }
+
     pub(super) fn limit(&self) -> usize {
         self.limit
             .unwrap_or(Self::DEFAULT_LIMIT)
             .clamp(1, Self::MAX_LIMIT)
     }
 
-    pub(super) fn matches(&self, name: &str) -> bool {
+    /// Whether a design shows up for the query: its name contains it
+    /// (ignoring case) or its id starts with it.
+    pub(crate) fn matches(&self, id: &str, name: &str) -> bool {
         self.query
             .as_deref()
-            .is_none_or(|q| name.to_lowercase().contains(&q.to_lowercase()))
+            .is_none_or(|q| name.to_lowercase().contains(&q.to_lowercase()) || id_matches(id, q))
     }
+
+    /// Whether the query found designs only through their ids, none through
+    /// a name. `designs` is every `(id, name)` that matched.
+    pub(crate) fn only_by_id<'a>(
+        &self,
+        designs: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> bool {
+        let Some(q) = self.query.as_deref().filter(|q| !q.is_empty()) else {
+            return false;
+        };
+        let q = q.to_lowercase();
+        let mut any = false;
+        for (id, name) in designs {
+            if name.to_lowercase().contains(&q) {
+                return false;
+            }
+            any |= id_matches(id, &q);
+        }
+        any
+    }
+}
+
+fn id_matches(id: &str, query: &str) -> bool {
+    !query.is_empty() && id.to_lowercase().starts_with(&query.to_lowercase())
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -164,6 +195,10 @@ pub struct ScreenshotParams {
     /// Device pixel ratio, 0.25 to 3. Defaults to 1.
     #[serde(default)]
     pub(super) scale: Option<f64>,
+    /// Milliseconds after load when the image is taken, for pages with
+    /// scripts or animations. Defaults to 3000; at most 10000.
+    #[serde(default)]
+    pub(super) settle_ms: Option<u64>,
     #[serde(default)]
     pub(super) format: ImageFormat,
     /// JPEG or WebP quality, 1 to 100. Defaults to 80.
@@ -215,8 +250,9 @@ pub struct CreateArtboardParams {
     pub(super) name: String,
     /// Width in CSS pixels.
     pub(super) width: f64,
-    /// Height in CSS pixels.
-    pub(super) height: f64,
+    /// Height in CSS pixels. Omit it and the artboard grows to fit its content.
+    #[serde(default)]
+    pub(super) height: Option<f64>,
     /// Canvas position. Omit x and y to place it to the right of the existing
     /// artboards, top-aligned with them.
     #[serde(default)]
@@ -522,16 +558,19 @@ pub struct FindParams {
 #[serde(rename_all = "camelCase")]
 pub struct ReplaceParams {
     pub(super) design_id: String,
-    /// The value to find. A color, like "#3b82f6" or "rgb(59, 130, 246)", matches that color in any notation, including tints of it with their own alpha.
+    /// The text or value to find, matched exactly, like "300ms" or ".card". A color, like "#3b82f6" or "rgb(59, 130, 246)", matches that color in any notation outside a <script>. If replace is also a color, tints of it with their own alpha match too and keep their alpha; if replace is text like var(--brand), tints are left alone.
     pub(super) find: String,
     /// What to put in its place.
     pub(super) replace: String,
     /// Replace only inside this node, such as an artboard. Omit for every artboard.
     #[serde(default)]
     pub(super) within: Option<String>,
-    /// Also replace it in text content, like a product name. Defaults to false: styles, attributes and <style> CSS only.
+    /// Also replace it in text content, like a product name. Defaults to false: styles, attributes and the code in <style> and <script> only.
     #[serde(default)]
     pub(super) include_text: bool,
+    /// Replace every match even when a non-color value matches more than once inside a <style> or <script>. Without it, that case is refused with the match count and the lines, so you can narrow it with within or a longer find. dryRun never refuses.
+    #[serde(default)]
+    pub(super) all: bool,
     /// List what would change without changing it.
     #[serde(default)]
     pub(super) dry_run: bool,

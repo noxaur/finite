@@ -120,7 +120,7 @@ pub fn find(doc: &Document, within: Option<&str>, query: &Query) -> Vec<Found> {
 pub struct Places {
     pub styles: bool,
     pub attributes: bool,
-    /// The CSS in `<style>` blocks.
+    /// The code in `<style>` and `<script>` blocks.
     pub css: bool,
     pub text: bool,
 }
@@ -136,15 +136,21 @@ pub struct Replaced {
 
 /// Replaces `from` with `to` in every place `places` allows, under `within`
 /// or in every artboard. When `from` is a color, it matches the color in any
-/// notation (`#3B82F6`, `#3b82f6cc`, `rgb(59 130 246)`, `rgba(59, 130, 246,
-/// 0.2)`), and keeps each use's transparency. Otherwise it matches the exact
-/// text. Returns the ops and what they change.
+/// notation (`#3B82F6`, `rgb(59 130 246)`) and, when `to` is a color too, also
+/// its tints (`#3b82f6cc`, `rgba(59, 130, 246, 0.2)`), keeping each use's
+/// transparency; when `to` is text, tints are left alone. Otherwise it matches
+/// the exact text, and always does in a `<script>`, where `rgb(59 130 246)` is code. A
+/// match in a `<script>`, or in a `<style>` when `from` isn't a color, is
+/// refused when there's more than one match, unless `all` is set: `300ms` in
+/// one rule is rarely meant to change in every rule. Returns the ops and what
+/// they change.
 pub fn replace(
     doc: &Document,
     within: Option<&str>,
     from: &str,
     to: &str,
     places: Places,
+    all: bool,
 ) -> Result<(Vec<Op>, Vec<Replaced>), EditError> {
     if from.is_empty() {
         return Err(EditError("find can't be empty".into()));
@@ -154,15 +160,26 @@ pub fn replace(
     {
         return Err(EditError(format!("node {id:?} not found")));
     }
-    let colors = parse_color(from).zip(parse_color(to));
+    let (from_color, to_color) = (parse_color(from), parse_color(to));
+    let exact =
+        |value: &str| -> (String, usize) { (value.replace(from, to), value.matches(from).count()) };
+    // What `from` is decides whether a match is a color, not what it becomes:
+    // `#3b82f6` is a brand color even when `to` is `var(--brand)`, so it's
+    // matched in any notation and never as a prefix of `#3b82f6cc`'s text.
     let swap = |value: &str| -> (String, usize) {
-        match colors {
-            Some((from, to)) => replace_color(value, from, to),
-            None => (value.replace(from, to), value.matches(from).count()),
+        match (from_color, to_color) {
+            (Some(f), Some(t)) => replace_color(value, f, t),
+            (Some(f), None) => replace_color_with(value, f, false, |_| to.to_owned()),
+            _ => exact(value),
         }
     };
-    let mut ops = Vec::new();
+    let from_is_color = from_color.is_some();
+    // Matches the all-or-nothing rule applies to. Script code never counts as
+    // color: `rgb(59 130 246)` or `'#abc'` there is code, so it's matched as
+    // exact text.
+    let mut guarded = 0;
     let mut report = Vec::new();
+    let mut ops = Vec::new();
     for node in scope(doc, within) {
         let mut changes = Vec::new();
         let mut count = 0;
@@ -196,16 +213,30 @@ pub fn replace(
                         }
                     }
                 }
-                if places.css && tag.eq_ignore_ascii_case("style") {
+                if places.css && is_raw_text(tag) {
+                    let script = !tag.eq_ignore_ascii_case("style");
+                    let label = if script { "script" } else { "css" };
+                    let swap_code: &dyn Fn(&str) -> (String, usize) =
+                        if script { &exact } else { &swap };
                     for child in doc.children(Some(&node.id)) {
                         let Some(code) = &child.text else { continue };
-                        let (new, n) = swap(code);
+                        let (new, n) = swap_code(code);
                         if n > 0 && new != *code {
                             count += n;
-                            let lines: Vec<String> = css_lines(code)
-                                .filter(|line| swap(line).1 > 0)
-                                .map(|line| format!("css: {line} → {}", swap(&line).0))
+                            if script || !from_is_color {
+                                guarded += n;
+                            }
+                            let mut lines: Vec<String> = css_lines(code)
+                                .filter(|line| swap_code(line).1 > 0)
+                                .map(|line| format!("{label}: {line} → {}", swap_code(&line).0))
                                 .collect();
+                            // A find that spans `;`, `{` or `}` isn't inside any
+                            // one line, so show it with the code around it.
+                            if lines.is_empty() {
+                                lines = snippets(code, from, to)
+                                    .map(|(before, after)| format!("{label}: {before} → {after}"))
+                                    .collect();
+                            }
                             changes.extend(lines);
                             ops.push(Op::Set {
                                 id: child.id.clone(),
@@ -248,6 +279,19 @@ pub fn replace(
             report.push(Replaced { id, changes, count });
         }
     }
+    let total: usize = report.iter().map(|r| r.count).sum();
+    if guarded > 0 && total > 1 && !all {
+        let lines: Vec<&str> = report
+            .iter()
+            .flat_map(|r| r.changes.iter().map(String::as_str))
+            .collect();
+        return Err(EditError(format!(
+            "{from:?} matches {total} times, and not only in colors, so nothing changed. \
+             Narrow it with within or a longer find, or pass all: true to replace every one. \
+             It would change:\n  {}",
+            lines.join("\n  ")
+        )));
+    }
     Ok((ops, report))
 }
 
@@ -281,6 +325,29 @@ fn css_lines(css: &str) -> impl Iterator<Item = String> + '_ {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
+}
+
+/// Each match of `from` in `code` with up to 30 characters of code on either
+/// side, as `(before, after)` for replacing it with `to`.
+fn snippets<'a>(
+    code: &'a str,
+    from: &'a str,
+    to: &'a str,
+) -> impl Iterator<Item = (String, String)> + 'a {
+    const CONTEXT: usize = 30;
+    code.match_indices(from).map(move |(at, _)| {
+        let start = code[..at]
+            .char_indices()
+            .rev()
+            .nth(CONTEXT - 1)
+            .map_or(0, |(i, _)| i);
+        let end = code[at + from.len()..]
+            .char_indices()
+            .nth(CONTEXT)
+            .map_or(code.len(), |(i, _)| at + from.len() + i);
+        let (head, tail) = (&code[start..at], &code[at + from.len()..end]);
+        (format!("{head}{from}{tail}"), format!("{head}{to}{tail}"))
+    })
 }
 
 /// An sRGB color: red, green, blue, and alpha from 0 to 1 when it has one.
@@ -354,6 +421,20 @@ fn color_at(s: &str, at: usize) -> Option<(Color, usize)> {
 /// `value` with every use of the color `from` replaced by `to`, and how many
 /// there were. A use with its own alpha keeps it.
 fn replace_color(value: &str, from: Color, to: Color) -> (String, usize) {
+    replace_color_with(value, from, true, |alpha| {
+        format_color(to.0, alpha.or(to.1))
+    })
+}
+
+/// Like [`replace_color`], with each use rewritten by `render`, which gets
+/// the alpha the use had. Without `tints`, a use only matches a `from` that
+/// has its exact alpha, because `render` has nowhere to keep another one.
+fn replace_color_with(
+    value: &str,
+    from: Color,
+    tints: bool,
+    render: impl Fn(Option<f64>) -> String,
+) -> (String, usize) {
     let mut out = String::with_capacity(value.len());
     let mut count = 0;
     let mut i = 0;
@@ -364,9 +445,9 @@ fn replace_color(value: &str, from: Color, to: Color) -> (String, usize) {
             && rgb == from.0
             // A color with alpha only matches a `from` that has the same alpha
             // or none, so replacing #3b82f6 also updates its tints.
-            && (from.1.is_none() || from.1 == alpha)
+            && ((tints && from.1.is_none()) || from.1 == alpha)
         {
-            out.push_str(&format_color(to.0, alpha.or(to.1)));
+            out.push_str(&render(alpha));
             count += 1;
             i += len;
             continue;
@@ -398,7 +479,7 @@ mod tests {
             NewArtboard {
                 name: "B".into(),
                 width: 400.0,
-                height: 400.0,
+                height: Some(400.0),
                 position: None,
                 styles: Default::default(),
             },
@@ -446,7 +527,8 @@ mod tests {
             css: true,
             text: false,
         };
-        let (ops, report) = replace(&doc, Some(&board), "#3b82f6", "#f97316", places).unwrap();
+        let (ops, report) =
+            replace(&doc, Some(&board), "#3b82f6", "#f97316", places, false).unwrap();
         assert_eq!(ops.len(), 3, "{report:?}");
         assert_eq!(report.iter().map(|r| r.count).sum::<usize>(), 4);
         // Text is left alone unless asked for.
@@ -460,6 +542,168 @@ mod tests {
         let html = html::export(&doc, &board, false).unwrap();
         assert!(!html.to_lowercase().contains("#3b82f6\""), "{html}");
         assert!(html.contains("Go #3b82f6"));
+    }
+
+    #[test]
+    fn replace_reaches_scripts_and_refuses_ambiguous_code_matches() {
+        let (doc, board) = design(
+            r##"<style>.a { transition: opacity 300ms } .b { animation: spin 300ms }</style>
+<div class="a">300ms</div>
+<script>setTimeout(tick, 1500); setTimeout(done, 200)</script>"##,
+        );
+        let places = Places {
+            styles: true,
+            attributes: true,
+            css: true,
+            text: false,
+        };
+        let run =
+            |from: &str, to: &str, all: bool| replace(&doc, Some(&board), from, to, places, all);
+        // One match in a script is reached.
+        let (ops, report) = run("1500", "3000", false).unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(
+            report[0].changes,
+            ["script: setTimeout(tick, 1500) → setTimeout(tick, 3000)"]
+        );
+        // Two matches are refused, with the count and the lines.
+        let err = run("300ms", "500ms", false).unwrap_err().0;
+        assert!(
+            err.contains("matches 2 times") && err.contains("css: transition: opacity 300ms"),
+            "{err}"
+        );
+        // all, or a narrower find, goes through.
+        assert_eq!(run("300ms", "500ms", true).unwrap().0.len(), 1);
+        assert_eq!(
+            run("opacity 300ms", "opacity 500ms", false)
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn replace_treats_color_shaped_script_code_as_code() {
+        let (doc, board) = design(
+            r##"<div id="abc"></div>
+<style>.a { color: #abc } .b { color: #abc }</style>
+<script>document.querySelector('#abc'); paint(rgb(59, 130, 246))</script>"##,
+        );
+        let places = Places {
+            styles: true,
+            attributes: true,
+            css: true,
+            text: false,
+        };
+        // A color in a script is a selector, and one match there needs `all`
+        // as soon as there's a second match anywhere.
+        let err = replace(&doc, Some(&board), "#abc", "#def", places, false)
+            .unwrap_err()
+            .0;
+        assert!(err.contains("matches 3 times"), "{err}");
+        let (ops, _) = replace(&doc, Some(&board), "#abc", "#def", places, true).unwrap();
+        let mut doc = doc;
+        doc.apply_all(&ops);
+        let html = html::export(&doc, &board, false).unwrap();
+        // The selector is rewritten as typed, while the CSS color is recolored.
+        assert!(html.contains("querySelector('#def')"), "{html}");
+        assert!(html.contains(".a { color: #ddeeff }"), "{html}");
+
+        // A script's `rgb(...)` call isn't recolored by a color replace.
+        let (doc, board) = design(r##"<script>paint(rgb(59, 130, 246))</script>"##);
+        let (ops, report) = replace(
+            &doc,
+            Some(&board),
+            "rgb(59, 130, 246)",
+            "#f97316",
+            places,
+            false,
+        )
+        .unwrap();
+        assert_eq!(ops.len(), 1, "{report:?}");
+        let mut doc = doc;
+        doc.apply_all(&ops);
+        let html = html::export(&doc, &board, false).unwrap();
+        assert!(html.contains("paint(#f97316)"), "{html}");
+    }
+
+    #[test]
+    fn replace_calls_a_color_a_color_whatever_it_becomes() {
+        let (doc, board) =
+            design(r##"<style>.a { color: #abc } .b { border-color: #abc }</style>"##);
+        let places = Places {
+            styles: true,
+            attributes: true,
+            css: true,
+            text: false,
+        };
+        let (ops, report) =
+            replace(&doc, Some(&board), "#abc", "var(--brand)", places, false).unwrap();
+        assert_eq!(ops.len(), 1, "{report:?}");
+        assert_eq!(report[0].count, 2);
+    }
+
+    #[test]
+    fn replace_color_with_text_matches_whole_colors_in_any_notation() {
+        let (doc, board) =
+            design(r##"<style>.a{color:#abc}.b{color:#abcc}.c{color:rgb(170 187 204)}</style>"##);
+        let places = Places {
+            styles: true,
+            attributes: true,
+            css: true,
+            text: false,
+        };
+        let (ops, _) = replace(&doc, Some(&board), "#abc", "var(--brand)", places, false).unwrap();
+        let mut doc = doc;
+        doc.apply_all(&ops);
+        let html = html::export(&doc, &board, false).unwrap();
+        // The same color in another notation is replaced; a translucent tint
+        // is left alone, since a variable can't keep its transparency; and
+        // nothing is cut in half.
+        assert!(
+            html.contains(".a{color:var(--brand)}.b{color:#abcc}.c{color:var(--brand)}"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn replace_shows_a_find_that_spans_statements() {
+        let (doc, board) = design(
+            r##"<script>setInterval(next, 3000); other(); setInterval(next, 3000);</script>"##,
+        );
+        let places = Places {
+            styles: false,
+            attributes: false,
+            css: true,
+            text: false,
+        };
+        let find = "setInterval(next, 3000);";
+        let err = replace(
+            &doc,
+            Some(&board),
+            find,
+            "setInterval(next, 5000);",
+            places,
+            false,
+        )
+        .unwrap_err()
+        .0;
+        assert!(
+            err.contains("script: setInterval(next, 3000); other()")
+                && err.contains("setInterval(next, 5000); other()"),
+            "{err}"
+        );
+        let (_, report) = replace(
+            &doc,
+            Some(&board),
+            "other(); setInterval(next, 3000);",
+            "x",
+            places,
+            false,
+        )
+        .unwrap();
+        assert!(!report[0].changes.is_empty(), "{report:?}");
     }
 
     #[test]

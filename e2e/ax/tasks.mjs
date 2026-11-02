@@ -146,6 +146,63 @@ export const tasks = {
     },
   },
 
+  // Change one value inside a <style> block and one inside a <script>, without resending either.
+  "code-edit": {
+    workdir: "none",
+    async seed(mcp) {
+      const design = (await mcp.call("create_design", { name: "Motion lab" })).match(
+        /designId "([^"]+)"/,
+      )[1];
+      const board = idAfter(
+        await mcp.call("create_artboard", {
+          designId: design,
+          name: "Carousel",
+          width: 800,
+          height: 400,
+          x: 0,
+          y: 0,
+        }),
+        "artboard",
+      );
+      await mcp.call("write_html", {
+        designId: design,
+        targetId: board,
+        html: `<style>
+.slide { position: absolute; inset: 0; display: grid; place-items: center; font: 700 32px Inter, sans-serif; opacity: 0; transition: opacity 400ms ease }
+.slide.on { opacity: 1 }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: #d1d5db; transition: background 150ms ease }
+.dot.on { background: #111827 }
+.hint { position: absolute; bottom: 16px; left: 16px; font: 14px Inter, sans-serif; animation: pulse 2s ease-in-out infinite }
+@keyframes pulse { 50% { opacity: 0.4 } }
+</style>
+<div class="slide on" data-name="Slide 1">One</div><div class="slide" data-name="Slide 2">Two</div>
+<div class="hint" data-name="Hint">Swipe</div>
+<script>
+const slides = document.querySelectorAll(".slide");
+let i = 0;
+function next() { slides[i].classList.remove("on"); i = (i + 1) % slides.length; slides[i].classList.add("on"); }
+setInterval(next, 3000);
+</script>`,
+      });
+      return { design, board };
+    },
+    prompt: () =>
+      `Use the Finite MCP tools. In the Finite design named "Motion lab", make two changes to the Carousel artboard: ` +
+      `the slide fade should take 800ms instead of 400ms, and the carousel should advance every 5000ms instead of 3000ms. ` +
+      `Don't change anything else. Stop when you're done.`,
+    async check(mcp, ctx) {
+      const html = await mcp.call("get_html", { designId: ctx.design, nodeId: ctx.board });
+      const checks = [
+        /opacity 800ms ease/.test(html) && !/opacity 400ms/.test(html),
+        /setInterval\(next, 5000\)/.test(html) && !/3000/.test(html),
+        /transition: background 150ms ease/.test(html) &&
+          /animation: pulse 2s ease-in-out infinite/.test(html),
+        /function next\(\)/.test(html) && /Swipe/.test(html),
+      ];
+      return { passed: checks.filter(Boolean).length, total: checks.length, notes: [] };
+    },
+  },
+
   // A mobile version of an existing desktop artboard.
   mobile: {
     workdir: "none",

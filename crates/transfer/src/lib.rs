@@ -251,7 +251,7 @@ impl Imported {
             let spec = NewArtboard {
                 name: board.name,
                 width: board.width,
-                height: board.height,
+                height: Some(board.height),
                 position: board.position,
                 styles: board.styles,
             };

@@ -53,12 +53,16 @@ pub(crate) fn more_designs(shown: usize, total: usize) -> String {
     )
 }
 
+/// The note after a `list_designs` result whose query matched ids, not names.
+pub(crate) const ID_MATCH_NOTE: &str =
+    "The query matched the designId, not the name. Pass this designId to the other tools.";
+
 pub const OWNER_META: &str = "finite/owner";
 
 const INSTRUCTIONS: &str = include_str!("instructions.md");
 
 /// What the search tools add to the instructions.
-const SEARCH_INSTRUCTIONS: &str = "Search: find_nodes finds elements by text, name, tag, CSS or attribute, across artboards and <style> blocks. replace_values changes a value everywhere in one call, like a brand color in any notation. Use them instead of reading whole artboards.";
+const SEARCH_INSTRUCTIONS: &str = "Search: find_nodes finds elements by text, name, tag, CSS or attribute, across artboards and <style> blocks. replace_values finds and replaces text or a value in one call: a brand color in any notation everywhere, or part of a <style> or <script> with within (not set_text_content with the whole CSS). Use them instead of reading whole artboards.";
 
 /// Whether `FINITE_MCP_EXTRA` (a comma-separated list) turns on a group of
 /// experimental tools. AX experiments (`e2e/ax`) compare agents with and
@@ -452,7 +456,7 @@ mod transfer;
 #[tool_router]
 impl FiniteMcp {
     #[tool(
-        description = "List designs (canvases), most recently edited first, with each one's id, name, artboard count and last edit time. Returns 50 unless you pass a limit; pass a query to find one by name.",
+        description = "List designs (canvases), most recently edited first, with each one's id, name, artboard count and last edit time. Returns 50 unless you pass a limit; pass a query to find one by name or id.",
         annotations(read_only_hint = true)
     )]
     async fn list_designs(&self, Parameters(p): Parameters<ListParams>) -> ToolResult {
@@ -460,7 +464,7 @@ impl FiniteMcp {
             .hub
             .list()
             .into_iter()
-            .filter(|d| p.matches(&d.meta.name))
+            .filter(|d| p.matches(&d.meta.id, &d.meta.name))
             .collect();
         let limit = p.limit();
         let designs: Vec<_> = matching
@@ -479,6 +483,13 @@ impl FiniteMcp {
         let mut content = vec![ContentBlock::text(
             serde_json::to_string_pretty(&designs).expect("json values serialize"),
         )];
+        if p.only_by_id(
+            matching
+                .iter()
+                .map(|d| (d.meta.id.as_str(), d.meta.name.as_str())),
+        ) {
+            content.push(ContentBlock::text(ID_MATCH_NOTE));
+        }
         if matching.len() > limit {
             content.push(ContentBlock::text(more_designs(limit, matching.len())));
         }
@@ -762,7 +773,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Render artboards, or nodes inside them, to images to check how they look. Each image is cropped to its node's box; with no node, it captures every artboard (up to 10). A whole artboard also gets a layout check that names anything cut off by its edge and text that overflows its box.",
+        description = "Render artboards, or nodes inside them, to images to check how they look. Each image is cropped to its node's box; with no node, it captures every artboard (up to 10). A whole artboard also gets a layout check that names anything cut off by its edge and text that overflows its box. Pages with scripts or animations are captured about 3 seconds after load; pass settleMs (at most 10000) to take the image later, such as after a transition has finished.",
         annotations(read_only_hint = true)
     )]
     async fn get_screenshot(&self, Parameters(p): Parameters<ScreenshotParams>) -> ToolResult {
@@ -805,7 +816,9 @@ impl FiniteMcp {
             highlight: p.highlight_node_ids,
             transparent: p.transparent,
             reveal_overflow: p.reveal_overflow,
-            ..Default::default()
+            settle: p.settle_ms.map_or(screenshot::DEFAULT_SETTLE, |ms| {
+                Duration::from_millis(ms).min(screenshot::MAX_SETTLE)
+            }),
         };
         let plan = match handle.read(|d| screenshot::plan(d.doc(), shots, options)) {
             Ok(plan) => plan,
@@ -908,7 +921,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Create an artboard: a fixed-size frame on the canvas that holds a screen or component. Pass html to fill it in the same call (same rules as write_html), and class to style the artboard itself from CSS. Omit x and y to place it beside the existing artboards. Returns its id, position and size, and the content's outline with ids."
+        description = "Create an artboard: a frame on the canvas that holds a screen or component. Give a height for a fixed size, or omit it to grow with the content. Pass html to fill it in the same call (same rules as write_html), and class to style the artboard itself from CSS. Omit x and y to place it beside the existing artboards. Returns its id, position and size, and the content's outline with ids."
     )]
     async fn create_artboard(
         &self,
@@ -956,12 +969,13 @@ impl FiniteMcp {
                         return format!("Created artboard #{id}.");
                     };
                     let (w, h) = edit::pixel_size(board);
+                    let height = h.map_or_else(|| "auto height".to_owned(), |h| format!("{h}"));
                     let mut text = format!(
                         "Created artboard #{id} at x {}, y {}, {} × {}.",
                         board.x.unwrap_or(0.0),
                         board.y.unwrap_or(0.0),
                         w.unwrap_or(0.0),
-                        h.unwrap_or(0.0)
+                        height
                     );
                     if roots.is_empty() {
                         text.push_str(" Next: write_html into it.");
@@ -1060,7 +1074,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Set or remove HTML attributes on elements, such as an image's src and alt, an SVG path's d, or class and id. A null value removes the attribute."
+        description = "Set or remove HTML attributes on elements, such as an image's src and alt, an SVG path's d, or class and id. data-name sets the layer name (null clears it); data-id can't be changed. A null value removes the attribute."
     )]
     async fn set_attributes(
         &self,
