@@ -141,12 +141,12 @@ const styles = stylex.create({
     backgroundColor: { default: "transparent", ":hover": colors.bg },
     color: "inherit",
     font: "inherit",
-    cursor: "pointer",
+    cursor: "var(--cursor-pointer, pointer)",
   },
   primary: {
     borderColor: colors.accent,
     backgroundColor: { default: colors.accent, ":disabled": colors.border },
     color: "white",
-    cursor: { default: "pointer", ":disabled": "default" },
+    cursor: { default: "var(--cursor-pointer, pointer)", ":disabled": "default" },
   },
 });
