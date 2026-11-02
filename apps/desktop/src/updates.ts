@@ -6,7 +6,7 @@ export const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
 
 /**
  * Keeps the packaged app up to date without asking. electron-updater reads
- * the release feed named in `electron-builder.yml` (`publish`) at launch,
+ * the feed the release workflow builds in (`-c.publish.url`) at launch,
  * every four hours and after the computer wakes. It downloads a new version
  * in the background and installs it the next time the app quits, so the
  * server is never stopped while agents are using it.

@@ -1,6 +1,6 @@
-# Packages the desktop app with electron-builder, and names the feed its
-# updater reads (src/updates.ts). `vp run desktop#package` builds one for
-# this machine; .github/workflows/release.yml builds and publishes all three.
+# Packages the desktop app with electron-builder. `vp run desktop#package`
+# builds one for this machine; .github/workflows/release.yml builds and
+# publishes all three.
 appId: com.noxaur.finite
 productName: Finite
 # Names the user data folder (~/Library/Application Support/Finite on a Mac)
@@ -43,9 +43,6 @@ linux:
   target: AppImage
   category: Graphics
 
-# The source repository is private, and electron-updater downloads without a
-# token, so releases go to a public repository that holds only the builds.
-publish:
-  provider: github
-  owner: noxaur
-  repo: finite-releases
+# No feed, so a local package doesn't look for updates. The release workflow
+# sets the bucket it uploads to (-c.publish.url).
+publish: null

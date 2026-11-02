@@ -132,23 +132,26 @@ StyleX compiles through Babel (`apps/web/babel.config.js`) and the StyleX PostCS
 
 The desktop app updates itself, with no prompts. electron-updater looks for a new version at launch, every four hours and when the computer wakes. It downloads the new version in the background and installs it the next time the app quits. It never restarts the app on its own, because agents would lose their MCP sessions. On Windows and Linux, closing the last window quits. On a Mac it doesn't, but choosing Quit, logging out or restarting does. `apps/desktop/src/updates.ts` does all this, and it only runs in a packaged app.
 
-To ship a version, push a tag:
+Every push to main that passes CI is a release. `.github/workflows/release.yml` starts when the CI run finishes, builds the app on three runners and publishes it in two places. The Mac runner builds for Apple silicon and Intel, Windows gets an NSIS installer, and Linux gets an AppImage. Pushes that only change Markdown or `docs/` skip CI, so they don't release. To release by hand, such as after a failed run, run the workflow from the Actions tab.
 
-```bash
-git tag v0.2.0 && git push origin v0.2.0
-```
+The version is the major and minor from the root `package.json`, then the number of commits on main. The 152nd commit is `0.0.152`. To start `0.1.x`, change the root `package.json` to `0.1.0`. The patch keeps counting commits, so it never goes back down.
 
-`.github/workflows/release.yml` then builds the app on three runners. The Mac runner builds for Apple silicon and Intel, Windows gets an NSIS installer, and Linux gets an AppImage. The tag sets the version, and `apps/desktop/package.json` stays at `0.0.0`. electron-builder (`apps/desktop/electron-builder.yml`) uploads each build, with the `latest*.yml` files the updater reads, to a draft release. Once every platform has uploaded, the last job publishes the draft. So the updater never sees a release with one platform's files missing.
+Each release is a GitHub release in this repo, tagged `v0.0.152` on the released commit, with notes generated from the merged pull requests. This repo is private, and electron-updater downloads without a token, so the updater can't read those. It reads an S3-compatible bucket instead, like Cloudflare R2 or AWS S3. The workflow uploads the builds there first, then the `latest*.yml` files the updater reads, with `Cache-Control: no-cache`. So the updater never sees a version with one platform's files missing. The bucket's URL is built into each app's `app-update.yml` (`-c.publish.url`). A local `vp run package:desktop` has no feed, so it doesn't update.
 
-Releases go to `noxaur/finite-releases`, not this repo. This repo is private, and the updater downloads without a token. The workflow needs these secrets:
+The workflow needs these secrets and variables:
 
-| Secret                     | What it is                                                                     |
-| -------------------------- | ------------------------------------------------------------------------------ |
-| `RELEASES_TOKEN`           | A fine-grained token with Contents: read and write on `noxaur/finite-releases` |
-| `MAC_CERTIFICATE`          | The self-signed code signing certificate, as a base64 `.p12`                   |
-| `MAC_CERTIFICATE_PASSWORD` | Its password                                                                   |
+| Name                        | Kind     | What it is                                                   |
+| --------------------------- | -------- | ------------------------------------------------------------ |
+| `UPDATES_ACCESS_KEY_ID`     | secret   | An S3 access key that can write to the bucket                |
+| `UPDATES_SECRET_ACCESS_KEY` | secret   | Its secret                                                   |
+| `MAC_CERTIFICATE`           | secret   | The self-signed code signing certificate, as a base64 `.p12` |
+| `MAC_CERTIFICATE_PASSWORD`  | secret   | Its password                                                 |
+| `UPDATES_BUCKET`            | variable | The bucket's name                                            |
+| `UPDATES_ENDPOINT`          | variable | Its S3 API endpoint. Leave it unset for AWS S3               |
+| `UPDATES_REGION`            | variable | Its region. Leave it unset for R2, which uses `auto`         |
+| `UPDATES_URL`               | variable | The bucket's public URL, which the updater downloads from    |
 
-`noxaur/finite-releases` has to be public and have at least one commit, because GitHub tags a published release on a commit.
+The bucket has to be publicly readable. Don't change `UPDATES_URL` once apps are installed: they keep reading the URL they were built with.
 
 Mac builds are signed with a self-signed certificate, not an Apple Developer ID. Squirrel.Mac, which installs updates on a Mac, only checks that an update is signed with the same certificate as the running app. Apple doesn't have to issue it. `apps/desktop/scripts/sign-mac.cjs` signs the app, because electron-builder only signs with certificates macOS trusts. The Mac build fails without `MAC_CERTIFICATE`, because an unsigned build could never update.
 
