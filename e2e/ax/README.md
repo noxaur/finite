@@ -14,6 +14,24 @@ node e2e/ax/report.mjs --tools     # one row per label and task, plus calls per 
 
 Pass `--env FINITE_MCP_EXTRA=shared-styles` to try a tool group that's off by default. Results go to `e2e/ax/results/<label>/<task>-<n>/`, which git ignores. Each run folder holds `transcript.jsonl`, `feedback.md` (the agent's own account), `metrics.json` and `final.png`. Runs cost real money and use your Claude plan, about $0.05 to $0.80 each. A full round of 18 runs per variant can reach a 5-hour usage limit. A run cut off by a limit is marked `api error` in `metrics.json`, and `report.mjs` leaves it out. `--budget` caps each run at $4 by default.
 
+## Trying a tool design before building it
+
+`--surface <spec>` shows the agent a mock tool surface instead of the server's own tools. `mock-surface.mjs` serves it over stdio and answers each call through the run's real `finite-server`. Seeds, checks, screenshots and metrics all work as in a normal run. A spec file names only what changes. Real tools it doesn't name pass through unchanged. It can:
+
+- **Hide tools** with `drop`, and rewrite the instructions with `instructions: (real) => …`.
+- **Rename or re-describe a tool** with `forward: "real_tool"`, and reshape its arguments and reply with `args` and `reply`.
+- **Merge or split tools** with `run: async (args, real) => text`, a few lines that call real tools.
+- **Fake a feature that doesn't exist** with a canned `text` reply, to see whether agents reach for it.
+
+```bash
+node e2e/ax/run.mjs --task rebrand --runs 3 --label no-search --surface e2e/ax/surfaces/no-search.mjs
+node e2e/ax/run.mjs --task restyle --runs 3 --label cheap --surface e2e/ax/surfaces/example.mjs --model haiku --effort low
+```
+
+`surfaces/example.mjs` has one tool of each kind to copy from. `surfaces/no-search.mjs` drops the search tools, so a round on it against a round on the real server should repeat the first study's rebrand numbers below. Run that comparison before trusting a mock's results. A Haiku run at low effort costs about $0.01, so try designs on Haiku first and confirm the best ones on Sonnet.
+
+Real tools keep the real server's argument checks. For a schema a spec writes, the mock checks required fields and top-level types and enums, accepts arrays and objects sent as JSON strings like the real server, and fails the call with "failed to deserialize parameters" as the real server does. It doesn't check nested schemas. It can only show what the real server can compute. A tool that needs data the server doesn't have yet has to answer with canned text, and then the task's check has nothing real to test, so judge it from the transcript and the feedback.
+
 ## Tasks
 
 `tasks.mjs` defines them. Each one has a prompt, a seed and a check.

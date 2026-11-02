@@ -19,7 +19,7 @@ export async function connect(base, agent = "E2E") {
       .join("");
     return data ? JSON.parse(data) : null;
   };
-  await post({
+  const init = await post({
     jsonrpc: "2.0",
     id: id++,
     method: "initialize",
@@ -37,6 +37,8 @@ export async function connect(base, agent = "E2E") {
     return res.result;
   };
   return {
+    /** The server's instructions, as agents see them when they connect. */
+    instructions: init?.result?.instructions ?? "",
     /** Calls a tool and returns its text. Throws if the tool reports an error. */
     async call(name, args = {}) {
       const result = await this.callRaw(name, args);
