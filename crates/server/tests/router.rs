@@ -442,11 +442,19 @@ mod relay {
             json!({ "designId": ids[0], "name": "Newest" }),
         )
         .await;
-        let mixed = call(&client, "list_designs", json!({ "query": prefix, "limit": 1 })).await;
+        let mixed = call(
+            &client,
+            "list_designs",
+            json!({ "query": prefix, "limit": 1 }),
+        )
+        .await;
         assert!(mixed.contains(ids[0].as_str()), "{mixed}");
         assert!(!mixed.contains("matched the designId"), "{mixed}");
         let alone = call(&client, "list_designs", json!({ "query": ids[0] })).await;
-        assert!(alone.contains("matched the designId, not the name"), "{alone}");
+        assert!(
+            alone.contains("matched the designId, not the name"),
+            "{alone}"
+        );
         client.cancel().await.unwrap();
     }
 
