@@ -418,10 +418,10 @@ pub fn update_attributes(
                         .as_deref()
                         .map(|n| Value::String(label::clip(n, label::LAYER_NAME))),
                 });
-                if let Some(stale) = element(doc, id)?
+                for stale in element(doc, id)?
                     .attrs
                     .keys()
-                    .find(|k| k.eq_ignore_ascii_case(html::NAME_ATTR))
+                    .filter(|k| k.eq_ignore_ascii_case(html::NAME_ATTR))
                 {
                     ops.push(Op::Set {
                         id: id.clone(),
@@ -1150,6 +1150,24 @@ mod tests {
         let long = "x".repeat(label::LAYER_NAME + 20);
         assert_eq!(set(Some(&long)).unwrap().chars().count(), label::LAYER_NAME);
         assert_eq!(set(None), None);
+        assert!(doc.get(&board).unwrap().attrs.is_empty());
+    }
+
+    #[test]
+    fn set_attributes_clears_every_stale_data_name_copy() {
+        let mut doc = Document::default();
+        let board = board(&mut doc);
+        // Older calls could leave the same attribute under two spellings.
+        for key in ["data-name", "DATA-NAME"] {
+            doc.apply_all(&[Op::Set {
+                id: board.clone(),
+                key: PropKey::Attr(key.to_owned()),
+                value: Some("Old".into()),
+            }]);
+        }
+        let attrs = BTreeMap::from([("data-name".to_owned(), None)]);
+        let ops = update_attributes(&doc, std::slice::from_ref(&board), &attrs).unwrap();
+        doc.apply_all(&ops);
         assert!(doc.get(&board).unwrap().attrs.is_empty());
     }
 }
