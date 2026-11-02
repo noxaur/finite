@@ -28,6 +28,7 @@ pub mod figma;
 pub mod finite;
 mod html;
 mod report;
+pub mod scene;
 
 use std::collections::BTreeMap;
 
@@ -48,15 +49,18 @@ pub enum Format {
     Html,
     /// A `.finite` bundle.
     Finite,
+    /// A `.figma.json` file from or for the Finite Figma plugin.
+    Figma,
 }
 
 impl Format {
-    pub const ALL: [Format; 2] = [Format::Html, Format::Finite];
+    pub const ALL: [Format; 3] = [Format::Html, Format::Finite, Format::Figma];
 
     pub fn codec(self) -> &'static dyn Codec {
         match self {
             Format::Html => &html::Html,
             Format::Finite => &finite::Finite,
+            Format::Figma => &figma::Figma,
         }
     }
 
@@ -106,6 +110,8 @@ pub struct Revision<'a> {
     pub imports: &'a [ImportRecord],
     /// Where to read the files the design's nodes point to.
     pub blobs: &'a dyn Blobs,
+    /// Measures how artboards render, for formats without CSS.
+    pub measure: &'a dyn scene::Measure,
 }
 
 /// Reads blobs for an export. The server's store implements it.

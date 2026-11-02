@@ -448,6 +448,7 @@ mod tests {
             doc: design.doc(),
             imports: design.imports(),
             blobs: &NoBlobs,
+            measure: &crate::scene::NoMeasure,
         };
         let board = Scope::Artboard(placed.artboards[0].clone());
         let exported = Html.write(&revision, &board).unwrap();
@@ -546,6 +547,7 @@ mod tests {
             doc: design.doc(),
             imports: design.imports(),
             blobs: &OneBlob(png),
+            measure: &crate::scene::NoMeasure,
         };
         let exported = Html
             .write(&revision, &Scope::Artboard(placed.artboards[0].clone()))

@@ -540,6 +540,7 @@ mod tests {
             doc: source.doc(),
             imports: source.imports(),
             blobs: &Store(vec![PNG.to_vec()]),
+            measure: &crate::scene::NoMeasure,
         };
         let exported = Finite.write(&revision, &Scope::Design).unwrap();
         assert_eq!(exported.file_name, "home.finite");

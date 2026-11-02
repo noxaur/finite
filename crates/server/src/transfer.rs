@@ -209,6 +209,7 @@ pub async fn export(
                 doc: &doc,
                 imports: &imports,
                 blobs: &blobs,
+                measure: &finite_transfer::scene::NoMeasure,
             };
             format.codec().write(&revision, &scope)
         })
