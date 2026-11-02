@@ -353,9 +353,7 @@ export async function readNode(
     }
   } else if (node.children && node.children.length > 0) {
     const box = asBox(node.absoluteBoundingBox);
-    fig.children = await Promise.all(
-      node.children.map((c) => readNode(c, env, read, false, box)),
-    );
+    fig.children = await Promise.all(node.children.map((c) => readNode(c, env, read, false, box)));
   }
   return fig;
 }
