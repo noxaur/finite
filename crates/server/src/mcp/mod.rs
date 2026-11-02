@@ -793,7 +793,6 @@ impl FiniteMcp {
             settle: p.settle_ms.map_or(screenshot::DEFAULT_SETTLE, |ms| {
                 Duration::from_millis(ms).min(screenshot::MAX_SETTLE)
             }),
-            ..Default::default()
         };
         let plan = match handle.read(|d| screenshot::plan(d.doc(), shots, options)) {
             Ok(plan) => plan,
