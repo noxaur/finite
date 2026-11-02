@@ -30,7 +30,7 @@ node e2e/ax/run.mjs --task restyle --runs 3 --label cheap --surface e2e/ax/surfa
 
 `surfaces/example.mjs` has one tool of each kind to copy from. `surfaces/no-search.mjs` drops the search tools, so a round on it against a round on the real server should repeat the first study's rebrand numbers below. Run that comparison before trusting a mock's results. A Haiku run at low effort costs about $0.01, so try designs on Haiku first and confirm the best ones on Sonnet.
 
-Real tools keep the real server's argument checks. For a schema a spec writes, the mock checks required fields and top-level types and enums, accepts arrays and objects sent as JSON strings like the real server, and fails the call with "failed to deserialize parameters" as the real server does. It doesn't check nested schemas. It can only show what the real server can compute. A tool that needs data the server doesn't have yet has to answer with canned text, and then the task's check has nothing real to test, so judge it from the transcript and the feedback. The research behind this is in [docs/research/mock-tool-surfaces.md](../../docs/research/mock-tool-surfaces.md).
+Real tools keep the real server's argument checks. For a schema a spec writes, the mock checks required fields and top-level types and enums, accepts arrays and objects sent as JSON strings like the real server, and fails the call with "failed to deserialize parameters" as the real server does. It doesn't check nested schemas. It can only show what the real server can compute. A tool that needs data the server doesn't have yet has to answer with canned text, and then the task's check has nothing real to test, so judge it from the transcript and the feedback.
 
 ## Tasks
 
