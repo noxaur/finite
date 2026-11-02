@@ -408,6 +408,32 @@ pub fn update_attributes(
             if !html::is_attr_name(name) {
                 return err(format!("{name:?} isn't a valid attribute name"));
             }
+            // A layer's name is `Node.name`, not an attribute; write_html maps
+            // data-name the same way. Clear any stale copy left in attrs.
+            if lower == html::NAME_ATTR {
+                ops.push(Op::Set {
+                    id: id.clone(),
+                    key: PropKey::Name,
+                    value: value
+                        .as_deref()
+                        .map(|n| Value::String(label::clip(n, label::LAYER_NAME))),
+                });
+                for stale in element(doc, id)?
+                    .attrs
+                    .keys()
+                    .filter(|k| k.eq_ignore_ascii_case(html::NAME_ATTR))
+                {
+                    ops.push(Op::Set {
+                        id: id.clone(),
+                        key: PropKey::Attr(stale.clone()),
+                        value: None,
+                    });
+                }
+                continue;
+            }
+            if lower == html::ID_ATTR {
+                return err("data-id is the node id and can't be changed");
+            }
             // The same rule write_html applies when it parses HTML.
             if let Some(value) = value
                 && !html::is_safe_attr(name, value)
@@ -1100,5 +1126,48 @@ mod tests {
         assert!(set("onclick", "x()").is_err());
         assert!(set("x\" onload=\"alert(1)", "y").is_err());
         assert!(set("", "y").is_err());
+        assert!(set("data-id", "n9").is_err());
+    }
+
+    #[test]
+    fn set_attributes_renames_a_layer_through_data_name() {
+        let mut doc = Document::default();
+        let board = board(&mut doc);
+        let mut set = |value: Option<&str>| {
+            let attrs = BTreeMap::from([("data-name".to_owned(), value.map(str::to_owned))]);
+            let ops = update_attributes(&doc, std::slice::from_ref(&board), &attrs).unwrap();
+            assert!(ops.iter().all(|op| matches!(
+                op,
+                Op::Set {
+                    key: PropKey::Name,
+                    ..
+                }
+            )));
+            doc.apply_all(&ops);
+            doc.get(&board).unwrap().name.clone()
+        };
+        assert_eq!(set(Some("Header")).as_deref(), Some("Header"));
+        let long = "x".repeat(label::LAYER_NAME + 20);
+        assert_eq!(set(Some(&long)).unwrap().chars().count(), label::LAYER_NAME);
+        assert_eq!(set(None), None);
+        assert!(doc.get(&board).unwrap().attrs.is_empty());
+    }
+
+    #[test]
+    fn set_attributes_clears_every_stale_data_name_copy() {
+        let mut doc = Document::default();
+        let board = board(&mut doc);
+        // Older calls could leave the same attribute under two spellings.
+        for key in ["data-name", "DATA-NAME"] {
+            doc.apply_all(&[Op::Set {
+                id: board.clone(),
+                key: PropKey::Attr(key.to_owned()),
+                value: Some("Old".into()),
+            }]);
+        }
+        let attrs = BTreeMap::from([("data-name".to_owned(), None)]);
+        let ops = update_attributes(&doc, std::slice::from_ref(&board), &attrs).unwrap();
+        doc.apply_all(&ops);
+        assert!(doc.get(&board).unwrap().attrs.is_empty());
     }
 }
