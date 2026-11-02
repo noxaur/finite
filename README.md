@@ -17,6 +17,8 @@ vp install
 
 `vp run ready`, `vp test` and `vp run dev` build `crates/wasm/dist/finite.wasm` when they need it. To build it yourself, run `vp run wasm#build`.
 
+In [T3 Code](https://t3.codes), `t3.json` starts each new thread in its own worktree and runs `vp install` there. Its scripts menu has Dev and Ready. When a thread settles, `cargo clean` deletes that worktree's `target/`, so the next `cargo` command rebuilds from scratch.
+
 ## Connect an agent
 
 Start the app with `vp run dev`, then point an MCP client at the server's Streamable HTTP endpoint:

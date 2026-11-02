@@ -1,0 +1,29 @@
+{
+  "$schema": "https://t3.codes/schema/t3.json",
+  "defaultThreadEnvMode": "worktree",
+  "scripts": [
+    {
+      "name": "Setup Worktree",
+      "command": "vp install --frozen-lockfile",
+      "icon": "configure",
+      "runOnWorktreeCreate": true
+    },
+    {
+      "name": "Dev",
+      "command": "vp run dev",
+      "icon": "play",
+      "previewUrl": "http://localhost:5310"
+    },
+    {
+      "name": "Ready",
+      "command": "vp run ready",
+      "icon": "test"
+    },
+    {
+      "name": "Delete Build Output",
+      "command": "cargo clean",
+      "icon": "build",
+      "runOnSettle": true
+    }
+  ]
+}
