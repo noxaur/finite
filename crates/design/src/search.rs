@@ -159,18 +159,20 @@ pub fn replace(
     {
         return Err(EditError(format!("node {id:?} not found")));
     }
-    let colors = parse_color(from).zip(parse_color(to));
+    let (from_color, to_color) = (parse_color(from), parse_color(to));
     let exact =
         |value: &str| -> (String, usize) { (value.replace(from, to), value.matches(from).count()) };
+    // What `from` is decides whether a match is a color, not what it becomes:
+    // `#3b82f6` is a brand color even when `to` is `var(--brand)`, so it's
+    // matched in any notation and never as a prefix of `#3b82f6cc`'s text.
     let swap = |value: &str| -> (String, usize) {
-        match colors {
-            Some((from, to)) => replace_color(value, from, to),
-            None => exact(value),
+        match (from_color, to_color) {
+            (Some(f), Some(t)) => replace_color(value, f, t),
+            (Some(f), None) => replace_color_with(value, f, false, |_| to.to_owned()),
+            _ => exact(value),
         }
     };
-    // What `from` is decides whether a match is a color, not what it becomes:
-    // `#3b82f6` in two rules is a brand color even when `to` is `var(--brand)`.
-    let from_is_color = parse_color(from).is_some();
+    let from_is_color = from_color.is_some();
     // Matches the all-or-nothing rule applies to. Script code never counts as
     // color: `rgb(59 130 246)` or `'#abc'` there is code, so it's matched as
     // exact text.
@@ -418,6 +420,20 @@ fn color_at(s: &str, at: usize) -> Option<(Color, usize)> {
 /// `value` with every use of the color `from` replaced by `to`, and how many
 /// there were. A use with its own alpha keeps it.
 fn replace_color(value: &str, from: Color, to: Color) -> (String, usize) {
+    replace_color_with(value, from, true, |alpha| {
+        format_color(to.0, alpha.or(to.1))
+    })
+}
+
+/// Like [`replace_color`], with each use rewritten by `render`, which gets
+/// the alpha the use had. Without `tints`, a use only matches a `from` that
+/// has its exact alpha, because `render` has nowhere to keep another one.
+fn replace_color_with(
+    value: &str,
+    from: Color,
+    tints: bool,
+    render: impl Fn(Option<f64>) -> String,
+) -> (String, usize) {
     let mut out = String::with_capacity(value.len());
     let mut count = 0;
     let mut i = 0;
@@ -428,9 +444,9 @@ fn replace_color(value: &str, from: Color, to: Color) -> (String, usize) {
             && rgb == from.0
             // A color with alpha only matches a `from` that has the same alpha
             // or none, so replacing #3b82f6 also updates its tints.
-            && (from.1.is_none() || from.1 == alpha)
+            && ((tints && from.1.is_none()) || from.1 == alpha)
         {
-            out.push_str(&format_color(to.0, alpha.or(to.1)));
+            out.push_str(&render(alpha));
             count += 1;
             i += len;
             continue;
@@ -625,6 +641,29 @@ mod tests {
             replace(&doc, Some(&board), "#abc", "var(--brand)", places, false).unwrap();
         assert_eq!(ops.len(), 1, "{report:?}");
         assert_eq!(report[0].count, 2);
+    }
+
+    #[test]
+    fn replace_color_with_text_matches_whole_colors_in_any_notation() {
+        let (doc, board) =
+            design(r##"<style>.a{color:#abc}.b{color:#abcc}.c{color:rgb(170 187 204)}</style>"##);
+        let places = Places {
+            styles: true,
+            attributes: true,
+            css: true,
+            text: false,
+        };
+        let (ops, _) = replace(&doc, Some(&board), "#abc", "var(--brand)", places, false).unwrap();
+        let mut doc = doc;
+        doc.apply_all(&ops);
+        let html = html::export(&doc, &board, false).unwrap();
+        // The same color in another notation is replaced; a translucent tint
+        // is left alone, since a variable can't keep its transparency; and
+        // nothing is cut in half.
+        assert!(
+            html.contains(".a{color:var(--brand)}.b{color:#abcc}.c{color:var(--brand)}"),
+            "{html}"
+        );
     }
 
     #[test]
