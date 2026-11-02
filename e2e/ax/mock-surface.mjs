@@ -187,9 +187,11 @@ let buf = "";
 // Calls still being answered, so the mock finishes them before it exits.
 let pending = 0;
 let ended = false;
+// Exits once stdout has written everything, so no reply is cut off.
+const quit = () => process.stdout.write("", () => process.exit(0));
 const settle = () => {
   pending--;
-  if (ended && !pending) process.exit(0);
+  if (ended && !pending) quit();
 };
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
@@ -228,5 +230,5 @@ process.stdin.on("data", (chunk) => {
 });
 process.stdin.on("end", () => {
   ended = true;
-  if (!pending) process.exit(0);
+  if (!pending) quit();
 });
