@@ -1,38 +1,69 @@
-# Builds the desktop app for macOS, Windows and Linux when a version tag is
-# pushed (`git tag v0.2.0 && git push origin v0.2.0`), and publishes it to
-# noxaur/finite-releases, where the app's updater looks (apps/desktop/src/updates.ts).
+# Releases the desktop app after every push to main that passes CI. It
+# builds for macOS, Windows and Linux, makes a GitHub release in this repo,
+# and uploads the builds to the bucket the app's updater reads
+# (apps/desktop/src/updates.ts). This repo is private, and electron-updater
+# downloads without a token, so the updater can't read its releases.
 #
-# The release stays a draft until every platform has uploaded, so the
-# updater never sees a release with one platform's files missing.
+# The version is the major and minor from package.json, then the number of
+# commits on main: 0.0.152 for the 152nd commit. Pushes that skip CI (only
+# Markdown or docs/) don't release.
+#
+# The updater reads latest*.yml, which are uploaded after every build, so it
+# never sees a version with one platform's files missing. Before uploading,
+# the oldest versions are deleted from the bucket to keep it under 10 GB.
 #
 # Secrets:
-#   RELEASES_TOKEN               a token that can write releases in noxaur/finite-releases
+#   UPDATES_ACCESS_KEY_ID        an S3 key that can write to the bucket
+#   UPDATES_SECRET_ACCESS_KEY    its secret
 #   MAC_CERTIFICATE              base64 of the self-signed code signing .p12
 #   MAC_CERTIFICATE_PASSWORD     its password
+# Variables:
+#   UPDATES_BUCKET               the bucket's name
+#   UPDATES_ENDPOINT             its S3 API endpoint (empty for AWS S3)
+#   UPDATES_REGION               its region (empty for Cloudflare R2, which takes "auto")
+#   UPDATES_URL                  the public URL the updater downloads from
+#   UPDATES_LIMIT_BYTES          the most the bucket may hold (default 10 GB)
 name: Release
 
 on:
-  push:
-    tags: ["v*.*.*"]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  # Releases the latest commit on main by hand, such as after a failed run.
+  workflow_dispatch:
+
+# One release at a time. A push that arrives during a release waits, and
+# replaces any push already waiting, so versions publish in order.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 env:
-  RELEASES_REPO: noxaur/finite-releases
+  SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
 
 jobs:
-  draft:
+  version:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-      # Created here, before the builds, so they don't race to create it.
-      - run: gh release view "$GITHUB_REF_NAME" -R "$RELEASES_REPO" || gh release create "$GITHUB_REF_NAME" -R "$RELEASES_REPO" --draft --title "Finite ${{ steps.version.outputs.version }}" --notes ""
+      - run: '[ -n "$UPDATES_URL" ] || { echo "::error::Variable UPDATES_URL is missing"; exit 1; }'
         env:
-          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          UPDATES_URL: ${{ vars.UPDATES_URL }}
+      # The whole history, to count the commits.
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SHA }}
+          fetch-depth: 0
+      - id: version
+        run: echo "version=$(node -p 'require("./package.json").version.split(".").slice(0, 2).join(".")').$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
 
   build:
-    needs: draft
+    needs: version
     strategy:
       matrix:
         include:
@@ -53,6 +84,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SHA }}
       - uses: voidzero-dev/setup-vp@v1.21.2
         with:
           node-version: "24"
@@ -73,24 +106,100 @@ jobs:
 
       - run: vp run -F web... -F desktop build
       - run: node apps/desktop/scripts/stage-server.mjs ${{ matrix.arches }}
+      # The publish settings name the feed in the app's app-update.yml.
+      # electron-builder writes latest*.yml next to the builds, and the
+      # publish job uploads them.
       - working-directory: apps/desktop
         shell: bash
         run: >-
           vp exec electron-builder ${{ matrix.platform }}
           $(printf -- '--%s ' ${{ matrix.arches }})
-          --publish always
-          -c.extraMetadata.version=${{ needs.draft.outputs.version }}
+          --publish never
+          -c.extraMetadata.version=${{ needs.version.outputs.version }}
+          -c.publish.provider=generic
+          -c.publish.url=${{ vars.UPDATES_URL }}
         env:
-          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
           # Read by apps/desktop/scripts/sign-mac.cjs, so only the Mac build needs them.
           MAC_CERTIFICATE: ${{ runner.os == 'macOS' && secrets.MAC_CERTIFICATE || '' }}
           MAC_CERTIFICATE_PASSWORD: ${{ runner.os == 'macOS' && secrets.MAC_CERTIFICATE_PASSWORD || '' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ runner.os }}
+          path: |
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.zip
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.AppImage
+            apps/desktop/release/*.blockmap
+            apps/desktop/release/latest*.yml
+          if-no-files-found: error
 
   publish:
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
-      # Publishing makes it the latest release, which is what the updater reads.
-      - run: gh release edit "$GITHUB_REF_NAME" -R "$RELEASES_REPO" --draft=false --latest
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release
+          merge-multiple: true
+      # The tag is made on the released commit. A rerun finds the release
+      # and uploads the files again.
+      - run: |
+          gh release view "v$VERSION" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1 ||
+            gh release create "v$VERSION" -R "$GITHUB_REPOSITORY" --target "$SHA" --title "Finite $VERSION" --generate-notes
+          gh release upload "v$VERSION" -R "$GITHUB_REPOSITORY" --clobber release/*
         env:
-          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+      # Deletes the oldest versions' builds until the bucket, with this
+      # version added, stays under UPDATES_LIMIT_BYTES. The newest version
+      # already there stays, because latest*.yml points at it until this
+      # upload replaces them. Then the builds, then latest*.yml, which is
+      # what the updater reads. Those are never cached, so a new version
+      # reaches the updater at once.
+      - run: |
+          endpoint=()
+          [ -z "$UPDATES_ENDPOINT" ] || endpoint=(--endpoint-url "$UPDATES_ENDPOINT")
+          aws s3api list-objects-v2 --bucket "$UPDATES_BUCKET" "${endpoint[@]}" --output json > objects.json
+          python3 - > delete.txt <<'EOF'
+          import json, os, re, sys
+
+          limit = int(os.environ["UPDATES_LIMIT_BYTES"])
+          new = {name: os.path.getsize(f"release/{name}") for name in os.listdir("release")}
+          # An empty bucket prints nothing.
+          objects = json.load(open("objects.json")) if os.path.getsize("objects.json") else {}
+          # A rerun replaces this version's files, so they don't count twice.
+          existing = [o for o in objects.get("Contents") or [] if o["Key"] not in new]
+          total = sum(new.values()) + sum(o["Size"] for o in existing)
+
+          versions = {}
+          for o in existing:
+              match = re.search(r"(\d+)\.(\d+)\.(\d+)", o["Key"])
+              if match:
+                  versions.setdefault(tuple(map(int, match.groups())), []).append(o)
+          for version in sorted(versions)[:-1]:
+              if total <= limit:
+                  break
+              for o in versions[version]:
+                  print(o["Key"])
+                  total -= o["Size"]
+          if total > limit:
+              sys.exit(f"::error::The bucket would hold {total} bytes, over the {limit} limit")
+          EOF
+          while IFS= read -r key; do
+            aws s3 rm "s3://$UPDATES_BUCKET/$key" "${endpoint[@]}"
+          done < delete.txt
+          aws s3 cp release/ "s3://$UPDATES_BUCKET/" "${endpoint[@]}" --recursive --exclude "latest*.yml"
+          aws s3 cp release/ "s3://$UPDATES_BUCKET/" "${endpoint[@]}" --recursive --exclude "*" --include "latest*.yml" --cache-control no-cache
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.UPDATES_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.UPDATES_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ vars.UPDATES_REGION || 'auto' }}
+          UPDATES_BUCKET: ${{ vars.UPDATES_BUCKET }}
+          UPDATES_ENDPOINT: ${{ vars.UPDATES_ENDPOINT }}
+          # 10 GB, Cloudflare R2's free storage.
+          UPDATES_LIMIT_BYTES: ${{ vars.UPDATES_LIMIT_BYTES || '10000000000' }}
