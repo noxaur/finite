@@ -747,7 +747,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Render artboards, or nodes inside them, to images to check how they look. Each image is cropped to its node's box; with no node, it captures every artboard (up to 10). A whole artboard also gets a layout check that names anything cut off by its edge and text that overflows its box.",
+        description = "Render artboards, or nodes inside them, to images to check how they look. Each image is cropped to its node's box; with no node, it captures every artboard (up to 10). A whole artboard also gets a layout check that names anything cut off by its edge and text that overflows its box. Pages with scripts or animations are captured about 3 seconds after load; pass settleMs (at most 10000) to take the image later, such as after a transition has finished.",
         annotations(read_only_hint = true)
     )]
     async fn get_screenshot(&self, Parameters(p): Parameters<ScreenshotParams>) -> ToolResult {
@@ -790,6 +790,9 @@ impl FiniteMcp {
             highlight: p.highlight_node_ids,
             transparent: p.transparent,
             reveal_overflow: p.reveal_overflow,
+            settle: p.settle_ms.map_or(screenshot::DEFAULT_SETTLE, |ms| {
+                Duration::from_millis(ms).min(screenshot::MAX_SETTLE)
+            }),
             ..Default::default()
         };
         let plan = match handle.read(|d| screenshot::plan(d.doc(), shots, options)) {
