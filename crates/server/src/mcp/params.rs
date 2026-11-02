@@ -522,7 +522,7 @@ pub struct FindParams {
 #[serde(rename_all = "camelCase")]
 pub struct ReplaceParams {
     pub(super) design_id: String,
-    /// The text or value to find, matched exactly, like "300ms" or ".card". A color, like "#3b82f6" or "rgb(59, 130, 246)", matches that color in any notation, including tints of it with their own alpha.
+    /// The text or value to find, matched exactly, like "300ms" or ".card". A color, like "#3b82f6" or "rgb(59, 130, 246)", matches that color in any notation outside a <script>. If replace is also a color, tints of it with their own alpha match too and keep their alpha; if replace is text like var(--brand), tints are left alone.
     pub(super) find: String,
     /// What to put in its place.
     pub(super) replace: String,

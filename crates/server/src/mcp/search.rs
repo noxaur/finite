@@ -81,7 +81,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Find and replace text or a value, as one undo step: in inline styles, attributes (like SVG fill), <style> CSS and <script> code, and in visible text if includeText is set. Use it to change part of a <style> or <script> (a duration, a class name, a delay) without resending all of it. A color matches in any notation (#3B82F6, rgb(59 130 246), rgba(59,130,246,.2)) and each use keeps its own alpha, everywhere. Other text matches exactly; if it matches more than once inside a <style> or <script>, nothing changes until you narrow it with within or a longer find, or pass all: true. Preview with dryRun. Returns every change it made."
+        description = "Find and replace text or a value, as one undo step: in inline styles, attributes (like SVG fill), <style> CSS and <script> code, and in visible text if includeText is set. Use it to change part of a <style> or <script> (a duration, a class name, a delay) without resending all of it. A color matches in any notation (#3B82F6, rgb(59 130 246), rgba(59,130,246,.2)) in styles, attributes and <style>; when it is replaced by another color, each use keeps its own alpha, and when it is replaced by text like var(--brand), tints with their own alpha are left alone. Other text, and anything inside a <script>, matches exactly; if that matches more than once inside a <style> or <script>, nothing changes until you narrow it with within or a longer find, or pass all: true. Preview with dryRun. Returns every change it made."
     )]
     async fn replace_values(
         &self,

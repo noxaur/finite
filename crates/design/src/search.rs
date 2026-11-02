@@ -136,9 +136,10 @@ pub struct Replaced {
 
 /// Replaces `from` with `to` in every place `places` allows, under `within`
 /// or in every artboard. When `from` is a color, it matches the color in any
-/// notation (`#3B82F6`, `#3b82f6cc`, `rgb(59 130 246)`, `rgba(59, 130, 246,
-/// 0.2)`), and keeps each use's transparency. Otherwise it matches the exact
-/// text, and always does in a `<script>`, where `rgb(59 130 246)` is code. A
+/// notation (`#3B82F6`, `rgb(59 130 246)`) and, when `to` is a color too, also
+/// its tints (`#3b82f6cc`, `rgba(59, 130, 246, 0.2)`), keeping each use's
+/// transparency; when `to` is text, tints are left alone. Otherwise it matches
+/// the exact text, and always does in a `<script>`, where `rgb(59 130 246)` is code. A
 /// match in a `<script>`, or in a `<style>` when `from` isn't a color, is
 /// refused when there's more than one match, unless `all` is set: `300ms` in
 /// one rule is rarely meant to change in every rule. Returns the ops and what
