@@ -7,6 +7,7 @@
 //   seed(mcp)        sets up the design and returns ctx (ids the prompt and check need)
 //   check(mcp, ctx)  returns { passed, total, notes } from the design afterwards
 //   workdir          "none" (an empty folder) or "web-src" (a copy of the web app's source)
+//   files            optional: { name: content } written into the agent's folder
 //   followUp(ctx)    optional: a second prompt in the same session, measured on its own
 import fs from "node:fs";
 import os from "node:os";
@@ -61,6 +62,31 @@ const overlaps = (a, b) =>
   a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
 
 const BLUE = "#3b82f6";
+
+/** A marketing page from outside Finite, with code that mustn't run in a design. */
+const IMPORT_PAGE = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Northwind Coffee</title>
+  <script src="https://cdn.example.com/analytics.js"></script>
+  <script>track("pageview")</script>
+</head>
+<body style="margin: 0; background: #1f2a1d; color: #f5efe6; font-family: Georgia, serif">
+  <header style="display: flex; justify-content: space-between; padding: 24px 64px">
+    <strong style="font-size: 22px">Northwind</strong>
+    <nav style="display: flex; gap: 24px"><a href="/menu">Menu</a><a href="/beans">Beans</a></nav>
+  </header>
+  <main style="display: flex; flex-direction: column; align-items: center; gap: 24px; padding: 96px 64px; text-align: center">
+    <h1 style="font-size: 64px; margin: 0">Coffee that keeps up</h1>
+    <p style="max-width: 560px; font-size: 20px">Roasted every Monday, at your door by Wednesday.</p>
+    <button onclick="track('order'); location.href='/order'" style="background: #e0a458; color: #1f2a1d; border: 0; padding: 16px 32px; border-radius: 999px; font-size: 18px">Order now</button>
+    <img src="https://images.example.com/beans.jpg" alt="Beans" style="width: 640px; height: 360px; object-fit: cover; border-radius: 16px">
+    <iframe src="https://www.youtube.com/embed/xyz" width="640" height="360"></iframe>
+  </main>
+</body>
+</html>
+`;
 
 /** A landing page with the brand blue in a dozen places, three buttons and a typo. */
 const landing = `
@@ -499,6 +525,71 @@ setInterval(next, 3000);
   },
 
   // The task from the "Use the Finite MCP" thread: document the app's own UI.
+  // A file from somewhere else, with code in it that mustn't run, goes onto a given page.
+  "import-page": {
+    workdir: "none",
+    files: { "landing.html": IMPORT_PAGE },
+    async seed(mcp) {
+      const design = (await mcp.call("create_design", { name: "Northwind" })).match(
+        /designId "([^"]+)"/,
+      )[1];
+      await mcp.call("create_artboard", {
+        designId: design,
+        name: "Home",
+        width: 1440,
+        height: 900,
+      });
+      await mcp.call("create_page", { designId: design, name: "Inbox" });
+      return { design };
+    },
+    prompt: () =>
+      `Use the Finite MCP tools. Put the page in landing.html, in this folder, into the Finite design "Northwind" on its "Inbox" page, so the team can keep designing it there. ` +
+      `Then tell me in two or three sentences whether anything on the page didn't come across, and why. Stop when you're done.`,
+    async check(mcp, ctx) {
+      const info = JSON.parse(await mcp.call("get_basic_info", { designId: ctx.design }));
+      const inbox = info.pages.find((p) => p.name === "Inbox");
+      const boards = info.artboards.filter((a) => a.pageId === inbox?.id);
+      const html = (
+        await Promise.all(
+          boards.map((a) => mcp.call("get_html", { designId: ctx.design, nodeId: a.id })),
+        )
+      ).join("\n");
+      const checks = [
+        boards.length >= 1,
+        /Coffee that keeps up/.test(html) && /Order now/.test(html),
+        /#1f2a1d|rgb\(31, ?42, ?29\)/i.test(html),
+        !/onclick|track\(|<iframe/i.test(html),
+      ];
+      const notes = [`${boards.length} artboard(s) on Inbox`, `${info.artboards.length} in all`];
+      return { passed: checks.filter(Boolean).length, total: checks.length, notes };
+    },
+  },
+
+  // A file to open in Figma, saved where the person asked.
+  "export-figma": {
+    workdir: "none",
+    seed: (mcp) => seedLanding(mcp, "Acme landing"),
+    prompt: () =>
+      `Use the Finite MCP tools. I want to keep working on the landing page from the Finite design "Acme landing" in Figma, with the Finite Figma plugin. ` +
+      `Save a file I can open with the plugin in this folder as landing.figma.json, then tell me in two or three sentences what won't carry over exactly. Stop when you're done.`,
+    async check(_mcp, ctx) {
+      const file = path.join(ctx.workdir, "landing.figma.json");
+      let payload = null;
+      try {
+        payload = JSON.parse(fs.readFileSync(file, "utf8"));
+      } catch {}
+      const text = JSON.stringify(payload ?? {});
+      const checks = [
+        payload !== null,
+        payload?.v === 1 && payload?.kind === "figma-payload",
+        (payload?.nodes?.length ?? 0) >= 1,
+        /Ship faster/.test(text),
+      ];
+      const notes = [payload ? `${text.length} chars` : "no file"];
+      return { passed: checks.filter(Boolean).length, total: checks.length, notes };
+    },
+  },
+
   "ui-states": {
     workdir: "web-src",
     seed: async () => ({}),

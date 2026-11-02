@@ -568,6 +568,7 @@ dependencies = [
  "scraper",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -578,6 +579,7 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "finite-design",
+ "finite-transfer",
  "futures",
  "http",
  "http-body-util",
@@ -601,6 +603,16 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "webpki-roots",
+]
+
+[[package]]
+name = "finite-transfer"
+version = "0.0.2"
+dependencies = [
+ "base64 0.23.1",
+ "finite-design",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

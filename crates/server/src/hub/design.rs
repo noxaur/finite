@@ -10,9 +10,10 @@ use std::{
 };
 
 use finite_design::{
-    ActorId, Change, Design, Document, NodeId, Op, Record, Snapshot,
+    ActorId, Change, Design, Document, NodeId, Op, Record, Snapshot, Transaction,
     comment::{Anchor, Author, Comment, CommentError},
     edit::EditError,
+    import::ImportRecord,
     label,
 };
 use tokio::sync::{broadcast, watch};
@@ -130,7 +131,12 @@ impl DesignState {
         // count as active now.
         let mut journaled = HashSet::new();
         for record in stored.journal {
-            if let Record::Change { change } = &record {
+            if let Record::Change { change }
+            | Record::Import {
+                change: Some(change),
+                ..
+            } = &record
+            {
                 journaled.insert(change.actor.clone());
             }
             design.replay(record);
@@ -491,6 +497,18 @@ impl DesignHandle {
     }
 
     pub(super) fn publish(&self, state: &mut DesignState, actor: &Actor, change: &Change) {
+        self.broadcast(state, actor, change);
+        self.record(
+            state,
+            Record::Change {
+                change: change.clone(),
+            },
+        );
+    }
+
+    /// Sends a change to viewers and keeps it for those who resume, without
+    /// saving it.
+    fn broadcast(&self, state: &mut DesignState, actor: &Actor, change: &Change) {
         let message = DesignMessage::Change {
             change,
             actor_name: &actor.name,
@@ -503,12 +521,6 @@ impl DesignHandle {
         });
         state.journal_bytes += message.json.len();
         let _ = state.events.send(message);
-        self.record(
-            state,
-            Record::Change {
-                change: change.clone(),
-            },
-        );
     }
 
     /// Sends a change with the comments it moved, like pins whose artboard
@@ -620,6 +632,38 @@ impl DesignHandle {
         if let Some(change) = &change {
             self.publish_with_comments(&mut state, actor, change);
         }
+        Ok((output, change))
+    }
+
+    /// Imports into the design with [`Design::import`], all or nothing, as
+    /// one undo step for `actor`. The import's record and its change are
+    /// saved as one journal record. The import's bytes must already be stored.
+    pub fn import<T, E>(
+        &self,
+        actor: &Actor,
+        label: &str,
+        build: impl FnOnce(&mut Transaction<'_>) -> Result<(ImportRecord, T), E>,
+    ) -> Result<Edited<T>, E> {
+        let now = now_ms();
+        let mut state = self.lock();
+        state.touch(actor, now);
+        let (change, output) = state.design.import(&actor.id, label, now, build)?;
+        if let Some(change) = &change {
+            self.broadcast(&mut state, actor, change);
+        }
+        let import = state
+            .design
+            .imports()
+            .last()
+            .cloned()
+            .expect("just imported");
+        self.record(
+            &mut state,
+            Record::Import {
+                import,
+                change: change.clone(),
+            },
+        );
         Ok((output, change))
     }
 

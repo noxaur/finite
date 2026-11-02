@@ -1,0 +1,17 @@
+{
+  "name": "figma-plugin",
+  "version": "0.0.2",
+  "private": true,
+  "description": "Saves a Figma selection for Finite and builds Figma layers from a Finite export",
+  "type": "module",
+  "scripts": {
+    "build": "vp pack && node scripts/inline-ui.mjs",
+    "test": "vp test"
+  },
+  "devDependencies": {
+    "@figma/plugin-typings": "catalog:",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}

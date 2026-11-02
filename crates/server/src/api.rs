@@ -4,11 +4,12 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{
         DefaultBodyLimit, Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::StatusCode,
+    http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, patch, post, put},
 };
@@ -16,21 +17,38 @@ use finite_design::{
     Snapshot,
     comment::{self, Anchor, Author, AuthorKind, Comment, CommentError},
     edit,
+    import::ImportRecord,
+    version::{self, VersionError},
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::{self, error::RecvError};
 
+use crate::blob::{self, BlobHash};
 use crate::cluster::Place;
 use crate::heartbeat::{self, Heartbeat};
 use crate::hub::{
     Actor, AdoptError, DesignHandle, DesignSummary, Hub, LOBBY_LIMIT, OpenError, Outgoing, Since,
     is_design_id,
 };
+use crate::transfer::{self, ImportRequest, ImportResult, TransferError};
 
 /// The largest design another server can hand off. axum's default of 2 MB
 /// suits API calls, but a handoff carries a whole design with its undo
 /// histories, and one MCP call alone can add 4 MB.
 const HANDOFF_LIMIT: usize = 256 << 20;
+
+/// The largest file an import accepts: the largest blob, since the file is
+/// kept whole as one. The codecs parse it all in memory.
+pub const IMPORT_LIMIT: usize = crate::blob::MAX_BLOB;
+
+/// Who imports over HTTP. The body is the file itself, so unlike
+/// [`set_css`] there's no room for the person's own id and name.
+fn browser() -> Actor {
+    Actor {
+        id: "web".into(),
+        name: "Someone in the browser".into(),
+    }
+}
 
 pub fn routes() -> Router<Arc<Hub>> {
     Router::new()
@@ -57,6 +75,19 @@ pub fn routes() -> Router<Arc<Hub>> {
             post(reply_to_comment),
         )
         .route("/designs/{id}/css", put(set_css))
+        .route(
+            "/designs/{id}/import",
+            post(import).layer(DefaultBodyLimit::max(IMPORT_LIMIT)),
+        )
+        .route("/designs/{id}/export", get(export))
+        .route("/designs/{id}/imports", get(list_imports))
+        .route("/designs/{id}/imports/{import}/original", get(original))
+        .route(
+            "/designs/{id}/assets/{hash}",
+            get(get_asset)
+                .put(put_asset)
+                .layer(DefaultBodyLimit::max(blob::MAX_BLOB)),
+        )
 }
 
 /// `?q=…&limit=…` on the design list: a name to search for, and how many.
@@ -105,6 +136,8 @@ enum ApiError {
         owner: String,
     },
     Unprocessable(String),
+    /// Something broke on this server, like storage.
+    Failed(String),
     /// No server can serve the design right now, say while it moves
     /// between servers. Worth trying again in a moment.
     Unavailable(String),
@@ -123,6 +156,7 @@ impl IntoResponse for ApiError {
             Self::Unprocessable(message) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, message).into_response()
             }
+            Self::Failed(message) => (StatusCode::INTERNAL_SERVER_ERROR, message).into_response(),
             Self::Unavailable(message) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 [("retry-after", "1")],
@@ -138,6 +172,16 @@ impl From<CommentError> for ApiError {
         match error {
             CommentError::NotFound(_) => Self::NotFound(error.to_string()),
             _ => Self::Unprocessable(error.to_string()),
+        }
+    }
+}
+
+impl From<TransferError> for ApiError {
+    fn from(error: TransferError) -> Self {
+        match error {
+            TransferError::NotFound(message) => Self::NotFound(message),
+            TransferError::Invalid(message) => Self::Unprocessable(message),
+            TransferError::Io(_) => Self::Failed(error.to_string()),
         }
     }
 }
@@ -180,12 +224,16 @@ async fn get_design(
 
 /// Takes over a design another server is handing off, after the list of
 /// servers changed. Only the new owner accepts it, and only if it doesn't
-/// already have that design.
-async fn adopt(
-    State(hub): State<Arc<Hub>>,
-    Path(id): Path<String>,
-    Json(snapshot): Json<Snapshot>,
-) -> Response {
+/// already have that design. A snapshot from a newer version is refused with
+/// `409`, so the sender keeps its copy.
+async fn adopt(State(hub): State<Arc<Hub>>, Path(id): Path<String>, body: String) -> Response {
+    let snapshot: Snapshot = match version::SNAPSHOT.decode(&body) {
+        Ok(snapshot) => snapshot,
+        Err(error @ VersionError::Newer { .. }) => {
+            return (StatusCode::CONFLICT, error.to_string()).into_response();
+        }
+        Err(error) => return ApiError::Unprocessable(error.to_string()).into_response(),
+    };
     if snapshot.meta.id != id {
         return ApiError::Unprocessable("the snapshot is for another design".into())
             .into_response();
@@ -231,6 +279,78 @@ async fn owner_of(State(hub): State<Arc<Hub>>, Path(id): Path<String>) -> Respon
         owner: hub.elsewhere(&id),
     })
     .into_response()
+}
+
+/// A blob, by the hash of its bytes. A hash always names the same bytes, so
+/// browsers may keep the answer forever.
+///
+/// Anyone can store bytes that claim to be an image, so every answer is
+/// locked down: the type comes from the bytes, `nosniff` stops a browser
+/// from guessing another, and `sandbox` keeps a script in an SVG from running
+/// when someone opens the URL itself.
+async fn get_asset(
+    State(hub): State<Arc<Hub>>,
+    Path((id, hash)): Path<(String, String)>,
+) -> Response {
+    let mut response = match asset(&hub, &id, &hash).await {
+        Ok(response) => response,
+        Err(error) => error.into_response(),
+    };
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("sandbox"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
+}
+
+async fn asset(hub: &Hub, id: &str, hash: &str) -> Result<Response, ApiError> {
+    here(hub, id)?;
+    let hash = BlobHash::parse(hash).map_err(|e| ApiError::Unprocessable(e.to_string()))?;
+    let store = hub.store();
+    let key = hash.clone();
+    let bytes = tokio::task::spawn_blocking(move || store.get_blob(&key))
+        .await
+        .map_err(|e| ApiError::Unavailable(e.to_string()))?
+        .map_err(|e| ApiError::Unavailable(e.to_string()))?
+        .ok_or_else(|| ApiError::NotFound(format!("blob {hash} not found")))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, blob::media_type(&bytes)),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+/// Stores a blob a server is handing off along with its design. Only a
+/// handoff calls this: an import stores its own bytes. The hash in the path
+/// must match the body, so a handoff can't plant bytes under another name.
+async fn put_asset(
+    State(hub): State<Arc<Hub>>,
+    Path((id, hash)): Path<(String, String)>,
+    body: Bytes,
+) -> Result<StatusCode, ApiError> {
+    here(&hub, &id)?;
+    let hash = BlobHash::parse(&hash).map_err(|e| ApiError::Unprocessable(e.to_string()))?;
+    let store = hub.store();
+    tokio::task::spawn_blocking(move || {
+        let actual = BlobHash::of(&body);
+        if actual != hash {
+            return Ok(Err(ApiError::Unprocessable(format!(
+                "those bytes hash to {actual}, not {hash}"
+            ))));
+        }
+        store.put_blob(&body).map(|_| Ok(StatusCode::CREATED))
+    })
+    .await
+    .map_err(|e| ApiError::Unavailable(e.to_string()))?
+    .map_err(|e| ApiError::Unavailable(e.to_string()))?
 }
 
 /// Who is commenting. Users have no accounts yet, so the browser picks an id
@@ -384,6 +504,138 @@ async fn set_css(
     Ok(Json(Changed {
         seq: change.map(|c| c.seq),
     }))
+}
+
+/// `?format=…&name=…&strict=…` on an import: the format, the file's name,
+/// and the axes strict mode holds, like `preserved,editable`.
+#[derive(Deserialize)]
+struct ImportQuery {
+    format: String,
+    name: Option<String>,
+    /// The page the artboards go on. Omitted: the first page.
+    page: Option<String>,
+    #[serde(default)]
+    strict: String,
+}
+
+/// Imports the body, the file's exact bytes, as new artboards in one undo
+/// step. See `docs/import-export.md`.
+async fn import(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    Query(query): Query<ImportQuery>,
+    body: Bytes,
+) -> Result<(StatusCode, Json<ImportResult>), ApiError> {
+    here(&hub, &id)?;
+    let request = ImportRequest {
+        format: transfer::format_named(&query.format)?,
+        bytes: body.to_vec(),
+        file_name: query.name,
+        page: query.page,
+        strict: transfer::strict_named([query.strict.as_str()])?,
+    };
+    let result = transfer::import(&hub, &id, &browser(), request).await?;
+    Ok((StatusCode::CREATED, Json(result)))
+}
+
+/// `?format=…&artboard=…` on an export. Without an artboard it's the whole design.
+#[derive(Deserialize)]
+struct ExportQuery {
+    format: String,
+    artboard: Option<String>,
+}
+
+/// The design, or one artboard, as a file to download. `Finite-Diagnostics`
+/// counts what didn't convert exactly.
+async fn export(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    Query(query): Query<ExportQuery>,
+) -> Result<Response, ApiError> {
+    here(&hub, &id)?;
+    let format = transfer::format_named(&query.format)?;
+    let scope = match query.artboard {
+        Some(artboard) => finite_transfer::Scope::Artboard(artboard),
+        None => finite_transfer::Scope::Design,
+    };
+    let exported = transfer::export(&hub, &id, format, scope).await?;
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static(exported.media_type),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                attachment(Some(&exported.file_name)),
+            ),
+            (
+                header::HeaderName::from_static("finite-diagnostics"),
+                HeaderValue::from(exported.diagnostics.len()),
+            ),
+        ],
+        exported.bytes,
+    )
+        .into_response())
+}
+
+/// A `Content-Disposition` that downloads the file as `name`. Characters a
+/// header can't carry, and quotes, become `_`.
+fn attachment(name: Option<&str>) -> HeaderValue {
+    let Some(name) = name else {
+        return HeaderValue::from_static("attachment");
+    };
+    let name: String = name
+        .chars()
+        .map(|c| match c {
+            ' ' | '!' | '#'..='[' | ']'..='~' => c,
+            _ => '_',
+        })
+        .collect();
+    HeaderValue::from_str(&format!("attachment; filename=\"{name}\""))
+        .expect("only visible ASCII is left")
+}
+
+/// Every import into the design, oldest first, with what each one kept out.
+async fn list_imports(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<ImportRecord>>, ApiError> {
+    let imports = open(&hub, &id).await?.read(|d| d.imports().to_vec());
+    Ok(Json(imports))
+}
+
+/// The exact bytes an import received. They can be hostile HTML, so they're
+/// only ever downloaded: the type says nothing, `nosniff` stops a browser
+/// from guessing one, and `sandbox` stops a script if it renders anyway.
+async fn original(
+    State(hub): State<Arc<Hub>>,
+    Path((id, import)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    here(&hub, &id)?;
+    let (record, bytes) = transfer::original(&hub, &id, &import).await?;
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                attachment(record.file_name.as_deref()),
+            ),
+            (
+                header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            ),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                HeaderValue::from_static("sandbox"),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 /// Streams the design list: every design once, then each design as it changes.

@@ -8,6 +8,7 @@ use tower_http::{
 };
 
 pub mod api;
+pub mod blob;
 pub mod cluster;
 pub mod guard;
 pub mod heartbeat;
@@ -19,6 +20,7 @@ pub mod relay;
 pub mod router;
 pub mod screenshot;
 pub mod store;
+pub mod transfer;
 
 pub use hub::Hub;
 

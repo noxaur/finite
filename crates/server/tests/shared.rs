@@ -20,6 +20,7 @@ use std::{
 use finite_design::{Record, Snapshot};
 use finite_server::{
     Hub, app,
+    blob::BlobHash,
     cluster::{self, Cluster, Lease, Members},
     router,
     store::{Claim, MemoryStore, Registry, Store, Stored, Token},
@@ -89,6 +90,18 @@ impl Store for Cut {
     fn held(&self) -> io::Result<Vec<(String, Token)>> {
         self.check()?;
         self.inner.held()
+    }
+    fn put_blob(&self, bytes: &[u8]) -> io::Result<BlobHash> {
+        self.check()?;
+        self.inner.put_blob(bytes)
+    }
+    fn get_blob(&self, hash: &BlobHash) -> io::Result<Option<Vec<u8>>> {
+        self.check()?;
+        self.inner.get_blob(hash)
+    }
+    fn has_blob(&self, hash: &BlobHash) -> io::Result<bool> {
+        self.check()?;
+        self.inner.has_blob(hash)
     }
 }
 
