@@ -669,7 +669,7 @@ const styles = stylex.create({
     borderRadius: 4,
     fontSize: 11,
     lineHeight: 1.3,
-    color: "white",
+    color: colors.onAccent,
     backgroundColor: colors.accent,
     whiteSpace: "nowrap",
     transform: "scale(var(--inv-zoom, 1))",

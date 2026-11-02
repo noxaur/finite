@@ -7,6 +7,7 @@ import type { Comment } from "@/design/schema";
 import { COMMENT_LIMIT, NAME_LIMIT } from "@/lib/limits";
 import { isLocalUser, useLocalName } from "@/lib/user";
 import { timeAgo } from "@/lib/time";
+import { PIN_PATH } from "@/lib/cursors";
 import { PinFilters, PinIcon } from "./PinIcon";
 
 /** How far right of its pin a popover starts, in pixels. */
@@ -40,6 +41,18 @@ export function pinPosition(
 export function ToolPill({ mode, onMode }: { mode: Mode; onMode: (mode: Mode) => void }) {
   return (
     <div {...stylex.props(styles.pill)} role="toolbar" aria-label="Tools">
+      {/* The pill renders before any pins, so it carries its own wobble filter. */}
+      <svg width="0" height="0" style={{ position: "absolute" }} aria-hidden="true">
+        <filter id="tool-wob" x="-20%" y="-20%" width="140%" height="140%">
+          <feTurbulence type="fractalNoise" baseFrequency="0.045" numOctaves="1" seed="3" />
+          <feDisplacementMap
+            in="SourceGraphic"
+            scale="3"
+            xChannelSelector="R"
+            yChannelSelector="G"
+          />
+        </filter>
+      </svg>
       <button
         type="button"
         aria-pressed={mode === "pointer"}
@@ -47,8 +60,15 @@ export function ToolPill({ mode, onMode }: { mode: Mode; onMode: (mode: Mode) =>
         onClick={() => onMode("pointer")}
         {...stylex.props(styles.pillButton, mode === "pointer" && styles.pillActive)}
       >
-        <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M6 3.5 18.5 12l-5.6 1.3-2.9 5.7z" fill="currentColor" />
+        <svg width="20" height="20" viewBox="0 0 24 24" overflow="visible" aria-hidden="true">
+          <path
+            d="M6 3.5 18.5 12l-5.6 1.3-2.9 5.7z"
+            fill="currentColor"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinejoin="round"
+            filter="url(#tool-wob)"
+          />
         </svg>
       </button>
       <button
@@ -58,13 +78,15 @@ export function ToolPill({ mode, onMode }: { mode: Mode; onMode: (mode: Mode) =>
         onClick={() => onMode("comment")}
         {...stylex.props(styles.pillButton, mode === "comment" && styles.pillActive)}
       >
-        <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+        {/* The pin's own outline, so the tool looks like what it places. */}
+        <svg width="22" height="20" viewBox="0 0 40 36" overflow="visible" aria-hidden="true">
           <path
-            d="M12 3.5a8.5 8.5 0 1 1-4.3 15.8L3.5 20.5l1.2-4.1A8.5 8.5 0 0 1 12 3.5Z"
+            d={PIN_PATH}
             fill="none"
             stroke="currentColor"
-            strokeWidth="1.8"
+            strokeWidth="3.2"
             strokeLinejoin="round"
+            filter="url(#tool-wob)"
           />
         </svg>
       </button>
@@ -439,7 +461,7 @@ const styles = stylex.create({
   },
   pillActive: {
     backgroundColor: { default: colors.accent, ":hover": colors.accent },
-    color: "white",
+    color: colors.onAccent,
   },
   layer: {
     position: "absolute",
@@ -595,7 +617,7 @@ const styles = stylex.create({
     borderWidth: 0,
     borderRadius: "50%",
     backgroundColor: { default: colors.accent, ":disabled": colors.border },
-    color: "white",
+    color: colors.onAccent,
     fontSize: 14,
     cursor: { default: "var(--cursor-pointer, pointer)", ":disabled": "default" },
   },

@@ -10,10 +10,10 @@ const BLUE = "#2563eb";
 const GREEN = "#15803d";
 
 const LOOK: Record<PinState, { fill: string; stroke: string; dots: boolean }> = {
-  waiting: { fill: "#fff", stroke: INK, dots: true },
-  working: { fill: "#fff", stroke: INK, dots: true },
-  replied: { fill: "#e8effd", stroke: BLUE, dots: true },
-  resolved: { fill: "#e7f4ec", stroke: GREEN, dots: false },
+  waiting: { fill: INK, stroke: INK, dots: true },
+  working: { fill: INK, stroke: INK, dots: true },
+  replied: { fill: BLUE, stroke: BLUE, dots: true },
+  resolved: { fill: GREEN, stroke: GREEN, dots: false },
   draft: { fill: "#fff", stroke: INK, dots: false },
 };
 
@@ -94,7 +94,7 @@ export function PinIcon({ state, selected }: { state: PinState; selected?: boole
         />
       )}
       {look.dots && (
-        <g fill={look.stroke}>
+        <g fill="#fff">
           {DOTS.map(([cx, cy], i) => (
             <circle
               key={i}

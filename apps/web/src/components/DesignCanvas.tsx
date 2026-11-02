@@ -505,7 +505,8 @@ const styles = stylex.create({
     top: y,
     width,
     height,
-    outline: `calc(1.5px * var(--inv-zoom, 1)) solid ${colors.accent}`,
+    outline: `calc(1.5px * var(--inv-zoom, 1)) solid ${colors.ink}`,
+    boxShadow: `0 0 0 calc(3px * var(--inv-zoom, 1)) ${colors.halo}`,
     pointerEvents: "none",
   }),
   flash: {
@@ -548,7 +549,7 @@ const styles = stylex.create({
     paddingBlock: 1,
     borderRadius: 4,
     backgroundColor: colors.accent,
-    color: "white",
+    color: colors.onAccent,
     fontSize: 12,
   },
   dot: {

@@ -10,7 +10,12 @@ export const colors = stylex.defineVars({
   text: { default: "#1a1a18", [DARK]: "#ecebe6" },
   muted: { default: "#6b6a64", [DARK]: "#9c9b94" },
   border: { default: "#e2e0d8", [DARK]: "#33332f" },
-  accent: { default: "#c2410c", [DARK]: "#fb923c" },
+  accent: { default: "#1a1a18", [DARK]: "#ecebe6" },
+  /** Text and icons on an accent background. */
+  onAccent: { default: "#ffffff", [DARK]: "#1a1a18" },
+  /** Lines drawn over artboard content, on a `halo`, so they read on any artboard in either theme. */
+  ink: "#1a1a18",
+  halo: "#ffffff",
   ok: { default: "#15803d", [DARK]: "#4ade80" },
   danger: { default: "#b91c1c", [DARK]: "#f87171" },
 });
