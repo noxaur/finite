@@ -34,10 +34,7 @@ use axum::{
 use futures::{StreamExt, stream::SelectAll};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite;
-use tower_http::{
-    services::{ServeDir, ServeFile},
-    trace::TraceLayer,
-};
+use tower_http::trace::TraceLayer;
 
 use rmcp::transport::streamable_http_server::session::store::SessionStore;
 
@@ -147,10 +144,7 @@ fn build(
                 )),
         );
     let router = match static_dir {
-        Some(dir) => {
-            let not_found = format!("{dir}/404.html");
-            router.fallback_service(ServeDir::new(dir).not_found_service(ServeFile::new(not_found)))
-        }
+        Some(dir) => crate::frontend::serve(router, dir),
         None => router,
     };
     router.layer(TraceLayer::new_for_http())
