@@ -78,13 +78,17 @@ for (const [name, def] of Object.entries(named)) {
     name,
     forward,
     inputSchema: def.inputSchema ?? base.inputSchema,
+    // A real tool's own schema is the real server's to check: it accepts
+    // aliases and shapes the schema doesn't show.
+    check: Boolean(def.inputSchema),
   });
 }
 
 /**
- * Checks arguments against a tool's schema like the real server does: it
+ * Checks arguments against a spec's schema like the real server does: it
  * accepts arrays and objects sent as JSON strings, as agents often send them
- * before they've loaded a schema. Returns the arguments or throws.
+ * before they've loaded a schema. It checks required fields, the top-level
+ * fields' types and enums, not nested schemas. Returns the arguments or throws.
  */
 function validate(schema, args) {
   const out = { ...args };
@@ -104,6 +108,8 @@ function validate(schema, args) {
       !types.length ||
       types.some((t) => t === kind || (t === "integer" && Number.isInteger(value)));
     if (!ok) throw new Error(`invalid type for \`${key}\`: expected ${types.join(" or ")}`);
+    if (prop.enum && !prop.enum.includes(value))
+      throw new Error(`invalid value for \`${key}\`: expected one of ${prop.enum.join(", ")}`);
   }
   return out;
 }
@@ -157,13 +163,12 @@ async function handle(msg) {
       const tool = surface.get(msg.params?.name);
       if (!tool)
         throw Object.assign(new Error(`tool not found: ${msg.params?.name}`), { code: -32602 });
-      let args;
+      let args = msg.params.arguments ?? {};
+      // The real server reports bad arguments as a failed tool call, in these words.
       try {
-        args = validate(tool.inputSchema ?? {}, msg.params.arguments ?? {});
+        if (tool.check) args = validate(tool.inputSchema, args);
       } catch (error) {
-        throw Object.assign(new Error(`failed to deserialize parameters: ${error.message}`), {
-          code: -32602,
-        });
+        return textResult(`failed to deserialize parameters: ${error.message}`, true);
       }
       try {
         return await answer(tool, args);
@@ -179,6 +184,13 @@ async function handle(msg) {
 // stdio transport: one JSON-RPC message per line each way.
 const send = (msg) => process.stdout.write(JSON.stringify(msg) + "\n");
 let buf = "";
+// Calls still being answered, so the mock finishes them before it exits.
+let pending = 0;
+let ended = false;
+const settle = () => {
+  pending--;
+  if (ended && !pending) process.exit(0);
+};
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
   buf += chunk;
@@ -194,17 +206,27 @@ process.stdin.on("data", (chunk) => {
       send({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } });
       continue;
     }
+    if (!msg || typeof msg !== "object" || Array.isArray(msg)) {
+      send({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "invalid request" } });
+      continue;
+    }
     // Notifications and responses need no answer.
     if (msg.id === undefined || !msg.method) continue;
-    handle(msg).then(
-      (result) => send({ jsonrpc: "2.0", id: msg.id, result }),
-      (error) =>
-        send({
-          jsonrpc: "2.0",
-          id: msg.id,
-          error: { code: error.code ?? -32603, message: error.message },
-        }),
-    );
+    pending++;
+    handle(msg)
+      .then(
+        (result) => send({ jsonrpc: "2.0", id: msg.id, result }),
+        (error) =>
+          send({
+            jsonrpc: "2.0",
+            id: msg.id,
+            error: { code: error.code ?? -32603, message: error.message },
+          }),
+      )
+      .finally(settle);
   }
 });
-process.stdin.on("end", () => process.exit(0));
+process.stdin.on("end", () => {
+  ended = true;
+  if (!pending) process.exit(0);
+});
