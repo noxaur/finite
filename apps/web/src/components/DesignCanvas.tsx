@@ -315,7 +315,10 @@ export function DesignCanvas({ id }: { id: string }) {
   const importFile = async (file: File) => {
     const format = formatOf(file.name);
     if (!format) {
-      setImported({ status: "failed", message: "Pick an .html, .htm or .finite file." });
+      setImported({
+        status: "failed",
+        message: "Pick an .html, .htm, .finite or .figma.json file.",
+      });
       setPanel("import");
       return;
     }

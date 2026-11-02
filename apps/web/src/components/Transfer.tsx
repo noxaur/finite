@@ -3,7 +3,7 @@
 import * as stylex from "@stylexjs/stylex";
 import { useRef } from "react";
 import type { ImportResult } from "@/api/Api";
-import { exportHref, IMPORT_ACCEPT, originalHref, summarize } from "@/lib/transfer";
+import { exportHref, figmaHref, IMPORT_ACCEPT, originalHref, summarize } from "@/lib/transfer";
 import { colors, radii, space } from "@/styles/tokens.stylex";
 
 /** Where an import is: sending the file, done, or refused with the server's reason. */
@@ -34,7 +34,7 @@ export function ImportButton({ busy, onFile }: { busy: boolean; onFile: (file: F
         disabled={busy}
         onClick={() => input.current?.click()}
         {...stylex.props(styles.tool)}
-        title="Add artboards from an .html or .finite file"
+        title="Add artboards from an .html, .finite or .figma.json file"
       >
         {busy ? "Importing…" : "Import"}
       </button>
@@ -42,7 +42,7 @@ export function ImportButton({ busy, onFile }: { busy: boolean; onFile: (file: F
   );
 }
 
-/** What the Export button opens: a link per artboard as HTML, and the whole design as `.finite`. */
+/** What the Export button opens: a link per artboard as HTML and for Figma, and the whole design as `.finite`. */
 export function ExportMenu({
   designId,
   artboards,
@@ -62,18 +62,31 @@ export function ExportMenu({
         if (e.key === "Escape") onClose();
       }}
     >
-      {artboards.map(({ id, name }) => (
-        <a
-          key={id}
-          role="menuitem"
-          href={exportHref(designId, id)}
-          download
-          onClick={onClose}
-          {...stylex.props(styles.item)}
-        >
-          {artboards.length === 1 ? "This artboard" : name} as HTML
-        </a>
-      ))}
+      {artboards.flatMap(({ id, name }) => {
+        const label = artboards.length === 1 ? "This artboard" : name;
+        return [
+          <a
+            key={id}
+            role="menuitem"
+            href={exportHref(designId, id)}
+            download
+            onClick={onClose}
+            {...stylex.props(styles.item)}
+          >
+            {label} as HTML
+          </a>,
+          <a
+            key={`${id}:figma`}
+            role="menuitem"
+            href={figmaHref(designId, id)}
+            download
+            onClick={onClose}
+            {...stylex.props(styles.item)}
+          >
+            {label} for Figma
+          </a>,
+        ];
+      })}
       <a
         role="menuitem"
         href={exportHref(designId, null)}

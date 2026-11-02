@@ -1,6 +1,15 @@
 import { describe as suite, expect, it } from "vite-plus/test";
 import type { ImportDiagnostic, ImportResult } from "@/api/Api";
-import { describe, exportHref, formatOf, LISTED, originalHref, summarize } from "./transfer";
+import {
+  describe,
+  exportHref,
+  figmaHref,
+  formatOf,
+  IMPORT_ACCEPT,
+  LISTED,
+  originalHref,
+  summarize,
+} from "./transfer";
 
 const diagnostic = (overrides: Partial<ImportDiagnostic> = {}): ImportDiagnostic => ({
   path: "html/body/button",
@@ -32,6 +41,17 @@ suite("formatOf", () => {
     expect(formatOf("my.design.finite")).toBe("finite");
   });
 
+  it("reads a .figma.json file as a Figma payload, and a plain .json as nothing", () => {
+    expect(formatOf("Landing page.figma.json")).toBe("figma");
+    expect(formatOf("Card.FIGMA.JSON")).toBe("figma");
+    expect(formatOf("data.json")).toBeNull();
+    expect(formatOf(".figma.json")).toBe("figma");
+  });
+
+  it("is offered in the picker", () => {
+    expect(IMPORT_ACCEPT.split(",")).toContain(".figma.json");
+  });
+
   it("refuses anything else", () => {
     expect(formatOf("photo.png")).toBeNull();
     expect(formatOf("html")).toBeNull();
@@ -43,6 +63,10 @@ suite("links", () => {
   it("export one artboard as HTML, or the whole design as .finite", () => {
     expect(exportHref("d 1", "a/1")).toBe("/api/designs/d%201/export?format=html&artboard=a%2F1");
     expect(exportHref("d1", null)).toBe("/api/designs/d1/export?format=finite");
+  });
+
+  it("export one artboard for the Figma plugin", () => {
+    expect(figmaHref("d 1", "a/1")).toBe("/api/designs/d%201/export?format=figma&artboard=a%2F1");
   });
 
   it("point at an import's original bytes", () => {

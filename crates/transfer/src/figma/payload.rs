@@ -97,7 +97,8 @@ pub struct FigNode {
     pub text: Option<Text>,
     /// Vector shapes as SVG markup, exported by the plugin, for shapes the
     /// codec doesn't draw from fills alone: vectors, boolean operations,
-    /// stars, lines.
+    /// stars, lines. The SVG is the shape as drawn, already rotated, so a
+    /// layer with one has its bounding box as its box and a rotation of 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub svg: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -241,7 +242,7 @@ pub struct Text {
     /// `NONE`, `UNDERLINE` or `STRIKETHROUGH`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decoration: Option<String>,
-    /// `NONE`, `UPPER`, `LOWER` or `TITLE`.
+    /// `ORIGINAL`, `UPPER`, `LOWER` or `TITLE`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub case: Option<String>,
     /// Runs of characters styled unlike the rest, when there are any.
