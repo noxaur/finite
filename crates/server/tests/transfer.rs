@@ -243,3 +243,50 @@ async fn http_refuses_unknown_names_and_strict_failures_with_422() {
     let handle = hub.open(&id).await.unwrap();
     assert!(handle.read(|d| d.doc().is_empty() && d.imports().is_empty()));
 }
+
+/// Figma export measures the design in Chrome (or FINITE_CHROME); without
+/// one, it fails saying so, and the test passes.
+#[tokio::test]
+async fn a_figma_export_is_measured_in_a_browser() {
+    let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
+    let id = hub.create("Figma").meta.id;
+    let page = r#"<div data-name="Row" style="display: flex; gap: 10px; padding: 5px"><div data-name="A" style="width: 40px; height: 20px; background: #f00"></div><p data-name="Text" style="margin: 0; font: 16px/20px sans-serif">Hi</p></div>"#;
+    let imported = transfer::import(
+        &hub,
+        &id,
+        &agent(),
+        ImportRequest {
+            format: Format::Html,
+            bytes: page.as_bytes().to_vec(),
+            file_name: Some("row.html".into()),
+            strict: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let exported = match transfer::export(&hub, &id, Format::Figma, Scope::Design).await {
+        Ok(exported) => exported,
+        Err(TransferError::Invalid(error)) if error.contains("no Chrome") => {
+            eprintln!("skipped: {error}");
+            return;
+        }
+        Err(error) => panic!("{error}"),
+    };
+    assert_eq!(exported.file_name, "figma.figma.json");
+    let payload: Value = serde_json::from_slice(&exported.bytes).unwrap();
+    let board = &payload["nodes"][0];
+    assert_eq!(board["id"], imported.artboards[0].as_str());
+    let row = &board["children"][0];
+    assert_eq!(row["name"], "Row");
+    assert_eq!(row["layout"]["mode"], "HORIZONTAL");
+    assert_eq!(row["layout"]["gap"], 10.0);
+    let a = &row["children"][0];
+    assert_eq!(
+        (a["x"].as_f64(), a["width"].as_f64()),
+        (Some(5.0), Some(40.0))
+    );
+    assert_eq!(a["fills"][0]["color"]["r"], 1.0);
+    let text = &row["children"][1]["children"][0];
+    assert_eq!(text["type"], "TEXT");
+    assert_eq!(text["text"]["characters"], "Hi");
+}

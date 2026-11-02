@@ -39,7 +39,7 @@ pub struct ImportRecord {
     pub id: String,
     pub artifact: BlobHash,             // the exact bytes received
     pub format: String,                 // "html"
-    pub input_kind: String,             // "figma-plugin-payload v1", not "the Figma file"
+    pub input_kind: String,             // "figma-payload v1", not "the Figma file"
     pub file_name: Option<String>,
     pub received_at: u64,
     pub nodes: BTreeMap<NodeId, String>, // which source path each node came from
@@ -80,15 +80,19 @@ A quarantined `onclick` scores preserved yes, visual unknown and editable no. St
 
 ## Export
 
-Export reads one revision. HTML export holds the design's lock while the codec writes, which takes milliseconds. Figma export measures layout in a browser, which is too slow to do under the lock, so it will copy the revision first.
+Export reads one revision. The server copies the design under its lock, then the codec writes from the copy without the lock, so a slow export never holds up edits.
 
 The HTML codec writes one artboard as a standalone page: the base styles, the design's shared CSS, and the artboard with its layer names. The page carries the same content security policy the viewer uses. Importing the page gives back the artboard as a `<div>` inside a new artboard. The page's `<meta>` and `<title>` act on the page rather than the design, so they're quarantined.
 
-Figma export maps what has a Figma equivalent: flexbox becomes auto-layout, and colors, borders, radii and shadows become Figma properties. For anything else (grid, `calc()`, wrapped text), the headless Chrome the screenshot pipeline already runs measures the result. That measurement is a `ResolvedScene`, which is derived data: it's built for one revision, thrown away after the export, and never written back as CSS.
+Figma has no CSS, so Figma export reads how the artboard actually rendered. The headless Chrome the screenshot pipeline already runs measures every element's box and computed styles, through the `Measure` trait (`crates/transfer/src/scene.rs`). That measurement is a `Scene`, which is derived data: it's built for one revision, thrown away after the export, and never written back as CSS. Computed styles already account for classes and the shared CSS, so the codec maps what the browser drew, not what the inline styles say.
+
+Flexbox becomes auto layout only when auto layout would put every child where the browser did. The codec lays the children out the way Figma would and compares; if any child is more than a pixel off, because of margins, `order` or `flex-basis`, say, the frame keeps the measured positions and reports it. Grid always exports as measured positions.
 
 ## Reaching Figma
 
-The Figma REST API can't create nodes, so Finite ships a small Figma plugin. It exchanges a versioned JSON payload with the Finite server's HTTP API in both directions. The plugin carries no conversion logic. It runs typed commands and reports the ids Figma assigned.
+The Figma REST API can't create nodes, so Finite ships a small Figma plugin, `apps/figma-plugin`. The plugin and Finite trade `.figma.json` files, which hold a versioned payload (`crates/transfer/src/figma/payload.rs`, mirrored in `apps/figma-plugin/src/payload.ts`). One schema serves both directions. The plugin saves a selection as a file for Finite's Import button, and opens a file from Finite's Export menu to build layers. It has no network access, so there's no token to manage and no cross-origin surface. It also carries no conversion logic: it copies values between the payload and the Plugin API, and every mapping lives in the codec.
+
+The payload uses the Plugin API's names and units, so the plugin never converts. Fields a newer plugin sends that this server doesn't know land in `extra`: each is reported once, and the original bytes keep it. A vector shape travels as the SVG Figma exports, which is already rotated, so its box is its drawn bounding box.
 
 ## Storage
 

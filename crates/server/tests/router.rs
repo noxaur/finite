@@ -1045,7 +1045,9 @@ async fn the_router_passes_on_what_keeps_downloads_safe() {
     assert_eq!(got.headers()["x-content-type-options"], "nosniff");
 
     let imported: Value = http
-        .post(format!("{front}/api/designs/{id}/import?format=html&name=a.html"))
+        .post(format!(
+            "{front}/api/designs/{id}/import?format=html&name=a.html"
+        ))
         .body("<p onclick=\"x()\">Hi</p>")
         .send()
         .await
@@ -1055,7 +1057,9 @@ async fn the_router_passes_on_what_keeps_downloads_safe() {
         .unwrap();
     let import = imported["import"]["id"].as_str().unwrap();
     let original = http
-        .get(format!("{front}/api/designs/{id}/imports/{import}/original"))
+        .get(format!(
+            "{front}/api/designs/{id}/imports/{import}/original"
+        ))
         .send()
         .await
         .unwrap();

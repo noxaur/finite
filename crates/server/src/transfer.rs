@@ -16,6 +16,7 @@ use finite_transfer::{
 
 use crate::{
     hub::{Actor, Hub, OpenError, now_ms, random_id},
+    screenshot,
     store::Store,
 };
 
@@ -186,7 +187,8 @@ pub async fn import(
 }
 
 /// Writes `scope` of design `id` as `format`. The design is copied under
-/// its lock, so the export reads one revision, and written without it.
+/// its lock, so the export reads one revision, and written without it. A
+/// codec that measures layout, like Figma's, does it in headless Chrome.
 pub async fn export(
     hub: &Arc<Hub>,
     id: &str,
@@ -202,6 +204,7 @@ pub async fn export(
         )
     });
     let blobs = StoreBlobs(hub.store());
+    let measure = screenshot::ChromeMeasure(tokio::runtime::Handle::current());
     joined(
         tokio::task::spawn_blocking(move || {
             let revision = Revision {
@@ -209,7 +212,7 @@ pub async fn export(
                 doc: &doc,
                 imports: &imports,
                 blobs: &blobs,
-                measure: &finite_transfer::scene::NoMeasure,
+                measure: &measure,
             };
             format.codec().write(&revision, &scope)
         })

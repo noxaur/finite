@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, time::Duration};
 
 use finite_design::{Document, edit, html};
 use finite_server::screenshot::{
-    Format, Image, MAX_OUTPUT_SIDE, Options, Rect, Shot, capture, plan,
+    Format, Image, MAX_OUTPUT_SIDE, Options, Rect, Shot, capture, plan, plan_measurement, scene,
 };
 
 /// A PNG's width, height and RGBA pixels.
@@ -455,4 +455,56 @@ async fn shared_css_applies_and_the_artboard_overrides_it() {
     let width = |name: &str| boxes.iter().find(|b| b.id == names[name]).unwrap().width;
     assert_eq!(width("A"), 60.0);
     assert_eq!(width("B"), 70.0);
+}
+
+#[tokio::test]
+async fn a_scene_has_every_box_and_its_computed_styles() {
+    let (doc, names) = design(
+        r#"<div data-name="Board" style="width: 400px; height: 300px; position: relative; margin: 20px"><style>.c { background: #00f; }</style><div data-name="Red" class="c" style="position: absolute; left: 50px; top: 60px; width: 100px; height: 80px; background: #f00"></div><div data-name="Gone" style="display: none"><span data-name="Inside">x</span></div><p data-name="P" style="margin: 0; font: 20px/30px monospace; white-space: nowrap">ab<b data-name="B">cd</b>ef</p></div>"#,
+    );
+    let m = plan_measurement(&doc, &names["Board"], Options::default()).unwrap();
+    let scene = match scene(m).await {
+        Ok(scene) => scene,
+        Err(error) if error.contains("no Chrome") => {
+            eprintln!("skipped: {error}");
+            return;
+        }
+        Err(error) => panic!("{error}"),
+    };
+    let at = |id: &str| &scene.nodes[id];
+    // Boxes are from the artboard's corner, not the page's.
+    let board = at(&names["Board"]);
+    assert_eq!(
+        (board.x, board.y, board.width, board.height),
+        (0.0, 0.0, 400.0, 300.0)
+    );
+    let red = at(&names["Red"]);
+    assert_eq!(
+        (red.x, red.y, red.width, red.height),
+        (50.0, 60.0, 100.0, 80.0)
+    );
+    // Every property is read, after the cascade.
+    assert_eq!(red.style.len(), finite_transfer::scene::COMPUTED.len());
+    assert_eq!(red.style("background-color"), "rgb(255, 0, 0)");
+    assert_eq!(red.style("position"), "absolute");
+    // What doesn't render isn't there.
+    assert!(!scene.nodes.contains_key(&names["Gone"]));
+    assert!(!scene.nodes.contains_key(&names["Inside"]));
+    // Each text node has its own box, even beside an element, and its
+    // parent's styles.
+    let texts: Vec<_> = doc
+        .children(Some(&names["P"]))
+        .iter()
+        .filter(|c| c.tag().is_none())
+        .map(|c| at(&c.id))
+        .collect();
+    let bold = at(&names["B"]);
+    assert_eq!(texts.len(), 2);
+    assert_eq!((texts[0].x, texts[0].height), (0.0, 30.0));
+    assert!((texts[0].width - bold.x).abs() < 0.5, "{texts:?} {bold:?}");
+    assert!(
+        (texts[1].x - (bold.x + bold.width)).abs() < 0.5,
+        "{texts:?} {bold:?}"
+    );
+    assert_eq!(texts[1].style("font-size"), "20px");
 }

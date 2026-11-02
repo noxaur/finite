@@ -24,6 +24,7 @@ use finite_design::{
     edit::pixel_size,
     html::{self, BASE_CSS, BASE_LAYER, CSP, VIEWER_ID_ATTR},
 };
+use finite_transfer::scene::{COMPUTED, Measure, Resolved, Scene};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -581,6 +582,54 @@ pub struct Measurement {
     width: f64,
     height: f64,
     settle: Duration,
+    texts: Vec<TextRuns>,
+}
+
+/// Where an element's text nodes are on the page. Text nodes have no
+/// [`VIEWER_ID_ATTR`] to find them by, so each is located in its parent:
+/// the parent's `k`th DOM text node, characters `start..end` in UTF-16
+/// units. Adjacent text nodes in the document parse as one DOM text node,
+/// so several can share a `k`.
+type TextRuns = (NodeId, Vec<(NodeId, usize, usize, usize)>);
+
+/// The [`TextRuns`] of every element in `artboard`, for those with text.
+fn text_runs(doc: &Document, artboard: &str) -> Vec<TextRuns> {
+    let mut out = Vec::new();
+    for node in doc.subtree(artboard) {
+        let Some(tag) = node.tag() else { continue };
+        let tag = tag.to_ascii_lowercase();
+        // Their text is code, not content.
+        if tag == "script" || tag == "style" {
+            continue;
+        }
+        let mut runs = Vec::new();
+        let (mut k, mut offset, mut open) = (0, 0, false);
+        for (i, child) in doc.children(Some(&node.id)).into_iter().enumerate() {
+            if child.tag().is_some() {
+                if open {
+                    (k, offset, open) = (k + 1, 0, false);
+                }
+                continue;
+            }
+            // The parser normalizes line breaks, and drops a newline that
+            // opens a `<pre>`.
+            let text = child.text.as_deref().unwrap_or("").replace("\r\n", "\n");
+            let text = match text.strip_prefix('\n') {
+                Some(rest) if i == 0 && (tag == "pre" || tag == "listing") => rest,
+                _ => &text,
+            };
+            let len = text.encode_utf16().count();
+            if len == 0 {
+                continue;
+            }
+            runs.push((child.id.clone(), k, offset, offset + len));
+            (offset, open) = (offset + len, true);
+        }
+        if !runs.is_empty() {
+            out.push((node.id.clone(), runs));
+        }
+    }
+    out
 }
 
 /// Prepares to measure the artboard holding `node`, or fails if it's not in
@@ -598,6 +647,7 @@ pub fn plan_measurement(
     let (html, width, height) =
         page_html(doc, &artboard, &options).expect("the artboard is in the document");
     Ok(Measurement {
+        texts: text_runs(doc, &artboard),
         artboard,
         html,
         width,
@@ -630,6 +680,19 @@ async fn measure_page(
     dir: &std::path::Path,
     m: &Measurement,
 ) -> Result<Vec<ElementBox>, String> {
+    load(tab, dir, m).await?;
+    let mut layout = measure(tab, &m.artboard, &[]).await?;
+    let settle = m.settle.min(MAX_SETTLE);
+    if layout.animated && !settle.is_zero() {
+        tokio::time::sleep(settle).await;
+        layout = measure(tab, &m.artboard, &[]).await?;
+    }
+    Ok(layout.nodes.iter().map(element_box).collect())
+}
+
+/// Opens a measurement's page at the artboard's size, once its images and
+/// fonts have loaded.
+async fn load(tab: &mut cdp::Tab, dir: &std::path::Path, m: &Measurement) -> Result<(), String> {
     tab.call("Page.enable", json!({})).await?;
     let path = dir.join("page.html");
     tokio::fs::write(&path, &m.html)
@@ -651,13 +714,147 @@ async fn measure_page(
     tab.wait_for("Page.loadEventFired", LOAD).await?;
     tab.evaluate("document.fonts.ready.then(() => true)")
         .await?;
-    let mut layout = measure(tab, &m.artboard, &[]).await?;
+    Ok(())
+}
+
+/// How an artboard rendered, for an export to a format without CSS: every
+/// element's and text node's box, from the artboard's top left corner, and
+/// the computed styles in [`finite_transfer::scene::COMPUTED`]. A text node
+/// has its parent's styles, and a box as tall as its lines' line height,
+/// which is how a text layer is drawn. Elements without a box (`display: none`, or
+/// inside one) are left out. It renders the page as [`layout`] does.
+pub async fn scene(m: Measurement) -> Result<Scene, String> {
+    let chrome = chrome().ok_or(
+        "no Chrome, Chromium or Edge found to measure the page; set FINITE_CHROME to a browser binary",
+    )?;
+    let _turn = browsers()
+        .acquire()
+        .await
+        .map_err(|_| "measuring is shutting down")?;
+    let dir = std::env::temp_dir().join(format!("finite-scene-{}", random_id(10)));
+    let (browser, mut tab) = cdp::Browser::launch(&chrome, dir.clone()).await?;
+    let result = scene_page(&mut tab, &dir, &m).await;
+    browser.close(tab).await;
+    result
+}
+
+async fn scene_page(
+    tab: &mut cdp::Tab,
+    dir: &std::path::Path,
+    m: &Measurement,
+) -> Result<Scene, String> {
+    load(tab, dir, m).await?;
+    let mut raw = measure_scene(tab, m).await?;
     let settle = m.settle.min(MAX_SETTLE);
-    if layout.animated && !settle.is_zero() {
+    if raw.animated && !settle.is_zero() {
         tokio::time::sleep(settle).await;
-        layout = measure(tab, &m.artboard, &[]).await?;
+        raw = measure_scene(tab, m).await?;
     }
-    Ok(layout.nodes.iter().map(element_box).collect())
+    let mut nodes = BTreeMap::new();
+    for (id, x, y, width, height, style) in raw.elements {
+        nodes.insert(
+            id,
+            Resolved {
+                x,
+                y,
+                width,
+                height,
+                style,
+            },
+        );
+    }
+    for (id, parent, x, y, width, height) in raw.texts {
+        let Some(style) = nodes.get(&parent).map(|p| p.style.clone()) else {
+            continue;
+        };
+        nodes.insert(
+            id,
+            Resolved {
+                x,
+                y,
+                width,
+                height,
+                style,
+            },
+        );
+    }
+    Ok(Scene { nodes })
+}
+
+/// Measures artboards for an export in headless Chrome, with [`scene`].
+/// Codecs run on the blocking pool, so it waits on the runtime it was
+/// made on from there. Calling it on a runtime thread panics.
+pub struct ChromeMeasure(pub tokio::runtime::Handle);
+
+impl Measure for ChromeMeasure {
+    fn scene(&self, doc: &Document, artboard: &str) -> Result<Scene, finite_transfer::Error> {
+        let m =
+            plan_measurement(doc, artboard, Options::default()).map_err(finite_transfer::Error)?;
+        self.0.block_on(scene(m)).map_err(finite_transfer::Error)
+    }
+}
+
+/// What the page reports for a [`Scene`].
+#[derive(serde::Deserialize)]
+struct RawScene {
+    elements: Vec<RawElement>,
+    /// `[id, parent id, x, y, width, height]`.
+    texts: Vec<(NodeId, NodeId, f64, f64, f64, f64)>,
+    animated: bool,
+}
+
+/// `[id, x, y, width, height, styles]`.
+type RawElement = (NodeId, f64, f64, f64, f64, BTreeMap<String, String>);
+
+async fn measure_scene(tab: &mut cdp::Tab, m: &Measurement) -> Result<RawScene, String> {
+    let board = serde_json::to_string(&m.artboard).expect("strings serialize");
+    let props = serde_json::to_string(COMPUTED).expect("strings serialize");
+    let texts = serde_json::to_string(&m.texts).expect("strings serialize");
+    let script = format!(
+        r#"(() => {{
+  const board = document.querySelector(`[{VIEWER_ID_ATTR}="${{CSS.escape({board})}}"]`);
+  const origin = board.getBoundingClientRect();
+  const box = (r) => [r.left - origin.left, r.top - origin.top, r.width, r.height];
+  const runs = new Map({texts});
+  const elements = [];
+  const texts = [];
+  for (const el of [board, ...board.querySelectorAll(`[{VIEWER_ID_ATTR}]`)]) {{
+    if (el !== board && !el.getClientRects().length) continue;
+    const id = el.getAttribute("{VIEWER_ID_ATTR}");
+    const computed = getComputedStyle(el);
+    const style = {{}};
+    for (const name of {props}) style[name] = computed.getPropertyValue(name);
+    elements.push([id, ...box(el.getBoundingClientRect()), style]);
+    const own = [...el.childNodes].filter((c) => c.nodeType === 3);
+    const lineHeight = parseFloat(computed.lineHeight);
+    for (const [text, k, start, end] of runs.get(id) || []) {{
+      const node = own[k];
+      if (!node || end > node.length) continue;
+      const range = document.createRange();
+      range.setStart(node, start);
+      range.setEnd(node, end);
+      // Each line's box is its glyphs' height; widen it to the line height,
+      // as a text layer is drawn.
+      let ink = null;
+      for (const r of range.getClientRects()) {{
+        if (!r.width && !r.height) continue;
+        const lead = lineHeight ? (lineHeight - r.height) / 2 : 0;
+        const [l, t, rr, b] = [r.left, r.top - lead, r.right, r.bottom + lead];
+        ink = ink ? [Math.min(ink[0], l), Math.min(ink[1], t), Math.max(ink[2], rr), Math.max(ink[3], b)] : [l, t, rr, b];
+      }}
+      if (!ink) continue;
+      texts.push([text, id, ...box({{ left: ink[0], top: ink[1], width: ink[2] - ink[0], height: ink[3] - ink[1] }})]);
+    }}
+  }}
+  return {{
+    elements,
+    texts,
+    animated: document.scripts.length > 0 || document.getAnimations().length > 0,
+  }};
+}})()"#
+    );
+    let value = tab.evaluate(&script).await?;
+    serde_json::from_value(value).map_err(|e| format!("couldn't measure the page: {e}"))
 }
 
 fn rect([x, y, width, height]: [f64; 4]) -> Rect {
