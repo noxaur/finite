@@ -1,6 +1,6 @@
 {
   "name": "desktop",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "private": true,
   "description": "A design canvas that agents edit",
   "type": "module",
