@@ -100,6 +100,8 @@ export interface RendererOptions {
    * question, which arrives a moment later. Call them again to read the answer.
    */
   readonly onLayout?: () => void;
+  /** Called when a sandboxed artboard reports a new size, which an auto-height one does after its scripts run. */
+  readonly onResize?: () => void;
 }
 
 /**
@@ -578,8 +580,11 @@ export class Renderer {
       if (moved) this.options.onLayout?.();
     } else if (m.type === "size") {
       const fit = (n: number) => `${Math.min(MAX_SIDE, Math.max(1, n))}px`;
-      iframe.style.width = fit(num("width"));
-      iframe.style.height = fit(num("height"));
+      const [width, height] = [fit(num("width")), fit(num("height"))];
+      const changed = iframe.style.width !== width || iframe.style.height !== height;
+      iframe.style.width = width;
+      iframe.style.height = height;
+      if (changed) this.options.onResize?.();
     } else if (m.type === "wheel" && this.options.onWheel) {
       // The iframe's content is unscaled; the canvas zoom scales its box.
       const rect = iframe.getBoundingClientRect();

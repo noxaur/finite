@@ -174,7 +174,7 @@ async fn large_designs_move_too() {
     let artboard = NewArtboard {
         name: "Page".into(),
         width: 800.0,
-        height: 600.0,
+        height: Some(600.0),
         position: None,
         styles: Default::default(),
     };

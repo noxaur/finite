@@ -250,8 +250,9 @@ pub struct CreateArtboardParams {
     pub(super) name: String,
     /// Width in CSS pixels.
     pub(super) width: f64,
-    /// Height in CSS pixels.
-    pub(super) height: f64,
+    /// Height in CSS pixels. Omit it and the artboard grows to fit its content.
+    #[serde(default)]
+    pub(super) height: Option<f64>,
     /// Canvas position. Omit x and y to place it to the right of the existing
     /// artboards, top-aligned with them.
     #[serde(default)]

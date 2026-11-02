@@ -722,7 +722,7 @@ async fn the_router_relays_large_designs() {
     let artboard = NewArtboard {
         name: "Page".into(),
         width: 800.0,
-        height: 600.0,
+        height: Some(600.0),
         position: None,
         styles: Default::default(),
     };

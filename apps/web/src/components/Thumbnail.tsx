@@ -65,6 +65,7 @@ function Preview({ id, seq }: { id: string; seq: number }) {
     const controller = new AbortController();
     let renderer: Renderer | undefined;
     let replica: Replica | undefined;
+    let observer: ResizeObserver | undefined;
     const wait = Math.max(PAUSE_MS, lastFetch.current + MIN_INTERVAL_MS - Date.now());
     const timer = setTimeout(() => {
       lastFetch.current = Date.now();
@@ -84,12 +85,20 @@ function Preview({ id, seq }: { id: string; seq: number }) {
             renderer = new Renderer(world, replica);
             world.replaceChildren();
             renderer.reset();
-            const bounds = union(renderer.artboardBounds().values());
-            setEmpty(bounds === null);
-            if (!bounds) return;
-            const view = fit(bounds, frame.clientWidth, frame.clientHeight, 12);
-            world.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.zoom})`;
-            world.style.setProperty("--inv-zoom", "0");
+            const place = () => {
+              const bounds = union(renderer!.artboardBounds().values());
+              setEmpty(bounds === null);
+              if (!bounds) return;
+              const view = fit(bounds, frame.clientWidth, frame.clientHeight, 12);
+              world.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.zoom})`;
+              world.style.setProperty("--inv-zoom", "0");
+            };
+            place();
+            // An auto-height artboard grows as its images and fonts load.
+            if (typeof ResizeObserver !== "undefined") {
+              observer = new ResizeObserver(place);
+              for (const board of world.children) observer.observe(board);
+            }
           },
           () => {},
         );
@@ -97,6 +106,7 @@ function Preview({ id, seq }: { id: string; seq: number }) {
     return () => {
       clearTimeout(timer);
       controller.abort();
+      observer?.disconnect();
       renderer?.dispose();
       // The document lives in WebAssembly memory, which isn't garbage collected.
       replica?.free();

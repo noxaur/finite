@@ -75,7 +75,7 @@ async fn wire_messages_match_the_fixture() {
             let spec = NewArtboard {
                 name: "Home".into(),
                 width: 1440.0,
-                height: 900.0,
+                height: Some(900.0),
                 position: None,
                 styles: BTreeMap::new(),
             };
@@ -127,7 +127,7 @@ async fn wire_messages_match_the_fixture() {
             let spec = NewArtboard {
                 name: "Scratch".into(),
                 width: 300.0,
-                height: 200.0,
+                height: Some(200.0),
                 position: Some((2000.0, 0.0)),
                 styles: BTreeMap::new(),
             };
