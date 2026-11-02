@@ -185,13 +185,17 @@ pub(super) fn comments_json<'a>(
                 .chain(c.messages.iter().skip(1 + skipped));
             let thread: Vec<_> = shown
                 .map(|m| {
-                    serde_json::json!({
+                    let mut message = serde_json::json!({
                         "author": m.author.name,
                         "from": m.author.kind,
                         "message": m.body,
                         "at": m.at,
                         "changes": m.changes.iter().map(|c| &c.label).collect::<Vec<_>>(),
-                    })
+                    });
+                    if m.edited_at.is_some() {
+                        message["edited"] = true.into();
+                    }
+                    message
                 })
                 .collect();
             let relative_to = if c.artboard_id.is_some() {

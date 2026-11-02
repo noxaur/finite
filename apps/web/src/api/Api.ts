@@ -66,6 +66,13 @@ export class Api extends Context.Service<
       commentId: string,
       resolved: boolean,
     ): Effect.Effect<Comment, ApiError | Refused>;
+    /** Replaces the thread's newest message, which `author` must have written. */
+    editLastMessage(
+      designId: string,
+      commentId: string,
+      edit: { readonly author: CommentAuthor; readonly body: string },
+    ): Effect.Effect<Comment, ApiError | Refused>;
+    deleteComment(designId: string, commentId: string): Effect.Effect<void, ApiError>;
     /** Replaces the CSS every artboard shares, as an edit by `author`. Blank CSS removes it. */
     setSharedCss(
       designId: string,
@@ -171,6 +178,23 @@ export class Api extends Context.Service<
         return yield* sendComment(HttpClientRequest.patch(path), { resolved });
       });
 
+      const editLastMessage = Effect.fn("Api.editLastMessage")(function* (
+        designId: string,
+        commentId: string,
+        edit: { readonly author: CommentAuthor; readonly body: string },
+      ) {
+        const path = `${comments(designId)}/${encodeURIComponent(commentId)}/messages/last`;
+        return yield* sendComment(HttpClientRequest.patch(path), edit);
+      });
+
+      const deleteComment = Effect.fn("Api.deleteComment")(function* (
+        designId: string,
+        commentId: string,
+      ) {
+        const path = `${comments(designId)}/${encodeURIComponent(commentId)}`;
+        yield* client.del(path).pipe(toApiError);
+      });
+
       const setSharedCss = Effect.fn("Api.setSharedCss")(function* (
         designId: string,
         author: CommentAuthor,
@@ -188,6 +212,8 @@ export class Api extends Context.Service<
         createComment,
         replyToComment,
         setCommentResolved,
+        editLastMessage,
+        deleteComment,
         setSharedCss,
       });
     }),

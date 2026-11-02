@@ -83,6 +83,9 @@ pub enum Record {
     Comment {
         comment: Comment,
     },
+    CommentDeleted {
+        id: String,
+    },
     Meta {
         meta: DesignMeta,
     },
@@ -94,7 +97,8 @@ pub enum Record {
 /// The server holds one of these per open design and serializes access to it,
 /// so it is the single source of truth. All edits go through [`Design::commit`],
 /// [`Design::undo`] or [`Design::redo`], and all comment updates through
-/// [`Design::add_comment`], [`Design::reply`] or [`Design::set_resolved`].
+/// [`Design::add_comment`], [`Design::reply`], [`Design::set_resolved`],
+/// [`Design::edit_message`] or [`Design::delete_comment`].
 #[derive(Debug)]
 pub struct Design {
     pub meta: DesignMeta,
@@ -306,6 +310,7 @@ impl Design {
                     None => self.comments.push(comment),
                 }
             }
+            Record::CommentDeleted { id } => self.comments.retain(|c| c.id != id),
             Record::Meta { meta } => self.meta = meta,
         }
     }
@@ -394,6 +399,7 @@ impl Design {
             x: anchor.x,
             y: anchor.y,
             resolved: false,
+            resolved_at: None,
             created_at: now,
             messages: vec![Message {
                 author,
@@ -401,6 +407,7 @@ impl Design {
                 at: now,
                 seq: self.seq,
                 changes: Vec::new(),
+                edited_at: None,
             }],
             detached_at: None,
             rev: 0,
@@ -437,28 +444,74 @@ impl Design {
             ),
             AuthorKind::User => Vec::new(),
         };
-        comment.resolved = resolved;
+        mark_resolved(comment, resolved, now);
         comment.messages.push(Message {
             author,
             body,
             at: now,
             seq: self.seq,
             changes,
+            edited_at: None,
         });
         comment.rev += 1;
         Ok(comment)
     }
 
-    pub fn set_resolved(&mut self, id: &str, resolved: bool) -> Result<&Comment, CommentError> {
+    pub fn set_resolved(
+        &mut self,
+        id: &str,
+        resolved: bool,
+        now: u64,
+    ) -> Result<&Comment, CommentError> {
         let room_to_open = self.check_room_to_open();
         let comment = find(&mut self.comments, id)?;
         if comment.resolved && !resolved {
             room_to_open?;
         }
-        comment.resolved = resolved;
+        mark_resolved(comment, resolved, now);
         comment.rev += 1;
         Ok(comment)
     }
+
+    /// Replaces the body of comment `id`'s newest message, which must be by
+    /// `author_id`.
+    pub fn edit_message(
+        &mut self,
+        id: &str,
+        author_id: &str,
+        body: &str,
+        now: u64,
+    ) -> Result<&Comment, CommentError> {
+        let body = comment::check_body(body)?;
+        let comment = find(&mut self.comments, id)?;
+        let message = comment
+            .messages
+            .last_mut()
+            .filter(|m| m.author.id == author_id)
+            .ok_or(CommentError::NotEditable)?;
+        message.body = body;
+        message.edited_at = Some(now);
+        comment.rev += 1;
+        Ok(comment)
+    }
+
+    pub fn delete_comment(&mut self, id: &str) -> Result<(), CommentError> {
+        let index = self
+            .comments
+            .iter()
+            .position(|c| c.id == id)
+            .ok_or_else(|| CommentError::NotFound(id.into()))?;
+        self.comments.remove(index);
+        Ok(())
+    }
+}
+
+/// Sets the resolved state, and when it went to resolved.
+fn mark_resolved(comment: &mut Comment, resolved: bool, now: u64) {
+    if resolved && !comment.resolved {
+        comment.resolved_at = Some(now);
+    }
+    comment.resolved = resolved;
 }
 
 impl Design {
@@ -706,6 +759,55 @@ mod tests {
     }
 
     #[test]
+    fn only_the_newest_message_can_be_edited_by_its_author() {
+        let mut d = design();
+        d.commit("agent", "board", &[create("a", None)], 1);
+        let id = pin(&mut d, "a");
+        let edited = d.edit_message(&id, "user:1", " Make it blue ", 2).unwrap();
+        assert_eq!(edited.messages[0].body, "Make it blue");
+        assert_eq!(edited.messages[0].edited_at, Some(2));
+        assert_eq!(edited.rev, 1);
+        assert_eq!(
+            d.edit_message(&id, "user:2", "Mine now", 3).unwrap_err(),
+            CommentError::NotEditable
+        );
+        // Once an agent answers, the person's message isn't the newest.
+        d.reply(&id, author("agent", AuthorKind::Agent), "Done", None, 4)
+            .unwrap();
+        assert_eq!(
+            d.edit_message(&id, "user:1", "Actually red", 5)
+                .unwrap_err(),
+            CommentError::NotEditable
+        );
+    }
+
+    #[test]
+    fn resolving_stamps_when_and_deleting_survives_replay() {
+        let mut d = design();
+        d.commit("agent", "board", &[create("a", None)], 1);
+        let id = pin(&mut d, "a");
+        assert_eq!(d.set_resolved(&id, true, 7).unwrap().resolved_at, Some(7));
+        // Resolving again keeps the first time.
+        assert_eq!(d.set_resolved(&id, true, 9).unwrap().resolved_at, Some(7));
+        let agent = author("agent", AuthorKind::Agent);
+        d.set_resolved(&id, false, 10).unwrap();
+        let resolved = d.reply(&id, agent, "Done", Some(true), 11).unwrap();
+        assert_eq!(resolved.resolved_at, Some(11));
+
+        let comment = resolved.clone();
+        d.delete_comment(&id).unwrap();
+        assert!(d.comments().is_empty());
+        assert!(matches!(
+            d.delete_comment(&id),
+            Err(CommentError::NotFound(_))
+        ));
+        let mut restored = design();
+        restored.replay(Record::Comment { comment });
+        restored.replay(Record::CommentDeleted { id });
+        assert!(restored.comments().is_empty());
+    }
+
+    #[test]
     fn shared_css_is_undoable_and_saved() {
         let mut d = design();
         let css = |css: &str| Op::Css {
@@ -740,7 +842,7 @@ mod tests {
         assert_eq!(rev(&d), 0);
         d.reply(&id, author("agent", AuthorKind::Agent), "Done", None, 2)
             .unwrap();
-        d.set_resolved(&id, true).unwrap();
+        d.set_resolved(&id, true, 3).unwrap();
         assert_eq!(rev(&d), 2);
         // Deleting the artboard moves the pin, and that's a change too.
         d.commit("agent", "delete", &[Op::Delete { id: "a".into() }], 3);
@@ -783,11 +885,11 @@ mod tests {
         assert_eq!(more.unwrap_err(), CommentError::TooManyOpen);
 
         // Resolving one makes room, and reopening it is refused once that room is taken.
-        d.set_resolved(&ids[0], true).unwrap();
+        d.set_resolved(&ids[0], true, 0).unwrap();
         d.add_comment(user.clone(), anchor, "One more", &mut || "z".into(), 0)
             .unwrap();
         assert_eq!(
-            d.set_resolved(&ids[0], false).unwrap_err(),
+            d.set_resolved(&ids[0], false, 0).unwrap_err(),
             CommentError::TooManyOpen
         );
         // A person's reply would reopen it too.
@@ -837,7 +939,7 @@ mod tests {
             journal.push(Record::Change { change });
         }
         let id = pin(&mut live, "a");
-        let comment = live.set_resolved(&id, true).unwrap().clone();
+        let comment = live.set_resolved(&id, true, 3).unwrap().clone();
         journal.push(Record::Comment { comment });
         live.meta.name = "Renamed".into();
         journal.push(Record::Meta {

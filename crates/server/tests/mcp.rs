@@ -6,7 +6,7 @@ mod agent;
 use agent::{Agent, id_after, test_app};
 use axum::{
     body::Body,
-    http::{Request, header},
+    http::{Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -329,6 +329,77 @@ async fn long_agent_names_are_cut() {
         .as_str()
         .unwrap();
     assert_eq!(name.chars().count(), finite_design::comment::MAX_NAME);
+}
+
+/// A person edits their newest message over HTTP, agents see it was edited,
+/// and deleting the comment takes it away from agents too.
+#[tokio::test]
+async fn people_edit_their_newest_message_and_delete_comments() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Alice").await;
+    let created = agent.ok("create_design", json!({ "name": "Edits" })).await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .expect("a design id")
+        .to_owned();
+    let send = |method: &str, path: String, body: Value| {
+        let app = app.clone();
+        let req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        async move { app.oneshot(req).await.unwrap() }
+    };
+    let me = json!({ "id": "u1", "name": "Per" });
+    let res = send(
+        "POST",
+        format!("/api/designs/{design}/comments"),
+        json!({ "author": me, "body": "Make it red", "x": 1, "y": 2 }),
+    )
+    .await;
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let comment: Value = serde_json::from_slice(&bytes).unwrap();
+    let id = comment["id"].as_str().unwrap();
+    let last = format!("/api/designs/{design}/comments/{id}/messages/last");
+
+    let someone = json!({ "id": "u2", "name": "Guest" });
+    let res = send(
+        "PATCH",
+        last.clone(),
+        json!({ "author": someone, "body": "No" }),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let res = send(
+        "PATCH",
+        last.clone(),
+        json!({ "author": me, "body": "Make it blue" }),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let comments = agent
+        .ok("get_comments", json!({ "designId": design }))
+        .await;
+    assert!(comments.contains("Make it blue"), "{comments}");
+    assert!(comments.contains(r#""edited": true"#), "{comments}");
+
+    let res = send(
+        "DELETE",
+        format!("/api/designs/{design}/comments/{id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let comments = agent
+        .ok(
+            "get_comments",
+            json!({ "designId": design, "includeResolved": true }),
+        )
+        .await;
+    assert!(!comments.contains("Make it blue"), "{comments}");
 }
 
 /// An agent can find a design by name, and a long list is cut short.

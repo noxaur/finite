@@ -116,6 +116,16 @@ export class Camera {
     return { x: (clientX - rect.left - x) / zoom, y: (clientY - rect.top - y) / zoom };
   }
 
+  /** Pans so the canvas point (`x`, `y`) sits in the middle of the viewport, at the same zoom. */
+  centerOn(x: number, y: number) {
+    const { zoom } = this.view;
+    this.set({
+      zoom,
+      x: this.viewport.clientWidth / 2 - x * zoom,
+      y: this.viewport.clientHeight / 2 - y * zoom,
+    });
+  }
+
   fitTo(bounds: Bounds | null) {
     if (!bounds) return;
     this.set(fit(bounds, this.viewport.clientWidth, this.viewport.clientHeight));

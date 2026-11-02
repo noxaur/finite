@@ -15,7 +15,8 @@ import { localUser } from "@/lib/user";
 import { timeAgo } from "@/lib/time";
 import { runtime } from "@/runtime";
 import { colors, radii, space } from "@/styles/tokens.stylex";
-import { CommentLayer, type Draft, type Mode, ToolPill } from "./Comments";
+import { CommentLayer, type Draft, type Mode, pinPosition, ToolPill } from "./Comments";
+import { CommentsPanel } from "./CommentsPanel";
 import { SharedCssPanel } from "./SharedCss";
 
 /** How long "show what changed" outlines stay up. */
@@ -88,7 +89,10 @@ export function DesignCanvas({ id }: { id: string }) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [hover, setHover] = useState<Hit | null>(null);
   const [flash, setFlash] = useState<ReadonlyArray<string>>([]);
-  const [cssOpen, setCssOpen] = useState(false);
+  // The shared CSS and the comments list open in the same place, one at a time.
+  const [panel, setPanel] = useState<"css" | "comments" | null>(null);
+  const togglePanel = (name: "css" | "comments") =>
+    setPanel((open) => (open === name ? null : name));
 
   // Whether a draft or thread is open, for the window key handler.
   const popupRef = useRef(false);
@@ -270,6 +274,32 @@ export function DesignCanvas({ id }: { id: string }) {
     return undefined;
   };
 
+  const editMessage = async (commentId: string, body: string) => {
+    const exit = await runtime.runPromiseExit(
+      Api.use((api) => api.editLastMessage(id, commentId, { author: localUser(), body })),
+    );
+    if (Exit.isFailure(exit)) return unsent(exit.cause);
+    sessionRef.current?.upsertComment(exit.value);
+    return undefined;
+  };
+
+  const deleteComment = (commentId: string) => {
+    setOpenId(null);
+    void runtime.runPromiseExit(Api.use((api) => api.deleteComment(id, commentId))).then((exit) => {
+      if (Exit.isSuccess(exit)) sessionRef.current?.removeComment(commentId);
+    });
+  };
+
+  // From the comments list: open the thread and bring its pin into view.
+  const showComment = (commentId: string) => {
+    const comment = comments.get(commentId);
+    const replica = sessionRef.current?.replica;
+    const at = comment && replica ? pinPosition(replica, comment) : null;
+    if (at) cameraRef.current?.centerOn(at.x, at.y);
+    setDraft(null);
+    setOpenId(commentId);
+  };
+
   const saveCss = async (css: string) => {
     const exit = await runtime.runPromiseExit(
       Api.use((api) => api.setSharedCss(id, localUser(), css)),
@@ -303,6 +333,8 @@ export function DesignCanvas({ id }: { id: string }) {
     ...(target ? [{ key: "target", rect: canvasRect(target), flash: false }] : []),
     ...flash.map((nodeId) => ({ key: `flash:${nodeId}`, rect: canvasRect(nodeId), flash: true })),
   ];
+
+  const openCount = [...comments.values()].filter((c) => !c.resolved).length;
 
   const fitAll = () => {
     const renderer = rendererRef.current;
@@ -373,6 +405,8 @@ export function DesignCanvas({ id }: { id: string }) {
               onCancelDraft={() => setDraft(null)}
               onReply={reply}
               onResolve={resolve}
+              onEdit={editMessage}
+              onDelete={deleteComment}
               onShowChange={(nodeIds) => setFlash([...nodeIds])}
             />
           )}
@@ -390,12 +424,21 @@ export function DesignCanvas({ id }: { id: string }) {
         <span {...stylex.props(styles.spacer)} />
         <button
           type="button"
-          aria-pressed={cssOpen}
-          onClick={() => setCssOpen((open) => !open)}
+          aria-pressed={panel === "css"}
+          onClick={() => togglePanel("css")}
           {...stylex.props(styles.tool)}
           title="CSS every artboard uses"
         >
           Shared CSS
+        </button>
+        <button
+          type="button"
+          aria-pressed={panel === "comments"}
+          onClick={() => togglePanel("comments")}
+          {...stylex.props(styles.tool)}
+          title="Every comment, open and resolved"
+        >
+          Comments{openCount > 0 && <span {...stylex.props(styles.count)}>{openCount}</span>}
         </button>
         {presence.map((p) => (
           <span key={p.actor} {...stylex.props(styles.chip)} title={p.status ?? undefined}>
@@ -429,8 +472,18 @@ export function DesignCanvas({ id }: { id: string }) {
         </ol>
       )}
 
-      {cssOpen && (
-        <SharedCssPanel css={session.css} onSave={saveCss} onClose={() => setCssOpen(false)} />
+      {panel === "css" && (
+        <SharedCssPanel css={session.css} onSave={saveCss} onClose={() => setPanel(null)} />
+      )}
+      {panel === "comments" && sessionRef.current && (
+        <CommentsPanel
+          replica={sessionRef.current.replica}
+          comments={comments}
+          working={working}
+          openId={openId}
+          onSelect={showComment}
+          onClose={() => setPanel(null)}
+        />
       )}
 
       <ToolPill mode={mode} onMode={setMode} />
@@ -606,6 +659,11 @@ const styles = stylex.create({
     color: "inherit",
     font: "inherit",
     cursor: "var(--cursor-pointer, pointer)",
+  },
+  count: {
+    marginLeft: 6,
+    color: colors.muted,
+    fontVariantNumeric: "tabular-nums",
   },
   percent: {
     minWidth: 48,

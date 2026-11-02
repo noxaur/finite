@@ -9,6 +9,8 @@
 //!   how a viewer goes from a comment to the change that answered it.
 //! - A user's reply reopens a resolved comment. An agent's reply keeps the
 //!   current state unless it asks to resolve or reopen.
+//! - A person can edit their own message while it's the thread's newest, so
+//!   never one an agent has already answered.
 
 use std::{
     collections::{BTreeSet, HashSet, VecDeque},
@@ -72,6 +74,9 @@ pub struct Message {
     pub seq: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changes: Vec<ChangeRef>,
+    /// When its author last changed the body, in milliseconds since the Unix epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_at: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -86,6 +91,10 @@ pub struct Comment {
     pub x: f64,
     pub y: f64,
     pub resolved: bool,
+    /// When it was last resolved, in milliseconds since the Unix epoch.
+    /// Viewers fade resolved pins out a while after this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<u64>,
     pub created_at: u64,
     /// The first message is the comment itself; the rest are replies.
     pub messages: Vec<Message>,
@@ -137,12 +146,17 @@ pub struct Anchor {
 pub enum CommentError {
     NotFound(String),
     NodeNotFound(NodeId),
-    NotInArtboard { node: NodeId, artboard: NodeId },
+    NotInArtboard {
+        node: NodeId,
+        artboard: NodeId,
+    },
     Empty,
     TooLong,
     BadPosition,
     TooManyOpen,
     ThreadFull,
+    /// Only the newest message can be edited, and only by its author.
+    NotEditable,
 }
 
 impl fmt::Display for CommentError {
@@ -163,6 +177,9 @@ impl fmt::Display for CommentError {
             Self::ThreadFull => write!(
                 f,
                 "this thread has {MAX_MESSAGES} messages, the most it can have; start a new comment"
+            ),
+            Self::NotEditable => f.write_str(
+                "only your own message can be edited, while it's the newest in the thread",
             ),
         }
     }
@@ -421,6 +438,7 @@ mod tests {
             at: 0,
             seq: 0,
             changes: Vec::new(),
+            edited_at: None,
         };
         let mut comment = Comment {
             id: "c".into(),
@@ -429,6 +447,7 @@ mod tests {
             x: 0.0,
             y: 0.0,
             resolved: false,
+            resolved_at: None,
             created_at: 0,
             messages: vec![message(AuthorKind::User)],
             detached_at: None,

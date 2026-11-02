@@ -706,7 +706,28 @@ impl DesignHandle {
     }
 
     pub fn set_resolved(&self, id: &str, resolved: bool) -> Result<Comment, CommentError> {
-        self.update_comment(|design| design.set_resolved(id, resolved))
+        self.update_comment(|design| design.set_resolved(id, resolved, now_ms()))
+    }
+
+    /// Edits the newest message. See [`Design::edit_message`].
+    pub fn edit_message(
+        &self,
+        id: &str,
+        author_id: &str,
+        body: &str,
+    ) -> Result<Comment, CommentError> {
+        self.update_comment(|design| design.edit_message(id, author_id, body, now_ms()))
+    }
+
+    /// Deletes a comment, then tells viewers.
+    pub fn delete_comment(&self, id: &str) -> Result<(), CommentError> {
+        let mut state = self.lock();
+        state.design.delete_comment(id)?;
+        let message = DesignMessage::CommentDeleted { id };
+        let _ = state.events.send(Outgoing::new(None, &message));
+        self.record(&mut state, Record::CommentDeleted { id: id.to_owned() });
+        self.comments.notify_waiters();
+        Ok(())
     }
 
     /// Runs a comment update, then sends the whole comment to viewers.

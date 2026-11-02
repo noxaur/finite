@@ -90,6 +90,10 @@ pub enum DesignMessage<'a> {
     Comment {
         comment: &'a Comment,
     },
+    /// A person deleted a comment and its thread.
+    CommentDeleted {
+        id: &'a str,
+    },
 }
 
 /// A change a reconnecting viewer missed, as its `change` message had it.
