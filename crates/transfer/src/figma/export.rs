@@ -1023,4 +1023,31 @@ mod tests {
             (20.0, 40.0, 0.0)
         );
     }
+
+    #[test]
+    fn wrapped_flex_out_of_order_keeps_its_positions() {
+        let (doc, names) = design(
+            r#"<div data-name="Board"><div data-name="A"></div><div data-name="B"></div></div>"#,
+        );
+        let wrap = [("display", "flex"), ("flex-wrap", "wrap")];
+        let scene = |a: f64, b: f64| Scene {
+            nodes: BTreeMap::from([
+                (names["Board"].clone(), at(0.0, 0.0, 400.0, 300.0, &wrap)),
+                (names["A"].clone(), at(a, 0.0, 20.0, 20.0, &[])),
+                (names["B"].clone(), at(b, 0.0, 20.0, 20.0, &[])),
+            ]),
+        };
+        // `order` put B before A: auto layout would swap them back.
+        let (payload, exported) = export(&doc, scene(20.0, 0.0));
+        assert!(payload.nodes[0].layout.is_none());
+        assert!(exported.diagnostics[0].reason.contains("out of order"));
+        // In order, it wraps as auto layout.
+        let (payload, exported) = export(&doc, scene(0.0, 20.0));
+        assert!(payload.nodes[0].layout.as_ref().unwrap().wrap);
+        assert!(
+            exported.diagnostics.is_empty(),
+            "{:?}",
+            exported.diagnostics
+        );
+    }
 }

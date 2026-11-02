@@ -214,6 +214,46 @@ describe("auto layout", () => {
   });
 });
 
+describe("readText runs", () => {
+  it("keeps line height, letter spacing and case that differ in a run", () => {
+    const base = {
+      fontName: { family: "Inter", style: "Regular" },
+      fontSize: 16,
+      lineHeight: { unit: "AUTO" },
+      letterSpacing: { unit: "PIXELS", value: 0 },
+      textCase: "ORIGINAL",
+    };
+    const label = node({
+      type: "TEXT",
+      characters: "Hi there",
+      ...base,
+      lineHeight: MIXED,
+      letterSpacing: MIXED,
+      textCase: MIXED,
+    });
+    const text = readText(label, [
+      { start: 0, end: 3, ...base },
+      {
+        start: 3,
+        end: 8,
+        ...base,
+        lineHeight: { unit: "PIXELS", value: 30 },
+        letterSpacing: { unit: "PERCENT", value: 10 },
+        textCase: "UPPER",
+      },
+    ]);
+    expect(text?.runs).toEqual([
+      {
+        start: 3,
+        end: 8,
+        lineHeight: { unit: "PIXELS", value: 30 },
+        letterSpacing: { unit: "PERCENT", value: 10 },
+        case: "UPPER",
+      },
+    ]);
+  });
+});
+
 describe("readText", () => {
   const segment = (start: number, end: number, fields: Record<string, unknown>): SegmentLike => ({
     start,

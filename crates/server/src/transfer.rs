@@ -102,6 +102,28 @@ pub fn strict_named<'a>(
     Ok(axes)
 }
 
+/// The stack an import's parser gets. A file nests as deep as a design may,
+/// and the deserializers recurse once per level: a Figma payload overflowed
+/// Tokio's 2 MiB blocking threads at 120 levels, which aborts the whole
+/// server. Untouched stack pages cost nothing.
+const DEEP_STACK: usize = 128 << 20;
+
+/// Runs `f` on a thread of its own with [`DEEP_STACK`].
+async fn on_deep_stack<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, TransferError> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("finite-import".into())
+        .stack_size(DEEP_STACK)
+        .spawn(move || {
+            let _ = tx.send(f());
+        })
+        .map_err(TransferError::Io)?;
+    rx.await
+        .map_err(|_| TransferError::Io(std::io::Error::other("the import's parser stopped")))
+}
+
 fn joined<T>(result: Result<T, tokio::task::JoinError>) -> Result<T, TransferError> {
     result.map_err(|e| TransferError::Io(std::io::Error::other(e)))
 }
@@ -123,16 +145,14 @@ pub async fn import(
     let bytes = Arc::new(bytes);
     let (imported, bytes) = {
         let file_name = file_name.clone();
-        joined(
-            tokio::task::spawn_blocking(move || {
-                let input = Input {
-                    bytes: &bytes,
-                    file_name: file_name.as_deref(),
-                };
-                (format.codec().read(&input), bytes)
-            })
-            .await,
-        )?
+        on_deep_stack(move || {
+            let input = Input {
+                bytes: &bytes,
+                file_name: file_name.as_deref(),
+            };
+            (format.codec().read(&input), bytes)
+        })
+        .await?
     };
     let mut imported = imported.map_err(|e| TransferError::Invalid(e.0))?;
     // Every score is known before placing, so strict mode refuses before

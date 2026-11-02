@@ -278,6 +278,13 @@ pub struct TextRun {
     pub fills: Vec<Paint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decoration: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_height: Option<Measure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub letter_spacing: Option<Measure>,
+    /// Like [`Text::case`], with `ORIGINAL` to undo the layer's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub case: Option<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }

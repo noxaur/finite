@@ -47,13 +47,7 @@ impl Walk<'_> {
         if let Some(value) = text.decoration.as_deref().and_then(decoration) {
             set("text-decoration", value.into());
         }
-        let case = match text.case.as_deref() {
-            Some("UPPER") => Some("uppercase"),
-            Some("LOWER") => Some("lowercase"),
-            Some("TITLE") => Some("capitalize"),
-            _ => None,
-        };
-        if let Some(value) = case {
+        if let Some(value) = text.case.as_deref().and_then(text_case) {
             set("text-transform", value.into());
         }
         // Figma keeps the spaces and line breaks it's given.
@@ -132,6 +126,23 @@ impl Walk<'_> {
         if let Some(value) = run.decoration.as_deref().and_then(decoration) {
             styles.insert("text-decoration".into(), value.into());
         }
+        if let Some(value) = run.line_height.as_ref().and_then(line_height) {
+            styles.insert("line-height".into(), value);
+        }
+        if let Some(value) = run.letter_spacing.as_ref().and_then(letter_spacing) {
+            styles.insert("letter-spacing".into(), value);
+        }
+        match run.case.as_deref() {
+            Some("ORIGINAL") => {
+                styles.insert("text-transform".into(), "none".into());
+            }
+            Some(case) => {
+                if let Some(value) = text_case(case) {
+                    styles.insert("text-transform".into(), value.into());
+                }
+            }
+            None => {}
+        }
     }
 
     /// A text fragment for `characters`, if there are any.
@@ -188,6 +199,16 @@ fn letter_spacing(m: &Measure) -> Option<String> {
     }
 }
 
+/// Figma's text case as CSS `text-transform`.
+fn text_case(case: &str) -> Option<&'static str> {
+    match case {
+        "UPPER" => Some("uppercase"),
+        "LOWER" => Some("lowercase"),
+        "TITLE" => Some("capitalize"),
+        _ => None,
+    }
+}
+
 fn decoration(value: &str) -> Option<&'static str> {
     match value {
         "UNDERLINE" => Some("underline"),
@@ -210,6 +231,33 @@ mod tests {
         assert_eq!(byte_at(s, 3), Some(5));
         assert_eq!(byte_at(s, 4), Some(6));
         assert_eq!(byte_at(s, 5), None);
+    }
+
+    #[test]
+    fn runs_keep_line_height_spacing_and_case() {
+        let payload = r#"{"v":1,"kind":"figma-payload","file":{"name":"x"},"nodes":[{"id":"1","type":"FRAME","name":"F","x":0,"y":0,"width":100,"height":100,"children":[
+            {"id":"2","type":"TEXT","name":"T","x":0,"y":0,"width":100,"height":20,"text":{
+                "characters":"Hi there","fontFamily":"Inter","fontWeight":400,"fontSize":16,"case":"UPPER",
+                "runs":[{"start":3,"end":8,"lineHeight":{"unit":"PIXELS","value":30},"letterSpacing":{"unit":"PERCENT","value":10},"case":"ORIGINAL"}]}}]}]}"#;
+        let imported = super::super::read(&crate::Input {
+            bytes: payload.as_bytes(),
+            file_name: None,
+        })
+        .unwrap();
+        let text = &imported.boards[0].content[0];
+        let span = text
+            .children
+            .iter()
+            .find(|c| c.tag() == Some("span"))
+            .expect("a span for the run");
+        assert_eq!(span.styles["line-height"], "30px");
+        assert_eq!(span.styles["letter-spacing"], "0.1em");
+        assert_eq!(span.styles["text-transform"], "none");
+        assert!(
+            imported.diagnostics.is_empty(),
+            "{:?}",
+            imported.diagnostics
+        );
     }
 
     #[test]

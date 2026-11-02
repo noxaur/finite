@@ -238,12 +238,14 @@ export function appearance(
   return props;
 }
 
-const measure = (m: Measure | undefined, autoOk: boolean) => {
+function measure(m: Measure | undefined, autoOk: true): LineHeight | undefined;
+function measure(m: Measure | undefined, autoOk: false): LetterSpacing | undefined;
+function measure(m: Measure | undefined, autoOk: boolean): LineHeight | undefined {
   if (!m) return undefined;
-  if (m.unit === "AUTO") return autoOk ? { unit: "AUTO" as const } : undefined;
+  if (m.unit === "AUTO") return autoOk ? { unit: "AUTO" } : undefined;
   if (m.unit === "PIXELS" || m.unit === "PERCENT") return { unit: m.unit, value: m.value ?? 0 };
   return undefined;
-};
+}
 
 /** A text layer's styles, for after its font is set. */
 export function textProps(text: FigText): Record<string, unknown> {
@@ -259,12 +261,13 @@ export function textProps(text: FigText): Record<string, unknown> {
     text.decoration === "UNDERLINE" || text.decoration === "STRIKETHROUGH"
       ? text.decoration
       : "NONE";
-  props.textCase =
-    text.case === "UPPER" || text.case === "LOWER" || text.case === "TITLE"
-      ? text.case
-      : "ORIGINAL";
+  props.textCase = textCaseOf(text.case);
   return props;
 }
+
+/** A payload's text case as Figma's, `ORIGINAL` for anything else. */
+const textCaseOf = (value: string | undefined): TextCase =>
+  value === "UPPER" || value === "LOWER" || value === "TITLE" ? value : "ORIGINAL";
 
 /** The font a run asks for, built on the layer's own. */
 export function runFont(run: TextRun, text: FigText): WantedFont | undefined {
@@ -355,6 +358,11 @@ async function buildText(node: FigNode, text: FigText, ctx: Context): Promise<Te
       if (wanted) layer.setRangeFontName(start, end, await loadFont(wanted, ctx));
       if (run.fontSize !== undefined) layer.setRangeFontSize(start, end, Math.max(1, run.fontSize));
       if (run.fills) layer.setRangeFills(start, end, toPaints(run.fills, ctx.images));
+      const runLineHeight = measure(run.lineHeight, true);
+      if (runLineHeight) layer.setRangeLineHeight(start, end, runLineHeight);
+      const runSpacing = measure(run.letterSpacing, false);
+      if (runSpacing) layer.setRangeLetterSpacing(start, end, runSpacing);
+      if (run.case !== undefined) layer.setRangeTextCase(start, end, textCaseOf(run.case));
       if (run.decoration !== undefined) {
         const d = run.decoration;
         layer.setRangeTextDecoration(

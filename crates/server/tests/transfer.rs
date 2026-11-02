@@ -290,3 +290,36 @@ async fn a_figma_export_is_measured_in_a_browser() {
     assert_eq!(text["type"], "TEXT");
     assert_eq!(text["text"]["characters"], "Hi");
 }
+
+/// A Figma payload as deep as a payload may be is refused or imported, and
+/// never overflows the stack, which would abort the server.
+#[tokio::test]
+async fn a_deep_figma_payload_doesnt_crash_the_server() {
+    let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
+    let id = hub.create("Deep").meta.id;
+    for levels in [120, 250, 400] {
+        let frame = |id: usize, children: String| {
+            format!(
+                r#"{{"id":"{id}","type":"FRAME","name":"F","x":0,"y":0,"width":10,"height":10,"children":[{children}]}}"#
+            )
+        };
+        let mut nodes = String::new();
+        for level in (0..levels).rev() {
+            nodes = frame(level, nodes);
+        }
+        let payload =
+            format!(r#"{{"v":1,"kind":"figma-payload","file":{{"name":"x"}},"nodes":[{nodes}]}}"#);
+        let request = ImportRequest {
+            format: Format::Figma,
+            bytes: payload.into_bytes(),
+            file_name: None,
+            strict: Vec::new(),
+        };
+        let result = transfer::import(&hub, &id, &agent(), request).await;
+        if levels <= 250 {
+            assert!(result.is_ok(), "{levels} levels: {:?}", result.err());
+        } else {
+            assert!(result.is_err(), "{levels} levels");
+        }
+    }
+}

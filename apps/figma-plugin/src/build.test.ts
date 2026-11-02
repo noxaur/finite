@@ -338,6 +338,13 @@ function fakeHost(options: { fonts?: Array<[string, string]>; existing?: number 
     setRangeFills() {}
     setRangeFontSize() {}
     setRangeTextDecoration() {}
+    setRangeLineHeight(start: number, end: number, value: unknown) {
+      log.push(`range ${start}-${end} lineHeight ${JSON.stringify(value)}`);
+    }
+    setRangeLetterSpacing() {}
+    setRangeTextCase(start: number, end: number, value: unknown) {
+      log.push(`range ${start}-${end} textCase ${String(value)}`);
+    }
   }
 
   const page = new FakeNode("PAGE") as FakeNode & { selection: unknown[] };

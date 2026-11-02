@@ -170,25 +170,44 @@ fn flex(
         });
     }
 
-    if !wrap {
-        let boxes: Vec<[f64; 4]> = kids
-            .iter()
-            .zip(&fits)
-            .filter(|(_, fit)| {
-                fit.child.as_ref().and_then(|c| c.positioning.as_deref()) != Some("ABSOLUTE")
-            })
-            .map(|(kid, fit)| {
-                fit.text_box
-                    .unwrap_or([kid.node.x, kid.node.y, kid.node.width, kid.node.height])
-            })
-            .collect();
-        let laid = boxes.iter().map(|[x, y, w, h]| {
+    let boxes: Vec<[f64; 4]> = kids
+        .iter()
+        .zip(&fits)
+        .filter(|(_, fit)| {
+            fit.child.as_ref().and_then(|c| c.positioning.as_deref()) != Some("ABSOLUTE")
+        })
+        .map(|(kid, fit)| {
+            fit.text_box
+                .unwrap_or([kid.node.x, kid.node.y, kid.node.width, kid.node.height])
+        })
+        .collect();
+    let laid: Vec<([f64; 2], [f64; 2])> = boxes
+        .iter()
+        .map(|[x, y, w, h]| {
             if horizontal {
                 ([*x, *w], [*y, *h])
             } else {
                 ([*y, *h], [*x, *w])
             }
-        });
+        })
+        .collect();
+    if wrap {
+        // Wrapped lines aren't laid out here, but auto layout fills them in
+        // document order. A child out of reading order, as `order` makes
+        // it, would come back rearranged.
+        for pair in laid.windows(2) {
+            let (([pos, size], [line, _]), ([next, _], [next_line, _])) = (pair[0], pair[1]);
+            let same_line = (next_line - line).abs() <= TOLERANCE;
+            let backwards = if same_line {
+                next < pos + size - TOLERANCE
+            } else {
+                next_line < line
+            };
+            if backwards {
+                return Err("the browser placed its children out of order, as `order` does, so auto layout would rearrange them".into());
+            }
+        }
+    } else {
         let sizes: f64 = boxes
             .iter()
             .map(|b| if horizontal { b[2] } else { b[3] })
@@ -201,7 +220,7 @@ fn flex(
             "SPACE_BETWEEN" if n > 1.0 => (main.0, gap + free / (n - 1.0)),
             _ => (main.0, gap),
         };
-        for ([pos, size], [cpos, csize]) in laid {
+        for &([pos, size], [cpos, csize]) in &laid {
             let expected = match counter {
                 "CENTER" => Some(cross.0 + (cross.1 - csize) / 2.0),
                 "MAX" => Some(cross.0 + cross.1 - csize),

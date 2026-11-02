@@ -185,6 +185,10 @@ export interface TextRun {
   italic?: boolean;
   fills?: FigPaint[];
   decoration?: string;
+  lineHeight?: Measure;
+  letterSpacing?: Measure;
+  /** Like `FigText.case`, with `ORIGINAL` to undo the layer's. */
+  case?: string;
 }
 
 /**

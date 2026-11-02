@@ -284,6 +284,17 @@ export function readText(
     if (fills && JSON.stringify(fills) !== firstFills) run.fills = fills;
     const decor = str(segment.textDecoration);
     if (decor && decor !== (str(first.textDecoration) ?? "NONE")) run.decoration = decor;
+    const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+    const runLineHeight = readMeasure(segment.lineHeight);
+    if (runLineHeight && !same(runLineHeight, readMeasure(first.lineHeight))) {
+      run.lineHeight = runLineHeight;
+    }
+    const runSpacing = readMeasure(segment.letterSpacing);
+    if (runSpacing && !same(runSpacing, readMeasure(first.letterSpacing))) {
+      run.letterSpacing = runSpacing;
+    }
+    const runCase = str(segment.textCase);
+    if (runCase && runCase !== (str(first.textCase) ?? "ORIGINAL")) run.case = runCase;
     if (Object.keys(run).length > 2) runs.push(run);
   }
   if (runs.length > 0) text.runs = runs;
