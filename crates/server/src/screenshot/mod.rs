@@ -720,13 +720,16 @@ async fn render(
     // Scroll sizes are in the artboard's own pixels; its box on the page
     // includes any transform, such as `scale(2)`.
     // A collapsed side (an auto-height artboard with only positioned children)
-    // has no size to take the scale from, and a scale of 0 would hide its
-    // overflow, so it counts as unscaled.
-    let scale = |boxed: f64, offset: f64| if offset >= 1.0 { boxed / offset } else { 1.0 };
-    let (scale_x, scale_y) = (
-        scale(board.width, layout.offset[0]),
-        scale(board.height, layout.offset[1]),
-    );
+    // has no size to take the scale from, so it takes the other side's: a
+    // `scale()` transform scales both alike. With neither, it's unscaled.
+    let ratio = |boxed: f64, offset: f64| (offset >= 1.0).then(|| boxed / offset);
+    let (scale_x, scale_y) = {
+        let (x, y) = (
+            ratio(board.width, layout.offset[0]),
+            ratio(board.height, layout.offset[1]),
+        );
+        (x.or(y).unwrap_or(1.0), y.or(x).unwrap_or(1.0))
+    };
     let overflow = Overflow {
         right: (layout.scroll[0] - layout.client[0]).max(0.0) * scale_x,
         bottom: (layout.scroll[1] - layout.client[1]).max(0.0) * scale_y,
