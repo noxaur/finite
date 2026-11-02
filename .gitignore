@@ -45,3 +45,6 @@ crates/server/data
 apps/desktop/server
 apps/desktop/release
 e2e/ax/results
+
+# cargo-sweep stamp written by `vp run dev`
+sweep.timestamp
