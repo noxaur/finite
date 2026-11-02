@@ -14,7 +14,7 @@ Workflow:
 
 Users see which artboards you edit. To say what you're doing, call start_working_on_nodes with a short status, then finish_working_on_nodes.
 
-HTML: inline styles, or <style> blocks with classes. Prefer flexbox and gap. Name layers with data-name="Header". box-sizing is border-box. Images use <img src="https://...">; inline <svg> works. Artboards default to a white flex column with overflow hidden, so children shrink unless they have flex-shrink: 0. Resize an artboard with update_styles on its width or height. update_styles changes inline styles only; to change a <style> block, set_text_content on it with the whole new CSS.
+HTML: inline styles, or <style> blocks with classes. Prefer flexbox and gap. Name layers with data-name="Header". box-sizing is border-box. Images use <img src="https://...">; inline <svg> works. Artboards default to a white flex column with overflow hidden, so children shrink unless they have flex-shrink: 0. Resize an artboard with update_styles on its width or height. update_styles changes inline styles only; for part of a <style> or <script>, use replace_values with within, and set_text_content only to rewrite all of it.
 
 Motion: a <style> or <script> only affects its own artboard, so select by class or id, not html or body. Use @keyframes, transitions and :hover. For pointer-following effects, use a <script> with addEventListener (on* attributes are dropped). Scripts run sandboxed: inline only, no network requests, remote images and fonts allowed, restarted after every edit. get_screenshot captures about 3 seconds after load; pass settleMs (up to 10000) to capture later.
 

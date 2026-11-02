@@ -557,16 +557,19 @@ pub struct FindParams {
 #[serde(rename_all = "camelCase")]
 pub struct ReplaceParams {
     pub(super) design_id: String,
-    /// The value to find. A color, like "#3b82f6" or "rgb(59, 130, 246)", matches that color in any notation, including tints of it with their own alpha.
+    /// The text or value to find, matched exactly, like "300ms" or ".card". A color, like "#3b82f6" or "rgb(59, 130, 246)", matches that color in any notation outside a <script>. If replace is also a color, tints of it with their own alpha match too and keep their alpha; if replace is text like var(--brand), tints are left alone.
     pub(super) find: String,
     /// What to put in its place.
     pub(super) replace: String,
     /// Replace only inside this node, such as an artboard. Omit for every artboard.
     #[serde(default)]
     pub(super) within: Option<String>,
-    /// Also replace it in text content, like a product name. Defaults to false: styles, attributes and <style> CSS only.
+    /// Also replace it in text content, like a product name. Defaults to false: styles, attributes and the code in <style> and <script> only.
     #[serde(default)]
     pub(super) include_text: bool,
+    /// Replace every match even when a non-color value matches more than once inside a <style> or <script>. Without it, that case is refused with the match count and the lines, so you can narrow it with within or a longer find. dryRun never refuses.
+    #[serde(default)]
+    pub(super) all: bool,
     /// List what would change without changing it.
     #[serde(default)]
     pub(super) dry_run: bool,

@@ -62,7 +62,7 @@ pub const OWNER_META: &str = "finite/owner";
 const INSTRUCTIONS: &str = include_str!("instructions.md");
 
 /// What the search tools add to the instructions.
-const SEARCH_INSTRUCTIONS: &str = "Search: find_nodes finds elements by text, name, tag, CSS or attribute, across artboards and <style> blocks. replace_values changes a value everywhere in one call, like a brand color in any notation. Use them instead of reading whole artboards.";
+const SEARCH_INSTRUCTIONS: &str = "Search: find_nodes finds elements by text, name, tag, CSS or attribute, across artboards and <style> blocks. replace_values finds and replaces text or a value in one call: a brand color in any notation everywhere, or part of a <style> or <script> with within (not set_text_content with the whole CSS). Use them instead of reading whole artboards.";
 
 /// Whether `FINITE_MCP_EXTRA` (a comma-separated list) turns on a group of
 /// experimental tools. AX experiments (`e2e/ax`) compare agents with and
