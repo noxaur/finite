@@ -705,6 +705,37 @@ impl DesignHandle {
         Ok((output, change))
     }
 
+    /// Runs `build` with [`Design::transact`] under one lock: everything it
+    /// applies is one change and one undo step for `actor`, broadcast and
+    /// journaled once, and if it fails nobody sees anything. Build ops
+    /// against `tx.view()` and apply them with `tx.edit`, so edits inside
+    /// an instance become its overrides, as with [`Self::edit`].
+    pub fn transact<T, E>(
+        &self,
+        actor: &Actor,
+        label: &str,
+        build: impl FnOnce(&mut Transaction<'_>) -> Result<T, E>,
+    ) -> Result<Edited<T>, E> {
+        let now = now_ms();
+        let mut state = self.lock();
+        state.touch(actor, now);
+        let (change, output) = state.design.transact(&actor.id, label, now, build)?;
+        if let Some(change) = &change {
+            self.publish_with_comments(&mut state, actor, change, None);
+        }
+        Ok((output, change))
+    }
+
+    /// Stages `build` with [`Design::dry_run`]: the ops it would apply,
+    /// with the design left as it was and nothing sent or saved.
+    pub fn dry_run<T, E>(
+        &self,
+        actor: &Actor,
+        build: impl FnOnce(&mut Transaction<'_>) -> Result<T, E>,
+    ) -> Result<(Vec<Op>, T), E> {
+        self.lock().design.dry_run(&actor.id, build)
+    }
+
     /// Commits a person's gesture, sent from a browser tab, as one undo step
     /// for `actor`. The edits are planned with [`user_edit::plan`], the same
     /// function the tab ran to show them, against the document as it is

@@ -7,6 +7,7 @@
 //! - [`select`] matches CSS selectors against a document.
 //! - [`comment`] holds the threads users pin to the canvas.
 //! - [`tokens`] holds the design tokens every artboard can use.
+//! - [`css`] merges a patch into a stylesheet, keeping what it doesn't touch.
 //! - [`components`] expands instances of components and turns edits inside them into overrides.
 //! - [`user_edit`] plans the edits people make on the canvas, on the server and in the browser.
 //!
@@ -15,6 +16,7 @@
 
 pub mod comment;
 pub mod components;
+pub mod css;
 mod design;
 mod document;
 pub mod edit;
