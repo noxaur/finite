@@ -54,6 +54,11 @@ impl Browser {
         let spawned = Command::new(chrome)
             .arg("--headless")
             .arg("--disable-gpu")
+            // Without a GPU, WebGL falls back to SwiftShader, which renders
+            // on the CPU, so shaders show in screenshots. Since Chrome 137
+            // that fallback needs this flag; captured pages can't reach the
+            // network.
+            .arg("--enable-unsafe-swiftshader")
             .arg("--hide-scrollbars")
             .arg("--no-first-run")
             .arg("--no-default-browser-check")
