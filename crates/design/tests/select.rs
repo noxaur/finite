@@ -420,3 +420,15 @@ fn loose_selectors_match_the_element_a_rule_styles() {
     assert_eq!(loose("input::placeholder"), Vec::<String>::new());
     assert!(select::parse_loose("div..card").is_err());
 }
+
+#[test]
+fn nested_has_says_why() {
+    let error = select::parse(":has(> :has(> #k3x9a2bq))")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(":has() can't hold another :has()"),
+        "{error}"
+    );
+    assert!(select::parse(":has(> div > #k3x9a2bq)").is_ok());
+}

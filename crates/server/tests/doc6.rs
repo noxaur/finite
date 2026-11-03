@@ -141,6 +141,46 @@ async fn designs_are_listed_created_renamed_and_deleted() {
     assert!(error, "{gone}");
 }
 
+/// in: "text" changes what people read and leaves links, ids and titles
+/// alone, which a rename through a long article needs.
+#[tokio::test]
+async fn replace_in_text_leaves_attributes_alone() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect(&app, "Replacer").await;
+    let id = design(&mut agent, "Article").await;
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Page", "width": 600,
+                 "html": "<p>Every typeface <a href=\"/wiki/typeface_design\" title=\"typeface design\">typeface</a></p>" }]),
+    )
+    .await;
+    let done = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "replace", "find": "typeface", "replace": "font", "in": "text" }]),
+    )
+    .await;
+    assert!(done.contains("Replaced"), "{done}");
+    let page = html(&mut agent, &id, "p").await;
+    assert!(
+        page.contains("Every font") && page.contains(">font</a>"),
+        "{page}"
+    );
+    assert!(
+        page.contains("href=\"/wiki/typeface_design\"")
+            && page.contains("title=\"typeface design\""),
+        "{page}"
+    );
+    let wrong = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "replace", "find": "a", "replace": "b", "in": "everywhere" }]),
+    )
+    .await;
+    assert!(wrong.contains("isn't a place to replace in"), "{wrong}");
+}
+
 /// Deleting can't be undone, so the start of an id, which every other
 /// tool accepts, isn't enough.
 /// A copy is what x, y, page and mode place, not its original.
