@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite-plus";
 
 export default defineConfig({
@@ -15,6 +16,8 @@ export default defineConfig({
     rules: { "vite-plus/prefer-vite-plus-imports": "error" },
     options: { typeAware: true, typeCheck: true },
   },
+  // The web app's `@/` imports, for its tests.
+  resolve: { alias: { "@": fileURLToPath(new URL("./apps/web/src", import.meta.url)) } },
   test: {
     // Builds finite.wasm, which the web app's tests load.
     globalSetup: ["apps/web/src/design/wasm.setup.ts"],
