@@ -70,9 +70,13 @@ Browser
   query <css>                 Every matching element, with its text and position.
   eval <js>                   Evaluate JavaScript in the page and print the result.
   wait <js> [--timeout 5000]  Wait until the expression is truthy.
-  click <css> | click <x> <y> Click an element's center, or a point.
+  click <css> | click <x> <y> [--shift]
+                              Click an element's center, or a point. --shift
+                              holds Shift, as for adding to a comment's elements.
   hover <css> | hover <x> <y> Move the mouse there.
   type <text>                 Type into the focused element.
+  upload <css> <file>         Pick a file in a file input, as the OS file
+                              picker would. Hidden inputs work too.
   key <key>                   Press a key: Enter, Escape, c, Shift+1, Meta+z.
   viewport <width> <height>   Resize the page.
   console [--all]             Console messages and errors since the last call.
@@ -109,6 +113,7 @@ const { values: flags, positionals } = parseFlags({
     all: { type: "boolean" },
     lines: { type: "string", short: "n" },
     nth: { type: "string" },
+    shift: { type: "boolean" },
     help: { type: "boolean", short: "h" },
   },
 });
@@ -169,6 +174,8 @@ async function cli() {
     }
     return send(state, { command, tool, args: toolArgs, agent: flags.agent });
   }
+  // The daemon runs in another folder, so a file to upload goes as an absolute path.
+  if (command === "upload" && args[1]) args[1] = path.resolve(args[1]);
   return send(state, { command, args, flags });
 }
 
@@ -579,12 +586,12 @@ async function daemon(dir, options) {
       const value = await page.until(expression, Number(timeout ?? 5000));
       return { out: format(value), value: value ?? null };
     },
-    async click({ args: target, flags: { nth } }) {
+    async click({ args: target, flags: { nth, shift } }) {
       const { x, y, label } = await point(page, target, nth);
       await page.move(x - 1, y - 1);
-      await page.click(x, y);
+      await page.click(x, y, { shift });
       await settle(page);
-      return `Clicked ${label} at ${Math.round(x)},${Math.round(y)}`;
+      return `${shift ? "Shift-clicked" : "Clicked"} ${label} at ${Math.round(x)},${Math.round(y)}`;
     },
     async hover({ args: target, flags: { nth } }) {
       const { x, y, label } = await point(page, target, nth);
@@ -593,6 +600,19 @@ async function daemon(dir, options) {
       await page.move(x, y);
       await settle(page);
       return `Moved to ${label} at ${Math.round(x)},${Math.round(y)}`;
+    },
+    async upload({ args: [selector, file], flags: { nth } }) {
+      if (!selector || !file) throw new Error("usage: upload <css> <file>");
+      if (!fs.existsSync(file)) throw new Error(`no file at ${file}`);
+      const { result, exceptionDetails } = await page.send("Runtime.evaluate", {
+        expression: `$deepOrThrow(${JSON.stringify(selector)}, ${Number(nth ?? 0)})`,
+      });
+      if (exceptionDetails)
+        throw new Error(exceptionDetails.exception?.description ?? exceptionDetails.text);
+      // Chrome fires the input's change event, as it does after the OS picker.
+      await page.send("DOM.setFileInputFiles", { files: [file], objectId: result.objectId });
+      await settle(page);
+      return `Picked ${path.basename(file)} in ${selector}`;
     },
     async type({ args: [text] }) {
       if (text === undefined) throw new Error("usage: type <text>");

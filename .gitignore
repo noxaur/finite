@@ -48,3 +48,6 @@ e2e/ax/results
 
 # cargo-sweep stamp written by `vp run dev`
 sweep.timestamp
+
+# Evidence from .claude/skills/verify-finite runs
+.verify/
