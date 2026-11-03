@@ -28,9 +28,9 @@
 //   and history on the old ones are not kept. The three-way merge (stamps and
 //   read marks, "their change wins") is not mocked at all.
 // - css merges rules in JS (postcss), then writes the whole sheet with
-//   set_text_content (a <style> block) or set_shared_css. to: "inline" calls
+//   set_text_content (a <style> block). to: "inline" calls
 //   update_styles per matched element. The cascade note is computed here.
-// - replace is the real replace_values; the shared CSS part (which the real
+// - replace is the real replace_values; the tokens part (which the real
 //   tool doesn't cover) is replaced in JS, colors in any hex or rgb notation.
 // - check runs real get_layout on the touched artboards after the ops;
 //   status calls start_working_on_nodes after them. render, comments and
@@ -256,7 +256,7 @@ function matchPseudo(el, p, loose) {
   if (p.element) {
     if (loose) return true;
     throw new Error(
-      `"::${p.name}" is a pseudo-element, not an element. To style it, use a css op with to: "style" or "shared".`,
+      `"::${p.name}" is a pseudo-element, not an element. To style it, use a css op with to: "style".`,
     );
   }
   const sibs = elements(el.parent);
@@ -307,7 +307,7 @@ function matchPseudo(el, p, loose) {
       if (loose) return true;
       if (STATES.test(p.name))
         throw new Error(
-          `":${p.name}" describes a state, not elements. To style it, use a css op with to: "style" or "shared".`,
+          `":${p.name}" describes a state, not elements. To style it, use a css op with to: "style".`,
         );
       throw new Error(`":${p.name}" isn't supported in select`);
   }
@@ -476,8 +476,9 @@ function retool(text) {
     .replace("Next: create_artboard.", 'Next: edit with an "artboard" op.')
     .replace(/\bget_tree_summary\b|\bget_children\b|\bget_basic_info\b|\bget_node_info\b/g, "read")
     .replace(/\bget_html\b/g, 'read with as: "html"')
-    .replace(/\bget_shared_css\b/g, 'read with as: "css"')
-    .replace(/\bset_shared_css\b/g, 'a css op with to: "shared"')
+    .replace(/\bget_tokens\b/g, 'read with as: "css"')
+    .replace(/\bset_tokens\b/g, 'a "tokens" op')
+    .replace(/\bset_artboard_mode\b/g, "a move op with mode")
     .replace(/\bget_screenshot\b/g, "render")
     .replace(/\bget_layout\b/g, 'render with output: "layout"')
     .replace(/\bfind_nodes\b/g, "read with contains")
@@ -638,7 +639,7 @@ function cascadeNotes(trees, patch, onlyBoards) {
   return notes;
 }
 
-// Colors in any hex or rgb notation, for the shared CSS part of replace.
+// Colors in any hex or rgb notation, for the tokens part of replace.
 function parseColor(s) {
   const t = s.trim().toLowerCase();
   let m = t.match(/^#([0-9a-f]{3,8})$/);
@@ -686,7 +687,13 @@ const declarations = (css) => {
   }
   return out;
 };
-const sharedText = (t) => (t.startsWith("This design has no shared CSS") ? "" : t);
+/** The design's tokens and modes, as get_tokens gives them. */
+const tokensOf = async (real, designId) => JSON.parse(await real.call("get_tokens", { designId }));
+/** Each token's values as [name, mode or null, value]. */
+const tokenValues = (t) =>
+  Object.entries(t.tokens ?? {}).flatMap(([name, v]) =>
+    typeof v === "string" ? [[name, null, v]] : Object.entries(v).map(([m, x]) => [name, m, x]),
+  );
 
 /** A design's id from its id or its name, so {"designId": "Acme site"} works. */
 async function designIdOf(real, given) {
@@ -738,6 +745,7 @@ const EXAMPLES = {
   remove: `{"op": "remove", "select": "[data-name=Banner]"}`,
   replace: `{"op": "replace", "find": "#3b82f6", "replace": "#f97316"}`,
   page: `{"op": "page", "create": "Drafts", "as": "d"}`,
+  tokens: `{"op": "tokens", "set": {"--brand": "#f97316", "--bg": {"Light": "#ffffff", "Dark": "#0b0b0b"}}, "modes": ["Light", "Dark"]}`,
   import: `{"op": "import", "name": "landing.html", "content": "<!doctype html>…", "page": "Inbox"}`,
 };
 const KINDS = Object.keys(EXAMPLES);
@@ -792,6 +800,7 @@ function kindOf(op) {
   }
   if ((op.width != null || op.from != null) && op.name != null) return "artboard";
   if (op.content != null || op.contentBase64 != null) return "import";
+  if (op.set != null && op.select == null) return "tokens";
   if (op.create != null || op.rename != null) return "page";
   if (op.find != null) return "replace";
   if (op.css != null || op.styles != null) return "css";
@@ -1072,6 +1081,8 @@ const OPS = {
     const id = text.match(/artboard #([a-z0-9]+)/)?.[1];
     e.name(op.as, id);
     if (id) e.touched.add(id);
+    if (id && op.mode != null)
+      await e.write("set_artboard_mode", { artboardIds: [id], mode: String(op.mode) });
     return text;
   },
 
@@ -1159,7 +1170,7 @@ const OPS = {
       for (const n of patch.nodes) {
         if (n.type === "comment") continue;
         if (n.type === "atrule")
-          throw new Error(`inline styles can't hold @${n.name}; use to: "style" or "shared".`);
+          throw new Error(`inline styles can't hold @${n.name}; use to: "style".`);
         let ms = await e.match(n.selector, "css rule");
         if (scope) {
           ms = ms.filter(inScope);
@@ -1180,20 +1191,11 @@ const OPS = {
       if (!updates.length) throw new Error(`the css has no rules, like ${EXAMPLES.css}.`);
       return await e.write("update_styles", { updates });
     }
-    if (to === "shared") {
-      const trees = await e.trees();
-      const cur = sharedText(await e.real.call("get_shared_css", { designId: e.designId }));
-      const { css: next, changes } = mergeSheet(cur, patch);
-      const notes = cascadeNotes(trees, patch);
-      const text =
-        next === cur
-          ? "Nothing changed: the shared CSS already had that."
-          : await e.write("set_shared_css", { css: next });
-      for (const b of trees.boards.slice(0, 10)) e.touched.add(b.id);
-      return [`Shared CSS: ${changes.join("; ")}.`, text, ...notes].join("\n");
-    }
-    if (to !== "style")
-      throw new Error(`to "${op.to}" isn't one of inline (default), style, shared.`);
+    if (to === "shared" || to === "tokens")
+      throw new Error(
+        `there's no shared stylesheet. Put values every screen uses in tokens, like ${EXAMPLES.tokens}, and use them as var(--brand); put classes in each artboard's <style> with to: "style".`,
+      );
+    if (to !== "style") throw new Error(`to "${op.to}" isn't one of inline (default) or style.`);
     const trees = await e.trees();
     let boards = new Set();
     if (select) for (const m of await e.match(select)) boards.add(m.board);
@@ -1204,7 +1206,7 @@ const OPS = {
       if (trees.boards.length === 1) boards.add(trees.boards[0].id);
       else
         throw new Error(
-          `no element matches these rules yet, so it's unclear which artboard's <style> block they belong in. Pass select with the artboard, like "select": "#${trees.boards[0]?.id ?? "k3x9a2bq"}", or use to: "shared".`,
+          `no element matches these rules yet, so it's unclear which artboard's <style> block they belong in. Pass select with the artboard, like "select": "#${trees.boards[0]?.id ?? "k3x9a2bq"}".`,
         );
     }
     const parts = [];
@@ -1257,6 +1259,18 @@ const OPS = {
     const ms = await e.match(select);
     e.touch(ms);
     const parts = [];
+    if (op.mode !== undefined && op.to == null) {
+      const notBoards = ms.filter((m) => m.board !== m.id);
+      if (notBoards.length)
+        throw new Error(`mode is for artboards, and ${describeAll(notBoards)} isn't one.`);
+      parts.push(
+        await e.write("set_artboard_mode", {
+          artboardIds: ms.map((m) => m.id),
+          ...(op.mode != null && { mode: String(op.mode) }),
+        }),
+      );
+      if (op.page == null && op.x == null && op.y == null) return parts.join("\n");
+    }
     if (op.page != null && op.to == null) {
       const notBoards = ms.filter((m) => m.board !== m.id);
       if (notBoards.length)
@@ -1363,16 +1377,33 @@ const OPS = {
       const el = trees.byId.get(id.slice(1));
       if (el) e.touched.add(el.board);
     }
-    const cur = sharedText(await e.real.call("get_shared_css", { designId: e.designId }));
-    if (cur) {
-      const { css, n } = replaceInCss(cur, String(op.find), String(op.replace));
-      if (n) {
-        await e.write("set_shared_css", { css });
-        parts.push(`shared CSS: replaced ${n} use${n === 1 ? "" : "s"}.`);
-        for (const b of trees.boards.slice(0, 10)) e.touched.add(b.id);
-      } else parts.push(`shared CSS: no uses.`);
+    const t = await tokensOf(e.real, e.designId);
+    const set = {};
+    for (const [name, mode, value] of tokenValues(t)) {
+      const { css, n } = replaceInCss(value, String(op.find), String(op.replace));
+      if (!n) continue;
+      if (mode == null) set[name] = css;
+      else set[name] = { ...(set[name] ?? t.tokens[name]), [mode]: css };
+    }
+    const names = Object.keys(set);
+    if (names.length) {
+      await e.write("set_tokens", { tokens: set });
+      parts.push(`Tokens: replaced in ${names.join(", ")}.`);
+      for (const b of trees.boards.slice(0, 10)) e.touched.add(b.id);
     }
     return parts.join("\n");
+  },
+
+  async tokens(op, e) {
+    const set = typeof op.set === "string" ? JSON.parse(op.set) : (op.set ?? op.tokens);
+    if (set == null && op.modes == null)
+      throw new Error(`"tokens" needs set (and maybe modes), like ${EXAMPLES.tokens}.`);
+    const text = await e.write("set_tokens", {
+      tokens: set ?? {},
+      ...(op.modes != null && { modes: [op.modes].flat() }),
+    });
+    for (const b of (await e.trees()).boards.slice(0, 10)) e.touched.add(b.id);
+    return text;
   },
 
   async page(op, e) {
@@ -1513,7 +1544,7 @@ async function overview(real, designId, depth, pageId) {
   const others = (info.agentsWorking ?? []).filter((a) => a.name !== me);
   const n = (k, w) => `${k} ${w}${k === 1 ? "" : "s"}`;
   const lines = [
-    `Design "${info.name}" (designId "${info.designId}"): ${n(info.artboardCount, "artboard")}, ${n(info.nodeCount, "node")}, ${n(info.openComments, "open comment")}, shared CSS ${info.sharedCssChars ? `${info.sharedCssChars} chars` : "empty"}.`,
+    `Design "${info.name}" (designId "${info.designId}"): ${n(info.artboardCount, "artboard")}, ${n(info.nodeCount, "node")}, ${n(info.openComments, "open comment")}, ${n(info.tokenCount ?? 0, "token")}.`,
   ];
   if (info.pages?.length > 1 || pageId)
     lines.push(
@@ -1571,29 +1602,27 @@ async function search(real, designId, contains, within) {
     if (found.length) sections.push(`In ${what}: ${found.join("\n")}`);
   }
   if (!within?.length) {
-    const css = sharedText(await real.call("get_shared_css", { designId }));
     const color = parseColor(contains);
-    const hits = css
-      .split("\n")
-      .flatMap((l) => l.split(/(?<=\})\s*/))
-      .filter((l) =>
-        color
-          ? (l.match(/#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)/g) ?? []).some(
-              (m) => parseColor(m)?.rgb.join() === color.rgb.join(),
-            )
-          : l.toLowerCase().includes(contains.toLowerCase()),
-      );
+    const hits = tokenValues(await tokensOf(real, designId)).filter(([name, , v]) =>
+      color
+        ? (v.match(/#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)/g) ?? []).some(
+            (m) => parseColor(m)?.rgb.join() === color.rgb.join(),
+          )
+        : `${name} ${v}`.toLowerCase().includes(contains.toLowerCase()),
+    );
     if (hits.length)
-      sections.push(`In shared CSS:\n${hits.map((l) => `  ${l.trim()}`).join("\n")}`);
+      sections.push(
+        `In tokens:\n${hits.map(([n, m, v]) => `  ${n}${m ? ` (${m})` : ""}: ${v}`).join("\n")}`,
+      );
   }
   if (!sections.length)
-    return `Nothing ${within?.length ? "in the selection" : "in the design"} contains "${contains}": not in styles, <style> blocks, text, attributes, layer names${within?.length ? "" : " or shared CSS"}.`;
+    return `Nothing ${within?.length ? "in the selection" : "in the design"} contains "${contains}": not in styles, <style> blocks, text, attributes, layer names${within?.length ? "" : " or tokens"}.`;
   return retool(sections.join("\n\n"));
 }
 
 async function cssView(real, designId, trees, ms) {
-  const shared = sharedText(await real.call("get_shared_css", { designId }));
   if (!ms) {
+    const t = await tokensOf(real, designId);
     const blocks = [];
     for (const b of trees.boards)
       for (const s of [...walk(b.el)].filter((n) => n.tag === "style")) {
@@ -1603,14 +1632,15 @@ async function cssView(real, designId, trees, ms) {
         );
       }
     return [
-      shared ? `Shared CSS (every artboard uses it):\n${shared}` : "This design has no shared CSS.",
+      tokenValues(t).length
+        ? `Tokens (CSS variables every artboard can use as var(--name); modes: ${t.modes.join(", ")}):\n${JSON.stringify(t.tokens, null, 2)}${t.artboardModes ? `\nArtboards in another mode: ${JSON.stringify(t.artboardModes)}` : ""}`
+        : `This design has no tokens. Add some with ${EXAMPLES.tokens}.`,
       blocks.length
         ? `<style> blocks (read one with select and as: "html"):\n${blocks.join("\n")}`
         : "No <style> blocks.",
     ].join("\n\n");
   }
   const sheets = [];
-  if (shared) sheets.push({ origin: "shared", sheet: parseCssSafe(shared), board: null });
   for (const b of trees.boards)
     for (const s of [...walk(b.el)].filter((n) => n.tag === "style"))
       sheets.push({
@@ -1663,11 +1693,11 @@ const EDIT_DESCRIPTION = `Make changes to a design. One edit call is one transac
 Ops, each addressed with select, a CSS selector: #k3x9a2bq (a node id), .card, button, [data-name=Hero] h1, :root (every artboard), :contains("text"):
 
 ${EXAMPLES.artboard}
-  A new screen with its first sections. desktop 1440x900, tablet 768x1024, mobile 390x844. Omit x and y to place it right of the others; omit height to grow with the content. css (declarations) and class style the artboard itself. page: a page's name or id (default the first). from: "#k3x9a2bq" starts it as a copy of that artboard, with the given name and size, so a mobile version keeps the content and you only restyle it.
+  A new screen with its first sections. desktop 1440x900, tablet 768x1024, mobile 390x844. Omit x and y to place it right of the others; omit height to grow with the content. css (declarations) and class style the artboard itself. page: a page's name or id (default the first); mode: the mode its tokens come from, like "Dark". from: "#k3x9a2bq" starts it as a copy of that artboard, with the given name and size, so a mobile version keeps the content and you only restyle it.
 ${EXAMPLES.html}
   mode: append (default, last child), prepend (first child), before or after (a sibling), inner (replace the children), replace (replace the element). append and the others act on every match; inner and replace take one. Use inner on an element to change its text. With inner or replace, elements that keep the data-id from read's html are updated in place: they keep their ids, comment pins and history, and a value another agent changed since you read it is kept, and named in the result.
 ${EXAMPLES.css}
-  css is a stylesheet; each rule's selector picks elements. to: "inline" (default) sets the declarations in each match's style attribute (so #id { height: … } resizes an artboard); "style" merges the rules into the matching artboard's <style> block (use it for :hover, @media, @keyframes); "shared" into the CSS every artboard uses (variables like --brand, classes like .btn). Rules merge: a declaration replaces the same property, prop: unset removes it, an empty rule .x {} removes the rule. Or pass select and plain declarations: {"op": "css", "select": ".btn", "css": "border-radius: 999px"}. With rules, select limits them to inside its matches (with to: "style", it picks the artboard).
+  css is a stylesheet; each rule's selector picks elements. to: "inline" (default) sets the declarations in each match's style attribute (so #id { height: … } resizes an artboard); "style" merges the rules into the matching artboard's <style> block (use it for classes, :hover, @media, @keyframes). Values every screen shares go in tokens. Rules merge: a declaration replaces the same property, prop: unset removes it, an empty rule .x {} removes the rule. Or pass select and plain declarations: {"op": "css", "select": ".btn", "css": "border-radius: 999px"}. With rules, select limits them to inside its matches (with to: "style", it picks the artboard).
 ${EXAMPLES.attrs}
   Sets attributes on every match; null removes one. data-name is the layer name. data-id can't change; style goes through a css op.
 ${EXAMPLES.move}
@@ -1675,9 +1705,11 @@ ${EXAMPLES.move}
 ${EXAMPLES.remove}
   Deletes every match with everything inside it.
 ${EXAMPLES.replace}
-  A value everywhere: inline styles, attributes, <style> blocks, <script> code and shared CSS. A color matches in any notation, and tints keep their alpha. includeText: true also replaces visible text (a product name, a typo). select limits it to matches. replace "" deletes it.
+  A value everywhere: inline styles, attributes, <style> blocks, <script> code and token values. A color matches in any notation, and tints keep their alpha. includeText: true also replaces visible text (a product name, a typo). select limits it to matches. replace "" deletes it.
 ${EXAMPLES.page}
   Pages hold artboards; people see one page at a time. create, {"rename": "Drafts", "name": "Archive"} or {"remove": "Drafts"} (deletes the page and its artboards). Put artboards on a page with the artboard op's page, or {"op": "move", "select": "#k3x9a2bq", "page": "Drafts"}.
+${EXAMPLES.tokens}
+  Tokens are CSS variables every artboard can use as var(--brand). Give a token one value, a value per mode, or null to delete it; tokens you don't pass stay. modes names the design's modes in order: the first renames the first mode, more add modes. A mode without a value uses the first mode's. An artboard renders in one mode: the artboard op's mode, or {"op": "move", "select": "#k3x9a2bq", "mode": "Dark"}.
 ${EXAMPLES.import}
   Adds a file as new artboards: an .html page, a .finite bundle, a .figma.json from the Finite Figma plugin, or a repo .tar (contentBase64). Pass the file's text as content (Finite can't read your files). Scripts, handlers and embeds are dropped; the result lists what didn't convert exactly.
 
@@ -1697,15 +1729,15 @@ Example, a mobile copy in one call:
 
 const READ_DESCRIPTION = `Look at a design, as text.
 
-- No select: an overview (pages, artboards, open comments, who else is working, shared CSS size), then an outline of every artboard: one line per element with its tag, layer name, #id, size and text. Start here. page: "Inbox" shows only that page's artboards, here and with select.
+- No select: an overview (pages, artboards, open comments, who else is working, how many tokens), then an outline of every artboard: one line per element with its tag, layer name, #id, size and text. Start here. page: "Inbox" shows only that page's artboards, here and with select.
 - select (a CSS selector: #k3x9a2bq, .card, button, [data-name="Hero"] h1, :root for artboards, :contains("Sign in")) with as:
   "outline" (default): the outline under each match. depth sets how deep (default 4).
   "html": each match's HTML with inline styles; every element carries data-id. depth limits it.
-  "css": the CSS that applies to each match: its inline style, then each matching rule from its artboard's <style> blocks and the shared CSS, and which properties inline styles override.
+  "css": the CSS that applies to each match: its inline style, then each matching rule from its artboard's <style> blocks, and which properties inline styles override.
   "jsx": each match as JSX to paste into a React codebase, with style objects, or Tailwind classes with tailwind: true.
 - export: "figma" returns the design (or select's artboard) as a file's text: "html", "finite" (a bundle that imports back exactly), "repo" (a tar of text files for git), "figma" (for the Finite Figma plugin) or "jsx", with what didn't convert exactly. Save the text to a file yourself.
-- as: "css" without select: the shared CSS (or "This design has no shared CSS.") and a list of every <style> block.
-- contains: "#3b82f6" searches instead: elements whose styles (inline or in <style> blocks), text, attributes or layer name contain it, plus matching shared CSS rules. A color matches in any notation. With select, it searches inside the matches. Use it instead of reading whole artboards, before and after a change.
+- as: "css" without select: the design's tokens and modes, and a list of every <style> block.
+- contains: "#3b82f6" searches instead: elements whose styles (inline or in <style> blocks), text, attributes or layer name contain it, plus matching tokenss. A color matches in any notation. With select, it searches inside the matches. Use it instead of reading whole artboards, before and after a change.
 
 designId takes the design's id or its exact name.
 
@@ -1729,20 +1761,20 @@ function reworded(tools) {
 }
 
 export default {
-  instructions: `Finite is a design canvas for agents. A design holds artboards: fixed-size frames on an infinite canvas, made of plain HTML and CSS. People watch live and can't edit; they steer you by pinning comments.
+  instructions: `Finite is a design canvas for agents. A design holds artboards: fixed-size frames on an infinite canvas, made of plain HTML and CSS. People watch live, move, resize and delete things too, and steer you by pinning comments.
 
 There are six tools. Each one's description has its full grammar and examples, so load them all at once.
 
 - designs: find a design (query), create one (create: "Name"), rename one, or delete one for good (delete).
 - read: look at a design. With no select, an overview (pages, artboards, open comments, who is working) and every artboard's outline with ids. select is a CSS selector, where #k3x9a2bq is a node's id; as: "outline", "html", "css" or "jsx". contains: "#3b82f6" searches styles, text, attributes, <style> blocks and shared CSS. export: "figma" (or html, finite, repo, jsx) returns a file's text to save.
-- edit: every change. Its ops run in order as one transaction: all or nothing, one undo step. Ops: artboard, html, css, attrs, move, remove, replace, page, import. Each result ends with a layout check. status: "…" shows people what you're doing; dryRun: true previews.
+- edit: every change. Its ops run in order as one transaction: all or nothing, one undo step. Ops: artboard, html, css, attrs, move, remove, replace, tokens, page, import. Each result ends with a layout check. status: "…" shows people what you're doing; dryRun: true previews.
 - render: an image of what select matches (every artboard by default), or output: "layout" for each element's box as text.
 - comments: open comments; wait: 60 blocks until a new one arrives; reply: [{commentId, message, resolve: true}].
 - undo: reverses your own last edit calls; redo: true redoes.
 
 Every tool but designs takes a designId: the design's id or exact name. Other agents may edit the same design, so re-read before changing nodes you didn't create.
 
-Workflow: designs, then read, then edit. A new screen is one artboard op holding its first sections (desktop 1440x900, tablet 768x1024, mobile 390x844), then html ops for the rest; from: "#id" starts it as a copy of another artboard. Fix what the layout check reports, and render to see it. Pages keep drafts or flows apart: a page op makes one, and the artboard op's page puts a screen on it. Import a file with an import op, passing its text. To change a value everywhere (a brand color, in any notation), use one replace op. Put CSS variables and classes used on several screens in the shared CSS (a css op with to: "shared").
+Workflow: designs, then read, then edit. A new screen is one artboard op holding its first sections (desktop 1440x900, tablet 768x1024, mobile 390x844), then html ops for the rest; from: "#id" starts it as a copy of another artboard. Fix what the layout check reports, and render to see it. Pages keep drafts or flows apart: a page op makes one, and the artboard op's page puts a screen on it. Import a file with an import op, passing its text. To change a value everywhere (a brand color, in any notation), use one replace op. Put values several screens share (colors, fonts, spacing) in tokens with a tokens op, and use them as var(--brand); modes like Light and Dark give each token a value per mode, and an artboard's mode picks one.
 
 HTML: inline styles or <style> blocks with classes. Prefer flexbox and gap. Name layers with data-name="Header". box-sizing is border-box. <img src="https://…"> and inline <svg> work. Artboards are white flex columns with overflow hidden, so children shrink unless they have flex-shrink: 0. A <style> or <script> only affects its own artboard. Scripts run sandboxed: inline only, no network, addEventListener (on* attributes are dropped). render waits about 3 seconds after load.
 
