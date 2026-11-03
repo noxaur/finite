@@ -1,5 +1,6 @@
 //! Two agents and a person on one design: agent A rewrites a section from a
-//! stale read while agent B restyles its button (issue #68).
+//! stale read while agent B restyles its button (issue #68) or adds to it
+//! (issue #72).
 
 mod agent;
 
@@ -119,4 +120,89 @@ async fn a_stale_rewrite_keeps_ids_pins_and_other_agents_work() {
         .await;
     assert!(!after.contains("border-radius"), "{after}");
     assert!(after.contains(">Upgrade<"), "{after}");
+}
+
+#[tokio::test]
+async fn a_stale_rewrite_keeps_an_element_another_agent_added() {
+    let app = test_app();
+    let mut a = Agent::connect(&app, "Alice").await;
+    let mut b = Agent::connect(&app, "Bob").await;
+    let created = a.ok("create_design", json!({ "name": "Plans" })).await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .unwrap()
+        .to_owned();
+    let board = a
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Page", "width": 600, "height": 400 }),
+        )
+        .await;
+    let board = id_after(&board, "Created artboard");
+    a.ok(
+        "write_html",
+        json!({ "designId": design, "targetId": board,
+                "html": "<ul data-name=\"Plans\"><li>Free</li><li>Pro</li></ul>" }),
+    )
+    .await;
+    let list = a
+        .ok("get_html", json!({ "designId": design, "nodeId": board }))
+        .await;
+    let list = id_of(&list, "ul");
+
+    // A reads the list, then B adds a plan.
+    let read = a
+        .ok("get_html", json!({ "designId": design, "nodeId": list }))
+        .await;
+    let added = b
+        .ok(
+            "write_html",
+            json!({ "designId": design, "targetId": list, "html": "<li>Enterprise</li>" }),
+        )
+        .await;
+    // "li #<id> "Enterprise"" in its outline.
+    let enterprise = added
+        .split("li #")
+        .nth(1)
+        .unwrap()
+        .split(' ')
+        .next()
+        .unwrap()
+        .to_owned();
+
+    // A writes its old copy back with one text change.
+    let stale = read
+        .split("\n\n")
+        .next()
+        .unwrap()
+        .replace(">Pro<", ">Pro+<");
+    let wrote = a
+        .ok(
+            "write_html",
+            json!({ "designId": design, "targetId": list, "mode": "replace", "html": stale }),
+        )
+        .await;
+    let after = a
+        .ok("get_html", json!({ "designId": design, "nodeId": list }))
+        .await;
+    assert!(after.contains(">Pro+<"), "{after}");
+    assert!(
+        after.contains(&format!("data-id=\"{enterprise}\">Enterprise<")),
+        "{after}"
+    );
+    assert!(
+        wrote.contains(&format!(
+            "kept li #{enterprise} \"Enterprise\", which another agent added after you read it."
+        )),
+        "{wrote}"
+    );
+
+    let undone = b.ok("undo", json!({ "designId": design })).await;
+    assert!(undone.contains("Write HTML"), "{undone}");
+    let after = a
+        .ok("get_html", json!({ "designId": design, "nodeId": list }))
+        .await;
+    assert!(!after.contains("Enterprise"), "{after}");
+    assert!(after.contains(">Pro+<"), "{after}");
 }

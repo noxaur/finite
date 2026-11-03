@@ -29,8 +29,8 @@ pub mod user_edit;
 pub mod version;
 
 pub use design::{
-    ActorId, Change, Design, DesignMeta, Kept, MIGRATION_ACTOR, Merged, Origin, Record, Snapshot,
-    Transaction,
+    ActorId, Change, Design, DesignMeta, Kept, KeptNode, MIGRATION_ACTOR, Merged, Origin, Record,
+    Snapshot, Transaction,
 };
 pub use document::{Applied, Document, FIRST_PAGE, MAX_DEPTH, MAX_PAGES, Op, Page, Rejected};
 pub use history::{Entry, History};
