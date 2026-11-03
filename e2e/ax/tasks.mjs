@@ -141,6 +141,34 @@ async function allHtml(mcp, design) {
   return { info, html: parts.join("\n") };
 }
 
+/**
+ * A real website saved as one HTML file with its CSS inlined, from
+ * FINITE_AX_PAGES (a folder you fill yourself: third-party pages aren't
+ * committed). Imported as one artboard that grows to fit, like a person
+ * pasting a page in to redesign it.
+ */
+async function seedPage(mcp, file, name) {
+  const dir = process.env.FINITE_AX_PAGES;
+  if (!dir || !fs.existsSync(path.join(dir, file)))
+    throw new Error(`set FINITE_AX_PAGES to a folder holding ${file}`);
+  const design = (await mcp.call("create_design", { name })).match(/designId "([^"]+)"/)[1];
+  const content = fs.readFileSync(path.join(dir, file), "utf8");
+  await mcp.call("import_design", { designId: design, format: "html", content, name: file });
+  const info = JSON.parse(await mcp.call("get_basic_info", { designId: design }));
+  const board = info.artboards[0].id;
+  await mcp.call("update_styles", {
+    designId: design,
+    updates: [{ nodeIds: [board], styles: { height: null } }],
+  });
+  return { design, board, nodes: info.nodeCount };
+}
+
+/** How many elements find_nodes matches, from its first line. */
+const matches = async (mcp, design, query) => {
+  const text = await mcp.call("find_nodes", { designId: design, ...query });
+  return text.startsWith("No elements") ? 0 : Number(text.match(/^(\d+) element/)?.[1] ?? 0);
+};
+
 export const tasks = {
   "delete-design": {
     workdir: "none",
@@ -681,6 +709,62 @@ setInterval(next, 3000);
   },
 
   // A file to open in Figma, saved where the person asked.
+  // Edits inside a real, large page (about 4,800 nodes and 560 KB of CSS).
+  "big-edit": {
+    workdir: "none",
+    seed: (mcp) => seedPage(mcp, "stripe.html", "Stripe home"),
+    prompt: () =>
+      `Use the Finite MCP tools. The Finite design "Stripe home" holds a copy of a big real website. Make four changes and nothing else: ` +
+      `change the hero headline (the large one at the top, starting "Financial infrastructure to grow your revenue") to "Payments for every business"; ` +
+      `remove the "Book of the week" card (only that card, not the "What's happening" section around it); change the "Ready to get started?" heading to "Start building today"; ` +
+      `and replace the brand purple #635bff with #0a7cff everywhere it's used. Stop when you're done.`,
+    async check(mcp, ctx) {
+      const info = JSON.parse(await mcp.call("get_basic_info", { designId: ctx.design }));
+      const count = (query) => matches(mcp, ctx.design, query);
+      const purple = (await count({ style: "#635bff" })) + (await count({ attribute: "#635bff" }));
+      const checks = [
+        // The page holds the headline twice (two layouts); both change.
+        (await count({ text: "Payments for every business" })) >= 1 &&
+          (await count({ text: "to grow your revenue" })) === 0,
+        (await count({ text: "Book of the week" })) === 0 &&
+          (await count({ text: "How Africa Works" })) === 0,
+        (await count({ text: "Start building today" })) >= 1 &&
+          (await count({ text: "Ready to get started" })) === 0,
+        purple === 0 && (await count({ style: "#0a7cff" })) >= 1,
+        // Book of the week is one card of about 50 nodes in the "What's
+        // happening" section, whose other cards stay.
+        (await count({ text: "What's happening" })) >= 1 &&
+          (await count({ text: "Tobi Lütke" })) >= 1 &&
+          info.nodeCount > ctx.nodes - 120,
+      ];
+      const notes = [`${info.nodeCount}/${ctx.nodes} nodes`, `${purple} purple left`];
+      return { passed: checks.filter(Boolean).length, total: checks.length, notes };
+    },
+  },
+
+  // A long article: a word changes all through its text, and one heading.
+  "big-wiki": {
+    workdir: "none",
+    seed: (mcp) => seedPage(mcp, "wikipedia.html", "Typography article"),
+    prompt: () =>
+      `Use the Finite MCP tools. The Finite design "Typography article" holds a copy of a long Wikipedia article. ` +
+      `In the article's visible text, replace every "typeface" with "font" and every "Typefaces" or "typefaces" with "fonts", keeping capitals ("Typeface" becomes "Font"). ` +
+      `Then change the page title heading "Typography" at the top to "Typography (draft)". Change nothing else. Stop when you're done.`,
+    async check(mcp, ctx) {
+      const left = await matches(mcp, ctx.design, { text: "typeface" });
+      const info = JSON.parse(await mcp.call("get_basic_info", { designId: ctx.design }));
+      const checks = [
+        left === 0,
+        (await matches(mcp, ctx.design, { text: "font" })) >= 30,
+        // The heading's text sits in a child span, so find it by its text.
+        (await matches(mcp, ctx.design, { text: "Typography (draft)" })) >= 1,
+        info.nodeCount > ctx.nodes * 0.98,
+      ];
+      const notes = [`${left} with "typeface" left`, `${info.nodeCount}/${ctx.nodes} nodes`];
+      return { passed: checks.filter(Boolean).length, total: checks.length, notes };
+    },
+  },
+
   "export-figma": {
     workdir: "none",
     seed: (mcp) => seedLanding(mcp, "Acme landing"),

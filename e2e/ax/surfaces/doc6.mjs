@@ -77,7 +77,11 @@ function parseHtml(html) {
   while ((m = tagRe.exec(html))) {
     text(html.slice(last, m.index));
     last = tagRe.lastIndex;
-    if (m[0].startsWith("<!--")) continue;
+    if (m[0].startsWith("<!--")) {
+      // get_html's mark on an element whose children it left out to fit.
+      if (m[0].endsWith("not shown -->")) cur.collapsed = true;
+      continue;
+    }
     if (m[1]) {
       const tag = m[1].toLowerCase();
       for (let n = cur; n && n !== top; n = n.parent)
@@ -289,12 +293,16 @@ function matchPseudo(el, p, loose) {
     case "is":
     case "where":
       return parseSelector(p.arg).some((s) => matchAt(el, s, s.compounds.length - 1, loose));
-    case "has":
-      return [...walk(el)].some((d) =>
+    case "has": {
+      // :has(> x) looks at children only; :has(x) at every descendant.
+      const child = /^\s*>/.test(p.arg);
+      const pool = child ? elements(el) : [...walk(el)];
+      return pool.some((d) =>
         parseSelector(p.arg.replace(/^\s*>/, "")).some((s) =>
           matchAt(d, s, s.compounds.length - 1, loose),
         ),
       );
+    }
     default:
       if (loose) return true;
       if (STATES.test(p.name))
@@ -358,8 +366,7 @@ async function loadTrees(real, designId) {
   const boards = [];
   const byId = new Map();
   for (const a of info.artboards) {
-    const top = parseHtml(await real.call("get_html", { designId, nodeId: a.id }));
-    const el = elements(top)[0];
+    const el = await fullTree(real, designId, a.id);
     if (!el) continue;
     for (const n of [el, ...walk(el)]) {
       n.board = a.id;
@@ -368,6 +375,41 @@ async function loadTrees(real, designId) {
     boards.push({ ...a, el });
   }
   return { info, boards, byId };
+}
+
+/**
+ * A node's whole subtree. get_html cuts a big subtree to fit one result,
+ * marking elements whose children it left out, so this fetches those too.
+ * A server-side selector engine would see the whole document at once.
+ */
+async function fullTree(real, designId, id, tag = "div") {
+  const first = await real.call("get_html", { designId, nodeId: id, depth: 0 });
+  // A leaf too long for one result, like a big <style>: its text stays unread.
+  if (first.startsWith("This node's HTML is"))
+    return { tag, attrs: { "data-id": id }, children: [], parent: null, unread: true };
+  const el = elements(parseHtml(first))[0];
+  if (!el) return null;
+  const todo = [el, ...walk(el)].filter((n) => n.collapsed);
+  for (let calls = 0; todo.length && calls < 5000; calls++) {
+    const n = todo.shift();
+    const text = await real.call("get_html", { designId, nodeId: n.attrs["data-id"] });
+    let kids;
+    if (text.startsWith("This node's HTML is")) {
+      // Not even its children fit: fetch each child listed in the outline.
+      kids = [];
+      for (const x of text.matchAll(/^ {2}([a-z][\w-]*)(?: "[^"]*")? #([a-z0-9]{8})/gm))
+        kids.push(await fullTree(real, designId, x[2], x[1]));
+      kids = kids.filter(Boolean);
+    } else {
+      const got = elements(parseHtml(text))[0];
+      kids = got?.children ?? [];
+      for (const k of walk(got ?? { children: [] })) if (k.collapsed) todo.push(k);
+    }
+    n.children = kids;
+    n.collapsed = false;
+    for (const k of kids) k.parent = n;
+  }
+  return el;
 }
 
 /**
@@ -405,6 +447,11 @@ function matchAll(trees, sel, { loose = false } = {}) {
   }
   return out;
 }
+
+const isAncestor = (a, b) => {
+  for (let n = b?.parent; n; n = n.parent) if (n === a) return true;
+  return false;
+};
 
 const describeAll = (ms) =>
   ms
@@ -1275,6 +1322,14 @@ const OPS = {
     const select = selectOf(op);
     need({ ...op, select }, "remove", ["select"]);
     const ms = await e.match(select);
+    // Matches inside other matches mean select is broader than meant, like
+    // :has(...) matching every ancestor: removing them would take the outer ones.
+    const inside = (m) => ms.some((o) => o !== m && o.el && isAncestor(o.el, m.el));
+    const outer = ms.filter((m) => m.el && ms.some((o) => o !== m && isAncestor(m.el, o.el)));
+    if (ms.some(inside))
+      throw new Error(
+        `"${select}" matches ${ms.length} elements nested inside each other, so it would remove ${describeAll(outer)} with everything in ${outer.length === 1 ? "it" : "them"}. Narrow select to the elements you mean, like ":has(> h2:contains("…"))" for the element holding a heading.`,
+      );
     for (const m of ms) if (m.board && m.board !== m.id) e.touched.add(m.board);
     return e.write("delete_nodes", { nodeIds: ms.map((m) => m.id) });
   },

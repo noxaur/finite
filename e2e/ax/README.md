@@ -146,4 +146,19 @@ The round-1 spec failed `delete-design` and `import-page`, which it had no tools
 - **An `artboard` op with `from`** starts a screen as a copy of another, for mobile versions.
 - **Rewriting HTML keeps ids.** An `html` op with mode `inner` or `replace` updates elements that keep their `data-id` in place, and keeps values another agent changed since this agent read them. On today's server, the same rewrite gives every element a new id, leaves a comment pinned to a node that no longer exists, and silently wipes the other agent's newer change ([issue #68](https://github.com/noxaur/finite/issues/68)).
 
+### Large designs
+
+`big-edit` and `big-wiki` edit inside real websites saved as one HTML file each, with their CSS inlined: Stripe's home page (4,800 nodes, 560 KB of CSS) and Wikipedia's Typography article (6,700 nodes). Third-party pages aren't committed, so save your own and point `FINITE_AX_PAGES` at their folder. To save one, open the page in a browser, inline every `document.styleSheets` rule into one `<style>` (fetch cross-origin sheets separately), and save `document.documentElement.outerHTML`.
+
+| Model, runs per task | Surface | Runs passed | Calls     | Errors | Cost  |
+| -------------------- | ------- | ----------- | --------- | ------ | ----- |
+| Sonnet medium, 2     | today   | 4/4         | 137       | 0      | $1.34 |
+| Sonnet medium, 2     | doc6    | 4/4         | 41 (−70%) | 0      | $0.76 |
+| Haiku low, 3         | today   | 2/6         | 222       | 6      | $0.30 |
+| Haiku low, 3         | doc6    | 3/6         | 88 (−60%) | 4      | $0.24 |
+
+The gap is wider than on small designs because today's agents read and edit large pages element by element. One Haiku agent took 119 calls to change a word through the article, which is one `replace` op on doc6. Haiku's failures were the same on both surfaces: giving up on the article, and deleting the whole section around a card the first prompt called a "section". With "card", `big-edit` passed 3/3 on doc6 in 49 calls and 2/3 on today's tools in 84.
+
+Large pages also showed two things the mock had to handle: `get_html` cuts a big subtree to fit one result, so the mock fetches the cut parts to match selectors against the whole page, and `:has(…)` matches every ancestor of its target, so a `remove` whose matches nest inside each other is refused instead of deleting the page.
+
 Two things it still can't show: a real `edit` would label its change with its `status`, where the mock's comment replies link "Write HTML, Write HTML", which three agents found unclear. And its all-or-nothing rollback undoes real steps, so another agent could see, or build on, an edit that later rolls back. A server-side `edit` can stage its ops with the `Transaction` that `Design::import` already uses.
