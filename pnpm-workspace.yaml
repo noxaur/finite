@@ -8,6 +8,7 @@ catalogMode: prefer
 
 catalog:
   "@electron/osx-sign": ^1.3.3
+  "@figma/plugin-typings": ^1.142.0
   "@stylexjs/babel-plugin": ^0.19.1
   "@stylexjs/postcss-plugin": ^0.19.1
   "@stylexjs/stylex": ^0.19.1

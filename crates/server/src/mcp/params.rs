@@ -604,10 +604,44 @@ pub struct LayoutParams {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+pub struct ImportParams {
+    pub(super) design_id: String,
+    /// "html", "finite" (a Finite bundle) or "figma" (a .figma.json file from the Finite Figma plugin).
+    pub(super) format: String,
+    /// The file as text. Pass this or contentBase64, not both.
+    #[serde(default)]
+    pub(super) content: Option<String>,
+    /// The file's bytes in base64, for a file that isn't text.
+    #[serde(default)]
+    pub(super) content_base64: Option<String>,
+    /// The file's name, like "landing.html". Names the undo step and the download of the original.
+    #[serde(default)]
+    pub(super) file_name: Option<String>,
+    /// The id of the page the new artboards go on, unless the file names its own pages (a .finite bundle does). Omit for the first page.
+    #[serde(default)]
+    pub(super) page_id: Option<String>,
+    /// Refuse the import if anything scores no or unknown on these axes: "preserved", "visual", "editable".
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub(super) strict: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct CreatePageParams {
     pub(super) design_id: String,
     /// Like "Components".
     pub(super) name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportParams {
+    pub(super) design_id: String,
+    /// "html", "finite" (a Finite bundle) or "figma" (a .figma.json file for the Finite Figma plugin).
+    pub(super) format: String,
+    /// One artboard to export. Omit for the whole design.
+    #[serde(default)]
+    pub(super) artboard_id: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]

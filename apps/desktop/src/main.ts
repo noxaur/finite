@@ -1,7 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { createServer } from "node:net";
 import path from "node:path";
-import { app, BrowserWindow, dialog, shell } from "electron";
+import { app, BrowserWindow, dialog, session, shell } from "electron";
 import { afterStop } from "./restarts.js";
 import { keepUpToDate, offerMoveToApplications } from "./updates.js";
 
@@ -152,6 +152,10 @@ app
   .whenReady()
   .then(async () => {
     await offerMoveToApplications();
+    // Older builds served the page without Cache-Control, so
+    // Chromium may hold a page that names the last build's chunks. The
+    // server is local, so starting from an empty HTTP cache costs little.
+    await session.defaultSession.clearCache();
     keepUpToDate();
     await createWindow();
     app.on("activate", () => {

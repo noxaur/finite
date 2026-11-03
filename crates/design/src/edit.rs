@@ -241,7 +241,13 @@ pub fn write_html(
 /// [`html::parse`], with its error as an [`EditError`]. Parsing doesn't need
 /// the document, so the server does it before it takes the design's lock.
 pub fn parse_html(html_source: &str) -> Result<Vec<Fragment>> {
-    html::parse(html_source).or_else(|too_deep| err(too_deep.to_string()))
+    parse_html_reporting(html_source).map(|parsed| parsed.fragments)
+}
+
+/// [`parse_html`], saying what it left out, so the author can be told.
+pub fn parse_html_reporting(html_source: &str) -> Result<html::Parsed> {
+    html::parse_with(html_source, html::Policy::Authoring)
+        .or_else(|too_deep| err(too_deep.to_string()))
 }
 
 /// Inserts parsed HTML relative to `target`. Returns the ops and the ids of the new root nodes.

@@ -1,12 +1,14 @@
 //! A [`Store`] in Postgres, which several servers can share. Set
 //! `FINITE_DATABASE_URL` to use it.
 //!
-//! Three tables hold everything:
+//! Four tables hold everything:
 //!
 //! - `finite_designs`: one row per design, with its last snapshot as JSON,
 //!   the server holding its lease (`holder`), and its fencing token (`epoch`).
 //! - `finite_journal`: the records appended since that snapshot, in order.
 //! - `finite_nodes`: one row per server, with the time of its last heartbeat.
+//! - `finite_blobs`: one row per blob, keyed by the hash of its bytes. Blobs
+//!   never change, so they need no token.
 //!
 //! Every write checks the token in the same transaction that changes the
 //! design: `save` updates the row only `WHERE epoch = token`, and `append`
@@ -29,7 +31,13 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 
 pub mod tls;
 
-use crate::store::{Claim, Registry, Store, Stored, Token, fenced};
+use crate::{
+    blob::{self, BlobHash},
+    store::{
+        Claim, Registry, Store, Stored, Token, decode_record, decode_snapshot, encode_record,
+        encode_snapshot, fenced,
+    },
+};
 
 /// The longest one call may take before it fails, so a database that stopped
 /// answering can't hang a save forever.
@@ -57,6 +65,10 @@ CREATE TABLE IF NOT EXISTS finite_nodes (
     url text PRIMARY KEY,
     instance text NOT NULL,
     heartbeat timestamptz NOT NULL
+);
+CREATE TABLE IF NOT EXISTS finite_blobs (
+    hash text PRIMARY KEY,
+    bytes bytea NOT NULL
 );
 ";
 
@@ -325,12 +337,9 @@ impl Store for PgStore {
                 return Ok(None);
             };
             let snapshot: String = row.get(0);
-            let snapshot: Snapshot = match serde_json::from_str(&snapshot) {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    tracing::warn!(id, %error, "skipping unreadable design");
-                    return Ok(None);
-                }
+            let Some(snapshot) = decode_snapshot(&snapshot)? else {
+                tracing::warn!(id, "skipping unreadable design");
+                return Ok(None);
             };
             let rows = tx
                 .query(
@@ -340,10 +349,10 @@ impl Store for PgStore {
                 .await?;
             let mut journal = Vec::with_capacity(rows.len());
             for row in rows {
-                match serde_json::from_str(row.get(0)) {
-                    Ok(record) => journal.push(record),
-                    Err(error) => {
-                        tracing::warn!(id, %error, "journal has an unreadable record; ignoring the rest");
+                match decode_record(row.get(0))? {
+                    Some(record) => journal.push(record),
+                    None => {
+                        tracing::warn!(id, "journal has an unreadable record; ignoring the rest");
                         break;
                     }
                 }
@@ -355,7 +364,7 @@ impl Store for PgStore {
 
     fn save(&self, snapshot: &Snapshot, token: Token) -> io::Result<()> {
         let id = snapshot.meta.id.clone();
-        let json = serde_json::to_string(snapshot)?;
+        let json = encode_snapshot(snapshot)?;
         let token = token as i64;
         query!(self, |client| {
             let tx = client.transaction().await?;
@@ -390,8 +399,8 @@ impl Store for PgStore {
         let id = id.to_owned();
         let records = records
             .iter()
-            .map(serde_json::to_string)
-            .collect::<Result<Vec<String>, _>>()?;
+            .map(encode_record)
+            .collect::<io::Result<Vec<String>>>()?;
         let token = token as i64;
         query!(self, |client| {
             let tx = client.transaction().await?;
@@ -428,9 +437,45 @@ impl Store for PgStore {
         })
     }
 
+    fn put_blob(&self, bytes: &[u8]) -> io::Result<BlobHash> {
+        let hash = blob::accept(bytes)?;
+        let (key, bytes) = (hash.to_string(), bytes.to_vec());
+        query!(self, |client| {
+            client
+                .execute(
+                    "INSERT INTO finite_blobs (hash, bytes) VALUES ($1, $2)
+                     ON CONFLICT (hash) DO NOTHING",
+                    &[&key, &bytes],
+                )
+                .await?;
+            Ok(())
+        })?;
+        Ok(hash)
+    }
+
+    fn get_blob(&self, hash: &BlobHash) -> io::Result<Option<Vec<u8>>> {
+        let key = hash.to_string();
+        query!(self, |client| {
+            let row = client
+                .query_opt("SELECT bytes FROM finite_blobs WHERE hash = $1", &[&key])
+                .await?;
+            Ok(row.map(|row| row.get::<_, Vec<u8>>(0)))
+        })
+    }
+
+    fn has_blob(&self, hash: &BlobHash) -> io::Result<bool> {
+        let key = hash.to_string();
+        query!(self, |client| {
+            let row = client
+                .query_opt("SELECT 1 FROM finite_blobs WHERE hash = $1", &[&key])
+                .await?;
+            Ok(row.is_some())
+        })
+    }
+
     fn create(&self, snapshot: &Snapshot) -> io::Result<Option<Token>> {
         let id = snapshot.meta.id.clone();
-        let json = serde_json::to_string(snapshot)?;
+        let json = encode_snapshot(snapshot)?;
         let me = self.me.clone();
         query!(self, |client| {
             let row = client
@@ -667,6 +712,7 @@ mod tests {
             pages: Default::default(),
             comments: Vec::new(),
             histories: None,
+            imports: Vec::new(),
             log: None,
         };
         a.create(&snapshot("d")).unwrap().unwrap();

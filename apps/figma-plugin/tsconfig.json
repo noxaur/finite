@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "lib": ["es2023", "DOM", "DOM.Iterable"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "types": ["@figma/plugin-typings", "node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "skipLibCheck": true
+  },
+  "include": ["src", "scripts", "vite.config.ts"]
+}

@@ -47,6 +47,8 @@ Real tools keep the real server's argument checks. For a schema a spec writes, t
 | `pins`           | Put numbered pins over a button and a heading the agent didn't size                 | Finding where things rendered |
 | `overlap`        | Fix a small badge overlapping the frame name above it                               | Spotting and fixing overlaps  |
 | `screens-change` | Build three screens, then change their shared top bar in the same session           | Keeping a design up to date   |
+| `import-page`    | Import a web page with scripts, handlers and an embed onto a named page             | Importing safely              |
+| `export-figma`   | Export a design as a file for the Finite Figma plugin                               | Getting a file out            |
 
 ## What the metrics mean
 

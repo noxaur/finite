@@ -34,10 +34,7 @@ use axum::{
 use futures::{StreamExt, stream::SelectAll};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite;
-use tower_http::{
-    services::{ServeDir, ServeFile},
-    trace::TraceLayer,
-};
+use tower_http::trace::TraceLayer;
 
 use rmcp::transport::streamable_http_server::session::store::SessionStore;
 
@@ -47,8 +44,9 @@ use crate::{
     hub::LOBBY_LIMIT,
 };
 
-/// Bodies larger than this aren't forwarded.
-const MAX_BODY: usize = 8 << 20;
+/// Bodies larger than this aren't forwarded: an import's file, the largest
+/// body a design route takes.
+const MAX_BODY: usize = crate::api::IMPORT_LIMIT;
 
 struct Front {
     /// The servers, fixed or kept current from the shared store's heartbeats.
@@ -146,10 +144,7 @@ fn build(
                 )),
         );
     let router = match static_dir {
-        Some(dir) => {
-            let not_found = format!("{dir}/404.html");
-            router.fallback_service(ServeDir::new(dir).not_found_service(ServeFile::new(not_found)))
-        }
+        Some(dir) => crate::frontend::serve(router, dir),
         None => router,
     };
     router.layer(TraceLayer::new_for_http())
@@ -211,6 +206,18 @@ async fn send(
     }
 }
 
+/// The headers of a server's answer the browser gets too. Some are what
+/// keeps a download safe, like `sandbox` on an SVG someone uploaded, so
+/// leaving one out here would quietly undo it.
+const PASSED_ON: [&str; 6] = [
+    "content-type",
+    "cache-control",
+    "content-security-policy",
+    "x-content-type-options",
+    "content-disposition",
+    "finite-diagnostics",
+];
+
 /// A server's answer, passed on to the browser.
 async fn pass_on(res: reqwest::Result<reqwest::Response>) -> Response {
     let res = match res {
@@ -218,8 +225,8 @@ async fn pass_on(res: reqwest::Result<reqwest::Response>) -> Response {
         Err(error) => return bad_gateway(error),
     };
     let mut out = Response::builder().status(res.status());
-    for name in [header::CONTENT_TYPE, header::CACHE_CONTROL] {
-        if let Some(value) = res.headers().get(&name) {
+    for name in PASSED_ON {
+        if let Some(value) = res.headers().get(name) {
             out = out.header(name, value);
         }
     }
