@@ -178,6 +178,16 @@ pub struct HtmlParams {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+pub struct JsxParams {
+    pub(super) design_id: String,
+    pub(super) node_id: String,
+    /// Write styles as Tailwind classes instead of `style` objects.
+    #[serde(default)]
+    pub(super) tailwind: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ScreenshotParams {
     pub(super) design_id: String,
     /// An artboard, or a node inside one. The image is cropped to its box.

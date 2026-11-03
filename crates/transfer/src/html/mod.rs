@@ -5,7 +5,6 @@
 
 use std::collections::BTreeSet;
 
-use base64::{Engine, engine::general_purpose::STANDARD};
 use finite_design::{
     html::{self, Dropped, ExportOptions, Fragment, Policy},
     import::Dependency,
@@ -119,38 +118,7 @@ impl Codec for Html {
             layer = html::BASE_LAYER,
             base = html::BASE_CSS,
         );
-        // Files the design stores, like imported images, go inline: their
-        // URLs only work on this server.
-        let mut diagnostics = Vec::new();
-        let mut failed = None;
-        let page = assets::rewrite_urls(&page, |hash| match revision.blobs.get(hash) {
-            Ok(Some(bytes)) => Some(format!(
-                "data:{};base64,{}",
-                assets::media_type(&bytes),
-                STANDARD.encode(&bytes)
-            )),
-            Ok(None) => {
-                diagnostics.push(Diagnostic {
-                    node: None,
-                    path: assets::url("…", hash),
-                    what: "an image".into(),
-                    feature: Feature::Image,
-                    reason: "the design points at a file its store doesn't have".into(),
-                    preserved: Score::No,
-                    visual: Score::No,
-                    editable: Score::No,
-                    quarantined: false,
-                });
-                None
-            }
-            Err(error) => {
-                failed.get_or_insert(error);
-                None
-            }
-        });
-        if let Some(error) = failed {
-            return Err(error);
-        }
+        let (page, diagnostics) = assets::inline(&page, revision.blobs)?;
         Ok(Exported {
             file_name: format!("{}.html", file_stem(&title)),
             media_type: "text/html; charset=utf-8",

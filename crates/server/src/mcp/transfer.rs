@@ -101,7 +101,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Export the design, or one artboard, as a file: html, finite (a bundle that imports back exactly) or figma (for the Finite Figma plugin). Returns a diagnostic for anything that didn't convert exactly, and the file's text, cut off past 60,000 characters.",
+        description = "Export the design, or one artboard, as a file: html, finite (a bundle that imports back exactly), figma (for the Finite Figma plugin) or jsx (one artboard as a React component). Returns a diagnostic for anything that didn't convert exactly, and the file's text, cut off past 60,000 characters.",
         annotations(read_only_hint = true)
     )]
     async fn export_design(&self, Parameters(p): Parameters<ExportParams>) -> ToolResult {

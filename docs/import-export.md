@@ -1,10 +1,14 @@
 # Import and export
 
-Finite moves designs in and out through one Rust crate, `crates/transfer`. Each format is a **codec** that converts between that format and Finite's own `Document`, so the document is the hub and there are no converters between pairs of formats. v1 ships three codecs: HTML, a native `.finite` bundle, and Figma in both directions.
+Finite moves designs in and out through one Rust crate, `crates/transfer`. Each format is a **codec** that converts between that format and Finite's own `Document`, so the document is the hub and there are no converters between pairs of formats. v1 ships three codecs: HTML, a native `.finite` bundle, and Figma in both directions. A fourth, JSX, only exports.
 
 Two rules hold everything else up. Import never throws data away: Finite keeps the exact bytes it received, and anything it can't turn into nodes stays recoverable from them. And nothing that could run code reaches the document unless someone wrote it there on purpose.
 
 `crates/transfer/SUPPORT.md` shows what each codec does with each feature. A test generates it, so it can't go stale.
+
+## JSX
+
+`crates/transfer/src/jsx.rs` writes a node as JSX for a React codebase. The `get_jsx` MCP tool calls `jsx::convert` on any node, and the codec's `write` wraps an artboard in a component file (`?format=jsx`, `export_design`). Attributes take React's names (`class` is `className`, `for` is `htmlFor`, SVG `stroke-width` is `strokeWidth`). Text JSX can't hold, like `{` or leading spaces, goes out as a string expression. By default each node's styles become a `style` object. With `tailwind`, they become classes: a utility where its meaning is plain (`flex`, `gap-[8px]`) and an arbitrary property (`[background-color:#fff]`) for the rest. A value a class can't hold, like a `url(…)`, stays in a `style` object. `<script>` elements are left out with a diagnostic, and so is `!important`, which a style object can't carry and a Tailwind arbitrary value rejects. `SUPPORT.md` marks frame, solid fill and flex layout approximate for that reason and because a Tailwind class has less weight than an inline style. `get_jsx` keeps stored images as this server's URLs, like `get_html`, and says so; the codec's file inlines them. A `<textarea>`'s text becomes `defaultValue`. Not handled: `selected` on an `<option>` stays as is, so React warns until it moves to the `<select>`'s `defaultValue`. JSX can't be imported.
 
 ## Adding a format or a feature
 

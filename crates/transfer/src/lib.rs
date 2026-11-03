@@ -27,6 +27,7 @@ mod feature;
 pub mod figma;
 pub mod finite;
 mod html;
+pub mod jsx;
 mod report;
 pub mod scene;
 
@@ -51,16 +52,19 @@ pub enum Format {
     Finite,
     /// A `.figma.json` file from or for the Finite Figma plugin.
     Figma,
+    /// A React component. Export only.
+    Jsx,
 }
 
 impl Format {
-    pub const ALL: [Format; 3] = [Format::Html, Format::Finite, Format::Figma];
+    pub const ALL: [Format; 4] = [Format::Html, Format::Finite, Format::Figma, Format::Jsx];
 
     pub fn codec(self) -> &'static dyn Codec {
         match self {
             Format::Html => &html::Html,
             Format::Finite => &finite::Finite,
             Format::Figma => &figma::Figma,
+            Format::Jsx => &jsx::Jsx,
         }
     }
 

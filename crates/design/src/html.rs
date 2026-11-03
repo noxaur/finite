@@ -42,8 +42,9 @@ pub fn is_blocked_tag(tag: &str) -> bool {
 const RAW_TEXT_TAGS: &[&str] = &["script", "style"];
 
 /// HTML elements that never have children or a closing tag.
-const VOID_TAGS: &[&str] = &[
-    "area", "br", "col", "hr", "img", "input", "source", "track", "wbr",
+pub const VOID_TAGS: &[&str] = &[
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr",
 ];
 
 /// Base styles for rendering an artboard. Screenshots and the web viewer both
