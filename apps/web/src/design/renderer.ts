@@ -35,6 +35,12 @@ const BLOCKED_TAGS = new Set([
 
 /** How long a sandboxed artboard waits for edits to settle before reloading. */
 const RELOAD_DELAY_MS = 150;
+/**
+ * How long a hidden sandboxed artboard keeps its document. Showing it again
+ * before then is instant, and its scripts carry on where they were instead
+ * of starting over, so panning back and forth doesn't reload it each time.
+ */
+const UNLOAD_DELAY_MS = 30_000;
 const MAX_SIDE = 16_000;
 
 const isScript = (node: Node) => node.type === "element" && node.tag?.toLowerCase() === "script";
@@ -59,6 +65,10 @@ interface Frame {
    */
   awaitingSize?: boolean;
   reload?: ReturnType<typeof setTimeout>;
+  /** Unloads a hidden iframe once it has stayed hidden for `UNLOAD_DELAY_MS`. */
+  unload?: ReturnType<typeof setTimeout>;
+  /** The iframe's document is unloaded or out of date, so it loads again when shown. */
+  stale?: boolean;
   /** The iframe's latest answer to "what's under this point?", in its own coordinates. */
   hit?: { readonly x: number; readonly y: number; readonly id: string | null };
   /** The point last asked about, so the same question isn't sent twice. */
@@ -191,13 +201,13 @@ export class Renderer {
     this.abort.abort();
     this.culler.dispose();
     this.resizes?.disconnect();
-    for (const frame of this.frames.values()) clearTimeout(frame.reload);
+    for (const frame of this.frames.values()) clearTimers(frame);
   }
 
   /** Rebuilds everything from the replica. */
   reset() {
     for (const frame of this.frames.values()) {
-      clearTimeout(frame.reload);
+      clearTimers(frame);
       frame.root.remove();
     }
     this.frames.clear();
@@ -219,8 +229,9 @@ export class Renderer {
   /**
    * Sets the canvas area that's on screen, plus a margin, and hides the
    * artboards outside it (`null`: show them all). A hidden artboard costs
-   * no layout or paint, and a sandboxed one is unloaded, which also stops
-   * its scripts. Both come back when the area reaches them.
+   * no layout or paint, and a sandboxed one is unloaded once it has stayed
+   * hidden for `UNLOAD_DELAY_MS`, which also stops its scripts. Both come
+   * back when the area reaches them.
    *
    * An artboard is measured while shown and keeps that size while hidden,
    * so `artboardBounds` and "fit to view" still see it. Until it's
@@ -241,16 +252,26 @@ export class Renderer {
       }
     }
     frame.root.style.display = culled ? "none" : "";
-    if (!frame.iframe) return;
-    clearTimeout(frame.reload);
+    const iframe = frame.iframe;
+    if (!iframe) return;
+    clearTimeout(frame.unload);
     if (culled) {
-      frame.iframe.srcdoc = "";
-      delete frame.hit;
-      delete frame.asked;
-      frame.rects.clear();
-      frame.pendingRects.clear();
-    } else {
-      frame.iframe.srcdoc = artboardDocument(this.replica, id);
+      // An edit waiting to reload it is loaded when it's shown instead.
+      if (frame.reload !== undefined) frame.stale = true;
+      clearTimeout(frame.reload);
+      delete frame.reload;
+      // Keep the document for a while: a hidden iframe isn't rendered, and
+      // panning back to it shouldn't start its scripts over.
+      frame.unload = setTimeout(() => {
+        if (this.frames.get(id) !== frame || !this.culler.isCulled(id)) return;
+        iframe.srcdoc = "";
+        frame.stale = true;
+        forgetLayout(frame);
+      }, UNLOAD_DELAY_MS);
+    } else if (frame.stale) {
+      frame.stale = false;
+      iframe.srcdoc = artboardDocument(this.replica, id);
+      forgetLayout(frame);
     }
   }
 
@@ -359,8 +380,11 @@ export class Renderer {
       // What the instance shows may be a different size now.
       this.culler.touch(id);
       // A hidden artboard is built, or loaded, again when it's shown: the
-      // new content is read then, so a hidden iframe stays unloaded.
-      if (this.culler.isCulled(id)) continue;
+      // new content is read then, so a hidden iframe isn't reloaded now.
+      if (this.culler.isCulled(id)) {
+        if (frame.iframe) frame.stale = true;
+        continue;
+      }
       if ((frame.iframe !== null) !== this.isLive(id)) this.remount(node);
       else if (frame.iframe) this.scheduleReload(id, frame);
     }
@@ -650,7 +674,7 @@ export class Renderer {
   private unmount(id: string) {
     const frame = this.frames.get(id);
     if (frame) {
-      clearTimeout(frame.reload);
+      clearTimers(frame);
       frame.root.remove();
       this.frames.delete(id);
       this.culler.remove(id);
@@ -773,16 +797,17 @@ export class Renderer {
 
   private scheduleReload(id: string, frame: Frame) {
     clearTimeout(frame.reload);
+    delete frame.reload;
     // A hidden artboard loads its latest version when it's shown again.
-    if (this.culler.isCulled(id)) return;
+    if (this.culler.isCulled(id)) {
+      frame.stale = true;
+      return;
+    }
     frame.reload = setTimeout(() => {
+      delete frame.reload;
       if (this.frames.get(id) === frame && frame.iframe && !this.culler.isCulled(id)) {
         frame.iframe.srcdoc = artboardDocument(this.replica, id);
-        // A new document: earlier answers about its layout no longer hold.
-        delete frame.hit;
-        delete frame.asked;
-        frame.rects.clear();
-        frame.pendingRects.clear();
+        forgetLayout(frame);
       }
     }, RELOAD_DELAY_MS);
   }
@@ -866,6 +891,19 @@ export class Renderer {
       });
     }
   }
+}
+
+function clearTimers(frame: Frame) {
+  clearTimeout(frame.reload);
+  clearTimeout(frame.unload);
+}
+
+/** A new or unloaded document: earlier answers about its layout no longer hold. */
+function forgetLayout(frame: Frame) {
+  delete frame.hit;
+  delete frame.asked;
+  frame.rects.clear();
+  frame.pendingRects.clear();
 }
 
 /** Where an iframe's content sits on the page, and how much the canvas zoom scales it. */

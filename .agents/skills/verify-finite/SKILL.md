@@ -7,12 +7,12 @@ description: Prove a Finite feature works in the real app and keep the evidence.
 
 Finite has two surfaces, and most features need both. **Agents** edit designs through MCP tools at `/mcp`. **People** watch in the browser: the design list at `/` and the canvas at `/design/?id=<designId>`. A proof drives the agent side with `call` and checks the person's side in the page, or the other way round for comments.
 
-The harness is `e2e/headless.mjs`. `.claude/skills/finite-headless/SKILL.md` is its command reference (selectors that reach into shadow roots, sandboxed iframes, `--agent`, Python). Read it once before your first drive. This skill adds isolation, a doctor, an evidence folder, before-and-after runs and the feature map.
+The harness is `e2e/headless.mjs`. `.agents/skills/finite-headless/SKILL.md` is its command reference (selectors that reach into shadow roots, sandboxed iframes, `--agent`, Python). Read it once before your first drive. This skill adds isolation, a doctor, an evidence folder, before-and-after runs and the feature map.
 
 Every command below runs from the checkout root:
 
 ```bash
-V=.claude/skills/verify-finite/scripts/verify.sh
+V=.agents/skills/verify-finite/scripts/verify.sh
 ```
 
 Shell variables don't survive between tool calls. Repeat `V=...` and `RUN=...` at the start of each call.
@@ -120,7 +120,7 @@ A proof meets these standards:
 
 - **The real path.** A person's action goes through the page (click, key, type, upload), and an agent's action goes through an MCP `call`. Use the REST API only to read stored state. Writing through it skips the UI you're proving.
 - **Action and result.** Save the step that does the thing and the state after it, not only a final screenshot.
-- **Side effects.** Show the change stored as well as shown. `api GET /api/designs/<id>` returns `meta`, `nodes` and `comments` as the server saved them, and an agent's read tool (`get_comments`, `get_shared_css`, `get_tree_summary`) shows what the next agent will see.
+- **Side effects.** Show the change stored as well as shown. `api GET /api/designs/<id>` returns `meta`, `nodes` and `comments` as the server saved them, and an agent's read tool (`get_comments`, `get_tokens`, `get_tree_summary`) shows what the next agent will see.
 - **Both directions for live features.** An agent's edit must appear in the page without a reload. A person's comment must reach a waiting agent.
 - **No mocks.** The run uses the real server, the real browser and real MCP sessions.
 - **A clean console.** End with `$V save $RUN <n>-console console`. An exception or failed request there spoils the proof.
