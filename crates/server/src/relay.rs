@@ -329,7 +329,7 @@ impl ServerHandler for Relay {
                 "finite-router",
                 env!("CARGO_PKG_VERSION"),
             ))
-            .with_instructions(instructions())
+            .with_instructions(instructions(crate::mcp::Surface::from_env()))
     }
 
     /// Every server has the same tools, so the first that answers lists them.

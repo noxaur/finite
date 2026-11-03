@@ -88,19 +88,34 @@ pub(crate) fn extra(group: &str) -> bool {
         .any(|g| g == group)
 }
 
-/// Whether `FINITE_MCP_SURFACE=doc6` serves the six tools of `doc6`
-/// instead of today's, so AX runs (`e2e/ax`) can compare both on one build.
-/// Unset, or `classic`, serves today's tools.
-pub(crate) fn doc6() -> bool {
-    static DOC6: OnceLock<bool> = OnceLock::new();
-    *DOC6.get_or_init(|| {
-        std::env::var("FINITE_MCP_SURFACE").is_ok_and(|s| s.trim().eq_ignore_ascii_case("doc6"))
-    })
+/// Which tools an endpoint serves: today's (`Classic`), or the six of
+/// `doc6`. `/mcp` serves what `FINITE_MCP_SURFACE` names, so AX runs
+/// (`e2e/ax`) can compare both on one build, and `/mcp/classic` always
+/// serves today's tools, for scripts written against them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Surface {
+    #[default]
+    Classic,
+    Doc6,
+}
+
+impl Surface {
+    /// `FINITE_MCP_SURFACE`: `doc6`, or `classic` when unset.
+    pub fn from_env() -> Self {
+        match std::env::var("FINITE_MCP_SURFACE") {
+            Ok(s) if s.trim().eq_ignore_ascii_case("doc6") => Self::Doc6,
+            _ => Self::Classic,
+        }
+    }
+
+    pub(crate) fn doc6(self) -> bool {
+        self == Self::Doc6
+    }
 }
 
 /// What agents see when they connect, with a section for each extra tool group.
-pub(crate) fn instructions() -> &'static str {
-    if doc6() {
+pub(crate) fn instructions(surface: Surface) -> &'static str {
+    if surface.doc6() {
         return doc6::INSTRUCTIONS;
     }
     static TEXT: OnceLock<String> = OnceLock::new();
@@ -124,6 +139,7 @@ pub(crate) fn instructions() -> &'static str {
 #[derive(Clone)]
 pub struct FiniteMcp {
     hub: Arc<Hub>,
+    surface: Surface,
     session: Arc<SessionGuard>,
     /// Layout notes waiting for this session's next result (`layout` group).
     watch: Arc<watch::LayoutWatch>,
@@ -159,11 +175,14 @@ pub(crate) fn sessions() -> LocalSessionManager {
     sessions
 }
 
-/// The MCP endpoint as a tower service, to mount at `/mcp`.
-pub fn service(hub: Arc<Hub>) -> StreamableHttpService<FiniteMcp, LocalSessionManager> {
+/// The MCP endpoint serving `surface`'s tools, as a tower service.
+pub fn service(
+    hub: Arc<Hub>,
+    surface: Surface,
+) -> StreamableHttpService<FiniteMcp, LocalSessionManager> {
     let config = StreamableHttpServerConfig::default().with_allowed_hosts(hub.allowed_hosts());
     StreamableHttpService::new(
-        move || Ok(FiniteMcp::new(hub.clone())),
+        move || Ok(FiniteMcp::new(hub.clone(), surface)),
         Arc::new(sessions()),
         config,
     )
@@ -633,8 +652,8 @@ fn distinct<'a>(ids: impl Iterator<Item = &'a String>) -> usize {
 
 impl FiniteMcp {
     /// Every tool, with the [`extra`] groups that are turned on.
-    fn tools() -> ToolRouter<Self> {
-        if doc6() {
+    fn tools(surface: Surface) -> ToolRouter<Self> {
+        if surface.doc6() {
             return Self::doc6_router();
         }
         let mut router = Self::tool_router();
@@ -648,15 +667,16 @@ impl FiniteMcp {
         router
     }
 
-    pub fn new(hub: Arc<Hub>) -> Self {
+    pub fn new(hub: Arc<Hub>, surface: Surface) -> Self {
         Self {
             session: Arc::new(SessionGuard {
                 hub: hub.clone(),
                 actor: OnceLock::new(),
             }),
             hub,
-            watch: Arc::default(),
-            tool_router: Self::tools(),
+            surface,
+            watch: Arc::new(watch::LayoutWatch::new(surface)),
+            tool_router: Self::tools(surface),
         }
     }
 
@@ -722,7 +742,11 @@ impl FiniteMcp {
             let text = match error {
                 OpenError::Busy(_) => format!("design {id:?}: {error}."),
                 _ => {
-                    let list = if doc6() { "designs" } else { "list_designs" };
+                    let list = if self.surface.doc6() {
+                        "designs"
+                    } else {
+                        "list_designs"
+                    };
                     format!("design {id:?} not found. Call {list} to see the available ids.")
                 }
             };
@@ -1375,8 +1399,9 @@ impl FiniteMcp {
                     ));
                     content.push(ContentBlock::text(format::shot(image)));
                     if let Some(boxes) = &image.boxes {
-                        let notes =
-                            handle.read(|d| format::layout_notes(d.view(), &image.artboard, boxes));
+                        let notes = handle.read(|d| {
+                            format::layout_notes(d.view(), &image.artboard, boxes, self.surface)
+                        });
                         if !notes.is_empty() {
                             content.push(ContentBlock::text(notes));
                         }
@@ -1437,7 +1462,7 @@ impl FiniteMcp {
                     }
                     _ => node_id.clone(),
                 };
-                format::rendered_outline(doc, &root, depth, &boxes)
+                format::rendered_outline(doc, &root, depth, &boxes, self.surface)
             }));
         }
         ok(cut(
@@ -2072,7 +2097,7 @@ impl ServerHandler for FiniteMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         // doc6 takes a design's name for its id, in every tool.
-        if doc6()
+        if self.surface.doc6()
             && let Some(args) = request.arguments.as_mut()
             && let Some(serde_json::Value::String(given)) = args.get("designId")
         {
@@ -2088,7 +2113,7 @@ impl ServerHandler for FiniteMcp {
             }
         }
         // doc6 checks the layout after every edit, so its notes are always on.
-        let design = (extra("layout") || doc6())
+        let design = (extra("layout") || self.surface.doc6())
             .then(|| {
                 let id = request.arguments.as_ref()?.get("designId")?.as_str()?;
                 Some(id.to_owned())
@@ -2146,7 +2171,7 @@ impl ServerHandler for FiniteMcp {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("finite", env!("CARGO_PKG_VERSION")))
-            .with_instructions(instructions())
+            .with_instructions(instructions(self.surface))
     }
 }
 

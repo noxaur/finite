@@ -51,9 +51,16 @@ pub fn app(hub: Arc<Hub>, static_dir: Option<&str>) -> Router {
             guard::known_hosts,
         ));
     // MCP checks Host itself; the guard adds the Origin check.
-    let mcp = Router::new().nest_service("/mcp", mcp::service(hub)).layer(
-        axum::middleware::from_fn_with_state(allowed, guard::known_hosts),
-    );
+    let mcp = Router::new()
+        .nest_service(
+            "/mcp/classic",
+            mcp::service(hub.clone(), mcp::Surface::Classic),
+        )
+        .nest_service("/mcp", mcp::service(hub, mcp::Surface::from_env()))
+        .layer(axum::middleware::from_fn_with_state(
+            allowed,
+            guard::known_hosts,
+        ));
 
     let router = Router::new().nest("/api", api).merge(mcp);
 

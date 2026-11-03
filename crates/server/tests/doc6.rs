@@ -108,6 +108,19 @@ async fn it_serves_exactly_six_tools_and_their_instructions() {
 }
 
 #[tokio::test]
+async fn scripts_keep_todays_tools_at_mcp_classic() {
+    let (app, _) = doc6();
+    let mut script = Agent::connect_at(&app, "Seeder", "/mcp/classic").await;
+    let created = script
+        .ok("create_design", json!({ "name": "Seeded" }))
+        .await;
+    assert!(created.contains("Next: create_artboard."), "{created}");
+    let mut agent = Agent::connect(&app, "Six").await;
+    let read = agent.ok("read", json!({ "designId": "Seeded" })).await;
+    assert!(read.contains("No artboards yet"), "{read}");
+}
+
+#[tokio::test]
 async fn designs_are_listed_created_renamed_and_deleted() {
     let (app, _) = doc6();
     let mut agent = Agent::connect(&app, "Lister").await;

@@ -17,6 +17,8 @@ use tower::ServiceExt;
 
 pub struct Agent {
     app: Router,
+    /// The endpoint: `/mcp`, or `/mcp/classic`.
+    path: &'static str,
     pub name: &'static str,
     session: Option<String>,
     next_id: u64,
@@ -24,8 +26,14 @@ pub struct Agent {
 
 impl Agent {
     pub async fn connect(app: &Router, name: &'static str) -> Self {
+        Self::connect_at(app, name, "/mcp").await
+    }
+
+    /// Connects to the MCP endpoint at `path`.
+    pub async fn connect_at(app: &Router, name: &'static str, path: &'static str) -> Self {
         let mut agent = Self {
             app: app.clone(),
+            path,
             name,
             session: None,
             next_id: 1,
@@ -42,7 +50,7 @@ impl Agent {
 
     fn request(&self, body: Value) -> Request<Body> {
         // rmcp checks Host to block DNS rebinding, so send what a local client would.
-        let mut req = Request::post("/mcp")
+        let mut req = Request::post(self.path)
             .header(header::HOST, "127.0.0.1:4100")
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::ACCEPT, "application/json, text/event-stream");

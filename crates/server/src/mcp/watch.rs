@@ -93,9 +93,18 @@ impl Taken {
 pub(super) struct LayoutWatch {
     /// By design id, then artboard id.
     boards: Mutex<HashMap<String, HashMap<String, Entry>>>,
+    /// Whose tools the notes name.
+    surface: super::Surface,
 }
 
 impl LayoutWatch {
+    pub(super) fn new(surface: super::Surface) -> Self {
+        Self {
+            surface,
+            ..Self::default()
+        }
+    }
+
     /// Starts measuring the artboards `change` touched, and waits up to
     /// [`wait`] for it. What it finds is then waiting in [`Self::take`].
     pub(super) async fn after_edit(
@@ -126,7 +135,7 @@ impl LayoutWatch {
                 Some(format!(
                     "Layout: this edit touched {} artboards and only the first {BOARDS_PER_EDIT} were checked. {} checks the rest.",
                     boards.len() + left_out,
-                    layout_tool()
+                    layout_tool(self.surface)
                 )),
             );
         }
@@ -143,7 +152,7 @@ impl LayoutWatch {
                 if !watch.is_current(&design, &board, generation) {
                     return;
                 }
-                let note = measure(&handle, &board).await;
+                let note = measure(&handle, &board, watch.surface).await;
                 watch.finish(&design, &board, generation, note);
             }));
         }
@@ -238,26 +247,26 @@ impl LayoutWatch {
 }
 
 /// What the layout check says about `board`, if it found anything.
-async fn measure(handle: &DesignHandle, board: &str) -> Option<String> {
+async fn measure(handle: &DesignHandle, board: &str, surface: super::Surface) -> Option<String> {
     let plan = handle
         .read(|d| screenshot::plan_measurement(d.view(), board, screenshot::Options::default()));
     let boxes = tokio::time::timeout(MEASURE_LIMIT, screenshot::layout(plan.ok()?))
         .await
         .ok()?
         .ok()?;
-    let notes = handle.read(|d| layout_notes(d.view(), board, &boxes));
+    let notes = handle.read(|d| layout_notes(d.view(), board, &boxes, surface));
     if notes.is_empty() || notes.starts_with(CLEAN) {
         return None;
     }
     Some(format!(
         "{notes}\n(From checking artboard #{board} after your last edit. {} shows more.)",
-        layout_tool()
+        layout_tool(surface)
     ))
 }
 
 /// The tool that shows the whole layout, as this surface names it.
-fn layout_tool() -> &'static str {
-    if super::doc6() {
+fn layout_tool(surface: super::Surface) -> &'static str {
+    if surface.doc6() {
         "render with output: \"layout\""
     } else {
         "get_layout"

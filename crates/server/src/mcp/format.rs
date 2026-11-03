@@ -343,6 +343,7 @@ pub(super) fn layout_notes(
     doc: &Document,
     artboard: &str,
     boxes: &[crate::screenshot::ElementBox],
+    surface: super::Surface,
 ) -> String {
     use std::collections::{HashMap, HashSet};
     let by_id: HashMap<&str, &crate::screenshot::ElementBox> =
@@ -388,7 +389,7 @@ pub(super) fn layout_notes(
                 text,
                 " It is {content_bottom:.0} px tall, but the artboard is {:.0} px. If it should all show, make the artboard taller with {}.",
                 board.height,
-                if super::doc6() {
+                if surface.doc6() {
                     format!(
                         "{{\"op\": \"css\", \"css\": \"#{artboard} {{ height: {content_bottom:.0}px }}\"}}"
                     )
@@ -477,6 +478,7 @@ pub(super) fn rendered_outline(
     root: &str,
     max_depth: usize,
     boxes: &[crate::screenshot::ElementBox],
+    surface: super::Surface,
 ) -> String {
     use std::collections::HashMap;
     let by_id: HashMap<&str, &crate::screenshot::ElementBox> =
@@ -498,7 +500,7 @@ pub(super) fn rendered_outline(
         })
         .cloned()
         .collect();
-    let checked = layout_notes(doc, &board.id, &in_scope);
+    let checked = layout_notes(doc, &board.id, &in_scope, surface);
     if !checked.starts_with("Layout: nothing is cut off") {
         notes.push(checked);
     }
