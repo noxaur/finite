@@ -370,6 +370,23 @@ fn css_view(doc: &Document, ids: Option<&[NodeId]>) -> String {
             "  inline: {}",
             if inline.is_empty() { "(none)" } else { &inline }
         ));
+        // A <style> element shows the rules it holds.
+        if node.tag().is_some_and(|t| t.eq_ignore_ascii_case("style")) {
+            let css: String = doc
+                .children(Some(id))
+                .iter()
+                .filter_map(|c| c.text.as_deref())
+                .collect();
+            for rule in css::sheet_rules(&css) {
+                let mut context = rule.context.join(" ");
+                if !context.is_empty() {
+                    context.push(' ');
+                }
+                lines.push(format!("  rule: {context}{}", rule.text));
+            }
+            parts.push(lines.join("\n"));
+            continue;
+        }
         if let Some(board) = doc.artboard_of(id) {
             let rules = by_board.entry(board.id.clone()).or_insert_with(|| {
                 sheets(doc, &board.id)

@@ -233,6 +233,13 @@ async fn read_shows_an_overview_outline_html_css_and_search() {
             && css.contains("Inline styles beat sheet rules for: color"),
         "{css}"
     );
+    let sheet = agent
+        .ok(
+            "read",
+            json!({ "designId": id, "select": "style", "as": "css" }),
+        )
+        .await;
+    assert!(sheet.contains("rule: .card { padding: 8px }"), "{sheet}");
     let sheets = agent
         .ok("read", json!({ "designId": id, "as": "css" }))
         .await;
@@ -778,6 +785,14 @@ async fn render_and_the_layout_check_after_an_edit() {
         probe.contains("Layout:") && probe.contains(&board),
         "{probe}"
     );
+    // A clean check says so, so agents needn't render to find out.
+    let clean = agent
+        .ok(
+            "edit",
+            json!({ "designId": id, "op": "css", "select": "h1", "css": "letter-spacing: 1px" }),
+        )
+        .await;
+    assert!(clean.contains("Layout: nothing is cut off"), "{clean}");
     let tall = "<div data-name=\"Tall\" style=\"height: 900px; flex-shrink: 0\">Tall</div>";
     // check: false leaves the check out.
     let unchecked = edit(

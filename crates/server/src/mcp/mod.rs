@@ -794,7 +794,7 @@ impl FiniteMcp {
                         text.push_str(&note);
                     }
                     if check && extra("layout") {
-                        self.watch.after_edit(design_id, &handle, change).await;
+                        let _ = self.watch.after_edit(design_id, &handle, change).await;
                         let notes = self.watch.take(design_id);
                         if !notes.is_empty() {
                             text.push('\n');

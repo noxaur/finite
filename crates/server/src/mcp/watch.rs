@@ -107,12 +107,14 @@ impl LayoutWatch {
 
     /// Starts measuring the artboards `change` touched, and waits up to
     /// [`wait`] for it. What it finds is then waiting in [`Self::take`].
+    /// Returns whether every artboard it touched was measured in time and
+    /// had nothing to report.
     pub(super) async fn after_edit(
         self: &Arc<Self>,
         design: &str,
         handle: &Arc<DesignHandle>,
         change: &Change,
-    ) {
+    ) -> bool {
         let mut boards: Vec<String> = handle.read(|d| {
             let mut boards: Vec<String> = Vec::new();
             for op in &change.ops {
@@ -147,17 +149,24 @@ impl LayoutWatch {
                 // Let edits sent together all count before the first one measures.
                 tokio::time::sleep(Duration::from_millis(25)).await;
                 let Ok(_turn) = measuring().acquire().await else {
-                    return;
+                    return false;
                 };
                 if !watch.is_current(&design, &board, generation) {
-                    return;
+                    return false;
                 }
-                let note = measure(&handle, &board, watch.surface).await;
-                watch.finish(&design, &board, generation, note);
+                let measured = measure(&handle, &board, watch.surface).await;
+                let clean = matches!(measured, Some(None));
+                watch.finish(&design, &board, generation, measured.flatten());
+                clean
             }));
         }
         // On time out the tasks carry on and leave their notes for later.
-        let _ = tokio::time::timeout(wait(), futures::future::join_all(tasks)).await;
+        match tokio::time::timeout(wait(), futures::future::join_all(tasks)).await {
+            Ok(done) => {
+                left_out == 0 && !done.is_empty() && done.into_iter().all(|d| d.unwrap_or(false))
+            }
+            Err(_) => false,
+        }
     }
 
     fn bump(&self, design: &str, board: &str) -> u64 {
@@ -246,8 +255,13 @@ impl LayoutWatch {
     }
 }
 
-/// What the layout check says about `board`, if it found anything.
-async fn measure(handle: &DesignHandle, board: &str, surface: super::Surface) -> Option<String> {
+/// What the layout check says about `board`: `Some(None)` when it found
+/// nothing, and `None` when it couldn't measure it.
+async fn measure(
+    handle: &DesignHandle,
+    board: &str,
+    surface: super::Surface,
+) -> Option<Option<String>> {
     let plan = handle
         .read(|d| screenshot::plan_measurement(d.view(), board, screenshot::Options::default()));
     let boxes = tokio::time::timeout(MEASURE_LIMIT, screenshot::layout(plan.ok()?))
@@ -256,12 +270,12 @@ async fn measure(handle: &DesignHandle, board: &str, surface: super::Surface) ->
         .ok()?;
     let notes = handle.read(|d| layout_notes(d.view(), board, &boxes, surface));
     if notes.is_empty() || notes.starts_with(CLEAN) {
-        return None;
+        return Some(None);
     }
-    Some(format!(
+    Some(Some(format!(
         "{notes}\n(From checking artboard #{board} after your last edit. {} shows more.)",
         layout_tool(surface)
-    ))
+    )))
 }
 
 /// The tool that shows the whole layout, as this surface names it.

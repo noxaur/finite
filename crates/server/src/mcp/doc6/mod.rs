@@ -646,11 +646,15 @@ impl FiniteMcp {
         let mut text = edit::result(head, sections);
         if let Some(change) = &change {
             if p.check != Some(false) {
-                self.watch.after_edit(&p.design_id, &handle, change).await;
+                let clean = self.watch.after_edit(&p.design_id, &handle, change).await;
                 let notes = self.watch.take(&p.design_id);
                 if !notes.is_empty() {
                     text.push('\n');
                     text.push_str(&super::watch::Taken::text(&notes));
+                } else if clean {
+                    text.push_str(
+                        "\nLayout: nothing is cut off, overflowing or overlapping on the artboards this edit touched.",
+                    );
                 }
             } else {
                 self.watch.invalidate(&p.design_id);
