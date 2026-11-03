@@ -1,4 +1,5 @@
 import type { Bounds } from "./renderer";
+import { visibleBounds } from "./culling";
 
 /** The parts of a wheel event the camera reads. Sandboxed artboards forward these. */
 export type WheelInput = Pick<
@@ -129,6 +130,11 @@ export class Camera {
       x: this.viewport.clientWidth / 2 - x * zoom,
       y: this.viewport.clientHeight / 2 - y * zoom,
     });
+  }
+
+  /** The canvas area in view, with `margin` viewports around it. */
+  visibleWorld(margin = 0.5): Bounds {
+    return visibleBounds(this.view, this.viewport.clientWidth, this.viewport.clientHeight, margin);
   }
 
   fitTo(bounds: Bounds | null) {

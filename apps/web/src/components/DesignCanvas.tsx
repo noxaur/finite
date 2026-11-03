@@ -145,7 +145,11 @@ export function DesignCanvas({ id }: { id: string }) {
     sessionRef.current = session;
     rendererRef.current = renderer;
     cameraRef.current = camera;
+    // Hide the artboards outside the view, before React re-renders for the zoom.
+    camera.subscribe(() => renderer.setViewport(camera.visibleWorld()));
     camera.subscribe((view) => setZoom(view.zoom));
+    const resize = new ResizeObserver(() => renderer.setViewport(camera.visibleWorld()));
+    resize.observe(viewport);
     // A new renderer starts on the first page.
     setPickedPage(null);
 
@@ -204,6 +208,7 @@ export function DesignCanvas({ id }: { id: string }) {
       unsubscribe();
       close();
       controller.abort();
+      resize.disconnect();
       camera.dispose();
       renderer.dispose();
       // The document lives in WebAssembly memory, which isn't garbage collected.

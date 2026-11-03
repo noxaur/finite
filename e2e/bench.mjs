@@ -6,7 +6,11 @@
 //
 // - open: from navigation until all 240 artboards of a 90,000-node design are
 //   drawn, plus the main thread's script and task time while it opens.
-// - pan: frames per second while the wheel pans that design.
+// - pan: frames per second while the wheel pans that design, fitted to the
+//   window, so every artboard is in view.
+// - pan at 100%: the same at 100% zoom, where only a few artboards are in
+//   view and the rest can be skipped, plus the main thread's task time per
+//   second of panning (frames per second tops out near 60).
 // - write: one write_html of 30,000 nodes into an open design, from the
 //   tool call until the last node is on the page, plus script and task time.
 // - thumbnails: the design list with four 5,000-node designs, the most a
@@ -144,6 +148,7 @@ try {
   const bigNodes = await nodeCount(big);
   const opens = [];
   const pans = [];
+  const zoomedPans = [];
   for (let run = 0; run < runs; run++) {
     await page.send("Page.navigate", { url: "about:blank" });
     await page.sleep(300);
@@ -159,19 +164,29 @@ try {
     await page.eval(
       `window.__frames = 0; (function count() { __frames++; requestAnimationFrame(count); })(); 0`,
     );
-    const started = Date.now();
-    let step = 0;
-    while (Date.now() - started < 2000) {
-      await page.send("Input.dispatchMouseEvent", {
-        type: "mouseWheel",
-        x: 700,
-        y: 450,
-        deltaX: step++ % 40 < 20 ? 40 : -40,
-        deltaY: 0,
-      });
-    }
-    const frames = await page.eval(`__frames`);
-    pans.push(frames / ((Date.now() - started) / 1000));
+    const panFor = async (ms) => {
+      await page.eval(`__frames = 0; 0`);
+      const started = Date.now();
+      let step = 0;
+      while (Date.now() - started < ms) {
+        await page.send("Input.dispatchMouseEvent", {
+          type: "mouseWheel",
+          x: 700,
+          y: 450,
+          deltaX: step++ % 40 < 20 ? 40 : -40,
+          deltaY: 0,
+        });
+      }
+      return (await page.eval(`__frames`)) / ((Date.now() - started) / 1000);
+    };
+    pans.push(await panFor(2000));
+    // The "0" key sets 100% zoom, and the settle lets the browser redraw.
+    await page.send("Input.dispatchKeyEvent", { type: "keyDown", key: "0", text: "0" });
+    await page.send("Input.dispatchKeyEvent", { type: "keyUp", key: "0" });
+    await page.sleep(500);
+    await settle();
+    const zoomed = await busy(async () => ({ fps: await panFor(2000) }));
+    zoomedPans.push(zoomed);
   }
 
   // One write_html of 30,000 nodes into an open design.
@@ -203,6 +218,8 @@ try {
   console.log(`  script        ${ms(median(opens.map((o) => o.script)))}`);
   console.log(`  task          ${ms(median(opens.map((o) => o.task)))}`);
   console.log(`pan             ${median(pans).toFixed(1)} fps`);
+  console.log(`pan at 100%     ${median(zoomedPans.map((p) => p.fps)).toFixed(1)} fps`);
+  console.log(`  task per second panned  ${ms(median(zoomedPans.map((p) => p.task)) / 2)}`);
   console.log(`write_html, 30,000 nodes`);
   console.log(`  until drawn   ${ms(median(writes.map((w) => w.wall)))}`);
   console.log(`  script        ${ms(median(writes.map((w) => w.script)))}`);
@@ -212,7 +229,9 @@ try {
     ms((median(thumbs.map((t) => t[key])) - median(emptyList.map((t) => t[key]))) / 4);
   console.log(`  script        ${perThumb("script")} per thumbnail`);
   console.log(`  task          ${perThumb("task")} per thumbnail`);
-  console.log(`raw runs: ${JSON.stringify({ opens, pans, writes, emptyList, thumbs })}`);
+  console.log(
+    `raw runs: ${JSON.stringify({ opens, pans, zoomedPans, writes, emptyList, thumbs })}`,
+  );
 } finally {
   await page.close();
   const exited = new Promise((r) => server.once("exit", r));

@@ -1,5 +1,6 @@
 import * as stylex from "@stylexjs/stylex";
 import { colors } from "@/styles/tokens.stylex";
+import { ArtboardIndex } from "./culling";
 import { artboardDocument, BASE_LAYER, pixelSize } from "./html";
 import type { Applied, Replica } from "./replica";
 import type { Node } from "./schema";
@@ -52,6 +53,12 @@ interface Frame {
   /** Set for artboards with scripts, rendered in a sandboxed iframe. */
   readonly iframe: HTMLIFrameElement | null;
   reload?: ReturnType<typeof setTimeout>;
+  /** Hidden because it's outside the viewport. A hidden sandboxed artboard has its iframe unloaded. */
+  culled: boolean;
+  /** The size when last measured while shown. A hidden artboard reports this one. */
+  size?: { readonly width: number; readonly height: number };
+  /** An edit may have changed the size since it was measured. */
+  dirty: boolean;
   /** The iframe's latest answer to "what's under this point?", in its own coordinates. */
   hit?: { readonly x: number; readonly y: number; readonly id: string | null };
   /** The point last asked about, so the same question isn't sent twice. */
@@ -125,6 +132,11 @@ export class Renderer {
   private commenting = false;
   /** The page shown, or `null` for the first page. Only its artboards are mounted. */
   private page: string | null = null;
+  /** Where the artboards are, from their last measured size. Drives culling. */
+  private readonly index = new ArtboardIndex();
+  /** The canvas area to keep drawn, or `null` to draw everything. */
+  private area: Bounds | null = null;
+  private cullFrame = 0;
   private readonly abort = new AbortController();
 
   constructor(
@@ -142,6 +154,7 @@ export class Renderer {
 
   dispose() {
     this.abort.abort();
+    cancelAnimationFrame(this.cullFrame);
     for (const frame of this.frames.values()) clearTimeout(frame.reload);
   }
 
@@ -152,10 +165,89 @@ export class Renderer {
       frame.root.remove();
     }
     this.frames.clear();
+    this.index.clear();
     this.elements.clear();
     this.scripts.clear();
     for (const node of this.replica.nodes.values()) if (isScript(node)) this.scripts.add(node.id);
     for (const board of this.replica.artboards()) this.mount(board);
+  }
+
+  /**
+   * Sets the canvas area that's on screen, plus a margin, and hides the
+   * artboards outside it (`null`: show them all). A hidden artboard costs
+   * no layout or paint, and a sandboxed one is unloaded, which also stops
+   * its scripts. Both come back when the area reaches them.
+   *
+   * An artboard is measured once while shown and keeps that size while
+   * hidden, so `artboardBounds` and "fit to view" still see it. Until it's
+   * measured it stays drawn.
+   */
+  setViewport(area: Bounds | null) {
+    this.area = area;
+    this.cull();
+  }
+
+  private cull() {
+    const area = this.area;
+    if (!area) {
+      for (const [id, frame] of this.frames) if (frame.culled) this.setCulled(id, frame, false);
+      return;
+    }
+    // Read every layout first, then write, so the pass flushes layout once.
+    for (const [id, frame] of this.frames) {
+      if (!frame.culled && (!frame.size || frame.dirty)) this.measure(id, frame);
+    }
+    const inside = this.index.query(area);
+    for (const [id, frame] of this.frames) {
+      const show = inside.has(id) || !frame.size;
+      if (show === frame.culled) this.setCulled(id, frame, !show);
+    }
+  }
+
+  /** Asks for a cull pass at the next frame, once newly mounted artboards have been laid out. */
+  private requestCull() {
+    if (!this.area || this.cullFrame) return;
+    this.cullFrame = requestAnimationFrame(() => {
+      this.cullFrame = 0;
+      this.cull();
+    });
+  }
+
+  private measure(id: string, frame: Frame) {
+    const width = frame.root.offsetWidth;
+    const height = frame.root.offsetHeight;
+    // Zero both ways means the canvas itself isn't laid out; try again later.
+    if (width === 0 && height === 0) return;
+    frame.size = { width, height };
+    frame.dirty = false;
+    this.indexFrame(id, frame);
+  }
+
+  private indexFrame(id: string, frame: Frame) {
+    const node = this.replica.get(id);
+    if (!frame.size || !node) return;
+    this.index.set(id, { x: node.x ?? 0, y: node.y ?? 0, ...frame.size });
+  }
+
+  private setCulled(id: string, frame: Frame, culled: boolean) {
+    frame.culled = culled;
+    frame.root.style.display = culled ? "none" : "";
+    if (!culled) {
+      // Edits made while it was hidden changed its size; measure it again.
+      frame.dirty = true;
+      this.requestCull();
+    }
+    if (!frame.iframe) return;
+    clearTimeout(frame.reload);
+    if (culled) {
+      frame.iframe.srcdoc = "";
+      delete frame.hit;
+      delete frame.asked;
+      frame.rects.clear();
+      frame.pendingRects.clear();
+    } else {
+      frame.iframe.srcdoc = artboardDocument(this.replica, id);
+    }
   }
 
   /** Shows only the artboards on `page` (`null`: the first page). */
@@ -219,6 +311,7 @@ export class Renderer {
       const frame = this.frames.get(id);
       const node = this.replica.get(id);
       if (!frame || !node) continue;
+      if (!layoutOnly) frame.dirty = true;
       if ((frame.iframe !== null) !== this.isLive(id)) this.remount(node);
       else if (frame.iframe && !layoutOnly) this.scheduleReload(id, frame);
     }
@@ -229,12 +322,12 @@ export class Renderer {
     const out = new Map<string, Bounds>();
     for (const [id, frame] of this.frames) {
       const node = this.replica.get(id);
-      out.set(id, {
-        x: node?.x ?? 0,
-        y: node?.y ?? 0,
-        width: frame.root.offsetWidth,
-        height: frame.root.offsetHeight,
-      });
+      // A hidden artboard has no layout, so it reports the size it had when last shown.
+      const size =
+        frame.culled && frame.size
+          ? frame.size
+          : { width: frame.root.offsetWidth, height: frame.root.offsetHeight };
+      out.set(id, { x: node?.x ?? 0, y: node?.y ?? 0, ...size });
     }
     return out;
   }
@@ -389,6 +482,7 @@ export class Renderer {
       this.showWorking(frame, this.working.get(node.id));
       this.showCommenting(frame);
       if (frame.shadow) this.build(node, frame.shadow, false);
+      this.requestCull();
       return;
     }
     // Nodes in sandboxed artboards have no element here, so this skips them.
@@ -444,6 +538,7 @@ export class Renderer {
       clearTimeout(frame.reload);
       frame.root.remove();
       this.frames.delete(id);
+      this.index.delete(id);
     }
     this.elements.get(id)?.remove();
     this.elements.delete(id);
@@ -457,7 +552,11 @@ export class Renderer {
     } else if (key === "name") {
       if (frame) frame.label.textContent = labelOf(node);
     } else if (key === "x" || key === "y") {
-      if (frame) positionFrame(frame.root, node);
+      if (frame) {
+        positionFrame(frame.root, node);
+        this.indexFrame(node.id, frame);
+        this.requestCull();
+      }
     } else if (key.startsWith("style:") && el instanceof Element) {
       const name = key.slice(6);
       const value = node.styles[name];
@@ -507,6 +606,8 @@ export class Renderer {
         commentStyle: null,
         sharedStyle: null,
         iframe,
+        culled: false,
+        dirty: false,
         rects: new Map(),
         pendingRects: new Set(),
       };
@@ -540,6 +641,8 @@ export class Renderer {
       commentStyle,
       sharedStyle,
       iframe: null,
+      culled: false,
+      dirty: false,
       rects: new Map(),
       pendingRects: new Set(),
     };
@@ -553,8 +656,10 @@ export class Renderer {
 
   private scheduleReload(id: string, frame: Frame) {
     clearTimeout(frame.reload);
+    // A hidden artboard loads its latest version when it's shown again.
+    if (frame.culled) return;
     frame.reload = setTimeout(() => {
-      if (this.frames.get(id) === frame && frame.iframe) {
+      if (this.frames.get(id) === frame && frame.iframe && !frame.culled) {
         frame.iframe.srcdoc = artboardDocument(this.replica, id);
         // A new document: earlier answers about its layout no longer hold.
         delete frame.hit;
@@ -619,6 +724,7 @@ export class Renderer {
       const fit = (n: number) => `${Math.min(MAX_SIDE, Math.max(1, n))}px`;
       const [width, height] = [fit(num("width")), fit(num("height"))];
       const changed = iframe.style.width !== width || iframe.style.height !== height;
+      frame.dirty = true;
       iframe.style.width = width;
       iframe.style.height = height;
       if (changed) this.options.onResize?.();
