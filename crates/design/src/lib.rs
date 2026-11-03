@@ -7,9 +7,10 @@
 //! - [`comment`] holds the threads users pin to the canvas.
 //! - [`tokens`] holds the design tokens every artboard can use.
 //! - [`components`] expands instances of components and turns edits inside them into overrides.
+//! - [`user_edit`] plans the edits people make on the canvas, on the server and in the browser.
 //!
-//! This crate has no I/O, so the same rules can later run in a client (via WASM)
-//! for optimistic local edits.
+//! This crate has no I/O, so the same rules run in the browser (via WASM),
+//! which shows a person's edits before the server confirms them.
 
 pub mod comment;
 pub mod components;
@@ -24,6 +25,7 @@ pub mod label;
 mod node;
 pub mod search;
 pub mod tokens;
+pub mod user_edit;
 pub mod version;
 
 pub use design::{

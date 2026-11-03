@@ -1732,7 +1732,7 @@ impl FiniteMcp {
         let handle = design!(self, &p.design_id);
         let actor = self.actor(&ctx);
         let undone: Vec<String> = (0..p.steps.unwrap_or(1).max(1))
-            .map_while(|_| handle.undo(&actor).map(|c| c.label))
+            .map_while(|_| handle.undo(&actor, None).map(|c| c.label))
             .collect();
         if undone.is_empty() {
             return ok("Nothing to undo.");
@@ -1749,7 +1749,7 @@ impl FiniteMcp {
         let handle = design!(self, &p.design_id);
         let actor = self.actor(&ctx);
         let redone: Vec<String> = (0..p.steps.unwrap_or(1).max(1))
-            .map_while(|_| handle.redo(&actor).map(|c| c.label))
+            .map_while(|_| handle.redo(&actor, None).map(|c| c.label))
             .collect();
         if redone.is_empty() {
             return ok("Nothing to redo.");

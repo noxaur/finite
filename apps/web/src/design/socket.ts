@@ -6,6 +6,8 @@ export type SocketStatus = "connecting" | "open" | "closed";
 export interface SocketHandlers<M> {
   readonly onMessage: (message: M) => void;
   readonly onStatus?: (status: SocketStatus) => void;
+  /** Called with a way to send on each connection once it opens, and with `null` once it's gone. */
+  readonly onSend?: (send: ((data: string) => void) | null) => void;
 }
 
 /** Same origin as the page. In dev, the Next.js `/api` rewrite proxies WebSockets too. */
@@ -43,7 +45,7 @@ export interface SocketLike {
 export function connect<S extends Schema.Top>(
   url: () => string,
   schema: S,
-  { onMessage, onStatus }: SocketHandlers<S["Type"]>,
+  { onMessage, onStatus, onSend }: SocketHandlers<S["Type"]>,
   open: (url: string) => SocketLike = (url) => new WebSocket(url) as unknown as SocketLike,
 ): () => void {
   const decode = Schema.decodeUnknownSync(schema as never) as (input: unknown) => S["Type"];
@@ -67,6 +69,7 @@ export function connect<S extends Schema.Top>(
       socket.onopen = socket.onmessage = socket.onclose = null;
       socket.close();
       socket = undefined;
+      onSend?.(null);
     }
     if (closed) return;
     onStatus?.("closed");
@@ -80,6 +83,7 @@ export function connect<S extends Schema.Top>(
     current.onopen = () => {
       attempt = 0;
       onStatus?.("open");
+      onSend?.((data) => current.send(data));
       ping = setInterval(() => {
         current.send(PING);
         clearTimeout(deadline);

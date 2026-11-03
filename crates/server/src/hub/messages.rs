@@ -2,7 +2,7 @@
 //! messages sent on a design's WebSocket and on the design list's.
 
 use finite_design::{ActorId, Change, Design, DesignMeta, NodeId, Snapshot, comment::Comment};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// The id prefix of an agent known only by its MCP session on this server.
 /// Sessions live in memory, so such an agent never comes back once its
@@ -14,6 +14,15 @@ pub const SESSION_ACTOR: &str = "mcp:";
 pub struct Actor {
     pub id: ActorId,
     pub name: String,
+}
+
+/// Names one mutation a browser tab sent: the tab's random `client` id
+/// and the tab's counter. A change made by a mutation carries its stamp, so
+/// the tab that sent it knows the change is its own.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stamp {
+    pub client: String,
+    pub mid: u64,
 }
 
 /// Shows what an actor is working on, like an agent's indicator on an artboard.
@@ -79,6 +88,19 @@ pub enum DesignMessage<'a> {
         change: &'a Change,
         /// Display name of `change.actor`.
         actor_name: &'a str,
+        /// The mutation that made the change, when a person's tab sent it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mutation: Option<&'a Stamp>,
+    },
+    /// Sent only to the tab that sent mutation `mid`, when it changed
+    /// nothing: `error` says why it was refused, or is `None` when the
+    /// design already looked like that. `seq` is the design's seq when it
+    /// ran, so the tab first applies every change before it.
+    Settled {
+        mid: u64,
+        seq: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     Presence {
         presence: Vec<&'a Presence>,
@@ -102,6 +124,8 @@ pub enum DesignMessage<'a> {
 pub struct Missed<'a> {
     pub change: &'a Change,
     pub actor_name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mutation: Option<&'a Stamp>,
 }
 
 /// Messages pushed to the design list over WebSocket.

@@ -133,20 +133,43 @@ export async function launch({ width = 1440, height = 900 } = {}) {
     async move(x, y) {
       await send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
     },
-    /** Clicks at `x`, `y`, holding Shift when `shift` is set. */
-    async click(x, y, { shift = false } = {}) {
+    /** Clicks at `x`, `y`, holding Shift when `shift` is set, twice when `double` is. */
+    async click(x, y, { shift = false, double = false } = {}) {
       await page_.move(x, y);
       const modifiers = shift ? 8 : 0;
-      for (const type of ["mousePressed", "mouseReleased"]) {
-        await send("Input.dispatchMouseEvent", {
-          type,
-          x,
-          y,
-          modifiers,
-          button: "left",
-          clickCount: 1,
-        });
+      for (const clickCount of double ? [1, 2] : [1]) {
+        for (const type of ["mousePressed", "mouseReleased"]) {
+          await send("Input.dispatchMouseEvent", {
+            type,
+            x,
+            y,
+            modifiers,
+            button: "left",
+            clickCount,
+          });
+        }
       }
+    },
+    /**
+     * Presses at `from`, moves to `to` in `steps` moves, and releases, the
+     * way a person drags. Holds Shift when `shift` is set.
+     */
+    async drag(from, to, { steps = 10, shift = false } = {}) {
+      const modifiers = shift ? 8 : 0;
+      const mouse = (type, { x, y }, extra = {}) =>
+        send("Input.dispatchMouseEvent", { type, x, y, modifiers, button: "left", ...extra });
+      await page_.move(from.x, from.y);
+      await mouse("mousePressed", from, { clickCount: 1, buttons: 1 });
+      for (let i = 1; i <= steps; i++) {
+        const at = {
+          x: from.x + ((to.x - from.x) * i) / steps,
+          y: from.y + ((to.y - from.y) * i) / steps,
+        };
+        await mouse("mouseMoved", at, { buttons: 1 });
+        // A frame between moves, so the page's animation-frame work runs.
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      await mouse("mouseReleased", to, { clickCount: 1 });
     },
     async type(text) {
       for (const ch of text) await send("Input.insertText", { text: ch });

@@ -16,12 +16,13 @@ use finite_design::{
     edit::EditError,
     import::ImportRecord,
     label,
+    user_edit::{self, UserEdit},
 };
 use tokio::sync::{broadcast, watch};
 
 use super::{
     Actor, COMPACT_AFTER, COMPACT_BYTES, DesignMessage, DesignSummary, EVENT_BUFFER, HISTORY_TTL,
-    Missed, Outgoing, PRESENCE_TTL, Presence, RESUME_BYTES, RESUME_LIMIT, SESSION_ACTOR,
+    Missed, Outgoing, PRESENCE_TTL, Presence, RESUME_BYTES, RESUME_LIMIT, SESSION_ACTOR, Stamp,
     UNLOAD_AFTER, now_ms, random_id,
 };
 use crate::store::{Claim, Store, Stored, Token};
@@ -196,6 +197,7 @@ impl DesignState {
             .map(|kept| Missed {
                 change: &kept.change,
                 actor_name: &kept.actor_name,
+                mutation: kept.mutation.as_ref(),
             })
             .collect();
         // Seqs have no gaps, so a full set has exactly this many.
@@ -274,6 +276,7 @@ pub(super) struct Recent {
 struct Kept {
     change: Change,
     actor_name: String,
+    mutation: Option<Stamp>,
     /// The size of its `change` message.
     bytes: usize,
 }
@@ -524,8 +527,14 @@ impl DesignHandle {
         (Outgoing::new(None, &message), seq, rx)
     }
 
-    pub(super) fn publish(&self, state: &mut DesignState, actor: &Actor, change: &Change) {
-        self.broadcast(state, actor, change);
+    pub(super) fn publish(
+        &self,
+        state: &mut DesignState,
+        actor: &Actor,
+        change: &Change,
+        mutation: Option<&Stamp>,
+    ) {
+        self.broadcast(state, actor, change, mutation);
         self.record(
             state,
             Record::Change {
@@ -536,15 +545,23 @@ impl DesignHandle {
 
     /// Sends a change to viewers and keeps it for those who resume, without
     /// saving it.
-    fn broadcast(&self, state: &mut DesignState, actor: &Actor, change: &Change) {
+    fn broadcast(
+        &self,
+        state: &mut DesignState,
+        actor: &Actor,
+        change: &Change,
+        mutation: Option<&Stamp>,
+    ) {
         let message = DesignMessage::Change {
             change,
             actor_name: &actor.name,
+            mutation,
         };
         let message = Outgoing::new(Some(change.seq), &message);
         state.recent.push(Kept {
             change: change.clone(),
             actor_name: actor.name.clone(),
+            mutation: mutation.cloned(),
             bytes: message.json.len(),
         });
         state.journal_bytes += message.json.len();
@@ -560,6 +577,7 @@ impl DesignHandle {
         state: &mut DesignState,
         actor: &Actor,
         change: &Change,
+        mutation: Option<&Stamp>,
     ) {
         let (detached, reattached): (Vec<_>, Vec<_>) = state
             .design
@@ -572,7 +590,7 @@ impl DesignHandle {
             let _ = events.send(Outgoing::new(None, &message));
         };
         detached.iter().for_each(send);
-        self.publish(state, actor, change);
+        self.publish(state, actor, change, mutation);
         reattached.iter().for_each(send);
         for comment in detached.into_iter().chain(reattached) {
             self.record(state, Record::Comment { comment });
@@ -671,9 +689,47 @@ impl DesignHandle {
         let ops = components::redirect(doc, ops, &mut new_id)?;
         let change = state.design.commit(&actor.id, label, &ops, now);
         if let Some(change) = &change {
-            self.publish_with_comments(&mut state, actor, change);
+            self.publish_with_comments(&mut state, actor, change, None);
         }
         Ok((output, change))
+    }
+
+    /// Commits a person's gesture, sent from a browser tab, as one undo step
+    /// for `actor`. The edits are planned with [`user_edit::plan`], the same
+    /// function the tab ran to show them, against the document as it is
+    /// now, with the same new ids. The change carries `stamp`, so the tab
+    /// knows it as its own.
+    pub fn mutate(
+        &self,
+        actor: &Actor,
+        stamp: &Stamp,
+        edits: &[UserEdit],
+    ) -> Result<Option<Change>, EditError> {
+        let now = now_ms();
+        let mut state = self.lock();
+        state.touch(actor, now);
+        let doc = state.design.doc();
+        // The ids the tab made for its own copy of this edit.
+        let ops = user_edit::plan(
+            doc,
+            state.design.view(),
+            edits,
+            &mut user_edit::new_ids(doc, &stamp.client, stamp.mid),
+        )?;
+        let change = state
+            .design
+            .commit(&actor.id, user_edit::label(edits), &ops, now);
+        if let Some(change) = &change {
+            self.publish_with_comments(&mut state, actor, change, Some(stamp));
+        }
+        Ok(change)
+    }
+
+    /// The `settled` message for a tab's mutation `mid` that changed nothing,
+    /// with `error` saying why when it was refused.
+    pub fn settled(&self, mid: u64, error: Option<String>) -> Outgoing {
+        let seq = self.lock().design.seq();
+        Outgoing::new(None, &DesignMessage::Settled { mid, seq, error })
     }
 
     /// Imports into the design with [`Design::import`], all or nothing, as
@@ -690,7 +746,7 @@ impl DesignHandle {
         state.touch(actor, now);
         let (change, output) = state.design.import(&actor.id, label, now, build)?;
         if let Some(change) = &change {
-            self.broadcast(&mut state, actor, change);
+            self.broadcast(&mut state, actor, change, None);
         }
         let import = state
             .design
@@ -708,24 +764,25 @@ impl DesignHandle {
         Ok((output, change))
     }
 
-    pub fn undo(&self, actor: &Actor) -> Option<Change> {
-        self.step(actor, Design::undo)
+    pub fn undo(&self, actor: &Actor, mutation: Option<&Stamp>) -> Option<Change> {
+        self.step(actor, Design::undo, mutation)
     }
 
-    pub fn redo(&self, actor: &Actor) -> Option<Change> {
-        self.step(actor, Design::redo)
+    pub fn redo(&self, actor: &Actor, mutation: Option<&Stamp>) -> Option<Change> {
+        self.step(actor, Design::redo, mutation)
     }
 
     pub(super) fn step(
         &self,
         actor: &Actor,
         f: fn(&mut Design, &str, u64) -> Option<Change>,
+        mutation: Option<&Stamp>,
     ) -> Option<Change> {
         let now = now_ms();
         let mut state = self.lock();
         state.touch(actor, now);
         let change = f(&mut state.design, &actor.id, now)?;
-        self.publish_with_comments(&mut state, actor, &change);
+        self.publish_with_comments(&mut state, actor, &change, mutation);
         Some(change)
     }
 
@@ -960,6 +1017,7 @@ mod tests {
                 ops: Vec::new(),
             },
             actor_name: "Agent".into(),
+            mutation: None,
             bytes,
         }
     }
