@@ -423,6 +423,19 @@ async fn scripted_artboards_run_before_the_capture() {
     assert_eq!(Png::of(image).rgb(50, 50), BLUE);
 }
 
+#[tokio::test]
+async fn webgl_canvases_render() {
+    // A shader clears the canvas to blue; without WebGL it stays red.
+    let (doc, names) = design(
+        r#"<div data-name="Board" style="width: 100px; height: 100px"><canvas data-name="Canvas" id="gl" width="100" height="100" style="display: block; background: #f00"></canvas><script>const gl = document.getElementById('gl').getContext('webgl2'); gl.clearColor(0, 0, 1, 1); gl.clear(gl.COLOR_BUFFER_BIT);</script></div>"#,
+    );
+    let Some(images) = shoot(&doc, vec![Shot::node(&names["Canvas"])], Options::default()).await
+    else {
+        return;
+    };
+    assert_eq!(Png::of(images[0].as_ref().unwrap()).rgb(50, 50), BLUE);
+}
+
 #[test]
 fn plans_refuse_unknown_nodes_and_too_many_shots() {
     let (doc, names) = design(BOARD);
