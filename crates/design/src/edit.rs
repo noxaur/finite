@@ -30,6 +30,12 @@ impl fmt::Display for EditError {
 
 impl std::error::Error for EditError {}
 
+impl From<crate::Rejected> for EditError {
+    fn from(rejected: crate::Rejected) -> Self {
+        Self(rejected.to_string())
+    }
+}
+
 pub type Result<T> = std::result::Result<T, EditError>;
 
 fn err<T>(message: impl Into<String>) -> Result<T> {

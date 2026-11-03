@@ -346,7 +346,10 @@ impl ChangeLog {
 /// The artboards that contain the nodes `ops` target, as of `doc`. An
 /// edit to a component counts for the artboards its instances are on too,
 /// since it changes what they show.
-pub(crate) fn artboards_of(doc: &Document, ops: &[Op]) -> BTreeSet<NodeId> {
+pub(crate) fn artboards_of<'a>(
+    doc: &Document,
+    ops: impl IntoIterator<Item = &'a Op>,
+) -> BTreeSet<NodeId> {
     let mut out = BTreeSet::new();
     let mut seen = std::collections::HashSet::new();
     for op in ops {
