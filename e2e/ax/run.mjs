@@ -68,9 +68,12 @@ const freePort = () =>
 /** A Chromium for get_screenshot, if the server wouldn't find one itself. */
 function defaultChrome() {
   return (
-    ["/opt/helium-browser-bin/chrome", "/usr/bin/google-chrome", "/usr/bin/chromium"].find((p) =>
-      fs.existsSync(p),
-    ) ?? ""
+    [
+      "/opt/helium-browser-bin/chrome",
+      "/usr/bin/google-chrome",
+      "/usr/bin/chromium",
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    ].find((p) => fs.existsSync(p)) ?? ""
   );
 }
 

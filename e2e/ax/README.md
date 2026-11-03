@@ -98,3 +98,22 @@ What made the difference:
 - **`get_layout`.** It lists every element with where it rendered, and flags content cut off by the artboard's edge, text overflowing its box, and text overlapping other text. It takes no picture and answers in about 0.4 s. Agents used it in every `pins` and `overlap` run and stopped taking screenshots to find positions. Its first version gave only element boxes. A heading's box can span the page while its text is 70 px wide, so agents centered pins on empty space. Now it also says where an element's text sits when that's much smaller than its box.
 - **Shared CSS for every agent.** With the tools on, every `screens-change` agent put the top bar's styles in the shared CSS. The change was then one `set_shared_css` and one screenshot. Without them, agents edited each screen.
 - **Accepting what agents meant.** `get_screenshot` and `get_layout` with only a `designId` now cover every artboard, which every `overlap` agent on the old build tried, and got an error. Passing the `designId` as a `nodeId` says so. `create_artboard` takes `class`, because two agents styled `.screen` in a `<style>` block and found the artboard itself had no class.
+
+## Two redesigns tried as mocks (experimental)
+
+Two specs mock a redesign of the whole surface, so it can be tried before any Rust changes:
+
+- `surfaces/granular24.mjs`: 24 tools, one per job, with the same parameter names everywhere. `write_css` takes plain CSS for inline styles, `<style>` blocks and the shared CSS. Every edit takes `status` and `check`.
+- `surfaces/doc6.mjs`: 6 tools (`designs`, `read`, `edit`, `render`, `comments`, `undo`). Elements are addressed with CSS selectors, and `edit` takes a list of ops that apply all together or not at all, as one undo step.
+
+Each spec's header lists what it only approximates in JavaScript. Neither keeps node ids when HTML is rewritten, and neither protects one agent's edit from another agent's stale rewrite.
+
+A first round used Haiku at low effort, 3 runs each, on `restyle`, `rebrand`, `mobile`, `comments`, `pins` and `screens-change`. All 54 runs passed every check:
+
+| Surface    | Calls | Failed calls | Cost  |
+| ---------- | ----- | ------------ | ----- |
+| today      | 198   | 0            | $0.17 |
+| granular24 | 149   | 3            | $0.14 |
+| doc6       | 123   | 3            | $0.15 |
+
+Blind quality grades were level. About 21 of today's calls are `start_working_on_nodes` and `finish_working_on_nodes`, which both mocks fold into `status`. None of the 24 `edit` calls on doc6 failed on the op format. The no-search spec raised rebrand from 6.7 to 14.7 calls, in the same direction as the first study, so the mock's numbers can be trusted that far. Confirm on Sonnet, and on long tasks like `ui-states`, before acting on these.
