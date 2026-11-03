@@ -125,7 +125,7 @@ pub enum Record {
 ///
 /// The server holds one of these per open design and serializes access to it,
 /// so it is the single source of truth. All edits go through [`Design::commit`],
-/// [`Design::undo`] or [`Design::redo`], and all comment updates through
+/// [`Design::transact`], [`Design::undo`] or [`Design::redo`], and all comment updates through
 /// [`Design::add_comment`], [`Design::reply`], [`Design::set_resolved`],
 /// [`Design::edit_message`] or [`Design::delete_comment`].
 #[derive(Debug)]
@@ -220,6 +220,24 @@ impl SetLog {
     }
 
     fn record(&mut self, seq: u64, actor: &str, inverse: &[Op]) {
+        let Some(sets) = Sets::of(seq, actor, inverse) else {
+            return;
+        };
+        self.bytes += sets.bytes;
+        self.entries.push_back(sets);
+        while self.entries.len() > Self::LIMIT || self.bytes > Self::BYTE_LIMIT {
+            let Some(dropped) = self.entries.pop_front() else {
+                break;
+            };
+            self.bytes -= dropped.bytes;
+            self.since = dropped.seq;
+        }
+    }
+}
+
+impl Sets {
+    /// What a change with this inverse set and placed, or `None` if it did neither.
+    fn of<'a>(seq: u64, actor: &str, inverse: impl IntoIterator<Item = &'a Op>) -> Option<Self> {
         let mut old = Vec::new();
         let mut places = Vec::new();
         for op in inverse {
@@ -233,7 +251,7 @@ impl SetLog {
             }
         }
         if old.is_empty() && places.is_empty() {
-            return;
+            return None;
         }
         let bytes = old.iter().map(Op::size).sum::<usize>()
             + places
@@ -246,50 +264,134 @@ impl SetLog {
                             .map_or(0, String::len)
                 })
                 .sum::<usize>();
-        self.bytes += bytes;
-        self.entries.push_back(Sets {
+        Some(Self {
             seq,
             actor: actor.to_owned(),
             old,
             places,
             bytes,
-        });
-        while self.entries.len() > Self::LIMIT || self.bytes > Self::BYTE_LIMIT {
-            let Some(dropped) = self.entries.pop_front() else {
-                break;
-            };
-            self.bytes -= dropped.bytes;
-            self.since = dropped.seq;
-        }
+        })
     }
 }
 
-/// An edit being staged by [`Design::import`]. Ops apply as soon as they're
-/// added, so each step sees the ones before it, and they're rolled back if
-/// the import fails.
+/// An edit being staged by [`Design::transact`]. Ops apply as soon as
+/// they're added, so each step sees the ones before it, and they're rolled
+/// back if the transaction fails.
 pub struct Transaction<'a> {
     doc: &'a mut Document,
+    actor: &'a str,
+    sets: &'a SetLog,
     applied: Vec<Op>,
     /// Each applied op's inverse, in the order the ops applied.
     inverse: Vec<Vec<Op>>,
+    /// The artboards the ops' nodes were on before the transaction, and
+    /// where each of them was, as [`Design::commit`] notes them.
+    before: BTreeSet<NodeId>,
+    places: Vec<(NodeId, Point)>,
+    /// [`Transaction::view`], made when first asked for after an op applied.
+    view: std::cell::OnceCell<Document>,
+    /// The imports this transaction made, kept with the change.
+    imports: Vec<ImportRecord>,
 }
 
-impl Transaction<'_> {
+impl<'a> Transaction<'a> {
+    fn new(doc: &'a mut Document, actor: &'a str, sets: &'a SetLog) -> Self {
+        Self {
+            doc,
+            actor,
+            sets,
+            applied: Vec::new(),
+            inverse: Vec::new(),
+            before: BTreeSet::new(),
+            places: Vec::new(),
+            view: std::cell::OnceCell::new(),
+            imports: Vec::new(),
+        }
+    }
+
     /// The document with every op so far applied.
     pub fn doc(&self) -> &Document {
         self.doc
     }
 
+    /// [`Transaction::doc`] as it renders, with instances expanded, like
+    /// [`Design::view`]. Build edits against this and apply them with
+    /// [`Transaction::edit`].
+    pub fn view(&self) -> &Document {
+        if !self.doc.has_instances() {
+            return self.doc;
+        }
+        self.view
+            .get_or_init(|| crate::components::expand(self.doc).into_owned())
+    }
+
     /// Applies `ops` in order, or fails at the first one that doesn't apply.
-    /// The ops before it stay applied until the import finishes or fails.
+    /// The ops before it stay applied until the transaction finishes or fails.
     pub fn apply(&mut self, ops: &[Op]) -> Result<(), Rejected> {
+        // A created node wasn't on any artboard before, and the change log
+        // finds where it ended up, so only the other ops need looking at.
+        let creates = |op: &&Op| !matches!(op, Op::Create { .. });
+        let boards = comment::artboards_of(self.doc, ops.iter().filter(creates));
+        let new: BTreeSet<NodeId> = boards.difference(&self.before).cloned().collect();
+        self.places.extend(board_places(self.doc, &new));
+        self.before.extend(new);
         for op in ops {
             if let Applied::Changed(inverse) = self.doc.try_apply(op)? {
                 self.applied.push(op.clone());
                 self.inverse.push(inverse);
+                self.view.take();
             }
         }
         Ok(())
+    }
+
+    /// Applies ops built against [`Transaction::view`]: edits inside an
+    /// instance become its overrides first (`components::redirect`).
+    /// `make_id` makes ids for those; ones already taken are skipped.
+    pub fn edit(
+        &mut self,
+        ops: Vec<Op>,
+        make_id: &mut impl FnMut() -> NodeId,
+    ) -> Result<(), EditError> {
+        let mut new_id = || self.new_id(make_id);
+        let ops = crate::components::redirect(self.doc, ops, &mut new_id)?;
+        Ok(self.apply(&ops)?)
+    }
+
+    /// An id from `make_id` that no node has, counting the nodes this
+    /// transaction made, so ids stay unique across all of its steps.
+    pub fn new_id(&self, make_id: &mut impl FnMut() -> NodeId) -> NodeId {
+        loop {
+            let id = make_id();
+            if !self.doc.contains(&id) {
+                return id;
+            }
+        }
+    }
+
+    /// [`Design::merge`] against the document as staged. What this
+    /// transaction applied so far counts as `actor`'s latest change.
+    pub fn merge(&self, read_at: u64, ops: Vec<Op>) -> Merged {
+        let staged = Sets::of(0, self.actor, self.inverse.iter().rev().flatten());
+        merge(
+            self.sets,
+            staged.as_ref(),
+            self.doc,
+            self.actor,
+            read_at,
+            ops,
+        )
+    }
+
+    /// Keeps `import`'s record with the design if the transaction
+    /// succeeds. Undoing its change doesn't remove the record.
+    pub fn record_import(&mut self, import: ImportRecord) {
+        self.imports.push(import);
+    }
+
+    /// The ops applied so far, in order.
+    pub fn applied(&self) -> &[Op] {
+        &self.applied
     }
 
     fn roll_back(self) {
@@ -463,12 +565,78 @@ impl Design {
         Some(change)
     }
 
-    /// Imports into the design as one all-or-nothing change. `build` stages
-    /// ops through the [`Transaction`], each against the document as the
-    /// ops before it left it, and returns the import's record. If `build`
-    /// fails, the document is put back as it was and nothing is recorded.
-    /// Otherwise the ops become one undo step for `actor`, and the record is
-    /// kept for good: undoing the change doesn't remove it.
+    /// Runs `build` as one all-or-nothing change. `build` stages ops
+    /// through the [`Transaction`], each against the document as the ops
+    /// before it left it. If `build` fails, the document is put back as it
+    /// was, and nothing is numbered, logged or recorded. Otherwise the ops
+    /// become one change labelled `label` and one undo step for `actor`, and
+    /// comments follow their artboards as after [`Design::commit`]. The
+    /// imports `build` recorded ([`Transaction::record_import`]) are kept,
+    /// even when they added nothing.
+    pub fn transact<T, E>(
+        &mut self,
+        actor: &str,
+        label: &str,
+        now: u64,
+        build: impl FnOnce(&mut Transaction<'_>) -> Result<T, E>,
+    ) -> Result<(Option<Change>, T), E> {
+        let mut tx = Transaction::new(&mut self.doc, actor, &self.sets);
+        let output = match build(&mut tx) {
+            Ok(output) => output,
+            Err(error) => {
+                if !tx.applied.is_empty() {
+                    tx.roll_back();
+                    self.view.take();
+                }
+                return Err(error);
+            }
+        };
+        let Transaction {
+            applied,
+            inverse,
+            before,
+            places,
+            imports,
+            ..
+        } = tx;
+        self.imports.extend(imports);
+        if applied.is_empty() {
+            return Ok((None, output));
+        }
+        self.view.take();
+        reattach(
+            &self.doc,
+            &mut self.comments,
+            &mut self.comment_updates,
+            &places,
+        );
+        let inverse: Vec<Op> = inverse.into_iter().rev().flatten().collect();
+        let change = self.finish(actor, Origin::Edit, label, applied, &inverse, before, now);
+        self.history_mut(actor).record(label.to_owned(), inverse);
+        Ok((Some(change), output))
+    }
+
+    /// Stages `build` as [`Design::transact`] would and returns the ops that
+    /// would apply, then puts the document back whatever happened. Nothing
+    /// is numbered, logged or recorded.
+    pub fn dry_run<T, E>(
+        &mut self,
+        actor: &str,
+        build: impl FnOnce(&mut Transaction<'_>) -> Result<T, E>,
+    ) -> Result<(Vec<Op>, T), E> {
+        let mut tx = Transaction::new(&mut self.doc, actor, &self.sets);
+        let result = build(&mut tx);
+        let applied = std::mem::take(&mut tx.applied);
+        if !applied.is_empty() {
+            tx.roll_back();
+            self.view.take();
+        }
+        result.map(|output| (applied, output))
+    }
+
+    /// Imports into the design with [`Design::transact`], and keeps the
+    /// import's record that `build` returns for good: undoing the change
+    /// doesn't remove it.
     pub fn import<T, E>(
         &mut self,
         actor: &str,
@@ -476,42 +644,11 @@ impl Design {
         now: u64,
         build: impl FnOnce(&mut Transaction<'_>) -> Result<(ImportRecord, T), E>,
     ) -> Result<(Option<Change>, T), E> {
-        let mut tx = Transaction {
-            doc: &mut self.doc,
-            applied: Vec::new(),
-            inverse: Vec::new(),
-        };
-        let (import, output) = match build(&mut tx) {
-            Ok(built) => built,
-            Err(error) => {
-                tx.roll_back();
-                self.view.take();
-                return Err(error);
-            }
-        };
-        let Transaction {
-            applied, inverse, ..
-        } = tx;
-        // The expanded view was made before the import's nodes existed.
-        self.view.take();
-        self.imports.push(import);
-        if applied.is_empty() {
-            return Ok((None, output));
-        }
-        let inverse: Vec<Op> = inverse.into_iter().rev().flatten().collect();
-        // An import only adds nodes, so no comment needs to move, and no
-        // artboard was touched before it.
-        let change = self.finish(
-            actor,
-            Origin::Edit,
-            label,
-            applied,
-            &inverse,
-            BTreeSet::new(),
-            now,
-        );
-        self.history_mut(actor).record(label.to_owned(), inverse);
-        Ok((Some(change), output))
+        self.transact(actor, label, now, |tx| {
+            let (import, output) = build(tx)?;
+            tx.record_import(import);
+            Ok(output)
+        })
     }
 
     /// Every import, oldest first.
@@ -701,100 +838,8 @@ impl Design {
     /// `actor` added or moved in since follow the HTML. Other moves and
     /// creates are kept as they are. If the log no longer reaches back to
     /// `read_at`, the ops are returned unchanged with [`Merged::reached`] false.
-    pub fn merge(&self, actor: &str, read_at: u64, mut ops: Vec<Op>) -> Merged {
-        if read_at < self.sets.since {
-            return Merged {
-                ops,
-                kept: Vec::new(),
-                kept_nodes: Vec::new(),
-                reached: false,
-            };
-        }
-        // Each value set since the read: its value at the read, and who set it last.
-        let mut changed: HashMap<(&str, &PropKey), (&Option<serde_json::Value>, &str)> =
-            HashMap::new();
-        let first = self.sets.entries.partition_point(|e| e.seq <= read_at);
-        // Each node the rewrite deletes that was created, deleted or moved
-        // since the read: where it was at the read, and who placed it last.
-        let deleted: HashSet<&str> = ops
-            .iter()
-            .filter_map(|op| match op {
-                Op::Delete { id } => Some(id.as_str()),
-                _ => None,
-            })
-            .collect();
-        let mut placed: HashMap<&str, (&Option<Option<NodeId>>, &str)> = HashMap::new();
-        for entry in self.sets.entries.range(first..) {
-            // Backwards for the same reason as values below.
-            for (id, before) in entry.places.iter().rev() {
-                if deleted.contains(id.as_str()) {
-                    placed
-                        .entry(id.as_str())
-                        .or_insert((before, &entry.actor))
-                        .1 = &entry.actor;
-                }
-            }
-            // An inverse runs backwards, so its last op on a value holds
-            // what the value was before the change.
-            for op in entry.old.iter().rev() {
-                if let Op::Set { id, key, value } = op {
-                    changed
-                        .entry((id.as_str(), key))
-                        .or_insert((value, &entry.actor))
-                        .1 = &entry.actor;
-                }
-            }
-        }
-        let mut kept = Vec::new();
-        if !changed.is_empty() {
-            ops.retain(|op| {
-                let Op::Set { id, key, value } = op else {
-                    return true;
-                };
-                let Some(&(base, by)) = changed.get(&(id.as_str(), key)) else {
-                    return true;
-                };
-                let conflict = base != value;
-                if by == actor {
-                    return conflict;
-                }
-                kept.push(Kept {
-                    id: id.clone(),
-                    key: key.clone(),
-                    by: by.to_owned(),
-                    conflict,
-                });
-                false
-            });
-        }
-        let mut kept_nodes = Vec::new();
-        if !placed.is_empty() {
-            ops.retain(|op| {
-                let Op::Delete { id } = op else { return true };
-                let Some(&(before, by)) = placed.get(id.as_str()) else {
-                    return true;
-                };
-                let Some(now) = self.doc.get(id) else {
-                    return true;
-                };
-                let here = before.as_ref() == Some(&now.parent);
-                if here || by == actor {
-                    return true;
-                }
-                kept_nodes.push(KeptNode {
-                    id: id.clone(),
-                    by: by.to_owned(),
-                    moved: before.is_some(),
-                });
-                false
-            });
-        }
-        Merged {
-            ops,
-            kept,
-            kept_nodes,
-            reached: true,
-        }
+    pub fn merge(&self, actor: &str, read_at: u64, ops: Vec<Op>) -> Merged {
+        merge(&self.sets, None, &self.doc, actor, read_at, ops)
     }
 
     /// Comments a change has updated since the last call, so the server can
@@ -962,6 +1007,110 @@ impl Design {
             return Err(CommentError::TooManyOpen);
         }
         Ok(())
+    }
+}
+
+/// [`Design::merge`] over the changes in `sets`, then the one being staged
+/// in `staged`, against `doc`.
+fn merge(
+    sets: &SetLog,
+    staged: Option<&Sets>,
+    doc: &Document,
+    actor: &str,
+    read_at: u64,
+    mut ops: Vec<Op>,
+) -> Merged {
+    if read_at < sets.since {
+        return Merged {
+            ops,
+            kept: Vec::new(),
+            kept_nodes: Vec::new(),
+            reached: false,
+        };
+    }
+    // Each value set since the read: its value at the read, and who set it last.
+    let mut changed: HashMap<(&str, &PropKey), (&Option<serde_json::Value>, &str)> = HashMap::new();
+    let first = sets.entries.partition_point(|e| e.seq <= read_at);
+    // Each node the rewrite deletes that was created, deleted or moved
+    // since the read: where it was at the read, and who placed it last.
+    let deleted: HashSet<&str> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Delete { id } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut placed: HashMap<&str, (&Option<Option<NodeId>>, &str)> = HashMap::new();
+    for entry in sets.entries.range(first..).chain(staged) {
+        // Backwards for the same reason as values below.
+        for (id, before) in entry.places.iter().rev() {
+            if deleted.contains(id.as_str()) {
+                placed
+                    .entry(id.as_str())
+                    .or_insert((before, &entry.actor))
+                    .1 = &entry.actor;
+            }
+        }
+        // An inverse runs backwards, so its last op on a value holds
+        // what the value was before the change.
+        for op in entry.old.iter().rev() {
+            if let Op::Set { id, key, value } = op {
+                changed
+                    .entry((id.as_str(), key))
+                    .or_insert((value, &entry.actor))
+                    .1 = &entry.actor;
+            }
+        }
+    }
+    let mut kept = Vec::new();
+    if !changed.is_empty() {
+        ops.retain(|op| {
+            let Op::Set { id, key, value } = op else {
+                return true;
+            };
+            let Some(&(base, by)) = changed.get(&(id.as_str(), key)) else {
+                return true;
+            };
+            let conflict = base != value;
+            if by == actor {
+                return conflict;
+            }
+            kept.push(Kept {
+                id: id.clone(),
+                key: key.clone(),
+                by: by.to_owned(),
+                conflict,
+            });
+            false
+        });
+    }
+    let mut kept_nodes = Vec::new();
+    if !placed.is_empty() {
+        ops.retain(|op| {
+            let Op::Delete { id } = op else { return true };
+            let Some(&(before, by)) = placed.get(id.as_str()) else {
+                return true;
+            };
+            let Some(now) = doc.get(id) else {
+                return true;
+            };
+            let here = before.as_ref() == Some(&now.parent);
+            if here || by == actor {
+                return true;
+            }
+            kept_nodes.push(KeptNode {
+                id: id.clone(),
+                by: by.to_owned(),
+                moved: before.is_some(),
+            });
+            false
+        });
+    }
+    Merged {
+        ops,
+        kept,
+        kept_nodes,
+        reached: true,
     }
 }
 

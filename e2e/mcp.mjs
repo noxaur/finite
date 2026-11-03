@@ -1,4 +1,6 @@
 // A minimal MCP client over Streamable HTTP, enough to drive Finite's tools.
+// It uses /mcp/classic, which serves today's tools whichever surface /mcp
+// serves (FINITE_MCP_SURFACE), since the scripts call them by name.
 export async function connect(base, agent = "E2E") {
   let session;
   let id = 0;
@@ -9,7 +11,11 @@ export async function connect(base, agent = "E2E") {
       "X-Finite-Agent": agent,
     };
     if (session) headers["Mcp-Session-Id"] = session;
-    const res = await fetch(`${base}/mcp`, { method: "POST", headers, body: JSON.stringify(body) });
+    const res = await fetch(`${base}/mcp/classic`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
     session = res.headers.get("mcp-session-id") ?? session;
     const text = await res.text();
     const data = text

@@ -118,15 +118,26 @@ An op that no longer makes sense is skipped. A `set` on a deleted node does noth
 - **One history per actor.** An actor is whoever made a change. Today that's an agent: its `X-Finite-Agent` header if it sends one, otherwise its MCP session id. A `History` (`history.rs`) is an undo stack and a redo stack of inverse ops.
 - **Comment threads**, and a **change log** of the last 512 changes. Both are covered under Comments below.
 
-All edits go through three methods. Each returns a `Change`, or `None` if nothing changed. A change holds the seq, the actor, a label and the ops that took effect.
+All edits go through four methods. Each returns a `Change`, or `None` if nothing changed. A change holds the seq, the actor, a label and the ops that took effect.
 
 - `commit(actor, label, ops)` applies the ops and pushes their inverse onto that actor's undo stack.
+- `transact(actor, label, now, build)` runs several edit steps as one change, all or nothing (see "Several edits as one change" below).
 - `undo(actor)` pops the actor's latest undo entry and applies it as a new change. The inverse of _that_ goes on the redo stack.
 - `redo(actor)` does the same in the other direction.
 
 Undo applies inverses as new changes. It never rolls the document back to an old snapshot, so it can't erase another agent's work. This follows Liveblocks' design for [multiplayer undo](https://liveblocks.io/blog/how-to-build-undo-redo-in-a-multiplayer-environment).
 
 Each stack keeps at most 200 steps and about 32 MB of ops (`History::LIMIT` and `History::BYTE_LIMIT`), and older steps fall off the bottom. The size estimate, `Op::size`, adds up an op's strings plus a fixed amount, so it's cheap enough to run on every step. The byte limit matters because undoing a big delete recreates every node in it. Two hundred steps that each replaced a large artboard could hold millions of nodes, in memory and in every saved snapshot. The newest step is always kept, even if it's bigger than the limit on its own, so any edit can be undone at least once.
+
+### Several edits as one change
+
+Some edits take several steps, where each step builds on the last: create an artboard, write HTML into it, then style what the HTML made. `Design::transact` runs them as a **transaction**. Its `build` closure gets a `Transaction`, reads the document with `tx.doc()` (or `tx.view()`, with instances expanded), builds ops with an edit command and applies them with `tx.apply`. They apply at once through `Document::try_apply`, so the next step sees them, and an op that doesn't apply fails the step instead of being skipped. `tx.edit` applies ops built against `tx.view()`, turning edits inside an instance into overrides first (`components::redirect`). `tx.new_id` checks ids against the staged document, so ids stay unique across every step.
+
+If `build` returns an error, the transaction applies the inverses in reverse, which puts the document back as it was, and nothing is numbered, logged or recorded. Otherwise the steps become one `Change` with the transaction's label: one seq, one entry in the change log, one undo step, and comments whose artboard went or came back are moved as after `commit`. A comment reply's change links show that label, not one per step. `Design::dry_run` stages the same way and always rolls back, returning the ops that would apply. `Design::import` is a transaction that also keeps the import's record.
+
+A `write_html` rewrite staged as one step still merges against its read mark: `tx.merge` runs `Design::merge` over the set log and then over what the transaction applied so far, counted as the actor's own latest change. The set log then records the whole transaction as one change.
+
+On the server, `DesignHandle::transact` takes the design's lock once, runs the transaction, and broadcasts and journals its change once, so nobody sees a half-done transaction. `DesignHandle::dry_run` stages under the lock and sends nothing.
 
 ### Undo with two agents, step by step
 
@@ -178,6 +189,7 @@ Some of the work these commands do:
 
 A script URL is refused anywhere in a value, not just at its start. SVG animation can set an `href` while the page runs, from a list like `<animate attributeName="href" values="0;javascript:…">`, and an artboard without a script renders in a shadow root on the app's own origin. So a check that only looked at the start of the value let that through, and a click would have run the script as the app. The viewer's renderer checks attributes again before it sets them, with the same function through WebAssembly. The end-to-end test writes that SVG and checks the attribute never reaches the page.
 
+- `css::merge_sheet` merges a patch into a `<style>` block's CSS, so an agent can change part of a stylesheet without writing it all again. A rule with the same selector (ignoring whitespace) inside the same at-rules takes the patch's declarations, `prop: unset` removes one, and an empty rule like `.x {}` removes the rule. `@keyframes` replace the ones with the same name, and `@media`, `@supports` and the other at-rules that hold rules merge recursively. It parses with `cssparser` into a tree whose pieces are the exact text they came from, so rules the patch doesn't touch keep every byte, comments included. It reports each change with old and new values, like `.bar: color: red → blue, padding: 4px → removed, margin: 0 (new)`. `css::inline_conflicts` says which of a rule's properties the inline styles of the elements it matches override, since an inline style beats a stylesheet rule.
 - `update_styles` accepts `backgroundColor` or `background-color`. When you set a shorthand like `padding`, it also clears `padding-top` and friends. Styles are stored as a map, not as ordered CSS, so a leftover longhand would otherwise win.
 - `move_nodes` and `duplicate` pick free canvas space for anything that becomes a new artboard.
 - `delete_nodes`, `move_nodes` and `duplicate` first drop ids that are inside another id in the same call, and repeats (`top_level`). Each node walks up its ancestors instead of being compared with every other id. The comparison was quadratic, and it kept repeats, so deleting 10,000 cards with 100 of them listed twice made 10,050 deletes.
@@ -223,6 +235,20 @@ Every value kept from another agent is named in the result, like "kept border-ra
 Structure merges too. A child missing from the HTML is deleted only if it was under that parent at the mark. Say A reads a list with Free and Pro, B appends Enterprise, and A writes its copy back with Pro renamed. Enterprise isn't in A's HTML because it didn't exist when A read, so it stays where it is, and the result names it: "kept li #ltk7ccvx "Enterprise", which another agent added after you read it. Delete it if you meant to remove it." The same goes for an element another agent moved under that parent since the read ("moved here"). B can still undo its add. Elements A itself added or moved since follow A's HTML, and an element that was there at the read is deleted, even if someone moved it within the same parent since.
 
 The base comes from a **set log** (`SetLog` in `design.rs`): for each recent change, the old value of each property it set, and the parent before the change of each node it created, deleted or moved (none for a created node). Both come from the change's inverse. It holds the last 512 such changes, up to about 8 MB. It's kept in memory only, and loading a design or replaying its journal starts it empty. A mark older than what it holds can't be merged, so the result says the HTML replaced values others changed since the read, and that elements others added since were removed. Merging scans the log from the mark once, so it costs about as much as the changes since the read.
+
+### Finding elements with CSS selectors
+
+`crates/design/src/select.rs` matches CSS selectors against a document, so a tool can take `.card:has(> h2)` or `button:contains("Sign up")` instead of node ids. `select::parse` reads a selector list, and `select::matches` returns the elements it matches, in document order across artboards. `Scope` limits the search to one page's artboards or to the descendants of some nodes, as `querySelectorAll` on an element does. The rest of the artboard still counts there: within a card, `.card > h2` matches the card's heading.
+
+Servo's `selectors` crate does the matching, the same one `scraper` uses, so the rules are the browser's. `Matcher` builds a flat index of the scope's elements, with each one's parent, siblings and first child, and implements the crate's `Element` trait over it. Building the index is most of the cost. Reuse one `Matcher` to match many selectors against the same document, such as every rule in an artboard's stylesheets.
+
+Selectors see a design the way an agent reads its HTML. Each artboard is a root: `:root` matches artboards, and no selector reaches from one artboard to another. `#id` matches a node's id, then its `id` attribute. Node ids can start with a digit, which CSS doesn't allow in an id, so `#4kx92mab` is escaped before parsing. `[data-id]`, `[data-name]` and `[style]` read the node's id, layer name and inline styles. `:contains("text")` isn't standard CSS. It matches an element whose visible text, with its descendants', contains the text, ignoring case and runs of whitespace. Text in `<style>`, `<script>` and `<template>` isn't visible.
+
+Text nodes never match. An agent that read a text node's id can still name it, so `Matcher::text_nodes` resolves a list made only of `#id`s. As in CSS, `:has(x)` matches every ancestor of an `x` and `:has(> x)` only its parent, which is why a delete by `:has(...)` needs care.
+
+No element is hovered or focused in a design, so `parse` refuses a state like `:hover` and a pseudo-element like `::before`, and the error says to style them with a `css` op instead. `parse_loose` reads them as matching their element, to find which elements a stylesheet rule like `.btn:hover` styles. The `selectors` parser doesn't say where a selector goes wrong. When parsing fails, `select` reads longer and longer prefixes until one fails for a reason more text couldn't fix, and the error quotes the rest: `can't read "div..card" as a CSS selector (at ".card")`.
+
+`cargo run --release -p finite-design --example select` times it on a 6,991-node article. Each selector took about 1.4 to 1.6 ms, including `:has(a[href^='https'])` and `:contains(...)`. With a reused `Matcher`, it took 0.04 to 0.25 ms.
 
 ## Components
 
@@ -327,7 +353,7 @@ On startup, the hub reads every stored design to build the list, then drops each
 
 ### MCP
 
-`crates/server/src/mcp/` is the agent-facing side, served at `/mcp` over Streamable HTTP with the `rmcp` crate. It has seven files:
+`crates/server/src/mcp/` is the agent-facing side, served at `/mcp` over Streamable HTTP with the `rmcp` crate. It has these files, and the `doc6/` folder described below:
 
 - `mod.rs` defines most tools and works out which actor is calling.
 - `params.rs` holds each tool's arguments. `rmcp` turns them into the JSON schemas agents see. Batched edits also accept the shapes agents guess before their client loads a schema: lists and objects sent as JSON strings, a flat `nodeIds` and `styles` instead of `updates`, and `nodeId` for `nodeIds`. Before, a third of the longer AX runs hit "failed to deserialize parameters" at least once.
@@ -337,6 +363,19 @@ On startup, the hub reads every stored design to build the list, then drops each
 - `tokens.rs` has `set_tokens`, `get_tokens` and `set_artboard_mode`, and `token_ops`, which the web API's token route uses too. `set_tokens` takes a token's one value, its values by mode name, or `null`, and `modes` to name the modes. `get_tokens` returns them in that shape. `create_artboard` takes a `mode`, and `get_basic_info` shows each artboard's mode and the `tokenCount`. `get_html` and `get_jsx` note when a design has tokens, since markup copied elsewhere would lose them.
 - `watch.rs` adds a layout note to `write_html` and `update_styles` results when `FINITE_MCP_EXTRA=layout`. An edit measures the artboards it touched in Chrome (the first 3, and the note says when there were more) and waits up to a second; `FINITE_LAYOUT_WAIT_MS` changes that. If the browser is slower (the first call takes about 2 s, since each measurement launches Chrome), the note goes on the agent's next result for that design instead. Measurements run one at a time, and one whose artboard was edited again meanwhile is skipped. Any other edit, `undo`, `redo`, `get_layout` and `get_screenshot` drop a waiting note; a call that fails leaves it.
 - `instructions.md` is the text agents read when they connect. It's plain Markdown, so you can edit the workflow without touching Rust. Keep it short: Claude Code keeps the first 4,096 characters of a server's instructions and silently drops the rest. A test checks that the instructions, with every extra group's section added, stay under 4,000.
+
+#### The six-tool surface (doc6)
+
+`FINITE_MCP_SURFACE=doc6` serves six tools instead of today's: `designs`, `read`, `edit`, `render`, `comments` and `undo`, with their own instructions (`doc6/instructions.md`). Unset, or `classic`, serves today's tools. AX runs compare the two on one build; which one is the default comes after that. Components stay on the classic surface, behind `FINITE_MCP_EXTRA=components`. `/mcp/classic` always serves today's tools, whatever `/mcp` serves, so scripts and the e2e and AX harnesses keep working; the router relays both paths. doc6 runs on a single server for now: the relay lists and creates designs with the classic tools' names and routes calls by `designId`, which doc6's `designs` and name lookups don't carry, so a router started with `FINITE_MCP_SURFACE=doc6` refuses to start.
+
+Elements are addressed with CSS selectors, matched on the server by `finite_design::select` (see "Finding elements with CSS selectors"), on the whole design or one `page`. Every tool's `designId` also takes a design's exact name, in any case, or the start of its id: `call_tool` resolves it before the tool runs.
+
+- `doc6/ops.rs` reads an edit's ops: their kind (from `op`, an old tool name, or the fields), the fields each needs, and the work done before the design's lock, which is parsing HTML and reading and storing an import's file (`transfer::prepare`).
+- `doc6/edit.rs` runs the ops inside one `DesignHandle::transact`. Each op builds against `tx.view()` with the commands in `edit.rs` and stages with `tx.edit`, so it sees what the ops before it did, and an `as` name resolves to the id an earlier op made (`@name`). The first op that fails fails the call with "op N (kind): …. Nothing was changed.", and nobody sees anything. `dryRun` stages with `dry_run` instead. The change is labelled with `status`, or a summary of the ops ("Replace #3b82f6 → #f97316, css on .btn"), which undo and comment replies show; `status` also shows people which artboards the edit touched. An html op with mode `inner` or `replace` is the merged rewrite (`tx.merge`), taking one match. A `remove` whose matches nest inside each other is refused. `replace` also replaces in token values (`search::replace_in_tokens`), and an `import` op records its import in the transaction (`Transaction::record_import`), which the hub journals with the change.
+- `doc6/read.rs` has `read`'s views: an overview by page, and for a selector's matches their outline, HTML with its read mark, CSS (inline, each matching `<style>` rule, and what inline styles override), JSX, a search (`contains`, which also searches tokens) or an export.
+- After every edit, unless `check: false`, the edit waits for the layout check of `watch.rs` the way the `layout` note does, and a late note goes on the next result.
+
+`crates/server/tests/doc6.rs` drives every doc6 tool and op over MCP.
 
 `e2e/ax` measures how real agents do with the tools (see its README). Every change to a tool's shape, description or result is worth a run there before and after.
 
@@ -889,41 +928,42 @@ The guide explains each limit where it applies. This is the list in one place. M
 
 ## Words used in the code
 
-| Word          | Meaning                                                                           |
-| ------------- | --------------------------------------------------------------------------------- |
-| Design        | One canvas. Also called a canvas in the MCP tools.                                |
-| Artboard      | A top-level node: a fixed-size frame placed on the canvas.                        |
-| Node          | One element or text node.                                                         |
-| Op            | The smallest edit: `create`, `delete`, `set` or `move`.                           |
-| Change        | The ops from one commit, undo or redo, with a `seq`, actor and label.             |
-| Actor         | Whoever made a change: an agent, by its `X-Finite-Agent` name or its session.     |
-| Snapshot      | Everything needed to rebuild a design. Saved to disk and sent on connect.         |
-| Journal       | The records appended to `<id>.log` since the last snapshot.                       |
-| Compaction    | Writing a fresh snapshot and deleting the journal, every 1,000 records or 16 MB.  |
-| Replica       | The browser's copy of a design: the Rust document in WebAssembly, plus a cache.   |
-| WebAssembly   | A binary format browsers run. `crates/wasm` compiles the document model to it.    |
-| Golden file   | A recorded expected result that a test compares against, like `apply.json`.       |
-| Presence      | "Agent X is working on these nodes", shown as a badge.                            |
-| Hub           | The server's index of designs, with the ones in use loaded in memory.             |
-| Room          | The model for loading: a design is in memory only while someone uses it.          |
-| Long poll     | A request that stays open until there's news, like `wait_for_comments`.           |
-| Epoch         | One load of a design on a server. A viewer can resume only within the same one.   |
-| Revision      | A comment's `rev`: it goes up with each change, so the higher copy is newer.      |
-| Owner         | The one server that holds a design, picked by hashing its id over the servers.    |
-| Heartbeat     | The time a server writes to the shared store every 2 s, to show it's alive.       |
-| Lease         | How long a heartbeat, or a claim on a design, counts. 10 s by default.            |
-| Claim         | Taking a design's lease before loading it. It raises the design's fencing token.  |
-| Fencing token | The design's `epoch`. The store refuses a write with an older one.                |
-| Fenced        | What a stale server's write gets: another server took the design over.            |
-| Router        | `finite-server router`: the front door that sends requests to each owner.         |
-| Token         | A design's CSS variable, like `--brand`, with a value per mode.                   |
-| Mode          | A set of token values, like Light or Dark. Each artboard renders in one.          |
-| Component     | A subtree marked `component`: one definition that instances show.                 |
-| Instance      | A node with `instanceOf`: it shows its component, with its own overrides.         |
-| Override      | A value one instance shows differently, keyed by path and property.               |
-| Virtual id    | `instance/node`: a node shown inside an instance, which isn't in the document.    |
-| User edit     | One thing a person changes on the canvas (`user_edit::UserEdit`), sent in a list. |
-| Mutation      | A gesture's user edits, sent from a tab as one undo step, with the tab's stamp.   |
-| Draft         | The edits of a gesture in progress, shown in the browser and never sent.          |
-| Stamp         | A tab's random id and counter, which marks the change its mutation made.          |
-| Detach        | Turning an instance into a plain copy of what it shows.                           |
+| Word          | Meaning                                                                              |
+| ------------- | ------------------------------------------------------------------------------------ |
+| Design        | One canvas. Also called a canvas in the MCP tools.                                   |
+| Artboard      | A top-level node: a fixed-size frame placed on the canvas.                           |
+| Node          | One element or text node.                                                            |
+| Op            | The smallest edit: `create`, `delete`, `set` or `move`.                              |
+| Change        | The ops from one commit, transaction, undo or redo, with a `seq`, actor and label.   |
+| Transaction   | Several edit steps staged under one lock and committed as one change, or not at all. |
+| Actor         | Whoever made a change: an agent, by its `X-Finite-Agent` name or its session.        |
+| Snapshot      | Everything needed to rebuild a design. Saved to disk and sent on connect.            |
+| Journal       | The records appended to `<id>.log` since the last snapshot.                          |
+| Compaction    | Writing a fresh snapshot and deleting the journal, every 1,000 records or 16 MB.     |
+| Replica       | The browser's copy of a design: the Rust document in WebAssembly, plus a cache.      |
+| WebAssembly   | A binary format browsers run. `crates/wasm` compiles the document model to it.       |
+| Golden file   | A recorded expected result that a test compares against, like `apply.json`.          |
+| Presence      | "Agent X is working on these nodes", shown as a badge.                               |
+| Hub           | The server's index of designs, with the ones in use loaded in memory.                |
+| Room          | The model for loading: a design is in memory only while someone uses it.             |
+| Long poll     | A request that stays open until there's news, like `wait_for_comments`.              |
+| Epoch         | One load of a design on a server. A viewer can resume only within the same one.      |
+| Revision      | A comment's `rev`: it goes up with each change, so the higher copy is newer.         |
+| Owner         | The one server that holds a design, picked by hashing its id over the servers.       |
+| Heartbeat     | The time a server writes to the shared store every 2 s, to show it's alive.          |
+| Lease         | How long a heartbeat, or a claim on a design, counts. 10 s by default.               |
+| Claim         | Taking a design's lease before loading it. It raises the design's fencing token.     |
+| Fencing token | The design's `epoch`. The store refuses a write with an older one.                   |
+| Fenced        | What a stale server's write gets: another server took the design over.               |
+| Router        | `finite-server router`: the front door that sends requests to each owner.            |
+| Token         | A design's CSS variable, like `--brand`, with a value per mode.                      |
+| Mode          | A set of token values, like Light or Dark. Each artboard renders in one.             |
+| Component     | A subtree marked `component`: one definition that instances show.                    |
+| Instance      | A node with `instanceOf`: it shows its component, with its own overrides.            |
+| Override      | A value one instance shows differently, keyed by path and property.                  |
+| Virtual id    | `instance/node`: a node shown inside an instance, which isn't in the document.       |
+| User edit     | One thing a person changes on the canvas (`user_edit::UserEdit`), sent in a list.    |
+| Mutation      | A gesture's user edits, sent from a tab as one undo step, with the tab's stamp.      |
+| Draft         | The edits of a gesture in progress, shown in the browser and never sent.             |
+| Stamp         | A tab's random id and counter, which marks the change its mutation made.             |
+| Detach        | Turning an instance into a plain copy of what it shows.                              |

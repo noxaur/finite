@@ -337,3 +337,40 @@ fn a_token_deleted_in_an_edit_frees_its_place_at_the_limit() {
     assert_eq!(d.doc().tokens()["--b"][FIRST_MODE], "blue");
     assert!(!d.doc().tokens().contains_key("--a"));
 }
+
+#[test]
+fn replacing_in_tokens_matches_colors_in_any_notation() {
+    let mut design = design();
+    set(
+        &mut design,
+        &[
+            ("--brand", TokenChange::All("rgb(59 130 246)".into())),
+            ("--ring", TokenChange::All("0 0 0 2px #3b82f680".into())),
+            ("--gap", TokenChange::All("8px".into())),
+        ],
+    );
+    let (ops, lines) =
+        finite_design::search::replace_in_tokens(design.doc(), "#3B82F6", "#f97316").unwrap();
+    assert_eq!(
+        lines,
+        [
+            "--brand: rgb(59 130 246) → #f97316",
+            "--ring: 0 0 0 2px #3b82f680 → 0 0 0 2px rgba(249, 115, 22, 0.502)",
+        ]
+    );
+    design.commit("agent", "Replace", &ops, 0).unwrap();
+    assert_eq!(
+        finite_design::search::find_in_tokens(design.doc(), "rgb(249, 115, 22)"),
+        [
+            "--brand: #f97316",
+            "--ring: 0 0 0 2px rgba(249, 115, 22, 0.502)"
+        ]
+    );
+    assert_eq!(
+        finite_design::search::find_in_tokens(design.doc(), "GAP"),
+        ["--gap: 8px"]
+    );
+    let (ops, lines) =
+        finite_design::search::replace_in_tokens(design.doc(), "#000", "red").unwrap();
+    assert!(ops.is_empty() && lines.is_empty());
+}

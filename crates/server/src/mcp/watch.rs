@@ -29,8 +29,13 @@ use std::{
 
 use finite_design::Change;
 
-use super::format::layout_notes;
+use super::format::{layout_notes, overlap_note};
 use crate::{hub::DesignHandle, screenshot};
+
+/// How long a doc6 edit waits at least: its check is on by default, and AX
+/// runs saw a cold browser miss the classic wait on most first edits, so
+/// agents rendered to find out instead.
+const DOC6_WAIT: Duration = Duration::from_secs(5);
 
 /// How long an edit waits for its layout check before it answers without one.
 /// `FINITE_LAYOUT_WAIT_MS` sets it; the deferred-note tests set 0.
@@ -93,17 +98,28 @@ impl Taken {
 pub(super) struct LayoutWatch {
     /// By design id, then artboard id.
     boards: Mutex<HashMap<String, HashMap<String, Entry>>>,
+    /// Whose tools the notes name.
+    surface: super::Surface,
 }
 
 impl LayoutWatch {
+    pub(super) fn new(surface: super::Surface) -> Self {
+        Self {
+            surface,
+            ..Self::default()
+        }
+    }
+
     /// Starts measuring the artboards `change` touched, and waits up to
     /// [`wait`] for it. What it finds is then waiting in [`Self::take`].
+    /// Returns whether every artboard it touched was measured in time and
+    /// had nothing to report.
     pub(super) async fn after_edit(
         self: &Arc<Self>,
         design: &str,
         handle: &Arc<DesignHandle>,
         change: &Change,
-    ) {
+    ) -> bool {
         let mut boards: Vec<String> = handle.read(|d| {
             let mut boards: Vec<String> = Vec::new();
             for op in &change.ops {
@@ -124,8 +140,9 @@ impl LayoutWatch {
                 UNCHECKED,
                 generation,
                 Some(format!(
-                    "Layout: this edit touched {} artboards and only the first {BOARDS_PER_EDIT} were checked. get_layout checks the rest.",
-                    boards.len() + left_out
+                    "Layout: this edit touched {} artboards and only the first {BOARDS_PER_EDIT} were checked. {} checks the rest.",
+                    boards.len() + left_out,
+                    layout_tool(self.surface)
                 )),
             );
         }
@@ -137,17 +154,29 @@ impl LayoutWatch {
                 // Let edits sent together all count before the first one measures.
                 tokio::time::sleep(Duration::from_millis(25)).await;
                 let Ok(_turn) = measuring().acquire().await else {
-                    return;
+                    return false;
                 };
                 if !watch.is_current(&design, &board, generation) {
-                    return;
+                    return false;
                 }
-                let note = measure(&handle, &board).await;
-                watch.finish(&design, &board, generation, note);
+                let measured = measure(&handle, &board, watch.surface).await;
+                let clean = matches!(measured, Some(None));
+                watch.finish(&design, &board, generation, measured.flatten());
+                clean
             }));
         }
         // On time out the tasks carry on and leave their notes for later.
-        let _ = tokio::time::timeout(wait(), futures::future::join_all(tasks)).await;
+        let wait = if self.surface.doc6() {
+            wait().max(DOC6_WAIT)
+        } else {
+            wait()
+        };
+        match tokio::time::timeout(wait, futures::future::join_all(tasks)).await {
+            Ok(done) => {
+                left_out == 0 && !done.is_empty() && done.into_iter().all(|d| d.unwrap_or(false))
+            }
+            Err(_) => false,
+        }
     }
 
     fn bump(&self, design: &str, board: &str) -> u64 {
@@ -236,21 +265,52 @@ impl LayoutWatch {
     }
 }
 
-/// What the layout check says about `board`, if it found anything.
-async fn measure(handle: &DesignHandle, board: &str) -> Option<String> {
+/// What the layout check says about `board`: `Some(None)` when it found
+/// nothing, and `None` when it couldn't measure it.
+async fn measure(
+    handle: &DesignHandle,
+    board: &str,
+    surface: super::Surface,
+) -> Option<Option<String>> {
     let plan = handle
         .read(|d| screenshot::plan_measurement(d.view(), board, screenshot::Options::default()));
     let boxes = tokio::time::timeout(MEASURE_LIMIT, screenshot::layout(plan.ok()?))
         .await
         .ok()?
         .ok()?;
-    let notes = handle.read(|d| layout_notes(d.view(), board, &boxes));
-    if notes.is_empty() || notes.starts_with(CLEAN) {
-        return None;
+    let notes = handle.read(|d| {
+        let doc = d.view();
+        let mut notes = layout_notes(doc, board, &boxes, surface);
+        if notes.starts_with(CLEAN) {
+            notes.clear();
+        }
+        // doc6 promises overlapping text too, as get_layout reports it.
+        if surface.doc6()
+            && let Some(overlap) = overlap_note(doc, &boxes)
+        {
+            if !notes.is_empty() {
+                notes.push('\n');
+            }
+            notes.push_str(&overlap);
+        }
+        notes
+    });
+    if notes.is_empty() {
+        return Some(None);
     }
-    Some(format!(
-        "{notes}\n(From checking artboard #{board} after your last edit. get_layout shows more.)"
-    ))
+    Some(Some(format!(
+        "{notes}\n(From checking artboard #{board} after your last edit. {} shows more.)",
+        layout_tool(surface)
+    )))
+}
+
+/// The tool that shows the whole layout, as this surface names it.
+fn layout_tool(surface: super::Surface) -> &'static str {
+    if surface.doc6() {
+        "render with output: \"layout\""
+    } else {
+        "get_layout"
+    }
 }
 
 #[cfg(test)]

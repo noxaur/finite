@@ -39,7 +39,7 @@ Read `docs/how-finite-works.md` before you change the document model, the server
 
 ## Code map
 
-- `crates/design/`: the document model, with no I/O. `node.rs` (nodes and properties), `document.rs` (the node map, ops and limits), `design.rs` (the document plus every actor's history and comments), `history.rs` (undo stacks), `edit.rs` (edit commands), `html.rs` (HTML in and out, and what's unsafe), `search.rs`, `comment.rs`, `fractional.rs` (sibling order), `label.rs` and `user_edit.rs` (the edits people make in the browser). Add a tool's logic in `edit.rs`, not in the server.
+- `crates/design/`: the document model, with no I/O. `node.rs` (nodes and properties), `document.rs` (the node map, ops and limits), `design.rs` (the document plus every actor's history and comments), `history.rs` (undo stacks), `edit.rs` (edit commands), `css.rs` (merging a patch into a stylesheet), `html.rs` (HTML in and out, and what's unsafe), `search.rs`, `select.rs` (CSS selectors), `comment.rs`, `fractional.rs` (sibling order), `label.rs` and `user_edit.rs` (the edits people make in the browser). Add a tool's logic in `edit.rs`, not in the server.
 - `crates/wasm/`: the document model as `finite.wasm`, with a plain C ABI for the viewer. A new call is an export in `src/lib.rs` and a method in `apps/web/src/design/wasm.ts`.
 - `crates/server/`: the axum server.
   - `mcp/`: the tools. `mod.rs` defines them, `params.rs` holds their arguments, `format.rs` writes outlines and layout notes, `search.rs` and `tokens.rs` hold search and design tokens. `instructions.md` is what agents read when they connect; keep it under 4,000 characters.

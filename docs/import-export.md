@@ -78,7 +78,7 @@ Quarantined content stays only in the original bytes, in the blob store. The doc
 
 ## Imports are all-or-nothing
 
-`Design::import` gives `place` a `Transaction`. Each step's ops apply right away through `Document::try_apply`, so the next step sees them. Placing several artboards one after another keeps them from overlapping. `try_apply` returns `Applied::Changed`, `Applied::Unchanged` or `Rejected`, where plain `apply` skips any op that doesn't apply. That skipping is what keeps undo safe when other agents have edited in between, and undo keeps it.
+`Design::import` runs `place` as a transaction (`Design::transact`, see "Several edits as one change" in [How Finite works](how-finite-works.md)). Each step's ops apply right away through `Document::try_apply`, so the next step sees them. Placing several artboards one after another keeps them from overlapping. `try_apply` returns `Applied::Changed`, `Applied::Unchanged` or `Rejected`, where plain `apply` skips any op that doesn't apply. That skipping is what keeps undo safe when other agents have edited in between, and undo keeps it.
 
 If any step fails, the transaction puts the document back by applying the inverses in reverse, and nothing is recorded. The limits on nodes and nesting depth are checked against the staged document, so they count every artboard the import makes. When the import succeeds, its ops become one undo step, and the record and the change go to the journal as one `Record::Import`. A crash can't keep one without the other.
 

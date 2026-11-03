@@ -138,21 +138,27 @@ fn joined<T>(result: Result<T, tokio::task::JoinError>) -> Result<T, TransferErr
     result.map_err(|e| TransferError::Io(std::io::Error::other(e)))
 }
 
-/// Imports `request` into design `id` as one undo step for `actor`.
-pub async fn import(
+/// An import read, checked and stored, ready to place in a transaction
+/// with [`Prepared::place`].
+pub struct Prepared {
+    imported: finite_transfer::Imported,
+    format: Format,
+    artifact: BlobHash,
+    file_name: Option<String>,
+    design: String,
+}
+
+/// Reads an import's bytes for design `id`, refuses them as strict mode
+/// says, and stores them and every file they carry. Nothing points at the
+/// stored bytes until the import is placed. It doesn't take the design's lock.
+pub async fn prepare(
     hub: &Arc<Hub>,
     id: &str,
-    actor: &Actor,
-    request: ImportRequest,
-) -> Result<ImportResult, TransferError> {
-    let handle = hub.open(id).await?;
-    let ImportRequest {
-        format,
-        bytes,
-        file_name,
-        page,
-        strict,
-    } = request;
+    format: Format,
+    bytes: Vec<u8>,
+    file_name: Option<String>,
+    strict: &[Axis],
+) -> Result<Prepared, TransferError> {
     let bytes = Arc::new(bytes);
     let (imported, bytes) = {
         let file_name = file_name.clone();
@@ -173,7 +179,7 @@ pub async fn import(
         .iter()
         .map(|(_, d)| d.clone())
         .collect();
-    if let Some(first) = violations(&pending, &strict).first() {
+    if let Some(first) = violations(&pending, strict).first() {
         return Err(TransferError::Invalid(format!(
             "strict import refused: {} at {} ({})",
             first.what, first.path, first.reason
@@ -193,29 +199,70 @@ pub async fn import(
         .await,
     )?
     .map_err(TransferError::Io)?;
-    let label = match &file_name {
-        Some(name) => format!("Import {name}"),
-        None => format!("Import {}", format.codec().name()),
-    };
-    let receipt = Receipt {
-        id: random_id(12),
-        design: id.to_owned(),
-        page,
+    Ok(Prepared {
+        imported,
+        format,
         artifact,
         file_name,
-        received_at: now_ms(),
-    };
-    let ((import, placed), _) = handle
-        .import(actor, &label, |tx| {
-            let (record, placed) = imported.place(tx, receipt, &mut || random_id(8))?;
-            Ok::<_, finite_transfer::Error>((record.clone(), (record, placed)))
-        })
-        .map_err(|e| TransferError::Invalid(e.0))?;
-    Ok(ImportResult {
-        import,
-        artboards: placed.artboards,
-        diagnostics: placed.diagnostics,
+        design: id.to_owned(),
     })
+}
+
+impl Prepared {
+    /// The label of the change that adds it, like `Import landing.html`.
+    pub fn label(&self) -> String {
+        match &self.file_name {
+            Some(name) => format!("Import {name}"),
+            None => format!("Import {}", self.format.codec().name()),
+        }
+    }
+
+    /// Creates the import's artboards in `tx`, on `page` unless they name
+    /// their own, and records the import there.
+    pub fn place(
+        self,
+        tx: &mut finite_design::Transaction<'_>,
+        page: Option<String>,
+    ) -> Result<ImportResult, finite_transfer::Error> {
+        let receipt = Receipt {
+            id: random_id(12),
+            design: self.design,
+            page,
+            artifact: self.artifact,
+            file_name: self.file_name,
+            received_at: now_ms(),
+        };
+        let (import, placed) = self.imported.place(tx, receipt, &mut || random_id(8))?;
+        tx.record_import(import.clone());
+        Ok(ImportResult {
+            import,
+            artboards: placed.artboards,
+            diagnostics: placed.diagnostics,
+        })
+    }
+}
+
+/// Imports `request` into design `id` as one undo step for `actor`.
+pub async fn import(
+    hub: &Arc<Hub>,
+    id: &str,
+    actor: &Actor,
+    request: ImportRequest,
+) -> Result<ImportResult, TransferError> {
+    let handle = hub.open(id).await?;
+    let ImportRequest {
+        format,
+        bytes,
+        file_name,
+        page,
+        strict,
+    } = request;
+    let prepared = prepare(hub, id, format, bytes, file_name, &strict).await?;
+    let label = prepared.label();
+    let (result, _) = handle
+        .transact(actor, &label, |tx| prepared.place(tx, page))
+        .map_err(|e| TransferError::Invalid(e.0))?;
+    Ok(result)
 }
 
 /// Writes `scope` of design `id` as `format`. The design is copied under

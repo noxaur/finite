@@ -160,20 +160,10 @@ pub fn replace(
     {
         return Err(EditError(format!("node {id:?} not found")));
     }
-    let (from_color, to_color) = (parse_color(from), parse_color(to));
     let exact =
         |value: &str| -> (String, usize) { (value.replace(from, to), value.matches(from).count()) };
-    // What `from` is decides whether a match is a color, not what it becomes:
-    // `#3b82f6` is a brand color even when `to` is `var(--brand)`, so it's
-    // matched in any notation and never as a prefix of `#3b82f6cc`'s text.
-    let swap = |value: &str| -> (String, usize) {
-        match (from_color, to_color) {
-            (Some(f), Some(t)) => replace_color(value, f, t),
-            (Some(f), None) => replace_color_with(value, f, false, |_| to.to_owned()),
-            _ => exact(value),
-        }
-    };
-    let from_is_color = from_color.is_some();
+    let swap = |value: &str| swap(value, from, to);
+    let from_is_color = parse_color(from).is_some();
     // Matches the all-or-nothing rule applies to. Script code never counts as
     // color: `rgb(59 130 246)` or `'#abc'` there is code, so it's matched as
     // exact text.
@@ -293,6 +283,83 @@ pub fn replace(
         )));
     }
     Ok((ops, report))
+}
+
+/// `value` with `from` replaced by `to` the way [`replace`] replaces it in
+/// styles, and how many uses it replaced. What `from` is decides whether a
+/// match is a color, not what it becomes: `#3b82f6` is a brand color even
+/// when `to` is `var(--brand)`, so it's matched in any notation and never
+/// as a prefix of `#3b82f6cc`'s text.
+fn swap(value: &str, from: &str, to: &str) -> (String, usize) {
+    match (parse_color(from), parse_color(to)) {
+        (Some(f), Some(t)) => replace_color(value, f, t),
+        (Some(f), None) => replace_color_with(value, f, false, |_| to.to_owned()),
+        _ => (value.replace(from, to), value.matches(from).count()),
+    }
+}
+
+/// A token's name, with its mode's name when the design has more than one.
+fn token_label(doc: &Document, name: &str, mode: &str) -> String {
+    match doc.mode_map().get(mode) {
+        Some(m) if doc.modes().len() > 1 => format!("{name} ({})", m.name),
+        _ => name.to_owned(),
+    }
+}
+
+/// Replaces `from` with `to` in the design's token values, as [`replace`]
+/// does in styles: a color in any notation, keeping each use's alpha, and
+/// other text exactly. Returns the ops and a line for each value changed,
+/// like `--brand (Dark): #3b82f6 → #f97316`.
+pub fn replace_in_tokens(
+    doc: &Document,
+    from: &str,
+    to: &str,
+) -> Result<(Vec<Op>, Vec<String>), EditError> {
+    if from.is_empty() {
+        return Err(EditError("find can't be empty".into()));
+    }
+    let mut ops = Vec::new();
+    let mut lines = Vec::new();
+    for (name, values) in doc.tokens() {
+        for (mode, value) in values {
+            let (new, n) = swap(value, from, to);
+            if n == 0 || new == *value {
+                continue;
+            }
+            let label = token_label(doc, name, mode);
+            crate::tokens::check_value(new.trim())
+                .map_err(|why| EditError(format!("{label}: {why}")))?;
+            lines.push(format!("{label}: {value} → {new}"));
+            ops.push(Op::Token {
+                name: name.clone(),
+                mode_id: mode.clone(),
+                value: Some(new.trim().to_owned()),
+            });
+        }
+    }
+    Ok((ops, lines))
+}
+
+/// The token values that hold `needle`: a color in any notation, or text
+/// in the token's name or value, ignoring case. One line for each, like
+/// `--brand (Dark): #3b82f6`.
+pub fn find_in_tokens(doc: &Document, needle: &str) -> Vec<String> {
+    let lower = needle.to_lowercase();
+    let color = parse_color(needle).is_some();
+    let mut lines = Vec::new();
+    for (name, values) in doc.tokens() {
+        for (mode, value) in values {
+            let hit = if color {
+                swap(value, needle, needle).1 > 0
+            } else {
+                name.to_lowercase().contains(&lower) || value.to_lowercase().contains(&lower)
+            };
+            if hit {
+                lines.push(format!("{}: {value}", token_label(doc, name, mode)));
+            }
+        }
+    }
+    lines
 }
 
 /// Every node under `within`, or in every artboard, in document order.
