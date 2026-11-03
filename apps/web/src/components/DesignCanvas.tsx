@@ -12,6 +12,7 @@ import { DesignSession, initialSessionState, type SessionState } from "@/design/
 import { loadDesignModel } from "@/design/wasm";
 import { mcpUrl } from "@/lib/mcp";
 import { formatOf } from "@/lib/transfer";
+import { loadPlace, savePlace } from "@/lib/place";
 import { localUser } from "@/lib/user";
 import { timeAgo } from "@/lib/time";
 import { runtime } from "@/runtime";
@@ -47,6 +48,15 @@ function partOf(replica: Replica, nodeId: string): Part | null {
   const count = `${info.instances} instance${info.instances === 1 ? "" : "s"}`;
   return { id: info.component, label: `Component ${name} · ${count}` };
 }
+
+/**
+ * Stands in for a framing when the view came from a saved place. It never
+ * equals the camera's view, so nothing reframes over the restored one.
+ */
+const RESTORED: View = { x: NaN, y: NaN, zoom: NaN };
+
+/** How long the view rests before it's saved. */
+const SAVE_PLACE_MS = 300;
 
 /** How long "show what changed" outlines stay up. */
 const FLASH_MS = 1800;
@@ -126,6 +136,16 @@ export function DesignCanvas({ id }: { id: string }) {
   // The page picked in the sidebar, or `null` for the first. A page that's
   // gone shows the first page, as the renderer does.
   const [pickedPage, setPickedPage] = useState<string | null>(null);
+  // The last view of each page, by page id, so going back to a page shows it as it was left.
+  const viewsRef = useRef<Record<string, View>>({});
+  // The page whose view the camera holds, or `null` before it holds one.
+  const viewedPageRef = useRef<string | null>(null);
+  const rememberPlace = useRef(() => {});
+  const pickPage = (pageId: string) => {
+    setPickedPage(pageId);
+    viewedPageRef.current = pageId;
+    rememberPlace.current();
+  };
   const page = pages.find((p) => p.id === pickedPage) ?? pages[0];
   // The shared CSS, the comments list, the export menu and an import's result open in the
   // same place, one at a time.
@@ -146,7 +166,13 @@ export function DesignCanvas({ id }: { id: string }) {
 
     const camera = new Camera(viewport, world);
     const replica = new Replica();
-    framedRef.current = null;
+    // Open where this browser last was in the design, or frame the artboards.
+    const saved = loadPlace(id);
+    viewsRef.current = { ...saved?.views };
+    const savedView = saved?.page ? saved.views[saved.page] : undefined;
+    if (savedView) camera.set(savedView);
+    framedRef.current = savedView ? RESTORED : null;
+    viewedPageRef.current = savedView ? (saved?.page ?? null) : null;
     const renderer = new Renderer(frames, replica, {
       live: true,
       toPage: (x, y) => camera.toPage(x, y),
@@ -178,14 +204,49 @@ export function DesignCanvas({ id }: { id: string }) {
     // Hide the artboards outside the view, before React re-renders for the zoom.
     camera.subscribe(() => renderer.setViewport(camera.visibleWorld()));
     camera.subscribe((view) => setZoom(view.zoom));
+    setZoom(camera.view.zoom);
+    let saveTimer: ReturnType<typeof setTimeout> | undefined;
+    const savePlaceNow = () => {
+      clearTimeout(saveTimer);
+      // Until the document loads, the views are the saved ones and there's nothing to prune.
+      if (replica.pages.length === 0) return;
+      // Forget pages that were deleted, so the saved views don't pile up.
+      const views: Record<string, View> = {};
+      for (const { id: pageId } of replica.pages) {
+        const view = viewsRef.current[pageId];
+        if (view) views[pageId] = view;
+      }
+      savePlace(id, { page: renderer.shownPage(), views });
+    };
+    rememberPlace.current = () => {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(savePlaceNow, SAVE_PLACE_MS);
+    };
+    camera.subscribe((view) => {
+      if (viewedPageRef.current) viewsRef.current[viewedPageRef.current] = view;
+      rememberPlace.current();
+    });
+    // A reload can come before the timer fires.
+    window.addEventListener("pagehide", savePlaceNow);
     const resize = new ResizeObserver(() => renderer.setViewport(camera.visibleWorld()));
     resize.observe(viewport);
-    // A new renderer starts on the first page.
-    setPickedPage(null);
+    // A new renderer starts on the saved page, or the first.
+    renderer.setPage(saved?.page ?? null);
+    setPickedPage(saved?.page ?? null);
 
     // Frame the artboards once, when the first ones appear.
     const unsubscribe = session.subscribe(() => {
       setSession(session.state);
+      // The camera holds no page's view yet, or the page it held was deleted
+      // and the renderer moved to the first: show that page as it was left,
+      // or frame it.
+      const shown = replica.pages.length > 0 ? renderer.shownPage() : null;
+      if (shown && shown !== viewedPageRef.current) {
+        viewedPageRef.current = shown;
+        const seen = viewsRef.current[shown];
+        if (seen) camera.set(seen);
+        framedRef.current = seen ? RESTORED : null;
+      }
       if (framedRef.current) return;
       const bounds = union(renderer.artboardBounds().values());
       if (bounds) {
@@ -235,6 +296,9 @@ export function DesignCanvas({ id }: { id: string }) {
     const ticker = setInterval(() => setTick((t) => t + 1), 15_000);
 
     return () => {
+      savePlaceNow();
+      window.removeEventListener("pagehide", savePlaceNow);
+      rememberPlace.current = () => {};
       unsubscribe();
       close();
       controller.abort();
@@ -386,20 +450,26 @@ export function DesignCanvas({ id }: { id: string }) {
     });
   };
 
-  /** Shows the artboards on one page, framed in the viewport. */
+  /** Shows the artboards on one page, as it was last seen, or framed in the viewport. */
   const showPage = (pageId: string) => {
-    setPickedPage(pageId);
+    pickPage(pageId);
     const renderer = rendererRef.current;
     if (!renderer) return;
     renderer.setPage(pageId);
+    setDraft(null);
+    setOpenId(null);
+    setHover(null);
+    const seen = viewsRef.current[pageId];
+    if (seen) {
+      cameraRef.current?.set(seen);
+      framedRef.current = RESTORED;
+      return;
+    }
     const bounds = union(renderer.artboardBounds().values());
     if (bounds) cameraRef.current?.fitTo(bounds);
     // So auto-height artboards reframe it as they grow, and an empty page
     // frames its first artboard when one arrives.
     framedRef.current = bounds ? (cameraRef.current?.view ?? null) : null;
-    setDraft(null);
-    setOpenId(null);
-    setHover(null);
   };
 
   // From the comments list: open the thread and bring its pin into view,
@@ -409,7 +479,7 @@ export function DesignCanvas({ id }: { id: string }) {
     const replica = sessionRef.current?.replica;
     const board = comment?.artboardId ? replica?.get(comment.artboardId) : undefined;
     if (board?.parent === null && replica && replica.pageOf(board) !== page?.id) {
-      setPickedPage(replica.pageOf(board));
+      pickPage(replica.pageOf(board));
       rendererRef.current?.setPage(replica.pageOf(board));
     }
     const at = comment && replica ? pinPosition(replica, comment) : null;

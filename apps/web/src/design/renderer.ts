@@ -52,6 +52,12 @@ interface Frame {
   readonly sharedStyle: HTMLStyleElement | null;
   /** Set for artboards with scripts, rendered in a sandboxed iframe. */
   readonly iframe: HTMLIFrameElement | null;
+  /**
+   * Set while an auto-sized iframe hasn't reported its size: until then it
+   * has a placeholder size, which a restored view far down a tall artboard
+   * could miss, culling it before it can report.
+   */
+  awaitingSize?: boolean;
   reload?: ReturnType<typeof setTimeout>;
   /** The iframe's latest answer to "what's under this point?", in its own coordinates. */
   hit?: { readonly x: number; readonly y: number; readonly id: string | null };
@@ -138,7 +144,9 @@ export class Renderer {
   private readonly culler = new Culler(
     {
       measure: (id) => {
-        const root = this.frames.get(id)?.root;
+        const frame = this.frames.get(id);
+        if (frame?.awaitingSize) return null;
+        const root = frame?.root;
         const width = root?.offsetWidth ?? 0;
         const height = root?.offsetHeight ?? 0;
         // Zero both ways means it isn't laid out; try again later.
@@ -260,6 +268,8 @@ export class Renderer {
 
   /** Mounts the shown page's artboards and unmounts the rest. */
   private syncPage() {
+    // Before the document loads there are no pages, and no artboards to sync.
+    if (this.replica.pages.length === 0) return;
     const page = this.shownPage();
     for (const board of this.replica.artboards()) this.syncBoard(board, page);
   }
@@ -715,6 +725,7 @@ export class Renderer {
         commentStyle: null,
         sharedStyle: null,
         iframe,
+        awaitingSize: size.width === null || size.height === null,
         rects: new Map(),
         pendingRects: new Set(),
       };
@@ -826,9 +837,14 @@ export class Renderer {
         before.height !== rect.height;
       if (moved) this.options.onLayout?.();
     } else if (m.type === "size") {
+      // A new document reports zero both ways before its content lays out.
+      // Keep the size it has, or a tiny box could get it culled, and a culled
+      // iframe is unloaded before it can report its real size.
+      if (num("width") === 0 && num("height") === 0) return;
       const fit = (n: number) => `${Math.min(MAX_SIDE, Math.max(1, n))}px`;
       const [width, height] = [fit(num("width")), fit(num("height"))];
       const changed = iframe.style.width !== width || iframe.style.height !== height;
+      frame.awaitingSize = false;
       this.culler.touch(boardId);
       iframe.style.width = width;
       iframe.style.height = height;
