@@ -313,8 +313,9 @@ export function DesignCanvas({ id }: { id: string }) {
     const moved = press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > CLICK_SLOP;
     if (moved || (e.target instanceof Element && e.target.closest("[data-camera-ignore]"))) return;
     // Shift-click adds an element in the draft's artboard, or takes it out.
+    // Only on a sure answer: a stale one could take out the wrong element.
     if (mode === "comment" && draft?.nodeId && e.shiftKey) {
-      const hit = rendererRef.current?.hitTest(e.clientX, e.clientY) ?? null;
+      const hit = rendererRef.current?.hitTest(e.clientX, e.clientY, true) ?? null;
       if (hit?.artboardId === draft.artboardId) setDraft(toggleInDraft(draft, hit.nodeId));
       return;
     }
@@ -345,8 +346,14 @@ export function DesignCanvas({ id }: { id: string }) {
 
   const postComment = async (body: string) => {
     if (!draft) return undefined;
+    // Leave out elements an agent deleted or moved away while the person typed.
+    const replica = sessionRef.current?.replica;
+    const [nodeId = null, ...extraNodeIds] = selectionOf(draft).filter(
+      (node) => replica?.artboardOf(node)?.id === draft.artboardId,
+    );
+    const pin = { ...draft, nodeId, extraNodeIds };
     const exit = await runtime.runPromiseExit(
-      Api.use((api) => api.createComment(id, { author: localUser(), body, ...draft })),
+      Api.use((api) => api.createComment(id, { author: localUser(), body, ...pin })),
     );
     if (Exit.isFailure(exit)) return unsent(exit.cause);
     sessionRef.current?.upsertComment(exit.value);
