@@ -335,6 +335,7 @@ fn board(i: usize, layer: Layer, diagnostics: &mut Vec<(Anchor, Diagnostic)>) ->
         name: layer.name.unwrap_or_else(|| format!("Artboard {}", i + 1)),
         width,
         height,
+        auto_height: false,
         position: layer.x.zip(layer.y),
         styles: layer.styles,
         attrs,

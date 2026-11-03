@@ -3,7 +3,14 @@
 import * as stylex from "@stylexjs/stylex";
 import { useRef } from "react";
 import type { ImportResult } from "@/api/Api";
-import { exportHref, figmaHref, IMPORT_ACCEPT, originalHref, summarize } from "@/lib/transfer";
+import {
+  exportHref,
+  figmaHref,
+  IMPORT_ACCEPT,
+  originalHref,
+  repoHref,
+  summarize,
+} from "@/lib/transfer";
 import { colors, radii, space } from "@/styles/tokens.stylex";
 
 /** Where an import is: sending the file, done, or refused with the server's reason. */
@@ -34,7 +41,7 @@ export function ImportButton({ busy, onFile }: { busy: boolean; onFile: (file: F
         disabled={busy}
         onClick={() => input.current?.click()}
         {...stylex.props(styles.tool)}
-        title="Add artboards from an .html, .finite or .figma.json file"
+        title="Add artboards from an .html, .finite, .figma.json or .tar file"
       >
         {busy ? "Importing…" : "Import"}
       </button>
@@ -95,6 +102,15 @@ export function ExportMenu({
         {...stylex.props(styles.item)}
       >
         Whole design as .finite
+      </a>
+      <a
+        role="menuitem"
+        href={repoHref(designId)}
+        download
+        onClick={onClose}
+        {...stylex.props(styles.item)}
+      >
+        Whole design as text files (.tar)
       </a>
     </div>
   );

@@ -299,6 +299,7 @@ mod tests {
         for name in ["html", "htm", ".html"] {
             assert_eq!(format_named(name).unwrap(), Format::Html, "{name}");
         }
+        assert_eq!(format_named("repo").unwrap(), Format::Repo);
         assert!(format_named("docx").is_err());
     }
 }

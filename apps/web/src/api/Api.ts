@@ -22,7 +22,7 @@ export interface NewComment {
 const Changed = Schema.Struct({ seq: Schema.NullOr(Schema.Number) });
 
 /** The formats an import reads, chosen by the file's extension. */
-export type TransferFormat = "html" | "finite" | "figma";
+export type TransferFormat = "html" | "finite" | "figma" | "repo";
 
 const Score = Schema.Literals(["yes", "no", "unknown"]);
 

@@ -1634,7 +1634,7 @@ async fn jsx_results_are_cut_and_the_format_only_exports() {
         )
         .await;
     assert!(
-        failed && error.contains("html, finite, figma, jsx"),
+        failed && error.contains("html, finite, figma, jsx, repo"),
         "{error}"
     );
 }

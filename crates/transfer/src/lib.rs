@@ -28,6 +28,7 @@ pub mod figma;
 pub mod finite;
 mod html;
 pub mod jsx;
+mod repo;
 mod report;
 pub mod scene;
 
@@ -54,10 +55,18 @@ pub enum Format {
     Figma,
     /// A React component. Export only.
     Jsx,
+    /// A design as a folder of text files, packed as a tar archive.
+    Repo,
 }
 
 impl Format {
-    pub const ALL: [Format; 4] = [Format::Html, Format::Finite, Format::Figma, Format::Jsx];
+    pub const ALL: [Format; 5] = [
+        Format::Html,
+        Format::Finite,
+        Format::Figma,
+        Format::Jsx,
+        Format::Repo,
+    ];
 
     pub fn codec(self) -> &'static dyn Codec {
         match self {
@@ -65,6 +74,7 @@ impl Format {
             Format::Finite => &finite::Finite,
             Format::Figma => &figma::Figma,
             Format::Jsx => &jsx::Jsx,
+            Format::Repo => &repo::Repo,
         }
     }
 
@@ -184,6 +194,8 @@ pub struct Board {
     pub name: String,
     pub width: f64,
     pub height: f64,
+    /// The artboard grows to fit its content, so `height` isn't used.
+    pub auto_height: bool,
     /// Where on the canvas, or `None` to place it beside the others.
     pub position: Option<(f64, f64)>,
     /// The name of the page it goes on, or `None` for the import's page.
@@ -274,7 +286,7 @@ impl Imported {
             let spec = NewArtboard {
                 name: board.name,
                 width: board.width,
-                height: Some(board.height),
+                height: (!board.auto_height).then_some(board.height),
                 position: board.position,
                 page,
                 styles: board.styles,

@@ -326,3 +326,42 @@ async fn a_deep_figma_payload_doesnt_crash_the_server() {
         }
     }
 }
+
+#[tokio::test]
+async fn a_design_leaves_as_a_folder_and_comes_back() {
+    let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
+    let from = hub.create("Home").meta.id;
+    transfer::import(&hub, &from, &agent(), request(Vec::new()))
+        .await
+        .unwrap();
+
+    let exported = transfer::export(&hub, &from, Format::Repo, Scope::Design)
+        .await
+        .unwrap();
+    assert_eq!(exported.file_name, "home.finite-repo.tar");
+    let bytes = exported.bytes;
+    // The archive names its files in plain text.
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("finite.json") && text.contains("artboards/card.html"));
+    assert!(!text.contains("onclick"));
+
+    let to = hub.create("Copy").meta.id;
+    let result = transfer::import(
+        &hub,
+        &to,
+        &agent(),
+        ImportRequest {
+            format: Format::Repo,
+            bytes,
+            file_name: Some("home.finite-repo.tar".into()),
+            page: None,
+            strict: vec![Axis::Preserved, Axis::Editable],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.artboards.len(), 1);
+    assert_eq!(result.import.format, "repo");
+    let handle = hub.open(&to).await.unwrap();
+    assert_eq!(handle.read(|d| d.doc().len()), 4);
+}
