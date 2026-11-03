@@ -981,16 +981,62 @@ fn remove(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<String> {
     ))
 }
 
+/// Where a replace op looks: `in`, one place or a list of them, or by
+/// default everywhere but visible text, which `includeText` adds. Returns
+/// the places in the document and whether token values count.
+fn places_of(f: &Fields) -> Result<(Places, bool)> {
+    const PLACES: &str = "text, styles, attributes, code and tokens";
+    let Some(given) = f.get("in").filter(|v| !v.is_null()) else {
+        return Ok((
+            Places {
+                styles: true,
+                attributes: true,
+                css: true,
+                text: flag(f, "includeText"),
+            },
+            true,
+        ));
+    };
+    let names: Vec<&Value> = match given {
+        Value::Array(list) => list.iter().collect(),
+        one => vec![one],
+    };
+    let mut places = Places {
+        styles: false,
+        attributes: false,
+        css: false,
+        text: false,
+    };
+    let mut tokens = false;
+    for name in names {
+        match name
+            .as_str()
+            .map(|n| n.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("text") => places.text = true,
+            Some("styles" | "style") => places.styles = true,
+            Some("attributes" | "attrs" | "attribute") => places.attributes = true,
+            Some("code" | "css" | "script") => places.css = true,
+            Some("tokens" | "token") => tokens = true,
+            _ => {
+                return Err(format!(
+                    "in {name} isn't a place to replace in. The places are {PLACES}, like \"in\": \"text\" or \"in\": [\"styles\", \"tokens\"]"
+                ));
+            }
+        }
+    }
+    if !(places.text || places.styles || places.attributes || places.css || tokens) {
+        return Err(format!("in is empty: name one or more of {PLACES}"));
+    }
+    Ok((places, tokens))
+}
+
 fn replace(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<String> {
     need(Kind::Replace, f, &["find", "replace"])?;
     let find = text(f, "find").unwrap_or_default();
     let to = text(f, "replace").unwrap_or_default();
-    let places = Places {
-        styles: true,
-        attributes: true,
-        css: true,
-        text: flag(f, "includeText"),
-    };
+    let (places, in_tokens) = places_of(f)?;
     let all = flag(f, "all");
     let scope = match select_of(f).or_else(|| f.get("within").filter(|v| !v.is_null()).cloned()) {
         Some(select) => {
@@ -1034,7 +1080,7 @@ fn replace(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<String> 
         }
     }
     let mut tokens = Vec::new();
-    if scope.is_none() {
+    if scope.is_none() && in_tokens {
         let (ops, lines) =
             search::replace_in_tokens(tx.view(), &find, &to).map_err(|e| e.to_string())?;
         stage(tx, ops)?;
