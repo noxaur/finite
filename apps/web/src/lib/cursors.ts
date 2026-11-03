@@ -11,7 +11,7 @@ export const PIN_PATH =
   "M3 34C5 31 7 28 8 25C4 22 2 18 2 14C2 7 10 2 20 2C30 2 38 7 38 14C38 22 30 27 20 27C17 27 15 27 13 26C10 30 6 33 3 34Z";
 
 const HAND_POINTER =
-  "M11 18.6V5A1.8 1.8 0 0 1 14.6 5V14.6L15.1 15.6L15.6 14.6A2 2 0 0 1 19.6 14.6L20.1 15.6L20.6 14.8A1.9 1.9 0 0 1 24.4 14.8L24.9 15.8L25.4 16.2A1.6 1.6 0 0 1 28.6 16.2V21.5C28.6 26.5 25.6 29.6 21 29.6H17C14 29.6 12.4 28.2 10.9 26L6 19.8C4.9 18.4 5.8 16.4 7.6 16.6C9 16.8 10.1 17.6 11 18.6Z";
+  "M11 18.6V7A1.8 1.8 0 0 1 14.6 7V14.6L15.1 15.6L15.6 14.6A2 2 0 0 1 19.6 14.6L20.1 15.6L20.6 14.8A1.9 1.9 0 0 1 24.4 14.8L24.9 15.8L25.4 16.2A1.6 1.6 0 0 1 28.6 16.2V21.5C28.6 26.5 25.6 29.6 21 29.6H17C14 29.6 12.4 28.2 10.9 26L6 19.8C4.9 18.4 5.8 16.4 7.6 16.6C9 16.8 10.1 17.6 11 18.6Z";
 const OPEN_HAND =
   "M10 18.6V8.8A1.8 1.8 0 0 1 13.6 8.8V14L14.3 15.2L15 14V6.8A1.8 1.8 0 0 1 18.6 6.8V14L19.3 15.2L20 14V7.8A1.8 1.8 0 0 1 23.6 7.8V14.4L24.3 15.6L25 14.4V11.1A1.6 1.6 0 0 1 28.2 11.1V21.5C28.2 26.5 25.4 29.6 21 29.6H16.6C13.6 29.6 12 28.2 10.4 26L5 19.6C3.9 18.2 4.8 16.2 6.6 16.4C8 16.6 9.2 17.6 10 18.6Z";
 const CLOSED_HAND =
@@ -129,7 +129,7 @@ const CENTER: Point = [12, 12];
 const CURSORS: Record<string, string> = {
   arrow: cursor(unit([4, 3], "default"), [{ d: ARROW, fill: INK, width: 1.5 }]),
   // The hands are thin-inked with a wide outline, so the notches between fingers show white.
-  pointer: cursor({ box: [1, 1, 30, 30], size: 24, hotspot: [12.8, 3.5], fallback: "pointer" }, [
+  pointer: cursor({ box: [1, 2, 30, 30], size: 24, hotspot: [12.8, 5.5], fallback: "pointer" }, [
     { d: HAND_POINTER, fill: INK, width: 0.6, outline: 1 },
   ]),
   grab: cursor({ box: [1, 2, 30, 30], size: 24, hotspot: [19, 18], fallback: "grab" }, [
