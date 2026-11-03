@@ -1,4 +1,5 @@
 import * as stylex from "@stylexjs/stylex";
+import { iconMarkup } from "@/components/Icons";
 import { colors } from "@/styles/tokens.stylex";
 import { artboardDocument, BASE_LAYER, pixelSize } from "./html";
 import type { Applied, Replica } from "./replica";
@@ -41,6 +42,10 @@ const isScript = (node: Node) => node.type === "element" && node.tag?.toLowerCas
 interface Frame {
   readonly root: HTMLElement;
   readonly label: HTMLElement;
+  /** The artboard's name, in `label`. */
+  readonly name: HTMLElement;
+  /** Opens the artboard in preview mode, shown in `label` while the artboard is focused. */
+  readonly play: HTMLButtonElement;
   readonly badge: HTMLElement;
   readonly content: HTMLElement;
   /** Set for artboards rendered as live DOM in a shadow root. */
@@ -102,6 +107,8 @@ export interface RendererOptions {
   readonly onLayout?: () => void;
   /** Called when a sandboxed artboard reports a new size, which an auto-height one does after its scripts run. */
   readonly onResize?: () => void;
+  /** Called when the play button next to the focused artboard's name is clicked. */
+  readonly onPreview?: (artboardId: string) => void;
 }
 
 /**
@@ -123,6 +130,8 @@ export class Renderer {
   private readonly scripts = new Set<string>();
   private working: ReadonlyMap<string, string> = new Map();
   private commenting = false;
+  /** The artboard whose label shows the play button. */
+  private focused: string | null = null;
   /** The page shown, or `null` for the first page. Only its artboards are mounted. */
   private page: string | null = null;
   private readonly abort = new AbortController();
@@ -330,6 +339,12 @@ export class Renderer {
     for (const [id, frame] of this.frames) this.showWorking(frame, working.get(id));
   }
 
+  /** Shows the play button next to `id`'s name, and hides the rest. */
+  setFocused(id: string | null) {
+    this.focused = id;
+    for (const [boardId, frame] of this.frames) frame.play.hidden = boardId !== id;
+  }
+
   private showWorking(frame: Frame, label: string | undefined) {
     frame.badge.textContent = label ?? "";
     frame.badge.hidden = label === undefined;
@@ -455,7 +470,7 @@ export class Renderer {
     if (key === "text") {
       if (el instanceof Text) el.data = node.text ?? "";
     } else if (key === "name") {
-      if (frame) frame.label.textContent = labelOf(node);
+      if (frame) frame.name.textContent = labelOf(node);
     } else if (key === "x" || key === "y") {
       if (frame) positionFrame(frame.root, node);
     } else if (key.startsWith("style:") && el instanceof Element) {
@@ -478,7 +493,22 @@ export class Renderer {
 
     const label = document.createElement("div");
     label.className = stylex.props(styles.label).className ?? "";
-    label.textContent = labelOf(node);
+    const name = document.createElement("span");
+    name.textContent = labelOf(node);
+    const play = document.createElement("button");
+    play.type = "button";
+    play.title = "Preview";
+    play.ariaLabel = `Preview ${labelOf(node)}`;
+    play.className = stylex.props(styles.play).className ?? "";
+    // Its own filter id, since the unfocused artboards' buttons are hidden.
+    play.innerHTML = iconMarkup("play", 10, node.id);
+    play.hidden = node.id !== this.focused || !this.options.onPreview;
+    // So pressing it neither pans the canvas nor places a comment.
+    play.dataset.cameraIgnore = "";
+    play.addEventListener("click", () => this.options.onPreview?.(node.id), {
+      signal: this.abort.signal,
+    });
+    label.append(name, play);
 
     const badge = document.createElement("div");
     badge.className = stylex.props(styles.badge).className ?? "";
@@ -501,6 +531,8 @@ export class Renderer {
       return {
         root,
         label,
+        name,
+        play,
         badge,
         content,
         shadow: null,
@@ -534,6 +566,8 @@ export class Renderer {
     return {
       root,
       label,
+      name,
+      play,
       badge,
       content,
       shadow,
@@ -692,6 +726,9 @@ const styles = stylex.create({
     position: "absolute",
     left: 0,
     bottom: "100%",
+    display: "flex",
+    alignItems: "center",
+    gap: 4,
     paddingBottom: 4,
     fontSize: 12,
     lineHeight: 1.3,
@@ -700,6 +737,18 @@ const styles = stylex.create({
     transform: "scale(var(--inv-zoom, 1))",
     transformOrigin: "bottom left",
     fontFamily: "ui-sans-serif, system-ui, sans-serif",
+  },
+  play: {
+    display: { default: "grid", ":is([hidden])": "none" },
+    placeItems: "center",
+    width: 16,
+    height: 16,
+    padding: 0,
+    borderWidth: 0,
+    borderRadius: 4,
+    backgroundColor: { default: "transparent", ":hover": colors.surface },
+    color: { default: colors.muted, ":hover": colors.text },
+    cursor: "var(--cursor-pointer, pointer)",
   },
   badge: {
     position: "absolute",

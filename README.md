@@ -41,6 +41,10 @@ An artboard that contains a `<script>` renders in a sandboxed iframe instead. Th
 
 Thumbnails never run scripts. Screenshots run them under the same content policy, capturing the frame about 3 seconds after load.
 
+## Preview mode
+
+Preview mode shows one artboard at its own size over the canvas, running as a real page. It scrolls, takes clicks and hovers, and runs its scripts, while links and forms still do nothing. The Preview button in the top bar opens the focused artboard: the one that fills most of the view. That artboard's name on the canvas also has a play button. The left and right arrow keys step through the page's artboards, and `Esc` goes back to the canvas. The artboard renders in a sandboxed iframe under the same content policy as script artboards, and it reloads after each burst of edits.
+
 ## Comments
 
 The pill at the bottom of the canvas switches between the pointer tool (`V`) and the comment tool (`C`). In comment mode, you see an outline around the element under the cursor, and a click pins a comment to it. The left button no longer drags the canvas in comment mode; the wheel and the middle button still pan.
