@@ -471,6 +471,14 @@ impl Hub {
         Err(io::Error::other("couldn't find a free design id"))
     }
 
+    pub fn delete(&self, handle: &Arc<DesignHandle>) -> io::Result<()> {
+        handle.delete()?;
+        self.remove(handle);
+        let (message, _) = self.subscribe_lobby();
+        let _ = self.lobby.send(message);
+        Ok(())
+    }
+
     /// The `candidates` that this server owns, so the design is reachable
     /// where it's created, and that no design here has yet. A repeat would
     /// replace that design, in memory and on disk. With 36¹⁰ possible ids,
@@ -791,6 +799,7 @@ impl Hub {
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }
         for handle in self.handles() {
+            let _saving = handle.persistence.lock().unwrap();
             let Some((snapshot, token)) = handle.compact() else {
                 continue;
             };
@@ -921,20 +930,28 @@ async fn persist(hub: Weak<Hub>, design: Weak<DesignHandle>, mut dirty: watch::R
             let (Some(hub), Some(handle)) = (hub.upgrade(), design.upgrade()) else {
                 break;
             };
-            let Some(save) = handle.take_save() else {
-                continue;
-            };
+            let saving = handle.clone();
             let store = hub.store.clone();
-            let last = matches!(save, Save::Last(..));
-            let mut ended = last;
-            let saved = tokio::task::spawn_blocking(move || match save {
-                Save::Snapshot(snapshot, token) => store.save(&snapshot, token),
-                Save::Append(id, records, token) => store.append(&id, &records, token),
-                Save::Last(snapshot, token) => store
-                    .save(&snapshot, token)
-                    .and_then(|()| store.release(&snapshot.meta.id, token)),
+            let saved = tokio::task::spawn_blocking(move || {
+                let _saving = saving.persistence.lock().unwrap();
+                let save = saving.take_save()?;
+                let last = matches!(save, Save::Last(..));
+                let result = match save {
+                    Save::Snapshot(snapshot, token) => store.save(&snapshot, token),
+                    Save::Append(id, records, token) => store.append(&id, &records, token),
+                    Save::Last(snapshot, token) => store
+                        .save(&snapshot, token)
+                        .and_then(|()| store.release(&snapshot.meta.id, token)),
+                };
+                Some((last, result))
             })
             .await;
+            let (last, saved) = match saved {
+                Ok(Some((last, saved))) => (last, Ok(saved)),
+                Ok(None) => continue,
+                Err(error) => (false, Err(error)),
+            };
+            let mut ended = last;
             let retry = match saved.map_err(io::Error::other) {
                 Ok(Ok(())) => {
                     failures = 0;
@@ -968,7 +985,8 @@ async fn persist(hub: Weak<Hub>, design: Weak<DesignHandle>, mut dirty: watch::R
                     Some(wait)
                 }
             };
-            if !ended {
+            let state = handle.raw();
+            if !ended && state.as_ref().is_some_and(|s| s.life != Life::Gone) {
                 let summary = handle.summary();
                 let _ = hub.lobby.send(Outgoing::new(
                     None,

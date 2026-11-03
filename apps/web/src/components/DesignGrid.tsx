@@ -32,6 +32,7 @@ export function DesignGrid() {
   /** How many designs there are in all, from the socket's first message. */
   const [total, setTotal] = useState(0);
   const [query, setQuery] = useState("");
+  const [searchRevision, setSearchRevision] = useState(0);
   /** The server's answer to the last search: its designs, or null if it failed. */
   const [found, setFound] = useState<{
     readonly query: string;
@@ -49,6 +50,8 @@ export function DesignGrid() {
           if (message.type === "designs") {
             setDesigns(message.designs);
             setTotal(message.total);
+            setFound(null);
+            setSearchRevision((revision) => revision + 1);
             return;
           }
           setDesigns((current) => {
@@ -81,7 +84,7 @@ export function DesignGrid() {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [query]);
+  }, [query, searchRevision]);
 
   const search = query.trim();
   const answer = search && found?.query === search ? found : null;

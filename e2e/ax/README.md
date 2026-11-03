@@ -38,6 +38,7 @@ Real tools keep the real server's argument checks. For a schema a spec writes, t
 
 | Task             | What the agent does                                                                 | What it tests                 |
 | ---------------- | ----------------------------------------------------------------------------------- | ----------------------------- |
+| `delete-design`  | Delete one design while keeping another                                             | Design deletion and discovery |
 | `restyle`        | Swap a brand color on one landing page, round the buttons, fix a typo               | Finding things                |
 | `rebrand`        | Swap the color across three artboards, including a `<style>` block and an rgba tint | Finding things at scale       |
 | `mobile`         | Make a 390 px version of a desktop page                                             | Copying, layout, verifying    |
