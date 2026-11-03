@@ -233,6 +233,8 @@ fn replace_root(css: &str) -> String {
     let (mut i, mut copied) = (0, 0);
     while i < bytes.len() {
         match bytes[i] {
+            // An escaped character, like the `:` of `.icon\:root`, is part of a name.
+            b'\\' => i += 2,
             b'"' | b'\'' => i = string_end(css, i),
             b'/' if bytes.get(i + 1) == Some(&b'*') => i = comment_end(css, i),
             b':' if css
@@ -1514,5 +1516,10 @@ mod tests {
         );
         // It can't end its <style> element, wherever it came from.
         assert!(!layered_style("a{}</style><script>x()</script>").contains("</style"));
+        // An escaped colon is part of a class name, not a `:root`.
+        assert_eq!(
+            layered_style(".icon\\:root {}"),
+            "@layer finite-shared {\n.icon\\:root {}\n}"
+        );
     }
 }

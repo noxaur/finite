@@ -193,7 +193,10 @@ fn custom_properties_past_the_token_limit_stay_in_the_artboards() {
         "agent",
         "Old",
         &[Op::Css {
-            css: Some(format!(":root {{ {} }}", vars.join("; "))),
+            css: Some(format!(
+                "@import url(a.css);\n:root {{ {} }}",
+                vars.join("; ")
+            )),
         }],
         0,
     )
@@ -209,6 +212,11 @@ fn custom_properties_past_the_token_limit_stay_in_the_artboards() {
     let text = d.doc().children(Some(&style.id))[0].text.clone().unwrap();
     assert!(
         text.contains(":is(:root, :host) { --v2000: 2000px; }"),
+        "{text}"
+    );
+    // The import stays first, where it still loads.
+    assert!(
+        text.starts_with("@import url(a.css) layer(finite-shared);"),
         "{text}"
     );
 }
@@ -292,4 +300,18 @@ fn shared_css_cleared_before_tokens_cant_come_back_through_undo() {
             .is_none()
     );
     assert!(back.undo("agent", 0).is_none());
+}
+
+#[test]
+fn a_token_named_twice_in_one_edit_ends_with_its_last_value() {
+    let mut d = design();
+    set(&mut d, &[("--brand", TokenChange::All("red".into()))]);
+    set(
+        &mut d,
+        &[
+            ("--brand", TokenChange::All("blue".into())),
+            ("--brand", TokenChange::All("red".into())),
+        ],
+    );
+    assert_eq!(d.doc().tokens()["--brand"][FIRST_MODE], "red");
 }

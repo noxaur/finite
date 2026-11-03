@@ -181,7 +181,7 @@ pub fn migrate(css: &str) -> Migrated {
         let end = rule_end(css, at);
         let rule = &css[at..end];
         at = end;
-        let root = rule.find('{').and_then(|open| {
+        let root = block_open(rule).and_then(|open| {
             let selector = strip_comments(&rule[..open]);
             let selector = selector.trim();
             let body = rule[open + 1..].strip_suffix('}')?;
@@ -216,6 +216,22 @@ pub fn migrate(css: &str) -> Migrated {
     Migrated {
         tokens,
         rest: (!rest.is_empty()).then(|| rest.join("\n")),
+    }
+}
+
+/// Where the block of `rule` opens: its first `{` outside a comment.
+fn block_open(rule: &str) -> Option<usize> {
+    let mut at = 0;
+    loop {
+        let rest = &rule[at..];
+        let open = rest.find('{')?;
+        match rest.find("/*") {
+            Some(comment) if comment < open => {
+                at += comment + 2;
+                at += rule[at..].find("*/")? + 2;
+            }
+            _ => return Some(at + open),
+        }
     }
 }
 
@@ -349,7 +365,7 @@ mod tests {
     #[test]
     fn migrate_moves_root_variables_into_tokens() {
         let css = "@import url('https://fonts.example/a;b.css');\n\
-                   /* colors */ :root{--ink:#111;--font:'A;B', serif;color:red}\n\
+                   /* colors { */ :root{--ink:#111;--font:'A;B', serif;color:red}\n\
                    .btn{color:var(--ink)}\n\
                    :root { --ink: #222; --bad: red !important }";
         let migrated = migrate(css);

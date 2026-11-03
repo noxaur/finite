@@ -1243,11 +1243,16 @@ pub fn set_tokens(
         tokens::check_value(value.trim()).map_err(|why| EditError(format!("{name}: {why}")))
     };
     let mut ops = Vec::new();
-    let mut added = 0;
     let none = Values::new();
+    // What each token holds after the changes so far, so a name that comes
+    // twice builds on its first change.
+    let mut planned: BTreeMap<&str, Option<Values>> = BTreeMap::new();
     for (name, change) in changes {
         tokens::check_name(name).map_err(EditError)?;
-        let existing = doc.tokens().get(name);
+        let existing = match planned.get(name.as_str()) {
+            Some(values) => values.clone(),
+            None => doc.tokens().get(name).cloned(),
+        };
         let values = match change {
             TokenChange::Delete => None,
             TokenChange::All(value) => {
@@ -1255,7 +1260,7 @@ pub fn set_tokens(
                 Some(Values::from([(first.clone(), value.trim().to_owned())]))
             }
             TokenChange::Modes(by_mode) => {
-                let mut values = existing.cloned().unwrap_or_default();
+                let mut values = existing.clone().unwrap_or_default();
                 for (key, value) in by_mode {
                     let id = mode_id(key)?;
                     match value {
@@ -1271,11 +1276,11 @@ pub fn set_tokens(
                 (!values.is_empty()).then_some(values)
             }
         };
-        if existing.is_none() && values.is_some() {
-            added += 1;
-        }
         // One op per mode that changes, so undo reverses only those.
-        let (old, new) = (existing.unwrap_or(&none), values.as_ref().unwrap_or(&none));
+        let (old, new) = (
+            existing.as_ref().unwrap_or(&none),
+            values.as_ref().unwrap_or(&none),
+        );
         let modes: std::collections::BTreeSet<&String> = old.keys().chain(new.keys()).collect();
         for mode in modes {
             if old.get(mode) != new.get(mode) {
@@ -1286,7 +1291,12 @@ pub fn set_tokens(
                 });
             }
         }
+        planned.insert(name, values);
     }
+    let added = planned
+        .iter()
+        .filter(|(name, values)| values.is_some() && !doc.tokens().contains_key(**name))
+        .count();
     if doc.tokens().len() + added > tokens::MAX_TOKENS {
         return err(format!(
             "a design can have at most {} tokens",
@@ -1359,13 +1369,14 @@ pub fn migrate_css(doc: &Document, new_id: &mut impl FnMut() -> NodeId) -> Resul
             value: Some(value.clone()),
         })
         .collect();
+    // After the rest, so its leading `@import`s stay first.
     let past: Vec<String> = past.iter().map(|(n, v)| format!("{n}: {v}")).collect();
     let rest = match (past.is_empty(), migrated.rest) {
         (true, rest) => rest,
         (false, rest) => Some(format!(
-            ":root {{ {}; }}\n{}",
-            past.join("; "),
-            rest.unwrap_or_default()
+            "{}\n:root {{ {}; }}",
+            rest.unwrap_or_default(),
+            past.join("; ")
         )),
     };
     if let Some(rest) = rest {
