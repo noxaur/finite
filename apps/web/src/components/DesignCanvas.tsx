@@ -121,7 +121,8 @@ export function DesignCanvas({ id }: { id: string }) {
   // Re-rendering on every session update also moves pins with their artboards.
   const [session, setSession] = useState<SessionState>(initialSessionState);
   const { meta, presence, status, activity, comments, working, pages } = session;
-  const [zoom, setZoom] = useState(1);
+  // The zoom percentage, written by the camera so zooming doesn't re-render the canvas.
+  const zoomLabelRef = useRef<HTMLButtonElement>(null);
   const [missing, setMissing] = useState(false);
   const model = useDesignModel();
   const [, setTick] = useState(0);
@@ -201,10 +202,14 @@ export function DesignCanvas({ id }: { id: string }) {
     sessionRef.current = session;
     rendererRef.current = renderer;
     cameraRef.current = camera;
-    // Hide the artboards outside the view, before React re-renders for the zoom.
+    // Hide the artboards outside the view.
     camera.subscribe(() => renderer.setViewport(camera.visibleWorld()));
-    camera.subscribe((view) => setZoom(view.zoom));
-    setZoom(camera.view.zoom);
+    const showZoom = (view: View) => {
+      if (zoomLabelRef.current)
+        zoomLabelRef.current.textContent = `${Math.round(view.zoom * 100)}%`;
+    };
+    camera.subscribe(showZoom);
+    showZoom(camera.view);
     let saveTimer: ReturnType<typeof setTimeout> | undefined;
     const savePlaceNow = () => {
       clearTimeout(saveTimer);
@@ -789,12 +794,11 @@ export function DesignCanvas({ id }: { id: string }) {
         </button>
         <button
           type="button"
+          ref={zoomLabelRef}
           onClick={() => cameraRef.current?.set({ ...cameraRef.current.view, zoom: 1 })}
           {...stylex.props(styles.tool, styles.percent)}
           title="Zoom to 100% (0)"
-        >
-          {Math.round(zoom * 100)}%
-        </button>
+        />
         <button
           type="button"
           onClick={() => cameraRef.current?.zoomBy(1.25)}

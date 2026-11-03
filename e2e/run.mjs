@@ -755,9 +755,10 @@ try {
     Boolean(await page.until(`document.querySelectorAll("main li").length === 0`)),
   );
 
-  // Artboards outside the view are hidden, and a sandboxed one is unloaded
-  // until the view reaches it. "Fit to view" still counts the hidden ones,
-  // and an auto-height one keeps the height it had when it was shown.
+  // Artboards outside the view are hidden. A sandboxed one keeps its
+  // document for a while, so showing it again doesn't start its scripts
+  // over. "Fit to view" still counts the hidden ones, and an auto-height one
+  // keeps the height it had when it was shown.
   const wide = (await agent.call("create_design", { name: "Culling" })).match(
     /designId "([a-z0-9]+)"/,
   )[1];
@@ -794,7 +795,7 @@ try {
   await agent.call("write_html", {
     designId: wide,
     targetId: farLive,
-    html: `<div data-name="Box" style="width:100px;height:100px;animation:spin 1s infinite"></div><style>@keyframes spin{to{opacity:.5}}</style><script>document.title="on"</script>`,
+    html: `<div data-name="Box" style="width:100px;height:100px;animation:spin 1s infinite"></div><style>@keyframes spin{to{opacity:.5}}</style><script>document.title="on";parent.postMessage({boot:1},"*")</script>`,
   });
   await page.goto(`${base}/design/?id=${wide}`);
   await page.until(`document.querySelectorAll("[data-artboard]").length === 3`, 10_000);
@@ -808,6 +809,10 @@ try {
     );
   await page.until(`!!document.querySelector('[data-artboard="${farLive}"] iframe')`, 10_000);
   await page.sleep(300);
+  // Counts the times the sandboxed artboard's script starts from here on.
+  await page.eval(
+    `window.boots = 0; addEventListener("message", (e) => { if (e.data?.boot) window.boots++; })`,
+  );
   check(
     "zoomed out to fit, every artboard is drawn",
     !(await hidden(near)) && !(await hidden(far)) && !(await hidden(farLive)) && (await loaded()),
@@ -815,7 +820,7 @@ try {
   const fitted = await zoom();
   await page.key("0");
   check(
-    "at 100%, artboards outside the view are hidden and their iframe is unloaded",
+    "at 100%, artboards outside the view are hidden and their iframe stays loaded",
     Boolean(
       await page.until(
         `document.querySelector('[data-artboard="${far}"]').style.display === "none" && document.querySelector('[data-artboard="${farLive}"]').style.display === "none"`,
@@ -823,7 +828,7 @@ try {
       ),
     ) &&
       !(await hidden(near)) &&
-      !(await loaded()),
+      (await loaded()),
   );
   await page.key("!", "Digit1");
   check(
@@ -835,10 +840,14 @@ try {
       ),
     ) && (await zoom()) === fitted,
   );
-  check("the iframe loads again once it's in view", await loaded());
+  await page.sleep(300);
+  check(
+    "showing the sandboxed artboard again doesn't restart its script",
+    (await loaded()) && (await page.eval("window.boots")) === 0,
+  );
 
   // Editing a component draws its instances in hidden artboards too, without
-  // loading a hidden sandboxed one, and the index learns the new size.
+  // reloading a hidden sandboxed one, and the index learns the new size.
   const swatch = idAfter(
     await agent.call("write_html", {
       designId: wide,
@@ -865,7 +874,12 @@ try {
     updates: [{ nodeIds: [swatch], styles: { background: "rgb(0, 128, 0)" } }],
   });
   await page.sleep(600);
-  check("a hidden sandboxed artboard stays unloaded when its component changes", !(await loaded()));
+  check(
+    "a hidden sandboxed artboard isn't reloaded when its component changes",
+    !(await page.eval(
+      `document.querySelector('[data-artboard="${farLive}"] iframe').srcdoc.includes("rgb(0, 128, 0)")`,
+    )),
+  );
   check(
     "a hidden artboard's instance is drawn again",
     await page.eval(
