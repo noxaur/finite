@@ -144,6 +144,6 @@ The round-1 spec failed `delete-design` and `import-page`, which it had no tools
 - **`check` is on by default.** Agents set it on almost every round-1 edit.
 - **`dryRun` on `edit`.** Four round-1 agents asked to preview a broad `replace`.
 - **An `artboard` op with `from`** starts a screen as a copy of another, for mobile versions.
-- **Rewriting HTML keeps ids.** An `html` op with mode `inner` or `replace` updates elements that keep their `data-id` in place, and keeps values another agent changed since this agent read them. On today's server, the same rewrite gives every element a new id, leaves a comment pinned to a node that no longer exists, and silently wipes the other agent's newer change ([issue #ISSUE]).
+- **Rewriting HTML keeps ids.** An `html` op with mode `inner` or `replace` updates elements that keep their `data-id` in place, and keeps values another agent changed since this agent read them. On today's server, the same rewrite gives every element a new id, leaves a comment pinned to a node that no longer exists, and silently wipes the other agent's newer change ([issue #68](https://github.com/noxaur/finite/issues/68)).
 
 Two things it still can't show: a real `edit` would label its change with its `status`, where the mock's comment replies link "Write HTML, Write HTML", which three agents found unclear. And its all-or-nothing rollback undoes real steps, so another agent could see, or build on, an edit that later rolls back. A server-side `edit` can stage its ops with the `Transaction` that `Design::import` already uses.
