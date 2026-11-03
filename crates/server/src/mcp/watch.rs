@@ -201,6 +201,16 @@ impl LayoutWatch {
         taken
     }
 
+    /// The `taken` notes whose artboard hasn't been edited since, which is
+    /// the ones still true of the design. A tool that ran after they were
+    /// taken may have fixed what they name.
+    pub(super) fn still_current(&self, design: &str, taken: Vec<Taken>) -> Vec<Taken> {
+        taken
+            .into_iter()
+            .filter(|t| self.is_current(design, &t.board, t.generation))
+            .collect()
+    }
+
     /// Puts back notes whose result failed, unless the artboard has been
     /// edited since.
     pub(super) fn restore(&self, design: &str, taken: Vec<Taken>) {
@@ -292,6 +302,16 @@ mod tests {
         watch.bump("d", "b");
         watch.restore("d", taken);
         assert_eq!(Taken::text(&watch.take("d")), "kept");
+    }
+
+    #[test]
+    fn a_note_is_not_current_once_its_artboard_is_edited() {
+        let watch = LayoutWatch::default();
+        note(&watch, "d", "a", "fixed since");
+        note(&watch, "d", "b", "still true");
+        let taken = watch.take("d");
+        watch.bump("d", "a");
+        assert_eq!(Taken::text(&watch.still_current("d", taken)), "still true");
     }
 
     #[test]

@@ -1695,18 +1695,30 @@ impl ServerHandler for FiniteMcp {
             }
         });
         let tcc = ToolCallContext::new(self, request, context);
-        let mut response = self.tool_router.call(tcc).await?;
+        let mut response = match self.tool_router.call(tcc).await {
+            Ok(response) => response,
+            Err(error) => {
+                // The router refused the call, so nothing ran: the note still stands.
+                if let (Some(design), Some(notes)) = (design.as_deref(), notes) {
+                    self.watch.restore(design, notes);
+                }
+                return Err(error);
+            }
+        };
         if let (Some(design), Some(notes)) = (design.as_deref(), notes) {
             if matches!(&*name, "undo" | "redo" | "import_design") {
                 self.watch.invalidate(design);
             }
             match &mut response {
-                CallToolResponse::Complete(result)
-                    if !notes.is_empty() && result.is_error != Some(true) =>
-                {
-                    result
-                        .content
-                        .push(ContentBlock::text(watch::Taken::text(&notes)));
+                CallToolResponse::Complete(result) if result.is_error != Some(true) => {
+                    // An edit that changed an artboard has made its note out
+                    // of date, and the edit reports its own check.
+                    let notes = self.watch.still_current(design, notes);
+                    if !notes.is_empty() {
+                        result
+                            .content
+                            .push(ContentBlock::text(watch::Taken::text(&notes)));
+                    }
                 }
                 // A failed call changed nothing, so the note still stands.
                 _ => self.watch.restore(design, notes),
