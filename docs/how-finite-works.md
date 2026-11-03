@@ -339,6 +339,8 @@ update_styles({ "designId": "k7jo11y14e",
 5. 250 ms later, the change is appended to the design's journal on disk.
 6. In each browser, `Replica` applies the op through WebAssembly, and `Renderer` calls `style.setProperty("background-color", "#ff5a1f")` on that one button.
 
+`delete_design` permanently removes a canvas's snapshot and journal, including its pages, comments and undo history. The hub serializes deletion with saves, marks the handle gone, disconnects viewers and sends the lobby a fresh design list. Pending comment waits return a not-found error, and active searches refresh their results. Pending saves and shutdown flushes skip the deleted handle. The router keeps its cached lists current with each design update, so a deletion preserves the other servers' changes. Shared stores check the fencing token before deletion. Content-addressed blobs stay in the store because other designs may use them. Deletion cannot be undone; `delete_nodes` remains the tool for deleting an artboard.
+
 ## The viewer
 
 The browser side lives in `apps/web/src/design`. It's plain TypeScript classes, and React only hosts them. Here they are in the order a message flows through them:

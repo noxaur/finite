@@ -661,6 +661,24 @@ try {
   );
   await page.send("Network.setBlockedURLs", { urls: [] });
 
+  const deleteSearch = await rectOf(`document.querySelector('input[type="search"]')`);
+  await page.click(deleteSearch.x + 10, deleteSearch.y + 5);
+  await page.eval(`document.querySelector('input[type="search"]').select()`);
+  await page.type("E2E");
+  check(
+    "the design to delete is found by search",
+    Boolean(
+      await page.until(
+        `document.querySelectorAll("main li").length === 1 && document.querySelector("main li").textContent.includes("E2E")`,
+      ),
+    ),
+  );
+  await agent.call("delete_design", { designId: design });
+  check(
+    "deletion refreshes active search results",
+    Boolean(await page.until(`document.querySelectorAll("main li").length === 0`)),
+  );
+
   check("no errors on the page", page.errors.length === 0, page.errors.join(" | "));
 } catch (error) {
   check("the run finished", false, error.stack ?? String(error));

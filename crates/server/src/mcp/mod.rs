@@ -516,6 +516,20 @@ impl FiniteMcp {
         ))
     }
 
+    #[tool(
+        description = "Permanently delete a design (canvas), including all its pages, artboards, comments and undo history. This cannot be undone. To delete only an artboard, use delete_nodes instead.",
+        annotations(destructive_hint = true)
+    )]
+    async fn delete_design(&self, Parameters(p): Parameters<DesignParams>) -> ToolResult {
+        let handle = design!(self, &p.design_id);
+        let hub = self.hub.clone();
+        let deleted = tokio::task::spawn_blocking(move || hub.delete(&handle)).await;
+        match deleted.map_err(std::io::Error::other) {
+            Ok(Ok(())) => ok("Deleted the design permanently."),
+            Ok(Err(error)) | Err(error) => fail(format!("Couldn't delete the design: {error}")),
+        }
+    }
+
     #[tool(description = "Rename a design.")]
     async fn rename_design(&self, Parameters(p): Parameters<RenameDesignParams>) -> ToolResult {
         let handle = design!(self, &p.design_id);
@@ -1426,10 +1440,10 @@ impl FiniteMcp {
         annotations(read_only_hint = true)
     )]
     async fn wait_for_comments(&self, Parameters(p): Parameters<WaitParams>) -> ToolResult {
-        let handle = design!(self, &p.design_id);
         let timeout = Duration::from_secs(p.timeout_seconds.unwrap_or(60).clamp(1, 300));
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
+            let handle = design!(self, &p.design_id);
             // Register before checking, so a comment that lands in between still wakes us.
             let changed = handle.comments_changed();
             tokio::pin!(changed);

@@ -141,6 +141,32 @@ async function allHtml(mcp, design) {
 }
 
 export const tasks = {
+  "delete-design": {
+    workdir: "none",
+    async seed(mcp) {
+      const create = async (name) => {
+        const text = await mcp.call("create_design", { name });
+        return text.match(/designId "([a-z0-9]+)"/)[1];
+      };
+      const design = await create("Discarded draft");
+      const keep = await create("Published work");
+      await mcp.call("create_artboard", { designId: design, name: "Draft", width: 390 });
+      return { design, keep };
+    },
+    prompt: () =>
+      'Permanently delete the Finite design named "Discarded draft". Keep "Published work" unchanged. Use the Finite MCP tools and stop when done.',
+    async check(mcp, ctx) {
+      const designs = await mcp.call("list_designs");
+      const deleted = await mcp.callRaw("get_basic_info", { designId: ctx.design });
+      const kept = await mcp.callRaw("get_basic_info", { designId: ctx.keep });
+      const checks = [!designs.includes(ctx.design), !!deleted.isError, !kept.isError];
+      return {
+        passed: checks.filter(Boolean).length,
+        total: checks.length,
+        notes: ["Draft removed; published work retained"],
+      };
+    },
+  },
   // The brand color changed: every use, in styles and in a <style> block, has to change.
   restyle: {
     workdir: "none",

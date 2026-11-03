@@ -1102,3 +1102,45 @@ async fn the_router_passes_on_what_keeps_downloads_safe() {
             .starts_with("attachment")
     );
 }
+
+#[tokio::test]
+async fn deleting_a_design_keeps_other_servers_live_updates() {
+    let design = |id: &str, at: u64| json!({ "id": id, "name": id, "updatedAt": at });
+    let list = |designs: Vec<Value>| json!({ "type": "designs", "total": designs.len(), "designs": designs });
+    let a = scripted_lobby(vec![
+        list(vec![design("a1", 1)]),
+        json!({ "type": "design", "design": design("a2", 3) }),
+    ])
+    .await;
+    let b = scripted_lobby(vec![
+        list(vec![design("b1", 2)]),
+        list(vec![design("b1", 2)]),
+        list(vec![]),
+    ])
+    .await;
+    let (front, front_url) = listen().await;
+    tokio::spawn(async move { axum::serve(front, router::app(vec![a, b], None)).await });
+    let url = format!("{front_url}/api/designs/ws").replacen("http://", "ws://", 1);
+    let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    loop {
+        let Message::Text(text) = socket.next().await.unwrap().unwrap() else {
+            continue;
+        };
+        let message: Value = serde_json::from_str(text.as_str()).unwrap();
+        if message["type"] != "designs" {
+            continue;
+        }
+        let ids: Vec<_> = message["designs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["id"].as_str().unwrap())
+            .collect();
+        if ids.contains(&"b1") {
+            continue;
+        }
+        assert_eq!(ids, ["a2", "a1"]);
+        assert_eq!(message["total"], 2);
+        break;
+    }
+}

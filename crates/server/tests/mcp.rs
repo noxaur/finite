@@ -1415,3 +1415,77 @@ async fn agents_keep_components_on_their_own_page() {
         .await;
     assert!(info.contains("\"artboardCount\": 2"), "{info}");
 }
+
+#[tokio::test]
+async fn an_agent_deletes_a_design_permanently() {
+    let store = std::sync::Arc::new(finite_server::store::MemoryStore::default());
+    let hub = finite_server::Hub::new(store.clone()).unwrap();
+    let app = finite_server::app(hub.clone(), None);
+    let mut agent = Agent::connect(&app, "Alice").await;
+    let doomed = hub.create("Draft");
+    let kept = hub.create("Keep");
+    let id = &doomed.meta.id;
+    agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": id, "name": "Home", "width": 390 }),
+        )
+        .await;
+    let handle = hub.get(id).unwrap();
+    let (_, _, mut viewer) = handle.subscribe();
+    let (_, mut lobby) = hub.subscribe_lobby();
+    let tools = agent.rpc("tools/list", None).await;
+    let tool = tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "delete_design")
+        .unwrap();
+    assert_eq!(tool["annotations"]["destructiveHint"], true);
+    let deleted = agent.ok("delete_design", json!({ "designId": id })).await;
+    assert_eq!(deleted, "Deleted the design permanently.");
+    assert!(viewer.recv().await.is_err());
+    let message: Value = serde_json::from_str(&lobby.recv().await.unwrap().json).unwrap();
+    assert_eq!(message["type"], "designs");
+    assert_eq!(message["total"], 1);
+    assert_eq!(message["designs"][0]["id"], kept.meta.id);
+    for tool in ["get_basic_info", "undo", "delete_design"] {
+        let (text, error) = agent.call(tool, json!({ "designId": id })).await;
+        assert!(error && text.contains("not found"), "{tool}: {text}");
+    }
+    let listed = agent.ok("list_designs", json!({})).await;
+    assert!(!listed.contains(id));
+    assert!(listed.contains(&kept.meta.id));
+    hub.flush();
+    let restored = finite_server::Hub::new(store).unwrap();
+    assert!(restored.get(id).is_none());
+    assert!(restored.get(&kept.meta.id).is_some());
+}
+
+#[tokio::test]
+async fn deleting_a_design_ends_a_pending_comment_wait() {
+    let hub = finite_server::Hub::new(std::sync::Arc::new(
+        finite_server::store::MemoryStore::default(),
+    ))
+    .unwrap();
+    let design = hub.create("Waiting").meta.id;
+    let app = finite_server::app(hub.clone(), None);
+    let mut waiter = Agent::connect(&app, "Waiter").await;
+    let waiting_id = design.clone();
+    let waiting = tokio::spawn(async move {
+        waiter
+            .call(
+                "wait_for_comments",
+                json!({ "designId": waiting_id, "timeoutSeconds": 3 }),
+            )
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let handle = hub.get(&design).unwrap();
+    hub.delete(&handle).unwrap();
+    let (text, error) = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+        .await
+        .expect("deletion must end the wait promptly")
+        .unwrap();
+    assert!(error && text.contains("not found"), "{text}");
+}

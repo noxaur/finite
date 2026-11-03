@@ -244,6 +244,7 @@ pub struct DesignHandle {
     id: String,
     store: Arc<dyn Store>,
     state: Mutex<Option<DesignState>>,
+    pub(super) persistence: Mutex<()>,
     /// Kept current while loaded, so the design list never loads a design.
     summary: Mutex<DesignSummary>,
     /// Pinged on every change; the save task waits on it.
@@ -324,6 +325,7 @@ impl DesignHandle {
             id: summary.meta.id.clone(),
             store,
             state: Mutex::new(state),
+            persistence: Mutex::new(()),
             summary: Mutex::new(summary),
             dirty: watch::channel(()).0,
             comments: tokio::sync::Notify::new(),
@@ -437,6 +439,23 @@ impl DesignHandle {
             state.send_viewers_away();
         }
         self.comments.notify_waiters();
+    }
+
+    pub(super) fn delete(&self) -> io::Result<()> {
+        let _saving = self.persistence.lock().unwrap();
+        let mut state = self.lock();
+        if state.life != Life::Live {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "design is no longer available",
+            ));
+        }
+        self.store.delete(&self.id, state.token)?;
+        state.life = Life::Gone;
+        state.pending.clear();
+        state.send_viewers_away();
+        self.comments.notify_waiters();
+        Ok(())
     }
 
     pub fn read<T>(&self, f: impl FnOnce(&Design) -> T) -> T {
