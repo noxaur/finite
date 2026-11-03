@@ -3,22 +3,25 @@
 //! this module adds what a file needs on top: a page around the artboard on
 //! the way out, and on the way in, a record of everything left out.
 
+mod page_css;
+
 use std::collections::BTreeSet;
 
 use finite_design::{
+    edit,
     html::{self, Dropped, ExportOptions, Fragment, Policy},
     import::Dependency,
     tokens,
 };
 
 use crate::{
-    Anchor, Board, Codec, Diagnostic, Direction, Error, Exported, Feature, Imported, Input,
+    Anchor, Board, Codec, Diagnostic, Direction, Error, Exported, Feature, Imported, Input, LOOK,
     Revision, Scope, Score, Support, assets, file_stem,
 };
 
-/// The size of the artboard an HTML file goes into: a desktop screen.
+/// The width of the artboard an HTML file goes into: a desktop screen. It
+/// grows to fit the content, since a file says nothing about a height.
 const WIDTH: f64 = 1440.0;
-const HEIGHT: f64 = 900.0;
 
 pub struct Html;
 
@@ -63,7 +66,7 @@ impl Codec for Html {
         let mut board = Board {
             name: file_stem.unwrap_or("Imported HTML").to_owned(),
             width: WIDTH,
-            height: HEIGHT,
+            auto_height: true,
             ..Board::default()
         };
         let mut diagnostics = Vec::new();
@@ -78,8 +81,9 @@ impl Codec for Html {
             board.styles = page.styles;
             board.attrs = page.attrs;
             board.source = Some("/1".into());
-            diagnostics.extend(page_selectors(&page.content.fragments));
-            page.content
+            let mut content = page.content;
+            diagnostics.extend(page_css(&mut board, &mut content.fragments));
+            content
         } else {
             html::parse_with(source, Policy::Import).map_err(|e| Error(e.to_string()))?
         };
@@ -179,36 +183,82 @@ pub(crate) fn quarantine(dropped: Dropped) -> (Anchor, Diagnostic) {
     (anchor, diagnostic)
 }
 
-/// A page's `<style>` blocks may select `html` or `body`, which became the
-/// artboard, so those rules may no longer match anything.
-fn page_selectors(fragments: &[Fragment]) -> Vec<(Anchor, Diagnostic)> {
-    let mut out = Vec::new();
-    let mut ordinal = 0;
-    for fragment in fragments {
-        if fragment.tag() == Some("style") {
-            let css = fragment.inner_text().to_ascii_lowercase();
-            if css.contains("body") || css.contains("html") {
-                let anchor = Anchor {
-                    board: 0,
-                    node: Some(ordinal),
-                };
-                out.push((
-                    anchor,
-                    Diagnostic {
-                        node: None,
-                        path: String::new(),
-                        what: "<style>".into(),
-                        feature: Feature::Frame,
-                        reason: "it styles <html> or <body>, which became the artboard".into(),
-                        preserved: Score::Yes,
-                        visual: Score::Unknown,
-                        editable: Score::Yes,
-                        quarantined: false,
-                    },
-                ));
+/// Writes the page's rules for `html`, `body` and `:root` in each `<style>`
+/// for the artboard, which became both elements, and gives it the class they
+/// select. Inline styles beat any rule, so the artboard's default look moves
+/// into a cascade layer the page's rules override. Returns a diagnostic for
+/// each `<style>` with selectors that couldn't be mapped.
+fn page_css(board: &mut Board, fragments: &mut [Fragment]) -> Vec<(Anchor, Diagnostic)> {
+    fn walk<'a>(
+        fragments: &'a mut [Fragment],
+        ordinal: &mut usize,
+        styles: &mut Vec<(usize, &'a mut String)>,
+    ) {
+        for fragment in fragments {
+            let at = *ordinal;
+            *ordinal += fragment.count();
+            if fragment.tag() == Some("style") {
+                if let Some(text) = fragment.children.first_mut().and_then(|c| c.text.as_mut()) {
+                    styles.push((at, text));
+                }
+            } else {
+                *ordinal = at + 1;
+                walk(&mut fragment.children, ordinal, styles);
             }
         }
-        ordinal += fragment.count();
+    }
+    let mut styles = Vec::new();
+    walk(fragments, &mut 0, &mut styles);
+    let mut out = Vec::new();
+    let mut mapped = 0;
+    for (ordinal, text) in &mut styles {
+        let rewritten = page_css::rewrite(text);
+        mapped += rewritten.mapped;
+        **text = rewritten.css;
+        if rewritten.unmapped > 0 {
+            out.push((
+                Anchor {
+                    board: 0,
+                    node: Some(*ordinal),
+                },
+                Diagnostic {
+                    node: None,
+                    path: String::new(),
+                    what: "<style>".into(),
+                    feature: Feature::Frame,
+                    reason: format!(
+                        "{} selector(s) for <html> or <body> don't map onto the artboard, which became both",
+                        rewritten.unmapped
+                    ),
+                    preserved: Score::Yes,
+                    visual: Score::Unknown,
+                    editable: Score::Yes,
+                    quarantined: false,
+                },
+            ));
+        }
+    }
+    if mapped > 0
+        && let Some((_, first)) = styles.first_mut()
+    {
+        let look: String = edit::default_artboard_styles()
+            .iter()
+            .filter(|(name, _)| LOOK.contains(&name.as_str()))
+            .map(|(name, value)| format!("{name}: {value}; "))
+            .collect();
+        // The statement comes first, so the layer is the lowest of the page's
+        // own; a block can't, since it would void any `@import` after it.
+        let layer = page_css::LAYER;
+        **first = format!(
+            "@layer {layer};\n{first}\n@layer {layer} {{ .{class} {{ {look}}} }}",
+            class = page_css::CLASS
+        );
+        board.look_in_css = true;
+        let class = board.attrs.entry("class".into()).or_default();
+        if !class.is_empty() {
+            class.push(' ');
+        }
+        class.push_str(page_css::CLASS);
     }
     out
 }
@@ -476,14 +526,70 @@ mod tests {
         let board = design.doc().get(&placed.artboards[0]).unwrap();
         assert_eq!(board.name.as_deref(), Some("Home"));
         assert_eq!(board.styles["background"], "red");
-        assert_eq!(board.attrs["class"], "page");
+        assert_eq!(board.attrs["class"], "page finite-root");
         assert_eq!(board.attrs["lang"], "sv");
         assert!(!board.attrs.contains_key("onload"));
         let what: Vec<_> = placed.diagnostics.iter().map(|d| d.what.as_str()).collect();
-        assert_eq!(what, ["<style>", "onload"]);
+        assert_eq!(what, ["onload"]);
         // Every node remembers where it came from.
         let paths: Vec<_> = record.nodes.values().map(String::as_str).collect();
         assert_eq!(paths, ["/1", "/0/1", "/0/1/0", "/1/0", "/1/0/0"]);
+    }
+
+    #[test]
+    fn an_imported_file_grows_to_fit_its_content() {
+        for source in ["<p>Hi</p>", "<!doctype html><body><p>Hi</p></body>"] {
+            let mut design = design();
+            let (_, placed) = import(&mut design, source).unwrap();
+            let board = design.doc().get(&placed.artboards[0]).unwrap();
+            assert_eq!(board.styles["width"], "1440px");
+            assert_eq!(board.styles["height"], "auto", "{source}");
+        }
+    }
+
+    #[test]
+    fn a_pages_rules_for_html_and_body_style_the_artboard() {
+        let mut design = design();
+        let source = "<!doctype html><html class=\"dark\"><head><style>@import url(https://x/a.css); :root { --bg: #000 } html.dark body { background: var(--bg) } .a { content: \"body\" }</style></head><body class=\"home\"><style>body > main { color: #fff }</style><main>Hi</main></body></html>";
+        let (_, placed) = import(&mut design, source).unwrap();
+        let doc = design.doc();
+        let board = doc.get(&placed.artboards[0]).unwrap();
+        assert_eq!(board.attrs["class"], "dark home finite-root");
+        // The page's CSS sets the look, so the artboard's inline styles don't.
+        assert!(!board.styles.contains_key("background-color"));
+        assert!(!board.styles.contains_key("display"));
+        assert_eq!(board.styles["overflow"], "hidden");
+        let css: Vec<_> = doc
+            .children(Some(&board.id))
+            .into_iter()
+            .filter(|n| n.tag() == Some("style"))
+            .map(|n| doc.children(Some(&n.id))[0].text.clone().unwrap())
+            .collect();
+        assert_eq!(
+            css,
+            [
+                "@layer finite-artboard;\n@import url(https://x/a.css); .finite-root { --bg: #000 } :where(.finite-root).dark { background: var(--bg) } .a { content: \"body\" }\n@layer finite-artboard { .finite-root { background-color: #ffffff; display: flex; flex-direction: column; } }",
+                ":where(.finite-root) > main { color: #fff }",
+            ]
+        );
+        assert!(placed.diagnostics.is_empty(), "{:?}", placed.diagnostics);
+    }
+
+    #[test]
+    fn a_page_selector_that_cant_map_is_reported() {
+        let mut design = design();
+        let source = "<!doctype html><head><style>html + p { color: red }</style></head><body><p>Hi</p></body>";
+        let (_, placed) = import(&mut design, source).unwrap();
+        let board = design.doc().get(&placed.artboards[0]).unwrap();
+        // Nothing was rewritten, so the artboard keeps its usual look.
+        assert_eq!(board.styles["background-color"], "#ffffff");
+        assert!(!board.attrs.contains_key("class"));
+        assert_eq!(placed.diagnostics.len(), 1);
+        assert!(
+            placed.diagnostics[0].reason.contains("1 selector(s)"),
+            "{:?}",
+            placed.diagnostics
+        );
     }
 
     #[test]

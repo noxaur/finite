@@ -685,6 +685,7 @@ fn board(
         width,
         height,
         auto_height,
+        look_in_css: false,
         position: entry.x.zip(entry.y),
         styles: root.styles,
         attrs: root.attrs,

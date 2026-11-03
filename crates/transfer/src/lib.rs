@@ -334,6 +334,10 @@ impl Tokens {
     }
 }
 
+/// The defaults every artboard starts with that set how it looks rather
+/// than how it holds its content: a white flex column.
+pub const LOOK: [&str; 3] = ["background-color", "display", "flex-direction"];
+
 /// One artboard to create, with its content.
 #[derive(Debug, Default)]
 pub struct Board {
@@ -342,6 +346,9 @@ pub struct Board {
     pub height: f64,
     /// The artboard grows to fit its content, so `height` isn't used.
     pub auto_height: bool,
+    /// Leave the [`LOOK`] defaults out of the artboard's inline styles,
+    /// because the content's own CSS sets them, and inline styles would win.
+    pub look_in_css: bool,
     /// Where on the canvas, or `None` to place it beside the others.
     pub position: Option<(f64, f64)>,
     /// The name of the page it goes on, or `None` for the import's page.
@@ -429,6 +436,10 @@ impl Imported {
                 None => receipt.page.clone(),
             };
             let id = new_id();
+            let unset: Vec<&str> = LOOK
+                .into_iter()
+                .filter(|name| board.look_in_css && !board.styles.contains_key(*name))
+                .collect();
             let mut content = Vec::new();
             let mut numbered = || {
                 let id = new_id();
@@ -459,6 +470,9 @@ impl Imported {
                         .find(|(_, m)| m.name.eq_ignore_ascii_case(&name))?;
                     Some(id.clone())
                 });
+                for name in unset {
+                    node.styles.remove(name);
+                }
             }
             tx.apply(&ops)?;
             if let Some(rest) = &rest {

@@ -207,6 +207,7 @@ impl Walk<'_> {
             width,
             height,
             auto_height: false,
+            look_in_css: false,
             position,
             styles,
             attrs: BTreeMap::new(),

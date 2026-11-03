@@ -36,5 +36,5 @@ Preconditions:
 
 - The file input is hidden. `upload` sets its file through CDP, the same way the OS picker hands one over, and Chrome fires the input's change event. Clicking `Import` instead opens a native picker that headless Chrome can't show, and the run hangs on nothing.
 - The download links use the `download` attribute, and headless Chrome saves downloads nowhere you can read. Prove `export-download` by fetching each href with `api GET`. That's the same request the link makes.
-- An imported HTML artboard takes the file's name (`import-card`) and a 1440 × 900 frame, not the size of the HTML's root element.
+- An imported HTML artboard takes the file's name (`import-card`) and is 1440px wide with an auto height (`1440px × auto` in the tree summary), not the size of the HTML's root element.
 - Scripts, `on*` handlers and embeds never reach the design on import. An import that contained them reports diagnostics in the card, so snapshot the whole card, not just its status line.
