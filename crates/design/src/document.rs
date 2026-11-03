@@ -14,6 +14,10 @@ use crate::node::{Node, NodeId, NodeKind, PropKey};
 /// Serialized with its kind in `op`, as in `{"op": "delete", "id": "4biyjm26"}`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "ops are built and applied in place; boxing the node would touch every one"
+)]
 pub enum Op {
     /// Inserts one node. Children are separate `Create` ops that follow their parent.
     Create { node: Node },

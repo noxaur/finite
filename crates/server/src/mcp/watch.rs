@@ -239,12 +239,12 @@ impl LayoutWatch {
 /// What the layout check says about `board`, if it found anything.
 async fn measure(handle: &DesignHandle, board: &str) -> Option<String> {
     let plan = handle
-        .read(|d| screenshot::plan_measurement(d.doc(), board, screenshot::Options::default()));
+        .read(|d| screenshot::plan_measurement(d.view(), board, screenshot::Options::default()));
     let boxes = tokio::time::timeout(MEASURE_LIMIT, screenshot::layout(plan.ok()?))
         .await
         .ok()?
         .ok()?;
-    let notes = handle.read(|d| layout_notes(d.doc(), board, &boxes));
+    let notes = handle.read(|d| layout_notes(d.view(), board, &boxes));
     if notes.is_empty() || notes.starts_with(CLEAN) {
         return None;
     }

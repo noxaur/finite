@@ -18,7 +18,7 @@ use rmcp::{
 
 use super::{FiniteMcp, ToolResult, cut, fit, id_in, ok, outline, params::*, with_note};
 
-pub(super) const INSTRUCTIONS: &str = "Components: when screens share a part (top bar, card), write it with data-component=\"Top bar\" each time. The first is the component; later ones are instances of it and keep their own text and styles. To change every instance, rewrite the component in place (write_html replace). Ids inside an instance (instanceId/nodeId) change only it.";
+pub(super) const INSTRUCTIONS: &str = "Components: write a shared part with data-component=\"Top bar\" each time. The first defines it; later ones are instances with their own text and styles. Rewrite the first in place to change all.";
 
 /// How many instances get_components lists for each component.
 const INSTANCES_SHOWN: usize = 50;

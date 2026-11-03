@@ -8,8 +8,8 @@ Workflow:
 2. Orient: get_basic_info (it counts open comments), then get_tree_summary.
 3. New screen: create_artboard with its first section in html (desktop 1440x900, tablet 768x1024, mobile 390x844). Without x and y it goes right of the others. Omit the height and the artboard grows to fit its content.
 4. Build the rest in sections with write_html, one call per section (header, hero, card grid), not one huge call.
-5. Check with get_screenshot after each section. An artboard's shot has a layout check naming content cut off by its edge and text overflowing its box. A node's shot is cropped to it: add padding, or scale 2, to read small text. nodeIds takes up to 10.
-6. To know where things rendered (to place pins or badges over content) or to check a layout without an image, call get_layout: each element's box, plus cut-off, overflowing and overlapping text.
+5. Check with get_screenshot after each section. A node's shot is cropped to it: add padding, or scale 2, to read small text. nodeIds takes up to 10.
+6. To know where things rendered (to place pins or badges over content) or to check a layout without an image, call get_layout.
 7. Refine with update_styles, set_text_content, set_attributes, move_nodes or delete_nodes. Each edit lists the nodes it changed.
 
 Users see which artboards you edit. To say what you're doing, call start_working_on_nodes with a short status, then finish_working_on_nodes.

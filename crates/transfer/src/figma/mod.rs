@@ -40,6 +40,10 @@ impl Codec for Figma {
             // Figma has neither.
             (Feature::Script | Feature::Embed, Import | Export) => Unsupported,
             (Feature::ImportHistory, Import | Export) => Unsupported,
+            // Figma has components, but the plugin's file doesn't carry them;
+            // an instance is written as the layers it shows.
+            (Feature::Instance, Import) => Unsupported,
+            (Feature::Instance, Export) => Approximate,
         }
     }
 

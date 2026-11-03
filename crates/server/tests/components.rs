@@ -357,6 +357,61 @@ async fn a_component_changes_every_screen_in_one_edit() {
         .await;
     assert!(html.contains("data-instance-of"), "{html}");
 
+    // Exports and get_jsx show the instance as the elements it shows, with
+    // its override: a file has no component for it to point at, and an
+    // instance has no children of its own to read. They say so.
+    let html = agent
+        .ok(
+            "get_html",
+            json!({ "designId": design, "nodeId": screens[1] }),
+        )
+        .await;
+    assert!(
+        html.contains("shown expanded") && html.contains("remove the data-instance-of"),
+        "{html}"
+    );
+    let jsx = agent
+        .ok(
+            "get_jsx",
+            json!({ "designId": design, "nodeId": screens[1] }),
+        )
+        .await;
+    assert!(
+        jsx.contains("Preferences") && jsx.contains("Menu") && jsx.contains("component instances"),
+        "{jsx}"
+    );
+    for format in ["html", "finite", "figma", "jsx"] {
+        let exported = agent
+            .ok(
+                "export_design",
+                json!({ "designId": design, "format": format, "artboardId": screens[1] }),
+            )
+            .await;
+        assert!(
+            exported.contains("Preferences") && exported.contains("Menu"),
+            "{format} lost the instance's content: {exported}"
+        );
+        assert!(
+            !exported.contains("data-instance-of") && !exported.contains("instanceOf"),
+            "{format} points at a component: {exported}"
+        );
+        assert!(
+            exported.contains("1 instance(s) of \"Top bar\""),
+            "{format} didn't say so: {exported}"
+        );
+    }
+    // The whole design as a bundle, too, keeps the page and the content.
+    let bundle = agent
+        .ok(
+            "export_design",
+            json!({ "designId": design, "format": "finite" }),
+        )
+        .await;
+    assert!(
+        bundle.contains("Preferences") && bundle.contains("Profile") && bundle.contains("Mail"),
+        "{bundle}"
+    );
+
     // A component styled by its artboard's <style> block hears that
     // instances elsewhere won't get those rules.
     let wrote = agent

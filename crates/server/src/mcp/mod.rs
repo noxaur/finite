@@ -510,11 +510,26 @@ fn html_component_note(design: &finite_design::Design, id: &str, html: &str) -> 
     }
     if html.contains(html::INSTANCE_ATTR) && !components::is_virtual(id) {
         notes.push(format!(
-            "Elements with {} are instances: their content comes from that component. Ids inside one look like instanceId/nodeId, and editing those changes only that instance.",
+            "Elements with {} are instances: their content comes from that component, and is shown expanded here. Ids inside one look like instanceId/nodeId, and editing those changes only that instance. To copy this HTML into another design, remove the {} attributes: that design doesn't have the component.",
+            html::INSTANCE_ATTR,
             html::INSTANCE_ATTR
         ));
     }
     (!notes.is_empty()).then(|| notes.join("\n"))
+}
+
+/// For a file or code made from node `id`: instances in it are written as the
+/// elements they show, so the result doesn't follow their components.
+fn instances_note(design: &finite_design::Design, id: &str) -> Option<String> {
+    let doc = design.doc();
+    let count = doc
+        .subtree(components::real_id(id))
+        .into_iter()
+        .filter(|n| n.is_instance())
+        .count();
+    (count > 0).then(|| {
+        "It includes component instances, written as the elements they show; they won't follow their components elsewhere.".to_owned()
+    })
 }
 
 /// How many different nodes a batch of updates names.
@@ -1103,7 +1118,8 @@ impl FiniteMcp {
             tailwind: p.tailwind,
         };
         let converted = handle.read(|d| {
-            let doc = d.doc();
+            // The expanded view: an instance has no children of its own.
+            let doc = d.view();
             let converted = jsx::convert(doc, &p.node_id, &options, 0)?;
             if converted.jsx.len() > OUTPUT_LIMIT {
                 return Some(Err(cut(
@@ -1140,6 +1156,9 @@ impl FiniteMcp {
                 )
             })
             .collect();
+        if let Some(note) = handle.read(|d| instances_note(d, &p.node_id)) {
+            notes.push(note);
+        }
         let mut stored = 0;
         assets::rewrite_urls(&converted.jsx, |_| {
             stored += 1;

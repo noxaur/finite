@@ -223,6 +223,15 @@ export class Renderer {
   }
 
   private setCulled(id: string, frame: Frame, culled: boolean) {
+    if (!culled) {
+      // A component edited while this was hidden may have changed how it
+      // renders (it gained or lost a script): build it the right way now.
+      const node = this.replica.get(id);
+      if (node && (frame.iframe !== null) !== this.isLive(id)) {
+        this.remount(node);
+        return;
+      }
+    }
     frame.root.style.display = culled ? "none" : "";
     if (!frame.iframe) return;
     clearTimeout(frame.reload);
@@ -336,6 +345,11 @@ export class Renderer {
       const frame = this.frames.get(id);
       const node = this.replica.get(id);
       if (!frame || !node) continue;
+      // What the instance shows may be a different size now.
+      this.culler.touch(id);
+      // A hidden artboard is built, or loaded, again when it's shown: the
+      // new content is read then, so a hidden iframe stays unloaded.
+      if (this.culler.isCulled(id)) continue;
       if ((frame.iframe !== null) !== this.isLive(id)) this.remount(node);
       else if (frame.iframe) this.scheduleReload(id, frame);
     }

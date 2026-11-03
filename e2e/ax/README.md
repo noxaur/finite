@@ -36,22 +36,22 @@ Real tools keep the real server's argument checks. For a schema a spec writes, t
 
 `tasks.mjs` defines them. Each one has a prompt, a seed and a check.
 
-| Task             | What the agent does                                                                 | What it tests                 |
-| ---------------- | ----------------------------------------------------------------------------------- | ----------------------------- |
-| `delete-design`  | Delete one design while keeping another                                             | Design deletion and discovery |
-| `restyle`        | Swap a brand color on one landing page, round the buttons, fix a typo               | Finding things                |
-| `rebrand`        | Swap the color across three artboards, including a `<style>` block and an rgba tint | Finding things at scale       |
-| `mobile`         | Make a 390 px version of a desktop page                                             | Copying, layout, verifying    |
-| `comments`       | Handle two pinned comments                                                          | The comment loop              |
-| `screens`        | Build a consistent three-screen mobile flow                                         | Building, reuse               |
-| `ui-states`      | Draw every state of Finite's own web app, from its source                           | A long session                |
-| `pins`           | Put numbered pins over a button and a heading the agent didn't size                 | Finding where things rendered |
-| `overlap`        | Fix a small badge overlapping the frame name above it                               | Spotting and fixing overlaps  |
-| `sections`       | Fill a fixed-height artboard with six sections, one `write_html` call each          | Overflow after an edit        |
-| `screens-change` | Build three screens, then change their shared top bar in the same session           | Keeping a design up to date   |
-| `import-page`    | Import a web page with scripts, handlers and an embed onto a named page             | Importing safely              |
+| Task                  | What the agent does                                                                 | What it tests                 |
+| --------------------- | ----------------------------------------------------------------------------------- | ----------------------------- |
+| `delete-design`       | Delete one design while keeping another                                             | Design deletion and discovery |
+| `restyle`             | Swap a brand color on one landing page, round the buttons, fix a typo               | Finding things                |
+| `rebrand`             | Swap the color across three artboards, including a `<style>` block and an rgba tint | Finding things at scale       |
+| `mobile`              | Make a 390 px version of a desktop page                                             | Copying, layout, verifying    |
+| `comments`            | Handle two pinned comments                                                          | The comment loop              |
+| `screens`             | Build a consistent three-screen mobile flow                                         | Building, reuse               |
+| `ui-states`           | Draw every state of Finite's own web app, from its source                           | A long session                |
+| `pins`                | Put numbered pins over a button and a heading the agent didn't size                 | Finding where things rendered |
+| `overlap`             | Fix a small badge overlapping the frame name above it                               | Spotting and fixing overlaps  |
+| `sections`            | Fill a fixed-height artboard with six sections, one `write_html` call each          | Overflow after an edit        |
+| `screens-change`      | Build three screens, then change their shared top bar in the same session           | Keeping a design up to date   |
+| `import-page`         | Import a web page with scripts, handlers and an embed onto a named page             | Importing safely              |
 | `screens-restructure` | `screens-change`, but the change adds elements to the bar, which shared CSS can't   | Components                    |
-| `export-figma`   | Export a design as a file for the Finite Figma plugin                               | Getting a file out            |
+| `export-figma`        | Export a design as a file for the Finite Figma plugin                               | Getting a file out            |
 
 ## Trying an idea cheaply first
 

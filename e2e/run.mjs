@@ -808,6 +808,52 @@ try {
   );
   check("the iframe loads again once it's in view", await loaded());
 
+  // Editing a component draws its instances in hidden artboards too, without
+  // loading a hidden sandboxed one, and the index learns the new size.
+  const swatch = idAfter(
+    await agent.call("write_html", {
+      designId: wide,
+      targetId: near,
+      html: `<div data-name="Swatch" style="height:20px;background:rgb(0, 0, 255)"></div>`,
+    }),
+    '"Swatch"',
+  );
+  await agent.call("create_component", { designId: wide, nodeId: swatch });
+  for (const target of [far, farLive]) {
+    await agent.call("write_html", {
+      designId: wide,
+      targetId: target,
+      html: `<div data-instance-of="${swatch}"></div>`,
+    });
+  }
+  await page.key("0");
+  await page.until(
+    `document.querySelector('[data-artboard="${far}"]').style.display === "none" && document.querySelector('[data-artboard="${farLive}"]').style.display === "none"`,
+    5000,
+  );
+  await agent.call("update_styles", {
+    designId: wide,
+    updates: [{ nodeIds: [swatch], styles: { background: "rgb(0, 128, 0)" } }],
+  });
+  await page.sleep(600);
+  check("a hidden sandboxed artboard stays unloaded when its component changes", !(await loaded()));
+  check(
+    "a hidden artboard's instance is drawn again",
+    await page.eval(
+      `[...document.querySelector('[data-artboard="${far}"]').querySelectorAll("*")].map((e) => e.shadowRoot).find(Boolean).innerHTML.includes("rgb(0, 128, 0)")`,
+    ),
+  );
+  await page.key("!", "Digit1");
+  check(
+    "the sandboxed artboard loads the changed component once it's in view",
+    Boolean(
+      await page.until(
+        `document.querySelector('[data-artboard="${farLive}"] iframe').srcdoc.includes("rgb(0, 128, 0)")`,
+        5000,
+      ),
+    ),
+  );
+
   check("no errors on the page", page.errors.length === 0, page.errors.join(" | "));
 } catch (error) {
   check("the run finished", false, error.stack ?? String(error));

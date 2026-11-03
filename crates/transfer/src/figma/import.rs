@@ -226,6 +226,7 @@ impl Walk<'_> {
             styles,
             attrs: BTreeMap::new(),
             children,
+            ..Fragment::empty(NodeKind::Text)
         }
     }
 

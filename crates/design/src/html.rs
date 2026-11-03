@@ -676,7 +676,7 @@ pub fn parse_style(style: &str) -> Vec<(String, String)> {
 }
 
 impl Fragment {
-    pub(crate) fn empty(kind: NodeKind) -> Self {
+    pub fn empty(kind: NodeKind) -> Self {
         Self {
             kind,
             name: None,

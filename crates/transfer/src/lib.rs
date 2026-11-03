@@ -35,7 +35,7 @@ pub mod scene;
 use std::collections::BTreeMap;
 
 use finite_design::{
-    Document, NodeId, Op, Rejected, Transaction,
+    Document, NodeId, Op, Rejected, Transaction, components,
     edit::{self, EditError, NewArtboard},
     html::Fragment,
     import::{BlobHash, Dependency, ImportRecord, Quarantined},
@@ -126,6 +126,64 @@ pub struct Revision<'a> {
     pub blobs: &'a dyn Blobs,
     /// Measures how artboards render, for formats without CSS.
     pub measure: &'a dyn scene::Measure,
+}
+
+/// Writes `scope` of `revision` as `format`. Instances of components are
+/// written expanded, as the elements they show: the file has no component
+/// for `data-instance-of` or a bundle to point at, so a codec reading the
+/// raw document would write an instance with no content. The export says so
+/// in a [`Feature::Instance`] diagnostic.
+pub fn export(format: Format, revision: &Revision<'_>, scope: &Scope) -> Result<Exported, Error> {
+    let doc = revision.doc;
+    if !doc.has_instances() {
+        return format.codec().write(revision, scope);
+    }
+    let mut instances = Vec::new();
+    for board in revision.artboards(scope)? {
+        instances.extend(
+            doc.subtree(&board.id)
+                .into_iter()
+                .filter(|n| n.is_instance()),
+        );
+    }
+    let view = components::expand(doc);
+    let expanded = Revision {
+        name: revision.name,
+        doc: &view,
+        imports: revision.imports,
+        blobs: revision.blobs,
+        measure: revision.measure,
+    };
+    let mut exported = format.codec().write(&expanded, scope)?;
+    if !instances.is_empty() {
+        let mut names: Vec<String> = instances
+            .iter()
+            .filter_map(|i| i.instance_of.as_deref().and_then(|c| doc.get(c)))
+            .map(|c| format!("{:?}", c.display_name()))
+            .collect();
+        names.sort();
+        names.dedup();
+        exported.diagnostics.push(Diagnostic {
+            node: instances.first().map(|i| i.id.clone()),
+            path: instances.first().map_or_else(String::new, |i| format!("#{}", i.id)),
+            what: format!(
+                "{} instance(s) of {}",
+                instances.len(),
+                if names.is_empty() {
+                    "missing components".to_owned()
+                } else {
+                    names.join(", ")
+                }
+            ),
+            feature: Feature::Instance,
+            reason: "no format has components, so each instance is written as the elements it shows and no longer follows its component".into(),
+            preserved: Score::No,
+            visual: Score::Yes,
+            editable: Score::Yes,
+            quarantined: false,
+        });
+    }
+    Ok(exported)
 }
 
 /// Reads blobs for an export. The server's store implements it.
@@ -476,6 +534,112 @@ mod tests {
             saved, table,
             "SUPPORT.md is stale: run with FINITE_UPDATE_FIXTURES=1"
         );
+    }
+
+    /// Artboard `a` holds a "Bar" component; artboard `b` an instance of it
+    /// that overrides the title.
+    fn with_instance() -> Document {
+        let mut doc = Document::default();
+        let mut ops = Vec::new();
+        for (board, index) in [("a", "V"), ("b", "W")] {
+            ops.push(Op::Create {
+                node: finite_design::Node {
+                    index: index.into(),
+                    x: Some(0.0),
+                    y: Some(0.0),
+                    ..finite_design::Node::element(board, "div")
+                },
+            });
+        }
+        let bar = finite_design::html::parse(
+            r#"<header data-name="Bar"><h1 data-name="Title">Home</h1></header>"#,
+        )
+        .unwrap()
+        .remove(0);
+        let mut n = 0;
+        let mut next = || {
+            n += 1;
+            format!("n{n}")
+        };
+        let bar = bar.create_ops(Some("a"), "V".into(), None, &mut next, &mut ops);
+        ops.push(Op::Set {
+            id: bar.clone(),
+            key: finite_design::PropKey::Component,
+            value: Some(true.into()),
+        });
+        ops.push(Op::Create {
+            node: finite_design::Node {
+                parent: Some("b".into()),
+                index: "V".into(),
+                instance_of: Some(bar),
+                ..finite_design::Node::element("i", "header")
+            },
+        });
+        ops.push(Op::Set {
+            id: "i".into(),
+            key: finite_design::PropKey::Override("n3/text".into()),
+            value: Some("Settings".into()),
+        });
+        doc.apply_all(&ops);
+        doc
+    }
+
+    #[test]
+    fn an_export_writes_instances_as_the_elements_they_show() {
+        let doc = with_instance();
+        assert!(doc.get("i").unwrap().is_instance());
+        for format in Format::ALL {
+            let revision = Revision {
+                name: "App",
+                doc: &doc,
+                imports: &[],
+                blobs: &NoBlobs,
+                measure: &scene::NoMeasure,
+            };
+            // The raw document has nothing to write for the instance.
+            let raw = format
+                .codec()
+                .write(&revision, &Scope::Artboard("b".into()));
+            let exported = export(format, &revision, &Scope::Artboard("b".into()));
+            let name = format.codec().name();
+            let Ok(exported) = exported else {
+                // Figma measures layout, which this test can't.
+                assert_eq!(format, Format::Figma, "{name}: {:?}", raw.err());
+                continue;
+            };
+            let text = String::from_utf8(exported.bytes).unwrap();
+            assert!(
+                text.contains("Settings"),
+                "{name} wrote the override: {text}"
+            );
+            assert!(
+                !text.contains("data-instance-of") && !text.contains("instanceOf"),
+                "{name} points at a component: {text}"
+            );
+            let raw = raw.map(|r| String::from_utf8(r.bytes).unwrap()).unwrap();
+            assert!(!raw.contains("Settings"), "{name}: {raw}");
+            let [note] = exported.diagnostics.as_slice() else {
+                panic!("{name}: {:?}", exported.diagnostics);
+            };
+            assert_eq!(note.feature, Feature::Instance);
+            assert_eq!(note.node.as_deref(), Some("i"));
+            assert!(
+                note.what.contains("1 instance(s) of \"Bar\""),
+                "{}",
+                note.what
+            );
+            assert_eq!((note.preserved, note.visual), (Score::No, Score::Yes));
+        }
+        // An artboard with no instance gets no note.
+        let revision = Revision {
+            name: "App",
+            doc: &doc,
+            imports: &[],
+            blobs: &NoBlobs,
+            measure: &scene::NoMeasure,
+        };
+        let exported = export(Format::Html, &revision, &Scope::Artboard("a".into())).unwrap();
+        assert!(exported.diagnostics.is_empty());
     }
 
     #[test]

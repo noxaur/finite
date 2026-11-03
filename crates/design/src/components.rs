@@ -86,7 +86,11 @@ pub fn expand(doc: &Document) -> Cow<'_, Document> {
         .cloned()
         .chain(expander.out);
     // The design's shared CSS styles instances like everything else.
-    Cow::Owned(Document::from_nodes(nodes).with_css(doc.css().map(str::to_owned)))
+    Cow::Owned(
+        Document::from_nodes(nodes)
+            .with_css(doc.css().map(str::to_owned))
+            .with_pages(doc.page_map().clone()),
+    )
 }
 
 /// Instance `id` expanded: its root, as it renders, then the nodes inside
@@ -591,8 +595,8 @@ pub fn redirect(
                 }
                 detaching |= !orphans(doc, id).is_empty();
             }
-            // The shared stylesheet isn't part of any instance.
-            Op::Css { .. } => {}
+            // The shared stylesheet and the pages aren't part of any instance.
+            Op::Css { .. } | Op::Page { .. } => {}
             Op::Move { id, parent, .. } => {
                 if is_virtual(id) {
                     return Err(refuse_inside(doc, id, "it can't be moved on its own"));
@@ -1106,6 +1110,22 @@ mod tests {
             css: Some(".x { color: red; }".into()),
         });
         assert_eq!(expand(&doc).css(), Some(".x { color: red; }"));
+    }
+
+    #[test]
+    fn the_expanded_view_keeps_the_pages() {
+        let mut doc = design();
+        let ops = crate::edit::create_page(&doc, "drafts".into(), "Drafts").unwrap();
+        doc.apply_all(&ops);
+        doc.apply(&Op::Set {
+            id: "b".into(),
+            key: PropKey::Page,
+            value: Some(json!("drafts")),
+        });
+        let view = expand(&doc);
+        let names: Vec<_> = view.pages().iter().map(|(_, p)| p.name.clone()).collect();
+        assert_eq!(names, ["Page 1", "Drafts"]);
+        assert_eq!(view.page_of(view.get("b").unwrap()), "drafts");
     }
 
     #[test]
