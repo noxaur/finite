@@ -58,7 +58,7 @@ pub(crate) fn token_ops(
 /// The design's tokens as `set_tokens` takes them: the modes by name, and
 /// each token's values by mode name, or one value when only the first mode
 /// has one.
-fn listed(doc: &Document) -> Value {
+pub(super) fn listed(doc: &Document) -> Value {
     let modes = doc.modes();
     let name = |id: &str| {
         modes

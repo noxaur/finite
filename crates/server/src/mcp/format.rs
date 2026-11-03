@@ -386,8 +386,17 @@ pub(super) fn layout_notes(
         if content_bottom > board.height + 1.0 {
             let _ = write!(
                 text,
-                " It is {content_bottom:.0} px tall, but the artboard is {:.0} px. If it should all show, make the artboard taller with update_styles {{\"updates\": [{{\"nodeIds\": [\"{artboard}\"], \"styles\": {{\"height\": \"{content_bottom:.0}px\"}}}}]}}.",
-                board.height
+                " It is {content_bottom:.0} px tall, but the artboard is {:.0} px. If it should all show, make the artboard taller with {}.",
+                board.height,
+                if super::doc6() {
+                    format!(
+                        "{{\"op\": \"css\", \"css\": \"#{artboard} {{ height: {content_bottom:.0}px }}\"}}"
+                    )
+                } else {
+                    format!(
+                        "update_styles {{\"updates\": [{{\"nodeIds\": [\"{artboard}\"], \"styles\": {{\"height\": \"{content_bottom:.0}px\"}}}}]}}"
+                    )
+                }
             );
         }
         if content_right > board.width + 1.0 {

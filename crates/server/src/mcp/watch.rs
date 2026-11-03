@@ -124,8 +124,9 @@ impl LayoutWatch {
                 UNCHECKED,
                 generation,
                 Some(format!(
-                    "Layout: this edit touched {} artboards and only the first {BOARDS_PER_EDIT} were checked. get_layout checks the rest.",
-                    boards.len() + left_out
+                    "Layout: this edit touched {} artboards and only the first {BOARDS_PER_EDIT} were checked. {} checks the rest.",
+                    boards.len() + left_out,
+                    layout_tool()
                 )),
             );
         }
@@ -249,8 +250,18 @@ async fn measure(handle: &DesignHandle, board: &str) -> Option<String> {
         return None;
     }
     Some(format!(
-        "{notes}\n(From checking artboard #{board} after your last edit. get_layout shows more.)"
+        "{notes}\n(From checking artboard #{board} after your last edit. {} shows more.)",
+        layout_tool()
     ))
+}
+
+/// The tool that shows the whole layout, as this surface names it.
+fn layout_tool() -> &'static str {
+    if super::doc6() {
+        "render with output: \"layout\""
+    } else {
+        "get_layout"
+    }
 }
 
 #[cfg(test)]

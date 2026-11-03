@@ -4,7 +4,7 @@
 //! HTML and picked out each use by eye.
 
 use finite_design::{
-    Op, components,
+    Document, Op, components,
     search::{self, Places, Query},
 };
 use rmcp::{
@@ -17,6 +17,33 @@ use super::{FiniteMcp, ToolResult, cut, ok, outline, params::*};
 
 /// How many matches find_nodes lists.
 const FOUND_SHOWN: usize = 200;
+
+/// What a search found: how many, then each match's outline line, grouped
+/// by artboard, with what matched. Lists the first [`FOUND_SHOWN`].
+pub(super) fn found_text(doc: &Document, found: &[search::Found]) -> String {
+    let mut text = format!(
+        "{} element{} match:\n",
+        found.len(),
+        if found.len() == 1 { "" } else { "s" }
+    );
+    let mut board: Option<String> = None;
+    for f in found.iter().take(FOUND_SHOWN) {
+        let here = doc.artboard_of(&f.id).map(|b| b.id.clone());
+        if here != board {
+            if let Some(b) = here.as_deref().and_then(|id| doc.get(id)) {
+                text.push_str(&format!("Artboard {:?} #{}:\n", b.display_name(), b.id));
+            }
+            board = here;
+        }
+        text.push_str("  ");
+        text.push_str(outline(doc, &f.id, 0).lines().next().unwrap_or("").trim());
+        for detail in &f.details {
+            text.push_str(&format!("\n      {detail}"));
+        }
+        text.push('\n');
+    }
+    text
+}
 
 #[tool_router(router = search_router, vis = "pub(super)")]
 impl FiniteMcp {
@@ -52,27 +79,7 @@ impl FiniteMcp {
             if found.is_empty() {
                 return "No elements match.".into();
             }
-            let mut text = format!(
-                "{} element{} match:\n",
-                found.len(),
-                if found.len() == 1 { "" } else { "s" }
-            );
-            let mut board: Option<String> = None;
-            for f in found.iter().take(FOUND_SHOWN) {
-                let here = doc.artboard_of(&f.id).map(|b| b.id.clone());
-                if here != board {
-                    if let Some(b) = here.as_deref().and_then(|id| doc.get(id)) {
-                        text.push_str(&format!("Artboard {:?} #{}:\n", b.display_name(), b.id));
-                    }
-                    board = here;
-                }
-                text.push_str("  ");
-                text.push_str(outline(doc, &f.id, 0).lines().next().unwrap_or("").trim());
-                for detail in &f.details {
-                    text.push_str(&format!("\n      {detail}"));
-                }
-                text.push('\n');
-            }
+            let mut text = found_text(doc, &found);
             if found.len() > FOUND_SHOWN {
                 text.push_str(&format!(
                     "Showing the first {FOUND_SHOWN}. Narrow it with within or another filter.\n"

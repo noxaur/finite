@@ -88,8 +88,21 @@ pub(crate) fn extra(group: &str) -> bool {
         .any(|g| g == group)
 }
 
+/// Whether `FINITE_MCP_SURFACE=doc6` serves the six tools of `doc6`
+/// instead of today's, so AX runs (`e2e/ax`) can compare both on one build.
+/// Unset, or `classic`, serves today's tools.
+pub(crate) fn doc6() -> bool {
+    static DOC6: OnceLock<bool> = OnceLock::new();
+    *DOC6.get_or_init(|| {
+        std::env::var("FINITE_MCP_SURFACE").is_ok_and(|s| s.trim().eq_ignore_ascii_case("doc6"))
+    })
+}
+
 /// What agents see when they connect, with a section for each extra tool group.
 pub(crate) fn instructions() -> &'static str {
+    if doc6() {
+        return doc6::INSTRUCTIONS;
+    }
     static TEXT: OnceLock<String> = OnceLock::new();
     TEXT.get_or_init(|| {
         let mut text = INSTRUCTIONS.trim_end().to_owned();
@@ -621,6 +634,9 @@ fn distinct<'a>(ids: impl Iterator<Item = &'a String>) -> usize {
 impl FiniteMcp {
     /// Every tool, with the [`extra`] groups that are turned on.
     fn tools() -> ToolRouter<Self> {
+        if doc6() {
+            return Self::doc6_router();
+        }
         let mut router = Self::tool_router();
         router.merge(Self::search_router());
         if extra("components") {
@@ -706,7 +722,8 @@ impl FiniteMcp {
             let text = match error {
                 OpenError::Busy(_) => format!("design {id:?}: {error}."),
                 _ => {
-                    format!("design {id:?} not found. Call list_designs to see the available ids.")
+                    let list = if doc6() { "designs" } else { "list_designs" };
+                    format!("design {id:?} not found. Call {list} to see the available ids.")
                 }
             };
             CallToolResult::error(vec![ContentBlock::text(text)])
@@ -771,6 +788,25 @@ impl FiniteMcp {
     }
 }
 
+/// What a reply did: whether the comment is open, and the changes it links.
+fn replied(comment: &comment::Comment) -> String {
+    let labels: Vec<&str> = comment
+        .messages
+        .last()
+        .map(|m| m.changes.iter().map(|c| c.label.as_str()).collect())
+        .unwrap_or_default();
+    let state = if comment.resolved { "resolved" } else { "open" };
+    let linked = match labels.len() {
+        0 => "links none of your changes".to_owned(),
+        n => format!(
+            "links your {n} change{} to this artboard since the thread's last message: {}",
+            if n == 1 { "" } else { "s" },
+            labels.join(", ")
+        ),
+    };
+    format!("Replied. The comment is {state}, and your reply {linked}.")
+}
+
 /// Shows users which artboards an agent is editing, if it hasn't said with
 /// start_working_on_nodes. Most agents skipped that call, so viewers saw
 /// edits land with no one named. The indicator goes a minute after the
@@ -817,6 +853,7 @@ macro_rules! design {
 }
 
 mod component_tools;
+mod doc6;
 mod pages;
 mod search;
 mod tokens;
@@ -1978,25 +2015,7 @@ impl FiniteMcp {
             kind: AuthorKind::Agent,
         };
         match handle.reply(&p.comment_id, author, &p.message, p.resolve) {
-            Ok(comment) => {
-                let labels: Vec<&str> = comment
-                    .messages
-                    .last()
-                    .map(|m| m.changes.iter().map(|c| c.label.as_str()).collect())
-                    .unwrap_or_default();
-                let state = if comment.resolved { "resolved" } else { "open" };
-                let linked = match labels.len() {
-                    0 => "links none of your changes".to_owned(),
-                    n => format!(
-                        "links your {n} change{} to this artboard since the thread's last message: {}",
-                        if n == 1 { "" } else { "s" },
-                        labels.join(", ")
-                    ),
-                };
-                ok(format!(
-                    "Replied. The comment is {state}, and your reply {linked}."
-                ))
-            }
+            Ok(comment) => ok(replied(&comment)),
             Err(error) => fail(error.to_string()),
         }
     }
@@ -2049,10 +2068,27 @@ impl ServerHandler for FiniteMcp {
     /// names (the `layout` group). The layout tools drop it instead.
     async fn call_tool(
         &self,
-        request: CallToolRequestParams,
+        mut request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
-        let design = extra("layout")
+        // doc6 takes a design's name for its id, in every tool.
+        if doc6()
+            && let Some(args) = request.arguments.as_mut()
+            && let Some(serde_json::Value::String(given)) = args.get("designId")
+        {
+            match self.design_named(given) {
+                Ok(id) => {
+                    args.insert("designId".into(), id.into());
+                }
+                Err(text) => {
+                    return Ok(CallToolResponse::Complete(CallToolResult::error(vec![
+                        ContentBlock::text(text),
+                    ])));
+                }
+            }
+        }
+        // doc6 checks the layout after every edit, so its notes are always on.
+        let design = (extra("layout") || doc6())
             .then(|| {
                 let id = request.arguments.as_ref()?.get("designId")?.as_str()?;
                 Some(id.to_owned())
@@ -2062,7 +2098,7 @@ impl ServerHandler for FiniteMcp {
         // note out of date. Edits through `edit` clear it themselves.
         let drops_note = matches!(
             &*request.name,
-            "get_layout" | "get_screenshot" | "undo" | "redo" | "import_design"
+            "get_layout" | "get_screenshot" | "undo" | "redo" | "import_design" | "render"
         );
         let name = request.name.clone();
         // Before the tool runs: an edit starts a new check, which replaces the note.
@@ -2133,10 +2169,12 @@ mod tests {
             tokens::INSTRUCTIONS,
         ]
         .join("\n\n");
-        assert!(
-            all.chars().count() <= INSTRUCTIONS_LIMIT,
-            "{} characters: Claude Code would cut the end off",
-            all.chars().count()
-        );
+        for (surface, text) in [("classic", all.as_str()), ("doc6", doc6::INSTRUCTIONS)] {
+            assert!(
+                text.chars().count() <= INSTRUCTIONS_LIMIT,
+                "{surface}: {} characters: Claude Code would cut the end off",
+                text.chars().count()
+            );
+        }
     }
 }
