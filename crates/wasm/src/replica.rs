@@ -124,7 +124,15 @@ impl Replica {
     /// instances expanded. With `ids`, every element carries its node id,
     /// for sandboxed artboards. Empty when there's no such node.
     pub fn export(&self, id: &str, ids: bool) -> String {
-        let view = components::expand(&self.doc);
+        // Expanding the whole design is only worth it when the subtree
+        // shows an instance, or is inside one (a virtual id).
+        let shows_instance =
+            !self.doc.contains(id) || self.doc.subtree(id).into_iter().any(|n| n.is_instance());
+        let view = if shows_instance {
+            components::expand(&self.doc)
+        } else {
+            std::borrow::Cow::Borrowed(&self.doc)
+        };
         let html = if ids {
             html::export_for_viewer(&view, id)
         } else {

@@ -18,7 +18,7 @@ use rmcp::{
 
 use super::{FiniteMcp, ToolResult, cut, fit, id_in, ok, outline, params::*, with_note};
 
-pub(super) const INSTRUCTIONS: &str = "Components: write a shared part with data-component=\"Top bar\" each time. The first defines it; later ones are instances with their own text and styles. Rewrite the first in place to change all.";
+pub(super) const INSTRUCTIONS: &str = "Components: repeat data-component=\"Top bar\"; the first defines it, later ones are instances. Edit the first to change all.";
 
 /// How many instances get_components lists for each component.
 const INSTANCES_SHOWN: usize = 50;

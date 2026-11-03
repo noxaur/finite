@@ -35,7 +35,7 @@ pub mod scene;
 use std::collections::BTreeMap;
 
 use finite_design::{
-    Document, NodeId, Op, Rejected, Transaction, components,
+    Document, Node, NodeId, Op, Rejected, Transaction, components,
     edit::{self, EditError, NewArtboard},
     html::Fragment,
     import::{BlobHash, Dependency, ImportRecord, Quarantined},
@@ -128,6 +128,30 @@ pub struct Revision<'a> {
     pub measure: &'a dyn scene::Measure,
 }
 
+/// `instance` and the instances inside the component it shows, and so on.
+/// The depth cap stops a component that (through others) shows itself.
+fn collect_instances<'a>(
+    doc: &'a Document,
+    instance: &'a Node,
+    out: &mut Vec<&'a Node>,
+    depth: usize,
+) {
+    out.push(instance);
+    let Some(component) = instance.instance_of.as_deref().and_then(|c| doc.get(c)) else {
+        return;
+    };
+    if depth >= 8 {
+        return;
+    }
+    for inner in doc
+        .subtree(&component.id)
+        .into_iter()
+        .filter(|n| n.is_instance())
+    {
+        collect_instances(doc, inner, out, depth + 1);
+    }
+}
+
 /// Writes `scope` of `revision` as `format`. Instances of components are
 /// written expanded, as the elements they show: the file has no component
 /// for `data-instance-of` or a bundle to point at, so a codec reading the
@@ -140,11 +164,13 @@ pub fn export(format: Format, revision: &Revision<'_>, scope: &Scope) -> Result<
     }
     let mut instances = Vec::new();
     for board in revision.artboards(scope)? {
-        instances.extend(
-            doc.subtree(&board.id)
-                .into_iter()
-                .filter(|n| n.is_instance()),
-        );
+        for node in doc
+            .subtree(&board.id)
+            .into_iter()
+            .filter(|n| n.is_instance())
+        {
+            collect_instances(doc, node, &mut instances, 0);
+        }
     }
     let view = components::expand(doc);
     let expanded = Revision {
@@ -640,6 +666,47 @@ mod tests {
         };
         let exported = export(Format::Html, &revision, &Scope::Artboard("a".into())).unwrap();
         assert!(exported.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn an_export_counts_instances_inside_components() {
+        let mut doc = with_instance();
+        let bar = doc.get("i").unwrap().instance_of.clone().unwrap();
+        let mut ops = Vec::new();
+        for (id, parent, index) in [("c2", "a", "X"), ("j", bar.as_str(), "Z")] {
+            ops.push(Op::Create {
+                node: finite_design::Node {
+                    parent: Some(parent.into()),
+                    index: index.into(),
+                    ..finite_design::Node::element(id, "div")
+                },
+            });
+        }
+        ops.push(Op::Set {
+            id: "c2".into(),
+            key: finite_design::PropKey::Component,
+            value: Some(true.into()),
+        });
+        ops.push(Op::Set {
+            id: "j".into(),
+            key: finite_design::PropKey::InstanceOf,
+            value: Some("c2".into()),
+        });
+        for op in &ops {
+            doc.apply(op).unwrap();
+        }
+        let revision = Revision {
+            name: "App",
+            doc: &doc,
+            imports: &[],
+            blobs: &NoBlobs,
+            measure: &scene::NoMeasure,
+        };
+        let exported = export(Format::Html, &revision, &Scope::Artboard("b".into())).unwrap();
+        let [note] = exported.diagnostics.as_slice() else {
+            panic!("{:?}", exported.diagnostics);
+        };
+        assert!(note.what.starts_with("2 instance(s) of"), "{}", note.what);
     }
 
     #[test]

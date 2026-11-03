@@ -320,12 +320,15 @@ impl Design {
             Ok(built) => built,
             Err(error) => {
                 tx.roll_back();
+                self.view.take();
                 return Err(error);
             }
         };
         let Transaction {
             applied, inverse, ..
         } = tx;
+        // The expanded view was made before the import's nodes existed.
+        self.view.take();
         self.imports.push(import);
         if applied.is_empty() {
             return Ok((None, output));
@@ -747,6 +750,45 @@ mod tests {
 
     fn color_of(d: &Design, id: &str) -> Option<String> {
         d.doc().get(id)?.styles.get("color").cloned()
+    }
+
+    #[test]
+    fn an_import_shows_in_the_view_that_was_read_before_it() {
+        let mut d = design();
+        let mut ops = vec![create("a", None), create("bar", Some("a"))];
+        ops.push(Op::Set {
+            id: "bar".into(),
+            key: PropKey::Component,
+            value: Some(json!(true)),
+        });
+        let mut instance = Node::element("i", "div");
+        instance.parent = Some("a".into());
+        instance.index = "W".into();
+        instance.instance_of = Some("bar".into());
+        ops.push(Op::Create { node: instance });
+        d.commit("alice", "setup", &ops, 1);
+        // Reading the expanded view caches it.
+        assert!(d.view().get("b").is_none());
+
+        let record = crate::import::ImportRecord {
+            id: "imp".into(),
+            artifact: crate::import::BlobHash::of(b"x"),
+            format: "html".into(),
+            input_kind: "html".into(),
+            file_name: None,
+            received_at: 0,
+            nodes: Default::default(),
+            dependencies: Vec::new(),
+            quarantined: Vec::new(),
+        };
+        let (change, ()) = d
+            .import::<_, Rejected>("alice", "Import", 2, |tx| {
+                tx.apply(&[create("b", None)])?;
+                Ok((record, ()))
+            })
+            .unwrap();
+        assert!(change.is_some());
+        assert!(d.view().get("b").is_some(), "the import is in the view");
     }
 
     #[test]
