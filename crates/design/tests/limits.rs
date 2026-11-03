@@ -15,6 +15,7 @@ fn limits_match_the_shared_fixture() {
         "about": "Limits the server enforces, recorded from crates/design/tests/limits.rs. apps/web/src/lib/limits.test.ts checks the web app's copies.",
         "commentBody": comment::MAX_BODY,
         "authorName": comment::MAX_NAME,
+        "commentSelection": comment::MAX_SELECTION,
     });
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/limits.json");
     if std::env::var_os("FINITE_UPDATE_FIXTURES").is_some() {

@@ -535,6 +535,7 @@ impl Design {
             id,
             artboard_id: anchor.artboard_id,
             node_id: anchor.node_id,
+            extra_node_ids: anchor.extra_node_ids,
             x: anchor.x,
             y: anchor.y,
             resolved: false,
@@ -884,6 +885,7 @@ mod tests {
         let anchor = Anchor {
             artboard_id: Some(artboard.into()),
             node_id: Some(artboard.into()),
+            extra_node_ids: Vec::new(),
             x: 10.0,
             y: 20.0,
         };
@@ -1049,6 +1051,7 @@ mod tests {
         let anchor = Anchor {
             artboard_id: Some("a".into()),
             node_id: None,
+            extra_node_ids: Vec::new(),
             x: 0.0,
             y: 0.0,
         };
@@ -1095,6 +1098,7 @@ mod tests {
         let anchor = Anchor {
             artboard_id: Some("missing".into()),
             node_id: None,
+            extra_node_ids: Vec::new(),
             x: 0.0,
             y: 0.0,
         };

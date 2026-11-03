@@ -178,6 +178,71 @@ async fn agents_answer_comments_and_link_their_changes() {
     assert!(info.contains("\"openComments\": 0"), "{info}");
 }
 
+/// A comment can point at several elements, and agents see each of them.
+#[tokio::test]
+async fn a_comment_points_at_several_elements() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Claude").await;
+    let created = agent
+        .ok("create_design", json!({ "name": "Landing" }))
+        .await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .unwrap()
+        .to_owned();
+    let board = agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Home", "width": 400, "height": 300 }),
+        )
+        .await;
+    let board = id_after(&board, "Created artboard");
+    let wrote = agent
+        .ok(
+            "write_html",
+            json!({ "designId": design, "targetId": board,
+                    "html": "<h1 data-name=\"Title\">Hi</h1><button data-name=\"CTA\">Go</button>" }),
+        )
+        .await;
+    let title = id_after(&wrote, "Title");
+    let cta = id_after(&wrote, "CTA");
+
+    let post = |extra: Value| {
+        let app = app.clone();
+        let req = Request::post(format!("/api/designs/{design}/comments"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "author": { "id": "u1", "name": "Guest" }, "body": "Line these up",
+                        "artboardId": board, "nodeId": title, "extraNodeIds": extra,
+                        "x": 10, "y": 10 })
+                .to_string(),
+            ))
+            .unwrap();
+        async move { app.oneshot(req).await.unwrap().status() }
+    };
+    assert_eq!(post(json!([title])).await, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(post(json!([cta])).await, StatusCode::CREATED);
+
+    let comments = agent
+        .ok("get_comments", json!({ "designId": design }))
+        .await;
+    let comment: Value = serde_json::from_str(&comments).unwrap();
+    assert_eq!(comment[0]["nodeId"], title.as_str());
+    assert_eq!(
+        comment[0]["alsoSelected"][0]["nodeId"],
+        cta.as_str(),
+        "{comments}"
+    );
+    assert!(
+        comment[0]["alsoSelected"][0]["node"]
+            .as_str()
+            .unwrap()
+            .contains("CTA"),
+        "{comments}"
+    );
+}
+
 #[tokio::test]
 async fn an_agent_waits_for_the_next_comment() {
     let app = test_app();

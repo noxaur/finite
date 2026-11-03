@@ -4,7 +4,7 @@ import * as stylex from "@stylexjs/stylex";
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Replica } from "@/design/replica";
 import type { Comment } from "@/design/schema";
-import { COMMENT_LIMIT, NAME_LIMIT } from "@/lib/limits";
+import { COMMENT_LIMIT, NAME_LIMIT, SELECTION_LIMIT } from "@/lib/limits";
 import { isLocalUser, useLocalName } from "@/lib/user";
 import { timeAgo } from "@/lib/time";
 import { PIN_PATH } from "@/lib/cursors";
@@ -22,9 +22,30 @@ export type Mode = "pointer" | "comment";
 export interface Draft {
   readonly artboardId: string | null;
   readonly nodeId: string | null;
+  /** More elements in the same artboard, picked with shift-click. */
+  readonly extraNodeIds: ReadonlyArray<string>;
   /** Relative to the artboard, or canvas coordinates when `artboardId` is `null`. */
   readonly x: number;
   readonly y: number;
+}
+
+/** Every element a draft or comment points at, its `nodeId` first. */
+export function selectionOf(
+  pin: Pick<Draft, "nodeId"> & { readonly extraNodeIds?: ReadonlyArray<string> },
+): ReadonlyArray<string> {
+  return pin.nodeId === null ? [] : [pin.nodeId, ...(pin.extraNodeIds ?? [])];
+}
+
+/**
+ * Adds `nodeId` to the draft's elements, or takes it out if it's there.
+ * Returns `null` when that leaves none, and the draft as it was when it's full.
+ */
+export function toggleInDraft(draft: Draft, nodeId: string): Draft | null {
+  const nodes = selectionOf(draft);
+  if (!nodes.includes(nodeId) && nodes.length >= SELECTION_LIMIT) return draft;
+  const next = nodes.includes(nodeId) ? nodes.filter((id) => id !== nodeId) : [...nodes, nodeId];
+  const [first, ...rest] = next;
+  return first === undefined ? null : { ...draft, nodeId: first, extraNodeIds: rest };
 }
 
 /** Where a pin sits on the canvas. A pin whose artboard is gone stays where it last was. */
@@ -238,6 +259,7 @@ function DraftPin({ replica, draft, onPost, onCancelDraft }: LayerProps & { draf
       </div>
       <Popover>
         <NameLine />
+        {draft.nodeId !== null && <SelectionLine count={selectionOf(draft).length} />}
         <Composer
           placeholder="Add a comment"
           autoFocus
@@ -246,6 +268,17 @@ function DraftPin({ replica, draft, onPost, onCancelDraft }: LayerProps & { draf
         />
       </Popover>
     </div>
+  );
+}
+
+/** How many elements the draft points at, and how to change that. */
+function SelectionLine({ count }: { count: number }) {
+  return (
+    <span data-selection-count={count} {...stylex.props(styles.muted)}>
+      {count === 1
+        ? "Shift-click to add elements"
+        : `${count} elements · Shift-click to add or remove`}
+    </span>
   );
 }
 
