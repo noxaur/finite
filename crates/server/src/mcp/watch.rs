@@ -8,13 +8,22 @@
 //! (a cold browser, a busy one), the measuring finishes after the response and
 //! the note goes on the agent's next result for that design. Agents often send
 //! several edits at once, so a note from an earlier edit can arrive with a
-//! later one. A newer edit to the same artboard replaces a note, and
-//! `get_layout` and `get_screenshot` drop it, since they report the layout
-//! themselves.
+//! later one.
+//!
+//! A note describes the design as of one edit, so anything that changes the
+//! design afterwards drops it: a newer `write_html` or `update_styles` on the
+//! artboard replaces it, any other edit clears every note on the design (see
+//! [`LayoutWatch::invalidate`]), and `get_layout` and `get_screenshot` drop it
+//! because they report the layout themselves. A tool that fails leaves a note
+//! where it was.
+//!
+//! Measurements run one at a time, and one whose artboard has been edited
+//! again by the time its turn comes is skipped, so six edits sent together
+//! start one browser, not six.
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
 
@@ -24,14 +33,36 @@ use super::format::layout_notes;
 use crate::{hub::DesignHandle, screenshot};
 
 /// How long an edit waits for its layout check before it answers without one.
-pub(super) const WAIT: Duration = Duration::from_millis(1_000);
+/// `FINITE_LAYOUT_WAIT_MS` sets it; the deferred-note tests set 0.
+fn wait() -> Duration {
+    static WAIT: OnceLock<Duration> = OnceLock::new();
+    *WAIT.get_or_init(|| {
+        std::env::var("FINITE_LAYOUT_WAIT_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+            .map_or(Duration::from_millis(1_000), Duration::from_millis)
+    })
+}
+
+/// The longest one measurement may hold up the next. A hung browser is killed
+/// by `screenshot::layout`'s own, longer timeout.
+const MEASURE_LIMIT: Duration = Duration::from_secs(8);
 
 /// How many artboards one edit has measured, so an edit across a whole design
-/// doesn't start a browser for each.
+/// doesn't start a browser for each. The note says when it left some out.
 const BOARDS_PER_EDIT: usize = 3;
 
 /// What `layout_notes` starts with when it found nothing to report.
 const CLEAN: &str = "Layout: nothing is cut off";
+
+/// The entry for what one edit left unchecked, which no artboard has an id like.
+const UNCHECKED: &str = "+unchecked";
+
+/// One measurement at a time, across every design.
+fn measuring() -> &'static tokio::sync::Semaphore {
+    static SLOT: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+    SLOT.get_or_init(|| tokio::sync::Semaphore::new(1))
+}
 
 #[derive(Default)]
 struct Entry {
@@ -39,6 +70,23 @@ struct Entry {
     /// after a newer edit can tell it's out of date.
     generation: u64,
     note: Option<String>,
+}
+
+/// A note taken from the watch, to put on a result, or back if that result is an error.
+pub(super) struct Taken {
+    board: String,
+    generation: u64,
+    note: String,
+}
+
+impl Taken {
+    pub(super) fn text(taken: &[Taken]) -> String {
+        taken
+            .iter()
+            .map(|t| t.note.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 #[derive(Default)]
@@ -49,14 +97,14 @@ pub(super) struct LayoutWatch {
 
 impl LayoutWatch {
     /// Starts measuring the artboards `change` touched, and waits up to
-    /// [`WAIT`] for it. What it finds is then waiting in [`Self::take`].
+    /// [`wait`] for it. What it finds is then waiting in [`Self::take`].
     pub(super) async fn after_edit(
         self: &Arc<Self>,
         design: &str,
         handle: &Arc<DesignHandle>,
         change: &Change,
     ) {
-        let boards: Vec<String> = handle.read(|d| {
+        let mut boards: Vec<String> = handle.read(|d| {
             let mut boards: Vec<String> = Vec::new();
             for op in &change.ops {
                 if let Some(board) = d.doc().artboard_of(op.id())
@@ -65,20 +113,41 @@ impl LayoutWatch {
                     boards.push(board.id.clone());
                 }
             }
-            boards.truncate(BOARDS_PER_EDIT);
             boards
         });
+        let left_out = boards.len().saturating_sub(BOARDS_PER_EDIT);
+        boards.truncate(BOARDS_PER_EDIT);
+        let generation = self.bump(design, UNCHECKED);
+        if left_out > 0 {
+            self.finish(
+                design,
+                UNCHECKED,
+                generation,
+                Some(format!(
+                    "Layout: this edit touched {} artboards and only the first {BOARDS_PER_EDIT} were checked. get_layout checks the rest.",
+                    boards.len() + left_out
+                )),
+            );
+        }
         let mut tasks = Vec::new();
         for board in boards {
             let generation = self.bump(design, &board);
             let (watch, handle, design) = (Arc::clone(self), Arc::clone(handle), design.to_owned());
             tasks.push(tokio::spawn(async move {
+                // Let edits sent together all count before the first one measures.
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                let Ok(_turn) = measuring().acquire().await else {
+                    return;
+                };
+                if !watch.is_current(&design, &board, generation) {
+                    return;
+                }
                 let note = measure(&handle, &board).await;
                 watch.finish(&design, &board, generation, note);
             }));
         }
         // On time out the tasks carry on and leave their notes for later.
-        let _ = tokio::time::timeout(WAIT, futures::future::join_all(tasks)).await;
+        let _ = tokio::time::timeout(wait(), futures::future::join_all(tasks)).await;
     }
 
     fn bump(&self, design: &str, board: &str) -> u64 {
@@ -93,6 +162,13 @@ impl LayoutWatch {
         entry.generation
     }
 
+    fn is_current(&self, design: &str, board: &str, generation: u64) -> bool {
+        let all = self.boards.lock().expect("layout watch lock");
+        all.get(design)
+            .and_then(|d| d.get(board))
+            .is_some_and(|e| e.generation == generation)
+    }
+
     fn finish(&self, design: &str, board: &str, generation: u64, note: Option<String>) {
         let mut all = self.boards.lock().expect("layout watch lock");
         if let Some(entry) = all.get_mut(design).and_then(|d| d.get_mut(board))
@@ -103,19 +179,50 @@ impl LayoutWatch {
     }
 
     /// The notes waiting on `design`, which are then spent.
-    pub(super) fn take(&self, design: &str) -> Option<String> {
+    pub(super) fn take(&self, design: &str) -> Vec<Taken> {
         let mut all = self.boards.lock().expect("layout watch lock");
-        let notes: Vec<String> = all
-            .get_mut(design)?
-            .values_mut()
-            .filter_map(|e| e.note.take())
+        let Some(boards) = all.get_mut(design) else {
+            return Vec::new();
+        };
+        let mut taken: Vec<Taken> = boards
+            .iter_mut()
+            .filter_map(|(board, e)| {
+                Some(Taken {
+                    board: board.clone(),
+                    generation: e.generation,
+                    note: e.note.take()?,
+                })
+            })
             .collect();
-        (!notes.is_empty()).then(|| notes.join("\n"))
+        // Artboards in a steady order, the unchecked count last.
+        taken.sort_by(|a, b| {
+            (a.board == UNCHECKED, &a.board).cmp(&(b.board == UNCHECKED, &b.board))
+        });
+        taken
     }
 
-    /// Forgets what's waiting on `design`: the agent is looking at the layout.
-    pub(super) fn discard(&self, design: &str) {
-        let _ = self.take(design);
+    /// Puts back notes whose result failed, unless the artboard has been
+    /// edited since.
+    pub(super) fn restore(&self, design: &str, taken: Vec<Taken>) {
+        let mut all = self.boards.lock().expect("layout watch lock");
+        for t in taken {
+            if let Some(entry) = all.get_mut(design).and_then(|d| d.get_mut(&t.board))
+                && entry.generation == t.generation
+                && entry.note.is_none()
+            {
+                entry.note = Some(t.note);
+            }
+        }
+    }
+
+    /// Forgets what's waiting on `design`, and cancels measurements under
+    /// way: the design changed, or the agent is looking at the layout.
+    pub(super) fn invalidate(&self, design: &str) {
+        let mut all = self.boards.lock().expect("layout watch lock");
+        for entry in all.get_mut(design).into_iter().flat_map(|d| d.values_mut()) {
+            entry.generation += 1;
+            entry.note = None;
+        }
     }
 }
 
@@ -123,7 +230,10 @@ impl LayoutWatch {
 async fn measure(handle: &DesignHandle, board: &str) -> Option<String> {
     let plan = handle
         .read(|d| screenshot::plan_measurement(d.doc(), board, screenshot::Options::default()));
-    let boxes = screenshot::layout(plan.ok()?).await.ok()?;
+    let boxes = tokio::time::timeout(MEASURE_LIMIT, screenshot::layout(plan.ok()?))
+        .await
+        .ok()?
+        .ok()?;
     let notes = handle.read(|d| layout_notes(d.doc(), board, &boxes));
     if notes.is_empty() || notes.starts_with(CLEAN) {
         return None;
@@ -137,13 +247,17 @@ async fn measure(handle: &DesignHandle, board: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn note(watch: &LayoutWatch, design: &str, board: &str, text: &str) {
+        let g = watch.bump(design, board);
+        watch.finish(design, board, g, Some(text.into()));
+    }
+
     #[test]
     fn a_note_is_spent_once_it_is_read() {
         let watch = LayoutWatch::default();
-        let g = watch.bump("d", "a");
-        watch.finish("d", "a", g, Some("clipped".into()));
-        assert_eq!(watch.take("d").as_deref(), Some("clipped"));
-        assert_eq!(watch.take("d"), None);
+        note(&watch, "d", "a", "clipped");
+        assert_eq!(Taken::text(&watch.take("d")), "clipped");
+        assert!(watch.take("d").is_empty());
     }
 
     #[test]
@@ -151,30 +265,42 @@ mod tests {
         let watch = LayoutWatch::default();
         let old = watch.bump("d", "a");
         let new = watch.bump("d", "a");
+        assert!(!watch.is_current("d", "a", old));
         watch.finish("d", "a", old, Some("stale".into()));
-        assert_eq!(watch.take("d"), None);
+        assert!(watch.take("d").is_empty());
         watch.finish("d", "a", new, Some("fresh".into()));
-        assert_eq!(watch.take("d").as_deref(), Some("fresh"));
+        assert_eq!(Taken::text(&watch.take("d")), "fresh");
     }
 
     #[test]
-    fn a_newer_edit_clears_the_note_it_replaces() {
+    fn invalidating_clears_notes_and_cancels_measurements_under_way() {
         let watch = LayoutWatch::default();
-        let g = watch.bump("d", "a");
-        watch.finish("d", "a", g, Some("clipped".into()));
-        watch.bump("d", "a");
-        assert_eq!(watch.take("d"), None);
+        note(&watch, "d", "a", "clipped");
+        let running = watch.bump("d", "b");
+        watch.invalidate("d");
+        assert!(!watch.is_current("d", "b", running));
+        watch.finish("d", "b", running, Some("late".into()));
+        assert!(watch.take("d").is_empty());
     }
 
     #[test]
-    fn notes_are_kept_per_design_and_discarded_on_request() {
+    fn a_failed_result_gives_its_notes_back_unless_the_artboard_changed() {
         let watch = LayoutWatch::default();
-        for design in ["d1", "d2"] {
-            let g = watch.bump(design, "a");
-            watch.finish(design, "a", g, Some(format!("note {design}")));
-        }
-        watch.discard("d1");
-        assert_eq!(watch.take("d1"), None);
-        assert_eq!(watch.take("d2").as_deref(), Some("note d2"));
+        note(&watch, "d", "a", "kept");
+        note(&watch, "d", "b", "replaced");
+        let taken = watch.take("d");
+        watch.bump("d", "b");
+        watch.restore("d", taken);
+        assert_eq!(Taken::text(&watch.take("d")), "kept");
+    }
+
+    #[test]
+    fn notes_are_kept_per_design() {
+        let watch = LayoutWatch::default();
+        note(&watch, "d1", "a", "note d1");
+        note(&watch, "d2", "a", "note d2");
+        watch.invalidate("d1");
+        assert!(watch.take("d1").is_empty());
+        assert_eq!(Taken::text(&watch.take("d2")), "note d2");
     }
 }

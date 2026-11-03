@@ -434,10 +434,14 @@ impl FiniteMcp {
                     show_working(&handle, &actor, change);
                     if check && extra("layout") {
                         self.watch.after_edit(design_id, &handle, change).await;
-                        if let Some(note) = self.watch.take(design_id) {
+                        let notes = self.watch.take(design_id);
+                        if !notes.is_empty() {
                             text.push('\n');
-                            text.push_str(&note);
+                            text.push_str(&watch::Taken::text(&notes));
                         }
+                    } else if !check {
+                        // Any other edit can change what a waiting note says.
+                        self.watch.invalidate(design_id);
                     }
                 }
                 ok(text)
@@ -1674,22 +1678,39 @@ impl ServerHandler for FiniteMcp {
                 Some(id.to_owned())
             })
             .flatten();
-        let reports_layout = matches!(&*request.name, "get_layout" | "get_screenshot");
+        // Tools that report the layout, or change the design, make a waiting
+        // note out of date. Edits through `edit` clear it themselves.
+        let drops_note = matches!(
+            &*request.name,
+            "get_layout" | "get_screenshot" | "undo" | "redo" | "import_design"
+        );
+        let name = request.name.clone();
         // Before the tool runs: an edit starts a new check, which replaces the note.
-        let note = design.as_deref().and_then(|d| {
-            if reports_layout {
-                self.watch.discard(d);
-                None
+        let notes = design.as_deref().map(|d| {
+            if drops_note {
+                self.watch.invalidate(d);
+                Vec::new()
             } else {
                 self.watch.take(d)
             }
         });
         let tcc = ToolCallContext::new(self, request, context);
         let mut response = self.tool_router.call(tcc).await?;
-        if let (Some(note), CallToolResponse::Complete(result)) = (note, &mut response)
-            && result.is_error != Some(true)
-        {
-            result.content.push(ContentBlock::text(note));
+        if let (Some(design), Some(notes)) = (design.as_deref(), notes) {
+            if matches!(&*name, "undo" | "redo" | "import_design") {
+                self.watch.invalidate(design);
+            }
+            match &mut response {
+                CallToolResponse::Complete(result)
+                    if !notes.is_empty() && result.is_error != Some(true) =>
+                {
+                    result
+                        .content
+                        .push(ContentBlock::text(watch::Taken::text(&notes)));
+                }
+                // A failed call changed nothing, so the note still stands.
+                _ => self.watch.restore(design, notes),
+            }
         }
         Ok(response)
     }
