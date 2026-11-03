@@ -2,12 +2,18 @@
 //
 //   vp run bench
 //
-// It prints four numbers, each the median of a few runs:
+// It prints these numbers, each the median of a few runs:
 //
 // - open: from navigation until all 240 artboards of a 90,000-node design are
 //   drawn, plus the main thread's script and task time while it opens.
+// - bitmaps: from the design being drawn until every artboard in view without
+//   a script has switched to a cached bitmap (scripted ones stay live), which happens at this zoom because it's far out.
+// - bitmap memory: what the cached bitmaps hold at a pixel ratio of 2, fitted
+//   and zoomed in to just below where bitmaps stop.
+// - zoom: main-thread task time per zoom step at that zoom, with 600 ms
+//   between steps so the browser redraws what it can see after each.
 // - pan: frames per second while the wheel pans that design, fitted to the
-//   window, so every artboard is in view.
+//   window, plus the main thread's task time per second of panning.
 // - pan at 100%: the same at 100% zoom, where only a few artboards are in
 //   view and the rest can be skipped, plus the main thread's task time per
 //   second of panning (frames per second tops out near 60).
@@ -100,14 +106,25 @@ await page.send("Performance.enable");
 const metrics = async () => {
   const { metrics } = await page.send("Performance.getMetrics");
   const get = (name) => metrics.find((m) => m.name === name).value * 1000;
-  return { script: get("ScriptDuration"), task: get("TaskDuration") };
+  return {
+    script: get("ScriptDuration"),
+    task: get("TaskDuration"),
+    style: get("RecalcStyleDuration"),
+    layout: get("LayoutDuration"),
+  };
 };
 /** Main-thread script and task time spent while `work` runs. */
 const busy = async (work) => {
   const before = await metrics();
   const result = await work();
   const after = await metrics();
-  return { ...result, script: after.script - before.script, task: after.task - before.task };
+  return {
+    ...result,
+    script: after.script - before.script,
+    task: after.task - before.task,
+    style: after.style - before.style,
+    layout: after.layout - before.layout,
+  };
 };
 const settle = () =>
   page.eval(`new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(0))))`);
@@ -154,6 +171,8 @@ try {
   const bigNodes = await nodeCount(big);
   const opens = [];
   const pans = [];
+  const bitmaps = [];
+  const zooms = [];
   const zoomedPans = [];
   const sweeps = [];
   for (let run = 0; run < runs; run++) {
@@ -194,7 +213,44 @@ try {
       }
       return (await page.eval(`__frames`)) / ((Date.now() - started) / 1000);
     };
-    pans.push(await panFor(2000));
+    // Zoomed out to fit, the artboards in view become bitmaps one frame at a
+    // time. The ones far outside the view are hidden and stay as they are.
+    const inView = `[...document.querySelectorAll("[data-artboard]")].filter((a) => a.style.display !== "none" && !a.querySelector("iframe"))`;
+    const lodStarted = Date.now();
+    await page
+      .until(
+        `${inView}.every((a) => a.dataset.lod === "bitmap") && ${inView}.length > 0`,
+        Number(process.env.BENCH_BITMAP_WAIT ?? 60_000),
+      )
+      .catch(() => false);
+    bitmaps.push({
+      wall: Date.now() - lodStarted,
+      drawn: await page.eval(`document.querySelectorAll('[data-lod="bitmap"]').length`),
+      inView: await page.eval(`${inView}.length`),
+    });
+    await page.sleep(500);
+    await settle();
+    // Zoom in and out a step at a time, past the point where the browser redraws.
+    zooms.push(
+      await busy(async () => {
+        for (let i = 0; i < 6; i++) {
+          await page.send("Input.dispatchMouseEvent", {
+            type: "mouseWheel",
+            x: 700,
+            y: 450,
+            deltaX: 0,
+            deltaY: i % 2 ? 30 : -30,
+            modifiers: 2,
+          });
+          await page.sleep(600);
+          await settle();
+        }
+        return {};
+      }),
+    );
+    await page.sleep(500);
+    await settle();
+    pans.push(await busy(async () => ({ fps: await panFor(2000) })));
     // The "0" key sets 100% zoom, and the settle lets the browser redraw.
     await page.send("Input.dispatchKeyEvent", { type: "keyDown", key: "0", text: "0" });
     await page.send("Input.dispatchKeyEvent", { type: "keyUp", key: "0" });
@@ -219,6 +275,62 @@ try {
       }),
     );
   }
+
+  // What the bitmaps hold in memory at a pixel ratio of 2: fitted, and then
+  // zoomed in to just below where bitmaps stop, where they're sharpest.
+  await page.send("Emulation.setDeviceMetricsOverride", {
+    width: 1440,
+    height: 900,
+    deviceScaleFactor: 2,
+    mobile: false,
+  });
+  await page.send("Page.navigate", { url: `${base}/design/?id=${big}` });
+  await page.until(`document.querySelectorAll("[data-artboard]").length === 240`, 60_000);
+  const inViewAll = `[...document.querySelectorAll("[data-artboard]")].filter((a) => a.style.display !== "none" && !a.querySelector("iframe"))`;
+  const bitmapped = () =>
+    page
+      .until(
+        `${inViewAll}.length > 0 && ${inViewAll}.every((a) => a.dataset.lod === "bitmap")`,
+        60_000,
+      )
+      .catch(() => false);
+  const held = async () => ({
+    mb:
+      (Number(
+        await page.eval(
+          `document.querySelector("[data-artboard]").parentElement.dataset.bitmapPixels`,
+        ),
+      ) *
+        4) /
+      1e6,
+    count: await page.eval(`document.querySelectorAll('[data-artboard] canvas').length`),
+    zoom: await page.eval(
+      `new DOMMatrix(getComputedStyle(document.querySelector("[data-artboard]").parentElement.parentElement).transform).a`,
+    ),
+  });
+  await bitmapped();
+  await page.sleep(500);
+  const memoryFitted = await held();
+  for (let i = 0; i < 3; i++) {
+    await page.send("Input.dispatchMouseEvent", {
+      type: "mouseWheel",
+      x: 700,
+      y: 450,
+      deltaX: 0,
+      deltaY: -85,
+      modifiers: 2,
+    });
+    await page.sleep(300);
+  }
+  await bitmapped();
+  await page.sleep(1500);
+  const memoryZoomed = await held();
+  await page.send("Emulation.setDeviceMetricsOverride", {
+    width: 1440,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
 
   // One write_html of 30,000 nodes into an open design.
   const writes = [];
@@ -248,13 +360,27 @@ try {
   console.log(`  until drawn   ${ms(median(opens.map((o) => o.wall)))}`);
   console.log(`  script        ${ms(median(opens.map((o) => o.script)))}`);
   console.log(`  task          ${ms(median(opens.map((o) => o.task)))}`);
-  console.log(`pan             ${median(pans).toFixed(1)} fps`);
+  console.log(
+    `bitmaps         ${median(bitmaps.map((b) => b.drawn))} of ${median(bitmaps.map((b) => b.inView))} artboards in view, ${ms(median(bitmaps.map((b) => b.wall)))} after drawn`,
+  );
+  console.log(`zoom            task per step  ${ms(median(zooms.map((z) => z.task)) / 6)}`);
+  console.log(`pan             ${median(pans.map((p) => p.fps)).toFixed(1)} fps`);
+  console.log(`  task per second panned  ${ms(median(pans.map((p) => p.task)) / 2)}`);
   console.log(`pan at 100%     ${median(zoomedPans.map((p) => p.fps)).toFixed(1)} fps`);
   console.log(`  task per second panned  ${ms(median(zoomedPans.map((p) => p.task)) / 2)}`);
   console.log(`sweep at 100%   ${median(sweeps.map((p) => p.fps)).toFixed(1)} fps`);
   console.log(
     `  task per second swept   ${ms(median(sweeps.map((p) => p.task / p.seconds)))} (${median(sweeps.map((p) => p.seconds)).toFixed(1)} s)`,
   );
+  console.log(`bitmap memory at pixel ratio 2`);
+  for (const [name, m] of [
+    ["fitted", memoryFitted],
+    ["zoomed in", memoryZoomed],
+  ]) {
+    console.log(
+      `  ${name.padEnd(13)} ${m.mb.toFixed(1)} MB in ${m.count} bitmaps, at ${(m.zoom * 100).toFixed(1)}% zoom`,
+    );
+  }
   console.log(`write_html, 30,000 nodes`);
   console.log(`  until drawn   ${ms(median(writes.map((w) => w.wall)))}`);
   console.log(`  script        ${ms(median(writes.map((w) => w.script)))}`);
@@ -265,7 +391,7 @@ try {
   console.log(`  script        ${perThumb("script")} per thumbnail`);
   console.log(`  task          ${perThumb("task")} per thumbnail`);
   console.log(
-    `raw runs: ${JSON.stringify({ opens, pans, zoomedPans, sweeps, writes, emptyList, thumbs })}`,
+    `raw runs: ${JSON.stringify({ memoryFitted, memoryZoomed, opens, bitmaps, zooms, pans, zoomedPans, sweeps, writes, emptyList, thumbs })}`,
   );
 } finally {
   await page.close();

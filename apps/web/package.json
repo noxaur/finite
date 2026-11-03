@@ -20,6 +20,7 @@
     "@types/node": "catalog:",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
+    "happy-dom": "catalog:",
     "typescript": "catalog:",
     "wasm": "workspace:*"
   }

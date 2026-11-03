@@ -176,9 +176,10 @@ export function DesignCanvas({ id }: { id: string }) {
     rendererRef.current = renderer;
     cameraRef.current = camera;
     // Hide the artboards outside the view, before React re-renders for the zoom.
-    camera.subscribe(() => renderer.setViewport(camera.visibleWorld()));
+    const sync = () => renderer.setViewport(camera.visibleWorld(), camera.view.zoom);
+    camera.subscribe(sync);
     camera.subscribe((view) => setZoom(view.zoom));
-    const resize = new ResizeObserver(() => renderer.setViewport(camera.visibleWorld()));
+    const resize = new ResizeObserver(sync);
     resize.observe(viewport);
     // A new renderer starts on the first page.
     setPickedPage(null);

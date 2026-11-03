@@ -794,9 +794,17 @@ try {
     );
   await page.until(`!!document.querySelector('[data-artboard="${farLive}"] iframe')`, 10_000);
   await page.sleep(300);
+  // Fit is far enough out that artboards in view turn into bitmaps, except
+  // a scripted one, which stays live: "drawn" means a loaded iframe or a bitmap.
+  const lod = (id) =>
+    page.eval(`document.querySelector('[data-artboard="${id}"]').dataset.lod ?? ""`);
+  const boardDrawn = async () => (await loaded()) || (await lod(farLive)) === "bitmap";
   check(
     "zoomed out to fit, every artboard is drawn",
-    !(await hidden(near)) && !(await hidden(far)) && !(await hidden(farLive)) && (await loaded()),
+    !(await hidden(near)) &&
+      !(await hidden(far)) &&
+      !(await hidden(farLive)) &&
+      (await boardDrawn()),
   );
   const fitted = await zoom();
   await page.key("0");
@@ -821,7 +829,56 @@ try {
       ),
     ) && (await zoom()) === fitted,
   );
-  check("the iframe loads again once it's in view", await loaded());
+  check("the artboard is drawn again once it's in view", await boardDrawn());
+
+  // Far zoomed out, artboards in view are bitmaps of the live ones, and a
+  // sandboxed one stays live, since its scripts' output isn't in the HTML.
+  // Zooming in brings the live DOM back.
+  await page.goto(`${base}/design/?id=${wide}`);
+  await page.until(`document.querySelectorAll("[data-artboard]").length === 3`, 10_000);
+  await page.sleep(300);
+  await page.eval(`window.dispatchEvent(new Event("resize"))`);
+  // The three artboards are 30,000 apart: fit zooms out to the minimum.
+  check(
+    "far zoomed out, artboards in view are drawn as bitmaps",
+    Boolean(
+      await page.until(
+        `[...document.querySelectorAll("[data-artboard]")].filter((a) => a.style.display !== "none" && !a.querySelector("iframe")).every((a) => a.dataset.lod === "bitmap")`,
+        10_000,
+      ),
+    ),
+  );
+  check(
+    "a bitmapped artboard has a canvas, and a scripted one stays live",
+    (await page.eval(`document.querySelector('[data-artboard="${near}"] canvas') !== null`)) ===
+      true &&
+      (await loaded()) &&
+      (await lod(farLive)) === "",
+  );
+  await page.eval(`window.__bitmap = document.querySelector('[data-artboard="${near}"] canvas')`);
+  await agent.call("update_styles", {
+    designId: wide,
+    updates: [{ nodeIds: [near], styles: { background: "rgb(255, 0, 0)" } }],
+  });
+  check(
+    "an edit builds a new bitmap once it pauses, and the artboard stays a bitmap",
+    Boolean(
+      await page.until(
+        `(() => { const c = document.querySelector('[data-artboard="${near}"] canvas'); return c && c !== window.__bitmap; })()`,
+        10_000,
+      ),
+    ) && (await lod(near)) === "bitmap",
+  );
+  await page.key("0");
+  check(
+    "zoomed in, the artboard is live DOM again",
+    Boolean(
+      await page.until(
+        `!document.querySelector('[data-artboard="${near}"]').dataset.lod && !document.querySelector('[data-artboard="${near}"] canvas')?.isConnected`,
+        5000,
+      ),
+    ),
+  );
 
   // Editing a component draws its instances in hidden artboards too, without
   // loading a hidden sandboxed one, and the index learns the new size.

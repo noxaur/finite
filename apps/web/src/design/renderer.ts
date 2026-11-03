@@ -2,6 +2,15 @@ import * as stylex from "@stylexjs/stylex";
 import { colors } from "@/styles/tokens.stylex";
 import { Culler, pageBox } from "./culling";
 import { artboardDocument, BASE_LAYER, pixelSize } from "./html";
+import {
+  BITMAP_BUDGET,
+  bitmapScale,
+  evictionPlan,
+  rasterize,
+  rebuildDelay,
+  wantsBitmaps,
+  type Rasterizer,
+} from "./lod";
 import type { Applied, Replica } from "./replica";
 import type { Node } from "./schema";
 import { designModel } from "./wasm";
@@ -33,6 +42,9 @@ const BLOCKED_TAGS = new Set([
   "template",
 ]);
 
+/** A bitmap is drawn again only once the zoom needs it at this many times its scale; until then CSS scales it. */
+const BLUR_FACTOR = 2;
+
 /** How long a sandboxed artboard waits for edits to settle before reloading. */
 const RELOAD_DELAY_MS = 150;
 const MAX_SIDE = 16_000;
@@ -53,6 +65,28 @@ interface Frame {
   /** Set for artboards with scripts, rendered in a sandboxed iframe. */
   readonly iframe: HTMLIFrameElement | null;
   reload?: ReturnType<typeof setTimeout>;
+  /** The artboard drawn as a bitmap, once built. It's stale after an edit until rebuilt. */
+  bitmap?: HTMLCanvasElement;
+  /**
+   * Drawn as `bitmap` instead of live DOM, which is hidden, and hidden DOM
+   * runs no CSS animations. A sandboxed artboard is never a bitmap: its
+   * scripts' output isn't in the replica's HTML.
+   */
+  shown: boolean;
+  /** The `version` the bitmap shows. It's stale once an edit moves `version` past it. */
+  bitmapVersion?: number;
+  /** The scale the bitmap was drawn at. It's drawn again, sharper, when the zoom outgrows it. */
+  bitmapScale?: number;
+  /** The size the bitmap was drawn at, which the artboard keeps while it's shown. */
+  bitmapSize?: { readonly width: number; readonly height: number };
+  /** Counts edits, so a bitmap built before the latest one isn't used. */
+  version: number;
+  /** The version the browser couldn't draw, so it isn't retried until an edit changes it. */
+  failed?: number;
+  /** When the bitmap was last built, in ms since the epoch. */
+  built: number;
+  /** Rebuilds the bitmap once edits pause. */
+  rebuild?: ReturnType<typeof setTimeout>;
   /** The iframe's latest answer to "what's under this point?", in its own coordinates. */
   hit?: { readonly x: number; readonly y: number; readonly id: string | null };
   /** The point last asked about, so the same question isn't sent twice. */
@@ -103,6 +137,10 @@ export interface RendererOptions {
   readonly onLayout?: () => void;
   /** Maps a canvas point to a page point, for placing nodes in hidden artboards. */
   readonly toPage?: (x: number, y: number) => { x: number; y: number };
+  /** Draws an artboard into a canvas. Tests replace it, since they have no layout engine. */
+  readonly rasterize?: Rasterizer;
+  /** The most pixels all bitmaps may hold together (`BITMAP_BUDGET`). */
+  readonly bitmapBudget?: number;
   /** Called when a sandboxed artboard reports a new size, which an auto-height one does after its scripts run. */
   readonly onResize?: () => void;
 }
@@ -151,6 +189,17 @@ export class Renderer {
     },
     (run) => requestAnimationFrame(run),
   );
+  /** Zoomed far out, the artboards in view are drawn as bitmaps. */
+  private bitmaps = false;
+  /** Artboards waiting for a bitmap, built one per frame so zooming out doesn't stall. */
+  private readonly queue = new Set<string>();
+  private pumping = false;
+  /** The middle of the area in view, which the bitmaps farthest from are dropped first. */
+  private center: { readonly x: number; readonly y: number } | null = null;
+  /** The canvas zoom, which sets how sharp bitmaps are drawn. */
+  private zoom = 1;
+  /** Pixels held by all bitmaps together. */
+  private pixels = 0;
   /** Tells when an artboard's size changes, by content loading or an edit. */
   private readonly resizes =
     typeof ResizeObserver === "undefined"
@@ -183,16 +232,23 @@ export class Renderer {
     this.abort.abort();
     this.culler.dispose();
     this.resizes?.disconnect();
-    for (const frame of this.frames.values()) clearTimeout(frame.reload);
+    for (const frame of this.frames.values()) {
+      clearTimeout(frame.reload);
+      clearTimeout(frame.rebuild);
+    }
+    this.queue.clear();
   }
 
   /** Rebuilds everything from the replica. */
   reset() {
     for (const frame of this.frames.values()) {
       clearTimeout(frame.reload);
+      clearTimeout(frame.rebuild);
+      this.discard(frame);
       frame.root.remove();
     }
     this.frames.clear();
+    this.queue.clear();
     this.culler.clear();
     this.elements.clear();
     this.scripts.clear();
@@ -217,9 +273,22 @@ export class Renderer {
    * An artboard is measured while shown and keeps that size while hidden,
    * so `artboardBounds` and "fit to view" still see it. Until it's
    * measured it stays drawn. Passes run once per frame.
+   *
+   * Below a zoom the artboards in view are drawn as cached bitmaps too
+   * (see `./lod`), and as live DOM again above it.
    */
-  setViewport(area: Bounds | null) {
+  setViewport(area: Bounds | null, zoom = 1) {
     this.culler.setArea(area);
+    const zoomed = zoom !== this.zoom;
+    this.zoom = zoom;
+    this.center = area && { x: area.x + area.width / 2, y: area.y + area.height / 2 };
+    const bitmaps = area !== null && wantsBitmaps(zoom, this.bitmaps);
+    // A pan changes which artboards are in view, which the culler reports one by one;
+    // only a new mode or zoom asks every artboard.
+    if (bitmaps !== this.bitmaps || (bitmaps && zoomed)) {
+      this.bitmaps = bitmaps;
+      this.syncBitmaps();
+    }
   }
 
   private setCulled(id: string, frame: Frame, culled: boolean) {
@@ -233,17 +302,244 @@ export class Renderer {
       }
     }
     frame.root.style.display = culled ? "none" : "";
+    // Bitmaps in view can't be dropped, so hiding one is when it can be.
+    if (culled) this.evict("");
+    if (!culled && this.bitmaps) {
+      // A bitmap that's still current comes back as it was, without loading the iframe.
+      if (frame.bitmap && frame.bitmapVersion === frame.version) {
+        this.showBitmap(frame);
+        if (this.blurry(frame)) this.enqueue(id);
+        return;
+      }
+      // An edit made while it was hidden left the bitmap stale: draw live DOM
+      // until a new one is built, instead of showing the old.
+      const wasShown = frame.shown;
+      if (wasShown) this.showLive(id, frame);
+      this.enqueue(id);
+      if (wasShown) return;
+    }
     if (!frame.iframe) return;
     clearTimeout(frame.reload);
-    if (culled) {
-      frame.iframe.srcdoc = "";
-      delete frame.hit;
-      delete frame.asked;
-      frame.rects.clear();
-      frame.pendingRects.clear();
-    } else {
-      frame.iframe.srcdoc = artboardDocument(this.replica, id);
+    if (culled) this.unload(frame.iframe, frame);
+    else this.load(id, frame.iframe);
+  }
+
+  /** Loads a sandboxed artboard's latest document. */
+  private load(id: string, iframe: HTMLIFrameElement) {
+    iframe.srcdoc = artboardDocument(this.replica, id);
+  }
+
+  /** Empties a sandboxed artboard's iframe, which stops its scripts, and forgets what it said about its layout. */
+  private unload(iframe: HTMLIFrameElement, frame: Frame) {
+    clearTimeout(frame.reload);
+    iframe.srcdoc = "";
+    delete frame.hit;
+    delete frame.asked;
+    frame.rects.clear();
+    frame.pendingRects.clear();
+  }
+
+  /** Brings the artboards in view in line with `this.bitmaps`: draws or queues bitmaps, or goes back to live DOM. */
+  private syncBitmaps() {
+    for (const [id, frame] of this.frames) {
+      if (!this.bitmaps) {
+        if (frame.shown) this.showLive(id, frame);
+        // Live DOM is what's on screen now; the pixels aren't worth holding.
+        this.discard(frame);
+      } else if (!this.culler.isCulled(id)) {
+        if (!frame.shown) {
+          if (frame.bitmap && frame.bitmapVersion === frame.version) this.showBitmap(frame);
+          else this.enqueue(id);
+        }
+        // Zoomed in since it was drawn: draw it again sharper, and show this one meanwhile.
+        if (frame.shown && this.blurry(frame)) this.enqueue(id);
+      }
     }
+  }
+
+  private enqueue(id: string) {
+    const frame = this.frames.get(id);
+    if (!frame || frame.iframe || frame.failed === frame.version) return;
+    this.queue.add(id);
+    if (this.pumping) return;
+    this.pumping = true;
+    void this.pump();
+  }
+
+  /** Builds the queued bitmaps, one per animation frame, in the order they were asked for. */
+  private async pump() {
+    try {
+      for (;;) {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+        const id = this.queue.values().next().value;
+        if (id === undefined) return;
+        this.queue.delete(id);
+        const frame = this.frames.get(id);
+        if (frame && this.bitmaps && !this.culler.isCulled(id)) await this.drawBitmap(id, frame);
+      }
+    } finally {
+      this.pumping = false;
+    }
+  }
+
+  /** Draws the artboard into a canvas from the replica, and shows it if bitmaps are on. */
+  private async drawBitmap(id: string, frame: Frame) {
+    // A current bitmap being drawn again sharper keeps its size, and so avoids a layout.
+    const size =
+      frame.shown && frame.bitmapVersion === frame.version && frame.bitmapSize
+        ? frame.bitmapSize
+        : this.liveSize(frame);
+    if (!size) return;
+    const version = frame.version;
+    const scale = this.scaleFor(size);
+    const model = designModel();
+    const css = `@layer ${BASE_LAYER} { ${model.baseCss} }${
+      this.replica.css === null ? "" : model.sharedStyle(this.replica.css, false)
+    }`;
+    let canvas: HTMLCanvasElement;
+    try {
+      canvas = await (this.options.rasterize ?? rasterize)(
+        this.replica.exportHtml(id, true),
+        css,
+        size.width,
+        size.height,
+        scale,
+      );
+    } catch {
+      // The browser couldn't draw it; the artboard stays live.
+      frame.failed = version;
+      return;
+    }
+    // Edited while drawing: that bitmap is out of date. Wait for the next pause.
+    if (this.frames.get(id) !== frame || frame.version !== version) return;
+    frame.built = Date.now();
+    frame.bitmapSize = size;
+    frame.bitmapVersion = version;
+    frame.bitmapScale = scale;
+    canvas.className = stylex.props(styles.bitmap).className ?? "";
+    this.discard(frame);
+    frame.bitmap = canvas;
+    this.setPixels(this.pixels + canvas.width * canvas.height);
+    this.evict(id);
+    // Its size may have changed with the edit: measure it again.
+    this.culler.touch(id);
+    if (this.bitmaps && !this.culler.isCulled(id)) this.showBitmap(frame);
+  }
+
+  /** The scale to draw an artboard of `size` at, at the current zoom. */
+  private scaleFor(size: { readonly width: number; readonly height: number }): number {
+    return bitmapScale(size.width, size.height, window.devicePixelRatio || 1, this.zoom);
+  }
+
+  /** Whether the bitmap was drawn at less than 1/BLUR_FACTOR of the scale the zoom now calls for. */
+  private blurry(frame: Frame): boolean {
+    return (
+      frame.bitmapSize !== undefined &&
+      frame.bitmapScale !== undefined &&
+      frame.bitmapScale * BLUR_FACTOR < this.scaleFor(frame.bitmapSize)
+    );
+  }
+
+  /** Drops the artboard's bitmap. */
+  private discard(frame: Frame) {
+    if (!frame.bitmap) return;
+    this.setPixels(this.pixels - frame.bitmap.width * frame.bitmap.height);
+    frame.bitmap.remove();
+    delete frame.bitmap;
+  }
+
+  /** Records the pixels bitmaps hold, and shows it as `data-bitmap-pixels` on the world, for the bench. */
+  private setPixels(pixels: number) {
+    this.pixels = pixels;
+    this.world.dataset.bitmapPixels = String(pixels);
+  }
+
+  /**
+   * Drops bitmaps, farthest from the view first, until they fit the budget.
+   * Those in view stay, and so does the one just built (`keep`).
+   */
+  private evict(keep: string) {
+    const budget = this.options.bitmapBudget ?? BITMAP_BUDGET;
+    if (this.pixels <= budget) return;
+    const candidates = [];
+    for (const [id, frame] of this.frames) {
+      if (!frame.bitmap || id === keep) continue;
+      if (this.bitmaps && !this.culler.isCulled(id)) continue;
+      const box = this.culler.box(id);
+      const distance =
+        box && this.center
+          ? Math.hypot(
+              box.x + box.width / 2 - this.center.x,
+              box.y + box.height / 2 - this.center.y,
+            )
+          : 0;
+      candidates.push({ id, pixels: frame.bitmap.width * frame.bitmap.height, distance });
+    }
+    for (const id of evictionPlan(candidates, this.pixels, budget)) {
+      const frame = this.frames.get(id)!;
+      // An evicted artboard that's still shown as a bitmap goes back to live DOM, hidden by culling.
+      if (frame.shown) this.showLive(id, frame);
+      this.discard(frame);
+    }
+  }
+
+  /**
+   * The artboard's size now. One drawn as a bitmap isn't laid out, so its
+   * live DOM is shown for a moment (nothing paints in between) to measure it.
+   */
+  private liveSize(frame: Frame): { readonly width: number; readonly height: number } | null {
+    const hidden = frame.shown;
+    if (hidden) this.setLive(frame, true);
+    const width = frame.root.offsetWidth;
+    const height = frame.root.offsetHeight;
+    if (hidden) this.setLive(frame, false);
+    return width === 0 && height === 0 ? null : { width, height };
+  }
+
+  /** Shows or hides the artboard's live content, keeping its box the size it has. */
+  private setLive(frame: Frame, live: boolean) {
+    const inner = frame.shadow ? frame.content.firstElementChild : frame.iframe;
+    if (inner instanceof HTMLElement) inner.style.display = live ? "" : "none";
+    const size = frame.bitmapSize;
+    frame.content.style.width = live || !size ? "" : `${size.width}px`;
+    frame.content.style.height = live || !size ? "" : `${size.height}px`;
+  }
+
+  private showBitmap(frame: Frame) {
+    if (!frame.bitmap || !frame.bitmapSize) return;
+    if (!frame.shown) {
+      frame.shown = true;
+      frame.root.dataset.lod = "bitmap";
+    }
+    // The bitmap may have been built at another size than the box has now.
+    this.setLive(frame, false);
+    if (frame.bitmap.parentElement !== frame.content) frame.content.append(frame.bitmap);
+  }
+
+  private showLive(id: string, frame: Frame) {
+    frame.shown = false;
+    delete frame.root.dataset.lod;
+    this.setLive(frame, true);
+    frame.bitmap?.remove();
+    this.culler.touch(id);
+    if (frame.iframe && !this.culler.isCulled(id)) this.load(id, frame.iframe);
+  }
+
+  /** An edit changed the artboard: its bitmap is out of date, and is rebuilt once edits pause. */
+  private invalidate(id: string, frame: Frame) {
+    frame.version++;
+    clearTimeout(frame.rebuild);
+    if (!this.bitmaps) {
+      // Live DOM is current; a new bitmap is built when zooming out again.
+      this.discard(frame);
+      return;
+    }
+    frame.rebuild = setTimeout(
+      () => {
+        if (this.frames.get(id) === frame && this.bitmaps) this.enqueue(id);
+      },
+      rebuildDelay(Date.now(), frame.built),
+    );
   }
 
   /** Shows only the artboards on `page` (`null`: the first page). */
@@ -288,6 +584,7 @@ export class Renderer {
       for (const [id, frame] of this.frames) {
         if (frame.sharedStyle) frame.sharedStyle.textContent = css;
         else this.scheduleReload(id, frame);
+        this.invalidate(id, frame);
       }
       return;
     }
@@ -316,7 +613,10 @@ export class Renderer {
       if (!frame || !node) continue;
       if (!layoutOnly) this.culler.touch(id);
       if ((frame.iframe !== null) !== this.isLive(id)) this.remount(node);
-      else if (frame.iframe && !layoutOnly) this.scheduleReload(id, frame);
+      else if (!layoutOnly) {
+        this.invalidate(id, frame);
+        if (frame.iframe) this.scheduleReload(id, frame);
+      }
     }
   }
 
@@ -389,6 +689,8 @@ export class Renderer {
       ) {
         continue;
       }
+      // A bitmap has no live nodes to ask, so it answers with the artboard.
+      if (frame.shown) return { artboardId, nodeId: artboardId };
       if (frame.iframe) {
         const nodeId = this.askHit(frame, clientX, clientY, exact);
         if (exact && nodeId === null) return null;
@@ -430,6 +732,10 @@ export class Renderer {
       if (!box || !this.options.toPage) return null;
       const r = pageBox(box, this.options.toPage);
       return new DOMRect(r.x, r.y, r.width, r.height);
+    }
+    // Hidden behind a bitmap, a node has no layout either: report the artboard.
+    if (hidden && this.frames.get(hidden.id)?.shown) {
+      return this.frames.get(hidden.id)!.content.getBoundingClientRect();
     }
     const el = this.elements.get(id);
     if (el?.isConnected) {
@@ -549,6 +855,7 @@ export class Renderer {
       if (frame.shadow) this.build(node, frame.shadow, false);
       this.culler.add(node.id, node.x ?? 0, node.y ?? 0);
       this.resizes?.observe(frame.root);
+      if (this.bitmaps) this.enqueue(node.id);
       return;
     }
     // Nodes in sandboxed artboards have no element here, so this skips them.
@@ -640,6 +947,9 @@ export class Renderer {
     const frame = this.frames.get(id);
     if (frame) {
       clearTimeout(frame.reload);
+      clearTimeout(frame.rebuild);
+      this.queue.delete(id);
+      this.discard(frame);
       frame.root.remove();
       this.frames.delete(id);
       this.culler.remove(id);
@@ -715,6 +1025,9 @@ export class Renderer {
         commentStyle: null,
         sharedStyle: null,
         iframe,
+        shown: false,
+        version: 0,
+        built: 0,
         rects: new Map(),
         pendingRects: new Set(),
       };
@@ -748,6 +1061,9 @@ export class Renderer {
       commentStyle,
       sharedStyle,
       iframe: null,
+      shown: false,
+      version: 0,
+      built: 0,
       rects: new Map(),
       pendingRects: new Set(),
     };
@@ -762,10 +1078,15 @@ export class Renderer {
   private scheduleReload(id: string, frame: Frame) {
     clearTimeout(frame.reload);
     // A hidden artboard loads its latest version when it's shown again.
-    if (this.culler.isCulled(id)) return;
+    if (this.culler.isCulled(id) || frame.shown) return;
     frame.reload = setTimeout(() => {
-      if (this.frames.get(id) === frame && frame.iframe && !this.culler.isCulled(id)) {
-        frame.iframe.srcdoc = artboardDocument(this.replica, id);
+      if (
+        this.frames.get(id) === frame &&
+        frame.iframe &&
+        !this.culler.isCulled(id) &&
+        !frame.shown
+      ) {
+        this.load(id, frame.iframe);
         // A new document: earlier answers about its layout no longer hold.
         delete frame.hit;
         delete frame.asked;
@@ -931,6 +1252,13 @@ const styles = stylex.create({
   },
   content: {
     contain: "layout paint",
+  },
+  bitmap: {
+    position: "absolute",
+    left: 0,
+    top: 0,
+    width: "100%",
+    height: "100%",
   },
   host: {
     display: "block",
