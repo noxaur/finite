@@ -1069,6 +1069,7 @@ mod tests {
         let anchor = Anchor {
             artboard_id: None,
             node_id: None,
+            extra_node_ids: Vec::new(),
             x: 1.0,
             y: 2.0,
         };
@@ -1112,6 +1113,7 @@ mod tests {
         let anchor = Anchor {
             artboard_id: Some("board".into()),
             node_id: None,
+            extra_node_ids: Vec::new(),
             x: 1.0,
             y: 2.0,
         };
@@ -1331,6 +1333,7 @@ mod tests {
         let anchor = Anchor {
             artboard_id: Some("board".into()),
             node_id: None,
+            extra_node_ids: Vec::new(),
             x: 1.0,
             y: 2.0,
         };

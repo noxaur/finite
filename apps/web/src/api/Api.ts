@@ -14,6 +14,8 @@ export interface NewComment {
   /** The artboard the pin sits on. `x` and `y` are relative to it, or to the canvas when `null`. */
   readonly artboardId: string | null;
   readonly nodeId: string | null;
+  /** More elements in the same artboard, picked with shift-click. */
+  readonly extraNodeIds: ReadonlyArray<string>;
   readonly x: number;
   readonly y: number;
 }

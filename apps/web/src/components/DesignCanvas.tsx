@@ -16,7 +16,15 @@ import { localUser } from "@/lib/user";
 import { timeAgo } from "@/lib/time";
 import { runtime } from "@/runtime";
 import { colors, radii, space } from "@/styles/tokens.stylex";
-import { CommentLayer, type Draft, type Mode, pinPosition, ToolPill } from "./Comments";
+import {
+  CommentLayer,
+  type Draft,
+  type Mode,
+  pinPosition,
+  selectionOf,
+  ToolPill,
+  toggleInDraft,
+} from "./Comments";
 import { CommentsPanel } from "./CommentsPanel";
 import { PagesSidebar } from "./PagesSidebar";
 import { SharedCssPanel } from "./SharedCss";
@@ -92,7 +100,7 @@ export function DesignCanvas({ id }: { id: string }) {
   const framesRef = useRef<HTMLDivElement>(null);
   const pressRef = useRef<{ x: number; y: number } | null>(null);
   const hoverFrame = useRef(0);
-  const pointerRef = useRef<{ x: number; y: number } | null>(null);
+  const pointerRef = useRef<{ x: number; y: number; shift: boolean } | null>(null);
   const refreshHover = useRef(() => {});
   const cameraRef = useRef<Camera | null>(null);
   // The view the camera framed the artboards with, until the person moves it.
@@ -269,7 +277,7 @@ export function DesignCanvas({ id }: { id: string }) {
   // Read by the renderer's onLayout callback, which outlives this render.
   refreshHover.current = () => {
     const pointer = pointerRef.current;
-    if (mode === "comment" && !draft && pointer) hoverAt(pointer.x, pointer.y);
+    if (mode === "comment" && pointer && (!draft || pointer.shift)) hoverAt(pointer.x, pointer.y);
   };
 
   // Names the component part under the pointer: people can't tell from the
@@ -287,9 +295,14 @@ export function DesignCanvas({ id }: { id: string }) {
     // Not while dragging to pan.
     if (pressRef.current) setPart(null);
     else partFrame.current = requestAnimationFrame(() => partAt(x, y));
-    if (mode !== "comment" || draft) return;
-    const { clientX, clientY } = e;
-    pointerRef.current = { x: clientX, y: clientY };
+    if (mode !== "comment") return;
+    const { clientX, clientY, shiftKey } = e;
+    pointerRef.current = { x: clientX, y: clientY, shift: shiftKey };
+    // With a draft open, outline only what a shift-click would add.
+    if (draft && !shiftKey) {
+      setHover(null);
+      return;
+    }
     cancelAnimationFrame(hoverFrame.current);
     hoverFrame.current = requestAnimationFrame(() => hoverAt(clientX, clientY));
   };
@@ -299,6 +312,13 @@ export function DesignCanvas({ id }: { id: string }) {
     pressRef.current = null;
     const moved = press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > CLICK_SLOP;
     if (moved || (e.target instanceof Element && e.target.closest("[data-camera-ignore]"))) return;
+    // Shift-click adds an element in the draft's artboard, or takes it out.
+    // Only on a sure answer: a stale one could take out the wrong element.
+    if (mode === "comment" && draft?.nodeId && e.shiftKey) {
+      const hit = rendererRef.current?.hitTest(e.clientX, e.clientY, true) ?? null;
+      if (hit?.artboardId === draft.artboardId) setDraft(toggleInDraft(draft, hit.nodeId));
+      return;
+    }
     // A click elsewhere closes the open thread or draft before it starts a new one.
     if (openId || draft) {
       setOpenId(null);
@@ -316,17 +336,24 @@ export function DesignCanvas({ id }: { id: string }) {
         ? {
             artboardId: hit.artboardId,
             nodeId: hit.nodeId,
+            extraNodeIds: [],
             x: point.x - (board.x ?? 0),
             y: point.y - (board.y ?? 0),
           }
-        : { artboardId: null, nodeId: null, ...point },
+        : { artboardId: null, nodeId: null, extraNodeIds: [], ...point },
     );
   };
 
   const postComment = async (body: string) => {
     if (!draft) return undefined;
+    // Leave out elements an agent deleted or moved away while the person typed.
+    const replica = sessionRef.current?.replica;
+    const [nodeId = null, ...extraNodeIds] = selectionOf(draft).filter(
+      (node) => replica?.artboardOf(node)?.id === draft.artboardId,
+    );
+    const pin = { ...draft, nodeId, extraNodeIds };
     const exit = await runtime.runPromiseExit(
-      Api.use((api) => api.createComment(id, { author: localUser(), body, ...draft })),
+      Api.use((api) => api.createComment(id, { author: localUser(), body, ...pin })),
     );
     if (Exit.isFailure(exit)) return unsent(exit.cause);
     sessionRef.current?.upsertComment(exit.value);
@@ -431,12 +458,14 @@ export function DesignCanvas({ id }: { id: string }) {
       });
   };
 
-  // Outline what a comment points at: the draft's target, the open thread's
-  // node, or whatever is under the pointer in comment mode. Rects are
+  // Outline what a comment points at: the draft's elements, the open
+  // thread's, and whatever is under the pointer in comment mode. Rects are
   // converted to canvas coordinates so they pan and zoom with the design.
   const openComment = openId ? comments.get(openId) : undefined;
-  const target =
-    draft?.nodeId ?? openComment?.nodeId ?? (mode === "comment" ? hover?.nodeId : undefined);
+  const targets = new Set([
+    ...(draft ? selectionOf(draft) : openComment ? selectionOf(openComment) : []),
+    ...(mode === "comment" && !openComment && hover ? [hover.nodeId] : []),
+  ]);
   const canvasRect = (nodeId: string) => {
     const rect = rendererRef.current?.nodeRect(nodeId);
     const camera = cameraRef.current;
@@ -446,7 +475,11 @@ export function DesignCanvas({ id }: { id: string }) {
     return { x: a.x, y: a.y, width: b.x - a.x, height: b.y - a.y };
   };
   const outlines = [
-    ...(target ? [{ key: "target", rect: canvasRect(target), flash: false }] : []),
+    ...[...targets].map((nodeId) => ({
+      key: `target:${nodeId}`,
+      rect: canvasRect(nodeId),
+      flash: false,
+    })),
     ...flash.map((nodeId) => ({ key: `flash:${nodeId}`, rect: canvasRect(nodeId), flash: true })),
   ];
 
@@ -485,6 +518,13 @@ export function DesignCanvas({ id }: { id: string }) {
         ref={viewportRef}
         onPointerDown={(e) => {
           pressRef.current = { x: e.clientX, y: e.clientY };
+        }}
+        // Keeps the draft's text box focused through a shift-click.
+        onMouseDown={(e) => {
+          const onCanvas = !(
+            e.target instanceof Element && e.target.closest("[data-camera-ignore]")
+          );
+          if (draft && e.shiftKey && onCanvas) e.preventDefault();
         }}
         onPointerMove={onCanvasPointerMove}
         onPointerLeave={() => {

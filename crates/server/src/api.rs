@@ -386,6 +386,8 @@ struct CreateComment {
     artboard_id: Option<String>,
     #[serde(default)]
     node_id: Option<String>,
+    #[serde(default)]
+    extra_node_ids: Vec<String>,
     x: f64,
     y: f64,
 }
@@ -417,6 +419,7 @@ async fn create_comment(
     let anchor = Anchor {
         artboard_id: body.artboard_id,
         node_id: body.node_id,
+        extra_node_ids: body.extra_node_ids,
         x: body.x,
         y: body.y,
     };

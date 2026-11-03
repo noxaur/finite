@@ -173,6 +173,7 @@ try {
     html: `<div data-name="Hero" style="padding:48px;display:flex;flex-direction:column;gap:16px"><h1 data-name="Title" style="margin:0;font:600 36px system-ui">Hello</h1><button data-name="CTA" style="width:160px;height:48px">Start</button></div>`,
   });
   const cta = idAfter(built, '"CTA"');
+  const title = idAfter(built, '"Title"');
   const live = idAfter(
     await agent.call("create_artboard", {
       designId: design,
@@ -432,10 +433,24 @@ try {
   const textarea = await rectOf(`document.querySelector("textarea")`);
   await page.click(textarea.x + 10, textarea.y + 10);
   await page.type("Make it orange");
+  // Shift-click adds the title to what the comment points at.
+  const heading = await rectOf(`${shadow}.querySelector("h1")`);
+  // Its left end: the comment box opens over the rest.
+  await page.click(heading.x + 5, heading.y + heading.h / 2, { shift: true });
+  await page.until(`document.querySelector('[data-selection-count="2"]')`);
+  check(
+    "shift-click outlines both elements",
+    (await page.eval(`document.querySelectorAll('[data-outline="target"]').length`)) === 2,
+  );
+  check(
+    "and keeps the comment box focused",
+    await page.eval(`document.activeElement?.value === "Make it orange"`),
+  );
   await page.key("Enter", "Enter", 13);
   await page.until(`document.querySelectorAll('button[aria-label^="Comment:"]').length === 1`);
   const [posted] = await comments(design);
   check("the comment points at the button", posted?.nodeId === cta);
+  check("and the title picked with it", posted?.extraNodeIds?.[0] === title);
   check("under the name the person set", posted?.messages[0].author.name === "Tester");
 
   // The agent picks it up, changes the button, and replies.

@@ -110,6 +110,8 @@ export const Comment = Schema.Struct({
   artboardId: Schema.NullOr(Schema.String),
   /** The element the user pointed at. */
   nodeId: Schema.NullOr(Schema.String),
+  /** The other elements the user selected with it. */
+  extraNodeIds: Schema.optionalKey(Schema.Array(Schema.String)),
   x: Schema.Number,
   y: Schema.Number,
   resolved: Schema.Boolean,

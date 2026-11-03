@@ -98,6 +98,7 @@ async fn wire_messages_match_the_fixture() {
     let anchor = Anchor {
         artboard_id: Some("board".into()),
         node_id: Some("n1".into()),
+        extra_node_ids: Vec::new(),
         x: 24.0,
         y: 16.0,
     };
@@ -144,6 +145,7 @@ async fn wire_messages_match_the_fixture() {
     let anchor = Anchor {
         artboard_id: Some("scratch".into()),
         node_id: None,
+        extra_node_ids: Vec::new(),
         x: 5.0,
         y: 5.0,
     };
@@ -185,6 +187,7 @@ async fn wire_messages_match_the_fixture() {
     let anchor = Anchor {
         artboard_id: None,
         node_id: None,
+        extra_node_ids: Vec::new(),
         x: 0.0,
         y: 0.0,
     };

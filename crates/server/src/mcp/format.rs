@@ -201,12 +201,12 @@ pub(super) fn comments_json<'a>(
     comments
         .map(|c| {
             let artboard = c.artboard_id.as_deref().and_then(|id| doc.get(id));
-            // The outline line for the element, like `button "CTA" #ab12 "Sign up"`.
-            let node = c
-                .node_id
-                .as_deref()
-                .filter(|id| doc.contains(id))
-                .map(|id| outline(doc, id, 0).lines().next().unwrap_or("").to_owned());
+            // The outline line for an element, like `button "CTA" #ab12 "Sign up"`.
+            let line = |id: &str| {
+                doc.contains(id)
+                    .then(|| outline(doc, id, 0).lines().next().unwrap_or("").to_owned())
+            };
+            let node = c.node_id.as_deref().and_then(line);
             // A thread can hold 200 messages of 4,000 characters. Keep the
             // request that started it and the latest few.
             let skipped = c.messages.len().saturating_sub(THREAD_SHOWN + 1);
@@ -242,7 +242,7 @@ pub(super) fn comments_json<'a>(
                 .as_deref()
                 .and_then(|id| finite_design::html::export(doc, id, true))
                 .filter(|html| html.len() <= COMMENT_NODE_HTML);
-            serde_json::json!({
+            let mut comment = serde_json::json!({
                 "commentId": c.id,
                 "resolved": c.resolved,
                 "artboardId": c.artboard_id,
@@ -255,7 +255,20 @@ pub(super) fn comments_json<'a>(
                 "pin": { "x": c.x.round(), "y": c.y.round(), "relativeTo": relative_to },
                 "thread": thread,
                 "messagesNotShown": skipped,
-            })
+            });
+            // The other elements the user selected, without their HTML: a
+            // selection can hold 50.
+            let also: Vec<_> = c
+                .extra_node_ids
+                .iter()
+                .filter_map(|id| {
+                    line(id).map(|node| serde_json::json!({ "nodeId": id, "node": node }))
+                })
+                .collect();
+            if !also.is_empty() {
+                comment["alsoSelected"] = also.into();
+            }
+            comment
         })
         .collect()
 }

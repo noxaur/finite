@@ -370,8 +370,13 @@ export class Renderer {
     return out;
   }
 
-  /** The topmost artboard under a page point, and the element in it. */
-  hitTest(clientX: number, clientY: number): Hit | null {
+  /**
+   * The topmost artboard under a page point, and the element in it. A
+   * sandboxed artboard answers later, so this returns its latest answer,
+   * even for another point, unless `exact` is set: then it's `null` until
+   * the answer for this point arrives.
+   */
+  hitTest(clientX: number, clientY: number, exact = false): Hit | null {
     const frames = [...this.frames];
     for (let i = frames.length - 1; i >= 0; i--) {
       const [artboardId, frame] = frames[i]!;
@@ -384,8 +389,11 @@ export class Renderer {
       ) {
         continue;
       }
-      if (frame.iframe)
-        return { artboardId, nodeId: this.askHit(frame, clientX, clientY) ?? artboardId };
+      if (frame.iframe) {
+        const nodeId = this.askHit(frame, clientX, clientY, exact);
+        if (exact && nodeId === null) return null;
+        return { artboardId, nodeId: nodeId ?? artboardId };
+      }
       let el = frame.shadow?.elementFromPoint(clientX, clientY) ?? null;
       while (el && !this.ids.has(el)) el = el.parentElement;
       return { artboardId, nodeId: (el && this.ids.get(el)) ?? artboardId };
@@ -397,7 +405,7 @@ export class Renderer {
    * Asks a sandboxed artboard what's under a page point. The answer arrives
    * by message, so this returns the latest one for that point, if any.
    */
-  private askHit(frame: Frame, clientX: number, clientY: number): string | null {
+  private askHit(frame: Frame, clientX: number, clientY: number, exact: boolean): string | null {
     const iframe = frame.iframe!;
     const { left, top, scale } = iframeBox(iframe);
     const x = Math.round((clientX - left) / scale);
@@ -406,7 +414,8 @@ export class Renderer {
       frame.asked = { x, y };
       iframe.contentWindow?.postMessage({ finite: { type: "hit", x, y } }, "*");
     }
-    return frame.hit?.x === x && frame.hit.y === y ? frame.hit.id : (frame.hit?.id ?? null);
+    if (frame.hit?.x === x && frame.hit.y === y) return frame.hit.id;
+    return exact ? null : (frame.hit?.id ?? null);
   }
 
   /**

@@ -1760,7 +1760,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Comments users pinned to a design, oldest first: what they asked for, which artboard and element it's about, and the thread so far. Open comments only, unless includeResolved is set. A long list comes in parts; the note at the end says which offset to pass next.",
+        description = "Comments users pinned to a design, oldest first: what they asked for, which artboard and element it's about (alsoSelected lists more elements the user picked with it), and the thread so far. Open comments only, unless includeResolved is set. A long list comes in parts; the note at the end says which offset to pass next.",
         annotations(read_only_hint = true)
     )]
     async fn get_comments(&self, Parameters(p): Parameters<CommentsParams>) -> ToolResult {

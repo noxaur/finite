@@ -5,3 +5,5 @@
 export const COMMENT_LIMIT = 4000;
 /** The longest name a person can comment under, in characters. */
 export const NAME_LIMIT = 48;
+/** How many elements one comment can point at. */
+export const SELECTION_LIMIT = 50;
