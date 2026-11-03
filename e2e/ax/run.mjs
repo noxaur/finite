@@ -122,7 +122,8 @@ async function startServer(bin) {
     api,
     stop() {
       child.kill();
-      fs.rmSync(data, { recursive: true, force: true });
+      // The server may still be writing its last save as it exits.
+      fs.rmSync(data, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     },
   };
 }

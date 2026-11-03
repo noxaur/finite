@@ -124,21 +124,26 @@ What made the difference:
 - **Shared CSS for every agent.** With the tools on, every `screens-change` agent put the top bar's styles in the shared CSS. The change was then one `set_shared_css` and one screenshot. Without them, agents edited each screen.
 - **Accepting what agents meant.** `get_screenshot` and `get_layout` with only a `designId` now cover every artboard, which every `overlap` agent on the old build tried, and got an error. Passing the `designId` as a `nodeId` says so. `create_artboard` takes `class`, because two agents styled `.screen` in a `<style>` block and found the artboard itself had no class.
 
-## Two redesigns tried as mocks (experimental)
+## A six-tool redesign, tried as a mock (experimental)
 
-Two specs mock a redesign of the whole surface, so it can be tried before any Rust changes:
+`surfaces/doc6.mjs` mocks a redesign of the whole surface as 6 tools: `designs`, `read`, `edit`, `render`, `comments` and `undo`. Elements are addressed with CSS selectors, and `edit` takes a list of ops that apply all together or not at all, as one undo step. Pages and imports are `edit` ops, JSX and file exports are `read` views, and `designs` deletes. The spec's header lists what it only approximates in JavaScript.
 
-- `surfaces/granular24.mjs`: 24 tools, one per job, with the same parameter names everywhere. `write_css` takes plain CSS for inline styles, `<style>` blocks and the shared CSS. Every edit takes `status` and `check`.
-- `surfaces/doc6.mjs`: 6 tools (`designs`, `read`, `edit`, `render`, `comments`, `undo`). Elements are addressed with CSS selectors, and `edit` takes a list of ops that apply all together or not at all, as one undo step.
+The first round tried it against a 24-tool spec with the same parameter names everywhere. doc6 took 123 calls to the other's 149 and today's 198, with the same errors and grades, so the 24-tool spec was dropped. A second round, after pages, import and export, `get_jsx` and `delete_design` shipped, ran 9 tasks: the first round's 6 plus `delete-design`, `import-page` and `export-figma`.
 
-Each spec's header lists what it only approximates in JavaScript. Neither keeps node ids when HTML is rewritten, and neither protects one agent's edit from another agent's stale rewrite.
+| Model, runs per task | Surface      | Runs passed | Calls      | Errors | Outside MCP | Cost  | Quality / fit |
+| -------------------- | ------------ | ----------- | ---------- | ------ | ----------- | ----- | ------------- |
+| Haiku low, 3         | today        | 27/27       | 264        | 2      | 15          | $0.26 | 7.1 / 7.2     |
+| Haiku low, 3         | doc6 round 1 | 20/27       | 203        | 2      | 38          | $0.25 | –             |
+| Haiku low, 3         | doc6         | 27/27       | 165 (−38%) | 3      | 17          | $0.22 | 7.1 / 7.4     |
+| Sonnet medium, 2     | today        | 18/18       | 135        | 0      | 15          | $2.54 | 7.3 / 7.6     |
+| Sonnet medium, 2     | doc6         | 18/18       | 89 (−34%)  | 0      | 4           | $2.26 | 7.1 / 7.7     |
 
-A first round used Haiku at low effort, 3 runs each, on `restyle`, `rebrand`, `mobile`, `comments`, `pins` and `screens-change`. All 54 runs passed every check:
+The round-1 spec failed `delete-design` and `import-page`, which it had no tools for. What round 2 changed, each from a round-1 transcript or feedback:
 
-| Surface    | Calls | Failed calls | Cost  |
-| ---------- | ----- | ------------ | ----- |
-| today      | 198   | 0            | $0.17 |
-| granular24 | 149   | 3            | $0.14 |
-| doc6       | 123   | 3            | $0.15 |
+- **A design's name works as its `designId`.** 2 of 3 round-1 `rebrand` agents passed "Acme site" and got an error.
+- **`check` is on by default.** Agents set it on almost every round-1 edit.
+- **`dryRun` on `edit`.** Four round-1 agents asked to preview a broad `replace`.
+- **An `artboard` op with `from`** starts a screen as a copy of another, for mobile versions.
+- **Rewriting HTML keeps ids.** An `html` op with mode `inner` or `replace` updates elements that keep their `data-id` in place, and keeps values another agent changed since this agent read them. On today's server, the same rewrite gives every element a new id, leaves a comment pinned to a node that no longer exists, and silently wipes the other agent's newer change ([issue #ISSUE]).
 
-Blind quality grades were level. About 21 of today's calls are `start_working_on_nodes` and `finish_working_on_nodes`, which both mocks fold into `status`. None of the 24 `edit` calls on doc6 failed on the op format. The no-search spec raised rebrand from 6.7 to 14.7 calls, in the same direction as the first study, so the mock's numbers can be trusted that far. Confirm on Sonnet, and on long tasks like `ui-states`, before acting on these.
+Two things it still can't show: a real `edit` would label its change with its `status`, where the mock's comment replies link "Write HTML, Write HTML", which three agents found unclear. And its all-or-nothing rollback undoes real steps, so another agent could see, or build on, an edit that later rolls back. A server-side `edit` can stage its ops with the `Transaction` that `Design::import` already uses.

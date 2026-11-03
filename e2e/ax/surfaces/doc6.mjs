@@ -37,6 +37,15 @@
 //   designs are thin merges of the real tools.
 // - Replies keep the real tools' wording, with old tool names in hints
 //   rewritten to the new surface (see retool).
+// - dryRun applies the ops through real tools, reports them, then undoes
+//   them, so people watching see the change flash in and out.
+// - designId takes a design's name too: the mock looks it up with
+//   list_designs when it isn't an id.
+//
+// Round 2 (after pages, import and export, get_jsx and delete_design
+// shipped) adds them without adding tools: pages and imports are edit ops,
+// jsx and file exports are read views, and designs deletes. check is on by
+// default, since agents set it on almost every edit in round 1.
 import postcss from "postcss";
 
 // ---------------------------------------------------------------- HTML tree
@@ -412,7 +421,11 @@ function retool(text) {
       /update_styles \{"updates": \[\{"nodeIds": \["([a-z0-9]+)"\], "styles": \{"([\w-]+)": "([^"]+)"\}\}\]\}/g,
       (_, id, prop, value) => `edit {"op": "css", "css": "#${id} { ${prop}: ${value} }"}`,
     )
-    .replace("Check it with get_screenshot.", "Check it with render, or pass check: true to edit.")
+    .replace(/\n?Check it with get_screenshot\./, "")
+    .replace(
+      /Next: create_artboard with that pageId\./,
+      'Next: an "artboard" op with page set to its name or id.',
+    )
     .replace("Next: create_artboard.", 'Next: edit with an "artboard" op.')
     .replace(/\bget_tree_summary\b|\bget_children\b|\bget_basic_info\b|\bget_node_info\b/g, "read")
     .replace(/\bget_html\b/g, 'read with as: "html"')
@@ -432,7 +445,13 @@ function retool(text) {
     .replace(/\blist_designs\b|\bcreate_design\b/g, "designs")
     .replace(/\bget_comments\b/g, "comments")
     .replace(/\bwait_for_comments\b/g, "comments with wait")
-    .replace(/\breply_to_comment\b/g, "comments with reply");
+    .replace(/\breply_to_comment\b/g, "comments with reply")
+    .replace(/\bget_jsx\b/g, 'read with as: "jsx"')
+    .replace(/\bexport_design\b/g, "read with export")
+    .replace(/\bimport_design\b/g, 'an "import" op')
+    .replace(/\b(create_page|rename_page|delete_page)\b/g, 'a "page" op')
+    .replace(/\bmove_to_page\b/g, "a move op with page")
+    .replace(/\bdelete_design\b/g, "designs with delete");
 }
 
 // ---------------------------------------------------------------- CSS
@@ -497,18 +516,25 @@ function mergeSheet(text, patch) {
           }
           continue;
         }
-        let n = 0;
+        const what = [];
         for (const d of decls) {
           const same = found.nodes.filter((x) => x.type === "decl" && x.prop === d.prop);
-          if (d.value.trim() === "unset") same.forEach((x) => x.remove());
-          else if (same.length) {
+          if (d.value.trim() === "unset") {
+            if (same.length) what.push(`${d.prop}: ${same[0].value} → removed`);
+            same.forEach((x) => x.remove());
+          } else if (same.length) {
+            if (same[0].value !== d.value) what.push(`${d.prop}: ${same[0].value} → ${d.value}`);
             same[0].value = d.value;
             same[0].important = d.important;
             same.slice(1).forEach((x) => x.remove());
-          } else found.append(d.clone());
-          n++;
+          } else {
+            found.append(d.clone());
+            what.push(`${d.prop}: ${d.value} (new)`);
+          }
         }
-        changes.push(`merged ${n} declaration${n === 1 ? "" : "s"} into ${context}${p.selector}`);
+        changes.push(
+          `${context}${p.selector}: ${what.length ? what.join(", ") : "already had those values"}`,
+        );
       } else if (p.type === "atrule") {
         const found = into.nodes?.find(
           (n) => n.type === "atrule" && n.name === p.name && n.params.trim() === p.params.trim(),
@@ -615,6 +641,45 @@ const declarations = (css) => {
 };
 const sharedText = (t) => (t.startsWith("This design has no shared CSS") ? "" : t);
 
+/** A design's id from its id or its name, so {"designId": "Acme site"} works. */
+async function designIdOf(real, given) {
+  const want = String(given).trim();
+  // The list is the first block; notes about id matches or more designs follow it.
+  const r = await real.callRaw("list_designs", { query: want, limit: 200 });
+  const list = r.isError ? [] : JSON.parse(r.content[0].text);
+  if (list.some((d) => d.designId === want)) return want;
+  const named = list.filter((d) => d.name.toLowerCase() === want.toLowerCase());
+  const hits = named.length ? named : list.length === 1 ? list : [];
+  if (hits.length === 1) return hits[0].designId;
+  const near = list.slice(0, 5).map((d) => `"${d.name}" (${d.designId})`);
+  throw new Error(
+    `there's no design "${want}"${hits.length > 1 ? " with one name" : ""}.${near.length ? ` Did you mean ${near.join(", ")}?` : " Call designs to list them."}`,
+  );
+}
+
+/** A page's id from its id, its name or an @ref, with the pages for messages. */
+async function pageIdOf(real, designId, page, refs) {
+  const p = String(page).trim();
+  if (p.startsWith("@") && refs?.has(p.slice(1))) return refs.get(p.slice(1));
+  const { pages } = JSON.parse(await real.call("get_basic_info", { designId }));
+  const hit =
+    pages.find((x) => x.id === p) ?? pages.find((x) => x.name.toLowerCase() === p.toLowerCase());
+  if (hit) return hit.id;
+  throw new Error(
+    `there's no page "${p}". Pages: ${pages.map((x) => `"${x.name}"`).join(", ")}. Add one with {"op": "page", "create": "${p}"}.`,
+  );
+}
+
+/** The format a file name implies, as the web app's Import button does. */
+const formatOf = (name) =>
+  /\.figma\.json$/i.test(name)
+    ? "figma"
+    : /\.finite$/i.test(name)
+      ? "finite"
+      : /\.tar$/i.test(name)
+        ? "repo"
+        : "html";
+
 // ---------------------------------------------------------------- edit ops
 
 const EXAMPLES = {
@@ -625,6 +690,8 @@ const EXAMPLES = {
   move: `{"op": "move", "select": "#a1b2c3d4", "to": "#list", "position": "prepend"}`,
   remove: `{"op": "remove", "select": "[data-name=Banner]"}`,
   replace: `{"op": "replace", "find": "#3b82f6", "replace": "#f97316"}`,
+  page: `{"op": "page", "create": "Drafts", "as": "d"}`,
+  import: `{"op": "import", "name": "landing.html", "content": "<!doctype html>…", "page": "Inbox"}`,
 };
 const KINDS = Object.keys(EXAMPLES);
 const ALIASES = {
@@ -641,6 +708,9 @@ const ALIASES = {
   move_nodes: "move",
   duplicate: "move",
   replace_values: "replace",
+  pages: "page",
+  create_page: "page",
+  import_design: "import",
 };
 const MODES = {
   append: "append",
@@ -658,7 +728,7 @@ const MODES = {
 };
 
 const need = (op, kind, keys) => {
-  const missing = keys.filter((k) => op[k] == null || op[k] === "");
+  const missing = keys.filter((k) => op[k] == null || (op[k] === "" && k !== "replace"));
   if (missing.length)
     throw new Error(`"${kind}" needs ${missing.join(" and ")}, like ${EXAMPLES[kind]}.`);
 };
@@ -673,7 +743,9 @@ function kindOf(op) {
       throw new Error(`there's no "${op.op ?? op.type}" op. Ops are ${KINDS.join(", ")}.`);
     return k;
   }
-  if (op.width != null && op.name != null) return "artboard";
+  if ((op.width != null || op.from != null) && op.name != null) return "artboard";
+  if (op.content != null || op.contentBase64 != null) return "import";
+  if (op.create != null || op.rename != null) return "page";
   if (op.find != null) return "replace";
   if (op.css != null || op.styles != null) return "css";
   if (op.html != null) return "html";
@@ -736,8 +808,207 @@ class Edit {
   }
 }
 
+// ---------------------------------------------------------------- keyed rewrites
+
+// What this agent last read of each node with read as: "html", per design:
+// the base of a three-way merge when it writes the node back.
+const seenNodes = new Map();
+const seenOf = (designId) => {
+  if (!seenNodes.has(designId)) seenNodes.set(designId, new Map());
+  return seenNodes.get(designId);
+};
+
+const styleMap = (el) => {
+  const out = {};
+  for (const d of String(el.attrs.style ?? "").split(";")) {
+    const at = d.indexOf(":");
+    if (at > 0)
+      out[d.slice(0, at).trim().toLowerCase()] = d
+        .slice(at + 1)
+        .trim()
+        .replace(/\s+/g, " ");
+  }
+  return out;
+};
+const attrMap = (el) => {
+  const out = {};
+  for (const [k, v] of Object.entries(el.attrs)) if (k !== "style" && k !== "data-id") out[k] = v;
+  return out;
+};
+const textOnly = (el) => el.children.every((c) => c.tag === "#text");
+const ownText = (el) =>
+  RAW.has(el.tag) ? (el.text ?? "") : el.children.map((c) => c.text).join(" ");
+
+/** A node's values as read: style and attributes by name, and its text when it holds only text. */
+const snapshot = (el) => ({
+  style: styleMap(el),
+  attrs: attrMap(el),
+  text: textOnly(el) ? ownText(el) : null,
+});
+
+function remember(designId, html) {
+  const seen = seenOf(designId);
+  for (const el of walk(parseHtml(html)))
+    if (el.attrs["data-id"]) seen.set(el.attrs["data-id"], snapshot(el));
+}
+
+const escapeText = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+function outerHtml(n) {
+  if (n.tag === "#text") return escapeText(n.text);
+  const attrs = Object.entries(n.attrs)
+    .map(([k, v]) => ` ${k}="${String(v).replace(/&/g, "&amp;").replace(/"/g, "&quot;")}"`)
+    .join("");
+  if (VOID.has(n.tag)) return `<${n.tag}${attrs}>`;
+  const inner = RAW.has(n.tag) ? (n.text ?? "") : n.children.map(outerHtml).join("");
+  return `<${n.tag}${attrs}>${inner}</${n.tag}>`;
+}
+
+/**
+ * Three-way merge of one value: what the agent read (base), what is there now
+ * (theirs) and what the agent wrote (mine). A value the agent didn't change
+ * keeps whatever is there now, so another agent's later change survives.
+ */
+function merge3(base, theirs, mine) {
+  if (mine === theirs) return { value: theirs, change: false };
+  if (base === undefined) return { value: mine, change: true };
+  if (mine === base) return { value: theirs, change: false, kept: theirs !== base };
+  if (theirs !== base) return { value: theirs, change: false, conflict: true };
+  return { value: mine, change: true };
+}
+
+/**
+ * Writes html over an element (mode replace) or its children (mode inner) in
+ * place, keeping every element whose data-id the html still carries: its id,
+ * comment pins and history stay, only changed values are set, and values
+ * another agent changed since this agent read them are kept. Returns null
+ * when the html carries no ids from there, or moves kept elements to another
+ * parent or order, so the op falls back to a plain write with new ids.
+ */
+async function keyedWrite(e, target, mode, html) {
+  const top = parseHtml(html);
+  const cur = target.el;
+  let pairs;
+  if (mode === "replace") {
+    const roots = top.children.filter((c) => c.tag !== "#text" || c.text.trim());
+    if (roots.length !== 1 || roots[0].attrs["data-id"] !== target.id) return null;
+    pairs = [[cur, roots[0]]];
+  } else pairs = [[cur, top]];
+  const inside = new Map([...walk(cur)].map((n) => [n.attrs["data-id"], n]));
+  if (![...walk(top)].some((n) => inside.has(n.attrs["data-id"]))) return null;
+
+  const seen = seenOf(e.designId);
+  const plan = { styles: [], attrs: [], texts: [], removes: [], inserts: [] };
+  const notes = [];
+  const visit = (old, mine, isRoot) => {
+    const id = old.attrs["data-id"];
+    const base = seen.get(id);
+    if (!(isRoot && mode === "inner")) {
+      const was = snapshot(old);
+      const now = snapshot(mine);
+      const styles = {};
+      for (const k of new Set([...Object.keys(was.style), ...Object.keys(now.style)])) {
+        const r = merge3(
+          base ? (base.style[k] ?? null) : undefined,
+          was.style[k] ?? null,
+          now.style[k] ?? null,
+        );
+        if (r.change) styles[k] = r.value;
+        if (r.kept)
+          notes.push(
+            `kept ${k}: ${was.style[k] ?? "(none)"} on ${label(old)}, which another agent set after you read it`,
+          );
+        if (r.conflict)
+          notes.push(
+            `kept ${k}: ${was.style[k] ?? "(none)"} on ${label(old)}: another agent changed it after you read it, so yours (${now.style[k] ?? "(none)"}) wasn't applied`,
+          );
+      }
+      if (Object.keys(styles).length) plan.styles.push({ nodeIds: [id], styles });
+      const attributes = {};
+      for (const k of new Set([...Object.keys(was.attrs), ...Object.keys(now.attrs)])) {
+        const r = merge3(
+          base ? (base.attrs[k] ?? null) : undefined,
+          was.attrs[k] ?? null,
+          now.attrs[k] ?? null,
+        );
+        if (r.change) attributes[k] = r.value;
+        if (r.conflict)
+          notes.push(`kept ${k} on ${label(old)}: another agent changed it after you read it`);
+      }
+      if (Object.keys(attributes).length) plan.attrs.push({ nodeIds: [id], attributes });
+      if (was.text !== null && now.text !== null) {
+        const r = merge3(base ? (base.text ?? undefined) : undefined, was.text, now.text);
+        if (r.change) plan.texts.push({ nodeId: id, text: r.value });
+        if (r.conflict)
+          notes.push(`kept the text of ${label(old)}: another agent changed it after you read it`);
+        return true;
+      }
+      if (old.tag !== mine.tag) return false;
+    }
+    const oldKids = elements(old);
+    const newKids = mine.children.filter((c) => c.tag !== "#text" || c.text.trim());
+    const mixed = (n) => n.children.some((c) => c.tag === "#text") && elements(n).length;
+    if ((mixed(old) || mixed(mine)) && textOf(old) !== textOf(mine)) return false;
+    const kept = newKids.filter(
+      (k) => k.tag !== "#text" && oldKids.some((o) => o.attrs["data-id"] === k.attrs["data-id"]),
+    );
+    const order = kept.map((k) =>
+      oldKids.findIndex((o) => o.attrs["data-id"] === k.attrs["data-id"]),
+    );
+    if (order.some((x, i) => i && x < order[i - 1])) return false;
+    for (const o of oldKids)
+      if (!kept.some((k) => k.attrs["data-id"] === o.attrs["data-id"])) {
+        if (newKids.some((k) => k.attrs?.["data-id"] === o.attrs["data-id"])) return false;
+        // An element written somewhere else in the html moved: not handled in place.
+        if ([...walk(top)].some((n) => n.attrs["data-id"] === o.attrs["data-id"])) return false;
+        plan.removes.push(o.attrs["data-id"]);
+      }
+    for (const [i, k] of newKids.entries()) {
+      if (k.tag === "#text") {
+        if (!mixed(old)) return false;
+        continue;
+      }
+      if (kept.includes(k)) {
+        if (
+          !visit(
+            oldKids.find((o) => o.attrs["data-id"] === k.attrs["data-id"]),
+            k,
+            false,
+          )
+        )
+          return false;
+      } else {
+        if (k.attrs["data-id"] && inside.has(k.attrs["data-id"])) return false;
+        const { "data-id": _, ...attrs } = k.attrs;
+        plan.inserts.push({ targetId: id, index: i, html: outerHtml({ ...k, attrs }) });
+      }
+    }
+    return true;
+  };
+  for (const [old, mine] of pairs) if (!visit(old, mine, true)) return null;
+
+  const out = [];
+  if (plan.removes.length) out.push(await e.write("delete_nodes", { nodeIds: plan.removes }));
+  if (plan.styles.length) out.push(await e.write("update_styles", { updates: plan.styles }));
+  if (plan.attrs.length) out.push(await e.write("set_attributes", { updates: plan.attrs }));
+  if (plan.texts.length) out.push(await e.write("set_text_content", { updates: plan.texts }));
+  for (const ins of plan.inserts.sort((a, b) => a.index - b.index))
+    out.push(await e.write("write_html", ins));
+  const changed =
+    plan.removes.length +
+    plan.styles.length +
+    plan.attrs.length +
+    plan.texts.length +
+    plan.inserts.length;
+  const head = changed
+    ? `Rewrote ${label(cur)} in place: elements that kept their data-id kept their ids, comments and history.`
+    : `Nothing changed: ${label(cur)} already matches.`;
+  return [head, ...notes.map((n) => `Note: ${n}.`), ...out].join("\n");
+}
+
 const OPS = {
   async artboard(op, e) {
+    const pageId = op.page != null ? await pageIdOf(e.real, e.designId, op.page, e.refs) : null;
+    if (op.from != null) return copyArtboard(op, e, pageId);
     need(op, "artboard", ["name", "width"]);
     const styles = { ...declarations(op.css), ...declarations(op.styles) };
     const text = await e.write("create_artboard", {
@@ -749,6 +1020,7 @@ const OPS = {
       ...(op.html != null && { html: op.html }),
       ...(op.class != null && { class: op.class }),
       ...(Object.keys(styles).length && { styles }),
+      ...(pageId && { pageId }),
     });
     const id = text.match(/artboard #([a-z0-9]+)/)?.[1];
     e.name(op.as, id);
@@ -769,6 +1041,13 @@ const OPS = {
       throw new Error(
         `"${select}" matches ${ms.length} elements; mode ${mode} takes one: ${describeAll(ms)}.`,
       );
+    if ((mode === "inner" || mode === "replace") && ms[0].el) {
+      const keyed = await keyedWrite(e, ms[0], mode, String(op.html));
+      if (keyed != null) {
+        e.touch(ms);
+        return keyed;
+      }
+    }
     if (ms.length > 100) throw new Error(`"${select}" matches ${ms.length} elements; at most 100.`);
     const parts = [];
     let first = null;
@@ -931,6 +1210,16 @@ const OPS = {
     const ms = await e.match(select);
     e.touch(ms);
     const parts = [];
+    if (op.page != null && op.to == null) {
+      const notBoards = ms.filter((m) => m.board !== m.id);
+      if (notBoards.length)
+        throw new Error(
+          `page moves artboards, and ${describeAll(notBoards)} ${notBoards.length === 1 ? "isn't one" : "aren't"}. Select artboards, like ":root" or "#k3x9a2bq".`,
+        );
+      const pageId = await pageIdOf(e.real, e.designId, op.page, e.refs);
+      parts.push(await e.write("move_to_page", { artboardIds: ms.map((m) => m.id), pageId }));
+      if (op.x == null && op.y == null) return parts.join("\n");
+    }
     if (op.x != null || op.y != null) {
       const updates = ms.map((m) => {
         const b = e.cache?.boards.find((x) => x.id === m.id);
@@ -1030,7 +1319,80 @@ const OPS = {
     }
     return parts.join("\n");
   },
+
+  async page(op, e) {
+    if (op.create != null || (op.name != null && op.rename == null && op.remove == null)) {
+      const name = String(op.create ?? op.name);
+      const text = await e.write("create_page", { name });
+      const id = text.match(/pageId "?([a-z0-9]+)"?/i)?.[1] ?? text.match(/\b([a-z0-9]{8})\b/)?.[1];
+      e.name(op.as, id);
+      return text;
+    }
+    if (op.rename != null) {
+      need(op, "page", ["name"]);
+      const pageId = await pageIdOf(e.real, e.designId, op.rename, e.refs);
+      await e.write("rename_page", { pageId, name: op.name });
+      return `Renamed page "${op.rename}" to "${op.name}".`;
+    }
+    if (op.remove != null) {
+      const pageId = await pageIdOf(e.real, e.designId, op.remove, e.refs);
+      return e.write("delete_page", { pageId });
+    }
+    throw new Error(
+      `"page" takes create, rename (with name) or remove, like ${EXAMPLES.page}, {"op": "page", "rename": "Drafts", "name": "Archive"} or {"op": "page", "remove": "Drafts"}.`,
+    );
+  },
+
+  async import(op, e) {
+    if (op.content == null && op.contentBase64 == null)
+      throw new Error(
+        `"import" needs the file as content (text) or contentBase64 (bytes), like ${EXAMPLES.import}. Finite can't read files on your machine, so read the file and pass its text.`,
+      );
+    const pageId = op.page != null ? await pageIdOf(e.real, e.designId, op.page, e.refs) : null;
+    const name = op.name ?? op.file ?? op.path;
+    const text = await e.write("import_design", {
+      format: op.format ?? formatOf(String(name ?? "")),
+      ...(op.content != null && { content: op.content }),
+      ...(op.contentBase64 != null && { contentBase64: op.contentBase64 }),
+      ...(name != null && { name: String(name).split("/").pop() }),
+      ...(pageId && { pageId }),
+      ...(op.strict != null && { strict: op.strict }),
+    });
+    const ids = text.match(/#[a-z0-9]{8}\b/g) ?? [];
+    for (const id of ids.slice(0, 10)) e.touched.add(id.slice(1));
+    e.name(op.as, ids[0]?.slice(1));
+    return text;
+  },
 };
+
+/** An artboard op with from: a copy of another artboard, renamed, resized and moved. */
+async function copyArtboard(op, e, pageId) {
+  const [src, ...more] = await e.match(op.from, "from");
+  if (more.length || src.board !== src.id)
+    throw new Error(
+      `from takes one artboard, like "from": "#k3x9a2bq"; "${op.from}" matches ${more.length ? `${more.length + 1} elements` : "an element inside one"}.`,
+    );
+  const text = await e.write("duplicate_nodes", { nodeIds: [src.id] });
+  const id = rootIds(text)[0] ?? text.match(/#([a-z0-9]{8})\b/)?.[1];
+  if (!id) throw new Error(`couldn't copy ${label(src.el)}: ${text}`);
+  const parts = [`Copied ${label(src.el)} as #${id}.`];
+  if (op.name != null) await e.write("rename_nodes", { updates: [{ nodeId: id, name: op.name }] });
+  const styles = { ...declarations(op.css), ...declarations(op.styles) };
+  if (op.width != null) styles.width = `${op.width}px`;
+  if (op.height != null) styles.height = `${op.height}px`;
+  if (Object.keys(styles).length)
+    await e.write("update_styles", { updates: [{ nodeIds: [id], styles }] });
+  if (pageId) await e.write("move_to_page", { artboardIds: [id], pageId });
+  if (op.x != null || op.y != null)
+    await e.write("set_artboard_position", {
+      updates: [{ nodeId: id, x: op.x ?? 0, y: op.y ?? 0 }],
+    });
+  if (op.html != null) await e.write("write_html", { targetId: id, html: op.html });
+  e.name(op.as, id);
+  e.touched.add(id);
+  parts.push(await e.real.call("get_tree_summary", { designId: e.designId, nodeId: id, depth: 2 }));
+  return parts.join("\n");
+}
 
 /** The ops of an edit call: ops (a list, one op or a JSON string), or one op flat. */
 function opsOf(a) {
@@ -1090,7 +1452,7 @@ async function layoutCheck(real, designId, boards) {
 
 // ---------------------------------------------------------------- read
 
-async function overview(real, designId, depth) {
+async function overview(real, designId, depth, pageId) {
   const info = JSON.parse(await real.call("get_basic_info", { designId }));
   const me = process.env.FINITE_AGENT;
   const others = (info.agentsWorking ?? []).filter((a) => a.name !== me);
@@ -1098,15 +1460,35 @@ async function overview(real, designId, depth) {
   const lines = [
     `Design "${info.name}" (designId "${info.designId}"): ${n(info.artboardCount, "artboard")}, ${n(info.nodeCount, "node")}, ${n(info.openComments, "open comment")}, shared CSS ${info.sharedCssChars ? `${info.sharedCssChars} chars` : "empty"}.`,
   ];
-  if (info.pages?.length > 1)
-    lines.push(`Pages: ${info.pages.map((p) => `"${p.name}" (${p.artboardCount})`).join(", ")}.`);
+  if (info.pages?.length > 1 || pageId)
+    lines.push(
+      `Pages: ${info.pages.map((p) => `"${p.name}" (${p.id}, ${n(info.artboards.filter((b) => b.pageId === p.id).length, "artboard")})`).join(", ")}.`,
+    );
   for (const a of others)
     lines.push(
-      `${a.name} is working on ${a.nodeIds.map((i) => `#${i}`).join(", ")}${a.status ? `: "${a.status}"` : ""}.`,
+      `${a.name} is working on ${a.nodeIds.map((i) => `#${i}`).join(", ")}${a.status ? `: "${a.status}"` : ""}. Edits never wait for each other, and rewriting html you read keeps values others changed since.`,
     );
   if (info.openComments) lines.push(`Open comments: call comments to read them.`);
   if (!info.artboardCount)
     return lines.concat(`No artboards yet. Add one with edit: ${EXAMPLES.artboard}`).join("\n");
+  const pageName = (id) => info.pages?.find((p) => p.id === id)?.name ?? id;
+  if (pageId || info.pages?.length > 1) {
+    const parts = [];
+    for (const p of info.pages.filter((x) => !pageId || x.id === pageId)) {
+      const boards = info.artboards.filter((b) => b.pageId === p.id);
+      const trees = [];
+      for (const b of boards)
+        trees.push(
+          await real.call("get_tree_summary", {
+            designId,
+            nodeId: b.id,
+            ...(depth != null && { depth }),
+          }),
+        );
+      parts.push(`Page "${pageName(p.id)}":\n${trees.join("\n") || "(no artboards)"}`);
+    }
+    return `${lines.join("\n")}\n\n${parts.join("\n\n")}`;
+  }
   const tree = await real.call("get_tree_summary", { designId, ...(depth != null && { depth }) });
   return `${lines.join("\n")}\n\n${tree}`;
 }
@@ -1226,9 +1608,9 @@ const EDIT_DESCRIPTION = `Make changes to a design. One edit call is one transac
 Ops, each addressed with select, a CSS selector: #k3x9a2bq (a node id), .card, button, [data-name=Hero] h1, :root (every artboard), :contains("text"):
 
 ${EXAMPLES.artboard}
-  A new screen with its first sections. desktop 1440x900, tablet 768x1024, mobile 390x844. Omit x and y to place it right of the others; omit height to grow with the content. css (declarations) and class style the artboard itself.
+  A new screen with its first sections. desktop 1440x900, tablet 768x1024, mobile 390x844. Omit x and y to place it right of the others; omit height to grow with the content. css (declarations) and class style the artboard itself. page: a page's name or id (default the first). from: "#k3x9a2bq" starts it as a copy of that artboard, with the given name and size, so a mobile version keeps the content and you only restyle it.
 ${EXAMPLES.html}
-  mode: append (default, last child), prepend (first child), before or after (a sibling), inner (replace the children), replace (replace the element). append and the others act on every match; inner and replace take one. Use inner on an element to change its text.
+  mode: append (default, last child), prepend (first child), before or after (a sibling), inner (replace the children), replace (replace the element). append and the others act on every match; inner and replace take one. Use inner on an element to change its text. With inner or replace, elements that keep the data-id from read's html are updated in place: they keep their ids, comment pins and history, and a value another agent changed since you read it is kept, and named in the result.
 ${EXAMPLES.css}
   css is a stylesheet; each rule's selector picks elements. to: "inline" (default) sets the declarations in each match's style attribute (so #id { height: … } resizes an artboard); "style" merges the rules into the matching artboard's <style> block (use it for :hover, @media, @keyframes); "shared" into the CSS every artboard uses (variables like --brand, classes like .btn). Rules merge: a declaration replaces the same property, prop: unset removes it, an empty rule .x {} removes the rule. Or pass select and plain declarations: {"op": "css", "select": ".btn", "css": "border-radius: 999px"}. With rules, select limits them to inside its matches (with to: "style", it picks the artboard).
 ${EXAMPLES.attrs}
@@ -1238,32 +1620,41 @@ ${EXAMPLES.move}
 ${EXAMPLES.remove}
   Deletes every match with everything inside it.
 ${EXAMPLES.replace}
-  A value everywhere: inline styles, attributes, <style> blocks, <script> code and shared CSS. A color matches in any notation, and tints keep their alpha. includeText: true also replaces visible text (a product name, a typo). select limits it to matches.
+  A value everywhere: inline styles, attributes, <style> blocks, <script> code and shared CSS. A color matches in any notation, and tints keep their alpha. includeText: true also replaces visible text (a product name, a typo). select limits it to matches. replace "" deletes it.
+${EXAMPLES.page}
+  Pages hold artboards; people see one page at a time. create, {"rename": "Drafts", "name": "Archive"} or {"remove": "Drafts"} (deletes the page and its artboards). Put artboards on a page with the artboard op's page, or {"op": "move", "select": "#k3x9a2bq", "page": "Drafts"}.
+${EXAMPLES.import}
+  Adds a file as new artboards: an .html page, a .finite bundle, a .figma.json from the Finite Figma plugin, or a repo .tar (contentBase64). Pass the file's text as content (Finite can't read your files). Scripts, handlers and embeds are dropped; the result lists what didn't convert exactly.
 
-"as": "m" names the node an op creates (an artboard, the first root of html, the first copy of a move); later ops in the same call target it with "@m" in select.
+"as": "m" names what an op creates (an artboard, the first root of html, the first copy of a move, a page); later ops in the same call use "@m" in select or page.
 
 status: a few words shown to people watching ("Making the mobile version").
-check: true appends a layout check of the artboards the edit touched: content cut off by the artboard's edge, text overflowing its box or overlapping other text, with the css op that fixes an artboard's height.
+A layout check of the artboards the edit touched follows every result: content cut off by the artboard's edge, text overflowing its box or overlapping other text, with the css op that fixes an artboard's height. check: false skips it.
+dryRun: true reports what the ops would change, and changes nothing. Use it before a broad replace or remove.
 
 Returns one numbered section per op: the nodes each changed or created, with their ids.
 
 Example, a mobile copy in one call:
-{"designId": "…", "status": "Mobile version", "check": true, "ops": [
+{"designId": "…", "status": "Mobile version", "ops": [
   {"op": "artboard", "name": "Landing — mobile", "width": 390, "height": 844, "html": "<header data-name=\\"Nav\\" style=\\"…\\">…</header>", "as": "m"},
   {"op": "html", "select": "@m", "html": "<section data-name=\\"Features\\" style=\\"…\\">…</section>"},
   {"op": "html", "select": "@m", "html": "<footer data-name=\\"Footer\\">…</footer>"}]}`;
 
 const READ_DESCRIPTION = `Look at a design, as text.
 
-- No select: an overview (artboards, open comments, who else is working, shared CSS size), then an outline of every artboard: one line per element with its tag, layer name, #id, size and text. Start here.
+- No select: an overview (pages, artboards, open comments, who else is working, shared CSS size), then an outline of every artboard: one line per element with its tag, layer name, #id, size and text. Start here. page: "Inbox" shows only that page's artboards, here and with select.
 - select (a CSS selector: #k3x9a2bq, .card, button, [data-name="Hero"] h1, :root for artboards, :contains("Sign in")) with as:
   "outline" (default): the outline under each match. depth sets how deep (default 4).
   "html": each match's HTML with inline styles; every element carries data-id. depth limits it.
   "css": the CSS that applies to each match: its inline style, then each matching rule from its artboard's <style> blocks and the shared CSS, and which properties inline styles override.
+  "jsx": each match as JSX to paste into a React codebase, with style objects, or Tailwind classes with tailwind: true.
+- export: "figma" returns the design (or select's artboard) as a file's text: "html", "finite" (a bundle that imports back exactly), "repo" (a tar of text files for git), "figma" (for the Finite Figma plugin) or "jsx", with what didn't convert exactly. Save the text to a file yourself.
 - as: "css" without select: the shared CSS (or "This design has no shared CSS.") and a list of every <style> block.
 - contains: "#3b82f6" searches instead: elements whose styles (inline or in <style> blocks), text, attributes or layer name contain it, plus matching shared CSS rules. A color matches in any notation. With select, it searches inside the matches. Use it instead of reading whole artboards, before and after a change.
 
-Examples: {"designId": "…"} · {"designId": "…", "select": "[data-name=Hero]", "as": "html"} · {"designId": "…", "contains": "Clould"} · {"designId": "…", "select": ".btn", "as": "css"}`;
+designId takes the design's id or its exact name.
+
+Examples: {"designId": "…"} · {"designId": "…", "select": "[data-name=Hero]", "as": "html"} · {"designId": "…", "contains": "Clould"} · {"designId": "…", "select": ".btn", "as": "css"} · {"designId": "…", "export": "figma"}`;
 
 /** Rewords errors and text results from every tool into this surface's words. */
 function reworded(tools) {
@@ -1271,6 +1662,7 @@ function reworded(tools) {
     const run = tool.run;
     tool.run = async (a, real) => {
       try {
+        if (a.designId != null) a = { ...a, designId: await designIdOf(real, a.designId) };
         const out = await run(a, real);
         return typeof out === "string" ? retool(out) : out;
       } catch (error) {
@@ -1286,16 +1678,16 @@ export default {
 
 There are six tools. Each one's description has its full grammar and examples, so load them all at once.
 
-- designs: find a design (query), create one (create: "Name"), or rename one.
-- read: look at a design. With no select, an overview (artboards, open comments, who is working) and every artboard's outline with ids. select is a CSS selector, where #k3x9a2bq is a node's id; as: "outline", "html" or "css". contains: "#3b82f6" searches styles, text, attributes, <style> blocks and shared CSS.
-- edit: every change. Its ops run in order as one transaction: all or nothing, one undo step. Ops: artboard, html, css, attrs, move, remove, replace. Add check: true for a layout check, and status: "…" to show people what you're doing.
+- designs: find a design (query), create one (create: "Name"), rename one, or delete one for good (delete).
+- read: look at a design. With no select, an overview (pages, artboards, open comments, who is working) and every artboard's outline with ids. select is a CSS selector, where #k3x9a2bq is a node's id; as: "outline", "html", "css" or "jsx". contains: "#3b82f6" searches styles, text, attributes, <style> blocks and shared CSS. export: "figma" (or html, finite, repo, jsx) returns a file's text to save.
+- edit: every change. Its ops run in order as one transaction: all or nothing, one undo step. Ops: artboard, html, css, attrs, move, remove, replace, page, import. Each result ends with a layout check. status: "…" shows people what you're doing; dryRun: true previews.
 - render: an image of what select matches (every artboard by default), or output: "layout" for each element's box as text.
 - comments: open comments; wait: 60 blocks until a new one arrives; reply: [{commentId, message, resolve: true}].
 - undo: reverses your own last edit calls; redo: true redoes.
 
-Every tool but designs takes a designId. Other agents may edit the same design, so re-read before changing nodes you didn't create.
+Every tool but designs takes a designId: the design's id or exact name. Other agents may edit the same design, so re-read before changing nodes you didn't create.
 
-Workflow: designs, then read, then edit. A new screen is one artboard op holding its first sections (desktop 1440x900, tablet 768x1024, mobile 390x844), then html ops for the rest. Check with check: true or render, and fix what they report. To change a value everywhere (a brand color, in any notation), use one replace op. Put CSS variables and classes used on several screens in the shared CSS (a css op with to: "shared").
+Workflow: designs, then read, then edit. A new screen is one artboard op holding its first sections (desktop 1440x900, tablet 768x1024, mobile 390x844), then html ops for the rest; from: "#id" starts it as a copy of another artboard. Fix what the layout check reports, and render to see it. Pages keep drafts or flows apart: a page op makes one, and the artboard op's page puts a screen on it. Import a file with an import op, passing its text. To change a value everywhere (a brand color, in any notation), use one replace op. Put CSS variables and classes used on several screens in the shared CSS (a css op with to: "shared").
 
 HTML: inline styles or <style> blocks with classes. Prefer flexbox and gap. Name layers with data-name="Header". box-sizing is border-box. <img src="https://…"> and inline <svg> work. Artboards are white flex columns with overflow hidden, so children shrink unless they have flex-shrink: 0. A <style> or <script> only affects its own artboard. Scripts run sandboxed: inline only, no network, addEventListener (on* attributes are dropped). render waits about 3 seconds after load.
 
@@ -1307,11 +1699,12 @@ Long results end with a note saying how to get the rest. Errors say what to do i
 
   tools: reworded({
     designs: {
-      description: `List, create or rename designs (canvases).
+      description: `List, create, rename or delete designs (canvases).
 
 - {} or {"query": "Acme"}: designs whose name contains query (or whose id starts with it), most recently edited first, with id, name, artboard count and last edit. limit (default 50, at most 200).
 - {"create": "Checkout flow"}: a new, empty design. Returns its designId.
-- {"designId": "…", "rename": "New name"}: renames it.`,
+- {"designId": "…", "rename": "New name"}: renames it.
+- {"delete": "…"}: deletes that design (its id or exact name) for good, with its pages, artboards, comments and history. It can't be undone. To delete only an artboard, use edit's remove op.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -1323,11 +1716,20 @@ Long results end with a note saying how to get the rest. Errors say what to do i
           create: { type: "string", description: "Create a design with this name." },
           designId: { type: "string", description: "With rename: the design to rename." },
           rename: { type: "string", description: "The new name for designId." },
+          delete: {
+            type: "string",
+            description: "A design's id or exact name to delete permanently.",
+          },
         },
       },
       annotations: { readOnlyHint: false },
       async run(a, real) {
         if (a.create) return retool(await real.call("create_design", { name: a.create }));
+        if (a.delete != null) {
+          const designId = await designIdOf(real, a.delete);
+          await real.call("delete_design", { designId });
+          return `Deleted design ${designId} permanently.`;
+        }
         if (a.rename != null) {
           if (!a.designId)
             throw new Error(`rename needs designId, like {"designId": "…", "rename": "New name"}.`);
@@ -1350,8 +1752,15 @@ Long results end with a note saying how to get the rest. Errors say what to do i
           select: SELECT,
           as: {
             type: "string",
-            enum: ["outline", "html", "css"],
-            description: 'What to show for select: "outline" (default), "html" or "css".',
+            enum: ["outline", "html", "css", "jsx"],
+            description: 'What to show for select: "outline" (default), "html", "css" or "jsx".',
+          },
+          tailwind: { type: "boolean", description: 'With as: "jsx", Tailwind classes.' },
+          page: { type: "string", description: "Only this page's artboards: its name or id." },
+          export: {
+            type: "string",
+            enum: ["html", "finite", "repo", "figma", "jsx"],
+            description: "Return the design, or select's artboard, as a file in this format.",
           },
           contains: {
             type: "string",
@@ -1367,16 +1776,51 @@ Long results end with a note saying how to get the rest. Errors say what to do i
       annotations: { readOnlyHint: true },
       async run(a, real) {
         const designId = a.designId;
-        const as = a.as ?? a.format ?? a.view;
+        const as = a.as ?? a.view;
+        const pageId = a.page != null ? await pageIdOf(real, designId, a.page) : null;
         const trees = a.select != null || as === "css" ? await loadTrees(real, designId) : null;
         let ms = null;
         if (a.select != null) {
           const sel = selectorText(a.select);
           ms = matchAll(trees, sel);
+          if (pageId) {
+            const on = new Set(trees.boards.filter((b) => b.pageId === pageId).map((b) => b.id));
+            ms = ms.filter((m) => on.has(m.board));
+          }
           if (!ms.length)
             throw new Error(
-              `"${sel}" matches no element. read with no select shows the outline with every id.`,
+              `"${sel}" matches no element${pageId ? ` on page "${a.page}"` : ""}. read with no select shows the outline with every id.`,
             );
+        }
+        const format = a.export ?? (as === "file" ? a.format : null);
+        if (format != null) {
+          const boards = [...new Set((ms ?? []).map((m) => m.board))];
+          if (boards.length > 1)
+            throw new Error(
+              `export takes the whole design, or one artboard; "${a.select}" is on ${boards.length}. Pass one artboard, or no select.`,
+            );
+          if (String(format) === "jsx" && !boards.length)
+            throw new Error(`export "jsx" takes one artboard: pass select, like "#k3x9a2bq".`);
+          return real.call("export_design", {
+            designId,
+            format: String(format),
+            ...(boards[0] && { artboardId: boards[0] }),
+          });
+        }
+        if (as === "jsx") {
+          if (!ms)
+            throw new Error(`as: "jsx" needs select, like {"select": "#k3x9a2bq", "as": "jsx"}.`);
+          const parts = [];
+          for (const m of ms.slice(0, 10))
+            parts.push(
+              await real.call("get_jsx", {
+                designId,
+                nodeId: m.id,
+                ...(a.tailwind != null && { tailwind: a.tailwind }),
+              }),
+            );
+          if (ms.length > 10) parts.push(`Showing 10 of ${ms.length} matches. Narrow select.`);
+          return parts.join("\n\n");
         }
         if (a.contains != null && a.contains !== "")
           return search(
@@ -1391,7 +1835,7 @@ Long results end with a note saying how to get the rest. Errors say what to do i
             throw new Error(
               `as: "html" needs select, like {"select": ":root", "as": "html"} for every artboard.`,
             );
-          return overview(real, designId, a.depth);
+          return overview(real, designId, a.depth, pageId);
         }
         const shown = ms.slice(0, 20);
         const parts = [];
@@ -1412,6 +1856,7 @@ Long results end with a note saying how to get the rest. Errors say what to do i
                   nodeId: m.id,
                   ...(a.depth != null && { depth: a.depth }),
                 });
+          if (as === "html") remember(designId, text);
           parts.push(head + retool(text).trimEnd());
         }
         if (ms.length > shown.length)
@@ -1441,7 +1886,12 @@ Long results end with a note saying how to get the rest. Errors say what to do i
           },
           check: {
             type: "boolean",
-            description: "Append a layout check of the artboards this edit touched.",
+            description:
+              "A layout check of the artboards this edit touched follows the result. false skips it.",
+          },
+          dryRun: {
+            type: "boolean",
+            description: "Report what the ops would change, then change nothing.",
           },
         },
         required: ["designId"],
@@ -1510,7 +1960,13 @@ Long results end with a note saying how to get the rest. Errors say what to do i
             ? `Changed the design in one step (${ops.length} op${ops.length === 1 ? "" : "s"}); undo reverses all of it.`
             : `Nothing changed: the design already looked like that.`;
         const out = [head, ...sections];
-        if (a.check && e.touched.size) out.push(await layoutCheck(real, designId, e.touched));
+        if (a.check !== false && e.touched.size && !a.dryRun)
+          out.push(await layoutCheck(real, designId, e.touched));
+        if (a.dryRun && steps > 0) {
+          await real.call("undo", { designId, steps });
+          stackOf(designId).undo.pop();
+          out[0] = `Dry run: nothing was changed. Without dryRun, this edit would make ${ops.length} op${ops.length === 1 ? "" : "s"} as one step:`;
+        }
         return out.join("\n");
       },
     },
@@ -1649,7 +2105,15 @@ Examples: {"designId": "…", "select": "#m0b1l3aa"} · {"designId": "…", "sel
           const list = JSON.parse(text);
           if (Array.isArray(list))
             return JSON.stringify(
-              list.map(({ nodeId, ...c }) => ({ ...c, ...(nodeId && { select: `#${nodeId}` }) })),
+              list.map(({ nodeId, alsoSelected, ...c }) => ({
+                ...c,
+                ...(nodeId && { select: `#${nodeId}` }),
+                ...(alsoSelected?.length && {
+                  alsoSelected: alsoSelected.map((x) =>
+                    x?.nodeId ? { ...x, select: `#${x.nodeId}` } : x,
+                  ),
+                }),
+              })),
               null,
               2,
             );
