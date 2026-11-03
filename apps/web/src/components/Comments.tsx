@@ -13,8 +13,6 @@ import { colors, radii, space } from "@/styles/tokens.stylex";
 
 /** How far right of its pin a popover starts, in pixels. */
 const POPOVER_GAP = 36;
-/** How long a resolved pin stays on the canvas, fading, before it goes. The comments panel keeps it. */
-export const DECAY_MS = 60_000;
 
 export type Mode = "pointer" | "comment";
 
@@ -58,15 +56,6 @@ export function pinPosition(
   if (board?.parent === null) return { x: (board.x ?? 0) + pin.x, y: (board.y ?? 0) + pin.y };
   // The artboard is gone: the pin stays where it was when it went.
   return pin.detachedAt ?? null;
-}
-
-/**
- * How long ago `comment` was resolved, or `null` while it's open. A comment
- * resolved before the server recorded when counts as long ago.
- */
-function resolvedFor(comment: Comment, now: number): number | null {
-  if (!comment.resolved) return null;
-  return comment.resolvedAt === undefined ? Infinity : now - comment.resolvedAt;
 }
 
 /** What a comment's pin shows. `working` is the agent label on its artboard, if any. */
@@ -158,32 +147,19 @@ interface LayerProps {
 /**
  * Comment pins and the open thread, drawn in canvas coordinates inside the
  * camera's transformed layer. Each pin keeps its screen size at any zoom.
- * A resolved pin fades out over `DECAY_MS` and then leaves the canvas,
- * unless its thread is open.
+ * A resolved pin leaves the canvas at once, unless its thread is open.
  */
 export function CommentLayer(props: LayerProps) {
   const { replica, comments, openId, draft, working } = props;
-  const now = Date.now();
   const busyAny = [...comments.values()].some(
     (c) => !c.resolved && c.artboardId !== null && working.has(c.artboardId),
   );
-  // Re-render when the next fading pin should go.
-  const [, setExpired] = useState(0);
-  const nextExpiry = Math.min(
-    ...[...comments.values()].map((c) => DECAY_MS - (resolvedFor(c, now) ?? Infinity)),
-  );
-  useEffect(() => {
-    if (nextExpiry <= 0 || nextExpiry === Infinity) return;
-    const timer = setTimeout(() => setExpired((n) => n + 1), nextExpiry);
-    return () => clearTimeout(timer);
-  }, [nextExpiry]);
   return (
     <div {...stylex.props(styles.layer)}>
       <PinFilters boiling={busyAny} />
       {[...comments.values()].map((comment) => {
         const open = comment.id === openId;
-        const age = resolvedFor(comment, now);
-        if (age !== null && age >= DECAY_MS && !open) return null;
+        if (comment.resolved && !open) return null;
         const at = pinPosition(replica, comment);
         if (!at) return null;
         const board = comment.artboardId === null ? undefined : replica.get(comment.artboardId);
@@ -202,22 +178,13 @@ export function CommentLayer(props: LayerProps) {
               onClick={() => props.onOpen(open ? null : comment.id)}
               {...stylex.props(styles.pin)}
             >
-              {age !== null && !open ? (
-                // Keyed by when it was resolved, so resolving again restarts the fade.
-                <Decay key={comment.resolvedAt} age={age}>
-                  <PinIcon state="resolved" />
-                </Decay>
-              ) : (
-                <PinIcon
-                  state={pinState(
-                    comment,
-                    busy && comment.artboardId !== null
-                      ? working.get(comment.artboardId)
-                      : undefined,
-                  )}
-                  selected={open}
-                />
-              )}
+              <PinIcon
+                state={pinState(
+                  comment,
+                  busy && comment.artboardId !== null ? working.get(comment.artboardId) : undefined,
+                )}
+                selected={open}
+              />
             </button>
             {open && (
               <Thread
@@ -237,16 +204,6 @@ export function CommentLayer(props: LayerProps) {
       {draft && <DraftPin {...props} draft={draft} />}
     </div>
   );
-}
-
-/**
- * Fades its children out over what's left of `DECAY_MS`. The delay is read
- * once: changing it later would shift the running animation by the time
- * that already passed.
- */
-function Decay({ age, children }: { age: number; children: ReactNode }) {
-  const [delay] = useState(-age);
-  return <span {...stylex.props(styles.decaying, styles.decayFrom(delay))}>{children}</span>;
 }
 
 function DraftPin({ replica, draft, onPost, onCancelDraft }: LayerProps & { draft: Draft }) {
@@ -596,13 +553,6 @@ const pulse = stylex.keyframes({
   "100%": { boxShadow: `0 0 0 10px rgba(194, 65, 12, 0)` },
 });
 
-// Holds most of its ink, then thins out at the end.
-const decay = stylex.keyframes({
-  "0%": { opacity: 1 },
-  "70%": { opacity: 0.7 },
-  "100%": { opacity: 0 },
-});
-
 const styles = stylex.create({
   pill: {
     position: "absolute",
@@ -653,15 +603,6 @@ const styles = stylex.create({
     transformOrigin: "0 0",
   }),
   raised: { zIndex: 1 },
-  decaying: {
-    display: "block",
-    animationName: decay,
-    animationDuration: `${DECAY_MS}ms`,
-    animationTimingFunction: "linear",
-    animationFillMode: "forwards",
-  },
-  // A negative delay starts the fade partway, so a reload doesn't restart it.
-  decayFrom: (delayMs: number) => ({ animationDelay: `${delayMs}ms` }),
   pin: {
     position: "absolute",
     left: -3,

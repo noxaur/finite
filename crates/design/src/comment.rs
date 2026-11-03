@@ -97,7 +97,7 @@ pub struct Comment {
     pub y: f64,
     pub resolved: bool,
     /// When it was last resolved, in milliseconds since the Unix epoch.
-    /// Viewers fade resolved pins out a while after this.
+    /// Viewers no longer read it: a resolved pin leaves the canvas at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_at: Option<u64>,
     pub created_at: u64,

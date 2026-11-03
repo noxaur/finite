@@ -499,7 +499,7 @@ Here's what happened in the demo you saw:
 
 5. Your reply reopens a resolved comment, so you can keep steering in one thread.
 
-A resolved pin fades out and leaves the canvas a minute after it was resolved (`DECAY_MS` in `components/Comments.tsx`). The server stamps `resolvedAt` when a comment goes from open to resolved, and the viewer fades the pin with a CSS animation whose negative delay is that age. The delay is read once, when the pin mounts. Setting it again on a later render would shift the running animation by the time already passed, and an early version faded twice as fast for that reason. A comment resolved before `resolvedAt` existed counts as long ago, so it's hidden at once. The **Comments** button in the top bar opens a side panel that lists every comment, open and resolved, newest first. Picking one centers its pin and opens the thread, even after the pin has left the canvas.
+A resolved pin leaves the canvas at once, unless its thread is open. The server still stamps `resolvedAt` when a comment goes from open to resolved, though no viewer reads it now. The **Comments** button in the top bar opens a side panel that lists every comment, open and resolved, newest first. Picking one centers its pin and opens the thread, even after the pin has left the canvas.
 
 Next to it, **Import** takes an `.html` or `.finite` file and **Export** downloads one artboard as HTML or the whole design as a `.finite` bundle (`components/Transfer.tsx`). Both go through the routes in [Import and export](import-export.md); the new artboards arrive over the WebSocket like any other change.
 

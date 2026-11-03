@@ -464,7 +464,6 @@ try {
     designId: design,
     commentId: posted.id,
     message: "Done",
-    resolve: true,
   });
   check("the reply links the agent's change", replied.includes("1 change"), replied);
 
@@ -481,6 +480,21 @@ try {
   );
   await page.until(`!document.querySelector('[data-outline="flash"]')`);
   await page.key("Escape", "Escape", 27);
+
+  // A resolved pin leaves the canvas at once, and reopening brings it back.
+  const pins = `document.querySelectorAll('button[aria-label^="Comment:"]').length`;
+  const setResolved = (resolved) =>
+    fetch(`${base}/api/designs/${design}/comments/${posted.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ resolved }),
+    });
+  await setResolved(true);
+  await page.until(`${pins} === 0`);
+  check("a resolved pin leaves the canvas", true);
+  await setResolved(false);
+  await page.until(`${pins} === 1`);
+  check("and returns when the comment reopens", true);
 
   // A comment inside the sandboxed artboard points at the element there.
   // Comment mode turns off the iframe's pointer events, but Chrome routes the
