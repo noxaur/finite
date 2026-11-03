@@ -527,6 +527,14 @@ impl FiniteMcp {
             };
             let handle = design!(self, &id);
             let name = handle.summary().meta.name;
+            // Deleting can't be undone, so only an exact id or name will do:
+            // an id prefix or a mistyped name could pick another design.
+            if id != given.trim() && !name.trim().eq_ignore_ascii_case(given.trim()) {
+                return fail(format!(
+                    "\"{}\" isn't a design's exact id or name, so nothing was deleted. Did you mean {name:?} ({id})? Pass its id to delete it.",
+                    given.trim()
+                ));
+            }
             let hub = self.hub.clone();
             let deleted = tokio::task::spawn_blocking(move || hub.delete(&handle)).await;
             return match deleted.map_err(std::io::Error::other) {

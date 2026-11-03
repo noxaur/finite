@@ -773,6 +773,23 @@ fn move_op(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<(String,
             .cloned()
             .collect()
     };
+    // Copy first, so mode, page and x and y place the copies, not the originals.
+    let duplicate = text(f, "op").is_some_and(|o| o.eq_ignore_ascii_case("duplicate"));
+    if flag(f, "copy") || flag(f, "duplicate") || duplicate {
+        let (ops, roots) = {
+            let t = &*tx;
+            edit::duplicate(t.view(), &ids, &mut || fresh(t)).map_err(|e| e.to_string())?
+        };
+        stage(tx, ops)?;
+        made = roots.first().cloned();
+        parts.push(format!(
+            "Copied {} node{}:\n{}",
+            roots.len(),
+            plural(roots.len()),
+            outlines(tx.view(), &roots, 2).trim_end()
+        ));
+        ids = roots;
+    }
     if f.contains_key("mode") && to.is_none() {
         let doc = tx.view();
         let wrong = not_boards(doc, &ids);
@@ -849,22 +866,6 @@ fn move_op(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<(String,
         let shown = describe(doc, &ids);
         stage(tx, ops)?;
         parts.push(format!("Placed {shown}."));
-    }
-    let duplicate = text(f, "op").is_some_and(|o| o.eq_ignore_ascii_case("duplicate"));
-    if flag(f, "copy") || flag(f, "duplicate") || duplicate {
-        let (ops, roots) = {
-            let t = &*tx;
-            edit::duplicate(t.view(), &ids, &mut || fresh(t)).map_err(|e| e.to_string())?
-        };
-        stage(tx, ops)?;
-        made = roots.first().cloned();
-        parts.push(format!(
-            "Copied {} node{}:\n{}",
-            roots.len(),
-            plural(roots.len()),
-            outlines(tx.view(), &roots, 2).trim_end()
-        ));
-        ids = roots;
     }
     let Some(to) = to else {
         if parts.is_empty() {

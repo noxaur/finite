@@ -366,7 +366,7 @@ On startup, the hub reads every stored design to build the list, then drops each
 
 #### The six-tool surface (doc6)
 
-`FINITE_MCP_SURFACE=doc6` serves six tools instead of today's: `designs`, `read`, `edit`, `render`, `comments` and `undo`, with their own instructions (`doc6/instructions.md`). Unset, or `classic`, serves today's tools. AX runs compare the two on one build; which one is the default comes after that. Components stay on the classic surface, behind `FINITE_MCP_EXTRA=components`.
+`FINITE_MCP_SURFACE=doc6` serves six tools instead of today's: `designs`, `read`, `edit`, `render`, `comments` and `undo`, with their own instructions (`doc6/instructions.md`). Unset, or `classic`, serves today's tools. AX runs compare the two on one build; which one is the default comes after that. Components stay on the classic surface, behind `FINITE_MCP_EXTRA=components`. `/mcp/classic` always serves today's tools, whatever `/mcp` serves, so scripts and the e2e and AX harnesses keep working; the router relays both paths. doc6 runs on a single server for now: the relay lists and creates designs with the classic tools' names and routes calls by `designId`, which doc6's `designs` and name lookups don't carry, so a router started with `FINITE_MCP_SURFACE=doc6` refuses to start.
 
 Elements are addressed with CSS selectors, matched on the server by `finite_design::select` (see "Finding elements with CSS selectors"), on the whole design or one `page`. Every tool's `designId` also takes a design's exact name, in any case, or the start of its id: `call_tool` resolves it before the tool runs.
 

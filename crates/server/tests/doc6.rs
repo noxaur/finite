@@ -141,6 +141,50 @@ async fn designs_are_listed_created_renamed_and_deleted() {
     assert!(error, "{gone}");
 }
 
+/// Deleting can't be undone, so the start of an id, which every other
+/// tool accepts, isn't enough.
+/// A copy is what x, y, page and mode place, not its original.
+#[tokio::test]
+async fn move_with_copy_places_the_copy() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect(&app, "Copier").await;
+    let id = design(&mut agent, "Copies").await;
+    let made = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Home", "width": 400, "height": 300, "x": 0, "y": 0 }]),
+    )
+    .await;
+    let board = id_after(&made, "artboard");
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "move", "select": format!("#{board}"), "copy": true, "x": 2000, "y": 0 }]),
+    )
+    .await;
+    let overview = agent.ok("read", json!({ "designId": id })).await;
+    assert!(
+        overview.contains(&format!("#{board} (artboard at 0, 0)")),
+        "the original stays: {overview}"
+    );
+    assert!(overview.contains("(artboard at 2000, 0)"), "{overview}");
+}
+
+#[tokio::test]
+async fn delete_takes_only_an_exact_id_or_name() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect(&app, "Deleter").await;
+    let id = design(&mut agent, "Keep me").await;
+    let (refused, error) = agent.call("designs", json!({ "delete": &id[..6] })).await;
+    assert!(
+        error && refused.contains("nothing was deleted") && refused.contains(&id),
+        "{refused}"
+    );
+    agent.ok("read", json!({ "designId": id })).await;
+    let deleted = agent.ok("designs", json!({ "delete": id })).await;
+    assert!(deleted.contains("permanently"), "{deleted}");
+}
+
 #[tokio::test]
 async fn design_ids_take_a_name_or_the_start_of_an_id() {
     let (app, _) = doc6();

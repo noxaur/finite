@@ -75,13 +75,17 @@ pub struct Relay {
     /// router's list yet. Each has its own lock, so a slow server doesn't
     /// hold up calls to the others.
     backends: std::sync::Mutex<HashMap<String, Arc<Mutex<Option<Backend>>>>>,
+    /// The backends' endpoint this relays to: `/mcp`, or `/mcp/classic`.
+    path: &'static str,
 }
 
-/// The router's MCP endpoint, to mount at `/mcp`. With `sessions`, routers
-/// that share the store can each serve any session.
+/// The router's MCP endpoint, to mount at `path` (`/mcp` or `/mcp/classic`),
+/// relaying to the same path on the servers. With `sessions`, routers that
+/// share the store can each serve any session.
 pub fn service(
     members: Arc<Members>,
     sessions: Option<Arc<dyn SessionStore>>,
+    path: &'static str,
 ) -> StreamableHttpService<Relay, LocalSessionManager> {
     let mut config =
         StreamableHttpServerConfig::default().with_allowed_hosts(members.now().allowed_hosts());
@@ -93,6 +97,7 @@ pub fn service(
                 members: members.clone(),
                 next: next.clone(),
                 backends: Default::default(),
+                path,
             })
         },
         Arc::new(crate::mcp::sessions()),
@@ -179,7 +184,7 @@ impl Relay {
         {
             return Ok(backend.clone());
         }
-        let config = StreamableHttpClientTransportConfig::with_uri(format!("{base}/mcp"))
+        let config = StreamableHttpClientTransportConfig::with_uri(format!("{base}{}", self.path))
             .custom_headers(identity(ctx));
         let connect = async {
             ().serve(StreamableHttpClientTransport::from_config(config))
@@ -329,7 +334,11 @@ impl ServerHandler for Relay {
                 "finite-router",
                 env!("CARGO_PKG_VERSION"),
             ))
-            .with_instructions(instructions(crate::mcp::Surface::from_env()))
+            .with_instructions(instructions(if self.path == "/mcp/classic" {
+                crate::mcp::Surface::Classic
+            } else {
+                crate::mcp::Surface::from_env()
+            }))
     }
 
     /// Every server has the same tools, so the first that answers lists them.
