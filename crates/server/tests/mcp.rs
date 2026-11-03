@@ -1500,11 +1500,14 @@ async fn an_agent_gets_jsx_for_a_node() {
         .find(|w| w.len() == 10)
         .unwrap()
         .to_owned();
+    let hash = "a".repeat(64);
+    let html = format!(
+        "<div data-name=\"Card\" class=\"card\" style=\"display: flex; gap: 8px; background-color: #fff; color: red !important\"><label for=\"a\">Name</label><img src=\"/api/designs/{design}/assets/{hash}\"><script>go()</script></div>"
+    );
     let board = agent
         .ok(
             "create_artboard",
-            json!({ "designId": design, "name": "Card", "width": 390, "height": 400,
-                    "html": "<div data-name=\"Card\" class=\"card\" style=\"display: flex; gap: 8px; background-color: #fff\"><label for=\"a\">Name</label><script>go()</script></div>" }),
+            json!({ "designId": design, "name": "Card", "width": 390, "height": 400, "html": html }),
         )
         .await;
     let board = id_after(&board, "Created artboard");
@@ -1528,6 +1531,17 @@ async fn an_agent_gets_jsx_for_a_node() {
         "{jsx}"
     );
     assert!(jsx.contains("Left out <script>"), "{jsx}");
+    assert!(jsx.contains("Left out !important on color"), "{jsx}");
+    assert!(!jsx.contains("important\""), "{jsx}");
+    // Stored images keep their server URLs, as in get_html, and the result says so.
+    assert!(
+        jsx.contains(&format!("/api/designs/{design}/assets/{hash}")),
+        "{jsx}"
+    );
+    assert!(
+        jsx.contains("1 image URL points at this server's stored files"),
+        "{jsx}"
+    );
 
     let tailwind = agent
         .ok(
@@ -1551,4 +1565,76 @@ async fn an_agent_gets_jsx_for_a_node() {
         )
         .await;
     assert!(failed && error.contains("not found"), "{error}");
+}
+
+/// A node too big for one result returns its outline, and JSX is a format
+/// that only exports, so it fails clearly where the others work.
+#[tokio::test]
+async fn jsx_results_are_cut_and_the_format_only_exports() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Dev").await;
+    let created = agent.ok("create_design", json!({ "name": "Big" })).await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .unwrap()
+        .to_owned();
+    let board = agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Grid", "width": 1440, "height": 900 }),
+        )
+        .await;
+    let board = id_after(&board, "Created artboard");
+    let card = r#"<div data-name="Card" style="padding: 8px"><p>A product with a long description</p></div>"#;
+    agent
+        .ok(
+            "write_html",
+            json!({ "designId": design, "targetId": board, "html": card.repeat(3_000) }),
+        )
+        .await;
+    let jsx = agent
+        .ok("get_jsx", json!({ "designId": design, "nodeId": board }))
+        .await;
+    assert!(jsx.len() < 60_000 + 200, "get_jsx said {} chars", jsx.len());
+    assert!(
+        jsx.contains("Call get_jsx on one of its children"),
+        "{}",
+        tail(&jsx)
+    );
+
+    // The whole design doesn't fit in one component file.
+    let (error, failed) = agent
+        .call(
+            "export_design",
+            json!({ "designId": design, "format": "jsx" }),
+        )
+        .await;
+    assert!(failed && error.contains("pick one"), "{error}");
+    let exported = agent
+        .ok(
+            "export_design",
+            json!({ "designId": design, "format": "jsx", "artboardId": board }),
+        )
+        .await;
+    assert!(exported.contains("grid.jsx"), "{}", tail(&exported));
+
+    let (error, failed) = agent
+        .call(
+            "import_design",
+            json!({ "designId": design, "format": "jsx", "content": "<div/>" }),
+        )
+        .await;
+    assert!(failed && error.contains("can only be exported"), "{error}");
+    // An unknown format lists jsx among the ones that exist.
+    let (error, failed) = agent
+        .call(
+            "export_design",
+            json!({ "designId": design, "format": "nope" }),
+        )
+        .await;
+    assert!(
+        failed && error.contains("html, finite, figma, jsx"),
+        "{error}"
+    );
 }

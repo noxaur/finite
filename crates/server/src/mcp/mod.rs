@@ -31,7 +31,7 @@ use rmcp::{
     },
 };
 
-use finite_transfer::jsx;
+use finite_transfer::{assets, jsx};
 
 use crate::{
     hub::{Actor, DesignHandle, Hub, OpenError, SESSION_ACTOR, random_id},
@@ -830,7 +830,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "A node's subtree as JSX to paste into a React codebase: elements with React's attribute names and each node's styles as an inline style object, or as Tailwind classes with tailwind true. Elements carry their layer name as data-name. <script> elements are left out, and the result says so. A node with a lot of content returns its outline instead; call get_jsx on a child.",
+        description = "A node's subtree as JSX to paste into a React codebase: elements with React's attribute names and each node's styles as an inline style object, or as Tailwind classes with tailwind true. Elements carry their layer name as data-name. <script> elements are left out, and the result says so, as is any !important. Like get_html, it keeps stored images as this server's URLs; export_design with format jsx inlines them. A node with a lot of content returns its outline instead; call get_jsx on a child.",
         annotations(read_only_hint = true)
     )]
     async fn get_jsx(&self, Parameters(p): Parameters<JsxParams>) -> ToolResult {
@@ -876,6 +876,19 @@ impl FiniteMcp {
                 )
             })
             .collect();
+        let mut stored = 0;
+        assets::rewrite_urls(&converted.jsx, |_| {
+            stored += 1;
+            None
+        });
+        if stored > 0 {
+            notes.push(format!(
+                "{stored} image URL{} point{} at this server's stored files, so they only work here. \
+                 export_design with format jsx and an artboardId writes them inline.",
+                if stored == 1 { "" } else { "s" },
+                if stored == 1 { "s" } else { "" },
+            ));
+        }
         notes.extend(shared_css_note(&handle, "The JSX above"));
         let note = (!notes.is_empty()).then(|| notes.join("\n"));
         Ok(CallToolResult::success(with_note(

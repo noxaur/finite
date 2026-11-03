@@ -27,16 +27,12 @@ impl Codec for Jsx {
         use {Direction::*, Support::*};
         match (feature, direction) {
             (_, Import) => Unsupported,
-            // Declarations become style objects or Tailwind classes, and
-            // Tailwind's arbitrary values cover any of them.
-            (
-                Feature::Frame
-                | Feature::Text
-                | Feature::SolidFill
-                | Feature::Image
-                | Feature::FlexLayout,
-                Export,
-            ) => Exact,
+            // Text and images are the same content in JSX.
+            (Feature::Text | Feature::Image, Export) => Exact,
+            // Styles become inline style objects, which keep their weight.
+            // With Tailwind they become classes, which a stylesheet rule can
+            // outrank, and `!important` can't be carried either way.
+            (Feature::Frame | Feature::SolidFill | Feature::FlexLayout, Export) => Approximate,
             // A component has no place for a script, so it's left out.
             (Feature::Script | Feature::Embed | Feature::ImportHistory, Export) => Unsupported,
         }
@@ -164,6 +160,22 @@ impl Writer<'_> {
             self.attr(NAME_ATTR, name);
         }
         let mut leftover = node.styles.clone();
+        for (property, value) in leftover.iter_mut() {
+            if let Some(stripped) = strip_important(value) {
+                self.diagnostics.push(Diagnostic {
+                    node: Some(node.id.clone()),
+                    path: format!("#{}", node.id),
+                    what: format!("!important on {property}"),
+                    feature: Feature::Frame,
+                    reason: "a style object and a Tailwind class can't carry it, so the declaration may now lose to a stylesheet rule".into(),
+                    preserved: Score::No,
+                    visual: Score::Unknown,
+                    editable: Score::Yes,
+                    quarantined: false,
+                });
+                *value = stripped;
+            }
+        }
         let mut classes = Vec::new();
         if self.options.tailwind {
             leftover.retain(|property, value| match utility(property, value) {
@@ -182,7 +194,7 @@ impl Writer<'_> {
                 // The model keeps styles in `styles`; a stray attribute
                 // would be a string, which React rejects.
             } else {
-                self.react_attr(tag, &lower, value);
+                self.react_attr(tag, name, value);
             }
         }
         if !classes.is_empty() {
@@ -215,6 +227,16 @@ impl Writer<'_> {
             return;
         }
         let children = self.doc.children(Some(&node.id));
+        if tag.eq_ignore_ascii_case("textarea") && children.iter().all(|c| c.kind == NodeKind::Text)
+        {
+            // React warns about children on a textarea; its text is the default value.
+            let value: String = children.iter().filter_map(|c| c.text.as_deref()).collect();
+            self.out.push_str(&format!(
+                " defaultValue={{{}}}></{tag}>\n",
+                serde_json::to_string(&value).expect("strings serialize")
+            ));
+            return;
+        }
         if tag.eq_ignore_ascii_case("style") {
             let css: String = children.iter().filter_map(|c| c.text.as_deref()).collect();
             let css = css
@@ -248,26 +270,27 @@ impl Writer<'_> {
             .push_str(&format!(" {name}=\"{}\"", html::escape(value, true)));
     }
 
-    /// An HTML attribute under the name and form React wants.
+    /// An HTML attribute under the name and form React wants. `name` is as
+    /// the parser stored it: HTML's names are lowercase, and SVG's keep their
+    /// camel case (`gradientUnits`, `stdDeviation`), which React uses too.
     fn react_attr(&mut self, tag: &str, name: &str, value: &str) {
-        if BOOLEAN_ATTRS.contains(&name) {
+        let lower = name.to_ascii_lowercase();
+        if BOOLEAN_ATTRS.contains(&lower.as_str()) {
             // React reads `disabled=""` as false.
-            let name = if name == "checked" {
-                "defaultChecked"
-            } else {
-                name
+            let react = match lower.as_str() {
+                "checked" => "defaultChecked",
+                other => BOOLEAN_NAMES
+                    .iter()
+                    .find_map(|(html, react)| (*html == other).then_some(*react))
+                    .unwrap_or(other),
             };
-            let name = BOOLEAN_NAMES
-                .iter()
-                .find_map(|(html, react)| (*html == name).then_some(*react))
-                .unwrap_or(name);
             self.out.push(' ');
-            self.out.push_str(name);
+            self.out.push_str(react);
             return;
         }
-        let name = match name {
+        let name = match lower.as_str() {
             "value" if matches!(tag, "input" | "textarea") => "defaultValue".to_owned(),
-            name => react_name(name),
+            _ => react_name(name),
         };
         self.attr(&name, value);
     }
@@ -339,7 +362,8 @@ const RENAMED_ATTRS: &[(&str, &str)] = &[
 ];
 
 fn react_name(name: &str) -> String {
-    if let Some((_, react)) = RENAMED_ATTRS.iter().find(|(html, _)| *html == name) {
+    let lower = name.to_ascii_lowercase();
+    if let Some((_, react)) = RENAMED_ATTRS.iter().find(|(html, _)| *html == lower) {
         return (*react).to_owned();
     }
     if name.starts_with("data-") || name.starts_with("aria-") || !name.contains(['-', ':']) {
@@ -363,6 +387,16 @@ fn camel(name: &str, separators: [char; 2]) -> String {
         }
     }
     out
+}
+
+/// `value` without a trailing `!important`, if it had one.
+fn strip_important(value: &str) -> Option<String> {
+    let value = value.trim_end();
+    let head = value.len().checked_sub("important".len())?;
+    let tail = value.get(head..)?;
+    let rest = value[..head].trim_end().strip_suffix('!')?;
+    tail.eq_ignore_ascii_case("important")
+        .then(|| rest.trim_end().to_owned())
 }
 
 /// A style property as an object key: `font-size` is `fontSize`, and
@@ -618,6 +652,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn svg_keeps_the_camel_case_the_parser_gives_it() {
+        let out = jsx(
+            "<svg><defs><linearGradient gradientUnits=\"userSpaceOnUse\" id=\"g\" x1=\"0\"><stop offset=\"0\" stop-color=\"#fff\"></stop></linearGradient><clipPath id=\"c\"><rect width=\"1\" height=\"1\"></rect></clipPath><filter id=\"f\"><feGaussianBlur stdDeviation=\"2\"></feGaussianBlur><feTurbulence baseFrequency=\"0.1\"></feTurbulence></filter><pattern id=\"p\" patternUnits=\"userSpaceOnUse\"></pattern><marker id=\"m\" markerWidth=\"4\" refX=\"1\"></marker></defs><path pathLength=\"1\" d=\"M0 0\"></path><animate attributeName=\"x\"></animate></svg>",
+            false,
+        );
+        for expected in [
+            "<linearGradient gradientUnits=\"userSpaceOnUse\" id=\"g\"",
+            "stopColor=\"#fff\"",
+            "<clipPath id=\"c\">",
+            "<feGaussianBlur stdDeviation=\"2\">",
+            "<feTurbulence baseFrequency=\"0.1\">",
+            "patternUnits=\"userSpaceOnUse\"",
+            "markerWidth=\"4\" refX=\"1\"",
+            "pathLength=\"1\"",
+            "attributeName=\"x\"",
+        ] {
+            assert!(out.jsx.contains(expected), "{expected} in\n{}", out.jsx);
+        }
+    }
+
+    #[test]
+    fn important_is_stripped_and_reported() {
+        for tailwind in [false, true] {
+            let out = jsx(
+                "<div style=\"color: red !important; width: 4px\"><p>x</p></div>",
+                tailwind,
+            );
+            assert!(!out.jsx.contains("important"), "{}", out.jsx);
+            assert!(
+                out.jsx.contains(if tailwind {
+                    "[color:red]"
+                } else {
+                    "color: \"red\""
+                }),
+                "{}",
+                out.jsx
+            );
+            assert_eq!(out.diagnostics.len(), 1, "{:?}", out.diagnostics);
+            assert_eq!(out.diagnostics[0].what, "!important on color");
+        }
+        assert_eq!(strip_important("red ! IMPORTANT "), Some("red".into()));
+        assert_eq!(strip_important("important"), None);
+    }
+
+    #[test]
+    fn a_textarea_keeps_its_text_as_the_default_value() {
+        let out = jsx("<div><textarea rows=\"2\">a\nb</textarea></div>", false);
+        assert!(
+            out.jsx
+                .contains("<textarea rows=\"2\" defaultValue={\"a\\nb\"}></textarea>"),
+            "{}",
+            out.jsx
+        );
+    }
+
     struct OneBlob(Vec<u8>);
 
     impl Blobs for OneBlob {
@@ -658,6 +748,37 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_component_file_holds_the_whole_artboard() {
+        let missing = url("d", &BlobHash::of(b"gone"));
+        let (design, id) = board(&format!("<p>Hi</p><img src=\"{missing}\">"));
+        let revision = Revision {
+            name: "Test",
+            doc: design.doc(),
+            imports: design.imports(),
+            blobs: &NoBlobs,
+            measure: &crate::scene::NoMeasure,
+        };
+        let exported = Jsx.write(&revision, &Scope::Artboard(id)).unwrap();
+        let file = String::from_utf8(exported.bytes).unwrap();
+        let lines: Vec<&str> = file.lines().collect();
+        assert_eq!(lines[0], "export default function HomeDesktop() {");
+        assert_eq!(lines[1], "  return (");
+        assert!(
+            lines[2].starts_with("    <div data-name=\"Home — Desktop\""),
+            "{file}"
+        );
+        assert_eq!(lines[3], "      <p>Hi</p>");
+        assert!(
+            lines[4].starts_with("      <img src=\"/api/designs/d/assets/"),
+            "{file}"
+        );
+        assert_eq!(&lines[5..], ["    </div>", "  );", "}"]);
+        // The file the store lacks stays a URL, and the export says so.
+        assert_eq!(exported.diagnostics.len(), 1);
+        assert_eq!(exported.diagnostics[0].preserved, Score::No);
     }
 
     #[test]
