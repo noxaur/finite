@@ -1,7 +1,7 @@
 import type { ImportDiagnostic, ImportResult, TransferFormat } from "@/api/Api";
 
 /** What the Import picker accepts. */
-export const IMPORT_ACCEPT = ".html,.htm,.finite,.figma.json";
+export const IMPORT_ACCEPT = ".html,.htm,.finite,.figma.json,.tar";
 
 /** How many left-out items the result lists before "and N more". */
 export const LISTED = 5;
@@ -15,6 +15,7 @@ export function formatOf(fileName: string): TransferFormat | null {
   const extension = fileName.slice(dot + 1).toLowerCase();
   if (extension === "html" || extension === "htm") return "html";
   if (extension === "finite") return "finite";
+  if (extension === "tar") return "repo";
   return null;
 }
 
@@ -25,6 +26,11 @@ export function exportHref(designId: string, artboardId: string | null): string 
   return artboardId === null
     ? `${designPath(designId)}/export?format=finite`
     : `${designPath(designId)}/export?format=html&artboard=${encodeURIComponent(artboardId)}`;
+}
+
+/** The link that downloads the whole design as a tar of text files, one HTML file per artboard, to keep in git. */
+export function repoHref(designId: string): string {
+  return `${designPath(designId)}/export?format=repo`;
 }
 
 /** The link that downloads one artboard as a `.figma.json` file for the Finite Figma plugin to open. */

@@ -143,7 +143,7 @@ fn is_page(source: &str) -> bool {
 
 /// A diagnostic for content the parser left out. All of it stays in the
 /// import's original bytes, so it's preserved but not editable.
-fn quarantine(dropped: Dropped) -> (Anchor, Diagnostic) {
+pub(crate) fn quarantine(dropped: Dropped) -> (Anchor, Diagnostic) {
     let script = dropped.what == "<script>" || !dropped.what.starts_with('<');
     let (feature, visual) = if script {
         // A script might change how the page looks once it runs, or not.

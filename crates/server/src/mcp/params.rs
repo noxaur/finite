@@ -616,7 +616,7 @@ pub struct LayoutParams {
 #[serde(rename_all = "camelCase")]
 pub struct ImportParams {
     pub(super) design_id: String,
-    /// "html", "finite" (a Finite bundle) or "figma" (a .figma.json file from the Finite Figma plugin).
+    /// "html", "finite" (a Finite bundle), "repo" (a tar of a design's text files; pass contentBase64) or "figma" (a .figma.json file from the Finite Figma plugin).
     pub(super) format: String,
     /// The file as text. Pass this or contentBase64, not both.
     #[serde(default)]
@@ -647,7 +647,7 @@ pub struct CreatePageParams {
 #[serde(rename_all = "camelCase")]
 pub struct ExportParams {
     pub(super) design_id: String,
-    /// "html", "finite" (a Finite bundle) or "figma" (a .figma.json file for the Finite Figma plugin).
+    /// "html", "finite" (a Finite bundle), "repo" (a tar of text files: one HTML file per artboard, the shared CSS and a manifest) or "figma" (a .figma.json file for the Finite Figma plugin).
     pub(super) format: String,
     /// One artboard to export. Omit for the whole design.
     #[serde(default)]

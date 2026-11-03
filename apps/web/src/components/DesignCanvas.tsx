@@ -368,7 +368,7 @@ export function DesignCanvas({ id }: { id: string }) {
     if (!format) {
       setImported({
         status: "failed",
-        message: "Pick an .html, .htm, .finite or .figma.json file.",
+        message: "Pick an .html, .htm, .finite, .figma.json or .tar file.",
       });
       setPanel("import");
       return;

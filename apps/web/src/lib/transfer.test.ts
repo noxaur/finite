@@ -39,6 +39,7 @@ suite("formatOf", () => {
     expect(formatOf("landing.html")).toBe("html");
     expect(formatOf("Landing.HTM")).toBe("html");
     expect(formatOf("my.design.finite")).toBe("finite");
+    expect(formatOf("home.finite-repo.tar")).toBe("repo");
   });
 
   it("reads a .figma.json file as a Figma payload, and a plain .json as nothing", () => {
