@@ -101,7 +101,7 @@ class Budget {
   async css(css: string, base = this.base, depth = 0): Promise<string> {
     let out = css;
     if (depth < 3) {
-      for (const match of [...css.matchAll(CSS_IMPORT)]) {
+      for (const match of css.matchAll(CSS_IMPORT)) {
         const url = absolute(match[1] ?? match[2] ?? "", base);
         if (url === null) continue;
         out = out.replace(match[0], await this.css(await this.text(url), url, depth + 1));

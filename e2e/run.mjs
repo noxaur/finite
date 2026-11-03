@@ -798,10 +798,13 @@ try {
   // a scripted one, which stays live: "drawn" means a loaded iframe or a bitmap.
   const lod = (id) =>
     page.eval(`document.querySelector('[data-artboard="${id}"]').dataset.lod ?? ""`);
-  const drawn = async () => (await loaded()) || (await lod(farLive)) === "bitmap";
+  const boardDrawn = async () => (await loaded()) || (await lod(farLive)) === "bitmap";
   check(
     "zoomed out to fit, every artboard is drawn",
-    !(await hidden(near)) && !(await hidden(far)) && !(await hidden(farLive)) && (await drawn()),
+    !(await hidden(near)) &&
+      !(await hidden(far)) &&
+      !(await hidden(farLive)) &&
+      (await boardDrawn()),
   );
   const fitted = await zoom();
   await page.key("0");
@@ -826,7 +829,7 @@ try {
       ),
     ) && (await zoom()) === fitted,
   );
-  check("the artboard is drawn again once it's in view", await drawn());
+  check("the artboard is drawn again once it's in view", await boardDrawn());
 
   // Far zoomed out, artboards in view are bitmaps of the live ones, and a
   // sandboxed one stays live, since its scripts' output isn't in the HTML.
