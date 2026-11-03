@@ -7,12 +7,12 @@ description: Prove a Finite feature works in the real app and keep the evidence.
 
 Finite has two surfaces, and most features need both. **Agents** edit designs through MCP tools at `/mcp`. **People** watch in the browser: the design list at `/` and the canvas at `/design/?id=<designId>`. A proof drives the agent side with `call` and checks the person's side in the page, or the other way round for comments.
 
-The harness is `e2e/headless.mjs`. `.claude/skills/finite-headless/SKILL.md` is its command reference (selectors that reach into shadow roots, sandboxed iframes, `--agent`, Python). Read it once before your first drive. This skill adds isolation, a doctor, an evidence folder, before-and-after runs and the feature map.
+The harness is `e2e/headless.mjs`. `.agents/skills/finite-headless/SKILL.md` is its command reference (selectors that reach into shadow roots, sandboxed iframes, `--agent`, Python). Read it once before your first drive. This skill adds isolation, a doctor, an evidence folder, before-and-after runs and the feature map.
 
 Every command below runs from the checkout root:
 
 ```bash
-V=.claude/skills/verify-finite/scripts/verify.sh
+V=.agents/skills/verify-finite/scripts/verify.sh
 ```
 
 Shell variables don't survive between tool calls. Repeat `V=...` and `RUN=...` at the start of each call.
