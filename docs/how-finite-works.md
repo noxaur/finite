@@ -353,7 +353,7 @@ On startup, the hub reads every stored design to build the list, then drops each
 
 ### MCP
 
-`crates/server/src/mcp/` is the agent-facing side, served at `/mcp` over Streamable HTTP with the `rmcp` crate. It has seven files:
+`crates/server/src/mcp/` is the agent-facing side, served at `/mcp` over Streamable HTTP with the `rmcp` crate. It has these files, and the `doc6/` folder described below:
 
 - `mod.rs` defines most tools and works out which actor is calling.
 - `params.rs` holds each tool's arguments. `rmcp` turns them into the JSON schemas agents see. Batched edits also accept the shapes agents guess before their client loads a schema: lists and objects sent as JSON strings, a flat `nodeIds` and `styles` instead of `updates`, and `nodeId` for `nodeIds`. Before, a third of the longer AX runs hit "failed to deserialize parameters" at least once.
@@ -363,6 +363,19 @@ On startup, the hub reads every stored design to build the list, then drops each
 - `tokens.rs` has `set_tokens`, `get_tokens` and `set_artboard_mode`, and `token_ops`, which the web API's token route uses too. `set_tokens` takes a token's one value, its values by mode name, or `null`, and `modes` to name the modes. `get_tokens` returns them in that shape. `create_artboard` takes a `mode`, and `get_basic_info` shows each artboard's mode and the `tokenCount`. `get_html` and `get_jsx` note when a design has tokens, since markup copied elsewhere would lose them.
 - `watch.rs` adds a layout note to `write_html` and `update_styles` results when `FINITE_MCP_EXTRA=layout`. An edit measures the artboards it touched in Chrome (the first 3, and the note says when there were more) and waits up to a second; `FINITE_LAYOUT_WAIT_MS` changes that. If the browser is slower (the first call takes about 2 s, since each measurement launches Chrome), the note goes on the agent's next result for that design instead. Measurements run one at a time, and one whose artboard was edited again meanwhile is skipped. Any other edit, `undo`, `redo`, `get_layout` and `get_screenshot` drop a waiting note; a call that fails leaves it.
 - `instructions.md` is the text agents read when they connect. It's plain Markdown, so you can edit the workflow without touching Rust. Keep it short: Claude Code keeps the first 4,096 characters of a server's instructions and silently drops the rest. A test checks that the instructions, with every extra group's section added, stay under 4,000.
+
+#### The six-tool surface (doc6)
+
+`FINITE_MCP_SURFACE=doc6` serves six tools instead of today's: `designs`, `read`, `edit`, `render`, `comments` and `undo`, with their own instructions (`doc6/instructions.md`). Unset, or `classic`, serves today's tools. AX runs compare the two on one build; which one is the default comes after that. Components stay on the classic surface, behind `FINITE_MCP_EXTRA=components`.
+
+Elements are addressed with CSS selectors, matched on the server by `finite_design::select` (see "Finding elements with CSS selectors"), on the whole design or one `page`. Every tool's `designId` also takes a design's exact name, in any case, or the start of its id: `call_tool` resolves it before the tool runs.
+
+- `doc6/ops.rs` reads an edit's ops: their kind (from `op`, an old tool name, or the fields), the fields each needs, and the work done before the design's lock, which is parsing HTML and reading and storing an import's file (`transfer::prepare`).
+- `doc6/edit.rs` runs the ops inside one `DesignHandle::transact`. Each op builds against `tx.view()` with the commands in `edit.rs` and stages with `tx.edit`, so it sees what the ops before it did, and an `as` name resolves to the id an earlier op made (`@name`). The first op that fails fails the call with "op N (kind): …. Nothing was changed.", and nobody sees anything. `dryRun` stages with `dry_run` instead. The change is labelled with `status`, or a summary of the ops ("Replace #3b82f6 → #f97316, css on .btn"), which undo and comment replies show; `status` also shows people which artboards the edit touched. An html op with mode `inner` or `replace` is the merged rewrite (`tx.merge`), taking one match. A `remove` whose matches nest inside each other is refused. `replace` also replaces in token values (`search::replace_in_tokens`), and an `import` op records its import in the transaction (`Transaction::record_import`), which the hub journals with the change.
+- `doc6/read.rs` has `read`'s views: an overview by page, and for a selector's matches their outline, HTML with its read mark, CSS (inline, each matching `<style>` rule, and what inline styles override), JSX, a search (`contains`, which also searches tokens) or an export.
+- After every edit, unless `check: false`, the edit waits for the layout check of `watch.rs` the way the `layout` note does, and a late note goes on the next result.
+
+`crates/server/tests/doc6.rs` drives every doc6 tool and op over MCP.
 
 `e2e/ax` measures how real agents do with the tools (see its README). Every change to a tool's shape, description or result is worth a run there before and after.
 
