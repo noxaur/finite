@@ -50,6 +50,8 @@ for (const label of chosen) {
       shots: avg((r) => r.screenshots).toFixed(1),
       cost: `$${avg((r) => r.cost).toFixed(2)}`,
       seconds: avg((r) => r.seconds).toFixed(0),
+      // Runs that finished with an artboard's content cut off, of those measured.
+      clipped: `${runs.filter((r) => r.clipped > 0).length}/${runs.filter((r) => r.clipped != null).length}`,
       quality: graded(runs, "quality"),
       fit: graded(runs, "fit"),
     });
@@ -74,6 +76,7 @@ const cols = [
   "shots",
   "cost",
   "seconds",
+  "clipped",
   "quality",
   "fit",
 ];

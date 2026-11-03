@@ -20,9 +20,10 @@ use finite_design::{
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, Implementation, MetaObject, ServerCapabilities, ServerConfig,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+        MetaObject, ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
     tool, tool_handler, tool_router,
@@ -69,8 +70,8 @@ const SEARCH_INSTRUCTIONS: &str = "Search: find_nodes finds elements by text, na
 /// Whether `FINITE_MCP_EXTRA` (a comma-separated list) turns on a group of
 /// experimental tools. AX experiments (`e2e/ax`) compare agents with and
 /// without a group before it ships to everyone, as the search and shared
-/// styles tools did. No group is experimental right now.
-#[allow(dead_code, reason = "kept for the next experimental group")]
+/// styles tools did. Right now `layout` adds a layout note to results
+/// after `write_html` and `update_styles` (see `watch.rs`).
 pub(crate) fn extra(group: &str) -> bool {
     static EXTRA: OnceLock<Vec<String>> = OnceLock::new();
     EXTRA
@@ -106,6 +107,8 @@ pub(crate) fn instructions() -> &'static str {
 pub struct FiniteMcp {
     hub: Arc<Hub>,
     session: Arc<SessionGuard>,
+    /// Layout notes waiting for this session's next result (`layout` group).
+    watch: Arc<watch::LayoutWatch>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -321,6 +324,7 @@ impl FiniteMcp {
                 actor: OnceLock::new(),
             }),
             hub,
+            watch: Arc::default(),
             tool_router: Self::tools(),
         }
     }
@@ -403,6 +407,21 @@ impl FiniteMcp {
         build: impl FnOnce(&Document) -> Result<(Vec<Op>, T), EditError>,
         report: impl FnOnce(&DesignHandle, T, Option<&Change>) -> String,
     ) -> ToolResult {
+        self.edit_checked(ctx, design_id, label, false, build, report)
+            .await
+    }
+
+    /// [`Self::edit`], and with `check` and the `layout` group on, a layout
+    /// check on the artboards it touched, for the next result (see `watch.rs`).
+    async fn edit_checked<T>(
+        &self,
+        ctx: &RequestContext<RoleServer>,
+        design_id: &str,
+        label: &str,
+        check: bool,
+        build: impl FnOnce(&Document) -> Result<(Vec<Op>, T), EditError>,
+        report: impl FnOnce(&DesignHandle, T, Option<&Change>) -> String,
+    ) -> ToolResult {
         let handle = match self.design(design_id).await {
             Ok(handle) => handle,
             Err(result) => return Ok(result),
@@ -410,10 +429,18 @@ impl FiniteMcp {
         let actor = self.actor(ctx);
         match handle.edit(&actor, label, build) {
             Ok((output, change)) => {
+                let mut text = report(&handle, output, change.as_ref());
                 if let Some(change) = &change {
                     show_working(&handle, &actor, change);
+                    if check && extra("layout") {
+                        self.watch.after_edit(design_id, &handle, change).await;
+                        if let Some(note) = self.watch.take(design_id) {
+                            text.push('\n');
+                            text.push_str(&note);
+                        }
+                    }
                 }
-                ok(report(&handle, output, change.as_ref()))
+                ok(text)
             }
             Err(error) => fail(error.to_string()),
         }
@@ -469,6 +496,7 @@ mod pages;
 mod search;
 mod styles;
 mod transfer;
+mod watch;
 
 #[tool_router]
 impl FiniteMcp {
@@ -1151,10 +1179,11 @@ impl FiniteMcp {
             Ok(Err(error)) => return fail(error.to_string()),
             Err(error) => return fail(error.to_string()),
         };
-        self.edit(
+        self.edit_checked(
             &ctx,
             &p.design_id,
             "Write HTML",
+            true,
             |doc| {
                 let mut new_id = id_in(doc);
                 edit::write_fragments(doc, &p.target_id, fragments, mode, p.index, &mut new_id)
@@ -1186,10 +1215,11 @@ impl FiniteMcp {
             Ok(updates) => updates,
             Err(error) => return fail(error),
         };
-        self.edit(
+        self.edit_checked(
             &ctx,
             &design_id,
             "Update styles",
+            true,
             |doc| {
                 let mut ops = Vec::new();
                 for update in &updates {
@@ -1631,6 +1661,39 @@ impl FiniteMcp {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for FiniteMcp {
+    /// Runs the tool, then adds any layout note waiting on the design it
+    /// names (the `layout` group). The layout tools drop it instead.
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, McpError> {
+        let design = extra("layout")
+            .then(|| {
+                let id = request.arguments.as_ref()?.get("designId")?.as_str()?;
+                Some(id.to_owned())
+            })
+            .flatten();
+        let reports_layout = matches!(&*request.name, "get_layout" | "get_screenshot");
+        // Before the tool runs: an edit starts a new check, which replaces the note.
+        let note = design.as_deref().and_then(|d| {
+            if reports_layout {
+                self.watch.discard(d);
+                None
+            } else {
+                self.watch.take(d)
+            }
+        });
+        let tcc = ToolCallContext::new(self, request, context);
+        let mut response = self.tool_router.call(tcc).await?;
+        if let (Some(note), CallToolResponse::Complete(result)) = (note, &mut response)
+            && result.is_error != Some(true)
+        {
+            result.content.push(ContentBlock::text(note));
+        }
+        Ok(response)
+    }
+
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("finite", env!("CARGO_PKG_VERSION")))
