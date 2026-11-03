@@ -1489,3 +1489,66 @@ async fn deleting_a_design_ends_a_pending_comment_wait() {
         .unwrap();
     assert!(error && text.contains("not found"), "{text}");
 }
+
+#[tokio::test]
+async fn an_agent_gets_jsx_for_a_node() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Dev").await;
+    let created = agent.ok("create_design", json!({ "name": "Code" })).await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .unwrap()
+        .to_owned();
+    let board = agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Card", "width": 390, "height": 400,
+                    "html": "<div data-name=\"Card\" class=\"card\" style=\"display: flex; gap: 8px; background-color: #fff\"><label for=\"a\">Name</label><script>go()</script></div>" }),
+        )
+        .await;
+    let board = id_after(&board, "Created artboard");
+    let card = agent
+        .ok(
+            "get_children",
+            json!({ "designId": design, "nodeId": board }),
+        )
+        .await;
+    let card: Value = serde_json::from_str(&card).unwrap();
+    let card = card[0]["id"].as_str().unwrap().to_owned();
+
+    let jsx = agent
+        .ok("get_jsx", json!({ "designId": design, "nodeId": card }))
+        .await;
+    assert!(
+        jsx.contains("className=\"card\"")
+            && jsx.contains("htmlFor=\"a\"")
+            && jsx.contains("backgroundColor: \"#fff\"")
+            && jsx.contains("gap: \"8px\""),
+        "{jsx}"
+    );
+    assert!(jsx.contains("Left out <script>"), "{jsx}");
+
+    let tailwind = agent
+        .ok(
+            "get_jsx",
+            json!({ "designId": design, "nodeId": card, "tailwind": true }),
+        )
+        .await;
+    assert!(
+        tailwind.contains("className=\"card ")
+            && tailwind.contains(" flex ")
+            && tailwind.contains("gap-[8px]")
+            && tailwind.contains("[background-color:#fff]")
+            && !tailwind.contains("style={{"),
+        "{tailwind}"
+    );
+
+    let (error, failed) = agent
+        .call(
+            "get_jsx",
+            json!({ "designId": design, "nodeId": "missing" }),
+        )
+        .await;
+    assert!(failed && error.contains("not found"), "{error}");
+}

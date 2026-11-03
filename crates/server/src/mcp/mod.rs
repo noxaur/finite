@@ -31,6 +31,8 @@ use rmcp::{
     },
 };
 
+use finite_transfer::jsx;
+
 use crate::{
     hub::{Actor, DesignHandle, Hub, OpenError, SESSION_ACTOR, random_id},
     screenshot,
@@ -181,6 +183,17 @@ fn with_note(content: ContentBlock, note: Option<String>) -> Vec<ContentBlock> {
     std::iter::once(content)
         .chain(note.map(ContentBlock::text))
         .collect()
+}
+
+/// A note that the design has shared CSS, which `what` (markup read from the
+/// design) leaves out, so using it outside the design would lose it.
+fn shared_css_note(handle: &DesignHandle, what: &str) -> Option<String> {
+    handle.read(|d| d.doc().css().map(str::len)).map(|chars| {
+        format!(
+            "This design also has shared CSS ({chars} characters, from get_shared_css) that every artboard uses. \
+             {what} leaves it out, so copy it too if you use this markup outside this design."
+        )
+    })
 }
 
 fn json(value: serde_json::Value) -> ToolResult {
@@ -729,15 +742,7 @@ impl FiniteMcp {
     )]
     async fn get_html(&self, Parameters(p): Parameters<HtmlParams>) -> ToolResult {
         let handle = design!(self, &p.design_id);
-        // The HTML leaves out the shared CSS its classes and variables may
-        // need, so say it's there: HTML copied elsewhere would lose it.
-        let shared = handle.read(|d| d.doc().css().map(str::len)).map(|chars| {
-            let from = ", from get_shared_css";
-            format!(
-                "This design also has shared CSS ({chars} characters{from}) that every artboard uses. \
-                 The HTML above leaves it out, so copy it too if you use this HTML outside this design."
-            )
-        });
+        let shared = shared_css_note(&handle, "The HTML above");
         let options = html::ExportOptions {
             ids: true,
             styles: p.include_styles.unwrap_or(true),
@@ -822,6 +827,61 @@ impl FiniteMcp {
                 &p.design_id,
             )),
         }
+    }
+
+    #[tool(
+        description = "A node's subtree as JSX to paste into a React codebase: elements with React's attribute names and each node's styles as an inline style object, or as Tailwind classes with tailwind true. Elements carry their layer name as data-name. <script> elements are left out, and the result says so. A node with a lot of content returns its outline instead; call get_jsx on a child.",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_jsx(&self, Parameters(p): Parameters<JsxParams>) -> ToolResult {
+        let handle = design!(self, &p.design_id);
+        let options = jsx::Options {
+            tailwind: p.tailwind,
+        };
+        let converted = handle.read(|d| {
+            let doc = d.doc();
+            let converted = jsx::convert(doc, &p.node_id, &options, 0)?;
+            if converted.jsx.len() > OUTPUT_LIMIT {
+                return Some(Err(cut(
+                    format!(
+                        "This node's JSX is {} characters, more than the {OUTPUT_LIMIT} a call returns. \
+                         Call get_jsx on one of its children instead:\n{}",
+                        converted.jsx.len(),
+                        outline(doc, &p.node_id, 1)
+                    ),
+                    "Use get_children to list them all.",
+                )));
+            }
+            Some(Ok(converted))
+        });
+        let converted = match converted {
+            Some(Ok(converted)) => converted,
+            Some(Err(outline)) => return ok(outline),
+            None => {
+                return fail(node_hint(
+                    format!("node {:?} not found", p.node_id),
+                    &p.design_id,
+                ));
+            }
+        };
+        let mut notes: Vec<String> = converted
+            .diagnostics
+            .iter()
+            .map(|d| {
+                format!(
+                    "Left out {} at #{}: {}.",
+                    d.what,
+                    d.node.as_deref().unwrap_or(""),
+                    d.reason
+                )
+            })
+            .collect();
+        notes.extend(shared_css_note(&handle, "The JSX above"));
+        let note = (!notes.is_empty()).then(|| notes.join("\n"));
+        Ok(CallToolResult::success(with_note(
+            ContentBlock::text(converted.jsx),
+            note,
+        )))
     }
 
     #[tool(
