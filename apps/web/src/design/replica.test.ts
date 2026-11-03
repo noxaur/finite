@@ -189,8 +189,10 @@ describe("Replica", () => {
     );
     expect(r.modeOf(r.get("b")!)).toBe("dark");
     // The same values again don't apply, as on the server.
-    expect(r.apply({ op: "token", name: "--brand", values: { "mode-1": "red" } })).toBeNull();
-    expect(r.apply({ op: "token", name: "--brand", values: null })).toEqual({ op: "tokens" });
+    expect(r.apply({ op: "token", name: "--brand", modeId: "mode-1", value: "red" })).toBeNull();
+    expect(r.apply({ op: "token", name: "--brand", modeId: "mode-1", value: null })).toEqual({
+      op: "tokens",
+    });
     expect(r.tokens.tokens["--brand"]).toBeUndefined();
     // Removing Dark sends its artboard back to the first mode.
     r.apply({ op: "mode", id: "dark", mode: null });

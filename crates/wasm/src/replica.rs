@@ -40,7 +40,8 @@ enum Applied<'a> {
     /// The old shared stylesheet changed. Only journals from before
     /// tokens hold it, so the viewer has nothing to draw.
     Css,
-    /// The token `name` now has `values`, or was deleted when it's `None`.
+    /// The token `name` now has `values`, all its modes' values, or is gone
+    /// when it's `None`.
     Token {
         name: &'a str,
         values: Option<&'a Values>,
@@ -377,10 +378,11 @@ mod tests {
             json!([
                 { "op": "mode", "id": "mode-1", "mode": { "name": "Light", "index": "V" } },
                 { "op": "mode", "id": "dark", "mode": dark },
-                { "op": "token", "name": "--bg", "values": { "mode-1": "#fff", "dark": "#111" } },
-                { "op": "token", "name": "--bg", "values": { "mode-1": "#fff", "dark": "#111" } },
+                { "op": "token", "name": "--bg", "modeId": "mode-1", "value": "#fff" },
+                { "op": "token", "name": "--bg", "modeId": "dark", "value": "#111" },
+                { "op": "token", "name": "--bg", "modeId": "dark", "value": "#111" },
                 { "op": "set", "id": "a", "key": "mode", "value": "dark" },
-                { "op": "token", "name": "--gone", "values": null },
+                { "op": "token", "name": "--gone", "modeId": "dark", "value": null },
             ]),
         );
         assert_eq!(
@@ -388,11 +390,11 @@ mod tests {
             json!({ "op": "mode", "id": "dark", "mode": dark })
         );
         assert_eq!(
-            results[2],
+            results[3],
             json!({ "op": "token", "name": "--bg", "values": { "mode-1": "#fff", "dark": "#111" } })
         );
-        assert_eq!(results[3], Value::Null);
-        assert_eq!(results[5], Value::Null);
+        assert_eq!(results[4], Value::Null);
+        assert_eq!(results[6], Value::Null);
         assert_eq!(
             r.token_style("a", true),
             "@layer finite-tokens { :host { --bg: #111; } }"

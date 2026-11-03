@@ -41,7 +41,7 @@ describe("artboardDocument", () => {
 
   it("puts the tokens before the artboard, in a layer its own styles override", () => {
     const r = replica([el("a", null, "div")]);
-    r.apply({ op: "token", name: "--brand", values: { "mode-1": "red" } });
+    r.apply({ op: "token", name: "--brand", modeId: "mode-1", value: "red" });
     const page = artboardDocument(r, "a");
     const tokens = page.indexOf("<style>@layer finite-tokens { :root { --brand: red; } }</style>");
     expect(tokens).toBeGreaterThan(page.indexOf(designModel().baseCss));

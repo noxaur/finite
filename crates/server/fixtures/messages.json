@@ -381,12 +381,16 @@
             "op": "mode"
           },
           {
+            "modeId": "mode-1",
             "name": "--brand",
             "op": "token",
-            "values": {
-              "mode-1": "orange",
-              "mode-dark": "gold"
-            }
+            "value": "orange"
+          },
+          {
+            "modeId": "mode-dark",
+            "name": "--brand",
+            "op": "token",
+            "value": "gold"
           }
         ],
         "origin": "edit",
@@ -557,12 +561,16 @@
                 "op": "mode"
               },
               {
+                "modeId": "mode-1",
                 "name": "--brand",
                 "op": "token",
-                "values": {
-                  "mode-1": "orange",
-                  "mode-dark": "gold"
-                }
+                "value": "orange"
+              },
+              {
+                "modeId": "mode-dark",
+                "name": "--brand",
+                "op": "token",
+                "value": "gold"
               }
             ],
             "origin": "edit",

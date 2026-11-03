@@ -85,7 +85,9 @@ pub const SHARED_LAYER: &str = "finite-shared";
 /// Old shared CSS as the text of a `<style>` element, with `</style` broken
 /// up so it can't end the element early. Its rules go in [`SHARED_LAYER`],
 /// and so do its leading `@import`s, which can't go inside a layer block
-/// and take a `layer()` instead.
+/// and take a `layer()` instead. The shared CSS rendered with `:root` as
+/// `:host` in shadow roots, and one `<style>` serves both, so `:root`
+/// becomes `:is(:root, :host)`.
 pub fn layered_style(css: &str) -> String {
     let mut head = String::new();
     let mut rest = css;
@@ -103,7 +105,7 @@ pub fn layered_style(css: &str) -> String {
         head.push('\n');
         rest = &at[end..];
     }
-    let body = rest.trim_start();
+    let body = replace_root(rest.trim_start());
     raw_text(
         &format!("{head}@layer {SHARED_LAYER} {{\n{body}\n}}"),
         "style",
@@ -220,6 +222,36 @@ fn url_end(css: &str) -> usize {
         }
     }
     bytes.len()
+}
+
+/// `css` with each `:root` selector, in any case, written as
+/// `:is(:root, :host)`, which matches in a page and in a shadow root alike.
+/// Strings and comments stay as they are.
+fn replace_root(css: &str) -> String {
+    let bytes = css.as_bytes();
+    let mut out = String::with_capacity(css.len());
+    let (mut i, mut copied) = (0, 0);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' | b'\'' => i = string_end(css, i),
+            b'/' if bytes.get(i + 1) == Some(&b'*') => i = comment_end(css, i),
+            b':' if css
+                .get(i..i + 5)
+                .is_some_and(|s| s.eq_ignore_ascii_case(":root"))
+                && !bytes
+                    .get(i + 5)
+                    .is_some_and(|&c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_') =>
+            {
+                out.push_str(&css[copied..i]);
+                out.push_str(":is(:root, :host)");
+                i += 5;
+                copied = i;
+            }
+            _ => i += 1,
+        }
+    }
+    out.push_str(&css[copied..]);
+    out
 }
 
 /// Names a node when written as an attribute (`<div data-name="Header">`).
@@ -1464,13 +1496,13 @@ mod tests {
         let css = "/* fonts */ @import \"https://fonts.example/css?family=A:wght@400;700\";\n\
                    @import url(https://fonts.example/b;c.css) screen;\n\
                    @import url(c.css) layer(mine);\n\
-                   :root { --brand: red; } :root-ish {}";
+                   :ROOT { --brand: red; } :root-ish {} [title=\":root\"] {} /* :root */";
         assert_eq!(
             layered_style(css),
             "@import \"https://fonts.example/css?family=A:wght@400;700\" layer(finite-shared);\n\
              @import url(https://fonts.example/b;c.css) layer(finite-shared) screen;\n\
              @import url(c.css) layer(mine);\n\
-             @layer finite-shared {\n:root { --brand: red; } :root-ish {}\n}"
+             @layer finite-shared {\n:is(:root, :host) { --brand: red; } :root-ish {} [title=\":root\"] {} /* :root */\n}"
         );
         // Comments and quoted parentheses don't confuse it.
         assert_eq!(

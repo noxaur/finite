@@ -69,6 +69,14 @@ impl History {
         self.redo.iter().rev().map(|e| e.label.as_str())
     }
 
+    /// Every op on both stacks.
+    pub fn ops(&self) -> impl Iterator<Item = &Op> {
+        self.undo
+            .iter()
+            .chain(&self.redo)
+            .flat_map(|entry| &entry.ops)
+    }
+
     pub fn begin_batch(&mut self) {
         self.batch_depth += 1;
     }

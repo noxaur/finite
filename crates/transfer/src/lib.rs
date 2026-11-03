@@ -408,6 +408,9 @@ impl Imported {
         for name in &self.pages {
             page_named(tx, name, new_id)?;
         }
+        // Files leave out the mode of an artboard in the first mode, which
+        // may not be the design's first mode.
+        let first_mode = self.tokens.modes.first().cloned();
         let rest = add_tokens(tx, self.tokens, self.css, &receipt.design, new_id)?;
         let mut boards: Vec<(NodeId, Vec<NodeId>)> = Vec::new();
         let mut nodes = BTreeMap::new();
@@ -449,7 +452,7 @@ impl Imported {
             )?;
             if let Some(Op::Create { node }) = ops.first_mut() {
                 node.attrs.extend(board.attrs);
-                node.mode = board.mode.and_then(|name| {
+                node.mode = board.mode.or_else(|| first_mode.clone()).and_then(|name| {
                     let modes = tx.doc().mode_map();
                     let (id, _) = modes
                         .iter()

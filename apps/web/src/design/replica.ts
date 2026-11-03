@@ -115,11 +115,14 @@ export class Replica {
         id,
         mode,
       })),
-      ...Object.entries(snapshot.tokens ?? {}).map(([name, values]) => ({
-        op: "token" as const,
-        name,
-        values,
-      })),
+      ...Object.entries(snapshot.tokens ?? {}).flatMap(([name, values]) =>
+        Object.entries(values).map(([modeId, value]) => ({
+          op: "token" as const,
+          name,
+          modeId,
+          value,
+        })),
+      ),
     ]);
     this.pages = JSON.parse(this.doc.pages()) as PageEntry[];
     this.tokens = JSON.parse(this.doc.tokens()) as TokenTable;

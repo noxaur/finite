@@ -74,8 +74,8 @@ pub fn check_name(name: &str) -> Result<(), String> {
 
 /// Whether `value` can go in a custom property declaration as it is. It
 /// can't end the declaration or its rule early (`;`, `{`, `}` and `!`
-/// outside strings), leave a string, comment or bracket open, or end the
-/// `<style>` element it's written in.
+/// outside strings), leave a string, comment or bracket open, break a line,
+/// or end the `<style>` element it's written in.
 pub fn check_value(value: &str) -> Result<(), String> {
     let bad = |why: &str| Err(format!("the token value {value:?} {why}"));
     if value.trim().is_empty() {
@@ -86,6 +86,10 @@ pub fn check_value(value: &str) -> Result<(), String> {
     }
     if value.to_ascii_lowercase().contains("</style") {
         return bad("can't contain </style");
+    }
+    // A line break ends a CSS string, so a quote across one wouldn't hold.
+    if value.contains(['\n', '\r', '\x0c']) {
+        return bad("can't contain a line break");
     }
     let bytes = value.as_bytes();
     let mut open = Vec::new();
@@ -178,7 +182,8 @@ pub fn migrate(css: &str) -> Migrated {
         let rule = &css[at..end];
         at = end;
         let root = rule.find('{').and_then(|open| {
-            let selector = rule[..open].trim();
+            let selector = strip_comments(&rule[..open]);
+            let selector = selector.trim();
             let body = rule[open + 1..].strip_suffix('}')?;
             selector.eq_ignore_ascii_case(":root").then_some(body)
         });
@@ -212,6 +217,20 @@ pub fn migrate(css: &str) -> Migrated {
         tokens,
         rest: (!rest.is_empty()).then(|| rest.join("\n")),
     }
+}
+
+/// `css` without its comments.
+fn strip_comments(css: &str) -> String {
+    let mut out = String::new();
+    let mut rest = css;
+    while let Some(at) = rest.find("/*") {
+        out.push_str(&rest[..at]);
+        rest = rest[at + 2..]
+            .find("*/")
+            .map_or("", |end| &rest[at + 2 + end + 2..]);
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The end of the top-level rule or statement at `start`: past the `}`
@@ -320,6 +339,8 @@ mod tests {
             "/* open",
             "a\\",
             "x</style><script>",
+            "\"\n; } } :root { color: red; } /*\"",
+            "a\nb",
         ] {
             assert!(check_value(bad).is_err(), "{bad}");
         }
@@ -328,7 +349,7 @@ mod tests {
     #[test]
     fn migrate_moves_root_variables_into_tokens() {
         let css = "@import url('https://fonts.example/a;b.css');\n\
-                   :root{--ink:#111;--font:'A;B', serif;color:red}\n\
+                   /* colors */ :root{--ink:#111;--font:'A;B', serif;color:red}\n\
                    .btn{color:var(--ink)}\n\
                    :root { --ink: #222; --bad: red !important }";
         let migrated = migrate(css);

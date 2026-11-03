@@ -249,7 +249,8 @@ impl Design {
 
     /// Moves a design's old shared CSS into tokens and its artboards'
     /// `<style>`s, once, after it loads (see [`edit::migrate_css`]). The
-    /// saved undo steps may set the old CSS again, so they're dropped.
+    /// saved undo steps may set the old CSS again, so they're dropped, and
+    /// so is any history that could, even once the CSS was cleared.
     /// Returns the change to save, or `None` when there was nothing to move.
     /// `new_id` can return an id that's taken; it's asked again.
     pub fn migrate_css(
@@ -258,6 +259,8 @@ impl Design {
         new_id: &mut impl FnMut() -> NodeId,
     ) -> Result<Option<Change>, EditError> {
         if self.doc.css().is_none() {
+            self.histories
+                .retain(|_, history| !history.ops().any(|op| matches!(op, Op::Css { .. })));
             return Ok(None);
         }
         let doc = &self.doc;

@@ -78,11 +78,12 @@ export const Op = Schema.Union([
     op: Schema.Literal("css"),
     css: Schema.optionalKey(Schema.NullOr(Schema.String)),
   }),
-  /** Sets a token's values, or deletes it when `values` is `null`. */
+  /** Sets a token's value in one mode, or removes it when `value` is `null`. */
   Schema.Struct({
     op: Schema.Literal("token"),
     name: Schema.String,
-    values: Schema.NullOr(TokenValues),
+    modeId: Schema.String,
+    value: Schema.NullOr(Schema.String),
   }),
   /** Creates, renames or reorders a mode, or removes it when `mode` is `null`. */
   Schema.Struct({

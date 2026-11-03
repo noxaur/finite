@@ -55,12 +55,16 @@ pub enum Op {
         #[serde(default)]
         page: Option<Page>,
     },
-    /// Sets one token's values by mode id, or deletes it when `values` is
-    /// `None` (see [`crate::tokens`]).
+    /// Sets one token's value in one mode, or removes it when `value` is
+    /// `None` (see [`crate::tokens`]). A token without values is gone. One
+    /// mode at a time, so undoing one agent's Light value leaves another's
+    /// Dark value alone.
     Token {
         name: String,
+        #[serde(rename = "modeId")]
+        mode_id: String,
         #[serde(default)]
-        values: Option<Values>,
+        value: Option<String>,
     },
     /// Creates, renames or reorders one mode, or removes it when `mode` is
     /// `None`. Artboards in a removed mode fall back to the first one.
@@ -133,8 +137,8 @@ impl<'de> Deserialize<'de> for Op {
             #[serde(default)]
             page: Option<Page>,
             name: Option<String>,
-            #[serde(default)]
-            values: Option<Values>,
+            #[serde(rename = "modeId")]
+            mode_id: Option<String>,
             #[serde(default)]
             mode: Option<Mode>,
         }
@@ -164,7 +168,12 @@ impl<'de> Deserialize<'de> for Op {
             },
             Kind::Token => Op::Token {
                 name: wire.name.ok_or_else(|| need("name"))?,
-                values: wire.values,
+                mode_id: wire.mode_id.ok_or_else(|| need("modeId"))?,
+                value: match wire.value {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(value)) => Some(value),
+                    Some(_) => return Err(D::Error::custom("a token's value is a string")),
+                },
             },
             Kind::Mode => Op::Mode {
                 id: wire.id.ok_or_else(|| need("id"))?,
@@ -212,12 +221,11 @@ impl Op {
             Op::Page { id, page } => {
                 BASE + id.len() + page.as_ref().map_or(0, |p| p.name.len() + p.index.len())
             }
-            Op::Token { name, values } => {
-                BASE + name.len()
-                    + values.as_ref().map_or(0, |values| {
-                        values.iter().map(|(k, v)| k.len() + v.len() + 8).sum()
-                    })
-            }
+            Op::Token {
+                name,
+                mode_id,
+                value,
+            } => BASE + name.len() + mode_id.len() + value.as_ref().map_or(0, String::len),
             Op::Mode { id, mode } => {
                 BASE + id.len() + mode.as_ref().map_or(0, |m| m.name.len() + m.index.len())
             }
@@ -787,30 +795,42 @@ impl Document {
                 let previous = std::mem::replace(&mut self.css, css);
                 Ok(Changed(vec![Op::Css { css: previous }]))
             }
-            Op::Token { name, values } => {
-                let previous = self.tokens.get(name).cloned();
-                if previous == *values {
+            Op::Token {
+                name,
+                mode_id,
+                value,
+            } => {
+                let previous = self.tokens.get(name).and_then(|v| v.get(mode_id)).cloned();
+                if previous == *value {
                     return Ok(Unchanged);
                 }
                 let invalid = || Rejected::Invalid(name.clone());
-                match values {
-                    Some(values) => {
+                match value {
+                    Some(value) => {
                         tokens::check_name(name).map_err(|_| invalid())?;
-                        if values.is_empty()
-                            || values.values().any(|v| tokens::check_value(v).is_err())
-                            || (previous.is_none() && self.tokens.len() >= tokens::MAX_TOKENS)
+                        tokens::check_value(value).map_err(|_| invalid())?;
+                        if !self.tokens.contains_key(name)
+                            && self.tokens.len() >= tokens::MAX_TOKENS
                         {
                             return Err(invalid());
                         }
-                        self.tokens.insert(name.clone(), values.clone());
+                        self.tokens
+                            .entry(name.clone())
+                            .or_default()
+                            .insert(mode_id.clone(), value.clone());
                     }
                     None => {
-                        self.tokens.remove(name);
+                        let values = self.tokens.get_mut(name).expect("it had a value");
+                        values.remove(mode_id);
+                        if values.is_empty() {
+                            self.tokens.remove(name);
+                        }
                     }
                 }
                 Ok(Changed(vec![Op::Token {
                     name: name.clone(),
-                    values: previous,
+                    mode_id: mode_id.clone(),
+                    value: previous,
                 }]))
             }
             Op::Mode { id, mode } => {

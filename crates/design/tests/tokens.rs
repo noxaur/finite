@@ -137,12 +137,80 @@ fn set_tokens_refuses_what_css_wouldnt_take() {
     let mut doc = Document::default();
     let op = Op::Token {
         name: "--x".into(),
-        values: Some(BTreeMap::from([(
-            FIRST_MODE.into(),
-            "} body { color: red".into(),
-        )])),
+        mode_id: FIRST_MODE.into(),
+        value: Some("} body { color: red".into()),
     };
     assert!(doc.try_apply(&op).is_err());
+}
+
+#[test]
+fn undo_takes_back_only_the_modes_an_agent_changed() {
+    let mut d = design();
+    let mut n = 0;
+    let names = ["Light".to_owned(), "Dark".to_owned()];
+    let (ops, _) = edit::set_modes(d.doc(), &names, &mut || {
+        n += 1;
+        format!("m{n}")
+    })
+    .unwrap();
+    d.commit("agent", "Modes", &ops, 0).unwrap();
+    set(&mut d, &[("--bg", by_mode(&[("Light", "white")]))]);
+    // Alice changes Light, then Bob sets Dark.
+    let modes = edit::mode_list(d.doc());
+    let ops = edit::set_tokens(
+        d.doc(),
+        &modes,
+        &[("--bg".into(), by_mode(&[("Light", "red")]))],
+    )
+    .unwrap();
+    d.commit("alice", "Light", &ops, 0).unwrap();
+    let ops = edit::set_tokens(
+        d.doc(),
+        &modes,
+        &[("--bg".into(), by_mode(&[("Dark", "black")]))],
+    )
+    .unwrap();
+    d.commit("bob", "Dark", &ops, 0).unwrap();
+    // Alice's undo puts Light back and leaves Bob's Dark value.
+    d.undo("alice", 0).unwrap();
+    assert_eq!(
+        d.doc().tokens()["--bg"],
+        BTreeMap::from([
+            (FIRST_MODE.to_owned(), "white".to_owned()),
+            ("m1".to_owned(), "black".to_owned())
+        ])
+    );
+}
+
+#[test]
+fn custom_properties_past_the_token_limit_stay_in_the_artboards() {
+    let mut d = design();
+    artboard(&mut d, "a");
+    let vars: Vec<String> = (0..=tokens::MAX_TOKENS)
+        .map(|i| format!("--v{i:04}: {i}px"))
+        .collect();
+    d.commit(
+        "agent",
+        "Old",
+        &[Op::Css {
+            css: Some(format!(":root {{ {} }}", vars.join("; "))),
+        }],
+        0,
+    )
+    .unwrap();
+    let mut n = 0;
+    d.migrate_css(0, &mut || {
+        n += 1;
+        format!("s{n}")
+    })
+    .unwrap();
+    assert_eq!(d.doc().tokens().len(), tokens::MAX_TOKENS);
+    let style = d.doc().children(Some("a"))[0];
+    let text = d.doc().children(Some(&style.id))[0].text.clone().unwrap();
+    assert!(
+        text.contains(":is(:root, :host) { --v2000: 2000px; }"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -206,4 +274,22 @@ fn old_shared_css_moves_into_tokens_and_each_artboard() {
             .unwrap()
             .is_none()
     );
+}
+
+#[test]
+fn shared_css_cleared_before_tokens_cant_come_back_through_undo() {
+    let mut d = design();
+    let css = |css: Option<&str>| Op::Css {
+        css: css.map(str::to_owned),
+    };
+    d.commit("agent", "Set", &[css(Some(".x { color: red }"))], 0)
+        .unwrap();
+    d.commit("agent", "Clear", &[css(None)], 0).unwrap();
+    let mut back = Design::from_snapshot(d.snapshot_to_save());
+    assert!(
+        back.migrate_css(0, &mut || unreachable!())
+            .unwrap()
+            .is_none()
+    );
+    assert!(back.undo("agent", 0).is_none());
 }

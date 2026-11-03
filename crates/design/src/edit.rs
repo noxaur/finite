@@ -1204,13 +1204,10 @@ pub fn delete_mode(doc: &Document, id: &str) -> Result<Vec<Op>> {
         .tokens()
         .iter()
         .filter(|(_, values)| values.contains_key(id))
-        .map(|(name, values)| {
-            let mut values = values.clone();
-            values.remove(id);
-            Op::Token {
-                name: name.clone(),
-                values: (!values.is_empty()).then_some(values),
-            }
+        .map(|(name, _)| Op::Token {
+            name: name.clone(),
+            mode_id: id.to_owned(),
+            value: None,
         })
         .collect();
     ops.push(Op::Mode {
@@ -1247,6 +1244,7 @@ pub fn set_tokens(
     };
     let mut ops = Vec::new();
     let mut added = 0;
+    let none = Values::new();
     for (name, change) in changes {
         tokens::check_name(name).map_err(EditError)?;
         let existing = doc.tokens().get(name);
@@ -1276,10 +1274,18 @@ pub fn set_tokens(
         if existing.is_none() && values.is_some() {
             added += 1;
         }
-        ops.push(Op::Token {
-            name: name.clone(),
-            values,
-        });
+        // One op per mode that changes, so undo reverses only those.
+        let (old, new) = (existing.unwrap_or(&none), values.as_ref().unwrap_or(&none));
+        let modes: std::collections::BTreeSet<&String> = old.keys().chain(new.keys()).collect();
+        for mode in modes {
+            if old.get(mode) != new.get(mode) {
+                ops.push(Op::Token {
+                    name: name.clone(),
+                    mode_id: mode.clone(),
+                    value: new.get(mode).cloned(),
+                });
+            }
+        }
     }
     if doc.tokens().len() + added > tokens::MAX_TOKENS {
         return err(format!(
@@ -1335,23 +1341,34 @@ pub fn set_artboard_mode(doc: &Document, ids: &[NodeId], mode: Option<&str>) -> 
 /// Moves a design's old shared CSS into tokens (see [`tokens::migrate`]).
 /// What isn't a token goes in a `<style>` at the start of every artboard,
 /// in the cascade layer the shared CSS had, so each artboard looks as it
-/// did. Then the old stylesheet is cleared.
+/// did, and so do custom properties past [`tokens::MAX_TOKENS`]. Then the
+/// old stylesheet is cleared.
 pub fn migrate_css(doc: &Document, new_id: &mut impl FnMut() -> NodeId) -> Result<Vec<Op>> {
     let Some(css) = doc.css() else {
         return Ok(Vec::new());
     };
     let migrated = tokens::migrate(css);
     let first = doc.first_mode().to_owned();
-    let mut ops: Vec<Op> = migrated
-        .tokens
-        .into_iter()
-        .take(tokens::MAX_TOKENS.saturating_sub(doc.tokens().len()))
+    let room = tokens::MAX_TOKENS.saturating_sub(doc.tokens().len());
+    let (fit, past) = migrated.tokens.split_at(migrated.tokens.len().min(room));
+    let mut ops: Vec<Op> = fit
+        .iter()
         .map(|(name, value)| Op::Token {
-            name,
-            values: Some(Values::from([(first.clone(), value)])),
+            name: name.clone(),
+            mode_id: first.clone(),
+            value: Some(value.clone()),
         })
         .collect();
-    if let Some(rest) = migrated.rest {
+    let past: Vec<String> = past.iter().map(|(n, v)| format!("{n}: {v}")).collect();
+    let rest = match (past.is_empty(), migrated.rest) {
+        (true, rest) => rest,
+        (false, rest) => Some(format!(
+            ":root {{ {}; }}\n{}",
+            past.join("; "),
+            rest.unwrap_or_default()
+        )),
+    };
+    if let Some(rest) = rest {
         let style = format!("<style>{}</style>", html::layered_style(&rest));
         for board in doc.artboards() {
             if board.is_instance() || board.kind == NodeKind::Text {

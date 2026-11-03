@@ -694,6 +694,29 @@ mod tests {
     }
 
     #[test]
+    fn an_artboard_in_the_first_mode_keeps_it_in_another_design() {
+        let bundle = json!({
+            "v": 1,
+            "kind": "finite-bundle",
+            "name": "Modes",
+            "modes": ["Light", "Dark"],
+            "tokens": { "--bg": { "Light": "white", "Dark": "black" } },
+            "artboards": [{ "name": "Board", "styles": { "width": "100px", "height": "100px" } }]
+        });
+        let mut target = design("new");
+        let changes = [("--bg".to_owned(), TokenChange::All("green".into()))];
+        let ops = edit::set_tokens(target.doc(), &edit::mode_list(target.doc()), &changes).unwrap();
+        target.commit("agent", "Tokens", &ops, 1);
+        let (_, placed) = place(&mut target, read(&bundle.to_string()).unwrap());
+        let doc = target.doc();
+        let board = doc.get(&placed.artboards[0]).unwrap();
+        assert_eq!(doc.mode_map()[doc.mode_of(board)].name, "Light");
+        assert!(
+            finite_design::tokens::style(doc, doc.mode_of(board), false).contains("--bg: white;")
+        );
+    }
+
+    #[test]
     fn an_old_bundles_shared_css_becomes_tokens() {
         let bundle = json!({
             "v": 1,
