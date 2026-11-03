@@ -1,4 +1,5 @@
 import * as stylex from "@stylexjs/stylex";
+import { iconMarkup } from "@/components/Icons";
 import { colors } from "@/styles/tokens.stylex";
 import { artboardDocument, BASE_LAYER, pixelSize } from "./html";
 import type { Applied, Replica } from "./replica";
@@ -499,7 +500,8 @@ export class Renderer {
     play.title = "Preview";
     play.ariaLabel = `Preview ${labelOf(node)}`;
     play.className = stylex.props(styles.play).className ?? "";
-    play.innerHTML = PLAY_ICON;
+    // Its own filter id, since the unfocused artboards' buttons are hidden.
+    play.innerHTML = iconMarkup("play", 10, node.id);
     play.hidden = node.id !== this.focused || !this.options.onPreview;
     // So pressing it neither pans the canvas nor places a comment.
     play.dataset.cameraIgnore = "";
@@ -678,10 +680,6 @@ function iframeBox(iframe: HTMLIFrameElement) {
   const scale = iframe.offsetWidth > 0 ? rect.width / iframe.offsetWidth : 1;
   return { left: rect.left, top: rect.top, scale };
 }
-
-/** A play triangle, in the label's text color. */
-const PLAY_ICON =
-  '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 1.2v7.6L8.6 5z" fill="currentColor"/></svg>';
 
 function labelOf(node: Node) {
   return node.name ?? node.tag ?? "Artboard";

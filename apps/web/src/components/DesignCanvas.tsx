@@ -18,6 +18,7 @@ import { runtime } from "@/runtime";
 import { colors, radii, space } from "@/styles/tokens.stylex";
 import { CommentLayer, type Draft, type Mode, pinPosition, ToolPill } from "./Comments";
 import { CommentsPanel } from "./CommentsPanel";
+import { Icon } from "./Icons";
 import { PagesSidebar } from "./PagesSidebar";
 import { Preview } from "./Preview";
 import { SharedCssPanel } from "./SharedCss";
@@ -552,9 +553,7 @@ export function DesignCanvas({ id }: { id: string }) {
           {...stylex.props(styles.tool, styles.play)}
           title="Preview the artboard in view"
         >
-          <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-            <path d="M2 1.2v7.6L8.6 5z" fill="currentColor" />
-          </svg>
+          <Icon name="play" size={10} />
           Preview
         </button>
         <button

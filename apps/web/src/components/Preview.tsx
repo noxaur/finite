@@ -5,6 +5,7 @@ import { type RefObject, useEffect, useRef, useState } from "react";
 import { artboardDocument, pixelSize } from "@/design/html";
 import type { Replica } from "@/design/replica";
 import { colors, radii, space } from "@/styles/tokens.stylex";
+import { Icon } from "./Icons";
 
 /** How long preview mode waits for edits to settle before reloading the artboard. */
 const RELOAD_DELAY_MS = 150;
@@ -99,7 +100,7 @@ export function Preview({ replica, boards, current, version, onSelect, onClose }
               aria-label="Previous artboard"
               title="Previous artboard (←)"
             >
-              ‹
+              <Icon name="previous" size={14} />
             </button>
             <span {...stylex.props(styles.muted)}>
               {index + 1} of {boards.length}
@@ -111,7 +112,7 @@ export function Preview({ replica, boards, current, version, onSelect, onClose }
               aria-label="Next artboard"
               title="Next artboard (→)"
             >
-              ›
+              <Icon name="next" size={14} />
             </button>
           </>
         )}
@@ -120,9 +121,10 @@ export function Preview({ replica, boards, current, version, onSelect, onClose }
           type="button"
           onClick={onClose}
           {...stylex.props(styles.tool)}
+          aria-label="Close"
           title="Back to the canvas (Esc)"
         >
-          Close
+          <Icon name="close" size={14} />
         </button>
       </header>
       <div {...stylex.props(styles.stage)}>
@@ -206,6 +208,8 @@ const styles = stylex.create({
   muted: { color: colors.muted, fontVariantNumeric: "tabular-nums" },
   spacer: { flexGrow: 1 },
   tool: {
+    display: "inline-grid",
+    placeItems: "center",
     minWidth: 28,
     height: 24,
     paddingInline: 6,
