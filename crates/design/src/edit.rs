@@ -1362,6 +1362,96 @@ fn move_to(
     Ok(ops)
 }
 
+/// Wraps sibling nodes in a new `<div>` named "Group", where the first of
+/// them was, keeping their order. Returns the ops and the group's id.
+pub fn group(
+    doc: &Document,
+    ids: &[NodeId],
+    new_id: &mut impl FnMut() -> NodeId,
+) -> Result<(Vec<Op>, NodeId)> {
+    let ids = top_level(doc, ids);
+    let Some(first) = ids.first() else {
+        return err("name the nodes to group");
+    };
+    let parent = node(doc, first)?.parent.clone();
+    let Some(parent) = parent else {
+        return err("artboards can't be grouped; group what's inside one");
+    };
+    for id in &ids {
+        if node(doc, id)?.parent.as_deref() != Some(parent.as_str()) {
+            return err("only nodes with the same parent can be grouped");
+        }
+        let depth = doc.depth(&parent) + 2 + doc.height(id);
+        if depth > MAX_DEPTH {
+            return err(format!(
+                "grouping {id:?} would nest {depth} levels deep; the limit is {MAX_DEPTH}"
+            ));
+        }
+    }
+    room_for(doc, 0, 1)?;
+    // In sibling order, so the group keeps them as they were.
+    let siblings = doc.children(Some(&parent));
+    let members: Vec<&Node> = siblings
+        .iter()
+        .copied()
+        .filter(|n| ids.iter().any(|id| **id == n.id))
+        .collect();
+    let at = siblings
+        .iter()
+        .position(|n| n.id == members[0].id)
+        .expect("a member is a child");
+    let prev = at.checked_sub(1).map(|i| siblings[i].index.as_str());
+    let id = new_id();
+    let mut ops = vec![Op::Create {
+        node: Node {
+            parent: Some(parent.clone()),
+            index: fractional::key_between(prev, Some(&members[0].index)),
+            name: Some("Group".into()),
+            ..Node::element(id.clone(), "div")
+        },
+    }];
+    let indexes = fractional::keys_between(None, None, members.len());
+    for (member, index) in members.iter().zip(indexes) {
+        ops.push(Op::Move {
+            id: member.id.clone(),
+            parent: Some(id.clone()),
+            index,
+        });
+    }
+    Ok((ops, id))
+}
+
+/// Takes the children out of each node in `ids`, into its parent where it
+/// was, and deletes it.
+pub fn ungroup(doc: &Document, ids: &[NodeId]) -> Result<Vec<Op>> {
+    let mut ops = Vec::new();
+    for id in top_level(doc, ids) {
+        let group = element(doc, id)?;
+        let Some(parent) = group.parent.clone() else {
+            return err(format!(
+                "{id:?} is an artboard; only a group inside one can be ungrouped"
+            ));
+        };
+        if group.is_instance() {
+            return err(format!(
+                "{id:?} is an instance; detach it before ungrouping it"
+            ));
+        }
+        let children = doc.children(Some(id));
+        let next = doc.next_sibling(id).map(|n| n.index.as_str());
+        let indexes = fractional::keys_between(Some(&group.index), next, children.len());
+        for (child, index) in children.iter().zip(indexes) {
+            ops.push(Op::Move {
+                id: child.id.clone(),
+                parent: Some(parent.clone()),
+                index,
+            });
+        }
+        ops.push(Op::Delete { id: id.clone() });
+    }
+    Ok(ops)
+}
+
 /// Copies nodes. Each copy lands right after its original; copied artboards
 /// are placed in free canvas space. Returns the ops and the new root ids.
 pub fn duplicate(

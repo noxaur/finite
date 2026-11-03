@@ -115,7 +115,9 @@ export class DesignSession {
     readonly replica: Replica = new Replica(),
     private readonly now: () => number = Date.now,
     private readonly editor: () => Editor = () => ({ id: "guest", name: "Guest" }),
-  ) {}
+  ) {
+    replica.setClient(this.client);
+  }
 
   get state(): SessionState {
     return this.current;
@@ -156,7 +158,8 @@ export class DesignSession {
    * be planned, like a move inside an instance, `error` says why.
    */
   draft(edits: ReadonlyArray<UserEdit> | null): LocalOutcome {
-    const outcome = this.replica.draft(edits, (a) => this.view.apply(a));
+    // Planned as the mutation it'll be sent as, so the nodes it makes keep their ids.
+    const outcome = this.replica.draft(this.nextMid, edits, (a) => this.view.apply(a));
     this.view.flush();
     return outcome;
   }

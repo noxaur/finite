@@ -176,6 +176,8 @@ export class Renderer {
   private readonly virtuals = new Map<string, string[]>();
   private working: ReadonlyMap<string, string> = new Map();
   private commenting = false;
+  /** The element being typed into (`editText`). */
+  private editing: HTMLElement | null = null;
   /** The page shown, or `null` for the first page. Only its artboards are mounted. */
   private page: string | null = null;
   /** Hides artboards outside the view. A hidden sandboxed one has its iframe unloaded. */
@@ -560,6 +562,62 @@ export class Renderer {
       right: inset(css.right),
       bottom: inset(css.bottom),
     };
+  }
+
+  /**
+   * Lets the person type into the text of element `id`, in place, as
+   * plain text. Enter or leaving it calls `done` with the text, and
+   * Escape with `null`. Either way the element's content is drawn from
+   * the document again, so what the browser did while typing never
+   * lingers. Returns whether it started: only an element in a shadow-root
+   * artboard that holds nothing but text can be typed into, and not one
+   * inside an instance, which its component draws.
+   */
+  editText(id: string, done: (text: string | null) => void): boolean {
+    const el = this.elements.get(id);
+    const board = this.replica.artboardOf(id);
+    if (!(el instanceof HTMLElement) || !board || this.frames.get(board.id)?.iframe) return false;
+    if (id.includes("/")) return false;
+    if (![...el.childNodes].every((child) => child instanceof Text)) return false;
+    const before = el.textContent ?? "";
+    const stop = new AbortController();
+    const finish = (keep: boolean) => {
+      stop.abort();
+      const text = el.textContent ?? "";
+      el.removeAttribute("contenteditable");
+      this.editing = null;
+      // Typing changed the DOM behind the renderer's back; draw it from the document.
+      const children = this.replica.children(id);
+      for (const child of children) this.elements.delete(child.id);
+      el.replaceChildren(...children.map((child) => this.build(child, null, false)));
+      done(keep && text !== before ? text : null);
+    };
+    el.contentEditable = "plaintext-only";
+    this.editing = el;
+    const { signal } = stop;
+    el.addEventListener(
+      "keydown",
+      (e) => {
+        // The canvas's shortcuts would take letters typed here.
+        e.stopPropagation();
+        if (e.key === "Escape") finish(false);
+        else if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          finish(true);
+        }
+      },
+      { signal },
+    );
+    el.addEventListener("blur", () => finish(true), { signal });
+    el.focus();
+    const selection = window.getSelection();
+    selection?.selectAllChildren(el);
+    return true;
+  }
+
+  /** Whether `target` is the element being typed into. */
+  isEditing(target: EventTarget | null): boolean {
+    return this.editing !== null && target === this.editing;
   }
 
   /** The artboard whose name label `target` is, if it's one. People drag artboards by it. */

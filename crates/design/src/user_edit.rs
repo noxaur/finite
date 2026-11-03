@@ -45,6 +45,24 @@ pub enum UserEdit {
     Delete {
         ids: Vec<NodeId>,
     },
+    /// Copies nodes, each right after its original. A copied artboard goes
+    /// in free space on its page.
+    Duplicate {
+        ids: Vec<NodeId>,
+    },
+    /// Wraps sibling nodes in a new `<div>`, where the first of them was.
+    Group {
+        ids: Vec<NodeId>,
+    },
+    /// Puts each node's children in its place and deletes it.
+    Ungroup {
+        ids: Vec<NodeId>,
+    },
+    /// Replaces the text of a text node, or of an element holding only text.
+    SetText {
+        id: NodeId,
+        text: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -59,6 +77,41 @@ pub struct Position {
 /// make the server plan under the design's lock.
 pub const MAX_EDITS: usize = 64;
 pub const MAX_IDS: usize = 1_000;
+/// The longest text a person can type into one node.
+pub const MAX_TEXT: usize = 100_000;
+
+/// Ids for the nodes a tab's mutation `mid` makes, like a duplicate's. The
+/// tab and the server make the same ones from the tab's stamp, so a person
+/// can select a copy and keep editing it before the server answers. An id
+/// the document already has is skipped.
+pub fn new_ids<'a>(doc: &'a Document, client: &str, mid: u64) -> impl FnMut() -> NodeId + 'a {
+    const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    // FNV-1a: plain arithmetic, so the server and WebAssembly agree.
+    let fnv = |h: u64, bytes: &[u8]| {
+        bytes
+            .iter()
+            .fold(h, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3))
+    };
+    let seed = fnv(
+        fnv(0xcbf2_9ce4_8422_2325, client.as_bytes()),
+        &mid.to_le_bytes(),
+    );
+    let mut n = 0_u64;
+    move || loop {
+        n += 1;
+        let mut h = fnv(seed, &n.to_le_bytes());
+        let id: String = (0..8)
+            .map(|_| {
+                let c = ALPHABET[(h % 36) as usize] as char;
+                h /= 36;
+                c
+            })
+            .collect();
+        if !doc.contains(&id) {
+            return id;
+        }
+    }
+}
 
 /// Turns a gesture's edits into ops. Every edit is planned against `view`,
 /// the document with instances expanded as it was before the gesture, so
@@ -101,6 +154,15 @@ pub fn plan(
                 before,
             } => edit::move_before(view, ids, parent.as_deref(), before.as_deref())?,
             UserEdit::Delete { ids } => edit::delete(view, ids)?,
+            UserEdit::Duplicate { ids } => edit::duplicate(view, ids, new_id)?.0,
+            UserEdit::Group { ids } => edit::group(view, ids, new_id)?.0,
+            UserEdit::Ungroup { ids } => edit::ungroup(view, ids)?,
+            UserEdit::SetText { id, text } => {
+                if text.len() > MAX_TEXT {
+                    return Err(EditError(format!("text can be at most {MAX_TEXT} bytes")));
+                }
+                edit::set_text(view, id, text, new_id)?
+            }
         });
     }
     components::redirect(doc, ops, new_id)
@@ -112,6 +174,10 @@ pub fn label(edits: &[UserEdit]) -> &'static str {
         UserEdit::SetPosition { .. } | UserEdit::Place { .. } => "Move",
         UserEdit::SetStyles { .. } => "Change styles",
         UserEdit::Delete { .. } => "Delete",
+        UserEdit::Duplicate { .. } => "Duplicate",
+        UserEdit::Group { .. } => "Group",
+        UserEdit::Ungroup { .. } => "Ungroup",
+        UserEdit::SetText { .. } => "Edit text",
     });
     let first = kinds.next().unwrap_or("Edit");
     if kinds.all(|k| k == first) {
@@ -126,9 +192,13 @@ impl UserEdit {
     pub fn ids(&self) -> Box<dyn Iterator<Item = &NodeId> + '_> {
         match self {
             Self::SetPosition { moves } => Box::new(moves.iter().map(|m| &m.id)),
-            Self::SetStyles { ids, .. } | Self::Place { ids, .. } | Self::Delete { ids } => {
-                Box::new(ids.iter())
-            }
+            Self::SetStyles { ids, .. }
+            | Self::Place { ids, .. }
+            | Self::Delete { ids }
+            | Self::Duplicate { ids }
+            | Self::Group { ids }
+            | Self::Ungroup { ids } => Box::new(ids.iter()),
+            Self::SetText { id, .. } => Box::new(std::iter::once(id)),
         }
     }
 
@@ -162,6 +232,19 @@ impl UserEdit {
             },
             Self::Delete {
                 ids: vec!["card".into()],
+            },
+            Self::Duplicate {
+                ids: vec!["card".into()],
+            },
+            Self::Group {
+                ids: vec!["card".into(), "other".into()],
+            },
+            Self::Ungroup {
+                ids: vec!["group".into()],
+            },
+            Self::SetText {
+                id: "title".into(),
+                text: "Hello".into(),
             },
         ]
     }

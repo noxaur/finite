@@ -65,6 +65,9 @@ pub struct Replica {
     /// plans against every frame. Expanding a big design with instances
     /// takes tens of milliseconds, and the draft doesn't change it.
     base_view: Option<Document>,
+    /// The tab's id in its stamps. New nodes' ids are made from it, as the
+    /// server makes them (`user_edit::new_ids`).
+    client: String,
 }
 
 /// One of this tab's edits, applied before the server confirms it.
@@ -72,6 +75,9 @@ pub struct Replica {
 struct Local {
     /// The mutation's id in this tab, `None` for the draft.
     mid: Option<u64>,
+    /// The mutation id its new nodes' ids are made from. The draft's is
+    /// the id it will be sent as, so proposing it keeps them.
+    seed: u64,
     edits: Vec<UserEdit>,
     /// Undoes it, read from the document it applied to.
     inverse: Vec<Op>,
@@ -182,27 +188,25 @@ impl Replica {
     fn plan(
         &mut self,
         mid: Option<u64>,
+        seed: u64,
         edits: Vec<UserEdit>,
         outcome: &mut Outcome,
     ) -> Result<Local, String> {
         let view = self
             .base_view
             .get_or_insert_with(|| components::expand(&self.doc).into_owned());
-        // The server picks its own ids for nodes an edit makes. These are
-        // only shown until its change replaces them.
-        let mut n = 0;
-        let doc = &self.doc;
-        let mut new_id = || loop {
-            n += 1;
-            let id = format!("local-{n}");
-            if !doc.contains(&id) {
-                return id;
-            }
-        };
-        let ops = user_edit::plan(&self.doc, view, &edits, &mut new_id).map_err(|e| e.0)?;
+        // The server makes the same ids, unless its document has one already.
+        let ops = user_edit::plan(
+            &self.doc,
+            view,
+            &edits,
+            &mut user_edit::new_ids(&self.doc, &self.client, seed),
+        )
+        .map_err(|e| e.0)?;
         let inverse = self.run(&ops, outcome);
         Ok(Local {
             mid,
+            seed,
             edits,
             inverse,
         })
@@ -226,7 +230,7 @@ impl Replica {
             let is_draft = local.mid.is_none();
             // Each plans against the document the ones before it left.
             self.base_view = None;
-            match self.plan(local.mid, local.edits, outcome) {
+            match self.plan(local.mid, local.seed, local.edits, outcome) {
                 Ok(local) if is_draft => self.draft = Some(local),
                 Ok(local) => self.pending.push(local),
                 Err(error) => match local.mid {
@@ -246,10 +250,16 @@ impl Replica {
         self.draft.is_some() || !self.pending.is_empty()
     }
 
+    /// Names the tab in the stamps of its mutations.
+    pub fn set_client(&mut self, client: &str) {
+        self.client = client.to_owned();
+    }
+
     /// Replaces the gesture's draft with `edits` (a JSON array), or clears
-    /// it when `edits` is `null`. When the edits don't plan, like a move
-    /// inside an instance, there's no draft and `error` says why.
-    pub fn draft(&mut self, edits: &str) -> Result<String, String> {
+    /// it when `edits` is `null`. `seed` is the mutation id it will be sent
+    /// as. When the edits don't plan, like a move inside an instance,
+    /// there's no draft and `error` says why.
+    pub fn draft(&mut self, seed: u64, edits: &str) -> Result<String, String> {
         let edits: Option<Vec<UserEdit>> =
             serde_json::from_str(edits).map_err(|e| e.to_string())?;
         let mut outcome = Outcome::default();
@@ -257,7 +267,7 @@ impl Replica {
             self.run(&old.inverse, &mut outcome);
         }
         if let Some(edits) = edits {
-            match self.plan(None, edits, &mut outcome) {
+            match self.plan(None, seed, edits, &mut outcome) {
                 Ok(local) => self.draft = Some(local),
                 Err(error) => outcome.error = Some(error),
             }
@@ -272,7 +282,7 @@ impl Replica {
         let edits: Vec<UserEdit> = serde_json::from_str(edits).map_err(|e| e.to_string())?;
         let mut outcome = Outcome::default();
         match self.draft.take() {
-            Some(mut draft) if draft.edits == edits => {
+            Some(mut draft) if draft.edits == edits && draft.seed == mid => {
                 draft.mid = Some(mid);
                 self.pending.push(draft);
             }
@@ -280,7 +290,7 @@ impl Replica {
                 if let Some(old) = old {
                     self.run(&old.inverse, &mut outcome);
                 }
-                match self.plan(Some(mid), edits, &mut outcome) {
+                match self.plan(Some(mid), mid, edits, &mut outcome) {
                     Ok(local) => self.pending.push(local),
                     Err(error) => outcome.error = Some(error),
                 }
@@ -687,7 +697,7 @@ mod tests {
     fn a_draft_becomes_pending_and_its_own_change_touches_nothing_twice() {
         let mut r = replica();
         let edits = serde_json::to_string(&[style("b", "4px")]).unwrap();
-        let drafted = outcome(&r.draft(&edits).unwrap());
+        let drafted = outcome(&r.draft(1, &edits).unwrap());
         assert_eq!(drafted["patches"][0]["op"]["key"], "style:left");
         // Proposing the same edits keeps what's on screen.
         assert_eq!(
@@ -707,7 +717,7 @@ mod tests {
     fn a_draft_that_cannot_plan_says_why() {
         let mut r = replica();
         let edits = json!([{ "kind": "place", "ids": ["a"], "parent": "d", "before": null }]);
-        let drafted = outcome(&r.draft(&edits.to_string()).unwrap());
+        let drafted = outcome(&r.draft(1, &edits.to_string()).unwrap());
         assert!(drafted["error"].as_str().unwrap().contains("into itself"));
         assert!(!r.has_local());
     }
@@ -715,7 +725,7 @@ mod tests {
     #[test]
     fn a_change_that_deletes_the_dragged_node_loses_the_draft() {
         let mut r = replica();
-        r.draft(&serde_json::to_string(&[style("d", "1px")]).unwrap())
+        r.draft(1, &serde_json::to_string(&[style("d", "1px")]).unwrap())
             .unwrap();
         let ops = json!([{ "op": "delete", "id": "b" }]);
         let received = outcome(&r.receive(&ops.to_string(), None).unwrap());
@@ -785,7 +795,7 @@ mod tests {
             let mut n = 0;
             let random_edit = |rng: &mut Rng| -> UserEdit {
                 let id = ids[rng.below(ids.len())].to_owned();
-                match rng.below(4) {
+                match rng.below(8) {
                     0 => style(&id, &format!("{}px", rng.below(5))),
                     1 => UserEdit::Place {
                         ids: vec![id],
@@ -798,6 +808,15 @@ mod tests {
                             x: rng.below(9) as f64,
                             y: 0.0,
                         }],
+                    },
+                    3 => UserEdit::Duplicate { ids: vec![id] },
+                    4 => UserEdit::Group {
+                        ids: vec![id, ids[rng.below(ids.len())].to_owned()],
+                    },
+                    5 => UserEdit::Ungroup { ids: vec![id] },
+                    6 => UserEdit::SetText {
+                        id,
+                        text: format!("t{}", rng.below(3)),
                     },
                     _ => UserEdit::Delete { ids: vec![id] },
                 }
@@ -838,7 +857,8 @@ mod tests {
                     // The person drags, or lets go.
                     1 => {
                         let edits = vec![random_edit(&mut rng)];
-                        tab.draft(&serde_json::to_string(&edits).unwrap()).unwrap();
+                        tab.draft(mid + 1, &serde_json::to_string(&edits).unwrap())
+                            .unwrap();
                     }
                     2 => {
                         if let Some(draft) = &tab.draft {
@@ -852,12 +872,12 @@ mod tests {
                     // The server runs the oldest mutation it was sent.
                     3 | 4 if !sent.is_empty() => {
                         let (mid, edits) = sent.remove(0);
-                        let mut fresh = 0;
-                        let planned =
-                            user_edit::plan(server.doc(), server.view(), &edits, &mut || {
-                                fresh += 1;
-                                format!("srv{seed}-{mid}-{fresh}")
-                            });
+                        let planned = user_edit::plan(
+                            server.doc(),
+                            server.view(),
+                            &edits,
+                            &mut user_edit::new_ids(server.doc(), "", mid),
+                        );
                         let change = planned
                             .ok()
                             .and_then(|ops| server.commit("user:p", "Edit", &ops, 0));
@@ -886,11 +906,15 @@ mod tests {
                 }
             }
             // Let everything land.
-            tab.draft("null").unwrap();
+            tab.draft(mid + 1, "null").unwrap();
             while !sent.is_empty() || !inbox.is_empty() {
                 if let Some((mid, edits)) = (!sent.is_empty()).then(|| sent.remove(0)) {
-                    let ops =
-                        user_edit::plan(server.doc(), server.view(), &edits, &mut || "late".into());
+                    let ops = user_edit::plan(
+                        server.doc(),
+                        server.view(),
+                        &edits,
+                        &mut user_edit::new_ids(server.doc(), "", mid),
+                    );
                     match ops
                         .ok()
                         .and_then(|ops| server.commit("user:p", "Edit", &ops, 0))

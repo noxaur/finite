@@ -94,6 +94,14 @@ export const UserEdit = Schema.Union([
     before: Schema.NullOr(Schema.String),
   }),
   Schema.Struct({ kind: Schema.Literal("delete"), ids: Schema.Array(Schema.String) }),
+  /** Copies nodes, each right after its original. */
+  Schema.Struct({ kind: Schema.Literal("duplicate"), ids: Schema.Array(Schema.String) }),
+  /** Wraps sibling nodes in a new `<div>`, where the first of them was. */
+  Schema.Struct({ kind: Schema.Literal("group"), ids: Schema.Array(Schema.String) }),
+  /** Puts each node's children in its place and deletes it. */
+  Schema.Struct({ kind: Schema.Literal("ungroup"), ids: Schema.Array(Schema.String) }),
+  /** Replaces the text of a text node, or of an element holding only text. */
+  Schema.Struct({ kind: Schema.Literal("setText"), id: Schema.String, text: Schema.String }),
 ]);
 export type UserEdit = typeof UserEdit.Type;
 

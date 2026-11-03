@@ -37,12 +37,8 @@ fn design() -> Design {
 }
 
 fn plan(design: &Design, edits: &[UserEdit]) -> Result<Vec<Op>, String> {
-    let mut n = 0;
-    user_edit::plan(design.doc(), design.view(), edits, &mut || {
-        n += 1;
-        format!("new{n}")
-    })
-    .map_err(|e| e.0)
+    let mut new_id = user_edit::new_ids(design.doc(), "tab", 1);
+    user_edit::plan(design.doc(), design.view(), edits, &mut new_id).map_err(|e| e.0)
 }
 
 fn apply(design: &mut Design, edits: &[UserEdit]) {
@@ -138,6 +134,90 @@ fn one_gesture_is_one_undo_step() {
     d.undo("user:p", 0).unwrap();
     assert_eq!(order(&d), ["a", "b", "c"]);
     assert!(d.doc().get("a").unwrap().styles.is_empty());
+}
+
+#[test]
+fn a_tab_and_the_server_make_the_same_new_ids() {
+    let d = design();
+    let duplicate = [UserEdit::Duplicate {
+        ids: vec!["a".into()],
+    }];
+    let plan_as = |client: &str, mid: u64| {
+        user_edit::plan(
+            d.doc(),
+            d.view(),
+            &duplicate,
+            &mut user_edit::new_ids(d.doc(), client, mid),
+        )
+        .unwrap()
+    };
+    assert_eq!(plan_as("tab", 1), plan_as("tab", 1));
+    assert_ne!(plan_as("tab", 1), plan_as("tab", 2));
+    assert_ne!(plan_as("tab", 1), plan_as("other", 1));
+}
+
+#[test]
+fn group_wraps_siblings_where_the_first_was_and_ungroup_undoes_it() {
+    let mut d = design();
+    apply(
+        &mut d,
+        &[UserEdit::Group {
+            ids: vec!["c".into(), "b".into()],
+        }],
+    );
+    let [first, group]: [String; 2] = order(&d).try_into().unwrap();
+    assert_eq!(first, "a");
+    let wrapped: Vec<String> = d
+        .doc()
+        .children(Some(&group))
+        .into_iter()
+        .map(|n| n.id.clone())
+        .collect();
+    assert_eq!(wrapped, ["b", "c"]);
+    assert_eq!(d.doc().get(&group).unwrap().name.as_deref(), Some("Group"));
+    apply(&mut d, &[UserEdit::Ungroup { ids: vec![group] }]);
+    assert_eq!(order(&d), ["a", "b", "c"]);
+}
+
+#[test]
+fn group_refuses_artboards_and_nodes_with_different_parents() {
+    let d = design();
+    let group = |ids: &[&str]| UserEdit::Group {
+        ids: ids.iter().map(|s| s.to_string()).collect(),
+    };
+    assert!(
+        plan(&d, &[group(&["board"])])
+            .unwrap_err()
+            .contains("artboards")
+    );
+    assert!(plan(&d, &[group(&["a", "board"])]).is_err());
+}
+
+#[test]
+fn duplicate_and_text_edits() {
+    let mut d = design();
+    apply(
+        &mut d,
+        &[UserEdit::Duplicate {
+            ids: vec!["a".into()],
+        }],
+    );
+    assert_eq!(order(&d).len(), 4);
+    assert_eq!(order(&d)[0], "a");
+    apply(
+        &mut d,
+        &[UserEdit::SetText {
+            id: "b".into(),
+            text: "Hi".into(),
+        }],
+    );
+    let text: Vec<_> = d
+        .doc()
+        .children(Some("b"))
+        .into_iter()
+        .filter_map(|n| n.text.clone())
+        .collect();
+    assert_eq!(text, ["Hi"]);
 }
 
 #[test]

@@ -688,6 +688,9 @@ enum ClientMessage {
     },
 }
 
+/// The longest client id a tab's stamp can carry. Tabs make 12 characters.
+const MAX_CLIENT: usize = 64;
+
 /// Runs one message from a person's tab. Returns the `settled` message for
 /// that tab when it changed nothing; a change reaches the tab with every
 /// other viewer's.
@@ -705,6 +708,10 @@ fn receive(handle: &DesignHandle, text: &str) -> Option<Outgoing> {
         | ClientMessage::Redo { author, stamp } => (author, stamp),
     };
     let author = author.clone().into_author();
+    // The stamp is kept with the change for viewers that resume.
+    if stamp.client.len() > MAX_CLIENT {
+        return Some(handle.settled(stamp.mid, Some("the stamp's client id is too long".into())));
+    }
     let actor = Actor {
         id: author.id,
         name: author.name,

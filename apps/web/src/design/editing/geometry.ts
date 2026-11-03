@@ -203,3 +203,82 @@ export function slotBefore(
 /** Whether `point` is inside `box`. */
 export const inside = (box: Box, point: Point) =>
   point.x >= box.left && point.x < box.right && point.y >= box.top && point.y < box.bottom;
+
+/** How close an edge or centre comes to another, in page pixels, before it snaps to it. */
+export const SNAP_PX = 6;
+
+/** A snap guide, in page pixels: a vertical line at `x` from `from` to `to`, or a horizontal one at `y`. */
+export type Guide =
+  | { readonly x: number; readonly from: number; readonly to: number }
+  | { readonly y: number; readonly from: number; readonly to: number };
+
+/**
+ * Snaps a moving box to the edges and centres of `others`, so things line
+ * up. `edges` says which of the box's own lines move with the pointer: all
+ * three for a move, one edge for a resize. Returns how far to shift the box
+ * along each axis (0 when nothing is near) and the guides to draw.
+ */
+export function snap(
+  box: Box,
+  others: ReadonlyArray<Box>,
+  edges: { readonly x: ReadonlyArray<number>; readonly y: ReadonlyArray<number> },
+  threshold = SNAP_PX,
+): { readonly dx: number; readonly dy: number; readonly guides: ReadonlyArray<Guide> } {
+  const lines = (b: Box, axis: "x" | "y") =>
+    axis === "x"
+      ? [b.left, (b.left + b.right) / 2, b.right]
+      : [b.top, (b.top + b.bottom) / 2, b.bottom];
+  const best = (axis: "x" | "y", own: ReadonlyArray<number>) => {
+    let shift = Infinity;
+    for (const other of others) {
+      for (const target of lines(other, axis)) {
+        for (const line of own) {
+          const d = target - line;
+          if (Math.abs(d) <= threshold && Math.abs(d) < Math.abs(shift)) shift = d;
+        }
+      }
+    }
+    return Number.isFinite(shift) ? shift : 0;
+  };
+  const dx = edges.x.length > 0 ? best("x", edges.x) : 0;
+  const dy = edges.y.length > 0 ? best("y", edges.y) : 0;
+  const moved: Box = {
+    left: box.left + dx,
+    right: box.right + dx,
+    top: box.top + dy,
+    bottom: box.bottom + dy,
+  };
+  const guides: Guide[] = [];
+  const close = (a: number, b: number) => Math.abs(a - b) < 0.5;
+  for (const other of others) {
+    for (const x of lines(other, "x")) {
+      if (edges.x.some((line) => close(line + dx, x))) {
+        guides.push({
+          x,
+          from: Math.min(moved.top, other.top),
+          to: Math.max(moved.bottom, other.bottom),
+        });
+      }
+    }
+    for (const y of lines(other, "y")) {
+      if (edges.y.some((line) => close(line + dy, y))) {
+        guides.push({
+          y,
+          from: Math.min(moved.left, other.left),
+          to: Math.max(moved.right, other.right),
+        });
+      }
+    }
+  }
+  return { dx, dy, guides };
+}
+
+/** The lines of `box` that a move carries: its edges and centre on each axis. */
+export const moveEdges = (box: Box) => ({
+  x: [box.left, (box.left + box.right) / 2, box.right],
+  y: [box.top, (box.top + box.bottom) / 2, box.bottom],
+});
+
+/** Whether two boxes overlap. */
+export const overlaps = (a: Box, b: Box) =>
+  a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;

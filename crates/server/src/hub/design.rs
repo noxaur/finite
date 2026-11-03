@@ -689,7 +689,8 @@ impl DesignHandle {
     /// Commits a person's gesture, sent from a browser tab, as one undo step
     /// for `actor`. The edits are planned with [`user_edit::plan`], the same
     /// function the tab ran to show them, against the document as it is
-    /// now. The change carries `stamp`, so the tab knows it as its own.
+    /// now, with the same new ids. The change carries `stamp`, so the tab
+    /// knows it as its own.
     pub fn mutate(
         &self,
         actor: &Actor,
@@ -700,13 +701,13 @@ impl DesignHandle {
         let mut state = self.lock();
         state.touch(actor, now);
         let doc = state.design.doc();
-        let mut new_id = || loop {
-            let id = random_id(8);
-            if !doc.contains(&id) {
-                return id;
-            }
-        };
-        let ops = user_edit::plan(doc, state.design.view(), edits, &mut new_id)?;
+        // The ids the tab made for its own copy of this edit.
+        let ops = user_edit::plan(
+            doc,
+            state.design.view(),
+            edits,
+            &mut user_edit::new_ids(doc, &stamp.client, stamp.mid),
+        )?;
         let change = state
             .design
             .commit(&actor.id, user_edit::label(edits), &ops, now);

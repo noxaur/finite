@@ -1,7 +1,7 @@
 import type { Hit, Measured } from "../renderer";
 import type { Replica } from "../replica";
 import type { UserEdit } from "../schema";
-import type { Handle, Point } from "./geometry";
+import type { Box, Guide, Handle, Point } from "./geometry";
 
 /**
  * A way for a person to edit the canvas with the pointer. To add one,
@@ -25,11 +25,19 @@ export interface Run {
   move(pointer: Pointer): ReadonlyArray<UserEdit> | null;
   /** A node to outline while it runs, like the container a move drops into. */
   target?(): string | null;
+  /** The guides the last move snapped to, in page pixels. */
+  guides?(): ReadonlyArray<Guide>;
+  /** A box to draw, in page pixels, like a selection box. */
+  area?(): Box | null;
+  /** What the gesture selects now, for one that selects instead of editing. */
+  selection?(): ReadonlyArray<string> | null;
 }
 
 /** The pointer, in page pixels. */
 export interface Pointer extends Point {
   readonly shift: boolean;
+  /** ⌘ or Ctrl is held, which turns snapping off. */
+  readonly free: boolean;
 }
 
 export interface Press extends Pointer {
@@ -52,4 +60,6 @@ export interface EditContext {
   hitTest(x: number, y: number): Hit | null;
   /** Canvas units per page pixel: one over the zoom. */
   readonly canvasPerPixel: number;
+  /** The artboards on the page that's shown, in order. */
+  artboards(): ReadonlyArray<string>;
 }

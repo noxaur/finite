@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vite-plus/test";
 import type { Node } from "../schema";
-import { type Facts, flowOf, moveAbsolute, moveArtboards, resize, slotBefore } from "./geometry";
+import {
+  type Facts,
+  flowOf,
+  moveAbsolute,
+  moveArtboards,
+  moveEdges,
+  resize,
+  slotBefore,
+  snap,
+} from "./geometry";
 
 const node = (styles: Record<string, string> = {}): Node => ({
   id: "n",
@@ -141,5 +150,28 @@ describe("finding where a dragged element goes", () => {
     ];
     expect(slotBefore("wrap", grid, { x: 30, y: 5 })).toBe("c");
     expect(slotBefore("wrap", grid, { x: 21, y: 25 })).toBe("d");
+  });
+});
+
+describe("snapping", () => {
+  const other = { left: 100, top: 0, right: 200, bottom: 50 };
+
+  it("pulls a nearby edge onto another box's edge and draws a guide there", () => {
+    const moving = { left: 204, top: 60, right: 254, bottom: 90 };
+    const { dx, dy, guides } = snap(moving, [other], moveEdges(moving));
+    expect(dx).toBe(-4);
+    expect(guides).toContainEqual({ x: 200, from: 0, to: 90 });
+    expect(dy).toBe(0);
+  });
+
+  it("leaves a box alone when nothing is near", () => {
+    const moving = { left: 300, top: 300, right: 340, bottom: 340 };
+    expect(snap(moving, [other], moveEdges(moving))).toEqual({ dx: 0, dy: 0, guides: [] });
+  });
+
+  it("snaps only the edge a resize drags", () => {
+    const moving = { left: 0, top: 0, right: 97, bottom: 20 };
+    expect(snap(moving, [other], { x: [97], y: [] }).dx).toBe(3);
+    expect(snap(moving, [other], { x: [], y: [] }).dx).toBe(0);
   });
 });

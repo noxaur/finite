@@ -29,6 +29,7 @@ import {
 } from "./Comments";
 import { CommentsPanel } from "./CommentsPanel";
 import { PagesSidebar } from "./PagesSidebar";
+import { Inspector } from "./Inspector";
 import { EditorNotice, SelectionLayer } from "./SelectionLayer";
 import { SharedCssPanel } from "./SharedCss";
 import { ExportMenu, ImportButton, ImportResultCard, type ImportState } from "./Transfer";
@@ -801,6 +802,14 @@ export function DesignCanvas({ id }: { id: string }) {
 
       <ToolPill mode={mode} onMode={setMode} />
       {editorRef.current && <EditorNotice editor={editorRef.current} />}
+      {editorRef.current && rendererRef.current && sessionRef.current && mode === "pointer" && (
+        <Inspector
+          editor={editorRef.current}
+          renderer={rendererRef.current}
+          replica={sessionRef.current.replica}
+          version={session.version}
+        />
+      )}
 
       <div {...stylex.props(styles.bar, styles.zoom)}>
         <button

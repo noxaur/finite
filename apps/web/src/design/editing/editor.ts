@@ -1,8 +1,16 @@
 import type { Renderer } from "../renderer";
 import type { UserEdit } from "../schema";
 import type { DesignSession } from "../session";
-import { HANDLES, type Handle, isPositioned, moveAbsolute, moveArtboards } from "./geometry";
-import type { EditContext, Press, Run } from "./gesture";
+import {
+  type Box,
+  type Guide,
+  HANDLES,
+  type Handle,
+  isPositioned,
+  moveAbsolute,
+  moveArtboards,
+} from "./geometry";
+import type { EditContext, Pointer, Press, Run } from "./gesture";
 import { GESTURES } from "./gestures";
 import { lineage, nodeOf } from "./tree";
 
@@ -20,6 +28,12 @@ export interface EditorState {
   readonly target: string | null;
   /** Whether a gesture is dragging. */
   readonly dragging: boolean;
+  /** The guides the running gesture snapped to, in page pixels. */
+  readonly guides: ReadonlyArray<Guide>;
+  /** The running gesture's box, like a selection box, in page pixels. */
+  readonly area: Box | null;
+  /** The node whose text the person is typing into. */
+  readonly editing: string | null;
   /** Why the last edit didn't happen, for a moment. */
   readonly notice: string | null;
 }
@@ -29,6 +43,9 @@ const idle: EditorState = {
   hover: null,
   target: null,
   dragging: false,
+  guides: [],
+  area: null,
+  editing: null,
   notice: null,
 };
 
@@ -37,7 +54,9 @@ const idle: EditorState = {
  * selection and the running gesture: a press goes to the first gesture in
  * `GESTURES` that takes it, each frame of the drag shows that gesture's
  * edits as the session's draft, and releasing commits them. A press no
- * gesture takes is left to the camera, which pans.
+ * gesture takes is left to the camera, which pans, as is any press while
+ * Space is held. Keys run the commands in `onKey`, and a double-click
+ * types into an element's text.
  *
  * It listens on the viewport in the capture phase, so it sees a press
  * before the camera does and can keep the camera from panning.
@@ -58,6 +77,10 @@ export class Editor {
   private frame = 0;
   private hoverFrame = 0;
   private noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Held down, Space hands the pointer to the camera, to pan. */
+  private space = false;
+  /** What ⌘C copied, for ⌘V to duplicate. */
+  private copied: ReadonlyArray<string> = [];
   private readonly abort = new AbortController();
 
   constructor(
@@ -72,7 +95,16 @@ export class Editor {
     viewport.addEventListener("pointerup", (e) => this.onUp(e), options);
     viewport.addEventListener("pointercancel", () => this.cancel(), options);
     viewport.addEventListener("pointerleave", () => this.update({ hover: null }), options);
+    viewport.addEventListener("dblclick", (e) => this.onDoubleClick(e), options);
     window.addEventListener("keydown", (e) => this.onKey(e), { signal: this.abort.signal });
+    window.addEventListener(
+      "keyup",
+      (e) => {
+        if (e.code === "Space") this.space = false;
+      },
+      { signal: this.abort.signal },
+    );
+    window.addEventListener("blur", () => (this.space = false), { signal: this.abort.signal });
     const unsubscribe = session.subscribe(() => this.prune());
     const unlisten = session.onDraftLost((reason) => {
       this.cancel();
@@ -106,6 +138,12 @@ export class Editor {
     this.update({ selection });
   }
 
+  /** Commits `edits` as one undo step, and says why if they're refused. */
+  async commit(edits: ReadonlyArray<UserEdit>) {
+    const result = await this.session.commit(edits);
+    if (result.kind === "refused") this.say(result.message);
+  }
+
   dispose() {
     this.cancel();
     this.abort.abort();
@@ -121,12 +159,27 @@ export class Editor {
       rect: (id) => this.renderer.nodeRect(id),
       hitTest: (x, y) => this.renderer.hitTest(x, y),
       canvasPerPixel: 1 / this.zoom(),
+      artboards: () => this.shownArtboards(),
     };
   }
 
+  /** The artboards on the page that's shown. */
+  private shownArtboards(): string[] {
+    const replica = this.session.replica;
+    const page = this.renderer.shownPage();
+    return replica
+      .artboards()
+      .filter((b) => replica.pageOf(b) === page)
+      .map((b) => b.id);
+  }
+
   private onDown(e: PointerEvent) {
-    if (!this.enabled || e.button !== 0 || this.run) return;
+    if (!this.enabled || e.button !== 0 || this.run || this.space) return;
     const target = e.target instanceof Element ? e.target : null;
+    // A press in the text being typed into places the caret.
+    if (this.current.editing !== null && e.composedPath().some((t) => this.renderer.isEditing(t))) {
+      return;
+    }
     const handle = (target?.closest("[data-handle]") as HTMLElement | null)?.dataset.handle;
     // Pins and other controls on the canvas keep their clicks.
     if (!handle && target?.closest("[data-camera-ignore]")) return;
@@ -136,6 +189,7 @@ export class Editor {
       x: e.clientX,
       y: e.clientY,
       shift: e.shiftKey,
+      free: e.metaKey || e.ctrlKey,
       hit,
       label,
       handle: HANDLES.includes(handle as Handle) ? (handle as Handle) : null,
@@ -194,7 +248,7 @@ export class Editor {
       return;
     }
     if (e.pointerId !== running.pointerId) return;
-    const pointer = { x: e.clientX, y: e.clientY, shift: e.shiftKey };
+    const pointer = pointerOf(e);
     if (!running.started) {
       if (Math.hypot(pointer.x - running.press.x, pointer.y - running.press.y) < DRAG_SLOP) return;
       running.started = true;
@@ -205,9 +259,10 @@ export class Editor {
     this.frame = requestAnimationFrame(() => this.step(pointer));
   }
 
-  private step(pointer: { x: number; y: number; shift: boolean }) {
+  private step(pointer: Pointer) {
     const running = this.run;
     if (!running) return;
+    const { run } = running;
     const edits = running.run.move(pointer);
     const json = JSON.stringify(edits);
     if (json !== running.shown) {
@@ -220,18 +275,24 @@ export class Editor {
       }
       running.edits = edits;
     }
-    this.update({ target: running.run.target?.() ?? null });
+    const selection = run.selection?.() ?? null;
+    this.update({
+      target: run.target?.() ?? null,
+      guides: run.guides?.() ?? [],
+      area: run.area?.() ?? null,
+      ...(selection && { selection }),
+    });
   }
 
   private onUp(e: PointerEvent) {
     const running = this.run;
     if (!running || e.pointerId !== running.pointerId) return;
     cancelAnimationFrame(this.frame);
-    if (running.started) this.step({ x: e.clientX, y: e.clientY, shift: e.shiftKey });
+    if (running.started) this.step(pointerOf(e));
     // The last frame's edits can't be planned, so it cancelled the gesture.
     if (this.run !== running) return;
     this.run = null;
-    this.update({ dragging: false, target: null });
+    this.update({ dragging: false, target: null, guides: [], area: null });
     if (running.edits) void this.commit(running.edits);
   }
 
@@ -241,33 +302,55 @@ export class Editor {
     if (!this.run) return;
     this.run = null;
     this.session.draft(null);
-    this.update({ dragging: false, target: null });
+    this.update({ dragging: false, target: null, guides: [], area: null });
   }
 
-  private async commit(edits: ReadonlyArray<UserEdit>) {
-    const result = await this.session.commit(edits);
-    if (result.kind === "refused") this.say(result.message);
+  /**
+   * Types into the text of the element double-clicked, in place: Enter or
+   * a click elsewhere keeps it, Escape puts it back. Only an element that
+   * holds nothing but text can be typed into, since typing replaces it all.
+   */
+  private onDoubleClick(e: MouseEvent) {
+    if (!this.enabled || this.run || this.current.editing !== null) return;
+    const hit = this.renderer.hitTest(e.clientX, e.clientY);
+    if (!hit || hit.nodeId === hit.artboardId) return;
+    const id = hit.nodeId;
+    const started = this.renderer.editText(id, (text) => {
+      this.update({ editing: null });
+      if (text !== null) void this.commit([{ kind: "setText", id, text }]);
+    });
+    if (!started) {
+      this.say("Only plain text outside components can be typed into here.");
+      return;
+    }
+    e.preventDefault();
+    this.update({ editing: id, selection: [id], hover: null });
   }
 
   private onKey(e: KeyboardEvent) {
     if (!this.enabled || isTyping(e)) return;
-    const mod = e.metaKey || e.ctrlKey;
-    const key = e.key.toLowerCase();
-    if (mod && (key === "z" || key === "y")) {
+    if (e.code === "Space") {
+      // Held, it pans; it would scroll or press a focused button otherwise.
+      this.space = true;
       e.preventDefault();
-      const redo = key === "y" || e.shiftKey;
-      void (redo ? this.session.redo() : this.session.undo()).then((result) => {
-        if (result.kind === "refused") this.say(result.message);
-      });
       return;
     }
-    if (mod || e.altKey) return;
+    const mod = e.metaKey || e.ctrlKey;
+    const { selection } = this.current;
+    if (mod) {
+      const command = this.command(e, selection);
+      if (command) {
+        e.preventDefault();
+        command();
+      }
+      return;
+    }
+    if (e.altKey) return;
     if (e.key === "Escape") {
       if (this.run) this.cancel();
       else this.selectParent();
       return;
     }
-    const { selection } = this.current;
     if (selection.length === 0 || this.run) return;
     if (e.key === "Delete" || e.key === "Backspace") {
       e.preventDefault();
@@ -287,6 +370,101 @@ export class Editor {
     e.preventDefault();
     const edits = this.nudge(selection, delta);
     if (edits.length > 0) void this.commit(edits);
+  }
+
+  /** The ⌘ (or Ctrl) shortcut `e` runs, if any. */
+  private command(e: KeyboardEvent, selection: ReadonlyArray<string>): (() => void) | null {
+    const replica = this.session.replica;
+    const some = selection.length > 0 && !this.run;
+    switch (e.code) {
+      case "KeyZ":
+      case "KeyY":
+        return () => {
+          const redo = e.code === "KeyY" || e.shiftKey;
+          void (redo ? this.session.redo() : this.session.undo()).then((result) => {
+            if (result.kind === "refused") this.say(result.message);
+          });
+        };
+      case "KeyA":
+        return () => this.selectAll();
+      case "KeyC":
+        return some ? () => (this.copied = [...selection]) : null;
+      case "KeyV": {
+        const ids = this.copied.filter((id) => replica.get(id) !== undefined);
+        return ids.length > 0 && !this.run ? () => this.duplicate(ids) : null;
+      }
+      case "KeyD":
+        return some ? () => this.duplicate(selection) : null;
+      case "KeyG":
+        return some ? () => (e.shiftKey ? this.ungroup(selection) : this.group(selection)) : null;
+      case "BracketRight":
+      case "BracketLeft": {
+        const [id] = selection;
+        if (selection.length !== 1 || id === undefined || this.run) return null;
+        const up = e.code === "BracketRight";
+        return () => this.restack(id, up, e.altKey);
+      }
+      default:
+        return null;
+    }
+  }
+
+  /** Selects everything beside what's selected, or every artboard on the page. */
+  private selectAll() {
+    const replica = this.session.replica;
+    const [first] = this.current.selection;
+    const parent = first === undefined ? null : (nodeOf(replica, first)?.parent ?? null);
+    const all =
+      parent === null
+        ? this.shownArtboards()
+        : replica
+            .children(parent)
+            .filter((n) => n.type === "element")
+            .map((n) => n.id);
+    this.update({ selection: all });
+  }
+
+  /** Copies nodes, each right after its original, and selects the copies. */
+  private duplicate(ids: ReadonlyArray<string>) {
+    const replica = this.session.replica;
+    void this.commit([{ kind: "duplicate", ids: [...ids] }]);
+    // The copies show at once, with the ids the server will give them.
+    const copies = ids.flatMap((id) => replica.siblingsAfter(id).next().value?.id ?? []);
+    if (copies.length > 0) this.update({ selection: copies });
+  }
+
+  private group(ids: ReadonlyArray<string>) {
+    void this.commit([{ kind: "group", ids: [...ids] }]);
+    const group = this.session.replica.get(ids[0]!)?.parent ?? null;
+    if (group !== null) this.update({ selection: [group] });
+  }
+
+  private ungroup(ids: ReadonlyArray<string>) {
+    const replica = this.session.replica;
+    const children = ids.flatMap((id) => replica.children(id).map((c) => c.id));
+    void this.commit([{ kind: "ungroup", ids: [...ids] }]);
+    this.update({ selection: children.filter((id) => replica.get(id) !== undefined) });
+  }
+
+  /**
+   * Moves a node up or down among its siblings, which is what stacks it
+   * over or under them: one step, or with ⌥ all the way.
+   */
+  private restack(id: string, up: boolean, all: boolean) {
+    const replica = this.session.replica;
+    const node = nodeOf(replica, id);
+    if (!node) return;
+    const siblings = replica.children(node.parent);
+    const at = siblings.findIndex((s) => s.id === id);
+    if (at < 0 || (up ? at === siblings.length - 1 : at === 0)) return;
+    const before = up
+      ? all
+        ? null
+        : (siblings[at + 2]?.id ?? null)
+      : all
+        ? siblings[0]!.id
+        : siblings[at - 1]!.id;
+    void this.commit([{ kind: "place", ids: [id], parent: node.parent, before }]);
   }
 
   /**
@@ -347,6 +525,13 @@ export class Editor {
     for (const listener of this.listeners) listener();
   }
 }
+
+const pointerOf = (e: PointerEvent): Pointer => ({
+  x: e.clientX,
+  y: e.clientY,
+  shift: e.shiftKey,
+  free: e.metaKey || e.ctrlKey,
+});
 
 /**
  * Whether keys go to a text field, which keeps them. A field inside an

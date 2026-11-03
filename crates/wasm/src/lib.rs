@@ -133,11 +133,23 @@ pub extern "C" fn replica_take_dirty(handle: u32) -> i32 {
     with_replica(handle, |replica| Ok(replica.take_dirty()))
 }
 
-/// [`Replica::draft`] with the edits JSON (or `null`) in the first `len` input bytes.
+/// [`Replica::set_client`] with the client id in the first `len` input bytes.
 #[unsafe(no_mangle)]
-pub extern "C" fn replica_draft(handle: u32, len: usize) -> i32 {
+pub extern "C" fn replica_set_client(handle: u32, len: usize) -> i32 {
     with_replica(handle, |replica| {
-        with_input(|input| replica.draft(text(input, 0, len)?))
+        with_input(|input| {
+            replica.set_client(text(input, 0, len)?);
+            Ok(String::new())
+        })
+    })
+}
+
+/// [`Replica::draft`] for mutation id `seed`, with the edits JSON (or
+/// `null`) in the first `len` input bytes.
+#[unsafe(no_mangle)]
+pub extern "C" fn replica_draft(handle: u32, seed: u32, len: usize) -> i32 {
+    with_replica(handle, |replica| {
+        with_input(|input| replica.draft(seed.into(), text(input, 0, len)?))
     })
 }
 

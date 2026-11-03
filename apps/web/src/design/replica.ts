@@ -215,9 +215,21 @@ export class Replica {
     return this.doc.hasLocal();
   }
 
-  /** Replaces the gesture's draft with `edits`, planned as the server would, or clears it. */
-  draft(edits: ReadonlyArray<UserEdit> | null, each?: (applied: Applied) => void): LocalOutcome {
-    return this.follows(this.doc.draft(JSON.stringify(edits)), each);
+  /** Names the tab in its stamps, so new nodes get the ids the server will give them. */
+  setClient(client: string) {
+    this.doc.setClient(client);
+  }
+
+  /**
+   * Replaces the gesture's draft with `edits`, planned as the server would,
+   * or clears it. `seed` is the mutation id it will be sent as.
+   */
+  draft(
+    seed: number,
+    edits: ReadonlyArray<UserEdit> | null,
+    each?: (applied: Applied) => void,
+  ): LocalOutcome {
+    return this.follows(this.doc.draft(seed, JSON.stringify(edits)), each);
   }
 
   /** Makes `edits` the tab's mutation `mid`. When they're the draft's, nothing changes on screen. */

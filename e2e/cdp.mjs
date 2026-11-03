@@ -133,19 +133,21 @@ export async function launch({ width = 1440, height = 900 } = {}) {
     async move(x, y) {
       await send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
     },
-    /** Clicks at `x`, `y`, holding Shift when `shift` is set. */
-    async click(x, y, { shift = false } = {}) {
+    /** Clicks at `x`, `y`, holding Shift when `shift` is set, twice when `double` is. */
+    async click(x, y, { shift = false, double = false } = {}) {
       await page_.move(x, y);
       const modifiers = shift ? 8 : 0;
-      for (const type of ["mousePressed", "mouseReleased"]) {
-        await send("Input.dispatchMouseEvent", {
-          type,
-          x,
-          y,
-          modifiers,
-          button: "left",
-          clickCount: 1,
-        });
+      for (const clickCount of double ? [1, 2] : [1]) {
+        for (const type of ["mousePressed", "mouseReleased"]) {
+          await send("Input.dispatchMouseEvent", {
+            type,
+            x,
+            y,
+            modifiers,
+            button: "left",
+            clickCount,
+          });
+        }
       }
     },
     /**

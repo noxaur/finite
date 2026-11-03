@@ -40,5 +40,29 @@
       "card"
     ],
     "kind": "delete"
+  },
+  {
+    "ids": [
+      "card"
+    ],
+    "kind": "duplicate"
+  },
+  {
+    "ids": [
+      "card",
+      "other"
+    ],
+    "kind": "group"
+  },
+  {
+    "ids": [
+      "group"
+    ],
+    "kind": "ungroup"
+  },
+  {
+    "id": "title",
+    "kind": "setText",
+    "text": "Hello"
   }
 ]

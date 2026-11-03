@@ -1,11 +1,23 @@
 import type { UserEdit } from "../../schema";
-import { flowOf, inside, isLayout, isPositioned, moveAbsolute, slotBefore } from "../geometry";
+import {
+  flowOf,
+  type Guide,
+  inside,
+  isLayout,
+  isPositioned,
+  moveAbsolute,
+  moveEdges,
+  slotBefore,
+  snap,
+} from "../geometry";
 import type { EditContext, Gesture, Pointer } from "../gesture";
 import { lineage, nodeOf } from "../tree";
+import { shifted, snapTargets } from "./snapping";
 
 /**
  * Drags a selected element. One that's absolutely positioned moves by its
- * insets. One in the flow keeps its size and moves among its siblings, or
+ * insets, snapping to its parent's and siblings' edges and centres (hold ⌘
+ * or Ctrl to place it freely). One in the flow keeps its size and moves among its siblings, or
  * into another flex or grid container once the pointer leaves its parent,
  * and the layout puts it where it lands.
  */
@@ -18,13 +30,24 @@ export const moveElement: Gesture = {
     const start = id === undefined ? null : ctx.measure(id);
     if (!node || node.parent === null || !start) return null;
     if (isPositioned(start)) {
+      const others = snapTargets(ctx, [node.id]);
+      let guides: ReadonlyArray<Guide> = [];
       return {
         move: (p) => {
-          const delta = { x: (p.x - press.x) / start.scale, y: (p.y - press.y) / start.scale };
+          let d = { x: p.x - press.x, y: p.y - press.y };
+          guides = [];
+          if (!p.free) {
+            const moved = shifted(start.rect, d);
+            const snapped = snap(moved, others, moveEdges(moved));
+            d = { x: d.x + snapped.dx, y: d.y + snapped.dy };
+            guides = snapped.guides;
+          }
+          const delta = { x: d.x / start.scale, y: d.y / start.scale };
           return Math.round(delta.x) === 0 && Math.round(delta.y) === 0
             ? null
             : [moveAbsolute(node, start, delta)];
         },
+        guides: () => guides,
       };
     }
     const home = node.parent;

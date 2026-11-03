@@ -56,11 +56,32 @@ export function SelectionLayer({
   const hover =
     state.hover !== null && !state.selection.includes(state.hover) ? rectOf(state.hover) : null;
   const target = state.target === null ? null : rectOf(state.target);
+  // Guides and the selection box come in page pixels.
+  const world = (left: number, top: number, right: number, bottom: number) => {
+    const a = camera.toWorld(left, top);
+    const b = camera.toWorld(right, bottom);
+    return { x: a.x, y: a.y, width: b.x - a.x, height: b.y - a.y };
+  };
+  const area =
+    state.area && world(state.area.left, state.area.top, state.area.right, state.area.bottom);
 
   return (
     <>
       {hover && <div {...stylex.props(styles.box(hover), styles.hover)} />}
       {target && <div {...stylex.props(styles.box(target), styles.target)} />}
+      {area && <div data-area {...stylex.props(styles.box(area), styles.area)} />}
+      {state.guides.map((g, i) => (
+        <div
+          key={i}
+          data-guide
+          {...stylex.props(
+            "x" in g
+              ? styles.box(world(g.x, g.from, g.x, g.to))
+              : styles.box(world(g.from, g.y, g.to, g.y)),
+            "x" in g ? styles.vertical : styles.horizontal,
+          )}
+        />
+      ))}
       {state.selection.map((id) => {
         const rect = rectOf(id);
         if (!rect) return null;
@@ -128,6 +149,16 @@ const styles = stylex.create({
   selected: {
     outline: `calc(1.5px * var(--inv-zoom, 1)) solid ${colors.ink}`,
     boxShadow: `0 0 0 calc(3px * var(--inv-zoom, 1)) ${colors.halo}`,
+  },
+  area: {
+    outline: `calc(1px * var(--inv-zoom, 1)) solid ${colors.ink}`,
+    backgroundColor: "rgba(26, 26, 24, 0.06)",
+  },
+  vertical: {
+    borderLeft: `calc(1px * var(--inv-zoom, 1)) solid ${colors.danger}`,
+  },
+  horizontal: {
+    borderTop: `calc(1px * var(--inv-zoom, 1)) solid ${colors.danger}`,
   },
   hover: {
     outline: `calc(1px * var(--inv-zoom, 1)) solid ${colors.ink}`,

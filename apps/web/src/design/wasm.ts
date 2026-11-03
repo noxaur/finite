@@ -25,7 +25,8 @@ interface Exports {
   replica_expand(handle: number, len: number): number;
   replica_take_dirty(handle: number): number;
   replica_component_info(handle: number, len: number): number;
-  replica_draft(handle: number, len: number): number;
+  replica_set_client(handle: number, len: number): number;
+  replica_draft(handle: number, seed: number, len: number): number;
   replica_propose(handle: number, mid: number, len: number): number;
   replica_receive(handle: number, len: number, mine: number): number;
   replica_settle(handle: number, mid: number): number;
@@ -206,9 +207,17 @@ export class WasmDocument {
     return this.model.callWith(id, (e, len) => e.replica_component_info(this.handle, len));
   }
 
-  /** Replaces the gesture's draft with a JSON array of edits, or clears it with `null`. Returns an outcome. */
-  draft(editsJson: string): string {
-    return this.model.callWith(editsJson, (e, len) => e.replica_draft(this.handle, len));
+  /** Names the tab in its stamps, which new node ids are made from. */
+  setClient(client: string) {
+    this.model.callWith(client, (e, len) => e.replica_set_client(this.handle, len));
+  }
+
+  /**
+   * Replaces the gesture's draft with a JSON array of edits, or clears it
+   * with `null`. `seed` is the mutation id it will be sent as. Returns an outcome.
+   */
+  draft(seed: number, editsJson: string): string {
+    return this.model.callWith(editsJson, (e, len) => e.replica_draft(this.handle, seed, len));
   }
 
   /** Makes a JSON array of edits the tab's mutation `mid`. Returns an outcome. */
