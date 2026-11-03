@@ -170,10 +170,10 @@ pub struct Migrated {
 }
 
 /// Splits shared CSS into tokens and the rules that aren't tokens. A
-/// custom property in a top-level `:root` rule becomes a token; any other
-/// declaration there stays in a `:root` rule in `rest`, and so does a
-/// property that isn't a valid token.
-pub fn migrate(css: &str) -> Migrated {
+/// custom property in a top-level `:root` rule becomes a token, up to
+/// `room` of them; any other declaration there stays in a `:root` rule in
+/// `rest`, and so does a property that isn't a valid token or doesn't fit.
+pub fn migrate(css: &str, room: usize) -> Migrated {
     let mut tokens: Vec<(String, String)> = Vec::new();
     let mut rest: Vec<String> = Vec::new();
     let mut at = 0;
@@ -200,6 +200,10 @@ pub fn migrate(css: &str) -> Migrated {
                 (check_name(name).is_ok() && check_value(value).is_ok())
                     .then(|| (name.to_owned(), value.to_owned()))
             });
+            // Past `room` tokens, a new name stays where it was, so the
+            // cascade still puts it before later rules.
+            let token = token
+                .filter(|(name, _)| tokens.len() < room || tokens.iter().any(|(n, _)| n == name));
             match token {
                 Some((name, value)) => {
                     tokens.retain(|(n, _)| *n != name);
@@ -368,7 +372,7 @@ mod tests {
                    /* colors { */ :root{--ink:#111;--font:'A;B', serif;color:red}\n\
                    .btn{color:var(--ink)}\n\
                    :root { --ink: #222; --bad: red !important }";
-        let migrated = migrate(css);
+        let migrated = migrate(css, MAX_TOKENS);
         assert_eq!(
             migrated.tokens,
             [
@@ -385,7 +389,7 @@ mod tests {
             )
         );
         assert_eq!(
-            migrate(":root { --a: 1px }").rest,
+            migrate(":root { --a: 1px }", MAX_TOKENS).rest,
             None,
             "nothing is left when it was all tokens"
         );

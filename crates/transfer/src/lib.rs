@@ -562,7 +562,10 @@ fn add_tokens(
     };
     let migrated = css
         .filter(|css| !css.trim().is_empty())
-        .map(|css| tokens::migrate(&resolve(css)))
+        .map(|css| {
+            let room = tokens::MAX_TOKENS.saturating_sub(tx.doc().tokens().len());
+            tokens::migrate(&resolve(css), room)
+        })
         .unwrap_or_default();
     let first = tx.doc().modes()[0].1.name.clone();
     let mut changes: Vec<(String, TokenChange)> = migrated

@@ -1242,8 +1242,6 @@ pub fn set_tokens(
     let check = |name: &str, value: &str| {
         tokens::check_value(value.trim()).map_err(|why| EditError(format!("{name}: {why}")))
     };
-    let mut ops = Vec::new();
-    let none = Values::new();
     // What each token holds after the changes so far, so a name that comes
     // twice builds on its first change.
     let mut planned: BTreeMap<&str, Option<Values>> = BTreeMap::new();
@@ -1276,23 +1274,28 @@ pub fn set_tokens(
                 (!values.is_empty()).then_some(values)
             }
         };
-        // One op per mode that changes, so undo reverses only those.
-        let (old, new) = (
-            existing.as_ref().unwrap_or(&none),
-            values.as_ref().unwrap_or(&none),
-        );
+        planned.insert(name, values);
+    }
+    // One op per mode that ends up different, so undo reverses only those.
+    // Removals go first, so a token deleted in the same edit frees its
+    // place before a new one takes it.
+    let none = Values::new();
+    let mut ops = Vec::new();
+    for (name, values) in &planned {
+        let old = doc.tokens().get(*name).unwrap_or(&none);
+        let new = values.as_ref().unwrap_or(&none);
         let modes: std::collections::BTreeSet<&String> = old.keys().chain(new.keys()).collect();
         for mode in modes {
             if old.get(mode) != new.get(mode) {
                 ops.push(Op::Token {
-                    name: name.clone(),
+                    name: (*name).to_owned(),
                     mode_id: mode.clone(),
                     value: new.get(mode).cloned(),
                 });
             }
         }
-        planned.insert(name, values);
     }
+    ops.sort_by_key(|op| matches!(op, Op::Token { value: Some(_), .. }));
     let added = planned
         .iter()
         .filter(|(name, values)| values.is_some() && !doc.tokens().contains_key(**name))
@@ -1357,29 +1360,19 @@ pub fn migrate_css(doc: &Document, new_id: &mut impl FnMut() -> NodeId) -> Resul
     let Some(css) = doc.css() else {
         return Ok(Vec::new());
     };
-    let migrated = tokens::migrate(css);
-    let first = doc.first_mode().to_owned();
     let room = tokens::MAX_TOKENS.saturating_sub(doc.tokens().len());
-    let (fit, past) = migrated.tokens.split_at(migrated.tokens.len().min(room));
-    let mut ops: Vec<Op> = fit
-        .iter()
+    let migrated = tokens::migrate(css, room);
+    let first = doc.first_mode().to_owned();
+    let mut ops: Vec<Op> = migrated
+        .tokens
+        .into_iter()
         .map(|(name, value)| Op::Token {
-            name: name.clone(),
+            name,
             mode_id: first.clone(),
-            value: Some(value.clone()),
+            value: Some(value),
         })
         .collect();
-    // After the rest, so its leading `@import`s stay first.
-    let past: Vec<String> = past.iter().map(|(n, v)| format!("{n}: {v}")).collect();
-    let rest = match (past.is_empty(), migrated.rest) {
-        (true, rest) => rest,
-        (false, rest) => Some(format!(
-            "{}\n:root {{ {}; }}",
-            rest.unwrap_or_default(),
-            past.join("; ")
-        )),
-    };
-    if let Some(rest) = rest {
+    if let Some(rest) = migrated.rest {
         let style = format!("<style>{}</style>", html::layered_style(&rest));
         for board in doc.artboards() {
             if board.is_instance() || board.kind == NodeKind::Text {

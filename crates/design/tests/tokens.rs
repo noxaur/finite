@@ -310,8 +310,30 @@ fn a_token_named_twice_in_one_edit_ends_with_its_last_value() {
         &mut d,
         &[
             ("--brand", TokenChange::All("blue".into())),
-            ("--brand", TokenChange::All("red".into())),
+            ("--brand", TokenChange::All("green".into())),
         ],
     );
-    assert_eq!(d.doc().tokens()["--brand"][FIRST_MODE], "red");
+    assert_eq!(d.doc().tokens()["--brand"][FIRST_MODE], "green");
+}
+
+#[test]
+fn a_token_deleted_in_an_edit_frees_its_place_at_the_limit() {
+    let mut d = design();
+    let fill: Vec<(String, TokenChange)> = (1..tokens::MAX_TOKENS)
+        .map(|i| (format!("--v{i}"), TokenChange::All("1px".into())))
+        .collect();
+    commit(&mut d, |doc| {
+        edit::set_tokens(doc, &edit::mode_list(doc), &fill)
+    });
+    set(
+        &mut d,
+        &[
+            ("--a", TokenChange::All("red".into())),
+            ("--b", TokenChange::All("blue".into())),
+            ("--a", TokenChange::Delete),
+        ],
+    );
+    assert_eq!(d.doc().tokens().len(), tokens::MAX_TOKENS);
+    assert_eq!(d.doc().tokens()["--b"][FIRST_MODE], "blue");
+    assert!(!d.doc().tokens().contains_key("--a"));
 }
