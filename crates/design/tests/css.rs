@@ -265,3 +265,44 @@ fn inline_styles_that_beat_a_rule_are_named() {
         ]
     );
 }
+
+#[test]
+fn top_rules_carry_each_value_and_name_the_at_rules() {
+    let (rules, at_rules) = css::top_rules(
+        "#a1 { height: 1712px; color: red !important; margin: unset }\n@media print { .b { color: black } }",
+    )
+    .unwrap();
+    assert_eq!(
+        rules,
+        [css::StyleRule {
+            selector: "#a1".into(),
+            declarations: vec![
+                ("height".into(), Some("1712px".into())),
+                ("color".into(), Some("red !important".into())),
+                ("margin".into(), None),
+            ],
+        }]
+    );
+    assert_eq!(at_rules, ["@media print"]);
+}
+
+#[test]
+fn sheet_rules_list_every_style_rule_with_its_at_rules() {
+    let rules = css::sheet_rules(
+        ".a { color: red;\n  padding: 4px }\n@media (max-width: 600px) { .a { color: blue } }\n@keyframes spin { to { opacity: 0 } }",
+    );
+    let shown: Vec<(String, String)> = rules
+        .into_iter()
+        .map(|r| (r.context.join(" "), r.text))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (String::new(), ".a { color: red; padding: 4px }".to_owned()),
+            (
+                "@media (max-width: 600px)".to_owned(),
+                ".a { color: blue }".to_owned()
+            ),
+        ]
+    );
+}

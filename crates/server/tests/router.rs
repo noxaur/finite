@@ -355,6 +355,30 @@ mod relay {
             .to_owned()
     }
 
+    /// Scripts and the e2e and AX harnesses use `/mcp/classic`, so the
+    /// router relays it to the servers' `/mcp/classic` too.
+    #[tokio::test]
+    async fn the_router_relays_mcp_classic() {
+        let (front, nodes) = deployment().await;
+        let config = StreamableHttpClientTransportConfig::with_uri(format!("{front}/mcp/classic"));
+        let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
+        let tools = client.list_all_tools().await.unwrap();
+        assert!(tools.iter().any(|t| t.name == "write_html"));
+        let mut ids = Vec::new();
+        for name in ["First", "Second"] {
+            ids.push(design_id(
+                &call(&client, "create_design", json!({ "name": name })).await,
+            ));
+        }
+        let cluster = Cluster::new(nodes, 0).unwrap();
+        let mut owners: Vec<usize> = ids.iter().map(|id| cluster.owner(id).unwrap()).collect();
+        owners.sort();
+        assert_eq!(owners, [0, 1], "creation takes turns across both servers");
+        for id in &ids {
+            call(&client, "get_basic_info", json!({ "designId": id })).await;
+        }
+    }
+
     #[tokio::test]
     async fn one_agent_session_reaches_every_server() {
         let (front, nodes) = deployment().await;

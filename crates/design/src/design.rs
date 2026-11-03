@@ -290,6 +290,8 @@ pub struct Transaction<'a> {
     places: Vec<(NodeId, Point)>,
     /// [`Transaction::view`], made when first asked for after an op applied.
     view: std::cell::OnceCell<Document>,
+    /// The imports this transaction made, kept with the change.
+    imports: Vec<ImportRecord>,
 }
 
 impl<'a> Transaction<'a> {
@@ -303,6 +305,7 @@ impl<'a> Transaction<'a> {
             before: BTreeSet::new(),
             places: Vec::new(),
             view: std::cell::OnceCell::new(),
+            imports: Vec::new(),
         }
     }
 
@@ -378,6 +381,12 @@ impl<'a> Transaction<'a> {
             read_at,
             ops,
         )
+    }
+
+    /// Keeps `import`'s record with the design if the transaction
+    /// succeeds. Undoing its change doesn't remove the record.
+    pub fn record_import(&mut self, import: ImportRecord) {
+        self.imports.push(import);
     }
 
     /// The ops applied so far, in order.
@@ -561,7 +570,9 @@ impl Design {
     /// before it left it. If `build` fails, the document is put back as it
     /// was, and nothing is numbered, logged or recorded. Otherwise the ops
     /// become one change labelled `label` and one undo step for `actor`, and
-    /// comments follow their artboards as after [`Design::commit`].
+    /// comments follow their artboards as after [`Design::commit`]. The
+    /// imports `build` recorded ([`Transaction::record_import`]) are kept,
+    /// even when they added nothing.
     pub fn transact<T, E>(
         &mut self,
         actor: &str,
@@ -585,8 +596,10 @@ impl Design {
             inverse,
             before,
             places,
+            imports,
             ..
         } = tx;
+        self.imports.extend(imports);
         if applied.is_empty() {
             return Ok((None, output));
         }
@@ -631,9 +644,11 @@ impl Design {
         now: u64,
         build: impl FnOnce(&mut Transaction<'_>) -> Result<(ImportRecord, T), E>,
     ) -> Result<(Option<Change>, T), E> {
-        let (change, (import, output)) = self.transact(actor, label, now, build)?;
-        self.imports.push(import);
-        Ok((change, output))
+        self.transact(actor, label, now, |tx| {
+            let (import, output) = build(tx)?;
+            tx.record_import(import);
+            Ok(output)
+        })
     }
 
     /// Every import, oldest first.

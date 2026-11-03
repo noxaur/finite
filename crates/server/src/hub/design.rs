@@ -14,7 +14,6 @@ use finite_design::{
     comment::{Anchor, Author, Comment, CommentError},
     components,
     edit::EditError,
-    import::ImportRecord,
     label,
     user_edit::{self, UserEdit},
 };
@@ -709,7 +708,9 @@ impl DesignHandle {
     /// applies is one change and one undo step for `actor`, broadcast and
     /// journaled once, and if it fails nobody sees anything. Build ops
     /// against `tx.view()` and apply them with `tx.edit`, so edits inside
-    /// an instance become its overrides, as with [`Self::edit`].
+    /// an instance become its overrides, as with [`Self::edit`]. An import
+    /// it records is journaled with the change in one record, so a crash
+    /// can't keep one without the other; its bytes must already be stored.
     pub fn transact<T, E>(
         &self,
         actor: &Actor,
@@ -719,11 +720,26 @@ impl DesignHandle {
         let now = now_ms();
         let mut state = self.lock();
         state.touch(actor, now);
+        let before = state.design.imports().len();
         let (change, output) = state.design.transact(&actor.id, label, now, build)?;
-        if let Some(change) = &change {
-            self.publish_with_comments(&mut state, actor, change, None);
+        let imports = state.design.imports()[before..].to_vec();
+        if imports.is_empty() {
+            if let Some(change) = &change {
+                self.publish_with_comments(&mut state, actor, change, None);
+            }
+            return Ok((output, change));
         }
-        Ok((output, change))
+        if let Some(change) = &change {
+            self.broadcast(&mut state, actor, change, None);
+        }
+        // The first record carries the change, and the rest only their imports.
+        let mut change = change;
+        let first = change.clone();
+        for import in imports {
+            let change = change.take();
+            self.record(&mut state, Record::Import { import, change });
+        }
+        Ok((output, first))
     }
 
     /// Stages `build` with [`Design::dry_run`]: the ops it would apply,
@@ -772,38 +788,6 @@ impl DesignHandle {
     pub fn settled(&self, mid: u64, error: Option<String>) -> Outgoing {
         let seq = self.lock().design.seq();
         Outgoing::new(None, &DesignMessage::Settled { mid, seq, error })
-    }
-
-    /// Imports into the design with [`Design::import`], all or nothing, as
-    /// one undo step for `actor`. The import's record and its change are
-    /// saved as one journal record. The import's bytes must already be stored.
-    pub fn import<T, E>(
-        &self,
-        actor: &Actor,
-        label: &str,
-        build: impl FnOnce(&mut Transaction<'_>) -> Result<(ImportRecord, T), E>,
-    ) -> Result<Edited<T>, E> {
-        let now = now_ms();
-        let mut state = self.lock();
-        state.touch(actor, now);
-        let (change, output) = state.design.import(&actor.id, label, now, build)?;
-        if let Some(change) = &change {
-            self.broadcast(&mut state, actor, change, None);
-        }
-        let import = state
-            .design
-            .imports()
-            .last()
-            .cloned()
-            .expect("just imported");
-        self.record(
-            &mut state,
-            Record::Import {
-                import,
-                change: change.clone(),
-            },
-        );
-        Ok((output, change))
     }
 
     pub fn undo(&self, actor: &Actor, mutation: Option<&Stamp>) -> Option<Change> {

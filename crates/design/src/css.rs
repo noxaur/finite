@@ -154,6 +154,79 @@ pub fn patch_rules(patch: &str) -> Result<Vec<PatchRule>, CssError> {
     Ok(out)
 }
 
+/// A style rule at the top level of a patch, with its declarations' values.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StyleRule {
+    pub selector: String,
+    /// Each property, as written, with its value (and any `!important`),
+    /// or `None` for `prop: unset`.
+    pub declarations: Vec<(String, Option<String>)>,
+}
+
+/// The style rules at the top level of `patch`, and the at-rules there
+/// (like `@media print`), which hold rules rather than declarations.
+pub fn top_rules(patch: &str) -> Result<(Vec<StyleRule>, Vec<String>), CssError> {
+    let mut rules = Vec::new();
+    let mut at_rules = Vec::new();
+    for item in parse(patch, true)?.items {
+        match &item.body {
+            Body::Decls(decls, _) if !item.prelude.starts_with('@') => rules.push(StyleRule {
+                selector: collapse(&item.prelude),
+                declarations: decls
+                    .set()
+                    .map(|d| (d.name.clone(), (!d.unsets()).then(|| d.value.clone())))
+                    .collect(),
+            }),
+            _ => at_rules.push(collapse(&item.prelude)),
+        }
+    }
+    Ok((rules, at_rules))
+}
+
+/// A style rule in a stylesheet, as [`sheet_rules`] lists them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SheetRule {
+    /// The at-rules around it, outermost first.
+    pub context: Vec<String>,
+    pub selector: String,
+    /// The rule on one line, like `.btn { color: red; padding: 4px }`.
+    pub text: String,
+}
+
+/// Every style rule in `sheet`, in order, read as browsers read it. Rules
+/// inside `@keyframes` aren't style rules, so they're left out.
+pub fn sheet_rules(sheet: &str) -> Vec<SheetRule> {
+    fn walk(list: &List, context: &mut Vec<String>, out: &mut Vec<SheetRule>) {
+        for item in &list.items {
+            match &item.body {
+                Body::Decls(decls, _) if !item.prelude.starts_with('@') => {
+                    let selector = collapse(&item.prelude);
+                    let body: Vec<String> = decls
+                        .set()
+                        .map(|d| format!("{}: {}", d.name, d.value))
+                        .collect();
+                    out.push(SheetRule {
+                        context: context.clone(),
+                        text: format!("{selector} {{ {} }}", body.join("; ")),
+                        selector,
+                    });
+                }
+                Body::Rules(inner, _) => {
+                    context.push(collapse(&item.prelude));
+                    walk(inner, context, out);
+                    context.pop();
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if let Ok(list) = parse(sheet, false) {
+        walk(&list, &mut Vec::new(), &mut out);
+    }
+    out
+}
+
 /// A property a patch rule sets that inline styles override on some of
 /// the elements it matches, since an inline style beats a stylesheet rule.
 #[derive(Clone, Debug, PartialEq, Eq)]

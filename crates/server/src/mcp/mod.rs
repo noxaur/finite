@@ -88,8 +88,36 @@ pub(crate) fn extra(group: &str) -> bool {
         .any(|g| g == group)
 }
 
+/// Which tools an endpoint serves: today's (`Classic`), or the six of
+/// `doc6`. `/mcp` serves what `FINITE_MCP_SURFACE` names, so AX runs
+/// (`e2e/ax`) can compare both on one build, and `/mcp/classic` always
+/// serves today's tools, for scripts written against them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Surface {
+    #[default]
+    Classic,
+    Doc6,
+}
+
+impl Surface {
+    /// `FINITE_MCP_SURFACE`: `doc6`, or `classic` when unset.
+    pub fn from_env() -> Self {
+        match std::env::var("FINITE_MCP_SURFACE") {
+            Ok(s) if s.trim().eq_ignore_ascii_case("doc6") => Self::Doc6,
+            _ => Self::Classic,
+        }
+    }
+
+    pub(crate) fn doc6(self) -> bool {
+        self == Self::Doc6
+    }
+}
+
 /// What agents see when they connect, with a section for each extra tool group.
-pub(crate) fn instructions() -> &'static str {
+pub(crate) fn instructions(surface: Surface) -> &'static str {
+    if surface.doc6() {
+        return doc6::INSTRUCTIONS;
+    }
     static TEXT: OnceLock<String> = OnceLock::new();
     TEXT.get_or_init(|| {
         let mut text = INSTRUCTIONS.trim_end().to_owned();
@@ -111,6 +139,7 @@ pub(crate) fn instructions() -> &'static str {
 #[derive(Clone)]
 pub struct FiniteMcp {
     hub: Arc<Hub>,
+    surface: Surface,
     session: Arc<SessionGuard>,
     /// Layout notes waiting for this session's next result (`layout` group).
     watch: Arc<watch::LayoutWatch>,
@@ -146,11 +175,14 @@ pub(crate) fn sessions() -> LocalSessionManager {
     sessions
 }
 
-/// The MCP endpoint as a tower service, to mount at `/mcp`.
-pub fn service(hub: Arc<Hub>) -> StreamableHttpService<FiniteMcp, LocalSessionManager> {
+/// The MCP endpoint serving `surface`'s tools, as a tower service.
+pub fn service(
+    hub: Arc<Hub>,
+    surface: Surface,
+) -> StreamableHttpService<FiniteMcp, LocalSessionManager> {
     let config = StreamableHttpServerConfig::default().with_allowed_hosts(hub.allowed_hosts());
     StreamableHttpService::new(
-        move || Ok(FiniteMcp::new(hub.clone())),
+        move || Ok(FiniteMcp::new(hub.clone(), surface)),
         Arc::new(sessions()),
         config,
     )
@@ -620,7 +652,10 @@ fn distinct<'a>(ids: impl Iterator<Item = &'a String>) -> usize {
 
 impl FiniteMcp {
     /// Every tool, with the [`extra`] groups that are turned on.
-    fn tools() -> ToolRouter<Self> {
+    fn tools(surface: Surface) -> ToolRouter<Self> {
+        if surface.doc6() {
+            return Self::doc6_router();
+        }
         let mut router = Self::tool_router();
         router.merge(Self::search_router());
         if extra("components") {
@@ -632,15 +667,16 @@ impl FiniteMcp {
         router
     }
 
-    pub fn new(hub: Arc<Hub>) -> Self {
+    pub fn new(hub: Arc<Hub>, surface: Surface) -> Self {
         Self {
             session: Arc::new(SessionGuard {
                 hub: hub.clone(),
                 actor: OnceLock::new(),
             }),
             hub,
-            watch: Arc::default(),
-            tool_router: Self::tools(),
+            surface,
+            watch: Arc::new(watch::LayoutWatch::new(surface)),
+            tool_router: Self::tools(surface),
         }
     }
 
@@ -706,7 +742,12 @@ impl FiniteMcp {
             let text = match error {
                 OpenError::Busy(_) => format!("design {id:?}: {error}."),
                 _ => {
-                    format!("design {id:?} not found. Call list_designs to see the available ids.")
+                    let list = if self.surface.doc6() {
+                        "designs"
+                    } else {
+                        "list_designs"
+                    };
+                    format!("design {id:?} not found. Call {list} to see the available ids.")
                 }
             };
             CallToolResult::error(vec![ContentBlock::text(text)])
@@ -753,7 +794,7 @@ impl FiniteMcp {
                         text.push_str(&note);
                     }
                     if check && extra("layout") {
-                        self.watch.after_edit(design_id, &handle, change).await;
+                        let _ = self.watch.after_edit(design_id, &handle, change).await;
                         let notes = self.watch.take(design_id);
                         if !notes.is_empty() {
                             text.push('\n');
@@ -769,6 +810,25 @@ impl FiniteMcp {
             Err(error) => fail(error.to_string()),
         }
     }
+}
+
+/// What a reply did: whether the comment is open, and the changes it links.
+fn replied(comment: &comment::Comment) -> String {
+    let labels: Vec<&str> = comment
+        .messages
+        .last()
+        .map(|m| m.changes.iter().map(|c| c.label.as_str()).collect())
+        .unwrap_or_default();
+    let state = if comment.resolved { "resolved" } else { "open" };
+    let linked = match labels.len() {
+        0 => "links none of your changes".to_owned(),
+        n => format!(
+            "links your {n} change{} to this artboard since the thread's last message: {}",
+            if n == 1 { "" } else { "s" },
+            labels.join(", ")
+        ),
+    };
+    format!("Replied. The comment is {state}, and your reply {linked}.")
 }
 
 /// Shows users which artboards an agent is editing, if it hasn't said with
@@ -817,6 +877,7 @@ macro_rules! design {
 }
 
 mod component_tools;
+mod doc6;
 mod pages;
 mod search;
 mod tokens;
@@ -1338,8 +1399,9 @@ impl FiniteMcp {
                     ));
                     content.push(ContentBlock::text(format::shot(image)));
                     if let Some(boxes) = &image.boxes {
-                        let notes =
-                            handle.read(|d| format::layout_notes(d.view(), &image.artboard, boxes));
+                        let notes = handle.read(|d| {
+                            format::layout_notes(d.view(), &image.artboard, boxes, self.surface)
+                        });
                         if !notes.is_empty() {
                             content.push(ContentBlock::text(notes));
                         }
@@ -1400,7 +1462,7 @@ impl FiniteMcp {
                     }
                     _ => node_id.clone(),
                 };
-                format::rendered_outline(doc, &root, depth, &boxes)
+                format::rendered_outline(doc, &root, depth, &boxes, self.surface)
             }));
         }
         ok(cut(
@@ -1978,25 +2040,7 @@ impl FiniteMcp {
             kind: AuthorKind::Agent,
         };
         match handle.reply(&p.comment_id, author, &p.message, p.resolve) {
-            Ok(comment) => {
-                let labels: Vec<&str> = comment
-                    .messages
-                    .last()
-                    .map(|m| m.changes.iter().map(|c| c.label.as_str()).collect())
-                    .unwrap_or_default();
-                let state = if comment.resolved { "resolved" } else { "open" };
-                let linked = match labels.len() {
-                    0 => "links none of your changes".to_owned(),
-                    n => format!(
-                        "links your {n} change{} to this artboard since the thread's last message: {}",
-                        if n == 1 { "" } else { "s" },
-                        labels.join(", ")
-                    ),
-                };
-                ok(format!(
-                    "Replied. The comment is {state}, and your reply {linked}."
-                ))
-            }
+            Ok(comment) => ok(replied(&comment)),
             Err(error) => fail(error.to_string()),
         }
     }
@@ -2049,10 +2093,27 @@ impl ServerHandler for FiniteMcp {
     /// names (the `layout` group). The layout tools drop it instead.
     async fn call_tool(
         &self,
-        request: CallToolRequestParams,
+        mut request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
-        let design = extra("layout")
+        // doc6 takes a design's name for its id, in every tool.
+        if self.surface.doc6()
+            && let Some(args) = request.arguments.as_mut()
+            && let Some(serde_json::Value::String(given)) = args.get("designId")
+        {
+            match self.design_named(given) {
+                Ok(id) => {
+                    args.insert("designId".into(), id.into());
+                }
+                Err(text) => {
+                    return Ok(CallToolResponse::Complete(CallToolResult::error(vec![
+                        ContentBlock::text(text),
+                    ])));
+                }
+            }
+        }
+        // doc6 checks the layout after every edit, so its notes are always on.
+        let design = (extra("layout") || self.surface.doc6())
             .then(|| {
                 let id = request.arguments.as_ref()?.get("designId")?.as_str()?;
                 Some(id.to_owned())
@@ -2062,7 +2123,7 @@ impl ServerHandler for FiniteMcp {
         // note out of date. Edits through `edit` clear it themselves.
         let drops_note = matches!(
             &*request.name,
-            "get_layout" | "get_screenshot" | "undo" | "redo" | "import_design"
+            "get_layout" | "get_screenshot" | "undo" | "redo" | "import_design" | "render"
         );
         let name = request.name.clone();
         // Before the tool runs: an edit starts a new check, which replaces the note.
@@ -2110,7 +2171,7 @@ impl ServerHandler for FiniteMcp {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("finite", env!("CARGO_PKG_VERSION")))
-            .with_instructions(instructions())
+            .with_instructions(instructions(self.surface))
     }
 }
 
@@ -2133,10 +2194,12 @@ mod tests {
             tokens::INSTRUCTIONS,
         ]
         .join("\n\n");
-        assert!(
-            all.chars().count() <= INSTRUCTIONS_LIMIT,
-            "{} characters: Claude Code would cut the end off",
-            all.chars().count()
-        );
+        for (surface, text) in [("classic", all.as_str()), ("doc6", doc6::INSTRUCTIONS)] {
+            assert!(
+                text.chars().count() <= INSTRUCTIONS_LIMIT,
+                "{surface}: {} characters: Claude Code would cut the end off",
+                text.chars().count()
+            );
+        }
     }
 }

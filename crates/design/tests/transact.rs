@@ -322,6 +322,44 @@ fn an_import_is_a_transaction_that_keeps_its_record() {
     assert_eq!(design.imports().len(), 1, "undo keeps the record");
 }
 
+#[test]
+fn a_transaction_keeps_the_imports_it_recorded_only_if_it_succeeds() {
+    let mut design = design();
+    let record = |id: &str| ImportRecord {
+        id: id.into(),
+        artifact: BlobHash::of(id.as_bytes()),
+        format: "html".into(),
+        input_kind: "html".into(),
+        file_name: None,
+        received_at: 1,
+        nodes: Default::default(),
+        dependencies: Vec::new(),
+        quarantined: Vec::new(),
+    };
+    let failed = design.transact("A", "Edit", 1, |tx| {
+        tx.record_import(record("lost"));
+        tx.apply(&[Op::Delete { id: "gone".into() }])
+    });
+    assert!(failed.is_err());
+    assert!(design.imports().is_empty());
+    // An import that added nothing is still kept, with no change.
+    let (change, ()) = design
+        .transact("A", "Edit", 1, |tx| {
+            tx.record_import(record("empty"));
+            Ok::<_, Rejected>(())
+        })
+        .unwrap();
+    assert!(change.is_none());
+    assert_eq!(design.imports(), [record("empty")]);
+    let (_, ()) = design
+        .dry_run("A", |tx| {
+            tx.record_import(record("dry"));
+            Ok::<_, Rejected>(())
+        })
+        .unwrap();
+    assert_eq!(design.imports().len(), 1, "a dry run keeps nothing");
+}
+
 const SECTION: &str = r#"<section style="padding: 24px"><h2>Pro</h2><button style="color: white">Buy</button></section>"#;
 
 /// The rewrite `get_html` HTML would be, with ids and the read mark.

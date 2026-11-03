@@ -26,7 +26,7 @@ const EXAMPLES: usize = 3;
 /// how many there are and where the first few are, so a page with hundreds
 /// of `<link>`s still reads in a few lines. `record` says where to find
 /// every path, if a line leaves some out.
-fn diagnostics(text: &mut String, diagnostics: &[Diagnostic], record: Option<&str>) {
+pub(super) fn diagnostics(text: &mut String, diagnostics: &[Diagnostic], record: Option<&str>) {
     if diagnostics.is_empty() {
         text.push_str("No conversion issues reported.\n");
         return;
@@ -152,7 +152,10 @@ impl FiniteMcp {
         description = "Export the design, or one artboard, as a file: html, finite (a bundle that imports back exactly), repo (a tar of text files for keeping in git: one HTML file per artboard and a manifest with the tokens; it imports back, but scripts are left out on import), figma (for the Finite Figma plugin) or jsx (one artboard as a React component). Returns a diagnostic for anything that didn't convert exactly, and the file's text, cut off past 60,000 characters.",
         annotations(read_only_hint = true)
     )]
-    async fn export_design(&self, Parameters(p): Parameters<ExportParams>) -> ToolResult {
+    pub(super) async fn export_design(
+        &self,
+        Parameters(p): Parameters<ExportParams>,
+    ) -> ToolResult {
         let format = match transfer::format_named(&p.format) {
             Ok(format) => format,
             Err(error) => return fail(error.to_string()),

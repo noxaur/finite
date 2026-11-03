@@ -343,6 +343,7 @@ pub(super) fn layout_notes(
     doc: &Document,
     artboard: &str,
     boxes: &[crate::screenshot::ElementBox],
+    surface: super::Surface,
 ) -> String {
     use std::collections::{HashMap, HashSet};
     let by_id: HashMap<&str, &crate::screenshot::ElementBox> =
@@ -386,8 +387,17 @@ pub(super) fn layout_notes(
         if content_bottom > board.height + 1.0 {
             let _ = write!(
                 text,
-                " It is {content_bottom:.0} px tall, but the artboard is {:.0} px. If it should all show, make the artboard taller with update_styles {{\"updates\": [{{\"nodeIds\": [\"{artboard}\"], \"styles\": {{\"height\": \"{content_bottom:.0}px\"}}}}]}}.",
-                board.height
+                " It is {content_bottom:.0} px tall, but the artboard is {:.0} px. If it should all show, make the artboard taller with {}.",
+                board.height,
+                if surface.doc6() {
+                    format!(
+                        "{{\"op\": \"css\", \"css\": \"#{artboard} {{ height: {content_bottom:.0}px }}\"}}"
+                    )
+                } else {
+                    format!(
+                        "update_styles {{\"updates\": [{{\"nodeIds\": [\"{artboard}\"], \"styles\": {{\"height\": \"{content_bottom:.0}px\"}}}}]}}"
+                    )
+                }
             );
         }
         if content_right > board.width + 1.0 {
@@ -468,6 +478,7 @@ pub(super) fn rendered_outline(
     root: &str,
     max_depth: usize,
     boxes: &[crate::screenshot::ElementBox],
+    surface: super::Surface,
 ) -> String {
     use std::collections::HashMap;
     let by_id: HashMap<&str, &crate::screenshot::ElementBox> =
@@ -489,11 +500,27 @@ pub(super) fn rendered_outline(
         })
         .cloned()
         .collect();
-    let checked = layout_notes(doc, &board.id, &in_scope);
+    let checked = layout_notes(doc, &board.id, &in_scope, surface);
     if !checked.starts_with("Layout: nothing is cut off") {
         notes.push(checked);
     }
-    let text: Vec<&crate::screenshot::ElementBox> = in_scope
+    notes.extend(overlap_note(doc, &in_scope));
+    if notes.is_empty() {
+        out.push_str("Layout: nothing is cut off, no text overflows its box, and no text overlaps other text.\n");
+    } else {
+        out.push_str(&notes.join("\n"));
+        out.push('\n');
+    }
+    out
+}
+
+/// The layout check's note on text elements in `boxes` that overlap
+/// each other, other than an element and what's inside it.
+pub(super) fn overlap_note(
+    doc: &Document,
+    boxes: &[crate::screenshot::ElementBox],
+) -> Option<String> {
+    let text: Vec<&crate::screenshot::ElementBox> = boxes
         .iter()
         .filter(|b| b.has_text && b.width > 0.0 && b.height > 0.0)
         .take(OVERLAP_CHECKED)
@@ -534,15 +561,9 @@ pub(super) fn rendered_outline(
         if pairs.len() > LAYOUT_NAMED {
             let _ = write!(text, "\n  … and {} more", pairs.len() - LAYOUT_NAMED);
         }
-        notes.push(text);
+        return Some(text);
     }
-    if notes.is_empty() {
-        out.push_str("Layout: nothing is cut off, no text overflows its box, and no text overlaps other text.\n");
-    } else {
-        out.push_str(&notes.join("\n"));
-        out.push('\n');
-    }
-    out
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
