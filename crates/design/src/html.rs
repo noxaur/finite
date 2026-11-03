@@ -23,6 +23,20 @@ pub struct Fragment {
     pub styles: BTreeMap<String, String>,
     pub attrs: BTreeMap<String, String>,
     pub children: Vec<Fragment>,
+    /// For an instance, the component it shows. Its `children` aren't
+    /// written: they describe what it looked like, to find its overrides.
+    pub instance_of: Option<NodeId>,
+    /// For an instance, the values it changes (see [`Node::overrides`]).
+    pub overrides: BTreeMap<String, Option<String>>,
+    /// The [`ID_ATTR`] it was written with, kept only inside an instance,
+    /// where it says which node of the component this element shows.
+    pub source: Option<NodeId>,
+    /// The component name it was written with ([`COMPONENT_ATTR`]): the
+    /// first element with a name defines that component, and later ones are
+    /// instances of it (see [`crate::edit::prepare_instances`]).
+    pub component: Option<String>,
+    /// The id to create it with, when it was decided before writing.
+    pub id: Option<NodeId>,
 }
 
 /// Elements dropped with their whole subtree: anything that loads other
@@ -247,6 +261,11 @@ fn replace_root(css: &str) -> String {
 pub const NAME_ATTR: &str = "data-name";
 /// Identifies a node in exported HTML.
 pub const ID_ATTR: &str = "data-id";
+/// Marks an instance in exported HTML with its component's id. Writing an
+/// element with it makes an instance of that component.
+pub const INSTANCE_ATTR: &str = "data-instance-of";
+/// Marks a component's root in exported HTML.
+pub const COMPONENT_ATTR: &str = "data-component";
 
 /// Parses an HTML fragment into detached subtrees.
 ///
@@ -440,6 +459,8 @@ struct Walk {
     dropped: Vec<Dropped>,
     /// The source path of each fragment kept so far. Its length numbers the next one.
     paths: Vec<String>,
+    /// Inside an instance: the children's [`ID_ATTR`]s are kept as [`Fragment::source`].
+    in_instance: bool,
 }
 
 impl Walk {
@@ -448,6 +469,7 @@ impl Walk {
             policy,
             dropped: Vec::new(),
             paths: Vec::new(),
+            in_instance: false,
         }
     }
 
@@ -551,8 +573,17 @@ impl Walk {
                     match name {
                         "style" => fragment.styles.extend(parse_style(value)),
                         NAME_ATTR => fragment.name = Some(label::clip(value, label::LAYER_NAME)),
-                        // Node ids come from the document.
-                        ID_ATTR => {}
+                        // Node ids come from the document, but inside an
+                        // instance they say which node of the component an
+                        // element shows.
+                        ID_ATTR if self.in_instance => fragment.source = Some(value.to_owned()),
+                        COMPONENT_ATTR if !value.trim().is_empty() => {
+                            fragment.component = Some(label::clip(value, label::LAYER_NAME));
+                        }
+                        ID_ATTR | COMPONENT_ATTR => {}
+                        INSTANCE_ATTR if !value.trim().is_empty() => {
+                            fragment.instance_of = Some(value.trim().to_owned());
+                        }
                         // Scripts must be inline: the sandbox doesn't load anything that runs.
                         "src" if is_script => {
                             let reason = "scripts must be inline";
@@ -564,7 +595,11 @@ impl Walk {
                         _ => self.drop(Some(me), &path, name.to_owned(), "it could run code"),
                     }
                 }
-                fragment.children = self.children(node.children(), depth + 1, &path, Some(me))?;
+                let outer = self.in_instance;
+                self.in_instance |= fragment.instance_of.is_some();
+                let children = self.children(node.children(), depth + 1, &path, Some(me));
+                self.in_instance = outer;
+                fragment.children = children?;
                 Some(fragment)
             }
             _ => None,
@@ -641,7 +676,7 @@ pub fn parse_style(style: &str) -> Vec<(String, String)> {
 }
 
 impl Fragment {
-    fn empty(kind: NodeKind) -> Self {
+    pub(crate) fn empty(kind: NodeKind) -> Self {
         Self {
             kind,
             name: None,
@@ -649,12 +684,32 @@ impl Fragment {
             styles: BTreeMap::new(),
             attrs: BTreeMap::new(),
             children: Vec::new(),
+            instance_of: None,
+            overrides: BTreeMap::new(),
+            source: None,
+            component: None,
+            id: None,
         }
     }
 
-    /// Copies the subtree rooted at `id`.
+    /// Copies the subtree rooted at `id`. An instance copies as an instance
+    /// with the same overrides, and a component's root as a new instance of
+    /// it, so a copied screen keeps following the components it shows.
     pub fn from_document(doc: &Document, id: &str) -> Option<Self> {
         let node = doc.get(id)?;
+        let instance_of = match (&node.instance_of, node.component) {
+            (Some(component), _) => Some(component.clone()),
+            (None, true) => Some(node.id.clone()),
+            (None, false) => None,
+        };
+        if let Some(component) = instance_of {
+            return Some(Self {
+                name: node.name.clone().filter(|_| !node.component),
+                instance_of: Some(component),
+                overrides: node.overrides.clone(),
+                ..Self::empty(node.kind.clone())
+            });
+        }
         Some(Self {
             kind: node.kind.clone(),
             name: node.name.clone(),
@@ -666,6 +721,7 @@ impl Fragment {
                 .iter()
                 .filter_map(|c| Self::from_document(doc, &c.id))
                 .collect(),
+            ..Self::empty(node.kind.clone())
         })
     }
 
@@ -694,7 +750,12 @@ impl Fragment {
             .unwrap_or(0)
     }
 
+    /// How many nodes writing this subtree creates. An instance's children
+    /// aren't written.
     pub fn count(&self) -> usize {
+        if self.instance_of.is_some() {
+            return 1;
+        }
         1 + self.children.iter().map(Self::count).sum::<usize>()
     }
 
@@ -707,8 +768,13 @@ impl Fragment {
         new_id: &mut impl FnMut() -> NodeId,
         ops: &mut Vec<Op>,
     ) -> NodeId {
-        let id = new_id();
-        let indexes = crate::fractional::keys_between(None, None, self.children.len());
+        let id = self.id.unwrap_or_else(&mut *new_id);
+        let children = if self.instance_of.is_some() {
+            Vec::new()
+        } else {
+            self.children
+        };
+        let indexes = crate::fractional::keys_between(None, None, children.len());
         ops.push(Op::Create {
             node: Node {
                 id: id.clone(),
@@ -722,9 +788,13 @@ impl Fragment {
                 page: None,
                 styles: self.styles,
                 attrs: self.attrs,
+                // A component it defines, by name, rather than one it shows.
+                component: self.component.is_some() && self.instance_of.is_none(),
+                instance_of: self.instance_of,
+                overrides: self.overrides,
             },
         });
-        for (child, index) in self.children.into_iter().zip(indexes) {
+        for (child, index) in children.into_iter().zip(indexes) {
             child.create_ops(Some(&id), index, None, new_id, ops);
         }
         id
@@ -957,6 +1027,13 @@ impl Writer<'_> {
         let _ = write!(self.out, "<{tag}");
         if self.options.ids {
             let _ = write!(self.out, " {ID_ATTR}=\"{}\"", escape(&node.id, true));
+            if let Some(component) = &node.instance_of {
+                let _ = write!(self.out, " {INSTANCE_ATTR}=\"{}\"", escape(component, true));
+            }
+            if node.component {
+                let name = node.display_name();
+                let _ = write!(self.out, " {COMPONENT_ATTR}=\"{}\"", escape(&name, true));
+            }
         }
         if self.options.names
             && let Some(name) = &node.name

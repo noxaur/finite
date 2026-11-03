@@ -130,6 +130,9 @@ pub struct Design {
     comment_updates: Vec<String>,
     /// Every import, oldest first. See [`Design::import`].
     imports: Vec<ImportRecord>,
+    /// The document with its instances expanded, made when first asked for
+    /// after a change. See [`Design::view`].
+    view: std::sync::OnceLock<Document>,
 }
 
 /// An edit being staged by [`Design::import`]. Ops apply as soon as they're
@@ -178,6 +181,7 @@ impl Design {
             log: ChangeLog::default(),
             comment_updates: Vec::new(),
             imports: Vec::new(),
+            view: Default::default(),
         }
     }
 
@@ -193,6 +197,7 @@ impl Design {
             log: snapshot.log.unwrap_or_default(),
             comment_updates: Vec::new(),
             imports: snapshot.imports,
+            view: Default::default(),
         }
     }
 
@@ -225,6 +230,18 @@ impl Design {
 
     pub fn doc(&self) -> &Document {
         &self.doc
+    }
+
+    /// The document as it renders: every instance shows its component's
+    /// content, as nodes with virtual ids (see [`crate::components`]). It's
+    /// the document itself when there are no instances. Tools that read
+    /// the design read this, and edits are built against it.
+    pub fn view(&self) -> &Document {
+        if !self.doc.has_instances() {
+            return &self.doc;
+        }
+        self.view
+            .get_or_init(|| crate::components::expand(&self.doc).into_owned())
     }
 
     pub fn seq(&self) -> u64 {
@@ -270,6 +287,7 @@ impl Design {
         if applied.is_empty() {
             return None;
         }
+        self.view.take();
         self.history_mut(actor).record(label.to_owned(), inverse);
         reattach(
             &self.doc,
@@ -348,6 +366,7 @@ impl Design {
             if applied.is_empty() {
                 continue;
             }
+            self.view.take();
             reattach(
                 &self.doc,
                 &mut self.comments,
@@ -426,6 +445,7 @@ impl Design {
                 // rather than undo the wrong thing.
                 self.histories.clear();
             }
+            self.view.take();
             self.seq = change.seq;
             self.log.record(&change, &self.doc, before);
         }
@@ -500,7 +520,7 @@ impl Design {
         now: u64,
     ) -> Result<&Comment, CommentError> {
         let body = comment::check_body(body)?;
-        comment::check_anchor(&self.doc, &anchor)?;
+        comment::check_anchor(self.view(), &anchor)?;
         self.check_room_to_open()?;
         let id = loop {
             let id = new_id();

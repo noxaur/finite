@@ -39,6 +39,7 @@ async function rendered(html, width, height, css = "") {
         return { id: el.dataset.id, name: el.dataset.name ?? null, tag: el.tagName.toLowerCase(),
           text: el.textContent.trim(), x: r.x - board.x, y: r.y - board.y, width: r.width, height: r.height,
           position: s.position, background: s.backgroundColor, fontSize: parseFloat(s.fontSize),
+          fontWeight: Number(s.fontWeight),
           visible: s.visibility !== "hidden" && s.display !== "none" && r.width > 0 && r.height > 0 };
       });
     })()`);
@@ -587,6 +588,54 @@ setInterval(next, 3000);
         total: checks.length,
         notes: [`${green}/${info.artboards.length} green top bars`],
       };
+    },
+  },
+  // screens-change with a change to the bar's elements, not just its colors,
+  // which shared CSS alone can't make in one place.
+  "screens-restructure": {
+    workdir: "none",
+    seed: async (mcp) => ({
+      design: (await mcp.call("create_design", { name: "Plantpal onboarding" })).match(
+        /designId "([^"]+)"/,
+      )[1],
+    }),
+    prompt: () =>
+      `Use the Finite MCP tools. In the Finite design "Plantpal onboarding", design a three-screen mobile onboarding flow for a plant-care app: ` +
+      `Welcome, Pick your plants (a grid of at least 6 selectable plant cards, two selected), and All set. ` +
+      `The screens must share the same top bar, colors, type and button style. Check how they look. Stop when you're done.`,
+    followUp: () =>
+      `The top bar changed. On every screen it now needs a back-arrow button at its left and a "Help" link at its right, ` +
+      `and its title should be bold. Each screen keeps its own title. Make the change on all screens and check it. Stop when you're done.`,
+    async check(mcp, ctx) {
+      const info = JSON.parse(await mcp.call("get_basic_info", { designId: ctx.design }));
+      const shared = await mcp
+        .callRaw("get_shared_css", { designId: ctx.design })
+        .catch(() => null);
+      const css = shared && !shared.isError ? (shared.content?.[0]?.text ?? "") : "";
+      const sharedCss = css.startsWith("This design has no shared CSS") ? "" : css;
+      const titles = ["Welcome", "Pick your plants", "All set"];
+      let done = 0;
+      const notes = [];
+      for (const a of info.artboards) {
+        const html = await mcp.call("get_html", { designId: ctx.design, nodeId: a.id });
+        const top = (await rendered(html, a.width, a.height, sharedCss)).filter(
+          (e) => e.visible && e.y < 140,
+        );
+        const has = {
+          back: top.some((e) => /^(←|‹|<|❮|〈|back)/i.test(e.text) || e.tag === "svg"),
+          help: top.some((e) => e.text === "Help"),
+          bold: top.some((e) => titles.some((t) => e.text === t) && e.fontWeight >= 600),
+        };
+        if (Object.values(has).every(Boolean)) done++;
+        else
+          notes.push(
+            `${a.name ?? a.id}: no ${Object.keys(has)
+              .filter((k) => !has[k])
+              .join(", ")}`,
+          );
+      }
+      const checks = [info.artboards.length >= 3, done >= 3 && done === info.artboards.length];
+      return { passed: checks.filter(Boolean).length, total: checks.length, notes };
     },
   },
 

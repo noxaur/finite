@@ -119,6 +119,28 @@ pub extern "C" fn replica_pages(handle: u32) -> i32 {
     with_replica(handle, |replica| Ok(replica.pages()))
 }
 
+/// [`Replica::expand`] for the instance id in the first `len` input bytes.
+#[unsafe(no_mangle)]
+pub extern "C" fn replica_expand(handle: u32, len: usize) -> i32 {
+    with_replica(handle, |replica| {
+        with_input(|input| Ok(replica.expand(text(input, 0, len)?)))
+    })
+}
+
+/// [`Replica::take_dirty`].
+#[unsafe(no_mangle)]
+pub extern "C" fn replica_take_dirty(handle: u32) -> i32 {
+    with_replica(handle, |replica| Ok(replica.take_dirty()))
+}
+
+/// [`Replica::component_info`] for the node id in the first `len` input bytes.
+#[unsafe(no_mangle)]
+pub extern "C" fn replica_component_info(handle: u32, len: usize) -> i32 {
+    with_replica(handle, |replica| {
+        with_input(|input| Ok(replica.component_info(text(input, 0, len)?)))
+    })
+}
+
 /// [`html::is_safe_attr`] for a name in the first `name_len` input bytes
 /// and a value in the `value_len` bytes after it. Returns 1 or 0.
 #[unsafe(no_mangle)]

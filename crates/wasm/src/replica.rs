@@ -5,7 +5,9 @@
 //! op touched, which is all the viewer needs to keep its own read cache of
 //! nodes and sibling order in step without knowing the rules.
 
-use finite_design::{Document, Node, Op, Page, html};
+use std::collections::BTreeSet;
+
+use finite_design::{Document, Node, NodeId, Op, Page, PropKey, components, html};
 use serde::Serialize;
 
 /// What applying one op touched. The viewer's `Applied` type in
@@ -46,6 +48,9 @@ enum Applied<'a> {
 #[derive(Debug, Default)]
 pub struct Replica {
     doc: Document,
+    /// Instances whose content changed since [`Replica::take_dirty`], so
+    /// the viewer can draw them again.
+    dirty: BTreeSet<NodeId>,
 }
 
 impl Replica {
@@ -59,6 +64,7 @@ impl Replica {
     pub fn load(&mut self, nodes: &str) -> Result<String, String> {
         let nodes: Vec<Node> = serde_json::from_str(nodes).map_err(|e| e.to_string())?;
         self.doc = Document::from_nodes(nodes);
+        self.dirty.clear();
         let lists: Vec<(Option<&str>, Vec<&str>)> = self
             .doc
             .child_lists()
@@ -78,8 +84,12 @@ impl Replica {
             if i > 0 {
                 out.push(b',');
             }
+            let before = self.shown_by(op, true);
             match self.doc.apply(op) {
                 Some(inverse) => {
+                    self.dirty.extend(before);
+                    let after = self.shown_by(op, false);
+                    self.dirty.extend(after);
                     let applied = describe(&self.doc, op, &inverse);
                     serde_json::to_writer(&mut out, &applied).expect("results serialize");
                 }
@@ -110,16 +120,77 @@ impl Replica {
         serde_json::to_string(&pages).expect("pages serialize")
     }
 
-    /// The subtree at `id` as compact HTML, as screenshots render it. With
-    /// `ids`, every element carries its node id, for sandboxed artboards.
-    /// Empty when there's no such node.
+    /// The subtree at `id` as compact HTML, as screenshots render it, with
+    /// instances expanded. With `ids`, every element carries its node id,
+    /// for sandboxed artboards. Empty when there's no such node.
     pub fn export(&self, id: &str, ids: bool) -> String {
+        let view = components::expand(&self.doc);
         let html = if ids {
-            html::export_for_viewer(&self.doc, id)
+            html::export_for_viewer(&view, id)
         } else {
-            html::export_compact(&self.doc, id)
+            html::export_compact(&view, id)
         };
         html.unwrap_or_default()
+    }
+
+    /// Instance `id` as it renders, as a JSON array of nodes: its root,
+    /// then what's inside it, parents first and siblings in order. Nodes
+    /// inside it have virtual ids (`instance/node`). `[]` if it isn't one.
+    pub fn expand(&self, id: &str) -> String {
+        serde_json::to_string(&components::expand_instance(&self.doc, id)).expect("nodes serialize")
+    }
+
+    /// The instances to draw again since the last call, as a JSON array
+    /// of ids, and forgets them.
+    pub fn take_dirty(&mut self) -> String {
+        let dirty: Vec<NodeId> = std::mem::take(&mut self.dirty)
+            .into_iter()
+            .filter(|id| self.doc.contains(id))
+            .collect();
+        serde_json::to_string(&dirty).expect("ids serialize")
+    }
+
+    /// What node `id` (real or virtual) is to components, as JSON: the
+    /// instance it's in and its component, or the component it's in, with
+    /// its name and instance count. `null` when it's neither.
+    pub fn component_info(&self, id: &str) -> String {
+        serde_json::to_string(&components::info(&self.doc, id)).expect("info serializes")
+    }
+
+    /// The instances whose content `op` changes, read before it applies
+    /// (`before`) or after: where its node was, and where it is.
+    fn shown_by(&self, op: &Op, before: bool) -> BTreeSet<NodeId> {
+        let doc = &self.doc;
+        if !doc.has_instances() {
+            return BTreeSet::new();
+        }
+        let mut out = BTreeSet::new();
+        let mut add = |id: &str| out.extend(components::affected(doc, id));
+        match (op, before) {
+            (Op::Create { node }, false) => {
+                add(&node.id);
+                if let Some(parent) = &node.parent {
+                    add(parent);
+                }
+            }
+            (Op::Delete { id }, true) => {
+                if let Some(parent) = doc.get(id).and_then(|n| n.parent.clone()) {
+                    add(&parent);
+                }
+                // Its components' other instances lose what they showed.
+                out.extend(components::orphaned_by(doc, id));
+            }
+            (Op::Move { id, .. }, _) => add(id),
+            (Op::Set { id, key, .. }, _) => {
+                add(id);
+                if *key == PropKey::Component || *key == PropKey::InstanceOf {
+                    out.insert(id.clone());
+                    out.extend(doc.instances_of(id).map(str::to_owned));
+                }
+            }
+            _ => {}
+        }
+        out
     }
 }
 
@@ -298,6 +369,49 @@ mod tests {
         assert!(r.apply("[{\"op\":\"nope\"}]").is_err());
         assert!(r.load("{").is_err());
         assert_eq!(r.document().len(), 4);
+    }
+
+    #[test]
+    fn instances_expand_and_say_when_to_draw_again() {
+        let mut r = replica();
+        apply(
+            &mut r,
+            json!([
+                { "op": "set", "id": "b", "key": "component", "value": true },
+                { "op": "create", "node": {
+                    "id": "i", "parent": "c", "index": "V", "type": "element", "tag": "div",
+                    "instanceOf": "b" } },
+            ]),
+        );
+        assert_eq!(r.take_dirty(), r#"["i"]"#);
+        assert_eq!(r.take_dirty(), "[]");
+        let nodes: Value = serde_json::from_str(&r.expand("i")).unwrap();
+        let ids: Vec<&str> = nodes
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["i", "i/d"]);
+        assert_eq!(nodes[1]["parent"], "i");
+        // Editing the component marks its instance.
+        apply(
+            &mut r,
+            json!([{ "op": "set", "id": "d", "key": "style:color", "value": "red" }]),
+        );
+        assert_eq!(r.take_dirty(), r#"["i"]"#);
+        assert!(
+            r.export("c", true)
+                .contains(r#"data-finite-id="i/d" style="color: red""#)
+        );
+        let info: Value = serde_json::from_str(&r.component_info("i/d")).unwrap();
+        assert_eq!(info["instance"], "i");
+        assert_eq!(info["component"], "b");
+        assert_eq!(info["instances"], 1);
+        assert_eq!(r.component_info("a"), "null");
+        // Deleting the component marks it too: it has nothing to show now.
+        apply(&mut r, json!([{ "op": "delete", "id": "b" }]));
+        assert_eq!(r.take_dirty(), r#"["i"]"#);
     }
 
     #[test]

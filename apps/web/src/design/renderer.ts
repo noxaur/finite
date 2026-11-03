@@ -124,6 +124,12 @@ export class Renderer {
   private readonly ids = new WeakMap<Element, string>();
   private readonly frames = new Map<string, Frame>();
   private readonly scripts = new Set<string>();
+  /** Every instance in the design, so a change can find the ones to draw again. */
+  private readonly instances = new Set<string>();
+  /** Whether each instance shows a `<script>` from its component, once asked. */
+  private readonly instanceScripts = new Map<string, boolean>();
+  /** The virtual ids drawn inside each instance, to forget when it's drawn again. */
+  private readonly virtuals = new Map<string, string[]>();
   private working: ReadonlyMap<string, string> = new Map();
   private commenting = false;
   /** The page shown, or `null` for the first page. Only its artboards are mounted. */
@@ -190,7 +196,15 @@ export class Renderer {
     this.culler.clear();
     this.elements.clear();
     this.scripts.clear();
-    for (const node of this.replica.nodes.values()) if (isScript(node)) this.scripts.add(node.id);
+    this.instances.clear();
+    this.instanceScripts.clear();
+    this.virtuals.clear();
+    for (const node of this.replica.nodes.values()) {
+      if (isScript(node)) this.scripts.add(node.id);
+      if (node.instanceOf !== undefined) this.instances.add(node.id);
+    }
+    // Loading a snapshot marks nothing, but don't let a stale list linger.
+    this.replica.takeDirty();
     for (const board of this.replica.artboards()) this.mount(board);
   }
 
@@ -270,7 +284,14 @@ export class Renderer {
     }
     const boards = this.touchedBoards(applied);
     if (applied.op === "create" && isScript(applied.node)) this.scripts.add(applied.node.id);
-    if (applied.op === "delete") for (const id of applied.removed) this.scripts.delete(id);
+    if (applied.op === "delete") {
+      for (const id of applied.removed) {
+        this.scripts.delete(id);
+        this.instances.delete(id);
+        this.instanceScripts.delete(id);
+      }
+    } else if (applied.node.instanceOf !== undefined) this.instances.add(applied.node.id);
+    else this.instances.delete(applied.node.id);
 
     // Patch shadow-root artboards in place. This is a no-op for sandboxed ones.
     this.patch(applied);
@@ -287,6 +308,36 @@ export class Renderer {
       if (!layoutOnly) this.culler.touch(id);
       if ((frame.iframe !== null) !== this.isLive(id)) this.remount(node);
       else if (frame.iframe && !layoutOnly) this.scheduleReload(id, frame);
+    }
+  }
+
+  /**
+   * Draws again the instances a change touched: an edit to a component
+   * changes what every instance of it shows, and an instance's overrides
+   * change only it. Call after a change's ops have all applied, since an
+   * instance is expanded from the document as it ends up.
+   */
+  flush() {
+    const boards = new Set<string>();
+    for (const id of this.replica.takeDirty()) {
+      this.instanceScripts.delete(id);
+      const node = this.replica.get(id);
+      const board = this.replica.artboardOf(id);
+      if (!node || !board) continue;
+      boards.add(board.id);
+      const frame = this.frames.get(board.id);
+      if (!frame || frame.iframe) continue;
+      // Draw it again only where it's drawn now.
+      if (node.parent !== null && !this.elements.has(id)) continue;
+      for (const sub of this.replica.subtree(id)) this.unmount(sub);
+      this.mount(node);
+    }
+    for (const id of boards) {
+      const frame = this.frames.get(id);
+      const node = this.replica.get(id);
+      if (!frame || !node) continue;
+      if ((frame.iframe !== null) !== this.isLive(id)) this.remount(node);
+      else if (frame.iframe) this.scheduleReload(id, frame);
     }
   }
 
@@ -414,6 +465,16 @@ export class Renderer {
   private isLive(board: string) {
     if (!this.options.live) return false;
     for (const id of this.scripts) if (this.replica.artboardOf(id)?.id === board) return true;
+    // An instance runs its component's scripts too.
+    for (const id of this.instances) {
+      if (this.replica.artboardOf(id)?.id !== board) continue;
+      let scripted = this.instanceScripts.get(id);
+      if (scripted === undefined) {
+        scripted = this.replica.expand(id).some(isScript);
+        this.instanceScripts.set(id, scripted);
+      }
+      if (scripted) return true;
+    }
     return false;
   }
 
@@ -488,6 +549,50 @@ export class Renderer {
 
   /** Creates the DOM for `node` and its descendants. Appends to `container` when given. */
   private build(node: Node, container: ParentNode | null, inSvg: boolean): Element | Text {
+    if (node.instanceOf !== undefined) return this.buildInstance(node, container, inSvg);
+    const el = this.create(node, inSvg);
+    if (el instanceof Element) {
+      const childSvg = (inSvg || node.tag === "svg") && node.tag !== "foreignObject";
+      for (const child of this.replica.children(node.id)) {
+        el.appendChild(this.build(child, null, childSvg));
+      }
+    }
+    container?.appendChild(el);
+    return el;
+  }
+
+  /**
+   * Draws instance `node` as its component, expanded by the Rust rules.
+   * The elements inside it are registered under their virtual ids, so
+   * hit tests and comments can point at them.
+   */
+  private buildInstance(node: Node, container: ParentNode | null, inSvg: boolean): Element | Text {
+    const [root, ...inside] = this.replica.expand(node.id);
+    const children = new Map<string, Node[]>();
+    for (const n of inside) {
+      if (n.parent === null) continue;
+      let list = children.get(n.parent);
+      if (!list) children.set(n.parent, (list = []));
+      list.push(n);
+    }
+    const drawn: string[] = [];
+    const draw = (n: Node, svg: boolean): Element | Text => {
+      const el = this.create(n, svg);
+      if (n.id !== node.id) drawn.push(n.id);
+      if (el instanceof Element) {
+        const childSvg = (svg || n.tag === "svg") && n.tag !== "foreignObject";
+        for (const child of children.get(n.id) ?? []) el.appendChild(draw(child, childSvg));
+      }
+      return el;
+    };
+    const el = draw(root ?? node, inSvg);
+    this.virtuals.set(node.id, drawn);
+    container?.appendChild(el);
+    return el;
+  }
+
+  /** One node's own element or text, registered under its id, without its children. */
+  private create(node: Node, inSvg: boolean): Element | Text {
     let el: Element | Text;
     if (node.type === "text") {
       el = document.createTextNode(node.text ?? "");
@@ -502,15 +607,9 @@ export class Renderer {
         for (const [name, value] of Object.entries(node.attrs)) setAttr(el, name, value);
         for (const [name, value] of Object.entries(node.styles)) setStyle(el, name, value);
       }
-      const childSvg = svg && tag !== "foreignObject";
-      this.elements.set(node.id, el);
       this.ids.set(el, node.id);
-      for (const child of this.replica.children(node.id)) {
-        el.appendChild(this.build(child, null, childSvg));
-      }
     }
     this.elements.set(node.id, el);
-    container?.appendChild(el);
     return el;
   }
 
@@ -525,11 +624,16 @@ export class Renderer {
     }
     this.elements.get(id)?.remove();
     this.elements.delete(id);
+    for (const inside of this.virtuals.get(id) ?? []) this.elements.delete(inside);
+    this.virtuals.delete(id);
   }
 
   private update(node: Node, key: string) {
     const el = this.elements.get(node.id);
     const frame = this.frames.get(node.id);
+    // An instance shows its component, so `flush` draws it again instead.
+    const instance = node.instanceOf !== undefined || key === "instanceOf";
+    if (instance && !["name", "x", "y"].includes(key)) return;
     if (key === "text") {
       if (el instanceof Text) el.data = node.text ?? "";
     } else if (key === "name") {

@@ -375,6 +375,56 @@
       "type": "change"
     },
     {
+      "actorName": "Claude",
+      "change": {
+        "actor": "agent:Claude",
+        "label": "Create component",
+        "ops": [
+          {
+            "id": "n1",
+            "key": "component",
+            "op": "set",
+            "value": true
+          }
+        ],
+        "origin": "edit",
+        "seq": 8
+      },
+      "type": "change"
+    },
+    {
+      "actorName": "Claude",
+      "change": {
+        "actor": "agent:Claude",
+        "label": "Insert instance",
+        "ops": [
+          {
+            "node": {
+              "attrs": {},
+              "id": "n3",
+              "index": "l",
+              "instanceOf": "n1",
+              "name": null,
+              "overrides": {
+                "style:padding": null
+              },
+              "parent": "board",
+              "styles": {},
+              "tag": "button",
+              "text": null,
+              "type": "element",
+              "x": null,
+              "y": null
+            },
+            "op": "create"
+          }
+        ],
+        "origin": "edit",
+        "seq": 9
+      },
+      "type": "change"
+    },
+    {
       "meta": {
         "createdAt": 0,
         "id": "design1",
@@ -477,6 +527,54 @@
             ],
             "origin": "edit",
             "seq": 7
+          }
+        },
+        {
+          "actorName": "Claude",
+          "change": {
+            "actor": "agent:Claude",
+            "label": "Create component",
+            "ops": [
+              {
+                "id": "n1",
+                "key": "component",
+                "op": "set",
+                "value": true
+              }
+            ],
+            "origin": "edit",
+            "seq": 8
+          }
+        },
+        {
+          "actorName": "Claude",
+          "change": {
+            "actor": "agent:Claude",
+            "label": "Insert instance",
+            "ops": [
+              {
+                "node": {
+                  "attrs": {},
+                  "id": "n3",
+                  "index": "l",
+                  "instanceOf": "n1",
+                  "name": null,
+                  "overrides": {
+                    "style:padding": null
+                  },
+                  "parent": "board",
+                  "styles": {},
+                  "tag": "button",
+                  "text": null,
+                  "type": "element",
+                  "x": null,
+                  "y": null
+                },
+                "op": "create"
+              }
+            ],
+            "origin": "edit",
+            "seq": 9
           }
         }
       ],
@@ -700,6 +798,7 @@
           },
           {
             "attrs": {},
+            "component": true,
             "id": "n1",
             "index": "V",
             "name": "CTA",
@@ -724,9 +823,26 @@
             "type": "text",
             "x": null,
             "y": null
+          },
+          {
+            "attrs": {},
+            "id": "n3",
+            "index": "l",
+            "instanceOf": "n1",
+            "name": null,
+            "overrides": {
+              "style:padding": null
+            },
+            "parent": "board",
+            "styles": {},
+            "tag": "button",
+            "text": null,
+            "type": "element",
+            "x": null,
+            "y": null
           }
         ],
-        "seq": 7
+        "seq": 9
       },
       "type": "snapshot"
     }

@@ -67,7 +67,8 @@ const processes = [];
 const folders = [];
 const start = (args, env) => {
   const child = spawn(bin, args, {
-    env: { ...process.env, RUST_LOG: "warn", ...env },
+    // The component tools are an extra group; the viewer check below uses them.
+    env: { ...process.env, RUST_LOG: "warn", FINITE_MCP_EXTRA: "components", ...env },
     stdio: ["ignore", "inherit", "inherit"],
   });
   processes.push(child);
@@ -234,6 +235,52 @@ try {
     "undo reverts it",
     Boolean(await page.until(`${shadow}.querySelector("button").style.outline === ""`)),
   );
+
+  // Components: an instance draws its component, and an edit to the
+  // component draws every instance again, while an override changes one.
+  const badge = idAfter(
+    await agent.call("write_html", {
+      designId: design,
+      targetId: page1,
+      html: `<span data-name="Badge" style="color: rgb(0, 0, 0)">New</span>`,
+    }),
+    '"Badge"',
+  );
+  await agent.call("create_component", { designId: design, nodeId: badge });
+  const instance = idAfter(
+    await agent.call("write_html", {
+      designId: design,
+      targetId: page1,
+      html: `<span data-instance-of="${badge}"></span>`,
+    }),
+    "span",
+  );
+  const drawn = (id) => `${shadow}.querySelectorAll("span")[${id === badge ? 0 : 1}]`;
+  check(
+    "an instance draws its component",
+    Boolean(await page.until(`${drawn(instance)}?.textContent === "New"`)),
+  );
+  await agent.call("update_styles", {
+    designId: design,
+    updates: [{ nodeIds: [badge], styles: { color: "rgb(0, 128, 0)" } }],
+  });
+  check(
+    "editing the component draws the instance again",
+    Boolean(await page.until(`${drawn(instance)}?.style.color === "rgb(0, 128, 0)"`)),
+  );
+  await agent.call("set_text_content", {
+    designId: design,
+    updates: [{ nodeId: instance, text: "Sale" }],
+  });
+  check(
+    "an override changes only the instance",
+    Boolean(
+      await page.until(
+        `${drawn(instance)}?.textContent === "Sale" && ${drawn(badge)}.textContent === "New"`,
+      ),
+    ),
+  );
+  await agent.call("delete_nodes", { designId: design, nodeIds: [badge, instance] });
 
   // A dropped connection resumes: the page gets what it missed, and the
   // artboards aren't rebuilt (a snapshot would replace the iframe).

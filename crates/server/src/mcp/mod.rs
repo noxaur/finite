@@ -13,8 +13,9 @@ use std::{
 
 use base64::Engine;
 use finite_design::{
-    Change, Document, NodeKind, Op,
+    Change, Document, NodeKind, Op, PropKey,
     comment::{self, Author, AuthorKind},
+    components,
     edit::{self, EditError, NewArtboard, WriteMode},
     html, label,
 };
@@ -71,7 +72,8 @@ const SEARCH_INSTRUCTIONS: &str = "Search: find_nodes finds elements by text, na
 /// experimental tools. AX experiments (`e2e/ax`) compare agents with and
 /// without a group before it ships to everyone, as the search and shared
 /// styles tools did. Right now `layout` adds a layout note to results
-/// after `write_html` and `update_styles` (see `watch.rs`).
+/// after `write_html` and `update_styles` (see `watch.rs`), and `components`
+/// is experimental.
 pub(crate) fn extra(group: &str) -> bool {
     static EXTRA: OnceLock<Vec<String>> = OnceLock::new();
     EXTRA
@@ -94,6 +96,10 @@ pub(crate) fn instructions() -> &'static str {
         let mut text = INSTRUCTIONS.trim_end().to_owned();
         text.push_str("\n\n");
         text.push_str(SEARCH_INSTRUCTIONS);
+        if extra("components") {
+            text.push_str("\n\n");
+            text.push_str(component_tools::INSTRUCTIONS);
+        }
         text.push_str("\n\n");
         text.push_str(styles::INSTRUCTIONS);
         text.push_str("\n\n");
@@ -245,17 +251,19 @@ fn changed(handle: &DesignHandle, change: Option<&Change>, requested: usize) -> 
         return describe(None).into();
     };
     handle.read(|d| {
-        let doc = d.doc();
+        let doc = d.view();
         let mut seen = std::collections::HashSet::new();
         let mut nodes = Vec::new();
         for op in &change.ops {
+            // An override names the node inside the instance it changes.
+            let shown = shown_id(op);
             // A text edit changes a text node; name the element it's in.
-            let id = match doc.get(op.id()) {
-                Some(n) if n.kind == NodeKind::Text => n.parent.as_deref().unwrap_or(op.id()),
-                _ => op.id(),
+            let id = match doc.get(&shown) {
+                Some(n) if n.kind == NodeKind::Text => n.parent.clone().unwrap_or(shown),
+                _ => shown,
             };
-            if doc.contains(id) && seen.insert(id.to_owned()) {
-                nodes.push(id.to_owned());
+            if doc.contains(&id) && seen.insert(id.clone()) {
+                nodes.push(id);
             }
         }
         let values = change
@@ -301,6 +309,214 @@ fn changed(handle: &DesignHandle, change: Option<&Change>, requested: usize) -> 
     })
 }
 
+/// The node an op changes as agents see it: for an override, the node
+/// inside the instance (`I/x`), otherwise the op's own node.
+fn shown_id(op: &Op) -> String {
+    if let Op::Set {
+        id,
+        key: PropKey::Override(key),
+        ..
+    } = op
+        && let Some((path, _)) = PropKey::split_override(key)
+        && !path.is_empty()
+    {
+        return format!("{id}/{path}");
+    }
+    op.id().to_owned()
+}
+
+/// What a change did to components, for the end of an edit's result:
+/// agents can't tell from the HTML whether an edit inside an instance
+/// changed only that instance or the component every instance shows.
+fn component_note(handle: &DesignHandle, change: &Change) -> Option<String> {
+    use std::collections::BTreeMap;
+    handle.read(|d| {
+        let doc = d.doc();
+        if !doc.has_instances() && !doc.nodes().any(|n| n.component) {
+            return None;
+        }
+        let name = |id: &str| {
+            doc.get(id)
+                .map(|n| format!("{:?} #{id}", n.display_name()))
+                .unwrap_or_else(|| format!("#{id}"))
+        };
+        let mut overridden: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+        let mut edited: BTreeMap<String, usize> = BTreeMap::new();
+        let mut detached = Vec::new();
+        // Components this change made: new ones, not edits to old ones.
+        let defined: Vec<&str> = change
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Create { node } if node.component => Some(node.id.as_str()),
+                _ => None,
+            })
+            .collect();
+        for op in &change.ops {
+            match op {
+                Op::Set {
+                    id,
+                    key: PropKey::Override(_),
+                    value,
+                } => {
+                    let entry = overridden.entry(id.as_str()).or_default();
+                    if value.is_some() {
+                        entry.0 += 1;
+                    } else {
+                        entry.1 += 1;
+                    }
+                }
+                Op::Set {
+                    id,
+                    key: PropKey::InstanceOf,
+                    value: None,
+                } => detached.push(id.as_str()),
+                Op::Set {
+                    key: PropKey::Component | PropKey::Name,
+                    ..
+                } => {}
+                _ => {
+                    let id = match op {
+                        Op::Create { node } => node.parent.as_deref().unwrap_or(&node.id),
+                        _ => op.id(),
+                    };
+                    if let Some(component) = components::component_of(doc, id) {
+                        *edited.entry(component.id.clone()).or_default() += 1;
+                    }
+                }
+            }
+        }
+        let mut notes = Vec::new();
+        // Detaching clears an instance's overrides; that's not news.
+        overridden.retain(|id, _| !detached.contains(id));
+        for (instance, (set, cleared)) in overridden {
+            let component = doc
+                .get(instance)
+                .and_then(|n| n.instance_of.as_deref())
+                .map(name)
+                .unwrap_or_default();
+            let mut text = format!("Only instance #{instance} of {component} changed");
+            if set > 0 {
+                text.push_str(&format!(
+                    ": {set} value{} became its overrides",
+                    if set == 1 { "" } else { "s" }
+                ));
+            }
+            if cleared > 0 {
+                text.push_str(&format!(
+                    "{}{cleared} value{} follow{} the component again",
+                    if set > 0 { ", and " } else { ": " },
+                    if cleared == 1 { "" } else { "s" },
+                    if cleared == 1 { "s" } else { "" },
+                ));
+            }
+            text.push_str(". To change every instance, edit the component instead.");
+            notes.push(text);
+        }
+        for id in &defined {
+            let count = doc.instances_of(id).count();
+            if count == 0 && doc.get(id).is_some() {
+                notes.push(format!(
+                    "Defined component {}. Write data-component={:?} again for an instance of it.",
+                    name(id),
+                    doc.get(id).map(|n| n.display_name()).unwrap_or_default()
+                ));
+                edited.remove(*id);
+            }
+        }
+        for (component, _) in edited {
+            let instances: Vec<String> = components::affected(doc, &component)
+                .into_iter()
+                .map(|i| format!("#{i}"))
+                .collect();
+            if instances.is_empty() {
+                notes.push(format!(
+                    "This edited component {}, which has no instances yet.",
+                    name(&component)
+                ));
+                continue;
+            }
+            // New nodes have no overrides yet, so name their ids in each
+            // instance: an agent giving each instance its own text needs them.
+            let added: Vec<&finite_design::Node> = change
+                .ops
+                .iter()
+                .filter_map(|op| match op {
+                    Op::Create { node } => doc.get(&node.id),
+                    _ => None,
+                })
+                .filter(|n| {
+                    n.tag().is_some()
+                        && components::component_of(doc, &n.id).is_some_and(|c| c.id == component)
+                        && n.id != component
+                })
+                .take(4)
+                .collect();
+            let direct: Vec<&str> = doc.instances_of(&component).take(CHANGED_NAMED).collect();
+            for node in &added {
+                let ids: Vec<String> = direct.iter().map(|i| format!("#{i}/{}", node.id)).collect();
+                let line = outline(doc, &node.id, 0);
+                notes.push(format!(
+                    "New in the component: {}. In its instances it's {}: set those to give each instance its own value.",
+                    line.lines().next().unwrap_or("").trim(),
+                    ids.join(", ")
+                ));
+            }
+            let shown: Vec<&str> = instances.iter().take(CHANGED_NAMED).map(String::as_str).collect();
+            notes.push(format!(
+                "This edited component {}, so all {} instance{} show it too ({}{}), except where they override a value.",
+                name(&component),
+                instances.len(),
+                if instances.len() == 1 { "" } else { "s" },
+                shown.join(", "),
+                if instances.len() > shown.len() { ", …" } else { "" }
+            ));
+        }
+        if !detached.is_empty() {
+            let ids: Vec<String> = detached.iter().map(|i| format!("#{i}")).collect();
+            notes.push(format!(
+                "Detached {}: {} plain cop{} now, no longer following a component.",
+                ids.join(", "),
+                if ids.len() == 1 { "it's a" } else { "they're" },
+                if ids.len() == 1 { "y" } else { "ies" }
+            ));
+        }
+        (!notes.is_empty()).then(|| notes.join("\n"))
+    })
+}
+
+/// What get_html's HTML says about components, so an agent knows where an
+/// edit would land: instances show their component's content, and ids
+/// inside one edit only it.
+fn html_component_note(design: &finite_design::Design, id: &str, html: &str) -> Option<String> {
+    let doc = design.doc();
+    let mut notes = Vec::new();
+    if let Some((instance, component)) = components::instance_of(doc, id) {
+        notes.push(format!(
+            "This is inside instance #{} of component {}. Editing it changes only this instance (an override); edit the component to change them all.",
+            instance.id,
+            component.map_or_else(String::new, |c| format!("{:?} #{}", c.display_name(), c.id)),
+        ));
+    } else if let Some(component) = components::component_of(doc, id) {
+        let count = doc.instances_of(&component.id).count();
+        notes.push(format!(
+            "This is {} component {:?} #{}, which {count} instance{} show{}: editing it changes all of them.",
+            if component.id == id { "the root of" } else { "inside" },
+            component.display_name(),
+            component.id,
+            if count == 1 { "" } else { "s" },
+            if count == 1 { "s" } else { "" },
+        ));
+    }
+    if html.contains(html::INSTANCE_ATTR) && !components::is_virtual(id) {
+        notes.push(format!(
+            "Elements with {} are instances: their content comes from that component. Ids inside one look like instanceId/nodeId, and editing those changes only that instance.",
+            html::INSTANCE_ATTR
+        ));
+    }
+    (!notes.is_empty()).then(|| notes.join("\n"))
+}
+
 /// How many different nodes a batch of updates names.
 fn distinct<'a>(ids: impl Iterator<Item = &'a String>) -> usize {
     ids.collect::<std::collections::HashSet<_>>().len()
@@ -311,6 +527,9 @@ impl FiniteMcp {
     fn tools() -> ToolRouter<Self> {
         let mut router = Self::tool_router();
         router.merge(Self::search_router());
+        if extra("components") {
+            router.merge(Self::component_router());
+        }
         router.merge(Self::styles_router());
         router.merge(Self::transfer_router());
         router.merge(Self::pages_router());
@@ -432,6 +651,10 @@ impl FiniteMcp {
                 let mut text = report(&handle, output, change.as_ref());
                 if let Some(change) = &change {
                     show_working(&handle, &actor, change);
+                    if let Some(note) = component_note(&handle, change) {
+                        text.push('\n');
+                        text.push_str(&note);
+                    }
                     if check && extra("layout") {
                         self.watch.after_edit(design_id, &handle, change).await;
                         let notes = self.watch.take(design_id);
@@ -459,7 +682,7 @@ fn show_working(handle: &DesignHandle, actor: &Actor, change: &Change) {
     let boards: Vec<String> = handle.read(|d| {
         let mut boards = Vec::new();
         for op in &change.ops {
-            if let Some(board) = d.doc().artboard_of(op.id())
+            if let Some(board) = d.view().artboard_of(op.id())
                 && !boards.contains(&board.id)
             {
                 boards.push(board.id.clone());
@@ -496,6 +719,7 @@ macro_rules! design {
     };
 }
 
+mod component_tools;
 mod pages;
 mod search;
 mod styles;
@@ -590,7 +814,7 @@ impl FiniteMcp {
         let handle = design!(self, &p.design_id);
         let presence = handle.presence();
         let info = handle.read(|design| {
-            let doc = design.doc();
+            let doc = design.view();
             let all = doc.artboards();
             let pages = doc.pages();
             let artboards: Vec<_> = all
@@ -658,7 +882,7 @@ impl FiniteMcp {
         let handle = design!(self, &p.design_id);
         let depth = p.depth.unwrap_or(4);
         let text = handle.read(|design| {
-            let doc = design.doc();
+            let doc = design.view();
             match &p.node_id {
                 Some(id) if !doc.contains(id) => Err(format!("node {id:?} not found")),
                 Some(id) => Ok(outline(doc, id, depth)),
@@ -706,8 +930,12 @@ impl FiniteMcp {
     )]
     async fn get_node_info(&self, Parameters(p): Parameters<NodesParams>) -> ToolResult {
         let handle = design!(self, &p.design_id);
-        let nodes: Vec<_> =
-            handle.read(|d| p.node_ids.iter().map(|id| node_json(d.doc(), id)).collect());
+        let nodes: Vec<_> = handle.read(|d| {
+            p.node_ids
+                .iter()
+                .map(|id| node_json(d.view(), id))
+                .collect()
+        });
         let total = nodes.len();
         let (content, shown) = fit(nodes.into_iter());
         Ok(CallToolResult::success(with_note(
@@ -727,7 +955,7 @@ impl FiniteMcp {
     async fn get_children(&self, Parameters(p): Parameters<ChildrenParams>) -> ToolResult {
         let handle = design!(self, &p.design_id);
         let children = handle.read(|design| {
-            let doc = design.doc();
+            let doc = design.view();
             if let Some(id) = &p.node_id
                 && !doc.contains(id)
             {
@@ -784,7 +1012,7 @@ impl FiniteMcp {
             ..Default::default()
         };
         let html = handle.read(|d| {
-            let doc = d.doc();
+            let doc = d.view();
             let (export, depth) = html::export_within(doc, &p.node_id, &options, OUTPUT_LIMIT)?;
             let has_children = !doc.children(Some(&p.node_id)).is_empty();
             if export.html.len() > OUTPUT_LIMIT && !has_children {
@@ -838,6 +1066,10 @@ impl FiniteMcp {
                         export.shortened,
                         if export.shortened == 1 { " was" } else { "s were" },
                 ));
+            }
+            if let Some(note) = html_component_note(d, &p.node_id, &out) {
+                out.push('\n');
+                out.push_str(&note);
             }
             if export.stylesheets > 0 {
                 out.push_str(&format!(
@@ -940,7 +1172,7 @@ impl FiniteMcp {
         // whole, so capture its artboards.
         if nodes.is_empty() {
             nodes = handle.read(|d| {
-                d.doc()
+                d.view()
                     .artboards()
                     .iter()
                     .take(screenshot::MAX_SHOTS)
@@ -977,7 +1209,7 @@ impl FiniteMcp {
                 Duration::from_millis(ms).min(screenshot::MAX_SETTLE)
             }),
         };
-        let plan = match handle.read(|d| screenshot::plan(d.doc(), shots, options)) {
+        let plan = match handle.read(|d| screenshot::plan(d.view(), shots, options)) {
             Ok(plan) => plan,
             Err(error) => return fail(node_hint(error, &p.design_id)),
         };
@@ -997,7 +1229,7 @@ impl FiniteMcp {
                     content.push(ContentBlock::text(format::shot(image)));
                     if let Some(boxes) = &image.boxes {
                         let notes =
-                            handle.read(|d| format::layout_notes(d.doc(), &image.artboard, boxes));
+                            handle.read(|d| format::layout_notes(d.view(), &image.artboard, boxes));
                         if !notes.is_empty() {
                             content.push(ContentBlock::text(notes));
                         }
@@ -1026,7 +1258,7 @@ impl FiniteMcp {
         let roots: Vec<String> = match p.node_id.filter(|id| !id.trim().is_empty()) {
             Some(id) => vec![id],
             None => handle.read(|d| {
-                d.doc()
+                d.view()
                     .artboards()
                     .iter()
                     .take(screenshot::MAX_SHOTS)
@@ -1041,7 +1273,7 @@ impl FiniteMcp {
         for node_id in roots {
             let options = screenshot::Options::default();
             let measurement =
-                match handle.read(|d| screenshot::plan_measurement(d.doc(), &node_id, options)) {
+                match handle.read(|d| screenshot::plan_measurement(d.view(), &node_id, options)) {
                     Ok(m) => m,
                     Err(error) => return fail(node_hint(error, &p.design_id)),
                 };
@@ -1050,7 +1282,7 @@ impl FiniteMcp {
                 Err(error) => return fail(error),
             };
             parts.push(handle.read(|d| {
-                let doc = d.doc();
+                let doc = d.view();
                 // A text node's layout is its element's.
                 let root = match doc.get(&node_id) {
                     Some(n) if n.kind == NodeKind::Text => {
@@ -1074,7 +1306,7 @@ impl FiniteMcp {
     async fn find_placement(&self, Parameters(p): Parameters<PlacementParams>) -> ToolResult {
         let handle = design!(self, &p.design_id);
         let placed = handle.read(|d| {
-            let doc = d.doc();
+            let doc = d.view();
             let page = p.page_id.as_deref().unwrap_or_else(|| doc.first_page());
             doc.page(page)
                 .map(|_| edit::find_placement(doc, page, p.width, p.height))
@@ -1131,7 +1363,7 @@ impl FiniteMcp {
             },
             |handle, (id, roots), _| {
                 handle.read(|d| {
-                    let doc = d.doc();
+                    let doc = d.view();
                     let Some(board) = doc.get(&id) else {
                         return format!("Created artboard #{id}.");
                     };
@@ -1196,7 +1428,7 @@ impl FiniteMcp {
                 handle.read(|d| {
                     let mut text = format!("Wrote {} root node(s):\n", roots.len());
                     for root in &roots {
-                        text.push_str(&outline(d.doc(), root, 3));
+                        text.push_str(&outline(d.view(), root, 3));
                     }
                     text.push_str(&left_out(&dropped));
                     cut(text, "Call get_tree_summary on a root to see it.")
@@ -1416,7 +1648,7 @@ impl FiniteMcp {
                 handle.read(|d| {
                     let mut text = format!("Created {} copies:\n", roots.len());
                     for root in &roots {
-                        text.push_str(&outline(d.doc(), root, 3));
+                        text.push_str(&outline(d.view(), root, 3));
                     }
                     cut(
                         text,
@@ -1641,7 +1873,7 @@ impl FiniteMcp {
             ));
         }
         if let Some(missing) =
-            handle.read(|d| node_ids.iter().find(|id| !d.doc().contains(id)).cloned())
+            handle.read(|d| node_ids.iter().find(|id| !d.view().contains(id)).cloned())
         {
             return fail(format!("node {missing:?} not found"));
         }
@@ -1749,6 +1981,7 @@ mod tests {
         let all = [
             INSTRUCTIONS.trim_end(),
             SEARCH_INSTRUCTIONS,
+            component_tools::INSTRUCTIONS,
             styles::INSTRUCTIONS,
         ]
         .join("\n\n");

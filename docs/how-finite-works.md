@@ -182,6 +182,60 @@ A test in `edit.rs` writes 1,000,000 levels on a thread with a Tokio worker's 2 
 
 A design also holds at most 100,000 nodes (`MAX_NODES`), and `write_html` and `duplicate` refuse edits that would pass it. When `write_html` replaces nodes, the ones it removes count against what it adds. For scale, the `big_design` example's 20,201-node artboard is already a big design. Without a limit, the largest `write_html` one MCP call can carry, 4 MB of `<i></i>`, made about 600,000 nodes. Its ops came to 92 MB of JSON, which the server journals and sends to every viewer, and an agent stuck in a loop could keep going. `cargo run --release -p finite-design --example big_design` now shows that write refused in about 0.2 seconds, most of it parsing.
 
+## Components
+
+Agents building several screens used to copy the same top bar into each one, and a later change meant editing every copy. A **component** fixes that. It's one definition, and its **instances** follow it, each changing only the values it **overrides**. `crates/design/src/components.rs` holds the rules.
+
+A component is an ordinary subtree whose root has `component: true`. It stays where it was built, often on the first screen, and renders like any other node. An instance is an element with `instanceOf` set to the component's id. It has no children of its own, and it stores only its `overrides`:
+
+```json
+{
+  "id": "k2n0d9xa",
+  "parent": "p7f3c1mz",
+  "index": "V",
+  "type": "element",
+  "tag": "header",
+  "instanceOf": "4biyjm26",
+  "overrides": { "9qd2h0ce/text": "Settings", "style:background": "#111827" }
+}
+```
+
+An override key is a property key after the path of the node it changes. `style:background` changes the instance's own root, and `9qd2h0ce/text` changes the text of component node `9qd2h0ce`. A value of `null` in `overrides` removes a value in that instance, like a border the component has. A node's JSON leaves the three fields out when they're unset, so older snapshots load as they are. The ops are the same four. `set` takes the new keys `component`, `instanceOf` and `override:<key>`, and undo, the journal and sync work as they did. An override that removes a value is `false` in an op, because `null` clears the override.
+
+### Expanding instances
+
+Everything that reads a design sees instances **expanded**. `components::expand` returns the document with each instance's content in place, as nodes with **virtual ids**: component node `x` inside instance `I` is `I/x`. A component can hold instances of other components, so a node can be `I/n/x`: node `x`, through instance `n`, inside `I`. Real ids never contain `/`. The path after the instance's id is the same path its override keys use, so an edit to `I/x` becomes an override on `I` keyed `x/…`. When instances nest, overrides from further out win.
+
+`Design::view` keeps the expanded document until the next change, and every MCP read uses it: outlines, `get_html`, `get_node_info`, search, screenshots and the layout notes. With no instances, it's the document itself. Expanding a 28,240-node design with 99 instances of a 21-node top bar took 37 ms in a release build.
+
+Expanding stops in three cases. An instance inside its own component shows nothing the second time. It leaves out nodes past the depth limit. And it stops after `MAX_NODES` virtual nodes, since instances nested in instances multiply. The edit commands refuse an instance that would contain itself (`check_cycle`), so only raw ops can reach the first case.
+
+### Edits inside instances
+
+`DesignHandle::edit` builds every edit against the expanded document, so you can pass `I/x` to any tool, like any other node id. Then `components::redirect` rewrites the ops before they commit:
+
+- Setting text, a style or an attribute on a node inside an instance, or on the instance's root, sets an override on the instance. A value equal to what the instance would show anyway clears the override instead, so the instance goes back to following the component. That's why `replace_values` changes a brand color in the component without pinning it in every instance.
+- It refuses ops that create, delete or move nodes inside an instance, and says what to do instead: edit the component, hide the part with `display: none`, or detach the instance.
+- Deleting a component first **detaches** its instances elsewhere. Each one becomes a plain copy of what it showed, with its overrides applied, and keeps its id. Undo brings back the component and the instances.
+
+Agents can't tell from the HTML which of these happened, so every edit's result says. An override reads "Only instance #k2n0d9xa of "Top bar" #4biyjm26 changed", and an edit to a component reads "so all 3 instances show it too". `get_html` marks instances with `data-instance-of` and component roots with `data-component`.
+
+Agents mostly make components without a tool, by naming them in HTML. The first element written with `data-component="Top bar"` defines a component called "Top bar". A later element with the same name, in the same HTML or another call, becomes an instance of it. Its text, styles and attributes can differ, and the differences become its overrides, but its elements have to match. So an agent that pastes the same bar into each screen, with each screen's title, gets one component and two instances, for no extra call. `get_html` writes a component's root with its name, so HTML read back and written again means the same component.
+
+A component changes by being rewritten in place. `write_html` with `replace` or `replace-children` inside a component edits the nodes that are already there, wherever a new element has the same tag and layer name as an old one, in order (`rewrite_in_place` in `edit.rs`). Those nodes keep their ids, so the instances' overrides still find them. Before, a rewrite made new nodes, and every instance quietly lost its own title. A screen rewritten with its `data-component` element redefines the component under the same id, so its instances keep following it.
+
+`write_html` understands that marker: `<header data-instance-of="4biyjm26"></header>` writes an instance. HTML that `get_html` returned for an instance can be written back too. Elements inside it carry their virtual `data-id`, and where they differ from the component, the differences become overrides. An element without one isn't in the component, so `write_html` refuses the HTML rather than drop the element. `duplicate_nodes` copies an instance as an instance. It copies a component's root as a new instance of it, so a copied screen keeps following its top bar.
+
+The component tools and the instructions about them are on only with `FINITE_MCP_EXTRA=components`, until AX runs show they help (`mcp/component_tools.rs`). `create_component` marks an element and can replace its copies in place. Each copy has to be built the same way, and its differences become overrides. The other tools are `insert_instance`, `get_components` and `detach_instance`. Everything else here applies whether or not the tools are on.
+
+A `<style>` block styles only its own artboard, and that catches agents out. In the first AX runs of `screens-change`, one agent styled its top bar with classes from each artboard's `<style>`. Then it had to recolor three blocks after all. The design's shared CSS reaches every artboard, and a `<style>` inside the component is part of it, so every instance carries either one. `create_component` names the classes a component takes from `<style>` blocks outside it and suggests both, and the instructions say to style a component inline or with shared CSS.
+
+### Components in the viewer
+
+The browser runs the same expansion through WebAssembly. The renderer draws an instance from `Replica.expand`, and registers each element under its virtual id, so a comment can point inside an instance. An edit to a component changes what every instance shows. So while a change applies, the Rust replica notes the instances it touched (`components::affected`). After the change's last op, `DesignView.flush` draws those instances again. Sandboxed artboards export the expanded document, so they match screenshots too.
+
+People can't edit the design, but they still need to know which parts follow a component. If you hover over one, the canvas outlines the instance in dashes and names it, like "Instance of Top bar". Hovering over a component names it and counts its instances.
+
 ## The server
 
 ### The hub
@@ -231,12 +285,13 @@ On startup, the hub reads every stored design to build the list, then drops each
 
 ### MCP
 
-`crates/server/src/mcp/` is the agent-facing side, served at `/mcp` over Streamable HTTP with the `rmcp` crate. It has six files:
+`crates/server/src/mcp/` is the agent-facing side, served at `/mcp` over Streamable HTTP with the `rmcp` crate. It has seven files:
 
 - `mod.rs` defines most tools and works out which actor is calling.
 - `params.rs` holds each tool's arguments. `rmcp` turns them into the JSON schemas agents see. Batched edits also accept the shapes agents guess before their client loads a schema: lists and objects sent as JSON strings, a flat `nodeIds` and `styles` instead of `updates`, and `nodeId` for `nodeIds`. Before, a third of the longer AX runs hit "failed to deserialize parameters" at least once.
 - `format.rs` writes the compact outlines that tools like `get_tree_summary` return, and the layout notes under screenshots.
 - `search.rs` has `find_nodes` and `replace_values`, over `finite_design::search`. They shipped behind a flag first, until AX runs showed they help.
+- `component_tools.rs` has `create_component`, `insert_instance`, `get_components` and `detach_instance`, behind `FINITE_MCP_EXTRA=components` (see "Components").
 - `styles.rs` has `set_shared_css` and `get_shared_css`, for the design's shared CSS. They shipped behind `FINITE_MCP_EXTRA=shared-styles` until AX runs showed agents use them, and now every agent gets them. `get_html` notes when a design has shared CSS, since HTML copied elsewhere would lose it.
 - `watch.rs` adds a layout note to `write_html` and `update_styles` results when `FINITE_MCP_EXTRA=layout`. An edit measures the artboards it touched in Chrome (the first 3, and the note says when there were more) and waits up to a second; `FINITE_LAYOUT_WAIT_MS` changes that. If the browser is slower (the first call takes about 2 s, since each measurement launches Chrome), the note goes on the agent's next result for that design instead. Measurements run one at a time, and one whose artboard was edited again meanwhile is skipped. Any other edit, `undo`, `redo`, `get_layout` and `get_screenshot` drop a waiting note; a call that fails leaves it.
 - `instructions.md` is the text agents read when they connect. It's plain Markdown, so you can edit the workflow without touching Rust. Keep it short: Claude Code keeps the first 4,096 characters of a server's instructions and silently drops the rest. A test checks that the instructions, with every extra group's section added, stay under 4,000.
@@ -347,7 +402,7 @@ update_styles({ "designId": "k7jo11y14e",
 The browser side lives in `apps/web/src/design`. It's plain TypeScript classes, and React only hosts them. Here they are in the order a message flows through them:
 
 - **`socket.ts`** opens the WebSocket, decodes each message with the Effect schemas in `schema.ts`, pings the server to check the connection still works, and reconnects with backoff. A new connection starts with a snapshot. A reconnect asks to resume and usually gets only what it missed (see "Reconnecting without starting over" below).
-- **`DesignSession`** (`session.ts`) owns one open design. It feeds each socket message to the replica, hands every applied op to the renderer, and keeps what the page shows around the canvas: the design's name, presence badges, comments, the activity list and the connection status. It holds all of that in one immutable state object, and `DesignCanvas` re-renders when it changes. The renderer plugs in through a three-method interface (`DesignView`), so `session.test.ts` runs it in Node with a fake renderer.
+- **`DesignSession`** (`session.ts`) owns one open design. It feeds each socket message to the replica, hands every applied op to the renderer, and keeps what the page shows around the canvas: the design's name, presence badges, comments, the activity list and the connection status. It holds all of that in one immutable state object, and `DesignCanvas` re-renders when it changes. The renderer plugs in through a four-method interface (`DesignView`), so `session.test.ts` runs it in Node with a fake renderer.
 - **`Replica`** (`replica.ts`) is the browser's copy of the document. The document itself lives in the module, so `apply` runs the Rust `Document::apply`. Next to it, `Replica` keeps a read cache for the renderer: each node by id, and each parent's children in sibling order. It changes the cache only as the Rust side reports. Loading returns the sibling order, and a create or move says which sibling the node now sits before, so the cache never compares indexes.
 
   A whole change goes into the module in one call (`applyAll`), however many ops it holds. Then the cache catches up one op at a time. The renderer patches the DOM after each op, so it sees the tree as it was right after that op.
@@ -705,6 +760,7 @@ The guide explains each limit where it applies. This is the list in one place. M
 | Nodes in a design                      | 100,000                                                           | `MAX_NODES` in `document.rs`               | Every node is journaled, held in memory and sent to viewers      |
 | Pages in a design                      | 100                                                               | `MAX_PAGES` in `document.rs`               | Every page shows in the sidebar and in `get_basic_info`          |
 | Nesting depth                          | 256 levels                                                        | `MAX_DEPTH` in `document.rs`               | Tree walks are recursive; deeper overflowed the stack            |
+| Nodes shown by instances               | 100,000, counted with the design's own                            | `room_for` in `edit.rs`, `Expander`        | Instances nested in instances multiply                           |
 | HTML nesting before parsing            | 4,096 by a quick count                                            | `html::parse`                              | html5ever is quadratic in depth                                  |
 | Undo steps per actor and stack         | 200 steps, about 32 MB                                            | `History::LIMIT`, `History::BYTE_LIMIT`    | Undoing a big delete recreates every node in it                  |
 | Undo for a named agent                 | 6 idle hours                                                      | `HISTORY_TTL` in `hub/mod.rs`              | Histories keep memory and snapshots busy                         |
@@ -757,3 +813,8 @@ The guide explains each limit where it applies. This is the list in one place. M
 | Fencing token | The design's `epoch`. The store refuses a write with an older one.               |
 | Fenced        | What a stale server's write gets: another server took the design over.           |
 | Router        | `finite-server router`: the front door that sends requests to each owner.        |
+| Component     | A subtree marked `component`: one definition that instances show.                |
+| Instance      | A node with `instanceOf`: it shows its component, with its own overrides.        |
+| Override      | A value one instance shows differently, keyed by path and property.              |
+| Virtual id    | `instance/node`: a node shown inside an instance, which isn't in the document.   |
+| Detach        | Turning an instance into a plain copy of what it shows.                          |

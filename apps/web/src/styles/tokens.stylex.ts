@@ -18,6 +18,8 @@ export const colors = stylex.defineVars({
   halo: "#ffffff",
   ok: { default: "#15803d", [DARK]: "#4ade80" },
   danger: { default: "#b91c1c", [DARK]: "#f87171" },
+  /** Components and their instances on the canvas. */
+  component: { default: "#7c3aed", [DARK]: "#a78bfa" },
 });
 
 export const space = stylex.defineVars({

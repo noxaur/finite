@@ -12,6 +12,7 @@ use std::{
 use finite_design::{
     ActorId, Change, Design, Document, NodeId, Op, Record, Snapshot, Transaction,
     comment::{Anchor, Author, Comment, CommentError},
+    components,
     edit::EditError,
     import::ImportRecord,
     label,
@@ -637,6 +638,11 @@ impl DesignHandle {
 
     /// Builds ops from the current document with `build`, then commits them as
     /// one undo step for `actor`.
+    ///
+    /// `build` sees the document as it renders, with instances expanded
+    /// (`Design::view`), so an edit can name a node inside an instance.
+    /// `components::redirect` then turns those ops into overrides on the
+    /// instance, or refuses them.
     pub fn edit<T>(
         &self,
         actor: &Actor,
@@ -646,7 +652,15 @@ impl DesignHandle {
         let now = now_ms();
         let mut state = self.lock();
         state.touch(actor, now);
-        let (ops, output) = build(state.design.doc())?;
+        let (ops, output) = build(state.design.view())?;
+        let doc = state.design.doc();
+        let mut new_id = || loop {
+            let id = random_id(8);
+            if !doc.contains(&id) {
+                return id;
+            }
+        };
+        let ops = components::redirect(doc, ops, &mut new_id)?;
         let change = state.design.commit(&actor.id, label, &ops, now);
         if let Some(change) = &change {
             self.publish_with_comments(&mut state, actor, change);
