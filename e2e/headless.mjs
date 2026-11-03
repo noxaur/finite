@@ -74,6 +74,10 @@ Browser
                               Click an element's center, or a point. --shift
                               holds Shift, as for adding to a comment's elements.
   hover <css> | hover <x> <y> Move the mouse there.
+  drag <css|x y> --by=<dx>,<dy> [--to <css>] [--steps 10] [--shift]
+                              Press on an element's center (or a point), move
+                              by dx,dy pixels or onto another element's center,
+                              and release, as a person drags.
   type <text>                 Type into the focused element.
   upload <css> <file>         Pick a file in a file input, as the OS file
                               picker would. Hidden inputs work too.
@@ -114,6 +118,9 @@ const { values: flags, positionals } = parseFlags({
     lines: { type: "string", short: "n" },
     nth: { type: "string" },
     shift: { type: "boolean" },
+    by: { type: "string" },
+    to: { type: "string" },
+    steps: { type: "string" },
     help: { type: "boolean", short: "h" },
   },
 });
@@ -600,6 +607,20 @@ async function daemon(dir, options) {
       await page.move(x, y);
       await settle(page);
       return `Moved to ${label} at ${Math.round(x)},${Math.round(y)}`;
+    },
+    async drag({ args: target, flags: { nth, by, to, steps, shift } }) {
+      if (!by && !to) throw new Error("usage: drag <css|x y> --by <dx>,<dy> | --to <css>");
+      const from = await point(page, target, nth);
+      let end;
+      if (to) end = await point(page, [to], 0);
+      else {
+        const [dx, dy] = String(by).split(",").map(Number);
+        if (!Number.isFinite(dx) || !Number.isFinite(dy)) throw new Error("--by takes dx,dy");
+        end = { x: from.x + dx, y: from.y + dy };
+      }
+      await page.drag(from, end, { steps: Number(steps ?? 10), shift });
+      await settle(page);
+      return `Dragged ${from.label} from ${Math.round(from.x)},${Math.round(from.y)} to ${Math.round(end.x)},${Math.round(end.y)}`;
     },
     async upload({ args: [selector, file], flags: { nth } }) {
       if (!selector || !file) throw new Error("usage: upload <css> <file>");

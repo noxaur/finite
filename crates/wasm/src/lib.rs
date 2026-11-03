@@ -133,6 +133,53 @@ pub extern "C" fn replica_take_dirty(handle: u32) -> i32 {
     with_replica(handle, |replica| Ok(replica.take_dirty()))
 }
 
+/// [`Replica::draft`] with the edits JSON (or `null`) in the first `len` input bytes.
+#[unsafe(no_mangle)]
+pub extern "C" fn replica_draft(handle: u32, len: usize) -> i32 {
+    with_replica(handle, |replica| {
+        with_input(|input| replica.draft(text(input, 0, len)?))
+    })
+}
+
+/// [`Replica::propose`] for mutation `mid`, with the edits JSON in the
+/// first `len` input bytes.
+#[unsafe(no_mangle)]
+pub extern "C" fn replica_propose(handle: u32, mid: u32, len: usize) -> i32 {
+    with_replica(handle, |replica| {
+        with_input(|input| replica.propose(mid.into(), text(input, 0, len)?))
+    })
+}
+
+/// [`Replica::receive`] with the ops JSON in the first `len` input bytes.
+/// `mine` is the tab's mutation id for the change, or 0 when it isn't the
+/// tab's own (mutation ids start at 1).
+#[unsafe(no_mangle)]
+pub extern "C" fn replica_receive(handle: u32, len: usize, mine: u32) -> i32 {
+    with_replica(handle, |replica| {
+        let mine = (mine != 0).then_some(mine.into());
+        with_input(|input| replica.receive(text(input, 0, len)?, mine))
+    })
+}
+
+/// [`Replica::settle`].
+#[unsafe(no_mangle)]
+pub extern "C" fn replica_settle(handle: u32, mid: u32) -> i32 {
+    with_replica(handle, |replica| Ok(replica.settle(mid.into())))
+}
+
+/// [`Replica::has_local`], as 1 or 0. Not a handle error: a freed replica has none.
+#[unsafe(no_mangle)]
+pub extern "C" fn replica_has_local(handle: u32) -> u32 {
+    REPLICAS.with(|table| {
+        table
+            .borrow()
+            .get(handle as usize)
+            .and_then(Option::as_ref)
+            .is_some_and(Replica::has_local)
+            .into()
+    })
+}
+
 /// [`Replica::component_info`] for the node id in the first `len` input bytes.
 #[unsafe(no_mangle)]
 pub extern "C" fn replica_component_info(handle: u32, len: usize) -> i32 {

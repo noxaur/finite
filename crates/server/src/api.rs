@@ -18,6 +18,7 @@ use finite_design::{
     comment::{self, Anchor, Author, AuthorKind, Comment, CommentError},
     edit,
     import::ImportRecord,
+    user_edit::UserEdit,
     version::{self, VersionError},
 };
 use serde::{Deserialize, Serialize};
@@ -28,7 +29,7 @@ use crate::cluster::Place;
 use crate::heartbeat::{self, Heartbeat};
 use crate::hub::{
     Actor, AdoptError, DesignHandle, DesignSummary, Hub, LOBBY_LIMIT, OpenError, Outgoing, Since,
-    is_design_id,
+    Stamp, is_design_id,
 };
 use crate::transfer::{self, ImportRequest, ImportResult, TransferError};
 
@@ -355,7 +356,7 @@ async fn put_asset(
 
 /// Who is commenting. Users have no accounts yet, so the browser picks an id
 /// and a name, and the server marks them as users.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct UserAuthor {
     id: String,
     name: String,
@@ -652,7 +653,7 @@ async fn lobby_socket(State(hub): State<Arc<Hub>>, ws: WebSocketUpgrade) -> Resp
                 (first, 0)
             }
         };
-        stream(socket, first, 0, rx, resync).await;
+        stream(socket, first, 0, rx, resync, |_: &str| None).await;
     })
 }
 
@@ -663,11 +664,73 @@ struct ResumeQuery {
     since: Option<u64>,
 }
 
+/// What a person's tab sends on a design's socket, besides pings. Each
+/// message names the person, as comments do, and carries the tab's stamp,
+/// so the change it makes (or a `settled` message, when it makes none)
+/// tells the tab which of its messages it answers. One socket handles its
+/// messages in order.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum ClientMessage {
+    /// A gesture's edits, as one undo step.
+    Mutate {
+        author: UserAuthor,
+        stamp: Stamp,
+        edits: Vec<UserEdit>,
+    },
+    Undo {
+        author: UserAuthor,
+        stamp: Stamp,
+    },
+    Redo {
+        author: UserAuthor,
+        stamp: Stamp,
+    },
+}
+
+/// Runs one message from a person's tab. Returns the `settled` message for
+/// that tab when it changed nothing; a change reaches the tab with every
+/// other viewer's.
+fn receive(handle: &DesignHandle, text: &str) -> Option<Outgoing> {
+    let message = match serde_json::from_str::<ClientMessage>(text) {
+        Ok(message) => message,
+        Err(error) => {
+            tracing::debug!(%error, "ignoring an unreadable message on a design socket");
+            return None;
+        }
+    };
+    let (author, stamp) = match &message {
+        ClientMessage::Mutate { author, stamp, .. }
+        | ClientMessage::Undo { author, stamp }
+        | ClientMessage::Redo { author, stamp } => (author, stamp),
+    };
+    let author = author.clone().into_author();
+    let actor = Actor {
+        id: author.id,
+        name: author.name,
+    };
+    let error = match &message {
+        ClientMessage::Mutate { edits, .. } => match handle.mutate(&actor, stamp, edits) {
+            Ok(Some(_)) => return None,
+            Ok(None) => None,
+            Err(error) => Some(error.to_string()),
+        },
+        ClientMessage::Undo { .. } => match handle.undo(&actor, Some(stamp)) {
+            Some(_) => return None,
+            None => Some("Nothing to undo".into()),
+        },
+        ClientMessage::Redo { .. } => match handle.redo(&actor, Some(stamp)) {
+            Some(_) => return None,
+            None => Some("Nothing to redo".into()),
+        },
+    };
+    Some(handle.settled(stamp.mid, error))
+}
+
 /// Streams one design: a snapshot (or, for a viewer that reconnects with
-/// `?epoch=…&since=…`, just what it missed), then every change and presence update.
-///
-/// Viewers can't edit the design yet, only comment on it (over HTTP). When
-/// users can edit, they will send ops and undo/redo requests on this socket.
+/// `?epoch=…&since=…`, just what it missed), then every change and presence
+/// update. A person's tab edits the design on the same socket
+/// ([`ClientMessage`]).
 async fn design_socket(
     State(hub): State<Arc<Hub>>,
     Path(id): Path<String>,
@@ -687,24 +750,28 @@ async fn design_socket(
     };
     ws.on_upgrade(move |socket| async move {
         let (first, seq, rx) = handle.subscribe_from(since.as_ref());
+        let receiving = handle.clone();
         let resync = move || {
             let (first, seq, _) = handle.subscribe();
             (first, seq)
         };
-        stream(socket, first, seq, rx, resync).await;
+        let receive = move |text: &str| receive(&receiving, text);
+        stream(socket, first, seq, rx, resync, receive).await;
     })
 }
 
 /// Sends `first`, then every broadcast message newer than `seq`. If the
 /// client falls behind the broadcast buffer, it gets a fresh snapshot instead
 /// of the changes it missed. Pings the client, and closes if it goes quiet
-/// (see [`crate::heartbeat`]).
+/// (see [`crate::heartbeat`]). Other text from the client goes to
+/// `receive`, and what it returns is sent back to this client alone.
 async fn stream(
     mut socket: WebSocket,
     first: Outgoing,
     mut seq: u64,
     mut rx: broadcast::Receiver<Outgoing>,
     resync: impl Fn() -> (Outgoing, u64),
+    receive: impl Fn(&str) -> Option<Outgoing>,
 ) {
     if !send(&mut socket, &first).await {
         return;
@@ -735,9 +802,15 @@ async fn stream(
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
                 Some(Ok(message)) => {
                     heartbeat.heard();
-                    if matches!(&message, Message::Text(text) if text.as_str() == heartbeat::PING)
-                        && !heartbeat::send(&mut socket, Message::text(heartbeat::PONG)).await
-                    {
+                    let Message::Text(text) = &message else { continue };
+                    let reply = if text.as_str() == heartbeat::PING {
+                        Message::text(heartbeat::PONG)
+                    } else if let Some(reply) = receive(text.as_str()) {
+                        Message::Text(reply.json)
+                    } else {
+                        continue;
+                    };
+                    if !heartbeat::send(&mut socket, reply).await {
                         return;
                     }
                 }

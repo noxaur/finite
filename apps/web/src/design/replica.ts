@@ -1,4 +1,4 @@
-import type { Node, Op, Snapshot } from "./schema";
+import type { Node, Op, Snapshot, UserEdit } from "./schema";
 import { designModel, type WasmDocument } from "./wasm";
 
 /** What a node is to components, from `components::info` in Rust. */
@@ -39,6 +39,24 @@ export interface PageEntry {
   readonly name: string;
 }
 
+/** What a call on the tab's own edits did, besides patching the document. */
+export interface LocalOutcome {
+  /** Why the edits asked for couldn't be planned, like a move inside an instance. */
+  readonly error: string | null;
+  /** The tab's mutations that no longer plan after a change, so they were dropped. */
+  readonly dropped: ReadonlyArray<number>;
+  /** Why the gesture's draft no longer plans after a change, like its node being deleted. */
+  readonly draftLost: string | null;
+}
+
+/** `Outcome` in `crates/wasm/src/replica.rs`. */
+interface RawOutcome {
+  readonly patches: ReadonlyArray<{ readonly op: Op; readonly touched: Touched }>;
+  readonly error?: string;
+  readonly dropped?: number[];
+  readonly draftLost?: string;
+}
+
 /** What the Rust `Replica` in `crates/wasm` says an op touched (`null`: it didn't apply). */
 type Touched =
   | { readonly op: "create"; readonly before: string | null }
@@ -69,8 +87,11 @@ type Touched =
  * cache then catches up one op at a time, so a caller that patches the DOM
  * after each op reads the tree as it was right after that op.
  *
- * When users can edit, local ops will apply here first (optimistically) and be
- * rebased on the server's changes.
+ * A person's own edits apply here before the server confirms them: the
+ * gesture in progress as a draft, then each sent mutation until its change
+ * comes back. The Rust side takes them off before each server change and
+ * plans them again on top (`draft`, `propose`, `receive`, `settle`), and
+ * says which ops that applied, so the cache follows as it does for changes.
  */
 export class Replica {
   readonly nodes = new Map<string, Node>();
@@ -187,6 +208,60 @@ export class Replica {
   /** The instance a node is shown in and its component, or the component it's part of. */
   componentInfo(id: string): ComponentInfo | null {
     return JSON.parse(this.doc.componentInfo(id)) as ComponentInfo | null;
+  }
+
+  /** Whether the tab has a draft, or mutations the server hasn't answered. */
+  get hasLocal(): boolean {
+    return this.doc.hasLocal();
+  }
+
+  /** Replaces the gesture's draft with `edits`, planned as the server would, or clears it. */
+  draft(edits: ReadonlyArray<UserEdit> | null, each?: (applied: Applied) => void): LocalOutcome {
+    return this.follows(this.doc.draft(JSON.stringify(edits)), each);
+  }
+
+  /** Makes `edits` the tab's mutation `mid`. When they're the draft's, nothing changes on screen. */
+  propose(
+    mid: number,
+    edits: ReadonlyArray<UserEdit>,
+    each?: (applied: Applied) => void,
+  ): LocalOutcome {
+    return this.follows(this.doc.propose(mid, JSON.stringify(edits)), each);
+  }
+
+  /**
+   * Applies a server change. `mine` is its mutation id when this tab sent
+   * it. Without edits of its own, this is `applyAll`.
+   */
+  receive(
+    ops: ReadonlyArray<Op>,
+    mine: number | null,
+    each?: (applied: Applied) => void,
+  ): LocalOutcome {
+    if (!this.hasLocal) {
+      this.applyAll(ops, each);
+      return { error: null, dropped: [], draftLost: null };
+    }
+    return this.follows(this.doc.receive(JSON.stringify(ops), mine ?? 0), each);
+  }
+
+  /** Drops mutation `mid`, which the server answered without a change. */
+  settle(mid: number, each?: (applied: Applied) => void): LocalOutcome {
+    return this.follows(this.doc.settle(mid), each);
+  }
+
+  /** Brings the cache up to date with what a local-layer call applied. */
+  private follows(json: string, each?: (applied: Applied) => void): LocalOutcome {
+    const outcome = JSON.parse(json) as RawOutcome;
+    for (const { op, touched } of outcome.patches) {
+      const applied = this.follow(op, touched);
+      if (applied) each?.(applied);
+    }
+    return {
+      error: outcome.error ?? null,
+      dropped: outcome.dropped ?? [],
+      draftLost: outcome.draftLost ?? null,
+    };
   }
 
   /** Applies one op. Returns `null` when it doesn't apply, as on the server. */

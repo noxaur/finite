@@ -215,3 +215,124 @@ describe("DesignSession", () => {
     expect(s.state.comments.get("c1")?.resolved).toBe(true);
   });
 });
+
+describe("a person's edits", () => {
+  const editing = () => {
+    const { view, session: s } = session();
+    const sent: Array<Record<string, unknown>> = [];
+    s.setSender((data) => sent.push(JSON.parse(data) as Record<string, unknown>));
+    s.receive(snapshot());
+    return { view, s, sent };
+  };
+  const move = (left: string) =>
+    [{ kind: "setStyles", ids: ["b"], styles: { left } }] as const satisfies ReadonlyArray<unknown>;
+  const ours = (sent: Array<Record<string, unknown>>, i: number) =>
+    sent[i]!.stamp as { client: string; mid: number };
+  const change = (seq: number, left: string, mutation?: { client: string; mid: number }) =>
+    ({
+      type: "change",
+      actorName: "Per",
+      change: {
+        seq,
+        actor: "user:p",
+        origin: "edit",
+        label: "Change styles",
+        ops: [{ op: "set", id: "b", key: "style:left", value: left }],
+      },
+      ...(mutation && { mutation }),
+    }) satisfies DesignMessage;
+
+  it("shows a draft, sends it on commit, and lands when its change comes back", async () => {
+    const { s, sent } = editing();
+    expect(s.draft(move("4px")).error).toBeNull();
+    expect(s.replica.get("b")?.styles.left).toBe("4px");
+    expect(sent).toHaveLength(0);
+    const result = s.commit(move("4px"));
+    expect(sent[0]).toMatchObject({ type: "mutate", edits: move("4px") });
+    expect(s.replica.hasLocal).toBe(true);
+    s.receive(change(4, "4px", ours(sent, 0)));
+    await expect(result).resolves.toEqual({ kind: "landed" });
+    expect(s.replica.hasLocal).toBe(false);
+    expect(s.replica.get("b")?.styles.left).toBe("4px");
+  });
+
+  it("keeps its edit on top of someone else's change to the same node", () => {
+    const { s, sent } = editing();
+    void s.commit(move("4px"));
+    s.receive(recolor(4));
+    expect(s.replica.get("b")?.styles).toEqual({ left: "4px", color: "#4" });
+    s.receive(change(5, "4px", ours(sent, 0)));
+    expect(s.replica.hasLocal).toBe(false);
+  });
+
+  it("rolls a refused edit back once the changes before the answer arrived", async () => {
+    const { s, sent } = editing();
+    const result = s.commit(move("4px"));
+    // The server ran an agent's change first, then refused ours.
+    s.receive({ type: "settled", mid: ours(sent, 0).mid, seq: 4, error: 'node "b" not found' });
+    expect(s.replica.get("b")?.styles.left).toBe("4px");
+    s.receive(recolor(4));
+    await expect(result).resolves.toEqual({ kind: "refused", message: 'node "b" not found' });
+    expect(s.replica.get("b")?.styles).toEqual({ color: "#4" });
+  });
+
+  it("loses the draft when someone deletes what it moves", () => {
+    const { s } = editing();
+    const lost: string[] = [];
+    s.onDraftLost((reason) => lost.push(reason));
+    s.draft(move("4px"));
+    s.receive({
+      type: "change",
+      actorName: "Claude",
+      change: {
+        seq: 4,
+        actor: "agent:Claude",
+        origin: "edit",
+        label: "Delete",
+        ops: [{ op: "delete", id: "b" }],
+      },
+    });
+    expect(lost).toHaveLength(1);
+    expect(s.replica.hasLocal).toBe(false);
+  });
+
+  it("sends unanswered edits again after resuming, and gives up on them after a snapshot", async () => {
+    const { s, sent } = editing();
+    s.setSender(null);
+    const first = s.commit(move("4px"));
+    expect(sent).toHaveLength(0);
+    s.setSender((data) => sent.push(JSON.parse(data) as Record<string, unknown>));
+    s.receive({
+      type: "resume",
+      changes: [],
+      comments: [],
+      presence: [],
+      meta: { id: "d", name: "Landing", createdAt: 0, updatedAt: 0 },
+    });
+    expect(sent.map((m) => m.type)).toEqual(["mutate"]);
+    s.receive(snapshot());
+    await expect(first).resolves.toEqual({ kind: "lost" });
+    expect(s.replica.hasLocal).toBe(false);
+  });
+
+  it("ends the gesture when a snapshot replaces the document it was drawn on", () => {
+    const { s } = editing();
+    const lost: string[] = [];
+    s.onDraftLost((reason) => lost.push(reason));
+    s.draft(move("4px"));
+    s.receive(snapshot());
+    expect(lost).toEqual(["The design reloaded."]);
+    expect(s.replica.get("b")?.styles.left).toBeUndefined();
+  });
+
+  it("undoes on the server and resolves with the change", async () => {
+    const { s, sent } = editing();
+    const undone = s.undo();
+    expect(sent[0]).toMatchObject({ type: "undo", author: { name: "Guest" } });
+    s.receive({
+      ...change(4, "0px", ours(sent, 0)),
+      change: { ...change(4, "0px").change, origin: "undo" },
+    });
+    await expect(undone).resolves.toEqual({ kind: "landed" });
+  });
+});

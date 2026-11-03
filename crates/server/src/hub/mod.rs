@@ -29,6 +29,7 @@ pub use design::{Busy, DesignHandle, Edited, Since};
 use design::{DesignState, Life, Save};
 pub use messages::{
     Actor, DesignMessage, DesignSummary, LobbyMessage, Missed, Outgoing, Presence, SESSION_ACTOR,
+    Stamp,
 };
 
 /// How long an agent's "working on" indicator lasts without activity.
@@ -1135,7 +1136,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(sent(), [("comment".into(), true), ("change".into(), false)]);
-        handle.undo(&agent).unwrap();
+        handle.undo(&agent, None).unwrap();
         assert_eq!(
             sent(),
             [("change".into(), false), ("comment".into(), false)]
@@ -1574,7 +1575,7 @@ mod tests {
         let restarted = Hub::new(store.clone()).unwrap();
         let handle = restarted.open(&id).await.unwrap();
         assert_eq!(handle.history(&agent).0, ["Create artboard"]);
-        assert!(handle.undo(&agent).is_some());
+        assert!(handle.undo(&agent, None).is_some());
         assert_eq!(handle.read(|d| d.doc().len()), 0);
     }
 
@@ -1653,7 +1654,7 @@ mod tests {
                 Ok((edit::rename(doc, "board", Some("Landing"))?, ()))
             })
             .unwrap();
-        handle.undo(&agent).unwrap();
+        handle.undo(&agent, None).unwrap();
         // The save task appends those to the journal; then the server dies
         // without a final snapshot.
         tokio::time::sleep(SAVE_DEBOUNCE * 2).await;
@@ -1665,7 +1666,7 @@ mod tests {
             handle.history(&agent),
             (vec!["Create artboard".into()], vec!["Rename".into()])
         );
-        assert!(handle.redo(&agent).is_some());
+        assert!(handle.redo(&agent, None).is_some());
         assert_eq!(
             handle.read(|d| d.doc().get("board").unwrap().name.clone()),
             Some("Landing".into())

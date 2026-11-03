@@ -1,6 +1,6 @@
 # Finite
 
-Finite is a design canvas that agents edit. Agents connect over MCP and build designs out of HTML and inline CSS. Several agents can work at once, on the same design or on different ones. People open the app to browse every design in a grid and watch any one of them update live on a pan-and-zoom canvas. In this MVP, people can create empty designs but can't edit them. Every edit to a design's content comes from an agent, and people steer agents by pinning comments to the canvas.
+Finite is a design canvas that agents edit. Agents connect over MCP and build designs out of HTML and inline CSS. Several agents can work at once, on the same design or on different ones. People open the app to browse every design in a grid and watch any one of them update live on a pan-and-zoom canvas. People steer agents by pinning comments to the canvas, and they can edit it themselves: select an element or an artboard, drag it, resize it from its handles, delete it, nudge it with the arrow keys, and undo their own edits with ⌘Z.
 
 For a guided tour of the internals, read [How Finite works](docs/how-finite-works.md).
 

@@ -1248,6 +1248,42 @@ pub fn move_nodes(
     parent: Option<&str>,
     index: Option<usize>,
 ) -> Result<Vec<Op>> {
+    check_move(doc, ids, parent)?;
+    let ids = top_level(doc, ids);
+    let indexes = doc.insertion_indexes(parent, index, ids.len());
+    move_to(doc, ids, parent, indexes)
+}
+
+/// Moves nodes under `parent`, right before its child `before` (at the end
+/// when `None`, or when `before` isn't one of its children any more),
+/// keeping their relative order. Naming a sibling instead of a position
+/// means a sibling another actor adds meanwhile can't shift where they land.
+pub fn move_before(
+    doc: &Document,
+    ids: &[NodeId],
+    parent: Option<&str>,
+    before: Option<&str>,
+) -> Result<Vec<Op>> {
+    check_move(doc, ids, parent)?;
+    let ids = top_level(doc, ids);
+    // The moved nodes leave their places first, so they never anchor themselves.
+    let siblings: Vec<&Node> = doc
+        .children(parent)
+        .into_iter()
+        .filter(|n| !ids.iter().any(|id| **id == n.id))
+        .collect();
+    let at = before
+        .and_then(|b| siblings.iter().position(|n| n.id == b))
+        .unwrap_or(siblings.len());
+    let prev = at.checked_sub(1).map(|i| siblings[i].index.as_str());
+    let next = siblings.get(at).map(|n| n.index.as_str());
+    let indexes = fractional::keys_between(prev, next, ids.len());
+    move_to(doc, ids, parent, indexes)
+}
+
+/// Refuses a move of `ids` under `parent` that would make a cycle, pass
+/// the depth limit or put an instance inside its own component.
+fn check_move(doc: &Document, ids: &[NodeId], parent: Option<&str>) -> Result<()> {
     if let Some(parent) = parent {
         element(doc, parent)?;
     }
@@ -1274,8 +1310,16 @@ pub fn move_nodes(
             }
         }
     }
-    let ids = top_level(doc, ids);
-    let indexes = doc.insertion_indexes(parent, index, ids.len());
+    Ok(())
+}
+
+/// The ops that move each of `ids` under `parent` at its index in `indexes`.
+fn move_to(
+    doc: &Document,
+    ids: Vec<&NodeId>,
+    parent: Option<&str>,
+    indexes: Vec<String>,
+) -> Result<Vec<Op>> {
     let mut ops = Vec::new();
     let mut placer = Placer::new(doc);
     for (id, index) in ids.into_iter().zip(indexes) {

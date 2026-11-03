@@ -91,6 +91,34 @@ export interface ForwardedWheel {
 }
 
 /** The artboard, and the deepest element in it, under a point. */
+/**
+ * What the live DOM says about one drawn element, which a person's edit
+ * needs to turn a drag into CSS: the document only holds inline styles,
+ * and the cascade (`<style>` blocks, classes, the shared CSS) decides the rest.
+ */
+export interface Measured {
+  /** The border box, in page pixels. */
+  readonly rect: DOMRect;
+  /** Page pixels per CSS pixel of the artboard: the camera's zoom. */
+  readonly scale: number;
+  readonly position: string;
+  readonly display: string;
+  readonly flexDirection: string;
+  readonly flexWrap: string;
+  readonly flexGrow: number;
+  /**
+   * With `box-sizing: content-box`, the padding and borders across and
+   * down, in CSS pixels, which `width` and `height` leave out. 0 for `border-box`.
+   */
+  readonly frameX: number;
+  readonly frameY: number;
+  /** Resolved insets in CSS pixels, `NaN` for `auto`. */
+  readonly left: number;
+  readonly top: number;
+  readonly right: number;
+  readonly bottom: number;
+}
+
 export interface Hit {
   readonly artboardId: string;
   /** For a sandboxed artboard, the artboard itself until its iframe answers. */
@@ -469,6 +497,52 @@ export class Renderer {
       }
     }
     return frame.content.getBoundingClientRect();
+  }
+
+  /**
+   * Measures an element drawn in a shadow-root artboard, or an artboard
+   * itself. `null` for text, for what's inside a sandboxed artboard (its
+   * iframe can't be read from here) and for hidden artboards.
+   */
+  measure(id: string): Measured | null {
+    const board = this.replica.artboardOf(id);
+    const frame = board && this.frames.get(board.id);
+    if (!frame || this.culler.isCulled(board.id)) return null;
+    // A sandboxed artboard's box is its iframe's, which is drawn at the artboard's size.
+    const el = frame.iframe ? (id === board.id ? frame.iframe : null) : this.elements.get(id);
+    if (!(el instanceof Element) || !el.isConnected) return null;
+    const css = getComputedStyle(el);
+    const inset = (value: string) => (value.endsWith("px") ? parseFloat(value) : NaN);
+    const width = frame.root.offsetWidth;
+    const sum = (...values: string[]) => values.reduce((n, v) => n + (parseFloat(v) || 0), 0);
+    const content = css.boxSizing === "content-box";
+    return {
+      rect: el.getBoundingClientRect(),
+      scale: width > 0 ? frame.root.getBoundingClientRect().width / width : 1,
+      // An artboard sits on the canvas by `x` and `y`, never by insets.
+      position: id === board.id ? "static" : css.position,
+      display: css.display,
+      flexDirection: css.flexDirection,
+      flexWrap: css.flexWrap,
+      flexGrow: parseFloat(css.flexGrow) || 0,
+      frameX: content
+        ? sum(css.paddingLeft, css.paddingRight, css.borderLeftWidth, css.borderRightWidth)
+        : 0,
+      frameY: content
+        ? sum(css.paddingTop, css.paddingBottom, css.borderTopWidth, css.borderBottomWidth)
+        : 0,
+      left: inset(css.left),
+      top: inset(css.top),
+      right: inset(css.right),
+      bottom: inset(css.bottom),
+    };
+  }
+
+  /** The artboard whose name label `target` is, if it's one. People drag artboards by it. */
+  labelOf(target: EventTarget | null): string | null {
+    if (!(target instanceof Element)) return null;
+    for (const [id, frame] of this.frames) if (frame.label.contains(target)) return id;
+    return null;
   }
 
   /** In comment mode, clicks over sandboxed artboards go to the canvas instead of the artboard. */

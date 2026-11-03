@@ -25,6 +25,11 @@ interface Exports {
   replica_expand(handle: number, len: number): number;
   replica_take_dirty(handle: number): number;
   replica_component_info(handle: number, len: number): number;
+  replica_draft(handle: number, len: number): number;
+  replica_propose(handle: number, mid: number, len: number): number;
+  replica_receive(handle: number, len: number, mine: number): number;
+  replica_settle(handle: number, mid: number): number;
+  replica_has_local(handle: number): number;
   is_safe_attr(nameLen: number, valueLen: number): number;
   shared_style(len: number, shadow: number): number;
   base_css(): number;
@@ -79,6 +84,11 @@ export class DesignModel {
   free(doc: WasmDocument, handle: number) {
     this.freeHandle.unregister(doc);
     if (!this.broken) this.exports.replica_free(handle);
+  }
+
+  /** @internal Calls a function that returns a number. */
+  callNumber(f: (exports: Exports) => number): number {
+    return this.run(() => f(this.exports));
   }
 
   /** @internal Calls a function that returns a string. */
@@ -194,6 +204,31 @@ export class WasmDocument {
   /** JSON: the instance and component a node belongs to, or `null`. */
   componentInfo(id: string): string {
     return this.model.callWith(id, (e, len) => e.replica_component_info(this.handle, len));
+  }
+
+  /** Replaces the gesture's draft with a JSON array of edits, or clears it with `null`. Returns an outcome. */
+  draft(editsJson: string): string {
+    return this.model.callWith(editsJson, (e, len) => e.replica_draft(this.handle, len));
+  }
+
+  /** Makes a JSON array of edits the tab's mutation `mid`. Returns an outcome. */
+  propose(mid: number, editsJson: string): string {
+    return this.model.callWith(editsJson, (e, len) => e.replica_propose(this.handle, mid, len));
+  }
+
+  /** Applies a server change's JSON ops; `mine` is its mutation id, or 0. Returns an outcome. */
+  receive(opsJson: string, mine: number): string {
+    return this.model.callWith(opsJson, (e, len) => e.replica_receive(this.handle, len, mine));
+  }
+
+  /** Drops mutation `mid`, which changed nothing on the server. Returns an outcome. */
+  settle(mid: number): string {
+    return this.model.callNoArgs((e) => e.replica_settle(this.handle, mid));
+  }
+
+  /** Whether the tab has a draft, or edits the server hasn't answered. */
+  hasLocal(): boolean {
+    return this.model.callNumber((e) => e.replica_has_local(this.handle)) === 1;
   }
 
   free() {
