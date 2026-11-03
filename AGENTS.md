@@ -79,4 +79,10 @@ Do not commit implementation plans, research notes, or agent scratch files. Keep
 
 Run `vp test` for the web side and `cargo test --workspace` for the Rust side. Put a document-model test in `crates/design/tests/` and a server test in `crates/server/tests/`. The golden files in `crates/*/fixtures/` are rewritten by `FINITE_UPDATE_FIXTURES=1 cargo test`; add the changed ones to your change. `vp run e2e` checks what a person sees in headless Chrome. To see a change in the real app, use the `finite-headless` skill.
 
+A change to how servers hand a design between them (leases, saving, `Hub::tick`) must pass `crates/server/tla/check.sh`; the `verify-design-leases` skill says how to read it.
+
+## Skills
+
+Project skills live in `.agents/skills/`, where Codex, Cursor and opencode find them. `.claude/skills` is a symlink to it for Claude Code. Add a new skill to `.agents/skills/`.
+
 - Test actual implementation, do not duplicate logic into tests.

@@ -1,6 +1,6 @@
 # Finite verification map
 
-This folder is the maintained source for proving Finite's user-facing behavior. Read this index before you drive the app, then follow the matching feature file as the recipe. Every command runs through `.claude/skills/verify-finite/scripts/verify.sh` (`$V` below), from the checkout root.
+This folder is the maintained source for proving Finite's user-facing behavior. Read this index before you drive the app, then follow the matching feature file as the recipe. Every command runs through `.agents/skills/verify-finite/scripts/verify.sh` (`$V` below), from the checkout root.
 
 ## Baseline preconditions
 
