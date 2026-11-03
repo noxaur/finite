@@ -1,4 +1,5 @@
 import type { Bounds } from "./renderer";
+import { visibleBounds } from "./culling";
 
 /** The parts of a wheel event the camera reads. Sandboxed artboards forward these. */
 export type WheelInput = Pick<
@@ -121,6 +122,15 @@ export class Camera {
     return { x: (clientX - rect.left - x) / zoom, y: (clientY - rect.top - y) / zoom };
   }
 
+  /** The page point over a canvas point. */
+  toPage(x: number, y: number): { x: number; y: number } {
+    const rect = this.viewport.getBoundingClientRect();
+    return {
+      x: rect.left + this.view.x + x * this.view.zoom,
+      y: rect.top + this.view.y + y * this.view.zoom,
+    };
+  }
+
   /** Pans so the canvas point (`x`, `y`) sits in the middle of the viewport, at the same zoom. */
   centerOn(x: number, y: number) {
     const { zoom } = this.view;
@@ -129,6 +139,11 @@ export class Camera {
       x: this.viewport.clientWidth / 2 - x * zoom,
       y: this.viewport.clientHeight / 2 - y * zoom,
     });
+  }
+
+  /** The canvas area in view, with `margin` viewports around it. */
+  visibleWorld(margin = 0.5): Bounds {
+    return visibleBounds(this.view, this.viewport.clientWidth, this.viewport.clientHeight, margin);
   }
 
   fitTo(bounds: Bounds | null) {

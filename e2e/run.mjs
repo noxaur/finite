@@ -679,6 +679,88 @@ try {
     Boolean(await page.until(`document.querySelectorAll("main li").length === 0`)),
   );
 
+  // Artboards outside the view are hidden, and a sandboxed one is unloaded
+  // until the view reaches it. "Fit to view" still counts the hidden ones,
+  // and an auto-height one keeps the height it had when it was shown.
+  const wide = (await agent.call("create_design", { name: "Culling" })).match(
+    /designId "([a-z0-9]+)"/,
+  )[1];
+  const near = idAfter(
+    await agent.call("create_artboard", { designId: wide, name: "Near", width: 600, height: 400 }),
+    "artboard",
+  );
+  const far = idAfter(
+    await agent.call("create_artboard", {
+      designId: wide,
+      name: "Far",
+      width: 600,
+      x: 30_000,
+      y: 0,
+    }),
+    "artboard",
+  );
+  await agent.call("write_html", {
+    designId: wide,
+    targetId: far,
+    html: `<div data-name="Tall" style="height:900px;background:#eee"></div>`,
+  });
+  const farLive = idAfter(
+    await agent.call("create_artboard", {
+      designId: wide,
+      name: "Far live",
+      width: 600,
+      height: 400,
+      x: 0,
+      y: 30_000,
+    }),
+    "artboard",
+  );
+  await agent.call("write_html", {
+    designId: wide,
+    targetId: farLive,
+    html: `<div data-name="Box" style="width:100px;height:100px;animation:spin 1s infinite"></div><style>@keyframes spin{to{opacity:.5}}</style><script>document.title="on"</script>`,
+  });
+  await page.goto(`${base}/design/?id=${wide}`);
+  await page.until(`document.querySelectorAll("[data-artboard]").length === 3`, 10_000);
+  const hidden = (id) =>
+    page.eval(`document.querySelector('[data-artboard="${id}"]').style.display === "none"`);
+  const loaded = () =>
+    page.eval(`document.querySelector('[data-artboard="${farLive}"] iframe').srcdoc.length > 0`);
+  const zoom = () =>
+    page.eval(
+      `getComputedStyle(document.querySelector("[data-artboard]").parentElement.parentElement).transform`,
+    );
+  await page.until(`!!document.querySelector('[data-artboard="${farLive}"] iframe')`, 10_000);
+  await page.sleep(300);
+  check(
+    "zoomed out to fit, every artboard is drawn",
+    !(await hidden(near)) && !(await hidden(far)) && !(await hidden(farLive)) && (await loaded()),
+  );
+  const fitted = await zoom();
+  await page.key("0");
+  check(
+    "at 100%, artboards outside the view are hidden and their iframe is unloaded",
+    Boolean(
+      await page.until(
+        `document.querySelector('[data-artboard="${far}"]').style.display === "none" && document.querySelector('[data-artboard="${farLive}"]').style.display === "none"`,
+        5000,
+      ),
+    ) &&
+      !(await hidden(near)) &&
+      !(await loaded()),
+  );
+  await page.key("!", "Digit1");
+  check(
+    "fit to view counts the hidden artboards, so it frames the same view",
+    Boolean(
+      await page.until(
+        `document.querySelector('[data-artboard="${far}"]').style.display === ""`,
+        5000,
+      ),
+    ) && (await zoom()) === fitted,
+  );
+  check("the iframe loads again once it's in view", await loaded());
+
   check("no errors on the page", page.errors.length === 0, page.errors.join(" | "));
 } catch (error) {
   check("the run finished", false, error.stack ?? String(error));
