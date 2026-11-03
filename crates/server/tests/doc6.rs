@@ -793,6 +793,19 @@ async fn render_and_the_layout_check_after_an_edit() {
         )
         .await;
     assert!(clean.contains("Layout: nothing is cut off"), "{clean}");
+    // It checks overlapping text, as render's layout output does.
+    let overlap = agent
+        .ok(
+            "edit",
+            json!({ "designId": id, "op": "html", "select": format!("#{board}"),
+                    "html": "<div data-name=\"Badge\" style=\"position: absolute; top: 30px; left: 0; font-size: 32px\">New Hello</div>" }),
+        )
+        .await;
+    assert!(
+        overlap.contains("pair of text elements overlap"),
+        "{overlap}"
+    );
+    agent.ok("undo", json!({ "designId": id })).await;
     let tall = "<div data-name=\"Tall\" style=\"height: 900px; flex-shrink: 0\">Tall</div>";
     // check: false leaves the check out.
     let unchecked = edit(

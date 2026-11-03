@@ -504,7 +504,23 @@ pub(super) fn rendered_outline(
     if !checked.starts_with("Layout: nothing is cut off") {
         notes.push(checked);
     }
-    let text: Vec<&crate::screenshot::ElementBox> = in_scope
+    notes.extend(overlap_note(doc, &in_scope));
+    if notes.is_empty() {
+        out.push_str("Layout: nothing is cut off, no text overflows its box, and no text overlaps other text.\n");
+    } else {
+        out.push_str(&notes.join("\n"));
+        out.push('\n');
+    }
+    out
+}
+
+/// The layout check's note on text elements in `boxes` that overlap
+/// each other, other than an element and what's inside it.
+pub(super) fn overlap_note(
+    doc: &Document,
+    boxes: &[crate::screenshot::ElementBox],
+) -> Option<String> {
+    let text: Vec<&crate::screenshot::ElementBox> = boxes
         .iter()
         .filter(|b| b.has_text && b.width > 0.0 && b.height > 0.0)
         .take(OVERLAP_CHECKED)
@@ -545,15 +561,9 @@ pub(super) fn rendered_outline(
         if pairs.len() > LAYOUT_NAMED {
             let _ = write!(text, "\n  … and {} more", pairs.len() - LAYOUT_NAMED);
         }
-        notes.push(text);
+        return Some(text);
     }
-    if notes.is_empty() {
-        out.push_str("Layout: nothing is cut off, no text overflows its box, and no text overlaps other text.\n");
-    } else {
-        out.push_str(&notes.join("\n"));
-        out.push('\n');
-    }
-    out
+    None
 }
 
 #[allow(clippy::too_many_arguments)]

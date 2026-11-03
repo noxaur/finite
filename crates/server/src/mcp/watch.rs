@@ -29,8 +29,13 @@ use std::{
 
 use finite_design::Change;
 
-use super::format::layout_notes;
+use super::format::{layout_notes, overlap_note};
 use crate::{hub::DesignHandle, screenshot};
+
+/// How long a doc6 edit waits at least: its check is on by default, and AX
+/// runs saw a cold browser miss the classic wait on most first edits, so
+/// agents rendered to find out instead.
+const DOC6_WAIT: Duration = Duration::from_secs(5);
 
 /// How long an edit waits for its layout check before it answers without one.
 /// `FINITE_LAYOUT_WAIT_MS` sets it; the deferred-note tests set 0.
@@ -161,7 +166,12 @@ impl LayoutWatch {
             }));
         }
         // On time out the tasks carry on and leave their notes for later.
-        match tokio::time::timeout(wait(), futures::future::join_all(tasks)).await {
+        let wait = if self.surface.doc6() {
+            wait().max(DOC6_WAIT)
+        } else {
+            wait()
+        };
+        match tokio::time::timeout(wait, futures::future::join_all(tasks)).await {
             Ok(done) => {
                 left_out == 0 && !done.is_empty() && done.into_iter().all(|d| d.unwrap_or(false))
             }
@@ -268,8 +278,24 @@ async fn measure(
         .await
         .ok()?
         .ok()?;
-    let notes = handle.read(|d| layout_notes(d.view(), board, &boxes, surface));
-    if notes.is_empty() || notes.starts_with(CLEAN) {
+    let notes = handle.read(|d| {
+        let doc = d.view();
+        let mut notes = layout_notes(doc, board, &boxes, surface);
+        if notes.starts_with(CLEAN) {
+            notes.clear();
+        }
+        // doc6 promises overlapping text too, as get_layout reports it.
+        if surface.doc6()
+            && let Some(overlap) = overlap_note(doc, &boxes)
+        {
+            if !notes.is_empty() {
+                notes.push('\n');
+            }
+            notes.push_str(&overlap);
+        }
+        notes
+    });
+    if notes.is_empty() {
         return Some(None);
     }
     Some(Some(format!(
