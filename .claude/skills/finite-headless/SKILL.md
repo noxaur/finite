@@ -40,6 +40,8 @@ Artboards render inside shadow roots, and these commands reach into them. So `qu
 
 An artboard with a `<script>` renders in a sandboxed iframe that selectors can't reach. Find the iframe's position with `query "[data-artboard] iframe"`, then `click <x> <y>`.
 
+`click <css> --shift` holds Shift, as when you add elements to a comment. `upload <css> <file>` picks a file in a file input, hidden ones included, the way the OS file picker hands one over. Use it for the Import button, whose picker headless Chrome can't show.
+
 If a target is out of view, `click` says so. Press `key Shift+1` to fit every artboard on screen, or use `viewport <w> <h>` to resize.
 
 ## The canvas's keys
