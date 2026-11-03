@@ -1,5 +1,20 @@
-import { type Applied, type PageEntry, Replica } from "./replica";
-import type { Change, Comment, DesignMessage, DesignMeta, Presence } from "./schema";
+import {
+  type Applied,
+  type LocalOutcome,
+  type PageEntry,
+  Replica,
+  type TokenTable,
+} from "./replica";
+import type {
+  Change,
+  ClientMessage,
+  Comment,
+  DesignMessage,
+  DesignMeta,
+  Presence,
+  Stamp,
+  UserEdit,
+} from "./schema";
 import { connectDesign, type SocketStatus } from "./socket";
 
 /** One line in the activity list: a recent change and who made it. */
@@ -33,12 +48,27 @@ export interface SessionState {
   /** Recent changes, newest first. */
   readonly activity: ReadonlyArray<Activity>;
   readonly artboardCount: number;
-  /** The design's shared CSS, or `null` when it has none. */
-  readonly css: string | null;
+  /** The design's tokens and modes. */
+  readonly tokens: TokenTable;
   /** The design's pages in order, with how many artboards each has. */
   readonly pages: ReadonlyArray<PageEntry & { readonly artboardCount: number }>;
   /** Bumps after every snapshot or change, so anything positioned on the design can follow it. */
   readonly version: number;
+}
+
+/** How a person's edit, undo or redo ended. */
+export type EditResult =
+  | { readonly kind: "landed" }
+  /** The design already looked like that, or there was nothing to undo. */
+  | { readonly kind: "unchanged" }
+  | { readonly kind: "refused"; readonly message: string }
+  /** The connection was replaced by a fresh snapshot before an answer came; the snapshot shows what happened. */
+  | { readonly kind: "lost" };
+
+/** Who is editing: the browser's person, as comments name them. */
+export interface Editor {
+  readonly id: string;
+  readonly name: string;
 }
 
 /** How many recent changes `activity` keeps. */
@@ -52,7 +82,7 @@ export const initialSessionState: SessionState = {
   comments: new Map(),
   activity: [],
   artboardCount: 0,
-  css: null,
+  tokens: { modes: [], tokens: {} },
   pages: [],
   version: 0,
 };
@@ -70,13 +100,30 @@ export class DesignSession {
   private epoch: string | null = null;
   /** Comments deleted while open, so a late REST answer can't bring one back. */
   private readonly deleted = new Set<string>();
+  /** Sends on the open connection, or `null` while there's none. */
+  private send: ((data: string) => void) | null = null;
+  /** Names this tab in the stamps of its mutations. One person can have several tabs. */
+  private readonly client = crypto.randomUUID().slice(0, 12);
+  private nextMid = 1;
+  /** Messages sent and not yet answered, by mutation id, oldest first. */
+  private readonly waiting = new Map<
+    number,
+    { readonly message: ClientMessage; readonly done: (result: EditResult) => void }
+  >();
+  /** `settled` answers that came before the changes they follow. */
+  private early: Array<{ readonly mid: number; readonly seq: number; readonly error?: string }> =
+    [];
+  private readonly draftLost = new Set<(reason: string) => void>();
 
   /** `view` must draw from `replica`, so pass the renderer the same replica. */
   constructor(
     private readonly view: DesignView,
     readonly replica: Replica = new Replica(),
     private readonly now: () => number = Date.now,
-  ) {}
+    private readonly editor: () => Editor = () => ({ id: "guest", name: "Guest" }),
+  ) {
+    replica.setClient(this.client);
+  }
 
   get state(): SessionState {
     return this.current;
@@ -99,17 +146,109 @@ export class DesignSession {
       {
         onStatus: (status) => this.update({ status }),
         onMessage: (message) => this.receive(message),
+        onSend: (send) => this.setSender(send),
       },
       () =>
         this.epoch ? `?epoch=${encodeURIComponent(this.epoch)}&since=${this.replica.seq}` : "",
     );
   }
 
+  /** Where this tab's edits go: the open connection, or `null` while there's none. */
+  setSender(send: ((data: string) => void) | null) {
+    this.send = send;
+  }
+
+  /**
+   * Shows `edits` as the gesture in progress, planned as the server will
+   * plan them, or clears them with `null`. Nothing is sent. When they can't
+   * be planned, like a move inside an instance, `error` says why.
+   */
+  draft(edits: ReadonlyArray<UserEdit> | null): LocalOutcome {
+    // Planned as the mutation it'll be sent as, so the nodes it makes keep their ids.
+    const outcome = this.replica.draft(this.nextMid, edits, (a) => this.view.apply(a));
+    this.view.flush();
+    return outcome;
+  }
+
+  /**
+   * Sends a gesture's edits as one undo step. They show at once: when
+   * they're the draft's, the screen doesn't change. Resolves when the
+   * server's change for them arrives, or it answers that it refused them.
+   */
+  commit(edits: ReadonlyArray<UserEdit>): Promise<EditResult> {
+    const mid = this.nextMid++;
+    const outcome = this.replica.propose(mid, edits, (a) => this.view.apply(a));
+    this.view.flush();
+    if (outcome.error !== null) {
+      return Promise.resolve({ kind: "refused", message: outcome.error });
+    }
+    return this.request({ type: "mutate", author: this.editor(), stamp: this.stamp(mid), edits });
+  }
+
+  /** Undoes this person's last edit. Not shown ahead: the server holds the history. */
+  undo(): Promise<EditResult> {
+    const stamp = this.stamp(this.nextMid++);
+    return this.request({ type: "undo", author: this.editor(), stamp });
+  }
+
+  redo(): Promise<EditResult> {
+    const stamp = this.stamp(this.nextMid++);
+    return this.request({ type: "redo", author: this.editor(), stamp });
+  }
+
+  /** Calls `listener` when a change from someone else means the gesture's draft no longer applies. */
+  onDraftLost(listener: (reason: string) => void): () => void {
+    this.draftLost.add(listener);
+    return () => this.draftLost.delete(listener);
+  }
+
+  private stamp(mid: number): Stamp {
+    return { client: this.client, mid };
+  }
+
+  private request(message: ClientMessage): Promise<EditResult> {
+    return new Promise((done) => {
+      this.waiting.set(message.stamp.mid, { message, done });
+      // Without a connection, it's sent once a reconnect resumes.
+      this.send?.(JSON.stringify(message));
+    });
+  }
+
+  /** Ends the wait for mutation `mid`. */
+  private answer(mid: number, result: EditResult) {
+    const waiting = this.waiting.get(mid);
+    this.waiting.delete(mid);
+    waiting?.done(result);
+  }
+
+  /** Runs the `settled` answers whose changes have all arrived. */
+  private settleEarly() {
+    const ready = this.early.filter((s) => s.seq <= this.replica.seq);
+    if (ready.length === 0) return;
+    this.early = this.early.filter((s) => s.seq > this.replica.seq);
+    for (const { mid, error } of ready) {
+      if (this.waiting.get(mid)?.message.type === "mutate") {
+        this.replica.settle(mid, (a) => this.view.apply(a));
+        this.view.flush();
+      }
+      this.answer(
+        mid,
+        error === undefined ? { kind: "unchanged" } : { kind: "refused", message: error },
+      );
+    }
+  }
+
   receive(message: DesignMessage) {
     switch (message.type) {
       case "snapshot":
         this.epoch = message.epoch;
+        // A snapshot replaces the tab's own edits: they may be in it already.
+        const drafting = this.replica.hasLocal;
         this.replica.load(message.snapshot);
+        // A gesture planned against the old document would commit what it saw there.
+        if (drafting) for (const listener of this.draftLost) listener("The design reloaded.");
+        this.early = [];
+        for (const mid of [...this.waiting.keys()]) this.answer(mid, { kind: "lost" });
         this.view.reset();
         this.update({
           meta: message.snapshot.meta,
@@ -119,7 +258,13 @@ export class DesignSession {
         });
         return;
       case "resume": {
-        const missed = message.changes.flatMap((m) => this.applyChange(m.change, m.actorName));
+        const missed = message.changes.flatMap((m) =>
+          this.applyChange(m.change, m.actorName, m.mutation),
+        );
+        // Whatever the server didn't get before the connection dropped goes again.
+        for (const { message: unanswered } of this.waiting.values()) {
+          this.send?.(JSON.stringify(unanswered));
+        }
         this.update({
           meta: message.meta,
           comments: new Map(message.comments.map((c) => [c.id, c])),
@@ -129,8 +274,12 @@ export class DesignSession {
         });
         return;
       }
+      case "settled":
+        this.early.push(message);
+        this.settleEarly();
+        return;
       case "change": {
-        const entry = this.applyChange(message.change, message.actorName);
+        const entry = this.applyChange(message.change, message.actorName, message.mutation);
         if (entry.length === 0) return;
         this.update({
           activity: [...entry, ...this.current.activity].slice(0, ACTIVITY_LIMIT),
@@ -176,12 +325,19 @@ export class DesignSession {
   }
 
   /** Applies a change we haven't seen, and returns its activity entry (none if we had). */
-  private applyChange(change: Change, actor: string): Activity[] {
+  private applyChange(change: Change, actor: string, mutation?: Stamp): Activity[] {
     if (change.seq <= this.replica.seq) return [];
+    const mine = mutation?.client === this.client ? mutation.mid : null;
     // One call into WebAssembly for the whole change; the view patches op by op.
-    this.replica.applyAll(change.ops, (applied) => this.view.apply(applied));
+    const outcome = this.replica.receive(change.ops, mine, (applied) => this.view.apply(applied));
     this.view.flush();
     this.replica.seq = change.seq;
+    if (mine !== null) this.answer(mine, { kind: "landed" });
+    // A dropped mutation still gets the server's own answer, which decides.
+    if (outcome.draftLost !== null) {
+      for (const listener of this.draftLost) listener(outcome.draftLost);
+    }
+    this.settleEarly();
     const label =
       change.origin === "edit"
         ? change.label
@@ -198,7 +354,7 @@ export class DesignSession {
     }
     return {
       artboardCount: boards.length,
-      css: this.replica.css,
+      tokens: this.replica.tokens,
       pages: this.replica.pages.map((p) => ({ ...p, artboardCount: counts.get(p.id) ?? 0 })),
       version: this.current.version + 1,
     };

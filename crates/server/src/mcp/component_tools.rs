@@ -83,7 +83,7 @@ impl FiniteMcp {
                     let outside = classes_styled_outside(d.doc(), &id);
                     if !outside.is_empty() {
                         text.push_str(&format!(
-                            "\nIts classes {} are styled by <style> blocks outside it. A <style> only styles its own artboard, so instances elsewhere don't follow changes to those rules. Move the rules into the shared CSS (set_shared_css) or a <style> inside the component.",
+                            "\nIts classes {} are styled by <style> blocks outside it. A <style> only styles its own artboard, so instances elsewhere don't follow changes to those rules. Move the rules into a <style> inside the component, or style it inline with tokens (set_tokens).",
                             outside.iter().map(|c| format!(".{c}")).collect::<Vec<_>>().join(", ")
                         ));
                     }

@@ -362,11 +362,35 @@
       "actorName": "Claude",
       "change": {
         "actor": "agent:Claude",
-        "label": "Set shared CSS",
+        "label": "Set tokens",
         "ops": [
           {
-            "css": ":root { --brand: orange; }",
-            "op": "css"
+            "id": "mode-1",
+            "mode": {
+              "index": "V",
+              "name": "Light"
+            },
+            "op": "mode"
+          },
+          {
+            "id": "mode-dark",
+            "mode": {
+              "index": "l",
+              "name": "Dark"
+            },
+            "op": "mode"
+          },
+          {
+            "modeId": "mode-1",
+            "name": "--brand",
+            "op": "token",
+            "value": "orange"
+          },
+          {
+            "modeId": "mode-dark",
+            "name": "--brand",
+            "op": "token",
+            "value": "gold"
           }
         ],
         "origin": "edit",
@@ -434,6 +458,62 @@
       "type": "meta"
     },
     {
+      "actorName": "Guest",
+      "change": {
+        "actor": "user:1",
+        "label": "Move",
+        "ops": [
+          {
+            "id": "board",
+            "key": "x",
+            "op": "set",
+            "value": 40.0
+          },
+          {
+            "id": "board",
+            "key": "y",
+            "op": "set",
+            "value": 80.0
+          }
+        ],
+        "origin": "edit",
+        "seq": 10
+      },
+      "mutation": {
+        "client": "tab1",
+        "mid": 1
+      },
+      "type": "change"
+    },
+    {
+      "actorName": "Guest",
+      "change": {
+        "actor": "user:1",
+        "label": "Move",
+        "ops": [
+          {
+            "id": "board",
+            "key": "y",
+            "op": "set",
+            "value": 0.0
+          },
+          {
+            "id": "board",
+            "key": "x",
+            "op": "set",
+            "value": 0.0
+          }
+        ],
+        "origin": "undo",
+        "seq": 11
+      },
+      "mutation": {
+        "client": "tab1",
+        "mid": 2
+      },
+      "type": "change"
+    },
+    {
       "comment": {
         "artboardId": null,
         "createdAt": 0,
@@ -447,7 +527,7 @@
               "name": "Guest"
             },
             "body": "Oops",
-            "seq": 9
+            "seq": 11
           }
         ],
         "nodeId": null,
@@ -518,11 +598,35 @@
           "actorName": "Claude",
           "change": {
             "actor": "agent:Claude",
-            "label": "Set shared CSS",
+            "label": "Set tokens",
             "ops": [
               {
-                "css": ":root { --brand: orange; }",
-                "op": "css"
+                "id": "mode-1",
+                "mode": {
+                  "index": "V",
+                  "name": "Light"
+                },
+                "op": "mode"
+              },
+              {
+                "id": "mode-dark",
+                "mode": {
+                  "index": "l",
+                  "name": "Dark"
+                },
+                "op": "mode"
+              },
+              {
+                "modeId": "mode-1",
+                "name": "--brand",
+                "op": "token",
+                "value": "orange"
+              },
+              {
+                "modeId": "mode-dark",
+                "name": "--brand",
+                "op": "token",
+                "value": "gold"
               }
             ],
             "origin": "edit",
@@ -575,6 +679,60 @@
             ],
             "origin": "edit",
             "seq": 9
+          }
+        },
+        {
+          "actorName": "Guest",
+          "change": {
+            "actor": "user:1",
+            "label": "Move",
+            "ops": [
+              {
+                "id": "board",
+                "key": "x",
+                "op": "set",
+                "value": 40.0
+              },
+              {
+                "id": "board",
+                "key": "y",
+                "op": "set",
+                "value": 80.0
+              }
+            ],
+            "origin": "edit",
+            "seq": 10
+          },
+          "mutation": {
+            "client": "tab1",
+            "mid": 1
+          }
+        },
+        {
+          "actorName": "Guest",
+          "change": {
+            "actor": "user:1",
+            "label": "Move",
+            "ops": [
+              {
+                "id": "board",
+                "key": "y",
+                "op": "set",
+                "value": 0.0
+              },
+              {
+                "id": "board",
+                "key": "x",
+                "op": "set",
+                "value": 0.0
+              }
+            ],
+            "origin": "undo",
+            "seq": 11
+          },
+          "mutation": {
+            "client": "tab1",
+            "mid": 2
           }
         }
       ],
@@ -767,12 +925,21 @@
             "y": 5.0
           }
         ],
-        "css": ":root { --brand: orange; }",
         "meta": {
           "createdAt": 0,
           "id": "design1",
           "name": "Landing v2",
           "updatedAt": 0
+        },
+        "modes": {
+          "mode-1": {
+            "index": "V",
+            "name": "Light"
+          },
+          "mode-dark": {
+            "index": "l",
+            "name": "Dark"
+          }
         },
         "nodes": [
           {
@@ -842,9 +1009,21 @@
             "y": null
           }
         ],
-        "seq": 9
+        "seq": 11,
+        "tokens": {
+          "--brand": {
+            "mode-1": "orange",
+            "mode-dark": "gold"
+          }
+        }
       },
       "type": "snapshot"
+    },
+    {
+      "error": "node \"gone\" not found",
+      "mid": 3,
+      "seq": 15,
+      "type": "settled"
     }
   ],
   "lobby": [

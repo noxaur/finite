@@ -304,10 +304,10 @@ async fn an_agent_waits_for_the_next_comment() {
     assert!(now.contains("Add a footer"), "{now}");
 }
 
-/// A person edits the shared CSS in the app. It's saved in the design, and
-/// an agent reading an artboard's HTML hears that the artboard depends on it.
+/// A person edits tokens and modes in the app. They're saved in the
+/// design, and an agent reading an artboard's HTML hears that it reads them.
 #[tokio::test]
-async fn a_person_sets_the_shared_css() {
+async fn a_person_sets_tokens() {
     let app = test_app();
     let mut agent = Agent::connect(&app, "Alice").await;
     let created = agent.ok("create_design", json!({ "name": "Css" })).await;
@@ -323,25 +323,42 @@ async fn a_person_sets_the_shared_css() {
         )
         .await;
     let board = id_after(&board, "Created artboard");
-    let put = |css: &str| {
-        Request::put(format!("/api/designs/{design}/css"))
+    let author = json!({ "id": "u1", "name": "Guest" });
+    let send = |method: &str, path: String, body: Value| {
+        Request::builder()
+            .method(method)
+            .uri(path)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(
-                json!({ "author": { "id": "u1", "name": "Guest" }, "css": css }).to_string(),
-            ))
+            .body(Body::from(body.to_string()))
             .unwrap()
     };
+    let put = |body: Value| send("PUT", format!("/api/designs/{design}/tokens"), body);
     let res = app
         .clone()
-        .oneshot(put(".btn { color: red; }"))
+        .oneshot(put(json!({
+            "author": author,
+            "modes": ["Light", "Dark"],
+            "tokens": { "--bg": { "Light": "#fff", "Dark": "#111" }, "--brand": "red" },
+        })))
         .await
         .unwrap();
     assert_eq!(res.status(), 200);
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
     let changed: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(changed["seq"].is_u64(), "{changed}");
-    let res = app.clone().oneshot(put("</style>")).await.unwrap();
+    let bad = json!({ "author": author, "tokens": { "--brand": "red; } body { color: red" } });
+    let res = app.clone().oneshot(put(bad)).await.unwrap();
     assert_eq!(res.status(), 422);
+    let res = app
+        .clone()
+        .oneshot(send(
+            "PUT",
+            format!("/api/designs/{design}/artboards/mode"),
+            json!({ "author": author, "ids": [board], "mode": "Dark" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
 
     let get = Request::get(format!("/api/designs/{design}"))
         .body(Body::empty())
@@ -349,14 +366,39 @@ async fn a_person_sets_the_shared_css() {
     let res = app.clone().oneshot(get).await.unwrap();
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
     let snapshot: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(snapshot["css"], ".btn { color: red; }");
+    let dark = snapshot["modes"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, mode)| mode["name"] == "Dark")
+        .map(|(id, _)| id.clone())
+        .unwrap();
+    assert_eq!(snapshot["tokens"]["--bg"][&dark], "#111");
+    let tokens = agent.ok("get_tokens", json!({ "designId": design })).await;
+    let tokens: Value = serde_json::from_str(&tokens).unwrap();
+    assert_eq!(tokens["artboardModes"]["Dark"], json!([board]));
 
     let html = agent
         .ok("get_html", json!({ "designId": design, "nodeId": board }))
         .await;
-    assert!(
-        html.contains("shared CSS (20 characters, from get_shared_css)"),
-        "{html}"
+    assert!(html.contains("2 tokens (get_tokens)"), "{html}");
+
+    // Deleting Dark takes its values, and the artboard goes back to Light.
+    let res = app
+        .clone()
+        .oneshot(send(
+            "DELETE",
+            format!("/api/designs/{design}/modes/{dark}"),
+            json!({ "author": author }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let tokens = agent.ok("get_tokens", json!({ "designId": design })).await;
+    let tokens: Value = serde_json::from_str(&tokens).unwrap();
+    assert_eq!(
+        tokens,
+        json!({ "modes": ["Light"], "tokens": { "--bg": "#fff", "--brand": "red" } })
     );
     // The person's edit is theirs to undo, not the agent's.
     assert_eq!(
@@ -1340,6 +1382,59 @@ async fn an_agent_imports_and_exports_a_file() {
         )
         .await;
     assert!(is_error && refused.contains("no format"), "{refused}");
+}
+
+/// A real page links dozens of stylesheets and fonts, each quarantined. The
+/// result says so in one line per kind, and the import record keeps them all.
+#[tokio::test]
+async fn a_big_pages_diagnostics_come_grouped() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Importer").await;
+    let created = agent.ok("create_design", json!({ "name": "Big" })).await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .unwrap()
+        .to_owned();
+    let links = "<link rel=\"stylesheet\" href=\"https://x/a.css\">".repeat(40);
+    let page = format!(
+        "<!doctype html><html><head>{links}</head><body><p>Hi</p><script>a()</script></body></html>"
+    );
+    let imported = agent
+        .ok(
+            "import_design",
+            json!({ "designId": design, "format": "html", "content": page }),
+        )
+        .await;
+    assert!(
+        imported.contains("41 diagnostic(s) of 2 kind(s)")
+            && imported.contains("- 40 × <link> at /0/0, /0/1, /0/2 and 37 more: ")
+            && imported.contains("- <script> at /1/1: "),
+        "{imported}"
+    );
+    assert!(
+        imported.contains(&format!("GET /api/designs/{design}/imports")),
+        "{imported}"
+    );
+    assert!(imported.len() < 1000, "{imported}");
+
+    let req = Request::get(format!("/api/designs/{design}/imports"))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let records: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(records[0]["quarantined"].as_array().unwrap().len(), 41);
+
+    // The artboard grows to fit the page instead of cutting it off at 900px.
+    let board = id_after(&imported, "Imported");
+    let info = agent
+        .ok(
+            "get_node_info",
+            json!({ "designId": design, "nodeId": board }),
+        )
+        .await;
+    assert!(info.contains("\"height\": \"auto\""), "{info}");
 }
 
 /// A script that changes the page after 5 seconds is only seen in an image

@@ -80,10 +80,10 @@ const CHANGE =
 async function checkChange(mcp, ctx) {
   const notes = [];
   let done = 0;
-  // A bold title can come from the shared CSS, which the HTML doesn't show.
-  const shared = await mcp.callRaw("get_shared_css", { designId: ctx.design }).catch(() => null);
-  const css = shared && !shared.isError ? (shared.content?.[0]?.text ?? "") : "";
-  const boldShared = /font-weight: ?(6|7|8|9)00|font-weight: ?bold/i.test(css);
+  // A bold title can come from a token, whose value the HTML doesn't show.
+  const listed = await mcp.callRaw("get_tokens", { designId: ctx.design }).catch(() => null);
+  const tokens = listed && !listed.isError ? (listed.content?.[0]?.text ?? "") : "";
+  const boldShared = /"(6|7|8|9)00"|"bold"/i.test(tokens);
   for (const [i, board] of ctx.boards.entries()) {
     const html = await mcp.call("get_html", { designId: ctx.design, nodeId: board });
     // The top bar's own HTML: the artboard's name repeats the title.

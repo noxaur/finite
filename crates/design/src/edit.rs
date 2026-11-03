@@ -16,6 +16,7 @@ use crate::{
     html::{self, Fragment},
     label,
     node::{Node, NodeId, NodeKind, PropKey},
+    tokens::{self, MAX_MODES, Mode, Values},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,15 +263,32 @@ pub fn write_fragments(
         return err("the HTML contained no elements or text (scripts and styles are dropped)");
     }
     let target_node = node(doc, target)?;
-    // Rewriting a component that has instances keeps the ids of what it
-    // still holds, so the instances' overrides still find their nodes.
-    if mode != WriteMode::Append
-        && let Some(component) = components::component_of(doc, target)
-        && !components::is_virtual(target)
-        && doc.instances_of(&component.id).next().is_some()
-        && let Some(result) = rewrite_in_place(doc, target, &fragments, mode, new_id)?
-    {
-        return Ok(result);
+    // A rewrite keeps the nodes the HTML names by data-id, so their ids,
+    // comment pins and undo history stay. Rewriting a component that has
+    // instances also keeps nodes by tag and layer name, so the instances'
+    // overrides still find them.
+    if mode != WriteMode::Append && !components::is_virtual(target) {
+        let in_component = components::component_of(doc, target)
+            .is_some_and(|c| doc.instances_of(&c.id).next().is_some());
+        let keyed = || {
+            let named = |ids: &[&Node]| {
+                fragments
+                    .iter()
+                    .any(|f| ids.iter().any(|n| f.source.as_deref() == Some(&n.id)))
+            };
+            let matched = match mode {
+                WriteMode::Replace => named(&[target_node]),
+                _ => named(&doc.children(Some(target))),
+            };
+            // Components are redefined by name instead (see `prepare_instances`).
+            matched && !doc.subtree(target).iter().any(|n| n.component)
+        };
+        if (in_component || keyed())
+            && let Some(result) =
+                rewrite_in_place(doc, target, &fragments, mode, in_component, new_id)?
+        {
+            return Ok(result);
+        }
     }
     let mut ops = Vec::new();
     let (parent, indexes) = match mode {
@@ -336,15 +354,18 @@ pub fn write_fragments(
     Ok((ops, roots))
 }
 
-/// [`write_fragments`] for content inside a component, as edits to the
-/// nodes already there where they match, so their ids stay. A node matches
-/// a fragment with the same tag and layer name; text matches text. Returns
-/// `None` when it can't, like replacing the root with something else.
+/// [`write_fragments`] as edits to the nodes already there where they
+/// match, so their ids stay. A node matches a fragment written with its
+/// data-id and tag, and text matches text in order. `by_name`, for content
+/// inside a component: a node also matches a fragment with the same tag
+/// and layer name, in order. Returns `None` when it can't, like replacing
+/// the root with something else.
 fn rewrite_in_place(
     doc: &Document,
     target: &str,
     fragments: &[Fragment],
     mode: WriteMode,
+    by_name: bool,
     new_id: &mut impl FnMut() -> NodeId,
 ) -> Result<Option<(Vec<Op>, Vec<NodeId>)>> {
     let mut fragments = fragments.to_vec();
@@ -355,7 +376,10 @@ fn rewrite_in_place(
             let [only] = fragments.as_slice() else {
                 return Ok(None);
             };
-            if !same_kind(target_node, only) || only.instance_of.is_some() {
+            if !same_kind(target_node, only)
+                || only.instance_of.is_some()
+                || !(by_name || only.source.as_deref() == Some(target))
+            {
                 return Ok(None);
             }
             // Written with its own name, it's the component, not an instance of it.
@@ -369,13 +393,20 @@ fn rewrite_in_place(
             }
             prepare_instances(doc, &mut fragments[0].children, Some(target), &[], new_id)?;
             update_node(target_node, &fragments[0], true, &mut ops);
-            reconcile(doc, target, &fragments[0].children, &mut ops, new_id);
+            reconcile(
+                doc,
+                target,
+                &fragments[0].children,
+                by_name,
+                &mut ops,
+                new_id,
+            );
             vec![target.to_owned()]
         }
         WriteMode::ReplaceChildren => {
             element(doc, target)?;
             prepare_instances(doc, &mut fragments, Some(target), &[], new_id)?;
-            reconcile(doc, target, &fragments, &mut ops, new_id)
+            reconcile(doc, target, &fragments, by_name, &mut ops, new_id)
         }
         WriteMode::Append => return Ok(None),
     };
@@ -439,37 +470,53 @@ fn update_node(node: &Node, fragment: &Fragment, root: bool, ops: &mut Vec<Op>) 
 }
 
 /// Makes `parent`'s children `fragments`, reusing the children that match
-/// one, in order. Returns the ids of the children, reused or new.
+/// one (see [`rewrite_in_place`]). Returns the ids of the children, reused or new.
 fn reconcile(
     doc: &Document,
     parent: &str,
     fragments: &[Fragment],
+    by_name: bool,
     ops: &mut Vec<Op>,
     new_id: &mut impl FnMut() -> NodeId,
 ) -> Vec<NodeId> {
     let old = doc.children(Some(parent));
     let mut used = vec![false; old.len()];
-    // Match in order: each fragment takes the first unused child after the
-    // last match that has its tag and name, so an inserted element doesn't
-    // shift the rest out of place.
-    let mut cursor = 0;
-    let matches: Vec<Option<usize>> = fragments
+    let reusable =
+        |n: &Node, f: &Fragment| same_kind(n, f) && f.instance_of.is_none() && !n.component;
+    // By data-id first, wherever the child moved to.
+    let position: HashMap<&str, usize> = old
+        .iter()
+        .enumerate()
+        .map(|(j, n)| (n.id.as_str(), j))
+        .collect();
+    let mut matches: Vec<Option<usize>> = fragments
         .iter()
         .map(|f| {
-            let fits = |n: &Node| {
-                same_kind(n, f)
-                    && f.instance_of.is_none()
-                    && !n.component
-                    && (n.kind == NodeKind::Text || n.name == f.name)
-            };
-            let found = (cursor..old.len()).find(|&j| !used[j] && fits(old[j]));
-            if let Some(j) = found {
+            let j = *position.get(f.source.as_deref()?)?;
+            (!used[j] && reusable(old[j], f)).then(|| {
                 used[j] = true;
-                cursor = j + 1;
-            }
-            found
+                j
+            })
         })
         .collect();
+    // Then in order: each fragment takes the first unused child after the
+    // last match that fits, so an inserted element doesn't shift the rest
+    // out of place.
+    let mut cursor = 0;
+    for (f, found) in fragments.iter().zip(&mut matches) {
+        if let Some(j) = *found {
+            cursor = j + 1;
+            continue;
+        }
+        let fits = |n: &Node| {
+            reusable(n, f) && (n.kind == NodeKind::Text || (by_name && n.name == f.name))
+        };
+        *found = (cursor..old.len()).find(|&j| !used[j] && fits(old[j]));
+        if let Some(j) = *found {
+            used[j] = true;
+            cursor = j + 1;
+        }
+    }
     for (j, child) in old.iter().enumerate() {
         if !used[j] {
             ops.push(Op::Delete {
@@ -477,7 +524,7 @@ fn reconcile(
             });
         }
     }
-    let indexes = fractional::keys_between(None, None, fragments.len());
+    let indexes = keep_order(&old, &matches);
     let mut ids = Vec::new();
     for ((fragment, found), index) in fragments.iter().zip(matches).zip(indexes) {
         match found {
@@ -492,7 +539,7 @@ fn reconcile(
                 }
                 update_node(child, fragment, false, ops);
                 if child.kind != NodeKind::Text {
-                    reconcile(doc, &child.id, &fragment.children, ops, new_id);
+                    reconcile(doc, &child.id, &fragment.children, by_name, ops, new_id);
                 }
                 ids.push(child.id.clone());
             }
@@ -506,6 +553,54 @@ fn reconcile(
         }
     }
     ids
+}
+
+/// The index for each fragment [`reconcile`] writes, where `matches` names
+/// the old child each one reuses. The longest run of reused children still
+/// in order keep their indexes, so only the ones that moved get a `Move`,
+/// and the rest get indexes between their neighbours.
+fn keep_order(old: &[&Node], matches: &[Option<usize>]) -> Vec<String> {
+    // Longest strictly increasing run of old indexes, by patience sorting:
+    // `tails[k]` ends the best run of length k + 1 found so far.
+    let reused: Vec<(usize, &str)> = matches
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| m.map(|j| (i, old[j].index.as_str())))
+        .collect();
+    let mut tails: Vec<usize> = Vec::new();
+    let mut prev: Vec<Option<usize>> = vec![None; reused.len()];
+    for (r, &(_, index)) in reused.iter().enumerate() {
+        let k = tails.partition_point(|&t| reused[t].1 < index);
+        prev[r] = k.checked_sub(1).map(|k| tails[k]);
+        if k == tails.len() {
+            tails.push(r);
+        } else {
+            tails[k] = r;
+        }
+    }
+    let mut kept: Vec<Option<&str>> = vec![None; matches.len()];
+    let mut at = tails.last().copied();
+    while let Some(r) = at {
+        kept[reused[r].0] = Some(reused[r].1);
+        at = prev[r];
+    }
+    let mut out = Vec::with_capacity(matches.len());
+    let mut i = 0;
+    while i < matches.len() {
+        if let Some(index) = kept[i] {
+            out.push(index.to_owned());
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < matches.len() && kept[i].is_none() {
+            i += 1;
+        }
+        let low = start.checked_sub(1).and_then(|s| kept[s]);
+        let high = kept.get(i).copied().flatten();
+        out.extend(fractional::keys_between(low, high, i - start));
+    }
+    out
 }
 
 /// How many nodes writing `fragments` adds to the expanded design: an
@@ -1094,24 +1189,296 @@ pub fn set_position(doc: &Document, id: &str, x: f64, y: f64) -> Result<Vec<Op>>
     ])
 }
 
-/// The longest shared stylesheet, the same order as a large `<style>` block.
-pub const MAX_CSS: usize = 100_000;
+/// How one token changes in [`set_tokens`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum TokenChange {
+    /// One value in every mode.
+    All(String),
+    /// Values by mode name or id. `None` removes that mode's value, so it
+    /// falls back to the first mode's.
+    Modes(BTreeMap<String, Option<String>>),
+    /// Deletes the token.
+    Delete,
+}
 
-/// Replaces the design's shared stylesheet, or removes it when `css` is
-/// blank. Exports put it in a `<style>` element, so it can't contain
-/// `</style`, which would end that element early.
-pub fn set_css(css: &str) -> Result<Vec<Op>> {
-    if css.len() > MAX_CSS {
+/// A design's modes as `(id, name)`, in order.
+pub type ModeList = Vec<(String, String)>;
+
+/// A design's modes as `(id, name)`, in order, for [`set_tokens`].
+pub fn mode_list(doc: &Document) -> ModeList {
+    doc.modes()
+        .into_iter()
+        .map(|(id, mode)| (id.to_owned(), mode.name.clone()))
+        .collect()
+}
+
+/// Names the design's modes in order. The first name renames the first
+/// mode, and so on, and names past the last mode add modes. It never
+/// deletes a mode. Returns the ops and the modes as they'll be, as
+/// [`mode_list`] gives them.
+pub fn set_modes(
+    doc: &Document,
+    names: &[String],
+    new_id: &mut impl FnMut() -> String,
+) -> Result<(Vec<Op>, ModeList)> {
+    let existing = doc.modes();
+    if names.len() < existing.len() {
         return err(format!(
-            "the shared CSS can be at most {MAX_CSS} characters; this is {}",
-            css.len()
+            "the design has {} modes ({}); name each of them, in order. Modes aren't deleted here.",
+            existing.len(),
+            existing
+                .iter()
+                .map(|(_, m)| m.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
-    if css.to_ascii_lowercase().contains("</style") {
-        return err("pass the CSS alone, without <style> tags");
+    if names.len() > MAX_MODES {
+        return err(format!("a design can have at most {MAX_MODES} modes"));
     }
-    let css = (!css.trim().is_empty()).then(|| css.to_owned());
-    Ok(vec![Op::Css { css }])
+    let mut seen = std::collections::HashSet::new();
+    let mut ops = Vec::new();
+    let mut list = Vec::new();
+    let mut last = None;
+    for (at, name) in names.iter().enumerate() {
+        let name = label::clip(name.trim(), label::LAYER_NAME);
+        if name.is_empty() {
+            return err("give every mode a name");
+        }
+        if !seen.insert(name.to_lowercase()) {
+            return err(format!("two modes are named {name:?}"));
+        }
+        let (id, index) = match existing.get(at) {
+            Some((id, mode)) => ((*id).to_owned(), mode.index.clone()),
+            None => (new_id(), fractional::key_between(last.as_deref(), None)),
+        };
+        last = Some(index.clone());
+        ops.push(Op::Mode {
+            id: id.clone(),
+            mode: Some(Mode {
+                name: name.clone(),
+                index,
+            }),
+        });
+        list.push((id, name));
+    }
+    Ok((ops, list))
+}
+
+/// Renames one mode.
+pub fn rename_mode(doc: &Document, id: &str, name: &str) -> Result<Vec<Op>> {
+    let names: Vec<String> = doc
+        .modes()
+        .into_iter()
+        .map(|(mode, m)| {
+            if mode == id {
+                name.to_owned()
+            } else {
+                m.name.clone()
+            }
+        })
+        .collect();
+    if !doc.modes().iter().any(|(mode, _)| *mode == id) {
+        return err(format!("mode {id:?} not found"));
+    }
+    Ok(set_modes(doc, &names, &mut || unreachable!("renaming adds no modes"))?.0)
+}
+
+/// Deletes a mode and every token value in it. Artboards in it fall back
+/// to the first mode. A design keeps at least one mode.
+pub fn delete_mode(doc: &Document, id: &str) -> Result<Vec<Op>> {
+    let modes = doc.modes();
+    if !modes.iter().any(|(mode, _)| *mode == id) {
+        return err(format!("mode {id:?} not found"));
+    }
+    if modes.len() == 1 {
+        return err("that's the design's only mode, and a design keeps at least one");
+    }
+    let mut ops: Vec<Op> = doc
+        .tokens()
+        .iter()
+        .filter(|(_, values)| values.contains_key(id))
+        .map(|(name, _)| Op::Token {
+            name: name.clone(),
+            mode_id: id.to_owned(),
+            value: None,
+        })
+        .collect();
+    ops.push(Op::Mode {
+        id: id.to_owned(),
+        mode: None,
+    });
+    Ok(ops)
+}
+
+/// Sets, changes or deletes tokens. `modes` is the design's modes as they
+/// are, or as [`set_modes`] leaves them in the same edit. A mode key is a
+/// mode's name, in any case, or its id.
+pub fn set_tokens(
+    doc: &Document,
+    modes: &[(String, String)],
+    changes: &[(String, TokenChange)],
+) -> Result<Vec<Op>> {
+    let first = &modes.first().expect("a design has a mode").0;
+    let mode_id = |key: &str| {
+        modes
+            .iter()
+            .find(|(id, name)| id == key || name.eq_ignore_ascii_case(key))
+            .map(|(id, _)| id.clone())
+            .ok_or_else(|| {
+                let names: Vec<&str> = modes.iter().map(|(_, n)| n.as_str()).collect();
+                EditError(format!(
+                    "the design has no mode {key:?}; its modes are {}. Pass modes to add one.",
+                    names.join(", ")
+                ))
+            })
+    };
+    let check = |name: &str, value: &str| {
+        tokens::check_value(value.trim()).map_err(|why| EditError(format!("{name}: {why}")))
+    };
+    // What each token holds after the changes so far, so a name that comes
+    // twice builds on its first change.
+    let mut planned: BTreeMap<&str, Option<Values>> = BTreeMap::new();
+    for (name, change) in changes {
+        tokens::check_name(name).map_err(EditError)?;
+        let existing = match planned.get(name.as_str()) {
+            Some(values) => values.clone(),
+            None => doc.tokens().get(name).cloned(),
+        };
+        let values = match change {
+            TokenChange::Delete => None,
+            TokenChange::All(value) => {
+                check(name, value)?;
+                Some(Values::from([(first.clone(), value.trim().to_owned())]))
+            }
+            TokenChange::Modes(by_mode) => {
+                let mut values = existing.clone().unwrap_or_default();
+                for (key, value) in by_mode {
+                    let id = mode_id(key)?;
+                    match value {
+                        Some(value) => {
+                            check(name, value)?;
+                            values.insert(id, value.trim().to_owned());
+                        }
+                        None => {
+                            values.remove(&id);
+                        }
+                    }
+                }
+                (!values.is_empty()).then_some(values)
+            }
+        };
+        planned.insert(name, values);
+    }
+    // One op per mode that ends up different, so undo reverses only those.
+    // Removals go first, so a token deleted in the same edit frees its
+    // place before a new one takes it.
+    let none = Values::new();
+    let mut ops = Vec::new();
+    for (name, values) in &planned {
+        let old = doc.tokens().get(*name).unwrap_or(&none);
+        let new = values.as_ref().unwrap_or(&none);
+        let modes: std::collections::BTreeSet<&String> = old.keys().chain(new.keys()).collect();
+        for mode in modes {
+            if old.get(mode) != new.get(mode) {
+                ops.push(Op::Token {
+                    name: (*name).to_owned(),
+                    mode_id: mode.clone(),
+                    value: new.get(mode).cloned(),
+                });
+            }
+        }
+    }
+    ops.sort_by_key(|op| matches!(op, Op::Token { value: Some(_), .. }));
+    let added = planned
+        .iter()
+        .filter(|(name, values)| values.is_some() && !doc.tokens().contains_key(**name))
+        .count();
+    if doc.tokens().len() + added > tokens::MAX_TOKENS {
+        return err(format!(
+            "a design can have at most {} tokens",
+            tokens::MAX_TOKENS
+        ));
+    }
+    Ok(ops)
+}
+
+/// What an artboard's `mode` should hold for the mode named `key` (or
+/// with that id): its id, or `None` for a design without saved modes,
+/// which keeps every artboard in its implicit one.
+pub fn artboard_mode(doc: &Document, key: &str) -> Result<Option<String>> {
+    let id = doc
+        .modes()
+        .into_iter()
+        .find(|(id, m)| *id == key || m.name.eq_ignore_ascii_case(key))
+        .map(|(id, _)| id.to_owned())
+        .ok_or_else(|| {
+            let names: Vec<String> = mode_list(doc).into_iter().map(|(_, n)| n).collect();
+            EditError(format!(
+                "the design has no mode {key:?}; its modes are {}",
+                names.join(", ")
+            ))
+        })?;
+    Ok((!doc.mode_map().is_empty()).then_some(id))
+}
+
+/// Sets the mode artboards render in, by the mode's name or id, or puts
+/// them back in the first mode when `mode` is `None`.
+pub fn set_artboard_mode(doc: &Document, ids: &[NodeId], mode: Option<&str>) -> Result<Vec<Op>> {
+    let mode = match mode {
+        Some(key) => artboard_mode(doc, key)?,
+        None => None,
+    };
+    let mut ops = Vec::new();
+    for id in ids {
+        if !node(doc, id)?.is_artboard() {
+            return err(format!(
+                "node {id:?} isn't an artboard; modes are set on artboards"
+            ));
+        }
+        ops.push(Op::Set {
+            id: id.clone(),
+            key: PropKey::Mode,
+            value: mode.clone().map(Value::from),
+        });
+    }
+    Ok(ops)
+}
+
+/// Moves a design's old shared CSS into tokens (see [`tokens::migrate`]).
+/// What isn't a token goes in a `<style>` at the start of every artboard,
+/// in the cascade layer the shared CSS had, so each artboard looks as it
+/// did, and so do custom properties past [`tokens::MAX_TOKENS`]. Then the
+/// old stylesheet is cleared.
+pub fn migrate_css(doc: &Document, new_id: &mut impl FnMut() -> NodeId) -> Result<Vec<Op>> {
+    let Some(css) = doc.css() else {
+        return Ok(Vec::new());
+    };
+    let room = tokens::MAX_TOKENS.saturating_sub(doc.tokens().len());
+    let migrated = tokens::migrate(css, room);
+    let first = doc.first_mode().to_owned();
+    let mut ops: Vec<Op> = migrated
+        .tokens
+        .into_iter()
+        .map(|(name, value)| Op::Token {
+            name,
+            mode_id: first.clone(),
+            value: Some(value),
+        })
+        .collect();
+    if let Some(rest) = migrated.rest {
+        let style = format!("<style>{}</style>", html::layered_style(&rest));
+        for board in doc.artboards() {
+            if board.is_instance() || board.kind == NodeKind::Text {
+                continue;
+            }
+            let (written, _) =
+                write_html(doc, &board.id, &style, WriteMode::Append, Some(0), new_id)?;
+            ops.extend(written);
+        }
+    }
+    ops.push(Op::Css { css: None });
+    Ok(ops)
 }
 
 /// Adds a page named `name` after the others, with the id `id`. A design
@@ -1248,6 +1615,42 @@ pub fn move_nodes(
     parent: Option<&str>,
     index: Option<usize>,
 ) -> Result<Vec<Op>> {
+    check_move(doc, ids, parent)?;
+    let ids = top_level(doc, ids);
+    let indexes = doc.insertion_indexes(parent, index, ids.len());
+    move_to(doc, ids, parent, indexes)
+}
+
+/// Moves nodes under `parent`, right before its child `before` (at the end
+/// when `None`, or when `before` isn't one of its children any more),
+/// keeping their relative order. Naming a sibling instead of a position
+/// means a sibling another actor adds meanwhile can't shift where they land.
+pub fn move_before(
+    doc: &Document,
+    ids: &[NodeId],
+    parent: Option<&str>,
+    before: Option<&str>,
+) -> Result<Vec<Op>> {
+    check_move(doc, ids, parent)?;
+    let ids = top_level(doc, ids);
+    // The moved nodes leave their places first, so they never anchor themselves.
+    let siblings: Vec<&Node> = doc
+        .children(parent)
+        .into_iter()
+        .filter(|n| !ids.iter().any(|id| **id == n.id))
+        .collect();
+    let at = before
+        .and_then(|b| siblings.iter().position(|n| n.id == b))
+        .unwrap_or(siblings.len());
+    let prev = at.checked_sub(1).map(|i| siblings[i].index.as_str());
+    let next = siblings.get(at).map(|n| n.index.as_str());
+    let indexes = fractional::keys_between(prev, next, ids.len());
+    move_to(doc, ids, parent, indexes)
+}
+
+/// Refuses a move of `ids` under `parent` that would make a cycle, pass
+/// the depth limit or put an instance inside its own component.
+fn check_move(doc: &Document, ids: &[NodeId], parent: Option<&str>) -> Result<()> {
     if let Some(parent) = parent {
         element(doc, parent)?;
     }
@@ -1274,8 +1677,16 @@ pub fn move_nodes(
             }
         }
     }
-    let ids = top_level(doc, ids);
-    let indexes = doc.insertion_indexes(parent, index, ids.len());
+    Ok(())
+}
+
+/// The ops that move each of `ids` under `parent` at its index in `indexes`.
+fn move_to(
+    doc: &Document,
+    ids: Vec<&NodeId>,
+    parent: Option<&str>,
+    indexes: Vec<String>,
+) -> Result<Vec<Op>> {
     let mut ops = Vec::new();
     let mut placer = Placer::new(doc);
     for (id, index) in ids.into_iter().zip(indexes) {
@@ -1314,6 +1725,96 @@ pub fn move_nodes(
             }
             _ => {}
         }
+    }
+    Ok(ops)
+}
+
+/// Wraps sibling nodes in a new `<div>` named "Group", where the first of
+/// them was, keeping their order. Returns the ops and the group's id.
+pub fn group(
+    doc: &Document,
+    ids: &[NodeId],
+    new_id: &mut impl FnMut() -> NodeId,
+) -> Result<(Vec<Op>, NodeId)> {
+    let ids = top_level(doc, ids);
+    let Some(first) = ids.first() else {
+        return err("name the nodes to group");
+    };
+    let parent = node(doc, first)?.parent.clone();
+    let Some(parent) = parent else {
+        return err("artboards can't be grouped; group what's inside one");
+    };
+    for id in &ids {
+        if node(doc, id)?.parent.as_deref() != Some(parent.as_str()) {
+            return err("only nodes with the same parent can be grouped");
+        }
+        let depth = doc.depth(&parent) + 2 + doc.height(id);
+        if depth > MAX_DEPTH {
+            return err(format!(
+                "grouping {id:?} would nest {depth} levels deep; the limit is {MAX_DEPTH}"
+            ));
+        }
+    }
+    room_for(doc, 0, 1)?;
+    // In sibling order, so the group keeps them as they were.
+    let siblings = doc.children(Some(&parent));
+    let members: Vec<&Node> = siblings
+        .iter()
+        .copied()
+        .filter(|n| ids.iter().any(|id| **id == n.id))
+        .collect();
+    let at = siblings
+        .iter()
+        .position(|n| n.id == members[0].id)
+        .expect("a member is a child");
+    let prev = at.checked_sub(1).map(|i| siblings[i].index.as_str());
+    let id = new_id();
+    let mut ops = vec![Op::Create {
+        node: Node {
+            parent: Some(parent.clone()),
+            index: fractional::key_between(prev, Some(&members[0].index)),
+            name: Some("Group".into()),
+            ..Node::element(id.clone(), "div")
+        },
+    }];
+    let indexes = fractional::keys_between(None, None, members.len());
+    for (member, index) in members.iter().zip(indexes) {
+        ops.push(Op::Move {
+            id: member.id.clone(),
+            parent: Some(id.clone()),
+            index,
+        });
+    }
+    Ok((ops, id))
+}
+
+/// Takes the children out of each node in `ids`, into its parent where it
+/// was, and deletes it.
+pub fn ungroup(doc: &Document, ids: &[NodeId]) -> Result<Vec<Op>> {
+    let mut ops = Vec::new();
+    for id in top_level(doc, ids) {
+        let group = element(doc, id)?;
+        let Some(parent) = group.parent.clone() else {
+            return err(format!(
+                "{id:?} is an artboard; only a group inside one can be ungrouped"
+            ));
+        };
+        if group.is_instance() {
+            return err(format!(
+                "{id:?} is an instance; detach it before ungrouping it"
+            ));
+        }
+        let children = doc.children(Some(id));
+        let next = doc.next_sibling(id).map(|n| n.index.as_str());
+        let indexes = fractional::keys_between(Some(&group.index), next, children.len());
+        for (child, index) in children.iter().zip(indexes) {
+            ops.push(Op::Move {
+                id: child.id.clone(),
+                parent: Some(parent.clone()),
+                index,
+            });
+        }
+        ops.push(Op::Delete { id: id.clone() });
     }
     Ok(ops)
 }

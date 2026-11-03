@@ -1,6 +1,6 @@
-Finite is a design canvas for agents. A design (a canvas) holds artboards: fixed-size frames on an infinite canvas, containing ordinary HTML and CSS. Users watch live and can't edit, so all changes come from agents. Users steer agents by pinning comments.
+Finite is a design canvas for agents. A design (a canvas) holds artboards: fixed-size frames on an infinite canvas, containing ordinary HTML and CSS. Users watch live, steer agents by pinning comments, and can move, resize and delete things too.
 
-Every tool except list_designs and create_design takes a designId. Other agents may edit the same design, so re-read the tree before editing nodes you didn't create.
+Every tool except list_designs and create_design takes a designId. Agents and people may edit the same design, so re-read the tree before editing nodes you didn't create.
 
 Workflow:
 

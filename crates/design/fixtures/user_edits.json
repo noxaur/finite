@@ -1,0 +1,68 @@
+[
+  {
+    "kind": "setPosition",
+    "moves": [
+      {
+        "id": "board",
+        "x": 120.0,
+        "y": -40.0
+      }
+    ]
+  },
+  {
+    "ids": [
+      "card"
+    ],
+    "kind": "setStyles",
+    "styles": {
+      "left": "24px",
+      "right": null
+    }
+  },
+  {
+    "before": "other",
+    "ids": [
+      "card"
+    ],
+    "kind": "place",
+    "parent": "list"
+  },
+  {
+    "before": null,
+    "ids": [
+      "card"
+    ],
+    "kind": "place",
+    "parent": null
+  },
+  {
+    "ids": [
+      "card"
+    ],
+    "kind": "delete"
+  },
+  {
+    "ids": [
+      "card"
+    ],
+    "kind": "duplicate"
+  },
+  {
+    "ids": [
+      "card",
+      "other"
+    ],
+    "kind": "group"
+  },
+  {
+    "ids": [
+      "group"
+    ],
+    "kind": "ungroup"
+  },
+  {
+    "id": "title",
+    "kind": "setText",
+    "text": "Hello"
+  }
+]

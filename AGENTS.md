@@ -6,8 +6,8 @@ Finite is a design canvas that agents edit and people steer.
 
 These are the things we can't compromise on. They make us what we are today and tomorrow.
 
-- Built for agents: agents are the only editors, so every tool, result and error is written for an agent to read. Measure a change with an AX run (`e2e/ax`) instead of guessing whether it helps.
-- Live and shared: several agents edit at once while people watch every change live. One agent's edit or undo never wipes out another's work.
+- Built for agents: agents do most of the editing, so every tool, result and error is written for an agent to read. People can select, move, resize and delete things on the canvas too. Measure a change with an AX run (`e2e/ax`) instead of guessing whether it helps.
+- Live and shared: several agents and people edit at once and see every change live. One actor's edit or undo never wipes out another's work.
 - Fast: an edit holds the design's lock, so a slow edit makes every agent and viewer wait. Performance is a core feature. Measure it (`vp run bench`, the `examples/` in each crate), and do not trade it for convenience.
 - Plain HTML and CSS: designs are ordinary HTML and CSS that agents already know, not a custom format.
 
@@ -20,22 +20,35 @@ These are the things we can't compromise on. They make us what we are today and 
 - If a short request has two possible meanings, ask one question before you start.
 - Do not say a bug is fixed until a test, log or recording shows it.
 
+## Hit every surface
+
+The most common defect in this repo is a feature that works on the path you tested and is missing everywhere else. Before you call a change done, walk this list and say which entries applied:
+
+- **Agent and person.** Agents edit through MCP tools and people watch in the viewer, so a feature needs both halves. A new tool needs the viewer to render its result, and a new viewer behavior needs a tool or a comment that can trigger it. Put the logic in `edit.rs` so every tool shares it.
+- **Tools.** A change to one tool often applies to its neighbors. Check `write_html`, `update_styles`, `set_attributes`, `replace_values`, `duplicate_nodes`, `move_nodes` and `import_design`, and update `instructions.md` and the tool descriptions so agents learn about it.
+- **Both renderers.** Artboards render in a shadow root, or in a sandboxed iframe when they contain a `<script>`. The screenshot renderer is a third path. Test a plain artboard and a script artboard.
+- **Wasm.** The server and the browser run the same document model. A new call needs an export in `crates/wasm/src/lib.rs` and a method in `apps/web/src/design/wasm.ts`.
+- **Undo and live edits.** Every op returns its inverse, and several agents edit at once. Check that undo, redo and a concurrent edit still work, and that comments, which sit outside the document, stay untouched.
+- **Both stores and many servers.** The folder store and the Postgres store both save snapshots and journals. With several servers, `cluster.rs` and `router.rs` send each request to the design's owner. A feature that reads or writes designs must work for each.
+- **Reverse states.** If you added a way in, add the way out and the way to see it. Delete needs restore, and resolve needs reopen. A one-way door is a bug.
+- **Docs.** Check whether the change makes `docs/how-finite-works.md` or the README inaccurate.
+
 ## How it works
 
-Read `docs/how-finite-works.md` before you change the document model, the server or the viewer. An agent calls an MCP tool at `/mcp` (`crates/server/src/mcp/`). The tool runs an edit command (`crates/design/src/edit.rs`), which reads the document and returns ops but never changes it. `DesignHandle::edit` (`hub/design.rs`) locks the design, commits the ops through `Design::commit`, broadcasts the change to every WebSocket and queues it for saving. Applying an op returns its inverse, and undo applies that inverse as a new change, so each agent undoes only its own work. `store.rs` saves a snapshot plus an append-only journal for each design. The browser runs the same Rust document model compiled to WebAssembly (`crates/wasm`): `socket.ts` receives the change, `DesignSession` feeds it to the `Replica`, and the `Renderer` patches only the DOM nodes each op touched. Artboards render in a shadow root, or in a sandboxed iframe when they contain a `<script>`. Comments are stored with the design but aren't part of the document, so undo never touches them. With several servers, `cluster.rs` picks each design's owner by rendezvous hashing and `router.rs` sends each request to it.
+Read `docs/how-finite-works.md` before you change the document model, the server or the viewer. An agent calls an MCP tool at `/mcp` (`crates/server/src/mcp/`). The tool runs an edit command (`crates/design/src/edit.rs`), which reads the document and returns ops but never changes it. `DesignHandle::edit` (`hub/design.rs`) locks the design, commits the ops through `Design::commit`, broadcasts the change to every WebSocket and queues it for saving. Applying an op returns its inverse, and undo applies that inverse as a new change, so each agent undoes only its own work. `store.rs` saves a snapshot plus an append-only journal for each design. The browser runs the same Rust document model compiled to WebAssembly (`crates/wasm`): `socket.ts` receives the change, `DesignSession` feeds it to the `Replica`, and the `Renderer` patches only the DOM nodes each op touched. Artboards render in a shadow root, or in a sandboxed iframe when they contain a `<script>`. Comments are stored with the design but aren't part of the document, so undo never touches them. A person's drag sends a `UserEdit` list over the design's socket; `user_edit::plan` turns it into ops on the server, and the browser runs the same function through WebAssembly to show the edit before the server confirms it (`crates/wasm/src/replica.rs`). With several servers, `cluster.rs` picks each design's owner by rendezvous hashing and `router.rs` sends each request to it.
 
 ## Code map
 
-- `crates/design/`: the document model, with no I/O. `node.rs` (nodes and properties), `document.rs` (the node map, ops and limits), `design.rs` (the document plus every actor's history and comments), `history.rs` (undo stacks), `edit.rs` (edit commands), `html.rs` (HTML in and out, and what's unsafe), `search.rs`, `comment.rs`, `fractional.rs` (sibling order) and `label.rs`. Add a tool's logic in `edit.rs`, not in the server.
+- `crates/design/`: the document model, with no I/O. `node.rs` (nodes and properties), `document.rs` (the node map, ops and limits), `design.rs` (the document plus every actor's history and comments), `history.rs` (undo stacks), `edit.rs` (edit commands), `html.rs` (HTML in and out, and what's unsafe), `search.rs`, `comment.rs`, `fractional.rs` (sibling order), `label.rs` and `user_edit.rs` (the edits people make in the browser). Add a tool's logic in `edit.rs`, not in the server.
 - `crates/wasm/`: the document model as `finite.wasm`, with a plain C ABI for the viewer. A new call is an export in `src/lib.rs` and a method in `apps/web/src/design/wasm.ts`.
 - `crates/server/`: the axum server.
-  - `mcp/`: the tools. `mod.rs` defines them, `params.rs` holds their arguments, `format.rs` writes outlines and layout notes, `search.rs` and `styles.rs` hold search and shared CSS. `instructions.md` is what agents read when they connect; keep it under 4,000 characters.
+  - `mcp/`: the tools. `mod.rs` defines them, `params.rs` holds their arguments, `format.rs` writes outlines and layout notes, `search.rs` and `tokens.rs` hold search and design tokens. `instructions.md` is what agents read when they connect; keep it under 4,000 characters.
   - `hub/`: the designs in memory. `mod.rs` loads, unloads and saves them, `design.rs` has `DesignHandle`, `messages.rs` has the WebSocket messages.
   - `api.rs`: REST and WebSockets for the web app. `guard.rs` keeps other websites out, and `heartbeat.rs` pings the sockets.
   - `store.rs` and `postgres/`: the folder store and the shared Postgres store.
   - `cluster.rs`, `router.rs` and `relay.rs`: running more than one server.
   - `screenshot/`: renders artboards with headless Chrome over CDP.
-- `apps/web/`: the Next.js app, styled with StyleX. `src/design/` is the viewer (socket, session, replica, renderer, camera), `src/components/` the React parts (design grid, canvas, comments, shared CSS), `src/api/` the Effect HTTP client and `src/styles/tokens.stylex.ts` the theme tokens.
+- `apps/web/`: the Next.js app, styled with StyleX. `src/design/` is the viewer (socket, session, replica, renderer, camera) and `src/design/editing/` how people edit it (the editor, gestures and the drag-to-CSS rules), `src/components/` the React parts (design grid, canvas, comments, tokens), `src/api/` the Effect HTTP client and `src/styles/tokens.stylex.ts` the theme tokens.
 - `apps/desktop/`: the Electron app that starts the server and shows the web app, with restarts and updates.
 - `e2e/`: `run.mjs` is the end-to-end test, `bench.mjs` the canvas benchmark, `headless.mjs` and `finite_headless.py` drive Finite by hand, and `ax/` runs real agents against the tools.
 

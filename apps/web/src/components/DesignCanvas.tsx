@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { Api, Refused } from "@/api/Api";
 import { Camera, union, type View } from "@/design/camera";
+import { Editor } from "@/design/editing/editor";
 import { type Hit, Renderer } from "@/design/renderer";
 import { Replica } from "@/design/replica";
 import { DesignSession, initialSessionState, type SessionState } from "@/design/session";
@@ -28,7 +29,9 @@ import {
 } from "./Comments";
 import { CommentsPanel } from "./CommentsPanel";
 import { PagesSidebar } from "./PagesSidebar";
-import { SharedCssPanel } from "./SharedCss";
+import { Inspector } from "./Inspector";
+import { EditorNotice, SelectionLayer } from "./SelectionLayer";
+import { type TokensActions, TokensPanel } from "./TokensPanel";
 import { ExportMenu, ImportButton, ImportResultCard, type ImportState } from "./Transfer";
 
 /** An instance or component under the pointer: what to outline and what to call it. */
@@ -69,9 +72,9 @@ const isTyping = (target: EventTarget | null) =>
 /**
  * A live view of one design. `DesignSession` streams it from the server and
  * the renderer patches the DOM; this component adds the camera, comments and
- * keyboard shortcuts. Users can't edit the design's artboards, but in comment
- * mode they pin comments that agents pick up over MCP, and they can edit the
- * shared CSS every artboard uses.
+ * keyboard shortcuts. With the pointer, people edit the design through the
+ * `Editor`; in comment mode they pin comments that agents pick up over MCP,
+ * and they can edit the design's tokens, which every artboard uses.
  */
 
 /** Why a comment or edit didn’t go through: the server’s reason, or a connection problem. */
@@ -117,6 +120,7 @@ export function DesignCanvas({ id }: { id: string }) {
   const framedRef = useRef<View | null>(null);
   const rendererRef = useRef<Renderer | null>(null);
   const sessionRef = useRef<DesignSession | null>(null);
+  const editorRef = useRef<Editor | null>(null);
 
   // Re-rendering on every session update also moves pins with their artboards.
   const [session, setSession] = useState<SessionState>(initialSessionState);
@@ -148,10 +152,10 @@ export function DesignCanvas({ id }: { id: string }) {
     rememberPlace.current();
   };
   const page = pages.find((p) => p.id === pickedPage) ?? pages[0];
-  // The shared CSS, the comments list, the export menu and an import's result open in the
+  // The tokens, the comments list, the export menu and an import's result open in the
   // same place, one at a time.
-  const [panel, setPanel] = useState<"css" | "comments" | "export" | "import" | null>(null);
-  const togglePanel = (name: "css" | "comments" | "export") =>
+  const [panel, setPanel] = useState<"tokens" | "comments" | "export" | "import" | null>(null);
+  const togglePanel = (name: "tokens" | "comments" | "export") =>
     setPanel((open) => (open === name ? null : name));
   const [imported, setImported] = useState<ImportState | null>(null);
 
@@ -182,6 +186,8 @@ export function DesignCanvas({ id }: { id: string }) {
       // so its real height arrives after the first frame. Frame it again,
       // unless the person has already panned or zoomed.
       onResize: () => {
+        // Outlines on the artboard follow its new size.
+        setTick((t) => t + 1);
         const view = camera.view;
         const framed = framedRef.current;
         if (!framed || framed.x !== view.x || framed.y !== view.y || framed.zoom !== view.zoom) {
@@ -198,8 +204,10 @@ export function DesignCanvas({ id }: { id: string }) {
         setTick((t) => t + 1);
       },
     });
-    const session = new DesignSession(renderer, replica);
+    const session = new DesignSession(renderer, replica, Date.now, localUser);
     sessionRef.current = session;
+    const editor = new Editor(viewport, session, renderer, () => camera.view.zoom);
+    editorRef.current = editor;
     rendererRef.current = renderer;
     cameraRef.current = camera;
     // Hide the artboards outside the view.
@@ -308,6 +316,8 @@ export function DesignCanvas({ id }: { id: string }) {
       close();
       controller.abort();
       resize.disconnect();
+      editor.dispose();
+      editorRef.current = null;
       camera.dispose();
       renderer.dispose();
       // The document lives in WebAssembly memory, which isn't garbage collected.
@@ -325,6 +335,7 @@ export function DesignCanvas({ id }: { id: string }) {
     const commenting = mode === "comment";
     if (cameraRef.current) cameraRef.current.dragToPan = !commenting;
     rendererRef.current?.setCommenting(commenting);
+    editorRef.current?.setEnabled(!commenting);
     if (!commenting) {
       setDraft(null);
       setHover(null);
@@ -493,11 +504,25 @@ export function DesignCanvas({ id }: { id: string }) {
     setOpenId(commentId);
   };
 
-  const saveCss = async (css: string) => {
-    const exit = await runtime.runPromiseExit(
-      Api.use((api) => api.setSharedCss(id, localUser(), css)),
-    );
-    return Exit.isFailure(exit) ? unsent(exit.cause) : undefined;
+  const tokenActions: TokensActions = {
+    save: async (change) => {
+      const exit = await runtime.runPromiseExit(
+        Api.use((api) => api.setTokens(id, localUser(), change)),
+      );
+      return Exit.isFailure(exit) ? unsent(exit.cause) : undefined;
+    },
+    deleteMode: async (modeId) => {
+      const exit = await runtime.runPromiseExit(
+        Api.use((api) => api.deleteMode(id, localUser(), modeId)),
+      );
+      return Exit.isFailure(exit) ? unsent(exit.cause) : undefined;
+    },
+    setArtboardMode: async (boardId, modeId) => {
+      const exit = await runtime.runPromiseExit(
+        Api.use((api) => api.setArtboardMode(id, localUser(), [boardId], modeId)),
+      );
+      return Exit.isFailure(exit) ? unsent(exit.cause) : undefined;
+    },
   };
 
   // The new artboards arrive over the socket, so all this shows is how the import went.
@@ -612,6 +637,14 @@ export function DesignCanvas({ id }: { id: string }) {
       >
         <div ref={worldRef} {...stylex.props(styles.world)}>
           <div ref={framesRef} />
+          {editorRef.current && rendererRef.current && cameraRef.current && (
+            <SelectionLayer
+              editor={editorRef.current}
+              renderer={rendererRef.current}
+              camera={cameraRef.current}
+              version={session.version}
+            />
+          )}
           {outlines.map(
             ({ key, rect, flash }) =>
               rect && (
@@ -677,12 +710,12 @@ export function DesignCanvas({ id }: { id: string }) {
         <span {...stylex.props(styles.spacer)} />
         <button
           type="button"
-          aria-pressed={panel === "css"}
-          onClick={() => togglePanel("css")}
+          aria-pressed={panel === "tokens"}
+          onClick={() => togglePanel("tokens")}
           {...stylex.props(styles.tool)}
-          title="CSS every artboard uses"
+          title="CSS variables every artboard uses, in each mode"
         >
-          Shared CSS
+          Tokens
         </button>
         <button
           type="button"
@@ -749,8 +782,16 @@ export function DesignCanvas({ id }: { id: string }) {
         </ol>
       )}
 
-      {panel === "css" && (
-        <SharedCssPanel css={session.css} onSave={saveCss} onClose={() => setPanel(null)} />
+      {panel === "tokens" && sessionRef.current && (
+        <TokensPanel
+          table={session.tokens}
+          artboards={sessionRef.current.replica
+            .artboards()
+            .filter((board) => sessionRef.current?.replica.pageOf(board) === page?.id)}
+          modeOf={(board) => sessionRef.current?.replica.modeOf(board) ?? ""}
+          actions={tokenActions}
+          onClose={() => setPanel(null)}
+        />
       )}
       {panel === "comments" && sessionRef.current && (
         <CommentsPanel
@@ -782,6 +823,15 @@ export function DesignCanvas({ id }: { id: string }) {
       )}
 
       <ToolPill mode={mode} onMode={setMode} />
+      {editorRef.current && <EditorNotice editor={editorRef.current} />}
+      {editorRef.current && rendererRef.current && sessionRef.current && mode === "pointer" && (
+        <Inspector
+          editor={editorRef.current}
+          renderer={rendererRef.current}
+          replica={sessionRef.current.replica}
+          version={session.version}
+        />
+      )}
 
       <div {...stylex.props(styles.bar, styles.zoom)}>
         <button

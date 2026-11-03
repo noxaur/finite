@@ -36,9 +36,10 @@ use std::collections::BTreeMap;
 
 use finite_design::{
     Document, Node, NodeId, Op, Rejected, Transaction, components,
-    edit::{self, EditError, NewArtboard},
+    edit::{self, EditError, NewArtboard, TokenChange, WriteMode},
     html::Fragment,
     import::{BlobHash, Dependency, ImportRecord, Quarantined},
+    tokens,
 };
 
 pub use feature::{Direction, Feature, Support};
@@ -261,7 +262,11 @@ pub struct Imported {
     /// Pages the import brings, by name, in order. Each one the design
     /// doesn't have by that name is created, even if no board goes on it.
     pub pages: Vec<String>,
-    /// Shared CSS to add after the design's own.
+    /// The tokens the import brings, merged into the design's.
+    pub tokens: Tokens,
+    /// Shared CSS from a bundle made before tokens. Its custom properties
+    /// become tokens, and the rest goes at the start of each new artboard,
+    /// as [`finite_design::edit::migrate_css`] does for a design.
     pub css: Option<String>,
     /// Files the import carries, like a bundle's images. The caller stores
     /// them before placing, and the content refers to them as
@@ -272,6 +277,67 @@ pub struct Imported {
     pub diagnostics: Vec<(Anchor, Diagnostic)>,
 }
 
+/// A design's tokens as files carry them: its modes' names in order, and
+/// each token's values by mode name. On import, a mode the design doesn't
+/// have by that name is added, and a token the design has gets the
+/// import's values.
+#[derive(Debug, Default, PartialEq)]
+pub struct Tokens {
+    pub modes: Vec<String>,
+    pub values: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+impl Tokens {
+    /// The design's tokens, each value passed through `portable`. A design
+    /// with only its implicit mode and no tokens has none.
+    pub fn of(doc: &Document, mut portable: impl FnMut(&str) -> String) -> Self {
+        if doc.tokens().is_empty() && doc.mode_map().is_empty() {
+            return Self::default();
+        }
+        let modes = doc.modes();
+        let name_of = |id: &str| {
+            modes
+                .iter()
+                .find(|(m, _)| *m == id)
+                .map(|(_, m)| m.name.clone())
+        };
+        Self {
+            modes: modes.iter().map(|(_, m)| m.name.clone()).collect(),
+            values: doc
+                .tokens()
+                .iter()
+                .map(|(name, values)| {
+                    let values = values
+                        .iter()
+                        .filter_map(|(mode, value)| Some((name_of(mode)?, portable(value))))
+                        .collect();
+                    (name.clone(), values)
+                })
+                .collect(),
+        }
+    }
+
+    /// The name of the mode `board` renders in, unless it's the first one.
+    pub fn mode_of(doc: &Document, board: &Node) -> Option<String> {
+        let mode = doc.mode_of(board);
+        (mode != doc.first_mode())
+            .then(|| doc.mode_map().get(mode).map(|m| m.name.clone()))
+            .flatten()
+    }
+
+    /// Every value, for checking the files they refer to.
+    pub fn texts(&self) -> impl Iterator<Item = &str> {
+        self.values
+            .values()
+            .flat_map(|v| v.values())
+            .map(String::as_str)
+    }
+}
+
+/// The defaults every artboard starts with that set how it looks rather
+/// than how it holds its content: a white flex column.
+pub const LOOK: [&str; 3] = ["background-color", "display", "flex-direction"];
+
 /// One artboard to create, with its content.
 #[derive(Debug, Default)]
 pub struct Board {
@@ -280,10 +346,15 @@ pub struct Board {
     pub height: f64,
     /// The artboard grows to fit its content, so `height` isn't used.
     pub auto_height: bool,
+    /// Leave the [`LOOK`] defaults out of the artboard's inline styles,
+    /// because the content's own CSS sets them, and inline styles would win.
+    pub look_in_css: bool,
     /// Where on the canvas, or `None` to place it beside the others.
     pub position: Option<(f64, f64)>,
     /// The name of the page it goes on, or `None` for the import's page.
     pub page: Option<String>,
+    /// The name of the mode it renders in, or `None` for the first mode.
+    pub mode: Option<String>,
     /// The artboard's own styles, over the defaults every artboard starts with.
     pub styles: BTreeMap<String, String>,
     pub attrs: BTreeMap<String, String>,
@@ -344,6 +415,10 @@ impl Imported {
         for name in &self.pages {
             page_named(tx, name, new_id)?;
         }
+        // Files leave out the mode of an artboard in the first mode, which
+        // may not be the design's first mode.
+        let first_mode = self.tokens.modes.first().cloned();
+        let rest = add_tokens(tx, self.tokens, self.css, &receipt.design, new_id)?;
         let mut boards: Vec<(NodeId, Vec<NodeId>)> = Vec::new();
         let mut nodes = BTreeMap::new();
         let resolve = |value: &mut String| {
@@ -361,6 +436,10 @@ impl Imported {
                 None => receipt.page.clone(),
             };
             let id = new_id();
+            let unset: Vec<&str> = LOOK
+                .into_iter()
+                .filter(|name| board.look_in_css && !board.styles.contains_key(*name))
+                .collect();
             let mut content = Vec::new();
             let mut numbered = || {
                 let id = new_id();
@@ -384,20 +463,32 @@ impl Imported {
             )?;
             if let Some(Op::Create { node }) = ops.first_mut() {
                 node.attrs.extend(board.attrs);
+                node.mode = board.mode.or_else(|| first_mode.clone()).and_then(|name| {
+                    let modes = tx.doc().mode_map();
+                    let (id, _) = modes
+                        .iter()
+                        .find(|(_, m)| m.name.eq_ignore_ascii_case(&name))?;
+                    Some(id.clone())
+                });
+                for name in unset {
+                    node.styles.remove(name);
+                }
             }
             tx.apply(&ops)?;
+            if let Some(rest) = &rest {
+                let style = format!(
+                    "<style>{}</style>",
+                    finite_design::html::layered_style(rest)
+                );
+                let (ops, _) =
+                    edit::write_html(tx.doc(), &id, &style, WriteMode::Append, Some(0), new_id)?;
+                tx.apply(&ops)?;
+            }
             if let Some(source) = board.source {
                 nodes.insert(id.clone(), source);
             }
             nodes.extend(content.iter().cloned().zip(board.paths));
             boards.push((id, content));
-        }
-        if let Some(css) = self.css.filter(|css| !css.trim().is_empty()) {
-            let mut css = assets::resolve(&css, &receipt.design);
-            if let Some(existing) = tx.doc().css() {
-                css = format!("{existing}\n\n{css}");
-            }
-            tx.apply(&edit::set_css(&css)?)?;
         }
         let mut quarantined = Vec::new();
         let diagnostics: Vec<Diagnostic> = self
@@ -446,6 +537,75 @@ impl Imported {
 
 /// The id of the page named `name`, created after the others if the design
 /// has none by that name.
+/// Adds an import's modes and tokens to the design, and the custom
+/// properties of its old shared CSS, if it has some. Returns the rest of
+/// that CSS, for each new artboard. A design that has no tokens and only
+/// its implicit mode takes the import's modes as they are.
+fn add_tokens(
+    tx: &mut Transaction<'_>,
+    imported: Tokens,
+    css: Option<String>,
+    design: &str,
+    new_id: &mut impl FnMut() -> NodeId,
+) -> Result<Option<String>, Error> {
+    let fresh = tx.doc().mode_map().is_empty() && tx.doc().tokens().is_empty();
+    let mut names: Vec<String> = if fresh {
+        Vec::new()
+    } else {
+        edit::mode_list(tx.doc())
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect()
+    };
+    for mode in imported.modes {
+        if !names.iter().any(|name| name.eq_ignore_ascii_case(&mode)) {
+            names.push(mode);
+        }
+    }
+    if !names.is_empty() {
+        let mut mode_id = || format!("mode-{}", new_id());
+        let (ops, _) = edit::set_modes(tx.doc(), &names, &mut mode_id)?;
+        tx.apply(&ops)?;
+    }
+    let resolve = |value: String| {
+        if value.contains(assets::SCHEME) {
+            assets::resolve(&value, design)
+        } else {
+            value
+        }
+    };
+    let migrated = css
+        .filter(|css| !css.trim().is_empty())
+        .map(|css| {
+            let room = tokens::MAX_TOKENS.saturating_sub(tx.doc().tokens().len());
+            tokens::migrate(&resolve(css), room)
+        })
+        .unwrap_or_default();
+    let first = tx.doc().modes()[0].1.name.clone();
+    let mut changes: Vec<(String, TokenChange)> = migrated
+        .tokens
+        .into_iter()
+        .map(|(name, value)| {
+            (
+                name,
+                TokenChange::Modes(BTreeMap::from([(first.clone(), Some(value))])),
+            )
+        })
+        .collect();
+    changes.extend(imported.values.into_iter().map(|(name, values)| {
+        let values = values
+            .into_iter()
+            .map(|(mode, value)| (mode, Some(resolve(value))))
+            .collect();
+        (name, TokenChange::Modes(values))
+    }));
+    if !changes.is_empty() {
+        let ops = edit::set_tokens(tx.doc(), &edit::mode_list(tx.doc()), &changes)?;
+        tx.apply(&ops)?;
+    }
+    Ok(migrated.rest)
+}
+
 fn page_named(
     tx: &mut Transaction<'_>,
     name: &str,

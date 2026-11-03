@@ -39,15 +39,13 @@ describe("artboardDocument", () => {
     expect(r.exportHtml("a")).toBe('<div class="x"></div>');
   });
 
-  it("puts the shared CSS before the artboard, in a layer its own styles override", () => {
+  it("puts the tokens before the artboard, in a layer its own styles override", () => {
     const r = replica([el("a", null, "div")]);
-    r.apply({ op: "css", css: ".btn { color: red; }</style>" });
+    r.apply({ op: "token", name: "--brand", modeId: "mode-1", value: "red" });
     const page = artboardDocument(r, "a");
-    const shared = page.indexOf(
-      "<style>@layer finite-shared {\n.btn { color: red; }<\\/style>\n}</style>",
-    );
-    expect(shared).toBeGreaterThan(page.indexOf(designModel().baseCss));
-    expect(shared).toBeLessThan(page.indexOf("<body>"));
+    const tokens = page.indexOf("<style>@layer finite-tokens { :root { --brand: red; } }</style>");
+    expect(tokens).toBeGreaterThan(page.indexOf(designModel().baseCss));
+    expect(tokens).toBeLessThan(page.indexOf("<body>"));
   });
 });
 

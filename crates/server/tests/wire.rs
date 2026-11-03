@@ -12,10 +12,11 @@ use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc};
 use finite_design::{
     comment::{Anchor, Author, AuthorKind},
     edit::{self, NewArtboard, WriteMode},
+    user_edit::{Position, UserEdit},
 };
 use finite_server::{
     Hub,
-    hub::{Actor, Outgoing, Since},
+    hub::{Actor, DesignMessage, Outgoing, Since, Stamp},
     store::MemoryStore,
 };
 use serde_json::{Value, json};
@@ -109,7 +110,7 @@ async fn wire_messages_match_the_fixture() {
             Ok((edit::update_styles(doc, &["n1".into()], &styles)?, ()))
         })
         .unwrap();
-    handle.undo(&agent).unwrap();
+    handle.undo(&agent, None).unwrap();
     let reply = Author {
         id: agent.id.clone(),
         name: agent.name.clone(),
@@ -159,8 +160,15 @@ async fn wire_messages_match_the_fixture() {
         })
         .unwrap();
     handle
-        .edit(&agent, "Set shared CSS", |_| {
-            Ok((edit::set_css(":root { --brand: orange; }")?, ()))
+        .edit(&agent, "Set tokens", |doc| {
+            let names = ["Light".to_owned(), "Dark".to_owned()];
+            let (mut ops, modes) = edit::set_modes(doc, &names, &mut || "mode-dark".into())?;
+            let brand = edit::TokenChange::Modes(BTreeMap::from([
+                ("Light".to_owned(), Some("orange".to_owned())),
+                ("Dark".to_owned(), Some("gold".to_owned())),
+            ]));
+            ops.extend(edit::set_tokens(doc, &modes, &[("--brand".into(), brand)])?);
+            Ok((ops, ()))
         })
         .unwrap();
     // The button becomes a component, and an instance of it removes its padding.
@@ -179,6 +187,24 @@ async fn wire_messages_match_the_fixture() {
         })
         .unwrap();
     handle.rename("Landing v2".into());
+    // A person drags the artboard in their browser tab, then undoes it.
+    let person = Actor {
+        id: "user:1".into(),
+        name: "Guest".into(),
+    };
+    let stamp = |mid| Stamp {
+        client: "tab1".into(),
+        mid,
+    };
+    let drag = [UserEdit::SetPosition {
+        moves: vec![Position {
+            id: "board".into(),
+            x: 40.0,
+            y: 80.0,
+        }],
+    }];
+    handle.mutate(&person, &stamp(1), &drag).unwrap().unwrap();
+    handle.undo(&person, Some(&stamp(2))).unwrap();
     let user = Author {
         id: "user:1".into(),
         name: "Guest".into(),
@@ -206,8 +232,15 @@ async fn wire_messages_match_the_fixture() {
     let mut design = vec![design_first];
     design.extend(drain(&mut events));
     design.push(first(resumed));
-    // A viewer that joins now gets the shared CSS in its snapshot.
+    // A viewer that joins now gets the tokens and modes in its snapshot.
     design.push(first(handle.subscribe().0));
+    // Only the tab whose mutation changed nothing gets this one.
+    let settled = DesignMessage::Settled {
+        mid: 3,
+        seq: 15,
+        error: Some("node \"gone\" not found".into()),
+    };
+    design.push(serde_json::to_value(settled).unwrap());
     let mut lobby_messages = vec![first(lobby_first)];
     lobby_messages.extend(drain(&mut lobby));
     let mut messages = json!({

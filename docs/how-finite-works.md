@@ -1,6 +1,6 @@
 # How Finite works
 
-Finite is a design canvas that only agents edit. An agent connects over MCP and sends tool calls like "write this HTML into that artboard". The Rust server turns each call into a few small edits and applies them to the one true copy of the design. Then it streams those edits to every browser that has the design open. Each browser keeps its own copy, applies the same edits with the same Rust code compiled to WebAssembly, and patches the page.
+Finite is a design canvas that agents edit, and people too. An agent connects over MCP and sends tool calls like "write this HTML into that artboard"; a person drags things on the canvas. The Rust server turns each call into a few small edits and applies them to the one true copy of the design. Then it streams those edits to every browser that has the design open. Each browser keeps its own copy, applies the same edits with the same Rust code compiled to WebAssembly, and patches the page.
 
 If you remember two ideas, make it these. The rest of this guide builds on them.
 
@@ -10,6 +10,7 @@ If you remember two ideas, make it these. The rest of this guide builds on them.
 How far you read depends on what you want:
 
 - **To understand Finite,** read through "Following one edit end to end". That covers the document, undo, the server and one edit's whole trip.
+- **To change how people edit,** read "People edit too". It covers adding a gesture or a kind of edit.
 - **To change the browser side,** read "The viewer" and "Comments". "The viewer" ends with how a browser reconnects without starting over, and how each end notices a connection that died silently.
 - **To run it for real,** read "Saving and recovering". It covers what's saved, when, and what survives a crash, undo included.
 - **To test a change the way a person sees it,** read "The end-to-end test".
@@ -80,22 +81,30 @@ Next to the map, `Document` keeps a **child index**: for each parent, its childr
 
 ## Ops and their inverses
 
-There are only six ops:
+There are only eight ops:
 
-| Op       | What it does                               | Its inverse                    |
-| -------- | ------------------------------------------ | ------------------------------ |
-| `create` | Inserts one node                           | `delete` that node             |
-| `delete` | Removes a node and its whole subtree       | `create` every removed node    |
-| `set`    | Sets or clears one property                | `set` it back to the old value |
-| `move`   | Gives a node a new parent and/or index     | `move` it back                 |
-| `css`    | Replaces or clears the design's shared CSS | `css` with the old stylesheet  |
-| `page`   | Sets or removes one page                   | `page` with the old page       |
+| Op       | What it does                                  | Its inverse                    |
+| -------- | --------------------------------------------- | ------------------------------ |
+| `create` | Inserts one node                              | `delete` that node             |
+| `delete` | Removes a node and its whole subtree          | `create` every removed node    |
+| `set`    | Sets or clears one property                   | `set` it back to the old value |
+| `move`   | Gives a node a new parent and/or index        | `move` it back                 |
+| `page`   | Sets or removes one page                      | `page` with the old page       |
+| `token`  | Sets or removes one token's value in one mode | `token` with the old value     |
+| `mode`   | Sets or removes one mode                      | `mode` with the old mode       |
+| `css`    | Sets the old shared CSS, from before tokens   | `css` with the old stylesheet  |
 
-The **shared CSS** is one stylesheet for the whole design, so agents define classes like `.btn` and variables like `--brand` once instead of in every artboard. It and `page` are the only ops that target the design rather than a node, so `Op::id` is empty for them. The document holds it next to the nodes, and snapshots carry it as `css`, so it's saved, sent to viewers and undone like any edit. Every artboard renders with it inside a **cascade layer**, `finite-shared`. Styles outside any layer beat layered ones whatever their specificity, so an artboard's own `<style>` blocks and inline styles override the shared CSS, even a more specific shared selector. The cascade reverses that for `!important`, so a shared `!important` beats the artboard's. Leading `@import`s can't go inside a layer block, so they get `layer(finite-shared)` instead. The base styles sit in an earlier layer, `finite-base`, so the shared CSS can override them, like the font a shadow root's `all: initial` resets.
+`page`, `token`, `mode` and `css` target the design rather than a node, so `Op::id` is empty for them.
 
-`html::shared_style` writes the stylesheet out, and screenshots, the viewer's shadow roots and sandboxed iframes, and thumbnails all use it, the viewer through WebAssembly. It breaks up any `</style` so the CSS can't end its element, whichever way it reached the document. In a shadow root, `:root` matches nothing, so there it writes `:root` selectors as `:host`, and variables like `--brand` still reach the artboard. `set_shared_css` and the web API refuse CSS over 100,000 characters or with `</style` in it (`edit::set_css`).
+**Design tokens** are the design's CSS variables, like `--brand`, which any artboard can read with `var(--brand)` (`crates/design/src/tokens.rs`). A token is a CSS custom property with one value per **mode**, like Light and Dark, and each artboard renders in one mode, as frames do in Figma. The document holds tokens by name and modes by id, next to the pages, and snapshots carry them as `tokens` and `modes`, so they're saved, sent to viewers and undone like any edit. Each `token` op changes one token's value in one mode, and each `mode` op one mode. So two agents adding tokens at once don't undo each other's, and undoing one agent's Light value leaves another's Dark value alone. A token with no values left is gone.
 
-**Pages** group artboards, and the viewer shows one page at a time, so a design can keep components or drafts away from its screens. A page is a name and a fractional index, keyed by id; the document holds them next to the shared CSS, and snapshots carry them as `pages`. An artboard's `page` property names its page. A design without pages has one implicit page, `page-1` ("Page 1"), so older designs need no migration, and `create_page` first saves that page for real so its artboards stay on it. An artboard whose `page` is missing or names a page that's gone is on the first page (`Document::page_of`), so undoing someone's `create_page` never hides artboards. Each `page` op touches one page, so two agents adding pages at once don't undo each other's. `delete_page` deletes the page's artboards with it, and a design keeps at least one page. Placing an artboard automatically (`find_placement`, `duplicate`, `move_nodes` to the canvas, `move_to_page`) looks only at the artboards on its page. The viewer's renderer mounts only the shown page's artboards, and the pages sidebar on the left switches between them. Comment pins on other pages' artboards are hidden; picking one in the comments list switches to its page.
+A design without modes has one implicit mode, `mode-1` ("Default"), the way it has an implicit page. An artboard's `mode` property names its mode, and a missing mode, or one that's gone, means the first mode (`Document::mode_of`). A token without a value in a mode takes its value in the first mode, so a Dark mode needs only the values that change. `edit::set_modes` names the modes in order: the first name renames the first mode, and names past the last add modes. `delete_mode` takes that mode's values out of every token, and a design keeps at least one mode.
+
+`tokens::style` writes an artboard's tokens in its mode as one rule, `:host { --brand: …; }` in a shadow root and `:root { … }` in screenshots, sandboxed iframes and HTML export. It sits in a **cascade layer**, `finite-tokens`, after the base styles' `finite-base`. Styles outside any layer beat layered ones, so an artboard's own `<style>` or inline style that sets `--brand` wins over the token. A value that could end its declaration or the `<style>` it's in is refused: a `;`, `{`, `}` or `!` outside a string, an open bracket, string or comment, a line break, which ends a CSS string, or `</style` (`tokens::check_value`). `Document::try_apply` checks that too, so an op from an import or a journal can't get around it. Fonts come from the fonts installed where the artboard renders.
+
+Tokens replaced the **shared CSS**, one stylesheet every artboard rendered with. Classes in it let one artboard's markup depend on rules it didn't carry, and components now share repeated parts instead. The `css` op stays so journals from before tokens still replay. When a design with shared CSS loads, `Design::migrate_css` moves it once (`edit::migrate_css`). Each custom property in a top-level `:root` rule becomes a token in the first mode, up to the token limit. The rest, `@import`s included, goes into a `<style>` at the start of every artboard, inside the old `finite-shared` layer (`html::layered_style`), so artboards look as they did. The shared CSS rendered `:root` as `:host` in shadow roots, and one `<style>` now serves shadow roots and pages alike, so the rest's `:root` becomes `:is(:root, :host)`. An artboard imported from a file keeps its mode by name, the first mode included, which may not be the design's first mode. The migration commits as the `finite` actor and drops every saved undo step, since an old step could set the shared CSS again. Old `.finite` bundles and repo folders migrate the same way when they're imported.
+
+**Pages** group artboards, and the viewer shows one page at a time, so a design can keep components or drafts away from its screens. A page is a name and a fractional index, keyed by id; the document holds them next to the tokens, and snapshots carry them as `pages`. An artboard's `page` property names its page. A design without pages has one implicit page, `page-1` ("Page 1"), so older designs need no migration, and `create_page` first saves that page for real so its artboards stay on it. An artboard whose `page` is missing or names a page that's gone is on the first page (`Document::page_of`), so undoing someone's `create_page` never hides artboards. Each `page` op touches one page, so two agents adding pages at once don't undo each other's. `delete_page` deletes the page's artboards with it, and a design keeps at least one page. Placing an artboard automatically (`find_placement`, `duplicate`, `move_nodes` to the canvas, `move_to_page`) looks only at the artboards on its page. The viewer's renderer mounts only the shown page's artboards, and the pages sidebar on the left switches between them. Comment pins on other pages' artboards are hidden; picking one in the comments list switches to its page.
 
 `Document::apply` runs one op and returns its inverse, read from the document at that moment. This is the **command pattern**.
 
@@ -130,6 +139,8 @@ Say Alice and Bob are both agents on one design:
 5. Alice undoes. Her top entry, `set b.color = none`, targets a node that no longer exists, so it's skipped and dropped. Undo falls through to `delete a`.
 
 The test `undo_only_reverses_own_changes` in `design.rs` runs exactly this.
+
+A rewrite with `write_html` keeps the nodes its HTML names by `data-id`, so it doesn't break another agent's undo either. "Rewriting HTML in place" below covers it.
 
 ### One set of rules for server and browser
 
@@ -182,6 +193,37 @@ A test in `edit.rs` writes 1,000,000 levels on a thread with a Tokio worker's 2 
 
 A design also holds at most 100,000 nodes (`MAX_NODES`), and `write_html` and `duplicate` refuse edits that would pass it. When `write_html` replaces nodes, the ones it removes count against what it adds. For scale, the `big_design` example's 20,201-node artboard is already a big design. Without a limit, the largest `write_html` one MCP call can carry, 4 MB of `<i></i>`, made about 600,000 nodes. Its ops came to 92 MB of JSON, which the server journals and sends to every viewer, and an agent stuck in a loop could keep going. `cargo run --release -p finite-design --example big_design` now shows that write refused in about 0.2 seconds, most of it parsing.
 
+### Rewriting HTML in place
+
+An agent changes a section by reading it with `get_html`, editing the HTML and writing it back with `write_html` in mode `replace` or `replace-children`. That rewrite is a **keyed reconciliation**, like React's keyed lists: an element written with the `data-id` that `get_html` gave it keeps its node. `rewrite_in_place` and `reconcile` in `edit.rs` turn the rewrite into ops on the nodes already there. A changed value is a `set`, a reordered child a `move`, a new element a `create` and a missing one a `delete`. So the elements keep their ids, the comments pinned to them and every agent's undo steps on them.
+
+Before, a rewrite deleted every node and created new ones. A person's comment then pointed at a node that no longer existed, and another agent's undo said "Nothing to undo", because its step targeted a deleted node.
+
+A few rules decide what matches:
+
+- An element matches the child of the same parent with its `data-id` and tag. A tag change, such as `<button>` to `<a>`, makes a new node, since a node's kind is fixed. So does an element moved to another parent.
+- Text matches text in order, so changing a button's label is one `set`.
+- Children that kept their order keep their indexes (`keep_order` finds the longest run of them still in order), so a reorder moves only what moved.
+- When no element names a node there, the write deletes and creates, as before. So does a rewrite whose subtree holds a component's root, which is redefined by name instead (see Components).
+
+The parser keeps a `data-id` as `Fragment::source`. Inside an instance it already said which component node an element shows.
+
+#### Merging a stale rewrite
+
+Keeping ids isn't enough on its own. Say agent A reads a section, agent B rounds its button, and A writes back its copy with only the text changed. A's HTML has no `border-radius`, so a plain rewrite would clear B's. The server can't tell "A removed it" from "A never saw it" without knowing what A read.
+
+So `get_html` marks its root with a **read mark**, `data-read-at="57"`: the design's `seq` when it was read. Agents copy the HTML back with the attribute in it, which is why the mark is an attribute rather than a separate argument. `write_html` takes the oldest mark on any element in its HTML, and `Design::merge` runs a **three-way merge** on each `set` the rewrite would do, with the design at the mark as the base:
+
+- The HTML has the value the base had: A didn't change it, so B's value stays.
+- A changed it and another agent changed it since: theirs stays.
+- A changed it and A made the last change since: A's wins.
+
+Every value kept from another agent is named in the result, like "kept border-radius: 999px on button "Buy" #8679e5zm, which another agent set after you read it". The agent can set it again on purpose. Without a mark, the HTML wins, as with any other edit.
+
+Structure merges too. A child missing from the HTML is deleted only if it was under that parent at the mark. Say A reads a list with Free and Pro, B appends Enterprise, and A writes its copy back with Pro renamed. Enterprise isn't in A's HTML because it didn't exist when A read, so it stays where it is, and the result names it: "kept li #ltk7ccvx "Enterprise", which another agent added after you read it. Delete it if you meant to remove it." The same goes for an element another agent moved under that parent since the read ("moved here"). B can still undo its add. Elements A itself added or moved since follow A's HTML, and an element that was there at the read is deleted, even if someone moved it within the same parent since.
+
+The base comes from a **set log** (`SetLog` in `design.rs`): for each recent change, the old value of each property it set, and the parent before the change of each node it created, deleted or moved (none for a created node). Both come from the change's inverse. It holds the last 512 such changes, up to about 8 MB. It's kept in memory only, and loading a design or replaying its journal starts it empty. A mark older than what it holds can't be merged, so the result says the HTML replaced values others changed since the read, and that elements others added since were removed. Merging scans the log from the mark once, so it costs about as much as the changes since the read.
+
 ## Components
 
 Agents building several screens used to copy the same top bar into each one, and a later change meant editing every copy. A **component** fixes that. It's one definition, and its **instances** follow it, each changing only the values it **overrides**. `crates/design/src/components.rs` holds the rules.
@@ -222,19 +264,19 @@ Agents can't tell from the HTML which of these happened, so every edit's result 
 
 Agents mostly make components without a tool, by naming them in HTML. The first element written with `data-component="Top bar"` defines a component called "Top bar". A later element with the same name, in the same HTML or another call, becomes an instance of it. Its text, styles and attributes can differ, and the differences become its overrides, but its elements have to match. So an agent that pastes the same bar into each screen, with each screen's title, gets one component and two instances, for no extra call. `get_html` writes a component's root with its name, so HTML read back and written again means the same component.
 
-A component changes by being rewritten in place. `write_html` with `replace` or `replace-children` inside a component edits the nodes that are already there, wherever a new element has the same tag and layer name as an old one, in order (`rewrite_in_place` in `edit.rs`). Those nodes keep their ids, so the instances' overrides still find them. Before, a rewrite made new nodes, and every instance quietly lost its own title. A screen rewritten with its `data-component` element redefines the component under the same id, so its instances keep following it.
+A component changes by being rewritten in place. `write_html` with `replace` or `replace-children` inside a component edits the nodes that are already there. A new element matches an old one by its `data-id`, as in any rewrite, and otherwise by the same tag and layer name, in order (`rewrite_in_place` in `edit.rs`). Those nodes keep their ids, so the instances' overrides still find them. Before, a rewrite made new nodes, and every instance quietly lost its own title. A screen rewritten with its `data-component` element redefines the component under the same id, so its instances keep following it.
 
 `write_html` understands that marker: `<header data-instance-of="4biyjm26"></header>` writes an instance. HTML that `get_html` returned for an instance can be written back too. Elements inside it carry their virtual `data-id`, and where they differ from the component, the differences become overrides. An element without one isn't in the component, so `write_html` refuses the HTML rather than drop the element. `duplicate_nodes` copies an instance as an instance. It copies a component's root as a new instance of it, so a copied screen keeps following its top bar.
 
 The component tools and the instructions about them are on only with `FINITE_MCP_EXTRA=components`, until AX runs show they help (`mcp/component_tools.rs`). `create_component` marks an element and can replace its copies in place. Each copy has to be built the same way, and its differences become overrides. The other tools are `insert_instance`, `get_components` and `detach_instance`. Everything else here applies whether or not the tools are on.
 
-A `<style>` block styles only its own artboard, and that catches agents out. In the first AX runs of `screens-change`, one agent styled its top bar with classes from each artboard's `<style>`. Then it had to recolor three blocks after all. The design's shared CSS reaches every artboard, and a `<style>` inside the component is part of it, so every instance carries either one. `create_component` names the classes a component takes from `<style>` blocks outside it and suggests both, and the instructions say to style a component inline or with shared CSS.
+A `<style>` block styles only its own artboard, and that catches agents out. In the first AX runs of `screens-change`, one agent styled its top bar with classes from each artboard's `<style>`. Then it had to recolor three blocks after all. A `<style>` inside the component is part of it, so every instance carries it, and tokens reach every artboard. `create_component` names the classes a component takes from `<style>` blocks outside it and suggests a `<style>` inside it, or inline styles with tokens.
 
 ### Components in the viewer
 
 The browser runs the same expansion through WebAssembly. The renderer draws an instance from `Replica.expand`, and registers each element under its virtual id, so a comment can point inside an instance. An edit to a component changes what every instance shows. So while a change applies, the Rust replica notes the instances it touched (`components::affected`). After the change's last op, `DesignView.flush` draws those instances again. Sandboxed artboards export the expanded document, so they match screenshots too.
 
-People can't edit the design, but they still need to know which parts follow a component. If you hover over one, the canvas outlines the instance in dashes and names it, like "Instance of Top bar". Hovering over a component names it and counts its instances.
+People need to know which parts follow a component, since their edits inside an instance only override it. If you hover over one, the canvas outlines the instance in dashes and names it, like "Instance of Top bar". Hovering over a component names it and counts its instances.
 
 ## The server
 
@@ -292,7 +334,7 @@ On startup, the hub reads every stored design to build the list, then drops each
 - `format.rs` writes the compact outlines that tools like `get_tree_summary` return, and the layout notes under screenshots.
 - `search.rs` has `find_nodes` and `replace_values`, over `finite_design::search`. They shipped behind a flag first, until AX runs showed they help.
 - `component_tools.rs` has `create_component`, `insert_instance`, `get_components` and `detach_instance`, behind `FINITE_MCP_EXTRA=components` (see "Components").
-- `styles.rs` has `set_shared_css` and `get_shared_css`, for the design's shared CSS. They shipped behind `FINITE_MCP_EXTRA=shared-styles` until AX runs showed agents use them, and now every agent gets them. `get_html` notes when a design has shared CSS, since HTML copied elsewhere would lose it.
+- `tokens.rs` has `set_tokens`, `get_tokens` and `set_artboard_mode`, and `token_ops`, which the web API's token route uses too. `set_tokens` takes a token's one value, its values by mode name, or `null`, and `modes` to name the modes. `get_tokens` returns them in that shape. `create_artboard` takes a `mode`, and `get_basic_info` shows each artboard's mode and the `tokenCount`. `get_html` and `get_jsx` note when a design has tokens, since markup copied elsewhere would lose them.
 - `watch.rs` adds a layout note to `write_html` and `update_styles` results when `FINITE_MCP_EXTRA=layout`. An edit measures the artboards it touched in Chrome (the first 3, and the note says when there were more) and waits up to a second; `FINITE_LAYOUT_WAIT_MS` changes that. If the browser is slower (the first call takes about 2 s, since each measurement launches Chrome), the note goes on the agent's next result for that design instead. Measurements run one at a time, and one whose artboard was edited again meanwhile is skipped. Any other edit, `undo`, `redo`, `get_layout` and `get_screenshot` drop a waiting note; a call that fails leaves it.
 - `instructions.md` is the text agents read when they connect. It's plain Markdown, so you can edit the workflow without touching Rust. Keep it short: Claude Code keeps the first 4,096 characters of a server's instructions and silently drops the rest. A test checks that the instructions, with every extra group's section added, stay under 4,000.
 
@@ -351,7 +393,9 @@ Every viewer shows the names and notes agents write, so they're cut to a fixed l
 | `GET /api/designs/{id}/ws?epoch=…&since=…`                        | The same socket, resuming after a reconnect         |
 | `POST …/comments`, `…/replies`, `PATCH …/comments/{cid}`          | Comment, reply, resolve                             |
 | `PATCH …/comments/{cid}/messages/last`, `DELETE …/comments/{cid}` | Edit your newest message, delete a comment          |
-| `PUT /api/designs/{id}/css`                                       | Replace the shared CSS, as the person's own edit    |
+| `PUT /api/designs/{id}/tokens`                                    | Name the modes and set tokens, as the person's edit |
+| `DELETE /api/designs/{id}/modes/{mode}`                           | Delete a mode and its values                        |
+| `PUT /api/designs/{id}/artboards/mode`                            | Set the mode artboards render in                    |
 | `POST /api/designs/{id}/import?format=…&name=…&strict=…`          | Import a file as new artboards                      |
 | `GET /api/designs/{id}/export?format=…&artboard=…`                | Download the design, or one artboard, as a file     |
 | `GET /api/designs/{id}/imports`, `…/imports/{iid}/original`       | The import records, and an import's exact bytes     |
@@ -397,6 +441,61 @@ update_styles({ "designId": "k7jo11y14e",
 
 `delete_design` permanently removes a canvas's snapshot and journal, including its pages, comments and undo history. The hub serializes deletion with saves, marks the handle gone, disconnects viewers and sends the lobby a fresh design list. Pending comment waits return a not-found error, and active searches refresh their results. Pending saves and shutdown flushes skip the deleted handle. The router keeps its cached lists current with each design update, so a deletion preserves the other servers' changes. Shared stores check the fencing token before deletion. Content-addressed blobs stay in the store because other designs may use them. Deletion cannot be undone; `delete_nodes` remains the tool for deleting an artboard.
 
+## People edit too
+
+People select things on the canvas (a click, Shift-click, a selection box on the empty canvas, ⌘A), drag and resize them with snapping to what's around them, type into text with a double-click, set exact X, Y, W and H in a panel, delete, duplicate (⌘D), copy and paste (⌘C, ⌘V), group (⌘G, ⌘⇧G), restack (⌘], ⌘[, with ⌥ to the front or back), nudge with the arrow keys, and undo their own edits with ⌘Z. Space held down pans. A gesture becomes one change, made by the person's actor, `user:<id>`, with the same id their comments use. So it lands in its own undo history, and undo keeps the person's and the agents' work apart the way it keeps two agents' apart.
+
+A gesture doesn't send ops. It sends **user edits**, a small closed list in `crates/design/src/user_edit.rs`: `setPosition` for artboards, `setStyles` for inline styles, `place` to move nodes before a sibling, `delete`, `duplicate`, `group`, `ungroup` and `setText`. Each says where things end up, like "left is 132px" or "before #p9", never by how much they change. `user_edit::plan` turns them into ops with the edit commands agents use (`update_styles`, `move_before`, `set_position`, `delete`, `duplicate`, `group`, `ungroup`, `set_text`), then `components::redirect`, so a change inside an instance becomes an override, as it does for agents. A `place` names the sibling to go before rather than a position, so a sibling an agent adds meanwhile can't shift where the node lands, and if that sibling is gone, the node goes last.
+
+### One drag, end to end
+
+1. The person presses on an element. `Editor` (`apps/web/src/design/editing/editor.ts`) updates the selection and offers the press to each gesture in `gestures/index.ts`, in order. The first that takes it runs; a press none takes is left to the camera, which pans.
+2. Each animation frame, the gesture turns the pointer into user edits, and `DesignSession.draft` shows them. The **draft** applies in the browser's replica: `crates/wasm` runs `user_edit::plan` on the tab's document and applies the ops, so what the person sees is the real CSS result, with the layout reflowing around it. Nothing is sent or saved.
+3. On release, `DesignSession.commit` makes the draft a **mutation** with the tab's **stamp** (a random id per tab and a counter) and sends `{type: "mutate", author, stamp, edits}` on the design's WebSocket. The screen doesn't change, because the draft is already showing.
+4. `DesignHandle::mutate` takes the lock, plans the same edits against the server's document, commits them and broadcasts the change with the stamp. Every tab applies it as usual. The tab that sent it sees its stamp and drops its own copy.
+5. If the mutation changes nothing, or `plan` refuses it (its node is gone), the server sends `settled {mid, seq, error}` to that tab alone. The tab applies every change up to `seq` first, then takes the mutation off and says why.
+
+A person's undo and redo go the same way, as `{type: "undo", author, stamp}`. They aren't shown ahead, since the history is on the server.
+
+### The tab's own edits, and rebasing them
+
+The replica's document is the server's document with the tab's own edits on top: the mutations it sent that the server hasn't answered, then the draft. This is **client-side prediction with server reconciliation**, the model Replicache calls mutators: the same named edit runs in the browser to predict the result and on the server to decide it. When a change arrives while the tab has edits of its own, `Replica::receive` in `crates/wasm/src/replica.rs`:
+
+1. undoes the draft, then the pending mutations, newest first, with the inverses their ops returned, so the document is the server's again exactly;
+2. applies the server's ops, and drops the mutation the change's stamp names;
+3. plans the remaining mutations, then the draft, again on top. One that no longer plans is dropped, and a draft that no longer plans ends the gesture, with the reason, like `node "x" not found`.
+
+Each inverse runs against the document it was read from, so the rollback is exact, and the tab always ends with the server's ops, whatever ids or indexes its own prediction picked. A randomized test in `replica.rs`, `the_tab_ends_up_with_the_servers_document`, interleaves agent edits, drafts, mutations, answers and refusals in 200 orders and checks that the tab's document equals the server's whenever it has no edits of its own. With no edits of its own, which is every watching tab, `receive` is the old path. The rollback and replay patch the same few DOM nodes twice within one task, so nothing flickers.
+
+New nodes, like a duplicate's copies or a group, get the same ids in the tab and on the server: `user_edit::new_ids` makes them from the mutation's stamp, so a person can select a copy and keep editing it before the server answers. Only when the server's document already holds an id the tab's doesn't do the two differ, and then the server's change wins as always. A snapshot replaces the tab's edits: they may be in it already, and sending them again could do them twice. A resume, which replays every change missed, acks the mutations that landed, and the tab sends the rest again.
+
+### From a drag to CSS
+
+Only the browser can lay a design out: `node.styles` holds inline styles, and `<style>` blocks, classes and the shared CSS decide the rest. So `Renderer.measure` reads the computed style and box of an element, and `editing/geometry.ts` decides what a drag means, in pure functions tested without a DOM:
+
+| What's dragged                     | Edit                                                                                                                                                                                                                                                                                                                                                                       |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| An artboard, by its name or itself | `setPosition`, in whole canvas pixels.                                                                                                                                                                                                                                                                                                                                     |
+| `position: absolute` or `fixed`    | `setStyles` on its insets: `right` or `bottom` when the inline style pins it by those, otherwise `left` and `top`. Start from the computed insets, add the pointer's move divided by the zoom.                                                                                                                                                                             |
+| In the flow                        | `place`. While the pointer is over the node's parent, it goes before the first sibling the pointer comes before along the parent's flow (row, column, reversed, or row by row for grids and wrapping flex). Outside the parent, the innermost flex or grid container under the pointer takes it. Over the node itself it stays put, so it can't flicker between two slots. |
+| A resize handle                    | `setStyles` with `width` and `height` in pixels, `flex-grow: 0` for a flex item that grew, and the left or top inset when the left or top edge moves. An artboard's left or top edge moves it too.                                                                                                                                                                         |
+
+Two limits: insets a stylesheet sets aren't visible in the inline style, so a node pinned by a class's `right` moves by `left`; and the zoom is the only scale it accounts for, so a rotated or skewed element moves along the screen's axes, not its own. The rules live in TypeScript, not Rust, because only the browser runs them: the server never sees a pointer or a computed style. The document's rules, like a shorthand clearing its longhands, stay in `user_edit::plan`.
+
+Moves and resizes **snap**: an edge or centre within 6 screen pixels of an edge or centre of the node's parent or siblings (for an artboard, the page's other artboards) jumps onto it, and a red guide shows the line (`snap` in `geometry.ts`). Holding ⌘ or Ctrl places it freely. A double-click types into an element that holds nothing but text, in place and as plain text (`Renderer.editText`); Enter or a click elsewhere commits a `setText`, and Escape puts it back. The renderer draws the element's content from the document again either way, since the browser changed the DOM while the person typed. The X, Y, W and H panel (`Inspector.tsx`) makes the same edits a drag would: an artboard's X and Y are its canvas position, a positioned element's are its insets, and an element in the flow shows its place but can't be moved from there.
+
+Elements inside a sandboxed (script) artboard can't be measured or patched from the canvas, so people move and resize those artboards by their name label but not what's in them. A press inside the iframe stays the artboard's, as before.
+
+### Adding a gesture or an edit
+
+A new gesture is a file in `apps/web/src/design/editing/gestures/` that implements `Gesture` (`gesture.ts`): `begin(press, ctx)` takes a press or returns `null`, and its run's `move(pointer)` returns the user edits the pointer means. List it in `gestures/index.ts`. It never touches the DOM, the document or the server.
+
+A new kind of edit is a variant of `UserEdit` with its arm in `plan` and `label`, a member of the `UserEdit` schema in `apps/web/src/design/schema.ts`, and an example in `UserEdit::examples`. Regenerate `crates/design/fixtures/user_edits.json` with `FINITE_UPDATE_FIXTURES=1 cargo test -p finite-design --test user_edits`; `wire.test.ts` decodes it and fails when a schema member has no example.
+
+### What others see
+
+Other tabs and agents see one change per gesture, never the frames of a drag, so the journal and every undo history hold one step. An agent's edit to the node being dragged lands under the draft, and the draft plans again on top: a different property sticks, and for the same property the person's later release wins. An agent that deletes the node ends the gesture. People's changes show in the activity list under their name, and agents read the tree again before editing nodes they didn't create, as the MCP instructions say.
+
 ## The viewer
 
 The browser side lives in `apps/web/src/design`. It's plain TypeScript classes, and React only hosts them. Here they are in the order a message flows through them:
@@ -419,7 +518,7 @@ The browser side lives in `apps/web/src/design`. It's plain TypeScript classes, 
 
   To add a call, say an edit command for when people can edit, you add an export in `crates/wasm/src/lib.rs` and a method in `wasm.ts`. The inputs are JSON, so that's all the glue a new command needs.
 
-- **`Renderer`** (`renderer.ts`) draws each artboard and patches only the DOM nodes an op touched. An artboard normally renders inside a **shadow root**, which scopes its `<style>` blocks to it and keeps the app's CSS out. An artboard that contains a `<script>` renders in a **sandboxed iframe** instead (`sandbox="allow-scripts"`), with a content security policy that blocks network requests. Iframes can't be patched from outside, so they reload 150 ms after a burst of edits. Designs are view-only, so the renderer cancels clicks and submits on the whole canvas, and a design's links and forms do nothing. One case needs more: `submit` doesn't cross a shadow root's boundary, and a form with a single text field and no button submits on Enter without a click. So each shadow root cancels `submit` itself. The end-to-end test presses Enter in such a form and checks that nothing navigates.
+- **`Renderer`** (`renderer.ts`) draws each artboard and patches only the DOM nodes an op touched. An artboard normally renders inside a **shadow root**, which scopes its `<style>` blocks to it and keeps the app's CSS out. An artboard that contains a `<script>` renders in a **sandboxed iframe** instead (`sandbox="allow-scripts"`), with a content security policy that blocks network requests. Iframes can't be patched from outside, so they reload 150 ms after a burst of edits. A design's own buttons, links and forms mustn't act while people edit it, so the renderer cancels clicks and submits on the whole canvas. One case needs more: `submit` doesn't cross a shadow root's boundary, and a form with a single text field and no button submits on Enter without a click. So each shadow root cancels `submit` itself. The end-to-end test presses Enter in such a form and checks that nothing navigates.
 - **`Camera`** (`camera.ts`) handles pan and zoom with one CSS transform on the canvas. It also converts page coordinates to canvas coordinates (`toWorld`).
 
 How big a design the canvas handles: `vp run bench` measures it in headless Chrome against a release server. On a Mac, a design of 90,480 nodes across 240 artboards draws in about 670 ms and pans at about 58 frames per second when fitted to the window, so every artboard is in view.
@@ -480,7 +579,7 @@ One trap if you write such a test: a paused clock jumps to the next timer whenev
 
 ## Comments
 
-You can't edit a design yourself, but you can pin comments, and agents act on them. A comment is a thread of messages anchored to an artboard and to the element the person clicked.
+Besides editing a design yourself, you can pin comments, and agents act on them. A comment is a thread of messages anchored to an artboard and to the element the person clicked.
 
 Here's what happened in the demo you saw:
 
@@ -501,7 +600,7 @@ Here's what happened in the demo you saw:
 
 A resolved pin leaves the canvas at once, unless its thread is open. The server still stamps `resolvedAt` when a comment goes from open to resolved, though no viewer reads it now. The **Comments** button in the top bar opens a side panel that lists every comment, open and resolved, newest first. Picking one centers its pin and opens the thread, even after the pin has left the canvas.
 
-Next to it, **Import** takes an `.html` or `.finite` file and **Export** downloads one artboard as HTML or the whole design as a `.finite` bundle (`components/Transfer.tsx`). Both go through the routes in [Import and export](import-export.md); the new artboards arrive over the WebSocket like any other change.
+Next to it, **Import** takes an `.html` or `.finite` file and **Export** downloads one artboard as HTML or the whole design as a `.finite` bundle (`components/Transfer.tsx`). Both go through the routes in [Import and export](import-export.md); the new artboards arrive over the WebSocket like any other change. An imported HTML file grows to fit its content, and a whole page's rules for `html`, `body` and `:root` are rewritten to select the artboard, which became both elements (see "Whole pages" there).
 
 You can edit your own message while it's the newest in its thread (`Design::edit_message`). Once an agent answers, the message is part of the record and stays as it was. `get_comments` marks an edited message with `edited: true`. Anyone can delete a comment with its whole thread (`Design::delete_comment`). The hub broadcasts `commentDeleted` and journals a `CommentDeleted` record. A REST answer for that comment can still arrive after the delete, so `DesignSession` remembers deleted ids and ignores late copies.
 
@@ -790,35 +889,41 @@ The guide explains each limit where it applies. This is the list in one place. M
 
 ## Words used in the code
 
-| Word          | Meaning                                                                          |
-| ------------- | -------------------------------------------------------------------------------- |
-| Design        | One canvas. Also called a canvas in the MCP tools.                               |
-| Artboard      | A top-level node: a fixed-size frame placed on the canvas.                       |
-| Node          | One element or text node.                                                        |
-| Op            | The smallest edit: `create`, `delete`, `set` or `move`.                          |
-| Change        | The ops from one commit, undo or redo, with a `seq`, actor and label.            |
-| Actor         | Whoever made a change: an agent, by its `X-Finite-Agent` name or its session.    |
-| Snapshot      | Everything needed to rebuild a design. Saved to disk and sent on connect.        |
-| Journal       | The records appended to `<id>.log` since the last snapshot.                      |
-| Compaction    | Writing a fresh snapshot and deleting the journal, every 1,000 records or 16 MB. |
-| Replica       | The browser's copy of a design: the Rust document in WebAssembly, plus a cache.  |
-| WebAssembly   | A binary format browsers run. `crates/wasm` compiles the document model to it.   |
-| Golden file   | A recorded expected result that a test compares against, like `apply.json`.      |
-| Presence      | "Agent X is working on these nodes", shown as a badge.                           |
-| Hub           | The server's index of designs, with the ones in use loaded in memory.            |
-| Room          | The model for loading: a design is in memory only while someone uses it.         |
-| Long poll     | A request that stays open until there's news, like `wait_for_comments`.          |
-| Epoch         | One load of a design on a server. A viewer can resume only within the same one.  |
-| Revision      | A comment's `rev`: it goes up with each change, so the higher copy is newer.     |
-| Owner         | The one server that holds a design, picked by hashing its id over the servers.   |
-| Heartbeat     | The time a server writes to the shared store every 2 s, to show it's alive.      |
-| Lease         | How long a heartbeat, or a claim on a design, counts. 10 s by default.           |
-| Claim         | Taking a design's lease before loading it. It raises the design's fencing token. |
-| Fencing token | The design's `epoch`. The store refuses a write with an older one.               |
-| Fenced        | What a stale server's write gets: another server took the design over.           |
-| Router        | `finite-server router`: the front door that sends requests to each owner.        |
-| Component     | A subtree marked `component`: one definition that instances show.                |
-| Instance      | A node with `instanceOf`: it shows its component, with its own overrides.        |
-| Override      | A value one instance shows differently, keyed by path and property.              |
-| Virtual id    | `instance/node`: a node shown inside an instance, which isn't in the document.   |
-| Detach        | Turning an instance into a plain copy of what it shows.                          |
+| Word          | Meaning                                                                           |
+| ------------- | --------------------------------------------------------------------------------- |
+| Design        | One canvas. Also called a canvas in the MCP tools.                                |
+| Artboard      | A top-level node: a fixed-size frame placed on the canvas.                        |
+| Node          | One element or text node.                                                         |
+| Op            | The smallest edit: `create`, `delete`, `set` or `move`.                           |
+| Change        | The ops from one commit, undo or redo, with a `seq`, actor and label.             |
+| Actor         | Whoever made a change: an agent, by its `X-Finite-Agent` name or its session.     |
+| Snapshot      | Everything needed to rebuild a design. Saved to disk and sent on connect.         |
+| Journal       | The records appended to `<id>.log` since the last snapshot.                       |
+| Compaction    | Writing a fresh snapshot and deleting the journal, every 1,000 records or 16 MB.  |
+| Replica       | The browser's copy of a design: the Rust document in WebAssembly, plus a cache.   |
+| WebAssembly   | A binary format browsers run. `crates/wasm` compiles the document model to it.    |
+| Golden file   | A recorded expected result that a test compares against, like `apply.json`.       |
+| Presence      | "Agent X is working on these nodes", shown as a badge.                            |
+| Hub           | The server's index of designs, with the ones in use loaded in memory.             |
+| Room          | The model for loading: a design is in memory only while someone uses it.          |
+| Long poll     | A request that stays open until there's news, like `wait_for_comments`.           |
+| Epoch         | One load of a design on a server. A viewer can resume only within the same one.   |
+| Revision      | A comment's `rev`: it goes up with each change, so the higher copy is newer.      |
+| Owner         | The one server that holds a design, picked by hashing its id over the servers.    |
+| Heartbeat     | The time a server writes to the shared store every 2 s, to show it's alive.       |
+| Lease         | How long a heartbeat, or a claim on a design, counts. 10 s by default.            |
+| Claim         | Taking a design's lease before loading it. It raises the design's fencing token.  |
+| Fencing token | The design's `epoch`. The store refuses a write with an older one.                |
+| Fenced        | What a stale server's write gets: another server took the design over.            |
+| Router        | `finite-server router`: the front door that sends requests to each owner.         |
+| Token         | A design's CSS variable, like `--brand`, with a value per mode.                   |
+| Mode          | A set of token values, like Light or Dark. Each artboard renders in one.          |
+| Component     | A subtree marked `component`: one definition that instances show.                 |
+| Instance      | A node with `instanceOf`: it shows its component, with its own overrides.         |
+| Override      | A value one instance shows differently, keyed by path and property.               |
+| Virtual id    | `instance/node`: a node shown inside an instance, which isn't in the document.    |
+| User edit     | One thing a person changes on the canvas (`user_edit::UserEdit`), sent in a list. |
+| Mutation      | A gesture's user edits, sent from a tab as one undo step, with the tab's stamp.   |
+| Draft         | The edits of a gesture in progress, shown in the browser and never sent.          |
+| Stamp         | A tab's random id and counter, which marks the change its mutation made.          |
+| Detach        | Turning an instance into a plain copy of what it shows.                           |

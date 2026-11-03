@@ -21,6 +21,24 @@ import { idAfter } from "../mcp.mjs";
  * styles, so a check can test what a person would see. It doesn't depend on
  * the server build under test.
  */
+/**
+ * The design's tokens as CSS for each artboard, in its mode, as Finite
+ * renders them: a function from an artboard's id to a `:root` rule.
+ */
+async function tokenCss(mcp, design) {
+  const listed = await mcp.callRaw("get_tokens", { designId: design }).catch(() => null);
+  if (!listed || listed.isError) return () => "";
+  const { modes, tokens, artboardModes = {} } = JSON.parse(listed.content?.[0]?.text ?? "{}");
+  return (board) => {
+    const mode = Object.keys(artboardModes).find((m) => artboardModes[m].includes(board));
+    const rules = Object.entries(tokens).map(([name, value]) => {
+      const v = typeof value === "string" ? value : (value[mode] ?? value[modes[0]]);
+      return v === undefined ? "" : `${name}: ${v};`;
+    });
+    return `:root { ${rules.join(" ")} }`;
+  };
+}
+
 async function rendered(html, width, height, css = "") {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "finite-ax-check-"));
   const file = path.join(dir, "page.html");
@@ -596,15 +614,11 @@ setInterval(next, 3000);
       `Make that change on all screens and check it. Stop when you're done.`,
     async check(mcp, ctx) {
       const info = JSON.parse(await mcp.call("get_basic_info", { designId: ctx.design }));
-      const shared = await mcp
-        .callRaw("get_shared_css", { designId: ctx.design })
-        .catch(() => null);
-      const css = shared && !shared.isError ? (shared.content?.[0]?.text ?? "") : "";
-      const sharedCss = css.startsWith("This design has no shared CSS") ? "" : css;
+      const tokens = await tokenCss(mcp, ctx.design);
       let green = 0;
       for (const a of info.artboards) {
         const html = await mcp.call("get_html", { designId: ctx.design, nodeId: a.id });
-        const els = await rendered(html, a.width, a.height, sharedCss);
+        const els = await rendered(html, a.width, a.height, tokens(a.id));
         const bar = els.find(
           (e) => e.background === "rgb(20, 83, 45)" && e.y < 160 && e.width >= a.width * 0.8,
         );
@@ -619,7 +633,7 @@ setInterval(next, 3000);
     },
   },
   // screens-change with a change to the bar's elements, not just its colors,
-  // which shared CSS alone can't make in one place.
+  // which tokens alone can't make in one place.
   "screens-restructure": {
     workdir: "none",
     seed: async (mcp) => ({
@@ -636,17 +650,13 @@ setInterval(next, 3000);
       `and its title should be bold. Each screen keeps its own title. Make the change on all screens and check it. Stop when you're done.`,
     async check(mcp, ctx) {
       const info = JSON.parse(await mcp.call("get_basic_info", { designId: ctx.design }));
-      const shared = await mcp
-        .callRaw("get_shared_css", { designId: ctx.design })
-        .catch(() => null);
-      const css = shared && !shared.isError ? (shared.content?.[0]?.text ?? "") : "";
-      const sharedCss = css.startsWith("This design has no shared CSS") ? "" : css;
+      const tokens = await tokenCss(mcp, ctx.design);
       const titles = ["Welcome", "Pick your plants", "All set"];
       let done = 0;
       const notes = [];
       for (const a of info.artboards) {
         const html = await mcp.call("get_html", { designId: ctx.design, nodeId: a.id });
-        const top = (await rendered(html, a.width, a.height, sharedCss)).filter(
+        const top = (await rendered(html, a.width, a.height, tokens(a.id))).filter(
           (e) => e.visible && e.y < 140,
         );
         const has = {

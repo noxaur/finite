@@ -1,4 +1,4 @@
-import type { Node, Op, Snapshot } from "./schema";
+import type { Node, Op, Snapshot, TokenValues, UserEdit } from "./schema";
 import { designModel, type WasmDocument } from "./wasm";
 
 /** What a node is to components, from `components::info` in Rust. */
@@ -29,14 +29,39 @@ export type Applied =
     }
   | { readonly op: "set"; readonly node: Node; readonly key: string }
   | { readonly op: "move"; readonly node: Node; readonly from: string | null }
-  | { readonly op: "css"; readonly css: string | null }
+  /** A token or mode changed; `Replica.tokens` has the new table. */
+  | { readonly op: "tokens" }
   /** A page was added, renamed, reordered or removed; `Replica.pages` has the new list. */
   | { readonly op: "page" };
+
+/** The design's tokens: its modes in order, and each token's values by mode id. */
+export interface TokenTable {
+  readonly modes: ReadonlyArray<{ readonly id: string; readonly name: string }>;
+  readonly tokens: Readonly<Record<string, TokenValues>>;
+}
 
 /** A page as the viewer lists it. */
 export interface PageEntry {
   readonly id: string;
   readonly name: string;
+}
+
+/** What a call on the tab's own edits did, besides patching the document. */
+export interface LocalOutcome {
+  /** Why the edits asked for couldn't be planned, like a move inside an instance. */
+  readonly error: string | null;
+  /** The tab's mutations that no longer plan after a change, so they were dropped. */
+  readonly dropped: ReadonlyArray<number>;
+  /** Why the gesture's draft no longer plans after a change, like its node being deleted. */
+  readonly draftLost: string | null;
+}
+
+/** `Outcome` in `crates/wasm/src/replica.rs`. */
+interface RawOutcome {
+  readonly patches: ReadonlyArray<{ readonly op: Op; readonly touched: Touched }>;
+  readonly error?: string;
+  readonly dropped?: number[];
+  readonly draftLost?: string;
 }
 
 /** What the Rust `Replica` in `crates/wasm` says an op touched (`null`: it didn't apply). */
@@ -50,7 +75,9 @@ type Touched =
       readonly from: string | null;
       readonly before: string | null;
     }
-  | { readonly op: "css"; readonly css: string | null }
+  | { readonly op: "css" }
+  | { readonly op: "token" }
+  | { readonly op: "mode" }
   | { readonly op: "page" }
   | null;
 
@@ -69,8 +96,11 @@ type Touched =
  * cache then catches up one op at a time, so a caller that patches the DOM
  * after each op reads the tree as it was right after that op.
  *
- * When users can edit, local ops will apply here first (optimistically) and be
- * rebased on the server's changes.
+ * A person's own edits apply here before the server confirms them: the
+ * gesture in progress as a draft, then each sent mutation until its change
+ * comes back. The Rust side takes them off before each server change and
+ * plans them again on top (`draft`, `propose`, `receive`, `settle`), and
+ * says which ops that applied, so the cache follows as it does for changes.
  */
 export class Replica {
   readonly nodes = new Map<string, Node>();
@@ -80,8 +110,8 @@ export class Replica {
   private lastFound = 0;
   private readonly doc: WasmDocument = designModel().newDocument();
   seq = 0;
-  /** The design's shared CSS, which every artboard renders with. */
-  css: string | null = null;
+  /** The design's tokens and modes, which every artboard renders with. */
+  tokens: TokenTable = { modes: [], tokens: {} };
   /** The pages in order, never empty: a design without pages has its implicit first page. */
   pages: ReadonlyArray<PageEntry> = [];
 
@@ -94,23 +124,47 @@ export class Replica {
     for (const node of snapshot.nodes) this.nodes.set(node.id, node);
     for (const [parent, ids] of order) this.childIds.set(parent, ids);
     this.seq = snapshot.seq;
-    // Loading clears the stylesheet and pages, so set them as the server would.
-    this.css = null;
+    // Loading clears the pages, tokens and modes, so set them as the server would.
     this.applyAll([
-      { op: "css", css: snapshot.css ?? null },
       ...Object.entries(snapshot.pages ?? {}).map(([id, page]) => ({
         op: "page" as const,
         id,
         page,
       })),
+      ...Object.entries(snapshot.modes ?? {}).map(([id, mode]) => ({
+        op: "mode" as const,
+        id,
+        mode,
+      })),
+      ...Object.entries(snapshot.tokens ?? {}).flatMap(([name, values]) =>
+        Object.entries(values).map(([modeId, value]) => ({
+          op: "token" as const,
+          name,
+          modeId,
+          value,
+        })),
+      ),
     ]);
     this.pages = JSON.parse(this.doc.pages()) as PageEntry[];
+    this.tokens = JSON.parse(this.doc.tokens()) as TokenTable;
   }
 
   /** The id of the page an artboard is on: its own page if that exists, else the first page. */
   pageOf(board: Node): string {
     const { page } = board;
     return page !== undefined && this.pages.some((p) => p.id === page) ? page : this.pages[0]!.id;
+  }
+
+  /** The id of the mode an artboard renders in: its own mode if that exists, else the first mode. */
+  modeOf(board: Node): string {
+    const { mode } = board;
+    const { modes } = this.tokens;
+    return mode !== undefined && modes.some((m) => m.id === mode) ? mode : (modes[0]?.id ?? "");
+  }
+
+  /** Artboard `id`'s tokens in its mode, as a `<style>`'s text; empty without tokens. */
+  tokenStyle(id: string, shadow: boolean): string {
+    return this.doc.tokenStyle(id, shadow);
   }
 
   /** Frees the WebAssembly side. The replica can't be used afterwards. */
@@ -189,6 +243,72 @@ export class Replica {
     return JSON.parse(this.doc.componentInfo(id)) as ComponentInfo | null;
   }
 
+  /** Whether the tab has a draft, or mutations the server hasn't answered. */
+  get hasLocal(): boolean {
+    return this.doc.hasLocal();
+  }
+
+  /** Names the tab in its stamps, so new nodes get the ids the server will give them. */
+  setClient(client: string) {
+    this.doc.setClient(client);
+  }
+
+  /**
+   * Replaces the gesture's draft with `edits`, planned as the server would,
+   * or clears it. `seed` is the mutation id it will be sent as.
+   */
+  draft(
+    seed: number,
+    edits: ReadonlyArray<UserEdit> | null,
+    each?: (applied: Applied) => void,
+  ): LocalOutcome {
+    return this.follows(this.doc.draft(seed, JSON.stringify(edits)), each);
+  }
+
+  /** Makes `edits` the tab's mutation `mid`. When they're the draft's, nothing changes on screen. */
+  propose(
+    mid: number,
+    edits: ReadonlyArray<UserEdit>,
+    each?: (applied: Applied) => void,
+  ): LocalOutcome {
+    return this.follows(this.doc.propose(mid, JSON.stringify(edits)), each);
+  }
+
+  /**
+   * Applies a server change. `mine` is its mutation id when this tab sent
+   * it. Without edits of its own, this is `applyAll`.
+   */
+  receive(
+    ops: ReadonlyArray<Op>,
+    mine: number | null,
+    each?: (applied: Applied) => void,
+  ): LocalOutcome {
+    if (!this.hasLocal) {
+      this.applyAll(ops, each);
+      return { error: null, dropped: [], draftLost: null };
+    }
+    return this.follows(this.doc.receive(JSON.stringify(ops), mine ?? 0), each);
+  }
+
+  /** Drops mutation `mid`, which the server answered without a change. */
+  settle(mid: number, each?: (applied: Applied) => void): LocalOutcome {
+    return this.follows(this.doc.settle(mid), each);
+  }
+
+  /** Brings the cache up to date with what a local-layer call applied. */
+  private follows(json: string, each?: (applied: Applied) => void): LocalOutcome {
+    const outcome = JSON.parse(json) as RawOutcome;
+    for (const { op, touched } of outcome.patches) {
+      const applied = this.follow(op, touched);
+      if (applied) each?.(applied);
+    }
+    return {
+      error: outcome.error ?? null,
+      dropped: outcome.dropped ?? [],
+      draftLost: outcome.draftLost ?? null,
+    };
+  }
+
   /** Applies one op. Returns `null` when it doesn't apply, as on the server. */
   apply(op: Op): Applied | null {
     return this.applyAll([op])[0] ?? null;
@@ -238,9 +358,12 @@ export class Replica {
         this.nodes.set(touched.node.id, touched.node);
         this.link(touched.node, touched.before);
         return { op: "move", node: touched.node, from: touched.from };
+      // The old shared CSS draws nothing, but refreshing the tokens is harmless.
       case "css":
-        this.css = touched.css;
-        return { op: "css", css: touched.css };
+      case "token":
+      case "mode":
+        this.tokens = JSON.parse(this.doc.tokens()) as TokenTable;
+        return { op: "tokens" };
       case "page":
         this.pages = JSON.parse(this.doc.pages()) as PageEntry[];
         return { op: "page" };

@@ -54,8 +54,8 @@ interface Frame {
   readonly shadow: ShadowRoot | null;
   /** Holds `COMMENTING_CSS` while in comment mode. */
   readonly commentStyle: HTMLStyleElement | null;
-  /** Holds the design's shared CSS, before the artboard's own styles. */
-  readonly sharedStyle: HTMLStyleElement | null;
+  /** Holds the design's tokens in the artboard's mode, before its own styles. */
+  readonly tokenStyle: HTMLStyleElement | null;
   /** Set for artboards with scripts, rendered in a sandboxed iframe. */
   readonly iframe: HTMLIFrameElement | null;
   /**
@@ -101,6 +101,34 @@ export interface ForwardedWheel {
 }
 
 /** The artboard, and the deepest element in it, under a point. */
+/**
+ * What the live DOM says about one drawn element, which a person's edit
+ * needs to turn a drag into CSS: the document only holds inline styles,
+ * and the cascade (`<style>` blocks, classes, the shared CSS) decides the rest.
+ */
+export interface Measured {
+  /** The border box, in page pixels. */
+  readonly rect: DOMRect;
+  /** Page pixels per CSS pixel of the artboard: the camera's zoom. */
+  readonly scale: number;
+  readonly position: string;
+  readonly display: string;
+  readonly flexDirection: string;
+  readonly flexWrap: string;
+  readonly flexGrow: number;
+  /**
+   * With `box-sizing: content-box`, the padding and borders across and
+   * down, in CSS pixels, which `width` and `height` leave out. 0 for `border-box`.
+   */
+  readonly frameX: number;
+  readonly frameY: number;
+  /** Resolved insets in CSS pixels, `NaN` for `auto`. */
+  readonly left: number;
+  readonly top: number;
+  readonly right: number;
+  readonly bottom: number;
+}
+
 export interface Hit {
   readonly artboardId: string;
   /** For a sandboxed artboard, the artboard itself until its iframe answers. */
@@ -148,6 +176,9 @@ export class Renderer {
   private readonly virtuals = new Map<string, string[]>();
   private working: ReadonlyMap<string, string> = new Map();
   private commenting = false;
+  /** The element being typed into (`editText`), and what ends that, keeping the text. */
+  private editing: HTMLElement | null = null;
+  private finishText: (() => void) | null = null;
   /** The page shown, or `null` for the first page. Only its artboards are mounted. */
   private page: string | null = null;
   /** Hides artboards outside the view. A hidden sandboxed one has its iframe unloaded. */
@@ -313,13 +344,14 @@ export class Renderer {
       if (applied.node.parent === null) this.syncBoard(applied.node, this.shownPage());
       return;
     }
-    if (applied.op === "css") {
-      // Every artboard uses it: restyle shadow roots, reload sandboxed ones.
-      const css = this.sharedCss();
-      for (const [id, frame] of this.frames) {
-        if (frame.sharedStyle) frame.sharedStyle.textContent = css;
-        else this.scheduleReload(id, frame);
-      }
+    if (applied.op === "tokens") {
+      // Every artboard uses them: restyle shadow roots, reload sandboxed ones.
+      for (const [id, frame] of this.frames) this.restyleTokens(id, frame);
+      return;
+    }
+    if (applied.op === "set" && applied.key === "mode") {
+      const frame = this.frames.get(applied.node.id);
+      if (frame) this.restyleTokens(applied.node.id, frame);
       return;
     }
     const boards = this.touchedBoards(applied);
@@ -495,6 +527,115 @@ export class Renderer {
     return frame.content.getBoundingClientRect();
   }
 
+  /**
+   * Measures an element drawn in a shadow-root artboard, or an artboard
+   * itself. `null` for text, for what's inside a sandboxed artboard (its
+   * iframe can't be read from here) and for hidden artboards.
+   */
+  measure(id: string): Measured | null {
+    const board = this.replica.artboardOf(id);
+    const frame = board && this.frames.get(board.id);
+    if (!frame || this.culler.isCulled(board.id)) return null;
+    // A sandboxed artboard's box is its iframe's, which is drawn at the artboard's size.
+    const el = frame.iframe ? (id === board.id ? frame.iframe : null) : this.elements.get(id);
+    if (!(el instanceof Element) || !el.isConnected) return null;
+    const css = getComputedStyle(el);
+    const inset = (value: string) => (value.endsWith("px") ? parseFloat(value) : NaN);
+    const width = frame.root.offsetWidth;
+    const sum = (...values: string[]) => values.reduce((n, v) => n + (parseFloat(v) || 0), 0);
+    const content = css.boxSizing === "content-box";
+    return {
+      rect: el.getBoundingClientRect(),
+      scale: width > 0 ? frame.root.getBoundingClientRect().width / width : 1,
+      // An artboard sits on the canvas by `x` and `y`, never by insets.
+      position: id === board.id ? "static" : css.position,
+      display: css.display,
+      flexDirection: css.flexDirection,
+      flexWrap: css.flexWrap,
+      flexGrow: parseFloat(css.flexGrow) || 0,
+      frameX: content
+        ? sum(css.paddingLeft, css.paddingRight, css.borderLeftWidth, css.borderRightWidth)
+        : 0,
+      frameY: content
+        ? sum(css.paddingTop, css.paddingBottom, css.borderTopWidth, css.borderBottomWidth)
+        : 0,
+      left: inset(css.left),
+      top: inset(css.top),
+      right: inset(css.right),
+      bottom: inset(css.bottom),
+    };
+  }
+
+  /**
+   * Lets the person type into the text of element `id`, in place, as
+   * plain text. Enter or leaving it calls `done` with the text, and
+   * Escape with `null`. Either way the element's content is drawn from
+   * the document again, so what the browser did while typing never
+   * lingers. Returns whether it started: only an element in a shadow-root
+   * artboard that holds nothing but text can be typed into, and not one
+   * inside an instance, which its component draws.
+   */
+  editText(id: string, done: (text: string | null) => void): boolean {
+    const el = this.elements.get(id);
+    const board = this.replica.artboardOf(id);
+    if (!(el instanceof HTMLElement) || !board || this.frames.get(board.id)?.iframe) return false;
+    if (id.includes("/") || this.replica.get(id)?.instanceOf !== undefined) return false;
+    if (![...el.childNodes].every((child) => child instanceof Text)) return false;
+    const before = el.textContent ?? "";
+    const stop = new AbortController();
+    const finish = (keep: boolean) => {
+      stop.abort();
+      const text = el.textContent ?? "";
+      el.removeAttribute("contenteditable");
+      this.editing = null;
+      this.finishText = null;
+      // Typing changed the DOM behind the renderer's back; draw it from the document.
+      const children = this.replica.children(id);
+      for (const child of children) this.elements.delete(child.id);
+      el.replaceChildren(...children.map((child) => this.build(child, null, false)));
+      done(keep && text !== before ? text : null);
+    };
+    el.contentEditable = "plaintext-only";
+    this.editing = el;
+    this.finishText = () => finish(true);
+    const { signal } = stop;
+    el.addEventListener(
+      "keydown",
+      (e) => {
+        // The canvas's shortcuts would take letters typed here.
+        e.stopPropagation();
+        if (e.key === "Escape") finish(false);
+        else if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          finish(true);
+        }
+      },
+      { signal },
+    );
+    el.addEventListener("blur", () => finish(true), { signal });
+    el.focus();
+    const selection = window.getSelection();
+    selection?.selectAllChildren(el);
+    return true;
+  }
+
+  /** Keeps what was typed into the text being edited, and stops editing it. */
+  finishTextEdit() {
+    this.finishText?.();
+  }
+
+  /** Whether `target` is the element being typed into. */
+  isEditing(target: EventTarget | null): boolean {
+    return this.editing !== null && target === this.editing;
+  }
+
+  /** The artboard whose name label `target` is, if it's one. People drag artboards by it. */
+  labelOf(target: EventTarget | null): string | null {
+    if (!(target instanceof Element)) return null;
+    for (const [id, frame] of this.frames) if (frame.label.contains(target)) return id;
+    return null;
+  }
+
   /** In comment mode, clicks over sandboxed artboards go to the canvas instead of the artboard. */
   setCommenting(commenting: boolean) {
     this.commenting = commenting;
@@ -536,7 +677,7 @@ export class Renderer {
   }
 
   /** Artboards an op changed: where its node is now, and where it was before. */
-  private touchedBoards(applied: Exclude<Applied, { op: "css" | "page" }>): Set<string> {
+  private touchedBoards(applied: Exclude<Applied, { op: "tokens" | "page" }>): Set<string> {
     const boards = new Set<string>();
     const add = (id: string | null) => {
       const board = id === null ? undefined : this.replica.artboardOf(id);
@@ -548,7 +689,7 @@ export class Renderer {
     return boards;
   }
 
-  private patch(applied: Exclude<Applied, { op: "css" | "page" }>) {
+  private patch(applied: Exclude<Applied, { op: "tokens" | "page" }>) {
     switch (applied.op) {
       case "create":
         this.mount(applied.node);
@@ -747,7 +888,7 @@ export class Renderer {
         content,
         shadow: null,
         commentStyle: null,
-        sharedStyle: null,
+        tokenStyle: null,
         iframe,
         awaitingSize: size.width === null || size.height === null,
         rects: new Map(),
@@ -765,14 +906,14 @@ export class Renderer {
     shadow.addEventListener("submit", (event) => event.preventDefault(), {
       signal: this.abort.signal,
     });
-    // In a layer, so the shared CSS can set what `HOST_CSS` resets, like
-    // the font on `:root`.
+    // In a layer, so the artboard's styles can set what `HOST_CSS` resets,
+    // like the font on `:root`.
     const base = document.createElement("style");
     base.textContent = `@layer ${BASE_LAYER} { ${HOST_CSS} ${designModel().baseCss} }`;
-    const sharedStyle = document.createElement("style");
-    sharedStyle.textContent = this.sharedCss();
+    const tokenStyle = document.createElement("style");
+    tokenStyle.textContent = this.replica.tokenStyle(node.id, true);
     const commentStyle = document.createElement("style");
-    shadow.append(base, sharedStyle, commentStyle);
+    shadow.append(base, tokenStyle, commentStyle);
     content.append(host);
     return {
       root,
@@ -781,17 +922,17 @@ export class Renderer {
       content,
       shadow,
       commentStyle,
-      sharedStyle,
+      tokenStyle,
       iframe: null,
       rects: new Map(),
       pendingRects: new Set(),
     };
   }
 
-  /** The shared CSS as a shadow root's `<style>` text, or nothing. */
-  private sharedCss(): string {
-    const { css } = this.replica;
-    return css === null ? "" : designModel().sharedStyle(css, true);
+  /** Gives artboard `id` its tokens as they are now, in its mode. */
+  private restyleTokens(id: string, frame: Frame) {
+    if (frame.tokenStyle) frame.tokenStyle.textContent = this.replica.tokenStyle(id, true);
+    else this.scheduleReload(id, frame);
   }
 
   private scheduleReload(id: string, frame: Frame) {

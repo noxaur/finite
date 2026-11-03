@@ -78,6 +78,7 @@ pub fn read(input: &Input<'_>) -> Result<Imported, Error> {
         format: "figma",
         input_kind: format!("figma-plugin-payload v{}", PAYLOAD.version),
         boards,
+        tokens: Default::default(),
         css: None,
         blobs: blobs.into_iter().map(|(_, bytes)| bytes).collect(),
         dependencies,
@@ -201,10 +202,12 @@ impl Walk<'_> {
         }
         Board {
             page: None,
+            mode: None,
             name,
             width,
             height,
             auto_height: false,
+            look_in_css: false,
             position,
             styles,
             attrs: BTreeMap::new(),

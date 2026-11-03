@@ -28,8 +28,9 @@ pub struct Fragment {
     pub instance_of: Option<NodeId>,
     /// For an instance, the values it changes (see [`Node::overrides`]).
     pub overrides: BTreeMap<String, Option<String>>,
-    /// The [`ID_ATTR`] it was written with, kept only inside an instance,
-    /// where it says which node of the component this element shows.
+    /// The [`ID_ATTR`] it was written with. A rewrite keeps the node with
+    /// that id; inside an instance, it says which node of the component this
+    /// element shows.
     pub source: Option<NodeId>,
     /// The component name it was written with ([`COMPONENT_ATTR`]): the
     /// first element with a name defines that component, and later ones are
@@ -71,23 +72,24 @@ pub const BASE_CSS: &str = "*, *::before, *::after { box-sizing: border-box; }";
 pub const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https:; img-src https: http: data: blob:; font-src https: data:; media-src https: data: blob:";
 
 /// The cascade layer for the base styles every artboard renders with. It
-/// comes first, so the shared CSS can override them, like the font that a
-/// shadow root's `all: initial` resets.
+/// comes first, so tokens and an artboard's styles can override them, like
+/// the font that a shadow root's `all: initial` resets.
 pub const BASE_LAYER: &str = "finite-base";
 
-/// The cascade layer the design's shared CSS goes in. Styles outside any
-/// layer beat layered ones whatever their specificity, so an artboard's own
-/// `<style>` blocks and inline styles override the shared CSS. The cascade
+/// The cascade layer the old shared CSS rendered in, and that its rules
+/// keep in each artboard after [`crate::edit::migrate_css`]. Styles outside
+/// any layer beat layered ones whatever their specificity, so an artboard's
+/// own `<style>` blocks and inline styles still override them. The cascade
 /// reverses that for `!important`: a shared `!important` wins.
 pub const SHARED_LAYER: &str = "finite-shared";
 
-/// The design's shared CSS as the text of a `<style>` element, with `</style`
-/// broken up so it can't end the element early. Its rules go in
-/// [`SHARED_LAYER`], and so do its leading `@import`s, which can't go inside
-/// a layer block and take a `layer()` instead. For a shadow root, where
-/// `:root` matches nothing, `:root` becomes `:host`, so variables defined
-/// there reach the artboard.
-pub fn shared_style(css: &str, shadow: bool) -> String {
+/// Old shared CSS as the text of a `<style>` element, with `</style` broken
+/// up so it can't end the element early. Its rules go in [`SHARED_LAYER`],
+/// and so do its leading `@import`s, which can't go inside a layer block
+/// and take a `layer()` instead. The shared CSS rendered with `:root` as
+/// `:host` in shadow roots, and one `<style>` serves both, so `:root`
+/// becomes `:is(:root, :host)`.
+pub fn layered_style(css: &str) -> String {
     let mut head = String::new();
     let mut rest = css;
     loop {
@@ -104,12 +106,7 @@ pub fn shared_style(css: &str, shadow: bool) -> String {
         head.push('\n');
         rest = &at[end..];
     }
-    let rest = rest.trim_start();
-    let body = if shadow {
-        replace_root(rest)
-    } else {
-        rest.to_owned()
-    };
+    let body = replace_root(rest.trim_start());
     raw_text(
         &format!("{head}@layer {SHARED_LAYER} {{\n{body}\n}}"),
         "style",
@@ -228,7 +225,8 @@ fn url_end(css: &str) -> usize {
     bytes.len()
 }
 
-/// `css` with each `:root` selector, in any case, written as `:host`.
+/// `css` with each `:root` selector, in any case, written as
+/// `:is(:root, :host)`, which matches in a page and in a shadow root alike.
 /// Strings and comments stay as they are.
 fn replace_root(css: &str) -> String {
     let bytes = css.as_bytes();
@@ -236,6 +234,8 @@ fn replace_root(css: &str) -> String {
     let (mut i, mut copied) = (0, 0);
     while i < bytes.len() {
         match bytes[i] {
+            // An escaped character, like the `:` of `.icon\:root`, is part of a name.
+            b'\\' => i += 2,
             b'"' | b'\'' => i = string_end(css, i),
             b'/' if bytes.get(i + 1) == Some(&b'*') => i = comment_end(css, i),
             b':' if css
@@ -246,7 +246,7 @@ fn replace_root(css: &str) -> String {
                     .is_some_and(|&c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_') =>
             {
                 out.push_str(&css[copied..i]);
-                out.push_str(":host");
+                out.push_str(":is(:root, :host)");
                 i += 5;
                 copied = i;
             }
@@ -266,6 +266,9 @@ pub const ID_ATTR: &str = "data-id";
 pub const INSTANCE_ATTR: &str = "data-instance-of";
 /// Marks a component's root in exported HTML.
 pub const COMPONENT_ATTR: &str = "data-component";
+/// The design's change counter when `get_html` read the HTML, on its root.
+/// Written back, it's the base of a three-way merge (see [`Parsed::read_at`]).
+pub const READ_ATTR: &str = "data-read-at";
 
 /// Parses an HTML fragment into detached subtrees.
 ///
@@ -298,6 +301,9 @@ pub struct Parsed {
     /// Where each kept fragment was in the source, numbered like
     /// [`Dropped::anchor`].
     pub paths: Vec<String>,
+    /// The oldest [`READ_ATTR`] on any element: when the author read what it
+    /// rewrites, so a rewrite can keep what others changed since.
+    pub read_at: Option<u64>,
 }
 
 /// A whole HTML page parsed with [`parse_page`]: its body as fragments,
@@ -354,6 +360,7 @@ pub fn parse_page(html: &str, policy: Policy) -> Result<Page, TooDeep> {
             fragments: Vec::new(),
             dropped: Vec::new(),
             paths: Vec::new(),
+            read_at: None,
         },
     };
     walk.wrapper(*root, "", &mut page);
@@ -459,8 +466,9 @@ struct Walk {
     dropped: Vec<Dropped>,
     /// The source path of each fragment kept so far. Its length numbers the next one.
     paths: Vec<String>,
-    /// Inside an instance: the children's [`ID_ATTR`]s are kept as [`Fragment::source`].
+    /// Inside an instance, where an [`ID_ATTR`] names a component's node.
     in_instance: bool,
+    read_at: Option<u64>,
 }
 
 impl Walk {
@@ -470,6 +478,7 @@ impl Walk {
             dropped: Vec::new(),
             paths: Vec::new(),
             in_instance: false,
+            read_at: None,
         }
     }
 
@@ -478,6 +487,7 @@ impl Walk {
             fragments,
             dropped: self.dropped,
             paths: self.paths,
+            read_at: self.read_at,
         }
     }
 
@@ -489,6 +499,16 @@ impl Walk {
         for (name, value) in el.attrs() {
             match name {
                 "style" => page.styles.extend(parse_style(value)),
+                // Both elements become the artboard, so it carries both's classes.
+                "class" => match page.attrs.get_mut("class") {
+                    Some(class) => {
+                        class.push(' ');
+                        class.push_str(value);
+                    }
+                    None => {
+                        page.attrs.insert(name.to_owned(), value.to_owned());
+                    }
+                },
                 _ if is_safe_attr(name, value) => {
                     page.attrs.insert(name.to_owned(), value.to_owned());
                 }
@@ -573,10 +593,17 @@ impl Walk {
                     match name {
                         "style" => fragment.styles.extend(parse_style(value)),
                         NAME_ATTR => fragment.name = Some(label::clip(value, label::LAYER_NAME)),
-                        // Node ids come from the document, but inside an
-                        // instance they say which node of the component an
-                        // element shows.
-                        ID_ATTR if self.in_instance => fragment.source = Some(value.to_owned()),
+                        // Node ids come from the document: a rewrite keeps
+                        // the node, and inside an instance they say which
+                        // node of the component an element shows.
+                        ID_ATTR if !value.trim().is_empty() => {
+                            fragment.source = Some(value.trim().to_owned());
+                        }
+                        READ_ATTR => {
+                            if let Ok(seq) = value.trim().parse::<u64>() {
+                                self.read_at = Some(self.read_at.map_or(seq, |r| r.min(seq)));
+                            }
+                        }
                         COMPONENT_ATTR if !value.trim().is_empty() => {
                             fragment.component = Some(label::clip(value, label::LAYER_NAME));
                         }
@@ -786,6 +813,7 @@ impl Fragment {
                 x: position.map(|p| p.0),
                 y: position.map(|p| p.1),
                 page: None,
+                mode: None,
                 styles: self.styles,
                 attrs: self.attrs,
                 // A component it defines, by name, rather than one it shows.
@@ -837,6 +865,8 @@ pub struct ExportOptions {
     /// Indents nested elements one per line. Without it, the HTML is written
     /// exactly as it renders, with no whitespace between elements.
     pub indent: bool,
+    /// Writes [`READ_ATTR`] with this value on the root.
+    pub read_at: Option<u64>,
 }
 
 impl Default for ExportOptions {
@@ -849,6 +879,7 @@ impl Default for ExportOptions {
             max_value_len: None,
             stylesheets: false,
             indent: true,
+            read_at: None,
         }
     }
 }
@@ -882,6 +913,7 @@ pub fn export_with(doc: &Document, id: &str, options: &ExportOptions) -> Option<
         out: String::new(),
         collapsed: 0,
         shortened: 0,
+        read_at: None,
     };
     let mut stylesheets = 0;
     if options.stylesheets && node.parent.is_some() {
@@ -890,6 +922,7 @@ pub fn export_with(doc: &Document, id: &str, options: &ExportOptions) -> Option<
             stylesheets += 1;
         }
     }
+    writer.read_at = options.read_at;
     writer.node(node, 0);
     Some(Export {
         html: writer.out,
@@ -983,6 +1016,8 @@ struct Writer<'a> {
     out: String,
     collapsed: usize,
     shortened: usize,
+    /// [`ExportOptions::read_at`], until the root is written.
+    read_at: Option<u64>,
 }
 
 impl Writer<'_> {
@@ -1034,6 +1069,9 @@ impl Writer<'_> {
                 let name = node.display_name();
                 let _ = write!(self.out, " {COMPONENT_ATTR}=\"{}\"", escape(&name, true));
             }
+        }
+        if let Some(seq) = self.read_at.take() {
+            let _ = write!(self.out, " {READ_ATTR}=\"{seq}\"");
         }
         if self.options.names
             && let Some(name) = &node.name
@@ -1494,36 +1532,32 @@ mod tests {
     }
 
     #[test]
-    fn shared_css_goes_in_its_layer_with_its_imports() {
+    fn old_shared_css_goes_in_its_layer_with_its_imports() {
         let css = "/* fonts */ @import \"https://fonts.example/css?family=A:wght@400;700\";\n\
                    @import url(https://fonts.example/b;c.css) screen;\n\
                    @import url(c.css) layer(mine);\n\
-                   :root { --brand: red; } :root-ish {}";
+                   :ROOT { --brand: red; } :root-ish {} [title=\":root\"] {} /* :root */";
         assert_eq!(
-            shared_style(css, false),
+            layered_style(css),
             "@import \"https://fonts.example/css?family=A:wght@400;700\" layer(finite-shared);\n\
              @import url(https://fonts.example/b;c.css) layer(finite-shared) screen;\n\
              @import url(c.css) layer(mine);\n\
-             @layer finite-shared {\n:root { --brand: red; } :root-ish {}\n}"
-        );
-        // In a shadow root, :root selectors become :host, but not text.
-        assert_eq!(
-            shared_style(
-                ":ROOT { --brand: red; } [title=\":root\"] {} /* :root */",
-                true
-            ),
-            "@layer finite-shared {\n:host { --brand: red; } [title=\":root\"] {} /* :root */\n}"
+             @layer finite-shared {\n:is(:root, :host) { --brand: red; } :root-ish {} [title=\":root\"] {} /* :root */\n}"
         );
         // Comments and quoted parentheses don't confuse it.
         assert_eq!(
-            shared_style(
-                "@import /* a */ url(\"a(b).css\") supports(display: grid) /* ; */ screen; .x {}",
-                false
+            layered_style(
+                "@import /* a */ url(\"a(b).css\") supports(display: grid) /* ; */ screen; .x {}"
             ),
             "@import /* a */ url(\"a(b).css\") layer(finite-shared) supports(display: grid) /* ; */ screen;\n\
              @layer finite-shared {\n.x {}\n}"
         );
         // It can't end its <style> element, wherever it came from.
-        assert!(!shared_style("a{}</style><script>x()</script>", false).contains("</style"));
+        assert!(!layered_style("a{}</style><script>x()</script>").contains("</style"));
+        // An escaped colon is part of a class name, not a `:root`.
+        assert_eq!(
+            layered_style(".icon\\:root {}"),
+            "@layer finite-shared {\n.icon\\:root {}\n}"
+        );
     }
 }

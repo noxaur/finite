@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Anchor, Board, Codec, Diagnostic, Direction, Error, Exported, Feature, Imported, Input,
-    Revision, Scope, Score, Support, assets, file_stem,
+    Revision, Scope, Score, Support, Tokens, assets, file_stem,
 };
 
 /// The bundle's format and version. See `finite_design::version`.
@@ -47,9 +47,22 @@ pub struct Bundle {
     pub kind: String,
     /// The design's name.
     pub name: String,
-    /// The shared CSS.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The shared CSS of a bundle made before tokens. Importing it moves
+    /// it into tokens (see [`Imported::css`]).
+    #[serde(default, skip_serializing)]
     pub css: Option<String>,
+    /// The design's modes, by name, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<String>,
+    /// The design's tokens, each with its values by mode name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tokens: BTreeMap<String, BTreeMap<String, String>>,
+    /// The name of the mode each artboard renders in, by its index in
+    /// `artboards`, for those not in the first mode. It's here rather than
+    /// in [`Layer`], since every layer of the deepest design is on the
+    /// stack at once while it's read.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub artboard_modes: BTreeMap<usize, String>,
     /// The design's pages, by name, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pages: Vec<String>,
@@ -72,6 +85,7 @@ pub struct Layer {
     /// The name of the page an artboard is on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<String>,
+
     /// Canvas position, for artboards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub x: Option<f64>,
@@ -138,7 +152,10 @@ impl Codec for Finite {
             .artboards
             .into_iter()
             .enumerate()
-            .map(|(i, layer)| board(i, layer, &mut diagnostics))
+            .map(|(i, layer)| Board {
+                mode: bundle.artboard_modes.get(&i).cloned(),
+                ..board(i, layer, &mut diagnostics)
+            })
             .collect();
         let dependencies = blobs
             .iter()
@@ -152,6 +169,10 @@ impl Codec for Finite {
             format: self.name(),
             input_kind: format!("finite-bundle v{}", BUNDLE.version),
             boards,
+            tokens: Tokens {
+                modes: bundle.modes,
+                values: bundle.tokens,
+            },
             css: bundle.css,
             blobs: blobs.into_iter().map(|(_, bytes)| bytes).collect(),
             dependencies,
@@ -177,6 +198,12 @@ impl Codec for Finite {
                 }
             })
             .collect();
+        let artboard_modes = revision
+            .artboards(scope)?
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, board)| Some((i, Tokens::mode_of(revision.doc, board)?)))
+            .collect();
         let pages = match scope {
             Scope::Design => revision
                 .doc
@@ -186,7 +213,7 @@ impl Codec for Finite {
                 .collect(),
             Scope::Artboard(_) => Vec::new(),
         };
-        let css = revision.doc.css().map(&mut portable);
+        let tokens = Tokens::of(revision.doc, &mut portable);
         let mut blobs = BTreeMap::new();
         let mut diagnostics = Vec::new();
         for hash in hashes {
@@ -226,7 +253,10 @@ impl Codec for Finite {
         let bundle = Bundle {
             kind: KIND.into(),
             name: revision.name.to_owned(),
-            css,
+            css: None,
+            modes: tokens.modes,
+            tokens: tokens.values,
+            artboard_modes,
             pages,
             artboards,
             blobs,
@@ -268,8 +298,12 @@ fn verified_blobs(bundle: &Bundle) -> Result<Vec<(BlobHash, Vec<u8>)>, Error> {
         .artboards
         .iter()
         .for_each(|layer| walk(layer, &mut referenced));
-    if let Some(css) = &bundle.css {
-        referenced.extend(assets::referenced(css));
+    for text in bundle
+        .css
+        .iter()
+        .chain(bundle.tokens.values().flat_map(|v| v.values()))
+    {
+        referenced.extend(assets::referenced(text));
     }
     if let Some(missing) = referenced.iter().find(|h| !bundle.blobs.contains_key(*h)) {
         return Err(Error(format!(
@@ -300,8 +334,14 @@ fn board(i: usize, layer: Layer, diagnostics: &mut Vec<(Anchor, Diagnostic)>) ->
         styles: layer.styles.clone(),
         ..Node::element("", "div")
     };
+    // An artboard without a height, or with `auto`, grows to fit.
+    let auto_height = layer
+        .styles
+        .get("height")
+        .is_none_or(|h| h.trim().eq_ignore_ascii_case("auto"));
     let (width, height) = match pixel_size(&probe) {
         (Some(w), Some(h)) if w > 0.0 && h > 0.0 => (w, h),
+        (Some(w), None) if w > 0.0 && auto_height => (w, FALLBACK.1),
         _ => {
             diagnostics.push((
                 Anchor {
@@ -339,7 +379,9 @@ fn board(i: usize, layer: Layer, diagnostics: &mut Vec<(Anchor, Diagnostic)>) ->
         name: layer.name.unwrap_or_else(|| format!("Artboard {}", i + 1)),
         width,
         height,
-        auto_height: false,
+        auto_height,
+        mode: None,
+        look_in_css: false,
         position: layer.x.zip(layer.y),
         styles: layer.styles,
         attrs,
@@ -497,7 +539,12 @@ fn layer(revision: &Revision<'_>, node: &Node, portable: &mut impl FnMut(&str) -
 
 #[cfg(test)]
 mod tests {
-    use finite_design::{Design, DesignMeta, html::export, import::ImportRecord};
+    use finite_design::{
+        Design, DesignMeta,
+        edit::{self, TokenChange},
+        html::export,
+        import::ImportRecord,
+    };
     use serde_json::json;
 
     use super::*;
@@ -558,7 +605,8 @@ mod tests {
         placed
     }
 
-    /// A design with one artboard holding a stored image, and shared CSS.
+    /// A design with one artboard holding a stored image, and tokens in two
+    /// modes, one of them pointing at a stored image too.
     fn source() -> Design {
         let mut source = design("old");
         let html = format!(
@@ -573,16 +621,28 @@ mod tests {
             })
             .unwrap();
         place(&mut source, imported);
-        let css = format!(
-            ".page {{ background: url({}) }}",
-            assets::url("old", &BlobHash::of(PNG))
+        let names = ["Light".to_owned(), "Dark".to_owned()];
+        let mut n = 0;
+        let (mut ops, modes) = edit::set_modes(source.doc(), &names, &mut || {
+            n += 1;
+            format!("m{n}")
+        })
+        .unwrap();
+        let hero = format!("url({})", assets::url("old", &BlobHash::of(PNG)));
+        let dark = TokenChange::Modes(
+            [("Light", "#fff"), ("Dark", "#111")]
+                .map(|(m, v)| (m.to_owned(), Some(v.to_owned())))
+                .into(),
         );
-        source.commit(
-            "agent",
-            "CSS",
-            &finite_design::edit::set_css(&css).unwrap(),
-            2,
-        );
+        let changes = [
+            ("--hero".to_owned(), TokenChange::All(hero)),
+            ("--bg".to_owned(), dark),
+        ];
+        ops.extend(edit::set_tokens(source.doc(), &modes, &changes).unwrap());
+        source.commit("agent", "Tokens", &ops, 2);
+        let board = source.doc().artboards()[0].id.clone();
+        let ops = edit::set_artboard_mode(source.doc(), &[board], Some("Dark")).unwrap();
+        source.commit("agent", "Mode", &ops, 3);
         source
     }
 
@@ -623,13 +683,72 @@ mod tests {
             html(&target, &new.id),
             html(&source, &old.id).replace("/api/designs/old/", "/api/designs/new/")
         );
-        assert_eq!(
-            target.doc().css(),
-            source
+        let names = |design: &Design| -> Vec<String> {
+            design
                 .doc()
-                .css()
-                .map(|css| css.replace("/designs/old/", "/designs/new/"))
-                .as_deref()
+                .modes()
+                .iter()
+                .map(|(_, m)| m.name.clone())
+                .collect()
+        };
+        assert_eq!(names(&target), ["Light", "Dark"]);
+        assert_eq!(Tokens::mode_of(target.doc(), new).as_deref(), Some("Dark"));
+        let carried = Tokens::of(target.doc(), str::to_owned);
+        let sent = Tokens::of(source.doc(), |v| {
+            v.replace("/designs/old/", "/designs/new/")
+        });
+        assert_eq!(carried, sent);
+    }
+
+    #[test]
+    fn an_artboard_in_the_first_mode_keeps_it_in_another_design() {
+        let bundle = json!({
+            "v": 1,
+            "kind": "finite-bundle",
+            "name": "Modes",
+            "modes": ["Light", "Dark"],
+            "tokens": { "--bg": { "Light": "white", "Dark": "black" } },
+            "artboards": [{ "name": "Board", "styles": { "width": "100px", "height": "100px" } }]
+        });
+        let mut target = design("new");
+        let changes = [("--bg".to_owned(), TokenChange::All("green".into()))];
+        let ops = edit::set_tokens(target.doc(), &edit::mode_list(target.doc()), &changes).unwrap();
+        target.commit("agent", "Tokens", &ops, 1);
+        let (_, placed) = place(&mut target, read(&bundle.to_string()).unwrap());
+        let doc = target.doc();
+        let board = doc.get(&placed.artboards[0]).unwrap();
+        assert_eq!(doc.mode_map()[doc.mode_of(board)].name, "Light");
+        assert!(
+            finite_design::tokens::style(doc, doc.mode_of(board), false).contains("--bg: white;")
+        );
+    }
+
+    #[test]
+    fn an_old_bundles_shared_css_becomes_tokens() {
+        let bundle = json!({
+            "v": 1,
+            "kind": "finite-bundle",
+            "name": "Old",
+            "css": ":root { --ink: #111 } .x { color: var(--ink) }",
+            "artboards": [{ "name": "Board", "styles": { "width": "100px", "height": "100px" } }]
+        });
+        let imported = read(&bundle.to_string()).unwrap();
+        let mut target = design("new");
+        let (_, placed) = place(&mut target, imported);
+        assert_eq!(
+            target.doc().tokens()["--ink"].values().next().unwrap(),
+            "#111"
+        );
+        let board = &placed.artboards[0];
+        let style = target.doc().children(Some(board))[0];
+        assert_eq!(style.tag(), Some("style"));
+        let text = target.doc().children(Some(&style.id))[0]
+            .text
+            .clone()
+            .unwrap();
+        assert!(
+            text.contains("@layer finite-shared {\n.x { color: var(--ink) }"),
+            "{text}"
         );
     }
 

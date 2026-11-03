@@ -1,6 +1,6 @@
 //! How an artboard actually rendered: each element's box and computed
 //! styles, measured in a browser. CSS decides layout through the cascade,
-//! classes and shared CSS, so an exporter to a format without CSS, like
+//! classes and tokens, so an exporter to a format without CSS, like
 //! Figma, reads the browser's answer instead of guessing from inline styles.
 //!
 //! A [`Scene`] is derived data. It's measured for one revision, used by one

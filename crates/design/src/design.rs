@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -6,10 +6,15 @@ use crate::{
     NodeId,
     comment::{self, Anchor, Author, AuthorKind, ChangeLog, Comment, CommentError, Message, Point},
     document::{Applied, Document, Op, Page, Rejected},
+    edit::{self, EditError},
     history::{Entry, History},
     import::ImportRecord,
-    node::Node,
+    node::{Node, PropKey},
+    tokens::{Mode, Values},
 };
+
+/// The actor that commits [`Design::migrate_css`]. Nobody undoes it.
+pub const MIGRATION_ACTOR: &str = "finite";
 
 /// Identifies whoever made a change: an agent's MCP session today, a user's tab later.
 pub type ActorId = String;
@@ -32,9 +37,16 @@ pub struct Snapshot {
     pub meta: DesignMeta,
     pub seq: u64,
     pub nodes: Vec<Node>,
-    /// The shared stylesheet (see [`Document::css`]).
+    /// The old shared stylesheet, in designs saved before tokens. Loading
+    /// one migrates it (see [`Design::migrate_css`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub css: Option<String>,
+    /// The design's tokens by name (see [`crate::tokens`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tokens: BTreeMap<String, Values>,
+    /// The design's modes by id. Absent when it has only its implicit first mode.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub modes: BTreeMap<String, Mode>,
     /// The design's pages by id (see [`Page`]). Absent when it has only its
     /// implicit first page.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -126,6 +138,8 @@ pub struct Design {
     comments: Vec<Comment>,
     /// Recent changes, so a reply can link the edits that answered a comment.
     log: ChangeLog,
+    /// What recent changes set, for [`Design::merge`].
+    sets: SetLog,
     /// Ids of comments that a change updated, for [`Design::take_comment_updates`].
     comment_updates: Vec<String>,
     /// Every import, oldest first. See [`Design::import`].
@@ -133,6 +147,121 @@ pub struct Design {
     /// The document with its instances expanded, made when first asked for
     /// after a change. See [`Design::view`].
     view: std::sync::OnceLock<Document>,
+}
+
+/// A rewrite after [`Design::merge`].
+#[derive(Debug)]
+pub struct Merged {
+    pub ops: Vec<Op>,
+    /// Values another actor changed after the read, which keep their value.
+    pub kept: Vec<Kept>,
+    /// Nodes another actor added or moved in after the read, which the
+    /// rewrite would have deleted and which stay instead.
+    pub kept_nodes: Vec<KeptNode>,
+    /// Whether the log reached back to the read. If not, nothing was merged.
+    pub reached: bool,
+}
+
+/// A value [`Design::merge`] kept: `key` on node `id`, last set by `by`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Kept {
+    pub id: NodeId,
+    pub key: PropKey,
+    pub by: ActorId,
+    /// The rewrite changed it too, to something else.
+    pub conflict: bool,
+}
+
+/// A node [`Design::merge`] kept: `id`, added or moved in by `by`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeptNode {
+    pub id: NodeId,
+    pub by: ActorId,
+    /// It existed at the read, somewhere else, and was moved here.
+    pub moved: bool,
+}
+
+/// The old value of every property each recent change set, and where each
+/// node it created, deleted or moved was before, taken from its inverse. In
+/// memory only: after a restart a merge can't look back further than the
+/// load.
+#[derive(Debug, Default)]
+struct SetLog {
+    /// Changes after this seq are all here.
+    since: u64,
+    entries: VecDeque<Sets>,
+    bytes: usize,
+}
+
+#[derive(Debug)]
+struct Sets {
+    seq: u64,
+    actor: ActorId,
+    /// The `Set` ops of the change's inverse, in the inverse's order.
+    old: Vec<Op>,
+    /// Each node the change created, deleted or moved, and where it was
+    /// before: `None` if it didn't exist, else its parent. In the
+    /// inverse's order.
+    places: Vec<(NodeId, Option<Option<NodeId>>)>,
+    bytes: usize,
+}
+
+impl SetLog {
+    /// How many changes it keeps, like the change log.
+    const LIMIT: usize = 512;
+    /// About how many bytes of values it keeps.
+    const BYTE_LIMIT: usize = 8 << 20;
+
+    fn starting_at(seq: u64) -> Self {
+        Self {
+            since: seq,
+            ..Self::default()
+        }
+    }
+
+    fn record(&mut self, seq: u64, actor: &str, inverse: &[Op]) {
+        let mut old = Vec::new();
+        let mut places = Vec::new();
+        for op in inverse {
+            match op {
+                Op::Set { .. } => old.push(op.clone()),
+                // Undoing a create deletes it, so it didn't exist before.
+                Op::Delete { id } => places.push((id.clone(), None)),
+                Op::Create { node } => places.push((node.id.clone(), Some(node.parent.clone()))),
+                Op::Move { id, parent, .. } => places.push((id.clone(), Some(parent.clone()))),
+                _ => {}
+            }
+        }
+        if old.is_empty() && places.is_empty() {
+            return;
+        }
+        let bytes = old.iter().map(Op::size).sum::<usize>()
+            + places
+                .iter()
+                .map(|(id, parent)| {
+                    32 + id.len()
+                        + parent
+                            .as_ref()
+                            .and_then(Option::as_ref)
+                            .map_or(0, String::len)
+                })
+                .sum::<usize>();
+        self.bytes += bytes;
+        self.entries.push_back(Sets {
+            seq,
+            actor: actor.to_owned(),
+            old,
+            places,
+            bytes,
+        });
+        while self.entries.len() > Self::LIMIT || self.bytes > Self::BYTE_LIMIT {
+            let Some(dropped) = self.entries.pop_front() else {
+                break;
+            };
+            self.bytes -= dropped.bytes;
+            self.since = dropped.seq;
+        }
+    }
 }
 
 /// An edit being staged by [`Design::import`]. Ops apply as soon as they're
@@ -179,6 +308,7 @@ impl Design {
             histories: HashMap::new(),
             comments: Vec::new(),
             log: ChangeLog::default(),
+            sets: SetLog::default(),
             comment_updates: Vec::new(),
             imports: Vec::new(),
             view: Default::default(),
@@ -190,11 +320,13 @@ impl Design {
             meta: snapshot.meta,
             doc: Document::from_nodes(snapshot.nodes)
                 .with_css(snapshot.css)
-                .with_pages(snapshot.pages),
+                .with_pages(snapshot.pages)
+                .with_tokens(snapshot.tokens, snapshot.modes),
             seq: snapshot.seq,
             comments: snapshot.comments,
             histories: snapshot.histories.unwrap_or_default(),
             log: snapshot.log.unwrap_or_default(),
+            sets: SetLog::starting_at(snapshot.seq),
             comment_updates: Vec::new(),
             imports: snapshot.imports,
             view: Default::default(),
@@ -210,6 +342,8 @@ impl Design {
             nodes,
             css: self.doc.css().map(str::to_owned),
             pages: self.doc.page_map().clone(),
+            tokens: self.doc.tokens().clone(),
+            modes: self.doc.mode_map().clone(),
             comments: self.comments.clone(),
             histories: None,
             log: None,
@@ -230,6 +364,36 @@ impl Design {
 
     pub fn doc(&self) -> &Document {
         &self.doc
+    }
+
+    /// Moves a design's old shared CSS into tokens and its artboards'
+    /// `<style>`s, once, after it loads (see [`edit::migrate_css`]). The
+    /// saved undo steps may set the old CSS again, so they're dropped, and
+    /// so is any history that could, even once the CSS was cleared.
+    /// Returns the change to save, or `None` when there was nothing to move.
+    /// `new_id` can return an id that's taken; it's asked again.
+    pub fn migrate_css(
+        &mut self,
+        now: u64,
+        new_id: &mut impl FnMut() -> NodeId,
+    ) -> Result<Option<Change>, EditError> {
+        if self.doc.css().is_none() {
+            self.histories
+                .retain(|_, history| !history.ops().any(|op| matches!(op, Op::Css { .. })));
+            return Ok(None);
+        }
+        let doc = &self.doc;
+        let mut fresh = || loop {
+            let id = new_id();
+            if !doc.contains(&id) {
+                return id;
+            }
+        };
+        let ops = edit::migrate_css(doc, &mut fresh)?;
+        self.histories.clear();
+        let change = self.commit(MIGRATION_ACTOR, "Moved shared CSS into tokens", &ops, now);
+        self.forget_actor(MIGRATION_ACTOR);
+        Ok(change)
     }
 
     /// The document as it renders: every instance shows its component's
@@ -288,14 +452,15 @@ impl Design {
             return None;
         }
         self.view.take();
-        self.history_mut(actor).record(label.to_owned(), inverse);
         reattach(
             &self.doc,
             &mut self.comments,
             &mut self.comment_updates,
             &places,
         );
-        Some(self.finish(actor, Origin::Edit, label, applied, before, now))
+        let change = self.finish(actor, Origin::Edit, label, applied, &inverse, before, now);
+        self.history_mut(actor).record(label.to_owned(), inverse);
+        Some(change)
     }
 
     /// Imports into the design as one all-or-nothing change. `build` stages
@@ -333,11 +498,19 @@ impl Design {
         if applied.is_empty() {
             return Ok((None, output));
         }
-        let inverse = inverse.into_iter().rev().flatten().collect();
-        self.history_mut(actor).record(label.to_owned(), inverse);
+        let inverse: Vec<Op> = inverse.into_iter().rev().flatten().collect();
         // An import only adds nodes, so no comment needs to move, and no
         // artboard was touched before it.
-        let change = self.finish(actor, Origin::Edit, label, applied, BTreeSet::new(), now);
+        let change = self.finish(
+            actor,
+            Origin::Edit,
+            label,
+            applied,
+            &inverse,
+            BTreeSet::new(),
+            now,
+        );
+        self.history_mut(actor).record(label.to_owned(), inverse);
         Ok((Some(change), output))
     }
 
@@ -357,8 +530,8 @@ impl Design {
     }
 
     fn step(&mut self, actor: &str, origin: Origin, now: u64) -> Option<Change> {
-        let history = self.histories.get_mut(actor)?;
         loop {
+            let history = self.histories.get_mut(actor)?;
             let entry = match origin {
                 Origin::Undo => history.pop_undo(),
                 _ => history.pop_redo(),
@@ -376,31 +549,39 @@ impl Design {
                 &mut self.comment_updates,
                 &places,
             );
+            let change = self.finish(actor, origin, &entry.label, applied, &inverse, before, now);
             let reverse = Entry {
-                label: entry.label.clone(),
+                label: entry.label,
                 ops: inverse,
             };
+            let history = self
+                .histories
+                .get_mut(actor)
+                .expect("the entry came from it");
             match origin {
                 Origin::Undo => history.push_redo(reverse),
                 _ => history.push_undo(reverse),
             }
-            return Some(self.finish(actor, origin, &entry.label, applied, before, now));
+            return Some(change);
         }
     }
 
-    /// Numbers a change that has been applied and logs it. `before` holds the
-    /// artboards its nodes were on before it applied, so a change that deletes
-    /// nodes still counts as touching their artboard.
+    /// Numbers a change that has been applied and logs it. `inverse` undoes
+    /// it. `before` holds the artboards its nodes were on before it applied,
+    /// so a change that deletes nodes still counts as touching their artboard.
+    #[allow(clippy::too_many_arguments)]
     fn finish(
         &mut self,
         actor: &str,
         origin: Origin,
         label: &str,
         ops: Vec<Op>,
+        inverse: &[Op],
         before: BTreeSet<NodeId>,
         now: u64,
     ) -> Change {
         self.seq += 1;
+        self.sets.record(self.seq, actor, inverse);
         self.meta.updated_at = now;
         let change = Change {
             seq: self.seq,
@@ -450,6 +631,8 @@ impl Design {
             }
             self.view.take();
             self.seq = change.seq;
+            // Replay doesn't keep inverses, so a merge can't look back past it.
+            self.sets = SetLog::starting_at(change.seq);
             self.log.record(&change, &self.doc, before);
         }
     }
@@ -494,6 +677,123 @@ impl Design {
             }
             self.histories.insert(change.actor.clone(), history);
             return true;
+        }
+    }
+
+    /// Three-way merges a rewrite of HTML read when the design was at
+    /// `read_at`. `ops` are what the rewrite would do to the document as it
+    /// is now, so each `Set` changes a value the HTML differs in. A value
+    /// that was changed since the read is the base's old value in the HTML,
+    /// unless the rewrite changed it too:
+    ///
+    /// - The HTML has the value as it was at the read: the author didn't
+    ///   change it, so the newer one stays and the `Set` is dropped.
+    /// - The HTML changed it, and so did another actor since: theirs stays.
+    /// - The HTML changed it, and `actor` made the last change since: the rewrite wins.
+    ///
+    /// Values kept from another actor are listed in [`Merged::kept`], so the
+    /// author knows and can set one again on purpose.
+    ///
+    /// A `Delete` of a node the HTML left out is dropped when the node
+    /// wasn't under its parent at the read: another actor created it or
+    /// moved it there since, so the HTML couldn't hold it. Those nodes stay
+    /// where they are and are listed in [`Merged::kept_nodes`]. Nodes
+    /// `actor` added or moved in since follow the HTML. Other moves and
+    /// creates are kept as they are. If the log no longer reaches back to
+    /// `read_at`, the ops are returned unchanged with [`Merged::reached`] false.
+    pub fn merge(&self, actor: &str, read_at: u64, mut ops: Vec<Op>) -> Merged {
+        if read_at < self.sets.since {
+            return Merged {
+                ops,
+                kept: Vec::new(),
+                kept_nodes: Vec::new(),
+                reached: false,
+            };
+        }
+        // Each value set since the read: its value at the read, and who set it last.
+        let mut changed: HashMap<(&str, &PropKey), (&Option<serde_json::Value>, &str)> =
+            HashMap::new();
+        let first = self.sets.entries.partition_point(|e| e.seq <= read_at);
+        // Each node the rewrite deletes that was created, deleted or moved
+        // since the read: where it was at the read, and who placed it last.
+        let deleted: HashSet<&str> = ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Delete { id } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let mut placed: HashMap<&str, (&Option<Option<NodeId>>, &str)> = HashMap::new();
+        for entry in self.sets.entries.range(first..) {
+            // Backwards for the same reason as values below.
+            for (id, before) in entry.places.iter().rev() {
+                if deleted.contains(id.as_str()) {
+                    placed
+                        .entry(id.as_str())
+                        .or_insert((before, &entry.actor))
+                        .1 = &entry.actor;
+                }
+            }
+            // An inverse runs backwards, so its last op on a value holds
+            // what the value was before the change.
+            for op in entry.old.iter().rev() {
+                if let Op::Set { id, key, value } = op {
+                    changed
+                        .entry((id.as_str(), key))
+                        .or_insert((value, &entry.actor))
+                        .1 = &entry.actor;
+                }
+            }
+        }
+        let mut kept = Vec::new();
+        if !changed.is_empty() {
+            ops.retain(|op| {
+                let Op::Set { id, key, value } = op else {
+                    return true;
+                };
+                let Some(&(base, by)) = changed.get(&(id.as_str(), key)) else {
+                    return true;
+                };
+                let conflict = base != value;
+                if by == actor {
+                    return conflict;
+                }
+                kept.push(Kept {
+                    id: id.clone(),
+                    key: key.clone(),
+                    by: by.to_owned(),
+                    conflict,
+                });
+                false
+            });
+        }
+        let mut kept_nodes = Vec::new();
+        if !placed.is_empty() {
+            ops.retain(|op| {
+                let Op::Delete { id } = op else { return true };
+                let Some(&(before, by)) = placed.get(id.as_str()) else {
+                    return true;
+                };
+                let Some(now) = self.doc.get(id) else {
+                    return true;
+                };
+                let here = before.as_ref() == Some(&now.parent);
+                if here || by == actor {
+                    return true;
+                }
+                kept_nodes.push(KeptNode {
+                    id: id.clone(),
+                    by: by.to_owned(),
+                    moved: before.is_some(),
+                });
+                false
+            });
+        }
+        Merged {
+            ops,
+            kept,
+            kept_nodes,
+            reached: true,
         }
     }
 
