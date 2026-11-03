@@ -35,7 +35,7 @@ export function Inspector({
     return editor.subscribe(() => setState(editor.state));
   }, [editor]);
   // What the person is typing, until it's committed or put back.
-  const [typing, setTyping] = useState<{ field: Field; text: string } | null>(null);
+  const [typing, setTyping] = useState<{ id: string; field: Field; text: string } | null>(null);
   // Escape blurs the field, and the blur mustn't commit what it put back.
   const putBack = useRef(false);
 
@@ -79,7 +79,11 @@ export function Inspector({
       putBack.current = false;
       return;
     }
-    if (!typing) return;
+    // Typed for a node that's no longer the one selected: drop it.
+    if (!typing || typing.id !== node.id) {
+      setTyping(null);
+      return;
+    }
     const edit = editFor(typing.field, parseFloat(typing.text));
     setTyping(null);
     if (edit) void editor.commit([edit]);
@@ -97,8 +101,12 @@ export function Inspector({
               aria-label={{ x: "X", y: "Y", w: "Width", h: "Height" }[field]}
               disabled={disabled}
               title={disabled ? "Its layout places it; drag it to reorder it" : undefined}
-              value={typing?.field === field ? typing.text : String(Math.round(values[field]))}
-              onChange={(e) => setTyping({ field, text: e.target.value })}
+              value={
+                typing?.field === field && typing.id === node.id
+                  ? typing.text
+                  : String(Math.round(values[field]))
+              }
+              onChange={(e) => setTyping({ id: node.id, field, text: e.target.value })}
               onBlur={commit}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {

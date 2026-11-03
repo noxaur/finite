@@ -176,8 +176,9 @@ export class Renderer {
   private readonly virtuals = new Map<string, string[]>();
   private working: ReadonlyMap<string, string> = new Map();
   private commenting = false;
-  /** The element being typed into (`editText`). */
+  /** The element being typed into (`editText`), and what ends that, keeping the text. */
   private editing: HTMLElement | null = null;
+  private finishText: (() => void) | null = null;
   /** The page shown, or `null` for the first page. Only its artboards are mounted. */
   private page: string | null = null;
   /** Hides artboards outside the view. A hidden sandboxed one has its iframe unloaded. */
@@ -577,7 +578,7 @@ export class Renderer {
     const el = this.elements.get(id);
     const board = this.replica.artboardOf(id);
     if (!(el instanceof HTMLElement) || !board || this.frames.get(board.id)?.iframe) return false;
-    if (id.includes("/")) return false;
+    if (id.includes("/") || this.replica.get(id)?.instanceOf !== undefined) return false;
     if (![...el.childNodes].every((child) => child instanceof Text)) return false;
     const before = el.textContent ?? "";
     const stop = new AbortController();
@@ -586,6 +587,7 @@ export class Renderer {
       const text = el.textContent ?? "";
       el.removeAttribute("contenteditable");
       this.editing = null;
+      this.finishText = null;
       // Typing changed the DOM behind the renderer's back; draw it from the document.
       const children = this.replica.children(id);
       for (const child of children) this.elements.delete(child.id);
@@ -594,6 +596,7 @@ export class Renderer {
     };
     el.contentEditable = "plaintext-only";
     this.editing = el;
+    this.finishText = () => finish(true);
     const { signal } = stop;
     el.addEventListener(
       "keydown",
@@ -613,6 +616,11 @@ export class Renderer {
     const selection = window.getSelection();
     selection?.selectAllChildren(el);
     return true;
+  }
+
+  /** Keeps what was typed into the text being edited, and stops editing it. */
+  finishTextEdit() {
+    this.finishText?.();
   }
 
   /** Whether `target` is the element being typed into. */

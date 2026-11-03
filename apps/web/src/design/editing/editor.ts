@@ -176,9 +176,12 @@ export class Editor {
   private onDown(e: PointerEvent) {
     if (!this.enabled || e.button !== 0 || this.run || this.space) return;
     const target = e.target instanceof Element ? e.target : null;
-    // A press in the text being typed into places the caret.
-    if (this.current.editing !== null && e.composedPath().some((t) => this.renderer.isEditing(t))) {
-      return;
+    if (this.current.editing !== null) {
+      // A press in the text being typed into places the caret.
+      if (e.composedPath().some((t) => this.renderer.isEditing(t))) return;
+      // Anywhere else keeps the text, as leaving the field would; the
+      // press below would otherwise keep the focus from moving.
+      this.renderer.finishTextEdit();
     }
     const handle = (target?.closest("[data-handle]") as HTMLElement | null)?.dataset.handle;
     // Pins and other controls on the canvas keep their clicks.
@@ -427,9 +430,22 @@ export class Editor {
   /** Copies nodes, each right after its original, and selects the copies. */
   private duplicate(ids: ReadonlyArray<string>) {
     const replica = this.session.replica;
-    void this.commit([{ kind: "duplicate", ids: [...ids] }]);
-    // The copies show at once, with the ids the server will give them.
-    const copies = ids.flatMap((id) => replica.siblingsAfter(id).next().value?.id ?? []);
+    // A node inside another one copied comes along with it, so only the outermost get copies.
+    const roots = ids.filter(
+      (id) =>
+        !lineage(replica, id)
+          .slice(1)
+          .some((ancestor) => ids.includes(ancestor)),
+    );
+    const next = (id: string) => replica.siblingsAfter(id).next().value?.id ?? null;
+    const before = roots.map(next);
+    void this.commit([{ kind: "duplicate", ids: [...roots] }]);
+    // The copies show at once, right after their originals, with the ids the server
+    // will give them. A sibling that was already there means the copy wasn't made.
+    const copies = roots.flatMap((id, i) => {
+      const copy = next(id);
+      return copy !== null && copy !== before[i] ? [copy] : [];
+    });
     if (copies.length > 0) this.update({ selection: copies });
   }
 
