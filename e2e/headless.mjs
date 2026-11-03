@@ -70,10 +70,14 @@ Browser
   query <css>                 Every matching element, with its text and position.
   eval <js>                   Evaluate JavaScript in the page and print the result.
   wait <js> [--timeout 5000]  Wait until the expression is truthy.
-  click <css> | click <x> <y> [--shift]
+  click <css> | click <x> <y> [--shift] [--double]
                               Click an element's center, or a point. --shift
                               holds Shift, as for adding to a comment's elements.
   hover <css> | hover <x> <y> Move the mouse there.
+  drag <css|x y> --by=<dx>,<dy> [--to <css>] [--steps 10] [--shift]
+                              Press on an element's center (or a point), move
+                              by dx,dy pixels or onto another element's center,
+                              and release, as a person drags.
   type <text>                 Type into the focused element.
   upload <css> <file>         Pick a file in a file input, as the OS file
                               picker would. Hidden inputs work too.
@@ -114,6 +118,10 @@ const { values: flags, positionals } = parseFlags({
     lines: { type: "string", short: "n" },
     nth: { type: "string" },
     shift: { type: "boolean" },
+    double: { type: "boolean" },
+    by: { type: "string" },
+    to: { type: "string" },
+    steps: { type: "string" },
     help: { type: "boolean", short: "h" },
   },
 });
@@ -586,12 +594,13 @@ async function daemon(dir, options) {
       const value = await page.until(expression, Number(timeout ?? 5000));
       return { out: format(value), value: value ?? null };
     },
-    async click({ args: target, flags: { nth, shift } }) {
+    async click({ args: target, flags: { nth, shift, double } }) {
       const { x, y, label } = await point(page, target, nth);
       await page.move(x - 1, y - 1);
-      await page.click(x, y, { shift });
+      await page.click(x, y, { shift, double });
       await settle(page);
-      return `${shift ? "Shift-clicked" : "Clicked"} ${label} at ${Math.round(x)},${Math.round(y)}`;
+      const how = `${shift ? "Shift-" : ""}${double ? "double-clicked" : "clicked"}`;
+      return `${how[0].toUpperCase()}${how.slice(1)} ${label} at ${Math.round(x)},${Math.round(y)}`;
     },
     async hover({ args: target, flags: { nth } }) {
       const { x, y, label } = await point(page, target, nth);
@@ -600,6 +609,20 @@ async function daemon(dir, options) {
       await page.move(x, y);
       await settle(page);
       return `Moved to ${label} at ${Math.round(x)},${Math.round(y)}`;
+    },
+    async drag({ args: target, flags: { nth, by, to, steps, shift } }) {
+      if (!by && !to) throw new Error("usage: drag <css|x y> --by <dx>,<dy> | --to <css>");
+      const from = await point(page, target, nth);
+      let end;
+      if (to) end = await point(page, [to], 0);
+      else {
+        const [dx, dy] = String(by).split(",").map(Number);
+        if (!Number.isFinite(dx) || !Number.isFinite(dy)) throw new Error("--by takes dx,dy");
+        end = { x: from.x + dx, y: from.y + dy };
+      }
+      await page.drag(from, end, { steps: Number(steps ?? 10), shift });
+      await settle(page);
+      return `Dragged ${from.label} from ${Math.round(from.x)},${Math.round(from.y)} to ${Math.round(end.x)},${Math.round(end.y)}`;
     },
     async upload({ args: [selector, file], flags: { nth } }) {
       if (!selector || !file) throw new Error("usage: upload <css> <file>");
@@ -869,6 +892,8 @@ const CODES = {
   "+": ["Equal", 187],
   "-": ["Minus", 189],
   "!": ["Digit1", 49],
+  "]": ["BracketRight", 221],
+  "[": ["BracketLeft", 219],
 };
 
 async function pressKey(page, spec) {

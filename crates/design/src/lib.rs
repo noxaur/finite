@@ -6,9 +6,10 @@
 //! - [`html`] converts between node trees and HTML.
 //! - [`comment`] holds the threads users pin to the canvas.
 //! - [`components`] expands instances of components and turns edits inside them into overrides.
+//! - [`user_edit`] plans the edits people make on the canvas, on the server and in the browser.
 //!
-//! This crate has no I/O, so the same rules can later run in a client (via WASM)
-//! for optimistic local edits.
+//! This crate has no I/O, so the same rules run in the browser (via WASM),
+//! which shows a person's edits before the server confirms them.
 
 pub mod comment;
 pub mod components;
@@ -22,6 +23,7 @@ pub mod import;
 pub mod label;
 mod node;
 pub mod search;
+pub mod user_edit;
 pub mod version;
 
 pub use design::{ActorId, Change, Design, DesignMeta, Origin, Record, Snapshot, Transaction};

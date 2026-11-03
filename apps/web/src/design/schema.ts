@@ -1,6 +1,6 @@
 import { Schema } from "effect";
 
-// Mirrors the Rust types in crates/design (Node, Op, Change, Snapshot, Comment) and
+// Mirrors the Rust types in crates/design (Node, Op, Change, Snapshot, Comment, UserEdit) and
 // crates/server/src/hub/messages.rs (Presence, DesignSummary, the socket messages).
 // Keep both sides in sync.
 
@@ -69,6 +69,45 @@ export const Op = Schema.Union([
   }),
 ]);
 export type Op = typeof Op.Type;
+
+/**
+ * One thing a person changes on the canvas (`user_edit::UserEdit` in Rust).
+ * Each states where things end up, not by how much they change.
+ */
+export const UserEdit = Schema.Union([
+  /** Puts artboards at these canvas positions. */
+  Schema.Struct({
+    kind: Schema.Literal("setPosition"),
+    moves: Schema.Array(Schema.Struct({ id: Schema.String, x: Schema.Number, y: Schema.Number })),
+  }),
+  /** Sets inline styles, or removes one when its value is `null`. */
+  Schema.Struct({
+    kind: Schema.Literal("setStyles"),
+    ids: Schema.Array(Schema.String),
+    styles: Schema.Record(Schema.String, Schema.NullOr(Schema.String)),
+  }),
+  /** Moves nodes under `parent` (the canvas when `null`), right before `before`, or last. */
+  Schema.Struct({
+    kind: Schema.Literal("place"),
+    ids: Schema.Array(Schema.String),
+    parent: Schema.NullOr(Schema.String),
+    before: Schema.NullOr(Schema.String),
+  }),
+  Schema.Struct({ kind: Schema.Literal("delete"), ids: Schema.Array(Schema.String) }),
+  /** Copies nodes, each right after its original. */
+  Schema.Struct({ kind: Schema.Literal("duplicate"), ids: Schema.Array(Schema.String) }),
+  /** Wraps sibling nodes in a new `<div>`, where the first of them was. */
+  Schema.Struct({ kind: Schema.Literal("group"), ids: Schema.Array(Schema.String) }),
+  /** Puts each node's children in its place and deletes it. */
+  Schema.Struct({ kind: Schema.Literal("ungroup"), ids: Schema.Array(Schema.String) }),
+  /** Replaces the text of a text node, or of an element holding only text. */
+  Schema.Struct({ kind: Schema.Literal("setText"), id: Schema.String, text: Schema.String }),
+]);
+export type UserEdit = typeof UserEdit.Type;
+
+/** The tab and its counter that sent a mutation, on the change it made. */
+export const Stamp = Schema.Struct({ client: Schema.String, mid: Schema.Number });
+export type Stamp = typeof Stamp.Type;
 
 export const DesignMeta = Schema.Struct({
   id: Schema.String,
@@ -180,18 +219,54 @@ export const DesignMessage = Schema.Union([
   /** Instead of a snapshot, after reconnecting with `?epoch=…&since=…`: what was missed. */
   Schema.Struct({
     type: Schema.Literal("resume"),
-    changes: Schema.Array(Schema.Struct({ change: Change, actorName: Schema.String })),
+    changes: Schema.Array(
+      Schema.Struct({
+        change: Change,
+        actorName: Schema.String,
+        mutation: Schema.optionalKey(Stamp),
+      }),
+    ),
     comments: Schema.Array(Comment),
     presence: Schema.Array(Presence),
     meta: DesignMeta,
   }),
-  Schema.Struct({ type: Schema.Literal("change"), change: Change, actorName: Schema.String }),
+  Schema.Struct({
+    type: Schema.Literal("change"),
+    change: Change,
+    actorName: Schema.String,
+    /** The mutation that made it, when a person's tab sent one. */
+    mutation: Schema.optionalKey(Stamp),
+  }),
+  /**
+   * Only to the tab that sent mutation `mid`, when it changed nothing:
+   * `error` says why it was refused. Apply every change up to `seq` first.
+   */
+  Schema.Struct({
+    type: Schema.Literal("settled"),
+    mid: Schema.Number,
+    seq: Schema.Number,
+    error: Schema.optionalKey(Schema.String),
+  }),
   Schema.Struct({ type: Schema.Literal("presence"), presence: Schema.Array(Presence) }),
   Schema.Struct({ type: Schema.Literal("meta"), meta: DesignMeta }),
   Schema.Struct({ type: Schema.Literal("comment"), comment: Comment }),
   Schema.Struct({ type: Schema.Literal("commentDeleted"), id: Schema.String }),
 ]);
 export type DesignMessage = typeof DesignMessage.Type;
+
+/** What a person's tab sends on `/api/designs/{id}/ws`, besides pings. */
+export type ClientMessage =
+  | {
+      readonly type: "mutate";
+      readonly author: { readonly id: string; readonly name: string };
+      readonly stamp: Stamp;
+      readonly edits: ReadonlyArray<UserEdit>;
+    }
+  | {
+      readonly type: "undo" | "redo";
+      readonly author: { readonly id: string; readonly name: string };
+      readonly stamp: Stamp;
+    };
 
 /** Sent on `/api/designs/ws`. */
 export const LobbyMessage = Schema.Union([
