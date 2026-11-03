@@ -4,6 +4,7 @@
 //! - [`Op`] is the unit of change. Applying one returns its inverse.
 //! - [`Design`] owns a document plus each actor's undo and redo stacks.
 //! - [`html`] converts between node trees and HTML.
+//! - [`select`] matches CSS selectors against a document.
 //! - [`comment`] holds the threads users pin to the canvas.
 //! - [`tokens`] holds the design tokens every artboard can use.
 //! - [`components`] expands instances of components and turns edits inside them into overrides.
@@ -24,6 +25,7 @@ pub mod import;
 pub mod label;
 mod node;
 pub mod search;
+pub mod select;
 pub mod tokens;
 pub mod user_edit;
 pub mod version;

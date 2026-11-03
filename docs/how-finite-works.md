@@ -224,6 +224,20 @@ Structure merges too. A child missing from the HTML is deleted only if it was un
 
 The base comes from a **set log** (`SetLog` in `design.rs`): for each recent change, the old value of each property it set, and the parent before the change of each node it created, deleted or moved (none for a created node). Both come from the change's inverse. It holds the last 512 such changes, up to about 8 MB. It's kept in memory only, and loading a design or replaying its journal starts it empty. A mark older than what it holds can't be merged, so the result says the HTML replaced values others changed since the read, and that elements others added since were removed. Merging scans the log from the mark once, so it costs about as much as the changes since the read.
 
+### Finding elements with CSS selectors
+
+`crates/design/src/select.rs` matches CSS selectors against a document, so a tool can take `.card:has(> h2)` or `button:contains("Sign up")` instead of node ids. `select::parse` reads a selector list, and `select::matches` returns the elements it matches, in document order across artboards. `Scope` limits the search to one page's artboards or to the descendants of some nodes, as `querySelectorAll` on an element does. The rest of the artboard still counts there: within a card, `.card > h2` matches the card's heading.
+
+Servo's `selectors` crate does the matching, the same one `scraper` uses, so the rules are the browser's. `Matcher` builds a flat index of the scope's elements, with each one's parent, siblings and first child, and implements the crate's `Element` trait over it. Building the index is most of the cost. Reuse one `Matcher` to match many selectors against the same document, such as every rule in an artboard's stylesheets.
+
+Selectors see a design the way an agent reads its HTML. Each artboard is a root: `:root` matches artboards, and no selector reaches from one artboard to another. `#id` matches a node's id, then its `id` attribute. Node ids can start with a digit, which CSS doesn't allow in an id, so `#4kx92mab` is escaped before parsing. `[data-id]`, `[data-name]` and `[style]` read the node's id, layer name and inline styles. `:contains("text")` isn't standard CSS. It matches an element whose visible text, with its descendants', contains the text, ignoring case and runs of whitespace. Text in `<style>`, `<script>` and `<template>` isn't visible.
+
+Text nodes never match. An agent that read a text node's id can still name it, so `Matcher::text_nodes` resolves a list made only of `#id`s. As in CSS, `:has(x)` matches every ancestor of an `x` and `:has(> x)` only its parent, which is why a delete by `:has(...)` needs care.
+
+No element is hovered or focused in a design, so `parse` refuses a state like `:hover` and a pseudo-element like `::before`, and the error says to style them with a `css` op instead. `parse_loose` reads them as matching their element, to find which elements a stylesheet rule like `.btn:hover` styles. The `selectors` parser doesn't say where a selector goes wrong. When parsing fails, `select` reads longer and longer prefixes until one fails for a reason more text couldn't fix, and the error quotes the rest: `can't read "div..card" as a CSS selector (at ".card")`.
+
+`cargo run --release -p finite-design --example select` times it on a 6,991-node article. Each selector took about 1.4 to 1.6 ms, including `:has(a[href^='https'])` and `:contains(...)`. With a reused `Matcher`, it took 0.04 to 0.25 ms.
+
 ## Components
 
 Agents building several screens used to copy the same top bar into each one, and a later change meant editing every copy. A **component** fixes that. It's one definition, and its **instances** follow it, each changing only the values it **overrides**. `crates/design/src/components.rs` holds the rules.
