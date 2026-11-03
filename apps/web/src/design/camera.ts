@@ -122,6 +122,15 @@ export class Camera {
     return { x: (clientX - rect.left - x) / zoom, y: (clientY - rect.top - y) / zoom };
   }
 
+  /** The page point over a canvas point. */
+  toPage(x: number, y: number): { x: number; y: number } {
+    const rect = this.viewport.getBoundingClientRect();
+    return {
+      x: rect.left + this.view.x + x * this.view.zoom,
+      y: rect.top + this.view.y + y * this.view.zoom,
+    };
+  }
+
   /** Pans so the canvas point (`x`, `y`) sits in the middle of the viewport, at the same zoom. */
   centerOn(x: number, y: number) {
     const { zoom } = this.view;

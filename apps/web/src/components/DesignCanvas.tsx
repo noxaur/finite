@@ -120,6 +120,7 @@ export function DesignCanvas({ id }: { id: string }) {
     framedRef.current = null;
     const renderer = new Renderer(frames, replica, {
       live: true,
+      toPage: (x, y) => camera.toPage(x, y),
       onWheel: (event) => camera.wheel(event),
       // An auto-height artboard with a script is measured inside its iframe,
       // so its real height arrives after the first frame. Frame it again,
