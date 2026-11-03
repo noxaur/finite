@@ -85,11 +85,12 @@ pub fn expand(doc: &Document) -> Cow<'_, Document> {
         .filter(|n| !replaced.contains(n.id.as_str()))
         .cloned()
         .chain(expander.out);
-    // The design's shared CSS styles instances like everything else.
+    // The design's tokens style instances like everything else.
     Cow::Owned(
         Document::from_nodes(nodes)
             .with_css(doc.css().map(str::to_owned))
-            .with_pages(doc.page_map().clone()),
+            .with_pages(doc.page_map().clone())
+            .with_tokens(doc.tokens().clone(), doc.mode_map().clone()),
     )
 }
 
@@ -595,8 +596,8 @@ pub fn redirect(
                 }
                 detaching |= !orphans(doc, id).is_empty();
             }
-            // The shared stylesheet and the pages aren't part of any instance.
-            Op::Css { .. } | Op::Page { .. } => {}
+            // The design's tokens, modes and pages aren't part of any instance.
+            Op::Css { .. } | Op::Page { .. } | Op::Token { .. } | Op::Mode { .. } => {}
             Op::Move { id, parent, .. } => {
                 if is_virtual(id) {
                     return Err(refuse_inside(doc, id, "it can't be moved on its own"));

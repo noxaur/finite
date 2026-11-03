@@ -23,6 +23,7 @@ use finite_design::{
     Document, NodeId, NodeKind,
     edit::pixel_size,
     html::{self, BASE_CSS, BASE_LAYER, CSP, VIEWER_ID_ATTR},
+    tokens,
 };
 use finite_transfer::scene::{COMPUTED, Measure, Resolved, Scene};
 use serde::Serialize;
@@ -426,11 +427,16 @@ fn page_html(doc: &Document, artboard: &str, options: &Options) -> Option<(Strin
     if options.transparent {
         overrides.push_str("html, body { background: transparent !important; }");
     }
-    // The design's shared CSS, in a layer the artboard's own styles
-    // override (see `html::shared_style`), after the base styles' layer.
-    let shared = doc.css().map_or(String::new(), |css| {
-        format!("<style>{}</style>", html::shared_style(css, false))
+    // The design's tokens in the artboard's mode, in a layer the
+    // artboard's own styles override, after the base styles' layer.
+    let tokens = doc.get(artboard).map_or(String::new(), |board| {
+        tokens::style(doc, doc.mode_of(board), false)
     });
+    let shared = if tokens.is_empty() {
+        String::new()
+    } else {
+        format!("<style>{tokens}</style>")
+    };
     let page = format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\"><style>@layer {BASE_LAYER} {{ {BASE_CSS} html, body {{ margin: 0; }} }}</style>{shared}</head><body>{body}<style>{overrides}</style></body></html>"
     );

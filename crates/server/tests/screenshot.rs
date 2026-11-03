@@ -3,7 +3,7 @@
 
 use std::{collections::BTreeMap, time::Duration};
 
-use finite_design::{Document, edit, html};
+use finite_design::{Document, Op, edit, html};
 use finite_server::screenshot::{
     Format, Image, MAX_OUTPUT_SIDE, Options, Rect, Shot, capture, plan, plan_measurement, scene,
 };
@@ -482,18 +482,23 @@ async fn a_whole_artboard_shot_measures_every_element() {
 }
 
 #[tokio::test]
-async fn shared_css_applies_and_the_artboard_overrides_it() {
+async fn migrated_shared_css_still_loses_to_the_artboards_own() {
     let (mut doc, names) = design(
         r#"<div data-name="Board" style="width: 300px; height: 200px"><style>.b { width: 70px; }</style><div data-name="A" class="a"></div><div data-name="B" class="b"></div></div>"#,
     );
     // More specific than the artboard's own rule, which still wins.
     // It overrides the base styles' box-sizing, too.
-    doc.apply_all(
-        &edit::set_css(
-            ".a, div.b { width: 50px; height: 10px; } .a { box-sizing: content-box; padding-left: 10px; }",
-        )
-        .unwrap(),
-    );
+    let css = ":root { --pad: 10px } .a, div.b { width: 50px; height: 10px; } .a { box-sizing: content-box; padding-left: var(--pad); }";
+    doc.apply_all(&[Op::Css {
+        css: Some(css.into()),
+    }]);
+    let mut n = 0;
+    let ops = edit::migrate_css(&doc, &mut || {
+        n += 1;
+        format!("m{n}")
+    })
+    .unwrap();
+    doc.apply_all(&ops);
     let Some(images) = shoot(&doc, vec![Shot::node(&names["Board"])], Options::default()).await
     else {
         return;
@@ -501,6 +506,37 @@ async fn shared_css_applies_and_the_artboard_overrides_it() {
     let boxes = images[0].as_ref().unwrap().boxes.clone().unwrap();
     let width = |name: &str| boxes.iter().find(|b| b.id == names[name]).unwrap().width;
     assert_eq!(width("A"), 60.0);
+    assert_eq!(width("B"), 70.0);
+}
+
+#[tokio::test]
+async fn tokens_render_in_the_artboards_mode() {
+    let (mut doc, names) = design(
+        r#"<div data-name="Board" style="width: 300px; height: 200px"><style>:root { --b: 70px; }</style><div data-name="A" style="width: var(--a); height: 10px"></div><div data-name="B" style="width: var(--b); height: 10px"></div></div>"#,
+    );
+    let names_of = ["Light".to_owned(), "Dark".to_owned()];
+    let (mut ops, modes) = edit::set_modes(&doc, &names_of, &mut || "dark".into()).unwrap();
+    let by_mode = |light: &str, dark: &str| {
+        edit::TokenChange::Modes(BTreeMap::from([
+            ("Light".to_owned(), Some(light.to_owned())),
+            ("Dark".to_owned(), Some(dark.to_owned())),
+        ]))
+    };
+    let changes = [
+        ("--a".to_owned(), by_mode("50px", "80px")),
+        ("--b".to_owned(), by_mode("20px", "30px")),
+    ];
+    ops.extend(edit::set_tokens(&doc, &modes, &changes).unwrap());
+    doc.apply_all(&ops);
+    doc.apply_all(&edit::set_artboard_mode(&doc, &[names["Board"].clone()], Some("Dark")).unwrap());
+    let Some(images) = shoot(&doc, vec![Shot::node(&names["Board"])], Options::default()).await
+    else {
+        return;
+    };
+    let boxes = images[0].as_ref().unwrap().boxes.clone().unwrap();
+    let width = |name: &str| boxes.iter().find(|b| b.id == names[name]).unwrap().width;
+    // A takes the Dark value, and the artboard's own --b beats the token.
+    assert_eq!(width("A"), 80.0);
     assert_eq!(width("B"), 70.0);
 }
 

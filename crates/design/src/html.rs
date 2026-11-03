@@ -71,23 +71,24 @@ pub const BASE_CSS: &str = "*, *::before, *::after { box-sizing: border-box; }";
 pub const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https:; img-src https: http: data: blob:; font-src https: data:; media-src https: data: blob:";
 
 /// The cascade layer for the base styles every artboard renders with. It
-/// comes first, so the shared CSS can override them, like the font that a
-/// shadow root's `all: initial` resets.
+/// comes first, so tokens and an artboard's styles can override them, like
+/// the font that a shadow root's `all: initial` resets.
 pub const BASE_LAYER: &str = "finite-base";
 
-/// The cascade layer the design's shared CSS goes in. Styles outside any
-/// layer beat layered ones whatever their specificity, so an artboard's own
-/// `<style>` blocks and inline styles override the shared CSS. The cascade
+/// The cascade layer the old shared CSS rendered in, and that its rules
+/// keep in each artboard after [`crate::edit::migrate_css`]. Styles outside
+/// any layer beat layered ones whatever their specificity, so an artboard's
+/// own `<style>` blocks and inline styles still override them. The cascade
 /// reverses that for `!important`: a shared `!important` wins.
 pub const SHARED_LAYER: &str = "finite-shared";
 
-/// The design's shared CSS as the text of a `<style>` element, with `</style`
-/// broken up so it can't end the element early. Its rules go in
-/// [`SHARED_LAYER`], and so do its leading `@import`s, which can't go inside
-/// a layer block and take a `layer()` instead. For a shadow root, where
-/// `:root` matches nothing, `:root` becomes `:host`, so variables defined
-/// there reach the artboard.
-pub fn shared_style(css: &str, shadow: bool) -> String {
+/// Old shared CSS as the text of a `<style>` element, with `</style` broken
+/// up so it can't end the element early. Its rules go in [`SHARED_LAYER`],
+/// and so do its leading `@import`s, which can't go inside a layer block
+/// and take a `layer()` instead. The shared CSS rendered with `:root` as
+/// `:host` in shadow roots, and one `<style>` serves both, so `:root`
+/// becomes `:is(:root, :host)`.
+pub fn layered_style(css: &str) -> String {
     let mut head = String::new();
     let mut rest = css;
     loop {
@@ -104,12 +105,7 @@ pub fn shared_style(css: &str, shadow: bool) -> String {
         head.push('\n');
         rest = &at[end..];
     }
-    let rest = rest.trim_start();
-    let body = if shadow {
-        replace_root(rest)
-    } else {
-        rest.to_owned()
-    };
+    let body = replace_root(rest.trim_start());
     raw_text(
         &format!("{head}@layer {SHARED_LAYER} {{\n{body}\n}}"),
         "style",
@@ -228,7 +224,8 @@ fn url_end(css: &str) -> usize {
     bytes.len()
 }
 
-/// `css` with each `:root` selector, in any case, written as `:host`.
+/// `css` with each `:root` selector, in any case, written as
+/// `:is(:root, :host)`, which matches in a page and in a shadow root alike.
 /// Strings and comments stay as they are.
 fn replace_root(css: &str) -> String {
     let bytes = css.as_bytes();
@@ -236,6 +233,8 @@ fn replace_root(css: &str) -> String {
     let (mut i, mut copied) = (0, 0);
     while i < bytes.len() {
         match bytes[i] {
+            // An escaped character, like the `:` of `.icon\:root`, is part of a name.
+            b'\\' => i += 2,
             b'"' | b'\'' => i = string_end(css, i),
             b'/' if bytes.get(i + 1) == Some(&b'*') => i = comment_end(css, i),
             b':' if css
@@ -246,7 +245,7 @@ fn replace_root(css: &str) -> String {
                     .is_some_and(|&c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_') =>
             {
                 out.push_str(&css[copied..i]);
-                out.push_str(":host");
+                out.push_str(":is(:root, :host)");
                 i += 5;
                 copied = i;
             }
@@ -786,6 +785,7 @@ impl Fragment {
                 x: position.map(|p| p.0),
                 y: position.map(|p| p.1),
                 page: None,
+                mode: None,
                 styles: self.styles,
                 attrs: self.attrs,
                 // A component it defines, by name, rather than one it shows.
@@ -1494,36 +1494,32 @@ mod tests {
     }
 
     #[test]
-    fn shared_css_goes_in_its_layer_with_its_imports() {
+    fn old_shared_css_goes_in_its_layer_with_its_imports() {
         let css = "/* fonts */ @import \"https://fonts.example/css?family=A:wght@400;700\";\n\
                    @import url(https://fonts.example/b;c.css) screen;\n\
                    @import url(c.css) layer(mine);\n\
-                   :root { --brand: red; } :root-ish {}";
+                   :ROOT { --brand: red; } :root-ish {} [title=\":root\"] {} /* :root */";
         assert_eq!(
-            shared_style(css, false),
+            layered_style(css),
             "@import \"https://fonts.example/css?family=A:wght@400;700\" layer(finite-shared);\n\
              @import url(https://fonts.example/b;c.css) layer(finite-shared) screen;\n\
              @import url(c.css) layer(mine);\n\
-             @layer finite-shared {\n:root { --brand: red; } :root-ish {}\n}"
-        );
-        // In a shadow root, :root selectors become :host, but not text.
-        assert_eq!(
-            shared_style(
-                ":ROOT { --brand: red; } [title=\":root\"] {} /* :root */",
-                true
-            ),
-            "@layer finite-shared {\n:host { --brand: red; } [title=\":root\"] {} /* :root */\n}"
+             @layer finite-shared {\n:is(:root, :host) { --brand: red; } :root-ish {} [title=\":root\"] {} /* :root */\n}"
         );
         // Comments and quoted parentheses don't confuse it.
         assert_eq!(
-            shared_style(
-                "@import /* a */ url(\"a(b).css\") supports(display: grid) /* ; */ screen; .x {}",
-                false
+            layered_style(
+                "@import /* a */ url(\"a(b).css\") supports(display: grid) /* ; */ screen; .x {}"
             ),
             "@import /* a */ url(\"a(b).css\") layer(finite-shared) supports(display: grid) /* ; */ screen;\n\
              @layer finite-shared {\n.x {}\n}"
         );
         // It can't end its <style> element, wherever it came from.
-        assert!(!shared_style("a{}</style><script>x()</script>", false).contains("</style"));
+        assert!(!layered_style("a{}</style><script>x()</script>").contains("</style"));
+        // An escaped colon is part of a class name, not a `:root`.
+        assert_eq!(
+            layered_style(".icon\\:root {}"),
+            "@layer finite-shared {\n.icon\\:root {}\n}"
+        );
     }
 }

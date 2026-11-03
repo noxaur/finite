@@ -70,7 +70,7 @@ describe("Replica", () => {
       (a: Applied) => {
         // Each callback sees the tree right after its own op.
         const where =
-          a.op === "delete" ? a.parent : a.op === "css" || a.op === "page" ? null : a.node.id;
+          a.op === "delete" ? a.parent : a.op === "tokens" || a.op === "page" ? null : a.node.id;
         seen.push(
           `${a.op} ${r
             .children("a")
@@ -163,23 +163,43 @@ describe("Replica", () => {
     );
   });
 
-  it("keeps the shared CSS from the snapshot and from changes", () => {
+  it("keeps the tokens and modes from the snapshot and from changes", () => {
     const r = new Replica();
     const snapshot = {
       meta: { id: "d", name: "D", createdAt: 0, updatedAt: 0 },
       seq: 0,
-      nodes: [node("a", null)],
+      nodes: [node("a", null), { ...node("b", null), mode: "dark" }],
       comments: [],
     };
-    r.load({ ...snapshot, css: ".btn { color: red; }" });
-    expect(r.css).toBe(".btn { color: red; }");
-    // The same CSS again doesn't apply, as on the server.
-    expect(r.apply({ op: "css", css: ".btn { color: red; }" })).toBeNull();
-    expect(r.apply({ op: "css", css: null })).toEqual({ op: "css", css: null });
-    expect(r.css).toBeNull();
-    r.apply({ op: "css", css: ":root { --brand: blue; }" });
+    r.load({
+      ...snapshot,
+      modes: { "mode-1": { name: "Light", index: "V" }, dark: { name: "Dark", index: "W" } },
+      tokens: { "--bg": { "mode-1": "#fff", dark: "#111" }, "--brand": { "mode-1": "red" } },
+    });
+    expect(r.tokens.modes).toEqual([
+      { id: "mode-1", name: "Light" },
+      { id: "dark", name: "Dark" },
+    ]);
+    // Each artboard gets the values of its own mode, and Dark falls back to Light's --brand.
+    expect(r.tokenStyle("a", true)).toBe(
+      "@layer finite-tokens { :host { --bg: #fff; --brand: red; } }",
+    );
+    expect(r.tokenStyle("b", false)).toBe(
+      "@layer finite-tokens { :root { --bg: #111; --brand: red; } }",
+    );
+    expect(r.modeOf(r.get("b")!)).toBe("dark");
+    // The same values again don't apply, as on the server.
+    expect(r.apply({ op: "token", name: "--brand", modeId: "mode-1", value: "red" })).toBeNull();
+    expect(r.apply({ op: "token", name: "--brand", modeId: "mode-1", value: null })).toEqual({
+      op: "tokens",
+    });
+    expect(r.tokens.tokens["--brand"]).toBeUndefined();
+    // Removing Dark sends its artboard back to the first mode.
+    r.apply({ op: "mode", id: "dark", mode: null });
+    expect(r.modeOf(r.get("b")!)).toBe("mode-1");
     r.load(snapshot);
-    expect(r.css).toBeNull();
+    expect(r.tokens).toEqual({ modes: [{ id: "mode-1", name: "Default" }], tokens: {} });
+    expect(r.tokenStyle("a", true)).toBe("");
   });
 
   it("lists pages and which page each artboard is on", () => {

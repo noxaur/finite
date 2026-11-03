@@ -3,7 +3,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 
-use crate::node::{Node, NodeId, NodeKind, PropKey};
+use crate::{
+    node::{Node, NodeId, NodeKind, PropKey},
+    tokens::{self, FIRST_MODE, FIRST_MODE_NAME, Mode, Values},
+};
 
 /// The smallest unit of change. Every edit, from any actor, becomes a list of ops.
 ///
@@ -36,8 +39,10 @@ pub enum Op {
         parent: Option<NodeId>,
         index: String,
     },
-    /// Replaces the design's shared stylesheet, the CSS every artboard
-    /// renders with, or removes it when `css` is `None`.
+    /// Replaces the design's old shared stylesheet, or removes it when
+    /// `css` is `None`. Tokens replaced it: only journals from before them
+    /// hold this op, and [`crate::Design::migrate_css`] moves what it set
+    /// into tokens when the design loads.
     Css {
         #[serde(default)]
         css: Option<String>,
@@ -49,6 +54,24 @@ pub enum Op {
         id: String,
         #[serde(default)]
         page: Option<Page>,
+    },
+    /// Sets one token's value in one mode, or removes it when `value` is
+    /// `None` (see [`crate::tokens`]). A token without values is gone. One
+    /// mode at a time, so undoing one agent's Light value leaves another's
+    /// Dark value alone.
+    Token {
+        name: String,
+        #[serde(rename = "modeId")]
+        mode_id: String,
+        #[serde(default)]
+        value: Option<String>,
+    },
+    /// Creates, renames or reorders one mode, or removes it when `mode` is
+    /// `None`. Artboards in a removed mode fall back to the first one.
+    Mode {
+        id: String,
+        #[serde(default)]
+        mode: Option<Mode>,
     },
 }
 
@@ -65,6 +88,12 @@ pub struct Page {
     /// Fractional index among pages (see [`crate::fractional`]).
     pub index: String,
 }
+
+/// The implicit first mode.
+static IMPLICIT_MODE: std::sync::LazyLock<Mode> = std::sync::LazyLock::new(|| Mode {
+    name: FIRST_MODE_NAME.into(),
+    index: "V".into(),
+});
 
 /// The id of a design's implicit first page, before it has any pages.
 pub const FIRST_PAGE: &str = "page-1";
@@ -90,6 +119,8 @@ impl<'de> Deserialize<'de> for Op {
             Move,
             Css,
             Page,
+            Token,
+            Mode,
         }
         #[derive(Deserialize)]
         struct Wire {
@@ -105,6 +136,11 @@ impl<'de> Deserialize<'de> for Op {
             css: Option<String>,
             #[serde(default)]
             page: Option<Page>,
+            name: Option<String>,
+            #[serde(rename = "modeId")]
+            mode_id: Option<String>,
+            #[serde(default)]
+            mode: Option<Mode>,
         }
         let wire = Wire::deserialize(deserializer)?;
         let need = |field: &'static str| D::Error::missing_field(field);
@@ -129,6 +165,19 @@ impl<'de> Deserialize<'de> for Op {
             Kind::Page => Op::Page {
                 id: wire.id.ok_or_else(|| need("id"))?,
                 page: wire.page,
+            },
+            Kind::Token => Op::Token {
+                name: wire.name.ok_or_else(|| need("name"))?,
+                mode_id: wire.mode_id.ok_or_else(|| need("modeId"))?,
+                value: match wire.value {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(value)) => Some(value),
+                    Some(_) => return Err(D::Error::custom("a token's value is a string")),
+                },
+            },
+            Kind::Mode => Op::Mode {
+                id: wire.id.ok_or_else(|| need("id"))?,
+                mode: wire.mode,
             },
         })
     }
@@ -172,16 +221,25 @@ impl Op {
             Op::Page { id, page } => {
                 BASE + id.len() + page.as_ref().map_or(0, |p| p.name.len() + p.index.len())
             }
+            Op::Token {
+                name,
+                mode_id,
+                value,
+            } => BASE + name.len() + mode_id.len() + value.as_ref().map_or(0, String::len),
+            Op::Mode { id, mode } => {
+                BASE + id.len() + mode.as_ref().map_or(0, |m| m.name.len() + m.index.len())
+            }
         }
     }
 
-    /// The node this op creates, deletes or changes. Empty for [`Op::Css`]
-    /// and [`Op::Page`], which change the design rather than a node.
+    /// The node this op creates, deletes or changes. Empty for the ops that
+    /// change the design rather than a node: [`Op::Css`], [`Op::Page`],
+    /// [`Op::Token`] and [`Op::Mode`].
     pub fn id(&self) -> &str {
         match self {
             Op::Create { node } => &node.id,
             Op::Delete { id } | Op::Set { id, .. } | Op::Move { id, .. } => id,
-            Op::Css { .. } | Op::Page { .. } => "",
+            Op::Css { .. } | Op::Page { .. } | Op::Token { .. } | Op::Mode { .. } => "",
         }
     }
 }
@@ -232,8 +290,8 @@ impl std::fmt::Display for Rejected {
 }
 
 /// The node tree of one design, stored flat by id, with an index from each
-/// parent to its children in sibling order, the design's shared CSS and its
-/// pages.
+/// parent to its children in sibling order, and the design's pages, tokens
+/// and modes.
 #[derive(Clone, Debug, Default)]
 pub struct Document {
     nodes: HashMap<NodeId, Node>,
@@ -242,11 +300,15 @@ pub struct Document {
     /// The instances of each component, by the component's id. A component
     /// that's gone can still have instances here, until they're detached.
     instances: HashMap<NodeId, BTreeSet<NodeId>>,
-    /// The shared stylesheet: CSS every artboard renders with, before its own
-    /// `<style>` blocks and inline styles, so those still override it.
+    /// The old shared stylesheet, until [`crate::Design::migrate_css`]
+    /// moves it into tokens. See [`Op::Css`].
     css: Option<String>,
     /// Pages by id. Empty for a design with only its implicit first page.
     pages: BTreeMap<String, Page>,
+    /// Token values by name (see [`crate::tokens`]).
+    tokens: BTreeMap<String, Values>,
+    /// Modes by id. Empty for a design with only its implicit first mode.
+    modes: BTreeMap<String, Mode>,
 }
 
 /// How many pages a design can have. Every page shows in the viewer's
@@ -264,15 +326,64 @@ impl Document {
         doc
     }
 
-    /// The document with `css` as its shared stylesheet.
+    /// The document with `css` as its old shared stylesheet.
     pub fn with_css(mut self, css: Option<String>) -> Self {
         self.css = css.filter(|css| !css.is_empty());
         self
     }
 
-    /// The shared stylesheet, if the design has one.
+    /// The old shared stylesheet, if the design still has one to migrate.
     pub fn css(&self) -> Option<&str> {
         self.css.as_deref()
+    }
+
+    /// The document with these tokens and modes.
+    pub fn with_tokens(
+        mut self,
+        tokens: BTreeMap<String, Values>,
+        modes: BTreeMap<String, Mode>,
+    ) -> Self {
+        self.tokens = tokens;
+        self.modes = modes;
+        self
+    }
+
+    /// Token values by name, in name order.
+    pub fn tokens(&self) -> &BTreeMap<String, Values> {
+        &self.tokens
+    }
+
+    /// Modes by id, as saved. Empty when the design has only its implicit first mode.
+    pub fn mode_map(&self) -> &BTreeMap<String, Mode> {
+        &self.modes
+    }
+
+    /// Modes in order, sorted by `(index, id)`. Never empty: a design
+    /// without modes has its implicit [`FIRST_MODE`].
+    pub fn modes(&self) -> Vec<(&str, &Mode)> {
+        if self.modes.is_empty() {
+            return vec![(FIRST_MODE, &IMPLICIT_MODE)];
+        }
+        let mut modes: Vec<(&str, &Mode)> =
+            self.modes.iter().map(|(id, m)| (id.as_str(), m)).collect();
+        modes.sort_by(|a, b| (&a.1.index, a.0).cmp(&(&b.1.index, b.0)));
+        modes
+    }
+
+    /// The id of the first mode.
+    pub fn first_mode(&self) -> &str {
+        self.modes
+            .iter()
+            .min_by(|a, b| (&a.1.index, a.0).cmp(&(&b.1.index, b.0)))
+            .map_or(FIRST_MODE, |(id, _)| id)
+    }
+
+    /// The mode an artboard renders in: its own mode if that exists, else the first mode.
+    pub fn mode_of<'a>(&'a self, artboard: &'a Node) -> &'a str {
+        match &artboard.mode {
+            Some(mode) if self.modes.contains_key(mode) => mode,
+            _ => self.first_mode(),
+        }
     }
 
     /// The document with `pages` as its pages.
@@ -683,6 +794,64 @@ impl Document {
                 }
                 let previous = std::mem::replace(&mut self.css, css);
                 Ok(Changed(vec![Op::Css { css: previous }]))
+            }
+            Op::Token {
+                name,
+                mode_id,
+                value,
+            } => {
+                let previous = self.tokens.get(name).and_then(|v| v.get(mode_id)).cloned();
+                if previous == *value {
+                    return Ok(Unchanged);
+                }
+                let invalid = || Rejected::Invalid(name.clone());
+                match value {
+                    Some(value) => {
+                        tokens::check_name(name).map_err(|_| invalid())?;
+                        tokens::check_value(value).map_err(|_| invalid())?;
+                        if !self.tokens.contains_key(name)
+                            && self.tokens.len() >= tokens::MAX_TOKENS
+                        {
+                            return Err(invalid());
+                        }
+                        self.tokens
+                            .entry(name.clone())
+                            .or_default()
+                            .insert(mode_id.clone(), value.clone());
+                    }
+                    None => {
+                        let values = self.tokens.get_mut(name).expect("it had a value");
+                        values.remove(mode_id);
+                        if values.is_empty() {
+                            self.tokens.remove(name);
+                        }
+                    }
+                }
+                Ok(Changed(vec![Op::Token {
+                    name: name.clone(),
+                    mode_id: mode_id.clone(),
+                    value: previous,
+                }]))
+            }
+            Op::Mode { id, mode } => {
+                let previous = self.modes.get(id).cloned();
+                if previous == *mode {
+                    return Ok(Unchanged);
+                }
+                if mode.as_ref().is_some_and(|m| {
+                    !crate::fractional::is_valid(&m.index)
+                        || (previous.is_none() && self.modes.len() >= tokens::MAX_MODES)
+                }) {
+                    return Err(Rejected::Invalid(id.clone()));
+                }
+                match mode {
+                    Some(mode) => self.modes.insert(id.clone(), mode.clone()),
+                    None => self.modes.remove(id),
+                };
+                Ok(Changed(vec![Op::Mode {
+                    id: id.clone(),
+                    mode: previous,
+                }]))
             }
             Op::Page { id, page } => {
                 let previous = self.pages.get(id).cloned();

@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 
 use finite_design::{
     Document, Node, NodeId, Op, Page, PropKey, components, html,
+    tokens::{self, Mode, Values},
     user_edit::{self, UserEdit},
 };
 use serde::Serialize;
@@ -37,9 +38,19 @@ enum Applied<'a> {
         from: Option<&'a str>,
         before: Option<&'a str>,
     },
-    /// The shared stylesheet is now `css`.
-    Css {
-        css: Option<&'a str>,
+    /// The old shared stylesheet changed. Only journals from before
+    /// tokens hold it, so the viewer has nothing to draw.
+    Css,
+    /// The token `name` now has `values`, all its modes' values, or is gone
+    /// when it's `None`.
+    Token {
+        name: &'a str,
+        values: Option<&'a Values>,
+    },
+    /// The mode `id` is now `mode`, or was removed when it's `None`.
+    Mode {
+        id: &'a str,
+        mode: Option<&'a Mode>,
     },
     /// The page `id` is now `page`, or was removed when it's `None`.
     Page {
@@ -346,6 +357,46 @@ impl Replica {
         serde_json::to_string(&pages).expect("pages serialize")
     }
 
+    /// The design's modes in order and its tokens by name, as JSON
+    /// `{"modes": [{id, name}], "tokens": {name: {modeId: value}}}`. Never
+    /// without a mode: a design without modes has its implicit first one.
+    pub fn tokens(&self) -> String {
+        #[derive(Serialize)]
+        struct Listed<'a> {
+            id: &'a str,
+            name: &'a str,
+        }
+        #[derive(Serialize)]
+        struct Tokens<'a> {
+            modes: Vec<Listed<'a>>,
+            tokens: &'a std::collections::BTreeMap<String, Values>,
+        }
+        let modes = self
+            .doc
+            .modes()
+            .into_iter()
+            .map(|(id, mode)| Listed {
+                id,
+                name: &mode.name,
+            })
+            .collect();
+        serde_json::to_string(&Tokens {
+            modes,
+            tokens: self.doc.tokens(),
+        })
+        .expect("tokens serialize")
+    }
+
+    /// The tokens for artboard `id` in its mode, as a `<style>` element's
+    /// text (see [`tokens::style`]), for a shadow root when `shadow` is
+    /// set. Empty when the design has no tokens or there's no such artboard.
+    pub fn token_style(&self, id: &str, shadow: bool) -> String {
+        match self.doc.get(id) {
+            Some(board) => tokens::style(&self.doc, self.doc.mode_of(board), shadow),
+            None => String::new(),
+        }
+    }
+
     /// The subtree at `id` as compact HTML, as screenshots render it, with
     /// instances expanded. With `ids`, every element carries its node id,
     /// for sandboxed artboards. Empty when there's no such node.
@@ -458,7 +509,15 @@ fn describe<'a>(doc: &'a Document, op: &'a Op, inverse: &'a [Op]) -> Applied<'a>
             },
             before: next(id),
         },
-        Op::Css { .. } => Applied::Css { css: doc.css() },
+        Op::Css { .. } => Applied::Css,
+        Op::Token { name, .. } => Applied::Token {
+            name,
+            values: doc.tokens().get(name),
+        },
+        Op::Mode { id, .. } => Applied::Mode {
+            id,
+            mode: doc.mode_map().get(id),
+        },
         Op::Page { id, .. } => Applied::Page {
             id,
             page: doc.page_map().get(id),
@@ -539,22 +598,42 @@ mod tests {
     }
 
     #[test]
-    fn css_results_hold_the_new_stylesheet() {
+    fn token_and_mode_results_hold_the_new_values() {
         let mut r = replica();
+        let dark = json!({ "name": "Dark", "index": "W" });
         let results = apply(
             &mut r,
             json!([
-                { "op": "css", "css": ".btn { color: red; }" },
-                { "op": "css", "css": ".btn { color: red; }" },
-                { "op": "css", "css": null },
+                { "op": "mode", "id": "mode-1", "mode": { "name": "Light", "index": "V" } },
+                { "op": "mode", "id": "dark", "mode": dark },
+                { "op": "token", "name": "--bg", "modeId": "mode-1", "value": "#fff" },
+                { "op": "token", "name": "--bg", "modeId": "dark", "value": "#111" },
+                { "op": "token", "name": "--bg", "modeId": "dark", "value": "#111" },
+                { "op": "set", "id": "a", "key": "mode", "value": "dark" },
+                { "op": "token", "name": "--gone", "modeId": "dark", "value": null },
             ]),
         );
         assert_eq!(
-            results[0],
-            json!({ "op": "css", "css": ".btn { color: red; }" })
+            results[1],
+            json!({ "op": "mode", "id": "dark", "mode": dark })
         );
-        assert_eq!(results[1], Value::Null);
-        assert_eq!(results[2], json!({ "op": "css", "css": null }));
+        assert_eq!(
+            results[3],
+            json!({ "op": "token", "name": "--bg", "values": { "mode-1": "#fff", "dark": "#111" } })
+        );
+        assert_eq!(results[4], Value::Null);
+        assert_eq!(results[6], Value::Null);
+        assert_eq!(
+            r.token_style("a", true),
+            "@layer finite-tokens { :host { --bg: #111; } }"
+        );
+        assert_eq!(r.token_style("missing", true), "");
+        let listed: Value = serde_json::from_str(&r.tokens()).unwrap();
+        assert_eq!(
+            listed["modes"],
+            json!([{ "id": "mode-1", "name": "Light" }, { "id": "dark", "name": "Dark" }])
+        );
+        assert_eq!(listed["tokens"]["--bg"]["dark"], "#111");
     }
 
     #[test]

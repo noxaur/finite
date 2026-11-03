@@ -160,8 +160,15 @@ async fn wire_messages_match_the_fixture() {
         })
         .unwrap();
     handle
-        .edit(&agent, "Set shared CSS", |_| {
-            Ok((edit::set_css(":root { --brand: orange; }")?, ()))
+        .edit(&agent, "Set tokens", |doc| {
+            let names = ["Light".to_owned(), "Dark".to_owned()];
+            let (mut ops, modes) = edit::set_modes(doc, &names, &mut || "mode-dark".into())?;
+            let brand = edit::TokenChange::Modes(BTreeMap::from([
+                ("Light".to_owned(), Some("orange".to_owned())),
+                ("Dark".to_owned(), Some("gold".to_owned())),
+            ]));
+            ops.extend(edit::set_tokens(doc, &modes, &[("--brand".into(), brand)])?);
+            Ok((ops, ()))
         })
         .unwrap();
     // The button becomes a component, and an instance of it removes its padding.
@@ -225,7 +232,7 @@ async fn wire_messages_match_the_fixture() {
     let mut design = vec![design_first];
     design.extend(drain(&mut events));
     design.push(first(resumed));
-    // A viewer that joins now gets the shared CSS in its snapshot.
+    // A viewer that joins now gets the tokens and modes in its snapshot.
     design.push(first(handle.subscribe().0));
     // Only the tab whose mutation changed nothing gets this one.
     let settled = DesignMessage::Settled {

@@ -141,11 +141,33 @@ export class Api extends Context.Service<
       /** The page the new artboards go on. */
       page?: string,
     ): Effect.Effect<ImportResult, ApiError | Refused>;
-    /** Replaces the CSS every artboard shares, as an edit by `author`. Blank CSS removes it. */
-    setSharedCss(
+    /**
+     * Names the modes in order (the first renames the first mode; extra names add modes),
+     * then sets each token: one value for every mode, values by mode id or name, or
+     * `null` to delete it. One edit by `author`.
+     */
+    setTokens(
       designId: string,
       author: CommentAuthor,
-      css: string,
+      change: {
+        readonly modes?: ReadonlyArray<string>;
+        readonly tokens?: Readonly<
+          Record<string, string | Readonly<Record<string, string | null>> | null>
+        >;
+      },
+    ): Effect.Effect<void, ApiError | Refused>;
+    /** Deletes a mode and its token values; its artboards go back to the first mode. */
+    deleteMode(
+      designId: string,
+      author: CommentAuthor,
+      modeId: string,
+    ): Effect.Effect<void, ApiError | Refused>;
+    /** Sets the mode artboards render in, or the first mode for `null`. */
+    setArtboardMode(
+      designId: string,
+      author: CommentAuthor,
+      ids: ReadonlyArray<string>,
+      modeId: string | null,
     ): Effect.Effect<void, ApiError | Refused>;
   }
 >()("finite/Api") {
@@ -269,13 +291,39 @@ export class Api extends Context.Service<
         yield* client.del(path).pipe(toApiError);
       });
 
-      const setSharedCss = Effect.fn("Api.setSharedCss")(function* (
+      const design = (designId: string) => `/designs/${encodeURIComponent(designId)}`;
+
+      const setTokens = Effect.fn("Api.setTokens")(function* (
         designId: string,
         author: CommentAuthor,
-        css: string,
+        change: {
+          readonly modes?: ReadonlyArray<string>;
+          readonly tokens?: Readonly<
+            Record<string, string | Readonly<Record<string, string | null>> | null>
+          >;
+        },
       ) {
-        const path = `/designs/${encodeURIComponent(designId)}/css`;
-        yield* send(HttpClientRequest.put(path), { author, css }, Changed);
+        const path = `${design(designId)}/tokens`;
+        yield* send(HttpClientRequest.put(path), { author, ...change }, Changed);
+      });
+
+      const deleteMode = Effect.fn("Api.deleteMode")(function* (
+        designId: string,
+        author: CommentAuthor,
+        modeId: string,
+      ) {
+        const path = `${design(designId)}/modes/${encodeURIComponent(modeId)}`;
+        yield* send(HttpClientRequest.delete(path), { author }, Changed);
+      });
+
+      const setArtboardMode = Effect.fn("Api.setArtboardMode")(function* (
+        designId: string,
+        author: CommentAuthor,
+        ids: ReadonlyArray<string>,
+        modeId: string | null,
+      ) {
+        const path = `${design(designId)}/artboards/mode`;
+        yield* send(HttpClientRequest.put(path), { author, ids, mode: modeId }, Changed);
       });
 
       // The body is the file itself, so the file's name and format ride in the query.
@@ -310,7 +358,9 @@ export class Api extends Context.Service<
         editLastMessage,
         deleteComment,
         importFile,
-        setSharedCss,
+        setTokens,
+        deleteMode,
+        setArtboardMode,
       });
     }),
   ).pipe(Layer.provide(FetchHttpClient.layer));

@@ -54,8 +54,8 @@ interface Frame {
   readonly shadow: ShadowRoot | null;
   /** Holds `COMMENTING_CSS` while in comment mode. */
   readonly commentStyle: HTMLStyleElement | null;
-  /** Holds the design's shared CSS, before the artboard's own styles. */
-  readonly sharedStyle: HTMLStyleElement | null;
+  /** Holds the design's tokens in the artboard's mode, before its own styles. */
+  readonly tokenStyle: HTMLStyleElement | null;
   /** Set for artboards with scripts, rendered in a sandboxed iframe. */
   readonly iframe: HTMLIFrameElement | null;
   /**
@@ -344,13 +344,14 @@ export class Renderer {
       if (applied.node.parent === null) this.syncBoard(applied.node, this.shownPage());
       return;
     }
-    if (applied.op === "css") {
-      // Every artboard uses it: restyle shadow roots, reload sandboxed ones.
-      const css = this.sharedCss();
-      for (const [id, frame] of this.frames) {
-        if (frame.sharedStyle) frame.sharedStyle.textContent = css;
-        else this.scheduleReload(id, frame);
-      }
+    if (applied.op === "tokens") {
+      // Every artboard uses them: restyle shadow roots, reload sandboxed ones.
+      for (const [id, frame] of this.frames) this.restyleTokens(id, frame);
+      return;
+    }
+    if (applied.op === "set" && applied.key === "mode") {
+      const frame = this.frames.get(applied.node.id);
+      if (frame) this.restyleTokens(applied.node.id, frame);
       return;
     }
     const boards = this.touchedBoards(applied);
@@ -676,7 +677,7 @@ export class Renderer {
   }
 
   /** Artboards an op changed: where its node is now, and where it was before. */
-  private touchedBoards(applied: Exclude<Applied, { op: "css" | "page" }>): Set<string> {
+  private touchedBoards(applied: Exclude<Applied, { op: "tokens" | "page" }>): Set<string> {
     const boards = new Set<string>();
     const add = (id: string | null) => {
       const board = id === null ? undefined : this.replica.artboardOf(id);
@@ -688,7 +689,7 @@ export class Renderer {
     return boards;
   }
 
-  private patch(applied: Exclude<Applied, { op: "css" | "page" }>) {
+  private patch(applied: Exclude<Applied, { op: "tokens" | "page" }>) {
     switch (applied.op) {
       case "create":
         this.mount(applied.node);
@@ -887,7 +888,7 @@ export class Renderer {
         content,
         shadow: null,
         commentStyle: null,
-        sharedStyle: null,
+        tokenStyle: null,
         iframe,
         awaitingSize: size.width === null || size.height === null,
         rects: new Map(),
@@ -905,14 +906,14 @@ export class Renderer {
     shadow.addEventListener("submit", (event) => event.preventDefault(), {
       signal: this.abort.signal,
     });
-    // In a layer, so the shared CSS can set what `HOST_CSS` resets, like
-    // the font on `:root`.
+    // In a layer, so the artboard's styles can set what `HOST_CSS` resets,
+    // like the font on `:root`.
     const base = document.createElement("style");
     base.textContent = `@layer ${BASE_LAYER} { ${HOST_CSS} ${designModel().baseCss} }`;
-    const sharedStyle = document.createElement("style");
-    sharedStyle.textContent = this.sharedCss();
+    const tokenStyle = document.createElement("style");
+    tokenStyle.textContent = this.replica.tokenStyle(node.id, true);
     const commentStyle = document.createElement("style");
-    shadow.append(base, sharedStyle, commentStyle);
+    shadow.append(base, tokenStyle, commentStyle);
     content.append(host);
     return {
       root,
@@ -921,17 +922,17 @@ export class Renderer {
       content,
       shadow,
       commentStyle,
-      sharedStyle,
+      tokenStyle,
       iframe: null,
       rects: new Map(),
       pendingRects: new Set(),
     };
   }
 
-  /** The shared CSS as a shadow root's `<style>` text, or nothing. */
-  private sharedCss(): string {
-    const { css } = this.replica;
-    return css === null ? "" : designModel().sharedStyle(css, true);
+  /** Gives artboard `id` its tokens as they are now, in its mode. */
+  private restyleTokens(id: string, frame: Frame) {
+    if (frame.tokenStyle) frame.tokenStyle.textContent = this.replica.tokenStyle(id, true);
+    else this.scheduleReload(id, frame);
   }
 
   private scheduleReload(id: string, frame: Frame) {

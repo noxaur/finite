@@ -371,46 +371,73 @@ try {
     Boolean(await page.until(`!document.body.textContent.includes("E2E: Testing")`)),
   );
 
-  // A person sets the shared CSS in the app. Every artboard uses it, the
-  // sandboxed one too, and an artboard's inline styles still override it.
-  const panel = `document.querySelector('form[aria-label="Shared CSS"]')`;
-  const cssToggle = await rectOf(
-    `[...document.querySelectorAll("header button")].find((b) => b.textContent === "Shared CSS")`,
+  // A person adds a token in the app. Every artboard gets it, the sandboxed
+  // one too, and the button the agent styled with var(--ok) turns green.
+  await agent.call("update_styles", {
+    designId: design,
+    updates: [{ nodeIds: [cta], styles: { color: "var(--ok, rgb(1, 2, 3))" } }],
+  });
+  // The agent's presence chip moves the header's buttons, so wait for the edit first.
+  await page.until(`getComputedStyle(${shadow}.querySelector("button")).color === "rgb(1, 2, 3)"`);
+  const panel = `document.querySelector('section[aria-label="Tokens"]')`;
+  const tokensToggle = await rectOf(
+    `[...document.querySelectorAll("header button")].find((b) => b.textContent === "Tokens")`,
   );
-  await page.click(cssToggle.x + cssToggle.w / 2, cssToggle.y + cssToggle.h / 2);
+  await page.click(tokensToggle.x + tokensToggle.w / 2, tokensToggle.y + tokensToggle.h / 2);
   await page.until(panel);
-  const cssBox = await rectOf(`${panel}.querySelector("textarea")`);
-  await page.click(cssBox.x + 10, cssBox.y + 10);
-  await page.type(":root { --ok: rgb(0, 128, 0); } button { color: var(--ok); width: 300px; }");
-  const save = await rectOf(`${panel}.querySelector('button[type="submit"]')`);
-  await page.click(save.x + save.w / 2, save.y + save.h / 2);
+  const field = (label) => `${panel}.querySelector('input[aria-label="${label}"]')`;
+  const nameBox = await rectOf(field("New token name"));
+  await page.click(nameBox.x + 10, nameBox.y + nameBox.h / 2);
+  await page.type("--ok");
+  const valueBox = await rectOf(field("New token value"));
+  await page.click(valueBox.x + 10, valueBox.y + valueBox.h / 2);
+  await page.type("rgb(0, 128, 0)");
+  const add = await rectOf(`${panel}.querySelector('form[aria-label="Add a token"] button')`);
+  await page.click(add.x + add.w / 2, add.y + add.h / 2);
   const ctaStyle = `getComputedStyle(${shadow}.querySelector("button"))`;
   check(
-    "shared CSS styles every artboard",
+    "a token reaches every artboard",
     Boolean(await page.until(`${ctaStyle}.color === "rgb(0, 128, 0)"`)) &&
       Boolean(
         await page.until(
-          `document.querySelector("[data-artboard] iframe").srcdoc.includes("rgb(0, 128, 0)")`,
+          `document.querySelector("[data-artboard] iframe").srcdoc.includes("--ok: rgb(0, 128, 0);")`,
         ),
       ),
   );
   check(
-    "an artboard's inline styles override it",
-    (await page.eval(`${ctaStyle}.width`)) === "160px",
+    "the activity list shows the person's edit",
+    (await page.eval(activity)).includes("Set tokens"),
   );
   check(
-    "the activity list shows the person's edit",
-    (await page.eval(activity)).includes("Set shared CSS"),
+    "the panel lists the token",
+    Boolean(await page.until(`${field("--ok in Default")}?.value === "rgb(0, 128, 0)"`)),
+  );
+
+  // An agent adds a Dark mode, and the person puts the artboard in it.
+  await agent.call("set_tokens", {
+    designId: design,
+    modes: ["Light", "Dark"],
+    tokens: { "--ok": { Dark: "rgb(0, 0, 255)" } },
+  });
+  await page.until(`${field("--ok in Dark")}?.value === "rgb(0, 0, 255)"`);
+  // The select of the artboard named "Page".
+  const select = `[...${panel}.querySelectorAll("label")].find((l) => l.textContent.startsWith("Page")).querySelector("select")`;
+  await page.eval(
+    `(() => { const s = ${select}; s.value = [...s.options].find((o) => o.textContent === "Dark").value; s.dispatchEvent(new Event("change", { bubbles: true })); })()`,
+  );
+  check(
+    "an artboard in the Dark mode takes its values",
+    Boolean(await page.until(`${ctaStyle}.color === "rgb(0, 0, 255)"`)),
   );
   const close = await rectOf(`${panel}.querySelector('button[type="button"]')`);
   await page.click(close.x + close.w / 2, close.y + close.h / 2);
   await page.until(`!${panel}`);
-  await fetch(`${base}/api/designs/${design}/css`, {
+  await fetch(`${base}/api/designs/${design}/tokens`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ author: { id: "e2e", name: "E2E" }, css: "" }),
+    body: JSON.stringify({ author: { id: "e2e", name: "E2E" }, tokens: { "--ok": null } }),
   });
-  await page.until(`${ctaStyle}.color !== "rgb(0, 128, 0)"`);
+  await page.until(`${ctaStyle}.color === "rgb(1, 2, 3)"`);
 
   // A person comments on the button, under their own name.
   await page.key("c", "KeyC", 67);

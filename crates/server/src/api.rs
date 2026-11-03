@@ -1,6 +1,6 @@
 //! HTTP and WebSocket routes for the web app, under `/api`.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -11,12 +11,12 @@ use axum::{
     },
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{get, patch, post, put},
+    routing::{delete, get, patch, post, put},
 };
 use finite_design::{
-    Snapshot,
+    Document, Op, Snapshot,
     comment::{self, Anchor, Author, AuthorKind, Comment, CommentError},
-    edit,
+    edit::{self, EditError},
     import::ImportRecord,
     user_edit::UserEdit,
     version::{self, VersionError},
@@ -31,6 +31,7 @@ use crate::hub::{
     Actor, AdoptError, DesignHandle, DesignSummary, Hub, LOBBY_LIMIT, OpenError, Outgoing, Since,
     Stamp, is_design_id,
 };
+use crate::mcp::{TokenValue, token_ops};
 use crate::transfer::{self, ImportRequest, ImportResult, TransferError};
 
 /// The largest design another server can hand off. axum's default of 2 MB
@@ -43,7 +44,7 @@ const HANDOFF_LIMIT: usize = 256 << 20;
 pub const IMPORT_LIMIT: usize = crate::blob::MAX_BLOB;
 
 /// Who imports over HTTP. The body is the file itself, so unlike
-/// [`set_css`] there's no room for the person's own id and name.
+/// [`set_tokens`] there's no room for the person's own id and name.
 fn browser() -> Actor {
     Actor {
         id: "web".into(),
@@ -75,7 +76,9 @@ pub fn routes() -> Router<Arc<Hub>> {
             "/designs/{id}/comments/{comment}/replies",
             post(reply_to_comment),
         )
-        .route("/designs/{id}/css", put(set_css))
+        .route("/designs/{id}/tokens", put(set_tokens))
+        .route("/designs/{id}/modes/{mode}", delete(delete_mode))
+        .route("/designs/{id}/artboards/mode", put(set_artboard_mode))
         .route(
             "/designs/{id}/import",
             post(import).layer(DefaultBodyLimit::max(IMPORT_LIMIT)),
@@ -475,39 +478,91 @@ async fn delete_comment(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Deserialize)]
-struct SetCss {
-    author: UserAuthor,
-    css: String,
-}
-
 /// What a change made: its `seq`, or `null` when it changed nothing.
 #[derive(Serialize)]
 struct Changed {
     seq: Option<u64>,
 }
 
-/// Replaces the design's shared CSS, as one undoable change by the person
-/// who sent it. Viewers get it as a change like any other.
-async fn set_css(
-    State(hub): State<Arc<Hub>>,
-    Path(id): Path<String>,
-    Json(body): Json<SetCss>,
+/// Commits a person's edit as one undoable change by them. Viewers get it
+/// as a change like any other.
+async fn person_edit(
+    hub: &Arc<Hub>,
+    id: &str,
+    author: UserAuthor,
+    label: &str,
+    build: impl FnOnce(&Document) -> Result<Vec<Op>, EditError>,
 ) -> Result<Json<Changed>, ApiError> {
-    let author = body.author.into_author();
+    let author = author.into_author();
     let actor = Actor {
         id: author.id,
         name: author.name,
     };
-    let (_, change) = open(&hub, &id)
+    let (_, change) = open(hub, id)
         .await?
-        .edit(&actor, "Set shared CSS", |_| {
-            Ok((edit::set_css(&body.css)?, ()))
-        })
+        .edit(&actor, label, |doc| Ok((build(doc)?, ())))
         .map_err(|error| ApiError::Unprocessable(error.to_string()))?;
     Ok(Json(Changed {
         seq: change.map(|c| c.seq),
     }))
+}
+
+#[derive(Deserialize)]
+struct SetTokens {
+    author: UserAuthor,
+    #[serde(default)]
+    modes: Option<Vec<String>>,
+    #[serde(default)]
+    tokens: BTreeMap<String, Option<TokenValue>>,
+}
+
+/// Names the modes and sets tokens, as `set_tokens` does for an agent.
+async fn set_tokens(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    Json(body): Json<SetTokens>,
+) -> Result<Json<Changed>, ApiError> {
+    person_edit(&hub, &id, body.author, "Set tokens", |doc| {
+        token_ops(doc, body.modes.as_deref(), &body.tokens)
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct ByPerson {
+    author: UserAuthor,
+}
+
+/// Deletes a mode and its token values.
+async fn delete_mode(
+    State(hub): State<Arc<Hub>>,
+    Path((id, mode)): Path<(String, String)>,
+    Json(body): Json<ByPerson>,
+) -> Result<Json<Changed>, ApiError> {
+    person_edit(&hub, &id, body.author, "Delete mode", |doc| {
+        edit::delete_mode(doc, &mode)
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct SetArtboardMode {
+    author: UserAuthor,
+    ids: Vec<String>,
+    /// The mode's id or name, or `null` for the first mode.
+    mode: Option<String>,
+}
+
+/// Sets the mode artboards render in.
+async fn set_artboard_mode(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    Json(body): Json<SetArtboardMode>,
+) -> Result<Json<Changed>, ApiError> {
+    person_edit(&hub, &id, body.author, "Set artboard mode", |doc| {
+        edit::set_artboard_mode(doc, &body.ids, body.mode.as_deref())
+    })
+    .await
 }
 
 /// `?format=…&name=…&strict=…` on an import: the format, the file's name,

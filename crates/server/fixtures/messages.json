@@ -362,11 +362,35 @@
       "actorName": "Claude",
       "change": {
         "actor": "agent:Claude",
-        "label": "Set shared CSS",
+        "label": "Set tokens",
         "ops": [
           {
-            "css": ":root { --brand: orange; }",
-            "op": "css"
+            "id": "mode-1",
+            "mode": {
+              "index": "V",
+              "name": "Light"
+            },
+            "op": "mode"
+          },
+          {
+            "id": "mode-dark",
+            "mode": {
+              "index": "l",
+              "name": "Dark"
+            },
+            "op": "mode"
+          },
+          {
+            "modeId": "mode-1",
+            "name": "--brand",
+            "op": "token",
+            "value": "orange"
+          },
+          {
+            "modeId": "mode-dark",
+            "name": "--brand",
+            "op": "token",
+            "value": "gold"
           }
         ],
         "origin": "edit",
@@ -574,11 +598,35 @@
           "actorName": "Claude",
           "change": {
             "actor": "agent:Claude",
-            "label": "Set shared CSS",
+            "label": "Set tokens",
             "ops": [
               {
-                "css": ":root { --brand: orange; }",
-                "op": "css"
+                "id": "mode-1",
+                "mode": {
+                  "index": "V",
+                  "name": "Light"
+                },
+                "op": "mode"
+              },
+              {
+                "id": "mode-dark",
+                "mode": {
+                  "index": "l",
+                  "name": "Dark"
+                },
+                "op": "mode"
+              },
+              {
+                "modeId": "mode-1",
+                "name": "--brand",
+                "op": "token",
+                "value": "orange"
+              },
+              {
+                "modeId": "mode-dark",
+                "name": "--brand",
+                "op": "token",
+                "value": "gold"
               }
             ],
             "origin": "edit",
@@ -877,12 +925,21 @@
             "y": 5.0
           }
         ],
-        "css": ":root { --brand: orange; }",
         "meta": {
           "createdAt": 0,
           "id": "design1",
           "name": "Landing v2",
           "updatedAt": 0
+        },
+        "modes": {
+          "mode-1": {
+            "index": "V",
+            "name": "Light"
+          },
+          "mode-dark": {
+            "index": "l",
+            "name": "Dark"
+          }
         },
         "nodes": [
           {
@@ -952,7 +1009,13 @@
             "y": null
           }
         ],
-        "seq": 11
+        "seq": 11,
+        "tokens": {
+          "--brand": {
+            "mode-1": "orange",
+            "mode-dark": "gold"
+          }
+        }
       },
       "type": "snapshot"
     },

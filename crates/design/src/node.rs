@@ -9,7 +9,7 @@ pub type NodeId = String;
 /// styles and attributes, and text nodes hold a string.
 ///
 /// Top-level nodes (`parent: None`) are artboards. They are the only nodes with
-/// a canvas position (`x`, `y`) and a `page`. Their size comes from their
+/// a canvas position (`x`, `y`), a `page` and a `mode`. Their size comes from their
 /// `width` and `height` styles.
 ///
 /// Serialized flat, as in `{"id": …, "type": "element", "tag": "div", …}`.
@@ -39,6 +39,10 @@ pub struct Node {
     /// that no longer exists, means the design's first page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<String>,
+    /// The token mode an artboard renders in (see [`crate::tokens`]).
+    /// `None`, or a mode that no longer exists, means the design's first mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     #[serde(default)]
     pub styles: BTreeMap<String, String>,
     #[serde(default)]
@@ -95,6 +99,8 @@ impl<'de> Deserialize<'de> for Node {
             #[serde(default)]
             page: Option<String>,
             #[serde(default)]
+            mode: Option<String>,
+            #[serde(default)]
             styles: BTreeMap<String, String>,
             #[serde(default)]
             attrs: BTreeMap<String, String>,
@@ -122,6 +128,7 @@ impl<'de> Deserialize<'de> for Node {
             x: wire.x,
             y: wire.y,
             page: wire.page,
+            mode: wire.mode,
             styles: wire.styles,
             attrs: wire.attrs,
             component: wire.component,
@@ -154,6 +161,7 @@ impl Node {
             x: None,
             y: None,
             page: None,
+            mode: None,
             styles: BTreeMap::new(),
             attrs: BTreeMap::new(),
             component: false,
@@ -204,6 +212,7 @@ impl Node {
             PropKey::X => self.x.map(Value::from),
             PropKey::Y => self.y.map(Value::from),
             PropKey::Page => self.page.clone().map(Value::String),
+            PropKey::Mode => self.mode.clone().map(Value::String),
             PropKey::Style(k) => self.styles.get(k).cloned().map(Value::String),
             PropKey::Attr(k) => self.attrs.get(k).cloned().map(Value::String),
             PropKey::Component => self.component.then_some(Value::Bool(true)),
@@ -251,6 +260,7 @@ impl Node {
             PropKey::X => self.x = number(value)?,
             PropKey::Y => self.y = number(value)?,
             PropKey::Page => self.page = string(value)?,
+            PropKey::Mode => self.mode = string(value)?,
             PropKey::Style(k) => put(&mut self.styles, k, string(value)?),
             PropKey::Attr(k) => put(&mut self.attrs, k, string(value)?),
             PropKey::Component => self.component = flag(value)?,
@@ -283,7 +293,7 @@ pub enum PropError {
 /// concurrent writes to the same property resolve last-writer-wins, and writes
 /// to different properties of the same node both survive.
 ///
-/// Serialized as `name`, `text`, `x`, `y`, `page`, `style:<css-property>` or
+/// Serialized as `name`, `text`, `x`, `y`, `page`, `mode`, `style:<css-property>` or
 /// `attr:<attribute>`, and for components as `component`, `instanceOf` and
 /// `override:<key>`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -294,6 +304,7 @@ pub enum PropKey {
     X,
     Y,
     Page,
+    Mode,
     Style(String),
     Attr(String),
     /// Whether the node is a component's root. Its value is `true`, or unset.
@@ -345,6 +356,7 @@ impl fmt::Display for PropKey {
             Self::X => f.write_str("x"),
             Self::Y => f.write_str("y"),
             Self::Page => f.write_str("page"),
+            Self::Mode => f.write_str("mode"),
             Self::Style(k) => write!(f, "style:{k}"),
             Self::Attr(k) => write!(f, "attr:{k}"),
             Self::Component => f.write_str("component"),
@@ -370,6 +382,7 @@ impl TryFrom<String> for PropKey {
             "x" => Self::X,
             "y" => Self::Y,
             "page" => Self::Page,
+            "mode" => Self::Mode,
             "component" => Self::Component,
             "instanceOf" => Self::InstanceOf,
             _ if s.starts_with("override:") => {

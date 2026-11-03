@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 use finite_design::{
     html::{self, Dropped, ExportOptions, Fragment, Policy},
     import::Dependency,
+    tokens,
 };
 
 use crate::{
@@ -91,6 +92,7 @@ impl Codec for Html {
             format: self.name(),
             input_kind: "html".into(),
             boards: vec![board],
+            tokens: Default::default(),
             css: None,
             blobs: Vec::new(),
             dependencies,
@@ -111,9 +113,12 @@ impl Codec for Html {
         let body = html::export_with(doc, &board.id, &options)
             .map(|e| e.html)
             .ok_or_else(|| Error(format!("{:?} isn't an artboard", board.id)))?;
-        let shared = doc.css().map_or(String::new(), |css| {
-            format!("\n<style>{}</style>", html::shared_style(css, false))
-        });
+        let tokens = tokens::style(doc, doc.mode_of(board), false);
+        let shared = if tokens.is_empty() {
+            String::new()
+        } else {
+            format!("\n<style>{tokens}</style>")
+        };
         let title = board.display_name();
         let page = format!(
             "<!doctype html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n<meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">\n<title>{title}</title>\n<style>@layer {layer} {{ {base} html, body {{ margin: 0; }} }}</style>{shared}\n</head>\n<body>\n{body}\n</body>\n</html>\n",

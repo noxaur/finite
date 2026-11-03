@@ -42,13 +42,13 @@ Read `docs/how-finite-works.md` before you change the document model, the server
 - `crates/design/`: the document model, with no I/O. `node.rs` (nodes and properties), `document.rs` (the node map, ops and limits), `design.rs` (the document plus every actor's history and comments), `history.rs` (undo stacks), `edit.rs` (edit commands), `html.rs` (HTML in and out, and what's unsafe), `search.rs`, `comment.rs`, `fractional.rs` (sibling order), `label.rs` and `user_edit.rs` (the edits people make in the browser). Add a tool's logic in `edit.rs`, not in the server.
 - `crates/wasm/`: the document model as `finite.wasm`, with a plain C ABI for the viewer. A new call is an export in `src/lib.rs` and a method in `apps/web/src/design/wasm.ts`.
 - `crates/server/`: the axum server.
-  - `mcp/`: the tools. `mod.rs` defines them, `params.rs` holds their arguments, `format.rs` writes outlines and layout notes, `search.rs` and `styles.rs` hold search and shared CSS. `instructions.md` is what agents read when they connect; keep it under 4,000 characters.
+  - `mcp/`: the tools. `mod.rs` defines them, `params.rs` holds their arguments, `format.rs` writes outlines and layout notes, `search.rs` and `tokens.rs` hold search and design tokens. `instructions.md` is what agents read when they connect; keep it under 4,000 characters.
   - `hub/`: the designs in memory. `mod.rs` loads, unloads and saves them, `design.rs` has `DesignHandle`, `messages.rs` has the WebSocket messages.
   - `api.rs`: REST and WebSockets for the web app. `guard.rs` keeps other websites out, and `heartbeat.rs` pings the sockets.
   - `store.rs` and `postgres/`: the folder store and the shared Postgres store.
   - `cluster.rs`, `router.rs` and `relay.rs`: running more than one server.
   - `screenshot/`: renders artboards with headless Chrome over CDP.
-- `apps/web/`: the Next.js app, styled with StyleX. `src/design/` is the viewer (socket, session, replica, renderer, camera) and `src/design/editing/` how people edit it (the editor, gestures and the drag-to-CSS rules), `src/components/` the React parts (design grid, canvas, comments, shared CSS), `src/api/` the Effect HTTP client and `src/styles/tokens.stylex.ts` the theme tokens.
+- `apps/web/`: the Next.js app, styled with StyleX. `src/design/` is the viewer (socket, session, replica, renderer, camera) and `src/design/editing/` how people edit it (the editor, gestures and the drag-to-CSS rules), `src/components/` the React parts (design grid, canvas, comments, tokens), `src/api/` the Effect HTTP client and `src/styles/tokens.stylex.ts` the theme tokens.
 - `apps/desktop/`: the Electron app that starts the server and shows the web app, with restarts and updates.
 - `e2e/`: `run.mjs` is the end-to-end test, `bench.mjs` the canvas benchmark, `headless.mjs` and `finite_headless.py` drive Finite by hand, and `ax/` runs real agents against the tools.
 

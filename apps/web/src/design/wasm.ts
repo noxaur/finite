@@ -25,6 +25,8 @@ interface Exports {
   replica_expand(handle: number, len: number): number;
   replica_take_dirty(handle: number): number;
   replica_component_info(handle: number, len: number): number;
+  replica_tokens(handle: number): number;
+  replica_token_style(handle: number, len: number, shadow: number): number;
   replica_set_client(handle: number, len: number): number;
   replica_draft(handle: number, seed: number, len: number): number;
   replica_propose(handle: number, mid: number, len: number): number;
@@ -32,7 +34,6 @@ interface Exports {
   replica_settle(handle: number, mid: number): number;
   replica_has_local(handle: number): number;
   is_safe_attr(nameLen: number, valueLen: number): number;
-  shared_style(len: number, shadow: number): number;
   base_css(): number;
   csp(): number;
 }
@@ -62,15 +63,6 @@ export class DesignModel {
   isSafeAttr(name: string, value: string): boolean {
     const [nameLen, valueLen] = this.put([name, value]);
     return this.run(() => this.exports.is_safe_attr(nameLen!, valueLen!)) === 1;
-  }
-
-  /**
-   * `html::shared_style`: the design's shared CSS as a `<style>` element's
-   * text, in a layer the artboard's own styles override. With `shadow`,
-   * `:root` becomes `:host`, since `:root` matches nothing in a shadow root.
-   */
-  sharedStyle(css: string, shadow: boolean): string {
-    return this.callWith(css, (e, len) => e.shared_style(len, shadow ? 1 : 0));
   }
 
   /** A new, empty document. Free it when done; otherwise it's freed once garbage collected. */
@@ -200,6 +192,22 @@ export class WasmDocument {
   /** JSON ids of the instances whose content changed since the last call. */
   takeDirty(): string {
     return this.model.callNoArgs((e) => e.replica_take_dirty(this.handle));
+  }
+
+  /** JSON: the modes in order, as `{id, name}`, and each token's values by mode id. */
+  tokens(): string {
+    return this.model.callNoArgs((e) => e.replica_tokens(this.handle));
+  }
+
+  /**
+   * `tokens::style`: artboard `id`'s tokens in its mode, as a `<style>`
+   * element's text, in a layer the artboard's own styles override. With
+   * `shadow` they go on `:host`, else on `:root`. Empty without tokens.
+   */
+  tokenStyle(id: string, shadow: boolean): string {
+    return this.model.callWith(id, (e, len) =>
+      e.replica_token_style(this.handle, len, shadow ? 1 : 0),
+    );
   }
 
   /** JSON: the instance and component a node belongs to, or `null`. */

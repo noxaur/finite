@@ -62,8 +62,8 @@ async fn a_deferred_note_is_given_once_and_dropped_when_it_goes_stale() {
             json!({ "designId": b.design, "nodeId": b.title, "text": "Still fits" }),
         ),
         (
-            "set_shared_css",
-            json!({ "designId": b.design, "css": ".x { color: red; }" }),
+            "set_tokens",
+            json!({ "designId": b.design, "tokens": { "--x": "red" } }),
         ),
         (
             "replace_values",

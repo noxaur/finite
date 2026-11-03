@@ -1,23 +1,24 @@
 //! A design as a folder of text files, for keeping next to the code.
 //!
 //! The folder holds one HTML file per artboard, so a pull request shows
-//! what changed in each screen, plus the shared CSS and a manifest:
+//! what changed in each screen, plus a manifest:
 //!
 //! ```text
-//! finite.json          name, pages, and each artboard's file, page and position
-//! shared.css           the design's shared CSS, if it has any
+//! finite.json          name, pages, tokens, and each artboard's file, page, mode and position
 //! artboards/home.html  one artboard: its <div> and everything inside
 //! assets/<sha256>.png  the files the design points to
 //! ```
 //!
 //! Export writes the folder as one tar archive, since a codec produces one
 //! file. Unpack it with `tar -xf`. To import a folder back, pack it with
-//! `tar -cf design.tar finite.json shared.css artboards assets`; a single
+//! `tar -cf design.tar finite.json artboards assets`; a single
 //! top-level folder around those is fine too. Files are written the same
 //! way every time, so an unchanged design leaves no diff.
 //!
 //! Layer names, styles, attributes and text come back as they were, along
-//! with each artboard's size, position and page. Node ids, history,
+//! with the tokens and each artboard's size, position, page and mode. A
+//! folder from before tokens can hold a `shared.css`, which importing moves
+//! into tokens. Node ids, history,
 //! comments and import records do not, as with a `.finite` bundle.
 //! Reading applies the same rules as an HTML import: scripts and other
 //! code that could run are quarantined.
@@ -37,7 +38,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Anchor, Board, Codec, Diagnostic, Direction, Error, Exported, Feature, Imported, Input,
-    Revision, Scope, Score, Support, assets, file_stem, html::quarantine,
+    Revision, Scope, Score, Support, Tokens, assets, file_stem, html::quarantine,
 };
 
 /// The manifest's format and version. See `finite_design::version`.
@@ -50,7 +51,6 @@ pub const REPO: Schema = Schema {
 /// What the manifest's `kind` says, so a stray JSON file isn't taken for one.
 const KIND: &str = "finite-repo";
 const MANIFEST: &str = "finite.json";
-const CSS: &str = "shared.css";
 
 /// Used for an artboard whose width or height isn't in pixels.
 const FALLBACK: (f64, f64) = (1440.0, 900.0);
@@ -67,9 +67,15 @@ struct Manifest {
     /// The design's pages, by name, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pages: Vec<String>,
-    /// The path of the shared CSS, if the design has any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The path of the shared CSS, in a folder from before tokens.
+    #[serde(default, skip_serializing)]
     css: Option<String>,
+    /// The design's modes, by name, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    modes: Vec<String>,
+    /// The design's tokens, each with its values by mode name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    tokens: BTreeMap<String, BTreeMap<String, String>>,
     /// Every artboard, in canvas order.
     artboards: Vec<Artboard>,
 }
@@ -80,6 +86,9 @@ struct Artboard {
     /// The name of the page it's on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     page: Option<String>,
+    /// The name of the mode it renders in, unless it's the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     x: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -162,7 +171,12 @@ impl Codec for Repo {
             ),
             None => None,
         };
-        let blobs = files.blobs(&mut boards, css.as_deref())?;
+        let tokens = Tokens {
+            modes: manifest.modes,
+            values: manifest.tokens,
+        };
+        let texts: Vec<&str> = css.as_deref().into_iter().chain(tokens.texts()).collect();
+        let blobs = files.blobs(&mut boards, &texts)?;
         let dependencies = blobs
             .iter()
             .map(|(hash, _)| Dependency {
@@ -175,6 +189,7 @@ impl Codec for Repo {
             input_kind: format!("finite-repo v{}", REPO.version),
             pages: manifest.pages,
             boards,
+            tokens,
             css,
             blobs: blobs.into_iter().map(|(_, bytes)| bytes).collect(),
             dependencies,
@@ -245,6 +260,7 @@ impl Codec for Repo {
             artboards.push(Artboard {
                 file,
                 page,
+                mode: Tokens::mode_of(doc, board),
                 x: board.x,
                 y: board.y,
             });
@@ -257,13 +273,15 @@ impl Codec for Repo {
                 .collect(),
             Scope::Artboard(_) => Vec::new(),
         };
-        let css = doc.css().map(&mut portable);
+        let tokens = Tokens::of(doc, &mut portable);
         let manifest = Manifest {
             v: REPO.version,
             kind: KIND.into(),
             name: revision.name.to_owned(),
             pages,
-            css: css.as_ref().map(|_| CSS.to_owned()),
+            css: None,
+            modes: tokens.modes,
+            tokens: tokens.values,
             artboards,
         };
         let mut json = serde_json::to_string_pretty(&manifest)
@@ -273,10 +291,6 @@ impl Codec for Repo {
             path: MANIFEST.into(),
             bytes: json.into_bytes(),
         }];
-        entries.extend(css.map(|css| tar::Entry {
-            path: CSS.into(),
-            bytes: css.into_bytes(),
-        }));
         entries.extend(files);
 
         hashes.sort();
@@ -547,7 +561,7 @@ impl Files {
     fn blobs(
         &self,
         boards: &mut [Board],
-        css: Option<&str>,
+        texts: &[&str],
     ) -> Result<Vec<(BlobHash, Vec<u8>)>, Error> {
         let mut blobs: BTreeMap<BlobHash, Vec<u8>> = BTreeMap::new();
         for (path, bytes) in &self.0 {
@@ -569,7 +583,7 @@ impl Files {
             board.attrs.values_mut().for_each(&mut collect);
             assets::for_each_value(&mut board.content, &mut collect);
         }
-        referenced.extend(css.into_iter().flat_map(assets::referenced));
+        referenced.extend(texts.iter().flat_map(|text| assets::referenced(text)));
         if let Some(missing) = referenced.iter().find(|h| !blobs.contains_key(*h)) {
             return Err(Error(format!(
                 "the folder refers to a file it doesn't contain: {}{missing}",
@@ -666,6 +680,7 @@ fn board(
     }
     Ok(Board {
         page: entry.page.clone(),
+        mode: entry.mode.clone(),
         name: root.name.unwrap_or_else(|| format!("Artboard {}", i + 1)),
         width,
         height,
@@ -771,7 +786,7 @@ mod tests {
     }
 
     /// Two pages, three artboards (two with the same name), an image,
-    /// a stylesheet and shared CSS.
+    /// a stylesheet and a token that points at the image.
     fn source() -> Design {
         let mut source = design("old");
         let ops = edit::create_page(source.doc(), "drafts".into(), "Drafts").unwrap();
@@ -783,11 +798,10 @@ mod tests {
         import_html(&mut source, &home, "Home.html", None);
         import_html(&mut source, "<p>Draft</p>", "Home.html", Some("drafts"));
         import_html(&mut source, "<p>Other</p>", "Settings.html", None);
-        let css = format!(
-            ".page {{ background: url({}) }}",
-            assets::url("old", &BlobHash::of(PNG))
-        );
-        source.commit("agent", "CSS", &edit::set_css(&css).unwrap(), 2);
+        let hero = format!("url({})", assets::url("old", &BlobHash::of(PNG)));
+        let changes = [("--hero".to_owned(), edit::TokenChange::All(hero))];
+        let ops = edit::set_tokens(source.doc(), &edit::mode_list(source.doc()), &changes).unwrap();
+        source.commit("agent", "Tokens", &ops, 2);
         source
     }
 
@@ -806,15 +820,10 @@ mod tests {
             .filter(|n| n.starts_with("artboards/home-"))
             .collect();
         assert_eq!(homes.len(), 2, "{names:?}");
-        for expected in [
-            "artboards/settings.html",
-            "finite.json",
-            "shared.css",
-            png.as_str(),
-        ] {
+        for expected in ["artboards/settings.html", "finite.json", png.as_str()] {
             assert!(names.contains(&expected), "{expected} in {names:?}");
         }
-        assert_eq!(names.len(), 6, "{names:?}");
+        assert_eq!(names.len(), 5, "{names:?}");
         // Files are text a person can read, with no server URLs in them.
         let home = files
             .iter()
@@ -837,10 +846,10 @@ mod tests {
             "{manifest}"
         );
         assert!(
-            !String::from_utf8(files["shared.css"].clone())
-                .unwrap()
-                .contains("/api/designs")
+            manifest.contains("\"--hero\": {\n      \"Default\": \"url(finite-asset:"),
+            "{manifest}"
         );
+        assert!(!manifest.contains("/api/designs"), "{manifest}");
         // The same design writes the same bytes, so an unchanged one leaves no diff.
         assert_eq!(exported.bytes, write(&source, &Scope::Design, &[PNG]).bytes);
         // The import record isn't carried, and the export says so.
@@ -888,11 +897,9 @@ mod tests {
             );
         }
         assert_eq!(
-            target.doc().css().map(str::to_owned),
-            source
-                .doc()
-                .css()
-                .map(|css| css.replace("/designs/old/", "/designs/new/"))
+            crate::Tokens::of(target.doc(), str::to_owned),
+            crate::Tokens::of(source.doc(), |v| v
+                .replace("/designs/old/", "/designs/new/"))
         );
 
         // And exporting that gives the folder it came from. Artboards that
@@ -1382,7 +1389,6 @@ mod tests {
             folder.as_os_str(),
         ]);
         assert!(folder.join("finite.json").is_file());
-        assert!(folder.join("shared.css").is_file());
         let listed = std::fs::read_dir(folder.join("artboards")).unwrap().count();
         assert_eq!(listed, 3);
 
