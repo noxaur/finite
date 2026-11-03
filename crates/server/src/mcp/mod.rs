@@ -13,7 +13,7 @@ use std::{
 
 use base64::Engine;
 use finite_design::{
-    Change, Design, Document, Kept, NodeKind, Op, PropKey,
+    Change, Design, Document, Kept, KeptNode, NodeKind, Op, PropKey,
     comment::{self, Author, AuthorKind},
     components,
     edit::{self, EditError, NewArtboard, WriteMode},
@@ -290,6 +290,36 @@ fn kept_note(doc: &Document, kept: &[Kept]) -> String {
             &mut text,
             format_args!(
                 "\n…and {} more values kept the same way.",
+                kept.len() - CHANGED_NAMED
+            ),
+        );
+    }
+    text
+}
+
+/// Names the elements a merged rewrite kept because another agent added
+/// them, or moved them in, after the HTML was read (see `Design::merge`).
+fn kept_nodes_note(doc: &Document, kept: &[KeptNode]) -> String {
+    let mut text = String::new();
+    for k in kept.iter().take(CHANGED_NAMED) {
+        if doc.get(&k.id).is_none() {
+            continue;
+        }
+        let on = outline(doc, &k.id, 0);
+        let _ = std::fmt::Write::write_fmt(
+            &mut text,
+            format_args!(
+                "\nNote: kept {}, which another agent {} after you read it. Delete it if you meant to remove it.",
+                on.lines().next().unwrap_or("").trim(),
+                if k.moved { "moved here" } else { "added" }
+            ),
+        );
+    }
+    if kept.len() > CHANGED_NAMED {
+        let _ = std::fmt::Write::write_fmt(
+            &mut text,
+            format_args!(
+                "\n…and {} more elements kept the same way.",
                 kept.len() - CHANGED_NAMED
             ),
         );
@@ -1480,7 +1510,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Write HTML into the design. mode \"append\" (default) inserts it as children of targetId, \"replace-children\" replaces the target's children, and \"replace\" replaces the target node. When replacing, an element written with the data-id get_html gave it keeps its node, id, comments and history; one without is new. With data-read-at from get_html, values others changed after that read keep theirs, and the result names them. Use inline styles or <style> blocks with classes; <script> is allowed for motion and interaction. Name layers with data-name. Returns the new nodes' outline with ids."
+        description = "Write HTML into the design. mode \"append\" (default) inserts it as children of targetId, \"replace-children\" replaces the target's children, and \"replace\" replaces the target node. When replacing, an element written with the data-id get_html gave it keeps its node, id, comments and history; one without is new. With data-read-at from get_html, values others changed after that read keep theirs, elements they added since stay, and the result names them. Use inline styles or <style> blocks with classes; <script> is allowed for motion and interaction. Name layers with data-name. Returns the new nodes' outline with ids."
     )]
     async fn write_html(
         &self,
@@ -1518,12 +1548,16 @@ impl FiniteMcp {
                     _ => finite_design::Merged {
                         ops,
                         kept: Vec::new(),
+                        kept_nodes: Vec::new(),
                         reached: true,
                     },
                 };
-                Ok((merged.ops, (roots, merged.kept, merged.reached)))
+                Ok((
+                    merged.ops,
+                    (roots, merged.kept, merged.kept_nodes, merged.reached),
+                ))
             },
-            |handle, (roots, kept, reached), _| {
+            |handle, (roots, kept, kept_nodes, reached), _| {
                 handle.read(|d| {
                     let doc = d.view();
                     let mut text = if mode == WriteMode::Replace && roots == [p.target_id.as_str()] {
@@ -1535,10 +1569,12 @@ impl FiniteMcp {
                         text.push_str(&outline(doc, root, 3));
                     }
                     text.push_str(&kept_note(doc, &kept));
+                    text.push_str(&kept_nodes_note(doc, &kept_nodes));
                     if !reached {
                         text.push_str(
                             "\nNote: your data-read-at is older than the changes this server remembers, \
-                             so values in your HTML replaced any that others changed since you read it.",
+                             so values in your HTML replaced any that others changed since you read it, \
+                             and elements others added since were removed.",
                         );
                     }
                     text.push_str(&left_out(&dropped));

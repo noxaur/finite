@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -155,6 +155,9 @@ pub struct Merged {
     pub ops: Vec<Op>,
     /// Values another actor changed after the read, which keep their value.
     pub kept: Vec<Kept>,
+    /// Nodes another actor added or moved in after the read, which the
+    /// rewrite would have deleted and which stay instead.
+    pub kept_nodes: Vec<KeptNode>,
     /// Whether the log reached back to the read. If not, nothing was merged.
     pub reached: bool,
 }
@@ -169,9 +172,19 @@ pub struct Kept {
     pub conflict: bool,
 }
 
-/// The old value of every property each recent change set, taken from its
-/// inverse. In memory only: after a restart a merge can't look back
-/// further than the load.
+/// A node [`Design::merge`] kept: `id`, added or moved in by `by`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeptNode {
+    pub id: NodeId,
+    pub by: ActorId,
+    /// It existed at the read, somewhere else, and was moved here.
+    pub moved: bool,
+}
+
+/// The old value of every property each recent change set, and where each
+/// node it created, deleted or moved was before, taken from its inverse. In
+/// memory only: after a restart a merge can't look back further than the
+/// load.
 #[derive(Debug, Default)]
 struct SetLog {
     /// Changes after this seq are all here.
@@ -186,6 +199,10 @@ struct Sets {
     actor: ActorId,
     /// The `Set` ops of the change's inverse, in the inverse's order.
     old: Vec<Op>,
+    /// Each node the change created, deleted or moved, and where it was
+    /// before: `None` if it didn't exist, else its parent. In the
+    /// inverse's order.
+    places: Vec<(NodeId, Option<Option<NodeId>>)>,
     bytes: usize,
 }
 
@@ -203,20 +220,38 @@ impl SetLog {
     }
 
     fn record(&mut self, seq: u64, actor: &str, inverse: &[Op]) {
-        let old: Vec<Op> = inverse
-            .iter()
-            .filter(|op| matches!(op, Op::Set { .. }))
-            .cloned()
-            .collect();
-        if old.is_empty() {
+        let mut old = Vec::new();
+        let mut places = Vec::new();
+        for op in inverse {
+            match op {
+                Op::Set { .. } => old.push(op.clone()),
+                // Undoing a create deletes it, so it didn't exist before.
+                Op::Delete { id } => places.push((id.clone(), None)),
+                Op::Create { node } => places.push((node.id.clone(), Some(node.parent.clone()))),
+                Op::Move { id, parent, .. } => places.push((id.clone(), Some(parent.clone()))),
+                _ => {}
+            }
+        }
+        if old.is_empty() && places.is_empty() {
             return;
         }
-        let bytes = old.iter().map(Op::size).sum();
+        let bytes = old.iter().map(Op::size).sum::<usize>()
+            + places
+                .iter()
+                .map(|(id, parent)| {
+                    32 + id.len()
+                        + parent
+                            .as_ref()
+                            .and_then(Option::as_ref)
+                            .map_or(0, String::len)
+                })
+                .sum::<usize>();
         self.bytes += bytes;
         self.entries.push_back(Sets {
             seq,
             actor: actor.to_owned(),
             old,
+            places,
             bytes,
         });
         while self.entries.len() > Self::LIMIT || self.bytes > Self::BYTE_LIMIT {
@@ -659,14 +694,19 @@ impl Design {
     /// Values kept from another actor are listed in [`Merged::kept`], so the
     /// author knows and can set one again on purpose.
     ///
-    /// Moves, creates and deletes are kept as they are. If the log no
-    /// longer reaches back to `read_at`, the ops are returned unchanged with
-    /// [`Merged::reached`] false.
+    /// A `Delete` of a node the HTML left out is dropped when the node
+    /// wasn't under its parent at the read: another actor created it or
+    /// moved it there since, so the HTML couldn't hold it. Those nodes stay
+    /// where they are and are listed in [`Merged::kept_nodes`]. Nodes
+    /// `actor` added or moved in since follow the HTML. Other moves and
+    /// creates are kept as they are. If the log no longer reaches back to
+    /// `read_at`, the ops are returned unchanged with [`Merged::reached`] false.
     pub fn merge(&self, actor: &str, read_at: u64, mut ops: Vec<Op>) -> Merged {
         if read_at < self.sets.since {
             return Merged {
                 ops,
                 kept: Vec::new(),
+                kept_nodes: Vec::new(),
                 reached: false,
             };
         }
@@ -674,7 +714,26 @@ impl Design {
         let mut changed: HashMap<(&str, &PropKey), (&Option<serde_json::Value>, &str)> =
             HashMap::new();
         let first = self.sets.entries.partition_point(|e| e.seq <= read_at);
+        // Each node the rewrite deletes that was created, deleted or moved
+        // since the read: where it was at the read, and who placed it last.
+        let deleted: HashSet<&str> = ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Delete { id } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let mut placed: HashMap<&str, (&Option<Option<NodeId>>, &str)> = HashMap::new();
         for entry in self.sets.entries.range(first..) {
+            // Backwards for the same reason as values below.
+            for (id, before) in entry.places.iter().rev() {
+                if deleted.contains(id.as_str()) {
+                    placed
+                        .entry(id.as_str())
+                        .or_insert((before, &entry.actor))
+                        .1 = &entry.actor;
+                }
+            }
             // An inverse runs backwards, so its last op on a value holds
             // what the value was before the change.
             for op in entry.old.iter().rev() {
@@ -708,9 +767,32 @@ impl Design {
                 false
             });
         }
+        let mut kept_nodes = Vec::new();
+        if !placed.is_empty() {
+            ops.retain(|op| {
+                let Op::Delete { id } = op else { return true };
+                let Some(&(before, by)) = placed.get(id.as_str()) else {
+                    return true;
+                };
+                let Some(now) = self.doc.get(id) else {
+                    return true;
+                };
+                let here = before.as_ref() == Some(&now.parent);
+                if here || by == actor {
+                    return true;
+                }
+                kept_nodes.push(KeptNode {
+                    id: id.clone(),
+                    by: by.to_owned(),
+                    moved: before.is_some(),
+                });
+                false
+            });
+        }
         Merged {
             ops,
             kept,
+            kept_nodes,
             reached: true,
         }
     }

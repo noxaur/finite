@@ -1,11 +1,11 @@
 //! Rewriting HTML with `replace` or `replace-children`: elements written
 //! with their data-id keep their node, and a rewrite of HTML read at an
-//! earlier seq keeps what other agents changed since (`Design::merge`).
+//! earlier seq keeps what other agents changed or added since (`Design::merge`).
 
 use std::collections::BTreeMap;
 
 use finite_design::{
-    Design, DesignMeta, Op, PropKey, Snapshot,
+    Design, DesignMeta, KeptNode, Merged, Op, PropKey, Snapshot,
     comment::{Anchor, Author, AuthorKind},
     edit::{self, NewArtboard, WriteMode},
     html::{self, ExportOptions},
@@ -49,6 +49,13 @@ impl Board {
         html: &str,
         mode: WriteMode,
     ) -> Vec<finite_design::Kept> {
+        let merged = self.write_merged(actor, target, html, mode);
+        assert!(merged.reached);
+        merged.kept
+    }
+
+    /// Writes `html` as `write_html` does, merging it if it has a read mark.
+    fn write_merged(&mut self, actor: &str, target: &str, html: &str, mode: WriteMode) -> Merged {
         let next = &mut self.next;
         let mut new_id = || {
             *next += 1;
@@ -64,16 +71,17 @@ impl Board {
             &mut new_id,
         )
         .unwrap();
-        let (ops, kept) = match parsed.read_at {
-            Some(seq) => {
-                let merged = self.design.merge(actor, seq, ops);
-                assert!(merged.reached);
-                (merged.ops, merged.kept)
-            }
-            None => (ops, Vec::new()),
+        let merged = match parsed.read_at {
+            Some(seq) => self.design.merge(actor, seq, ops),
+            None => Merged {
+                ops,
+                kept: Vec::new(),
+                kept_nodes: Vec::new(),
+                reached: true,
+            },
         };
-        self.design.commit(actor, "Write HTML", &ops, 0);
-        kept
+        self.design.commit(actor, "Write HTML", &merged.ops, 0);
+        merged
     }
 
     fn style(&mut self, actor: &str, id: &str, name: &str, value: &str) {
@@ -419,4 +427,143 @@ fn a_rewrite_holding_a_component_redefines_it_as_before() {
     assert_eq!(b.id("nav"), nav);
     assert!(b.design.doc().get(&nav).unwrap().component);
     assert_eq!(b.text_of(&b.id("b")), "Start");
+}
+
+/// The tags of `id`'s children, in order.
+fn child_tags(b: &Board, id: &str) -> Vec<String> {
+    b.design
+        .doc()
+        .children(Some(id))
+        .iter()
+        .filter_map(|n| n.tag().map(str::to_owned))
+        .collect()
+}
+
+#[test]
+fn a_stale_rewrite_keeps_an_element_another_agent_added_since() {
+    let mut b = Board::new();
+    let section = b.id("section");
+    let read = b.read(&section);
+    b.write("B", &section, "<p>New</p>", WriteMode::Append);
+    let p = b.id("p");
+    let merged = b.write_merged(
+        "A",
+        &section,
+        &read.replace(">Buy<", ">Upgrade<"),
+        WriteMode::Replace,
+    );
+    assert!(merged.reached);
+    assert_eq!(
+        merged.kept_nodes,
+        [KeptNode {
+            id: p.clone(),
+            by: "B".into(),
+            moved: false
+        }]
+    );
+    assert_eq!(child_tags(&b, &section), ["h2", "button", "p"]);
+    assert_eq!(b.text_of(&b.id("button")), "Upgrade");
+    // B can still undo its add, and A its rewrite.
+    let undone = b.design.undo("B", 0).expect("B's add still applies");
+    assert_eq!(undone.label, "Write HTML");
+    assert!(!b.design.doc().contains(&p));
+    b.design.undo("A", 0).unwrap();
+    assert_eq!(b.text_of(&b.id("button")), "Buy");
+}
+
+#[test]
+fn a_stale_rewrite_keeps_an_element_another_agent_moved_in_since() {
+    let mut b = Board::new();
+    let section = b.id("section");
+    b.write("B", "board", "<p>Elsewhere</p>", WriteMode::Append);
+    let p = b.id("p");
+    let read = b.read(&section);
+    let ops = edit::move_nodes(
+        b.design.doc(),
+        std::slice::from_ref(&p),
+        Some(&section),
+        None,
+    )
+    .unwrap();
+    b.design.commit("B", "Move", &ops, 0).unwrap();
+    let merged = b.write_merged("A", &section, &read, WriteMode::Replace);
+    assert_eq!(
+        merged.kept_nodes,
+        [KeptNode {
+            id: p.clone(),
+            by: "B".into(),
+            moved: true
+        }]
+    );
+    assert_eq!(
+        b.design.doc().get(&p).unwrap().parent.as_deref(),
+        Some(section.as_str())
+    );
+}
+
+#[test]
+fn a_stale_rewrite_still_removes_what_its_author_added_since() {
+    let mut b = Board::new();
+    let section = b.id("section");
+    let read = b.read(&section);
+    b.write("A", &section, "<p>Mine</p>", WriteMode::Append);
+    let merged = b.write_merged("A", &section, &read, WriteMode::Replace);
+    assert!(merged.kept_nodes.is_empty());
+    assert_eq!(child_tags(&b, &section), ["h2", "button"]);
+}
+
+#[test]
+fn a_stale_rewrite_still_removes_what_existed_at_the_read() {
+    let mut b = Board::new();
+    let section = b.id("section");
+    let h2 = b.id("h2");
+    let read = b.read(&section);
+    b.write("B", &section, "<p>New</p>", WriteMode::Append);
+    // B also moves the heading after the button, inside the same section.
+    let ops = edit::move_nodes(
+        b.design.doc(),
+        std::slice::from_ref(&h2),
+        Some(&section),
+        None,
+    )
+    .unwrap();
+    b.design.commit("B", "Move", &ops, 0).unwrap();
+    let start = read.find("<h2").unwrap();
+    let end = read.find("</h2>").unwrap() + 5;
+    let without = format!("{}{}", &read[..start], &read[end..]);
+    let merged = b.write_merged("A", &section, &without, WriteMode::Replace);
+    assert_eq!(merged.kept_nodes.len(), 1);
+    assert!(!b.design.doc().contains(&h2));
+    assert_eq!(child_tags(&b, &section), ["button", "p"]);
+}
+
+#[test]
+fn without_a_mark_a_rewrite_removes_what_others_added() {
+    let mut b = Board::new();
+    let section = b.id("section");
+    let read = b.read(&section);
+    b.write("B", &section, "<p>New</p>", WriteMode::Append);
+    let start = read.find(" data-read-at=").unwrap();
+    let end = start + read[start + 1..].find(' ').unwrap() + 1;
+    let unmarked = format!("{}{}", &read[..start], &read[end..]);
+    assert!(!unmarked.contains("data-read-at"), "{unmarked}");
+    b.write("A", &section, &unmarked, WriteMode::Replace);
+    assert_eq!(child_tags(&b, &section), ["h2", "button"]);
+}
+
+#[test]
+fn a_mark_older_than_the_log_removes_what_others_added() {
+    let mut b = Board::new();
+    let section = b.id("section");
+    let read = b.read(&section);
+    b.write("B", &section, "<p>New</p>", WriteMode::Append);
+    // A design loaded from a snapshot remembers nothing before the load.
+    b.design = Design::from_snapshot(Snapshot {
+        histories: None,
+        ..b.design.snapshot_to_save()
+    });
+    let merged = b.write_merged("A", &section, &read, WriteMode::Replace);
+    assert!(!merged.reached);
+    assert!(merged.kept_nodes.is_empty());
+    assert_eq!(child_tags(&b, &section), ["h2", "button"]);
 }
