@@ -16,6 +16,8 @@ export interface DesignView {
   reset(): void;
   /** Patches what one applied op touched. */
   apply(applied: Applied): void;
+  /** Catches up after a change's ops have all applied: draws the instances they changed again. */
+  flush(): void;
   /** Badges the artboards agents are working on, keyed by artboard id. */
   setWorking(working: ReadonlyMap<string, string>): void;
 }
@@ -178,6 +180,7 @@ export class DesignSession {
     if (change.seq <= this.replica.seq) return [];
     // One call into WebAssembly for the whole change; the view patches op by op.
     this.replica.applyAll(change.ops, (applied) => this.view.apply(applied));
+    this.view.flush();
     this.replica.seq = change.seq;
     const label =
       change.origin === "edit"

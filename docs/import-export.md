@@ -1,10 +1,14 @@
 # Import and export
 
-Finite moves designs in and out through one Rust crate, `crates/transfer`. Each format is a **codec** that converts between that format and Finite's own `Document`, so the document is the hub and there are no converters between pairs of formats. v1 ships three codecs: HTML, a native `.finite` bundle, and Figma in both directions.
+Finite moves designs in and out through one Rust crate, `crates/transfer`. Each format is a **codec** that converts between that format and Finite's own `Document`, so the document is the hub and there are no converters between pairs of formats. v1 ships four codecs that go both ways: HTML, a native `.finite` bundle, a folder of text files for git (`repo`), and Figma. A fifth, JSX, only exports.
 
 Two rules hold everything else up. Import never throws data away: Finite keeps the exact bytes it received, and anything it can't turn into nodes stays recoverable from them. And nothing that could run code reaches the document unless someone wrote it there on purpose.
 
 `crates/transfer/SUPPORT.md` shows what each codec does with each feature. A test generates it, so it can't go stale.
+
+## JSX
+
+`crates/transfer/src/jsx.rs` writes a node as JSX for a React codebase. The `get_jsx` MCP tool calls `jsx::convert` on any node, and the codec's `write` wraps an artboard in a component file (`?format=jsx`, `export_design`). Attributes take React's names (`class` is `className`, `for` is `htmlFor`, SVG `stroke-width` is `strokeWidth`). Text JSX can't hold, like `{` or leading spaces, goes out as a string expression. By default each node's styles become a `style` object. With `tailwind`, they become classes: a utility where its meaning is plain (`flex`, `gap-[8px]`) and an arbitrary property (`[background-color:#fff]`) for the rest. A value a class can't hold, like a `url(…)`, stays in a `style` object. `<script>` elements are left out with a diagnostic, and so is `!important`, which a style object can't carry and a Tailwind arbitrary value rejects. `SUPPORT.md` marks frame, solid fill and flex layout approximate for that reason and because a Tailwind class has less weight than an inline style. `get_jsx` keeps stored images as this server's URLs, like `get_html`, and says so; the codec's file inlines them. A `<textarea>`'s text becomes `defaultValue`. Not handled: `selected` on an `<option>` stays as is, so React warns until it moves to the `<select>`'s `defaultValue`. JSX can't be imported.
 
 ## Adding a format or a feature
 
@@ -88,6 +92,33 @@ Figma has no CSS, so Figma export reads how the artboard actually rendered. The 
 
 Flexbox becomes auto layout only when auto layout would put every child where the browser did. The codec lays the children out the way Figma would and compares; if any child is more than a pixel off, because of margins, `order` or `flex-basis`, say, the frame keeps the measured positions and reports it. Grid always exports as measured positions.
 
+## Keeping a design in a repo
+
+The `repo` codec writes a design as a folder of text files, so it can sit next to the code and show up in pull requests:
+
+```text
+finite.json          name, pages, and each artboard's file, page and position
+shared.css           the shared CSS, if the design has any
+artboards/home.html  one artboard: its <div> and everything inside, one tag per line
+assets/<sha256>.png  files the design points to, such as images
+```
+
+A codec returns one file, so the export is one tar archive of that folder. Unpack it with `tar -xf`, commit the files, and pack them again with `tar -cf design.tar finite.json shared.css artboards assets` to import them (one folder around those is fine). The archive is deterministic: an unchanged design writes the same bytes, so a re-export of an unedited design leaves no diff.
+
+Import back is exact for what Finite edits: layer names, styles, attributes, text and nesting, plus each artboard's size (an auto-height artboard stays auto-height), position and page, and the page list. A test exports a design with mixed text and inline elements and checks that the imported document matches node for node. What doesn't come back:
+
+- **Scripts.** A `<script>` is written to the file, but import quarantines it like any imported file's scripts, so it stays out of the document and is listed in the import's diagnostics. The original tar stays downloadable.
+- Node ids, undo history, comments and import records. The export reports the import records, as a bundle does.
+- Whitespace-only text that contains a newline. HTML import treats it as source indentation, here and in every other codec.
+- An artboard whose root isn't a `<div>`. Artboards are created as `<div>`s.
+- Two pages with the same name. The manifest refers to pages by name, so the second is written as `Name (2)` and the export says so.
+
+File names come from layer names, as ASCII letters, digits and dashes. A name with other characters, like `Café` or `日本語`, gets a short hash of the name added (`caf-1a2b3c.html`), so different names never share a file. Names Windows reserves (`con`, `nul`, `com1`…) get `-artboard` added. Artboards that share a name get a hash of each one's node id instead, so deleting one doesn't renumber the rest; the one left then takes the plain name. Renaming an artboard renames its file, and the importer reads the manifest, not the file name, so a renamed file still imports once the manifest says so.
+
+Reading applies the HTML import rules: scripts, handlers and embeds are quarantined, with their path in the file. Because the files are meant to be edited, the importer also checks the manifest against the files: a listed file must exist, and an asset's name must match its sha256. Archives that use pax or GNU long names are refused with a message (repack with `tar --format=ustar`), since a cut-off name would point at the wrong file. Images in files are `finite-asset:<sha256>` references to the `assets/` folder, not paths, so the HTML files show a missing image if opened directly in a browser.
+
+This is export and import only. Changing a file and importing it adds new artboards; it doesn't update the ones already in the design. A sync mode would build on the import record's node-to-path map, and isn't built.
+
 ## Reaching Figma
 
 The Figma REST API can't create nodes, so Finite ships a small Figma plugin, `apps/figma-plugin`. The plugin and Finite trade `.figma.json` files, which hold a versioned payload (`crates/transfer/src/figma/payload.rs`, mirrored in `apps/figma-plugin/src/payload.ts`). One schema serves both directions. The plugin saves a selection as a file for Finite's Import button, and opens a file from Finite's Export menu to build layers. It has no network access, so there's no token to manage and no cross-origin surface. It also carries no conversion logic: it copies values between the payload and the Plugin API, and every mapping lives in the codec.
@@ -118,7 +149,7 @@ To change a stored format, bump its version, add the upgrade step, and add a fix
 
 `crates/server/src/transfer.rs` has the three operations: `import`, `export` and `original`. The HTTP API, the MCP tools, the Figma plugin and the web UI are thin layers over them, and none of them holds conversion logic.
 
-Over HTTP, `POST /api/designs/{id}/import?format=html&name=…&strict=preserved,editable` takes the file's bytes as the body, up to 32 MB (the largest blob, since the file is kept whole), and answers `201` with the record, the new artboards and the diagnostics. `GET /api/designs/{id}/export?format=html&artboard=…` downloads the design, or one artboard, and its `Finite-Diagnostics` header counts the diagnostics. `GET /api/designs/{id}/imports` lists the records, and `GET /api/designs/{id}/imports/{import}/original` downloads the exact bytes, always as `application/octet-stream` with `nosniff` and `Content-Security-Policy: sandbox`, so a hostile page can't render. An unknown format or strict axis, bad input and a strict refusal all answer `422`. Agents have `import_design`, which takes the file as `content` or `contentBase64`, and `export_design`, which returns the file as text.
+Over HTTP, `POST /api/designs/{id}/import?format=html&name=…&strict=preserved,editable` takes the file's bytes as the body, up to 32 MB (the largest blob, since the file is kept whole), and answers `201` with the record, the new artboards and the diagnostics. `GET /api/designs/{id}/export?format=html&artboard=…` (or `format=repo` for the folder as a tar) downloads the design, or one artboard, and its `Finite-Diagnostics` header counts the diagnostics. `GET /api/designs/{id}/imports` lists the records, and `GET /api/designs/{id}/imports/{import}/original` downloads the exact bytes, always as `application/octet-stream` with `nosniff` and `Content-Security-Policy: sandbox`, so a hostile page can't render. An unknown format or strict axis, bad input and a strict refusal all answer `422`. Agents have `import_design`, which takes the file as `content` or `contentBase64`, and `export_design`, which returns the file as text.
 
 ## Not in v1
 

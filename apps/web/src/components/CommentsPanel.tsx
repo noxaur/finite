@@ -14,7 +14,7 @@ type Tab = "open" | "resolved";
 
 /**
  * Every comment on the design, open or resolved, newest first. Resolved pins
- * leave the canvas a minute after they're resolved, so this is where they're
+ * leave the canvas as soon as they're resolved, so this is where they're
  * kept. Picking one opens its thread on the canvas.
  */
 export function CommentsPanel({

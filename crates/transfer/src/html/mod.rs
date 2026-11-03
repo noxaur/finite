@@ -5,7 +5,6 @@
 
 use std::collections::BTreeSet;
 
-use base64::{Engine, engine::general_purpose::STANDARD};
 use finite_design::{
     html::{self, Dropped, ExportOptions, Fragment, Policy},
     import::Dependency,
@@ -46,6 +45,10 @@ impl Codec for Html {
             (Feature::Embed, Export) => Unsupported,
             // A page is the design, not how it got there.
             (Feature::ImportHistory, Import | Export) => Unsupported,
+            // `data-instance-of` would point at a component the file's reader
+            // doesn't have, so an instance is written as the elements it shows.
+            (Feature::Instance, Import) => Unsupported,
+            (Feature::Instance, Export) => Approximate,
         }
     }
 
@@ -119,38 +122,7 @@ impl Codec for Html {
             layer = html::BASE_LAYER,
             base = html::BASE_CSS,
         );
-        // Files the design stores, like imported images, go inline: their
-        // URLs only work on this server.
-        let mut diagnostics = Vec::new();
-        let mut failed = None;
-        let page = assets::rewrite_urls(&page, |hash| match revision.blobs.get(hash) {
-            Ok(Some(bytes)) => Some(format!(
-                "data:{};base64,{}",
-                assets::media_type(&bytes),
-                STANDARD.encode(&bytes)
-            )),
-            Ok(None) => {
-                diagnostics.push(Diagnostic {
-                    node: None,
-                    path: assets::url("…", hash),
-                    what: "an image".into(),
-                    feature: Feature::Image,
-                    reason: "the design points at a file its store doesn't have".into(),
-                    preserved: Score::No,
-                    visual: Score::No,
-                    editable: Score::No,
-                    quarantined: false,
-                });
-                None
-            }
-            Err(error) => {
-                failed.get_or_insert(error);
-                None
-            }
-        });
-        if let Some(error) = failed {
-            return Err(error);
-        }
+        let (page, diagnostics) = assets::inline(&page, revision.blobs)?;
         Ok(Exported {
             file_name: format!("{}.html", file_stem(&title)),
             media_type: "text/html; charset=utf-8",
@@ -175,7 +147,7 @@ fn is_page(source: &str) -> bool {
 
 /// A diagnostic for content the parser left out. All of it stays in the
 /// import's original bytes, so it's preserved but not editable.
-fn quarantine(dropped: Dropped) -> (Anchor, Diagnostic) {
+pub(crate) fn quarantine(dropped: Dropped) -> (Anchor, Diagnostic) {
     let script = dropped.what == "<script>" || !dropped.what.starts_with('<');
     let (feature, visual) = if script {
         // A script might change how the page looks once it runs, or not.

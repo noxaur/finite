@@ -13,6 +13,11 @@ pub type NodeId = String;
 /// `width` and `height` styles.
 ///
 /// Serialized flat, as in `{"id": …, "type": "element", "tag": "div", …}`.
+///
+/// Components and instances (see [`crate::components`]) add three fields,
+/// left out when unset: `component` marks a component's root, `instanceOf`
+/// names the component an instance shows, and `overrides` holds the values
+/// an instance changes.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Node {
@@ -38,6 +43,18 @@ pub struct Node {
     pub styles: BTreeMap<String, String>,
     #[serde(default)]
     pub attrs: BTreeMap<String, String>,
+    /// Marks the root of a component: a definition that instances show.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub component: bool,
+    /// On an instance, the component it shows. An instance has no children
+    /// of its own: it renders as its component, with its overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_of: Option<NodeId>,
+    /// On an instance, the values that differ from its component, keyed as
+    /// [`PropKey::Override`] keys are: `style:color` for the instance's own
+    /// root, `<path>/text` for a node inside it. `None` removes the value.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub overrides: BTreeMap<String, Option<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +98,12 @@ impl<'de> Deserialize<'de> for Node {
             styles: BTreeMap<String, String>,
             #[serde(default)]
             attrs: BTreeMap<String, String>,
+            #[serde(default)]
+            component: bool,
+            #[serde(default, rename = "instanceOf")]
+            instance_of: Option<NodeId>,
+            #[serde(default)]
+            overrides: BTreeMap<String, Option<String>>,
         }
         let wire = Wire::deserialize(deserializer)?;
         let kind = match wire.kind {
@@ -101,6 +124,9 @@ impl<'de> Deserialize<'de> for Node {
             page: wire.page,
             styles: wire.styles,
             attrs: wire.attrs,
+            component: wire.component,
+            instance_of: wire.instance_of,
+            overrides: wire.overrides,
         })
     }
 }
@@ -130,6 +156,9 @@ impl Node {
             page: None,
             styles: BTreeMap::new(),
             attrs: BTreeMap::new(),
+            component: false,
+            instance_of: None,
+            overrides: BTreeMap::new(),
         }
     }
 
@@ -142,6 +171,11 @@ impl Node {
 
     pub fn is_artboard(&self) -> bool {
         self.parent.is_none()
+    }
+
+    /// Whether this node is an instance of a component.
+    pub fn is_instance(&self) -> bool {
+        self.instance_of.is_some()
     }
 
     /// The name shown in layer lists: the explicit name, else the tag or a text snippet.
@@ -172,6 +206,13 @@ impl Node {
             PropKey::Page => self.page.clone().map(Value::String),
             PropKey::Style(k) => self.styles.get(k).cloned().map(Value::String),
             PropKey::Attr(k) => self.attrs.get(k).cloned().map(Value::String),
+            PropKey::Component => self.component.then_some(Value::Bool(true)),
+            PropKey::InstanceOf => self.instance_of.clone().map(Value::String),
+            // A removed value is `false`, since `null` clears the override.
+            PropKey::Override(k) => self
+                .overrides
+                .get(k)
+                .map(|v| v.clone().map_or(Value::Bool(false), Value::String)),
         }
     }
 
@@ -191,6 +232,13 @@ impl Node {
                 Some(_) => Err(PropError::ExpectedNumber),
             }
         }
+        fn flag(value: Option<Value>) -> Result<bool, PropError> {
+            match value {
+                None | Some(Value::Null) | Some(Value::Bool(false)) => Ok(false),
+                Some(Value::Bool(true)) => Ok(true),
+                Some(_) => Err(PropError::ExpectedBool),
+            }
+        }
         fn put(map: &mut BTreeMap<String, String>, k: &str, v: Option<String>) {
             match v {
                 Some(v) => map.insert(k.to_owned(), v),
@@ -205,6 +253,20 @@ impl Node {
             PropKey::Page => self.page = string(value)?,
             PropKey::Style(k) => put(&mut self.styles, k, string(value)?),
             PropKey::Attr(k) => put(&mut self.attrs, k, string(value)?),
+            PropKey::Component => self.component = flag(value)?,
+            PropKey::InstanceOf => self.instance_of = string(value)?,
+            PropKey::Override(k) => match value {
+                None | Some(Value::Null) => {
+                    self.overrides.remove(k);
+                }
+                Some(Value::Bool(false)) => {
+                    self.overrides.insert(k.clone(), None);
+                }
+                Some(Value::String(s)) => {
+                    self.overrides.insert(k.clone(), Some(s));
+                }
+                Some(_) => return Err(PropError::ExpectedString),
+            },
         }
         Ok(())
     }
@@ -214,6 +276,7 @@ impl Node {
 pub enum PropError {
     ExpectedString,
     ExpectedNumber,
+    ExpectedBool,
 }
 
 /// Addresses one property of a node. Properties are the unit of conflict:
@@ -221,7 +284,8 @@ pub enum PropError {
 /// to different properties of the same node both survive.
 ///
 /// Serialized as `name`, `text`, `x`, `y`, `page`, `style:<css-property>` or
-/// `attr:<attribute>`.
+/// `attr:<attribute>`, and for components as `component`, `instanceOf` and
+/// `override:<key>`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub enum PropKey {
@@ -232,6 +296,45 @@ pub enum PropKey {
     Page,
     Style(String),
     Attr(String),
+    /// Whether the node is a component's root. Its value is `true`, or unset.
+    Component,
+    /// The component an instance shows.
+    InstanceOf,
+    /// One value an instance changes. The key is the property it changes
+    /// (`text`, `style:…` or `attr:…`), after the path of the node inside
+    /// the instance and a `/` when it isn't the instance's root:
+    /// `style:color`, `k2n0d9xa/text`, `k2n0d9xa/4biyjm26/attr:src`. The
+    /// path is the node's id inside the instance (see [`crate::components`]).
+    /// The value is a string, or `false` for a value the instance removes.
+    Override(String),
+}
+
+impl PropKey {
+    /// Splits an override key into the path of the node it changes (empty
+    /// for the instance's root) and the property. `None` if it isn't one.
+    pub fn split_override(key: &str) -> Option<(&str, PropKey)> {
+        let (path, prop) = match key.rsplit_once('/') {
+            Some((path, prop)) if !path.is_empty() => (path, prop),
+            Some(_) => return None,
+            None => ("", key),
+        };
+        if !path.is_empty() && path.split('/').any(str::is_empty) {
+            return None;
+        }
+        match PropKey::try_from(prop.to_owned()).ok()? {
+            prop @ (PropKey::Text | PropKey::Style(_) | PropKey::Attr(_)) => Some((path, prop)),
+            _ => None,
+        }
+    }
+
+    /// The override key for `prop` on the node at `path` inside an instance.
+    pub fn override_key(path: &str, prop: &PropKey) -> String {
+        if path.is_empty() {
+            prop.to_string()
+        } else {
+            format!("{path}/{prop}")
+        }
+    }
 }
 
 impl fmt::Display for PropKey {
@@ -244,6 +347,9 @@ impl fmt::Display for PropKey {
             Self::Page => f.write_str("page"),
             Self::Style(k) => write!(f, "style:{k}"),
             Self::Attr(k) => write!(f, "attr:{k}"),
+            Self::Component => f.write_str("component"),
+            Self::InstanceOf => f.write_str("instanceOf"),
+            Self::Override(k) => write!(f, "override:{k}"),
         }
     }
 }
@@ -264,6 +370,15 @@ impl TryFrom<String> for PropKey {
             "x" => Self::X,
             "y" => Self::Y,
             "page" => Self::Page,
+            "component" => Self::Component,
+            "instanceOf" => Self::InstanceOf,
+            _ if s.starts_with("override:") => {
+                let key = &s["override:".len()..];
+                if PropKey::split_override(key).is_none() {
+                    return Err(format!("bad override key {s:?}"));
+                }
+                Self::Override(key.to_owned())
+            }
             _ => match s.split_once(':') {
                 Some(("style", k)) if !k.is_empty() => Self::Style(k.to_owned()),
                 Some(("attr", k)) if !k.is_empty() => Self::Attr(k.to_owned()),

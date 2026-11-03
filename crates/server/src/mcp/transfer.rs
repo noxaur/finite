@@ -101,7 +101,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Export the design, or one artboard, as a file: html, finite (a bundle that imports back exactly) or figma (for the Finite Figma plugin). Returns a diagnostic for anything that didn't convert exactly, and the file's text, cut off past 60,000 characters.",
+        description = "Export the design, or one artboard, as a file: html, finite (a bundle that imports back exactly), repo (a tar of text files for keeping in git: one HTML file per artboard, the shared CSS and a manifest; it imports back, but scripts are left out on import), figma (for the Finite Figma plugin) or jsx (one artboard as a React component). Returns a diagnostic for anything that didn't convert exactly, and the file's text, cut off past 60,000 characters.",
         annotations(read_only_hint = true)
     )]
     async fn export_design(&self, Parameters(p): Parameters<ExportParams>) -> ToolResult {
@@ -127,19 +127,24 @@ impl FiniteMcp {
         };
         let mut text = String::new();
         diagnostics(&mut text, &exported.diagnostics);
-        match String::from_utf8(exported.bytes) {
-            Ok(file) => {
+        // A tar archive is padded with NULs, which are valid UTF-8 but not text to read.
+        let file = match exported.media_type {
+            "application/x-tar" => None,
+            _ => std::str::from_utf8(&exported.bytes).ok(),
+        };
+        match file {
+            Some(file) => {
                 text.push_str(&format!(
                     "{} ({}):\n",
                     exported.file_name, exported.media_type
                 ));
-                text.push_str(&file);
+                text.push_str(file);
                 ok(cut(text, &format!("The whole file is at {route}.")))
             }
-            Err(error) => ok(format!(
+            None => ok(format!(
                 "{text}{} is {} bytes of {}, not text. Download it from {route}.",
                 exported.file_name,
-                error.as_bytes().len(),
+                exported.bytes.len(),
                 exported.media_type
             )),
         }

@@ -14,6 +14,8 @@ export interface NewComment {
   /** The artboard the pin sits on. `x` and `y` are relative to it, or to the canvas when `null`. */
   readonly artboardId: string | null;
   readonly nodeId: string | null;
+  /** More elements in the same artboard, picked with shift-click. */
+  readonly extraNodeIds: ReadonlyArray<string>;
   readonly x: number;
   readonly y: number;
 }
@@ -22,7 +24,7 @@ export interface NewComment {
 const Changed = Schema.Struct({ seq: Schema.NullOr(Schema.Number) });
 
 /** The formats an import reads, chosen by the file's extension. */
-export type TransferFormat = "html" | "finite" | "figma";
+export type TransferFormat = "html" | "finite" | "figma" | "repo";
 
 const Score = Schema.Literals(["yes", "no", "unknown"]);
 

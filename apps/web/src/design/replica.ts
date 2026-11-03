@@ -1,6 +1,23 @@
 import type { Node, Op, Snapshot } from "./schema";
 import { designModel, type WasmDocument } from "./wasm";
 
+/** What a node is to components, from `components::info` in Rust. */
+export interface ComponentInfo {
+  /** The instance the node is in, or is. */
+  readonly instance: string | null;
+  /** The component that instance shows, or the one the node is part of. */
+  readonly component: string | null;
+  readonly componentName: string | null;
+  /** How many instances the component has. */
+  readonly instances: number;
+}
+
+/** The real node an id stands for: itself, or the instance a virtual id is shown in. */
+export function realId(id: string): string {
+  const at = id.indexOf("/");
+  return at < 0 ? id : id.slice(0, at);
+}
+
 /** What applying an op touched, for the renderer to patch the DOM. */
 export type Applied =
   | { readonly op: "create"; readonly node: Node }
@@ -124,9 +141,12 @@ export class Replica {
     return this.children(null);
   }
 
-  /** The artboard containing `id` (or `id` itself, if it is one). */
+  /**
+   * The artboard containing `id` (or `id` itself, if it is one). A node
+   * inside an instance (`instance/node`) is on its instance's artboard.
+   */
   artboardOf(id: string): Node | undefined {
-    let node = this.nodes.get(id);
+    let node = this.nodes.get(realId(id));
     while (node?.parent) node = this.nodes.get(node.parent);
     return node;
   }
@@ -147,6 +167,26 @@ export class Replica {
   /** The subtree at `id` as HTML, as screenshots render it. With `ids`, elements carry `data-finite-id`. */
   exportHtml(id: string, ids = false): string {
     return this.doc.exportHtml(id, ids);
+  }
+
+  /**
+   * Instance `id` as it renders: its root, with its component's tag and
+   * styles and its overrides applied, then what's inside it, parents
+   * first. Nodes inside have virtual ids (`instance/node`). Empty if `id`
+   * isn't an instance.
+   */
+  expand(id: string): Node[] {
+    return JSON.parse(this.doc.expand(id)) as Node[];
+  }
+
+  /** The instances whose content changed since the last call, to draw again. */
+  takeDirty(): string[] {
+    return JSON.parse(this.doc.takeDirty()) as string[];
+  }
+
+  /** The instance a node is shown in and its component, or the component it's part of. */
+  componentInfo(id: string): ComponentInfo | null {
+    return JSON.parse(this.doc.componentInfo(id)) as ComponentInfo | null;
   }
 
   /** Applies one op. Returns `null` when it doesn't apply, as on the server. */

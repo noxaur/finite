@@ -39,6 +39,7 @@ async function rendered(html, width, height, css = "") {
         return { id: el.dataset.id, name: el.dataset.name ?? null, tag: el.tagName.toLowerCase(),
           text: el.textContent.trim(), x: r.x - board.x, y: r.y - board.y, width: r.width, height: r.height,
           position: s.position, background: s.backgroundColor, fontSize: parseFloat(s.fontSize),
+          fontWeight: Number(s.fontWeight),
           visible: s.visibility !== "hidden" && s.display !== "none" && r.width > 0 && r.height > 0 };
       });
     })()`);
@@ -141,6 +142,32 @@ async function allHtml(mcp, design) {
 }
 
 export const tasks = {
+  "delete-design": {
+    workdir: "none",
+    async seed(mcp) {
+      const create = async (name) => {
+        const text = await mcp.call("create_design", { name });
+        return text.match(/designId "([a-z0-9]+)"/)[1];
+      };
+      const design = await create("Discarded draft");
+      const keep = await create("Published work");
+      await mcp.call("create_artboard", { designId: design, name: "Draft", width: 390 });
+      return { design, keep };
+    },
+    prompt: () =>
+      'Permanently delete the Finite design named "Discarded draft". Keep "Published work" unchanged. Use the Finite MCP tools and stop when done.',
+    async check(mcp, ctx) {
+      const designs = await mcp.call("list_designs");
+      const deleted = await mcp.callRaw("get_basic_info", { designId: ctx.design });
+      const kept = await mcp.callRaw("get_basic_info", { designId: ctx.keep });
+      const checks = [!designs.includes(ctx.design), !!deleted.isError, !kept.isError];
+      return {
+        passed: checks.filter(Boolean).length,
+        total: checks.length,
+        notes: ["Draft removed; published work retained"],
+      };
+    },
+  },
   // The brand color changed: every use, in styles and in a <style> block, has to change.
   restyle: {
     workdir: "none",
@@ -255,6 +282,46 @@ setInterval(next, 3000);
         ],
         screenshot: mobile?.id,
       };
+    },
+  },
+
+  // Fill a fixed-height artboard a section at a time. Six sections don't fit
+  // in 700 px unless the agent makes them small or the artboard taller, which
+  // is what the layout note on write_html results (FINITE_MCP_EXTRA=layout)
+  // is meant to prompt. run.mjs counts the artboards left clipped.
+  sections: {
+    workdir: "none",
+    async seed(mcp) {
+      const design = (await mcp.call("create_design", { name: "Pocket app" })).match(
+        /designId "([^"]+)"/,
+      )[1];
+      const board = idAfter(
+        await mcp.call("create_artboard", {
+          designId: design,
+          name: "Landing",
+          width: 390,
+          height: 700,
+          x: 0,
+          y: 0,
+        }),
+        "artboard",
+      );
+      return { design, board };
+    },
+    prompt: () =>
+      `Use the Finite MCP tools. The Finite design "Pocket app" has an empty 390 px wide phone artboard named "Landing". ` +
+      `Build a landing page for a budgeting app called Pocket in it, one write_html call per section, with these six sections in order: ` +
+      `a header with the logo and a menu, a hero with a headline and a sign-up button, three feature cards, a testimonial, a pricing card, and a footer with links. ` +
+      `Stop when you're done.`,
+    async check(mcp, ctx) {
+      const html = await mcp.call("get_html", { designId: ctx.design, nodeId: ctx.board });
+      const checks = [
+        /pocket/i.test(html),
+        /<button/i.test(html),
+        (html.match(/<footer|data-name="Footer/gi) ?? []).length >= 1,
+        /pric/i.test(html) && /testimonial|“|"/i.test(html),
+      ];
+      return { passed: checks.filter(Boolean).length, total: checks.length, notes: [] };
     },
   },
 
@@ -521,6 +588,54 @@ setInterval(next, 3000);
         total: checks.length,
         notes: [`${green}/${info.artboards.length} green top bars`],
       };
+    },
+  },
+  // screens-change with a change to the bar's elements, not just its colors,
+  // which shared CSS alone can't make in one place.
+  "screens-restructure": {
+    workdir: "none",
+    seed: async (mcp) => ({
+      design: (await mcp.call("create_design", { name: "Plantpal onboarding" })).match(
+        /designId "([^"]+)"/,
+      )[1],
+    }),
+    prompt: () =>
+      `Use the Finite MCP tools. In the Finite design "Plantpal onboarding", design a three-screen mobile onboarding flow for a plant-care app: ` +
+      `Welcome, Pick your plants (a grid of at least 6 selectable plant cards, two selected), and All set. ` +
+      `The screens must share the same top bar, colors, type and button style. Check how they look. Stop when you're done.`,
+    followUp: () =>
+      `The top bar changed. On every screen it now needs a back-arrow button at its left and a "Help" link at its right, ` +
+      `and its title should be bold. Each screen keeps its own title. Make the change on all screens and check it. Stop when you're done.`,
+    async check(mcp, ctx) {
+      const info = JSON.parse(await mcp.call("get_basic_info", { designId: ctx.design }));
+      const shared = await mcp
+        .callRaw("get_shared_css", { designId: ctx.design })
+        .catch(() => null);
+      const css = shared && !shared.isError ? (shared.content?.[0]?.text ?? "") : "";
+      const sharedCss = css.startsWith("This design has no shared CSS") ? "" : css;
+      const titles = ["Welcome", "Pick your plants", "All set"];
+      let done = 0;
+      const notes = [];
+      for (const a of info.artboards) {
+        const html = await mcp.call("get_html", { designId: ctx.design, nodeId: a.id });
+        const top = (await rendered(html, a.width, a.height, sharedCss)).filter(
+          (e) => e.visible && e.y < 140,
+        );
+        const has = {
+          back: top.some((e) => /^(←|‹|<|❮|〈|back)/i.test(e.text) || e.tag === "svg"),
+          help: top.some((e) => e.text === "Help"),
+          bold: top.some((e) => titles.some((t) => e.text === t) && e.fontWeight >= 600),
+        };
+        if (Object.values(has).every(Boolean)) done++;
+        else
+          notes.push(
+            `${a.name ?? a.id}: no ${Object.keys(has)
+              .filter((k) => !has[k])
+              .join(", ")}`,
+          );
+      }
+      const checks = [info.artboards.length >= 3, done >= 3 && done === info.artboards.length];
+      return { passed: checks.filter(Boolean).length, total: checks.length, notes };
     },
   },
 

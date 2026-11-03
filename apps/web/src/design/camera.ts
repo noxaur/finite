@@ -1,4 +1,5 @@
 import type { Bounds } from "./renderer";
+import { visibleBounds } from "./culling";
 
 /** The parts of a wheel event the camera reads. Sandboxed artboards forward these. */
 export type WheelInput = Pick<
@@ -14,6 +15,9 @@ export interface View {
 
 const MIN_ZOOM = 0.02;
 const MAX_ZOOM = 8;
+
+/** How long after the view last moved the world stops being its own compositor layer. */
+const SETTLE_MS = 200;
 
 const clampZoom = (zoom: number) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom));
 
@@ -66,6 +70,7 @@ export class Camera {
   dragToPan = true;
   private readonly listeners = new Set<(view: View) => void>();
   private readonly abort = new AbortController();
+  private settle: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
     private readonly viewport: HTMLElement,
@@ -89,6 +94,7 @@ export class Camera {
   dispose() {
     this.abort.abort();
     this.listeners.clear();
+    clearTimeout(this.settle);
   }
 
   subscribe(listener: (view: View) => void) {
@@ -116,6 +122,15 @@ export class Camera {
     return { x: (clientX - rect.left - x) / zoom, y: (clientY - rect.top - y) / zoom };
   }
 
+  /** The page point over a canvas point. */
+  toPage(x: number, y: number): { x: number; y: number } {
+    const rect = this.viewport.getBoundingClientRect();
+    return {
+      x: rect.left + this.view.x + x * this.view.zoom,
+      y: rect.top + this.view.y + y * this.view.zoom,
+    };
+  }
+
   /** Pans so the canvas point (`x`, `y`) sits in the middle of the viewport, at the same zoom. */
   centerOn(x: number, y: number) {
     const { zoom } = this.view;
@@ -124,6 +139,11 @@ export class Camera {
       x: this.viewport.clientWidth / 2 - x * zoom,
       y: this.viewport.clientHeight / 2 - y * zoom,
     });
+  }
+
+  /** The canvas area in view, with `margin` viewports around it. */
+  visibleWorld(margin = 0.5): Bounds {
+    return visibleBounds(this.view, this.viewport.clientWidth, this.viewport.clientHeight, margin);
   }
 
   fitTo(bounds: Bounds | null) {
@@ -135,6 +155,13 @@ export class Camera {
     const { x, y, zoom } = this.view;
     this.world.style.transform = `translate(${x}px, ${y}px) scale(${zoom})`;
     this.world.style.setProperty("--inv-zoom", String(1 / zoom));
+    // While the view moves, the world is a compositor layer, so each frame
+    // moves the pixels it already drew instead of redrawing every artboard
+    // (heavy SVG filters made that lag). Once it settles, the layer goes and
+    // the browser redraws it sharp at the new zoom.
+    this.world.style.willChange = "transform";
+    clearTimeout(this.settle);
+    this.settle = setTimeout(() => (this.world.style.willChange = ""), SETTLE_MS);
     for (const listener of this.listeners) listener(this.view);
   }
 

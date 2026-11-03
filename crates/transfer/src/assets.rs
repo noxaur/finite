@@ -6,7 +6,10 @@
 //! into `finite-asset:<sha256>`, and on the way in, [`crate::Imported::place`]
 //! turns that back into a URL for the design it lands in.
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use finite_design::{html::Fragment, import::BlobHash};
+
+use crate::{Blobs, Diagnostic, Error, Feature, Score};
 
 /// How a file refers to a blob, followed by its hash.
 pub const SCHEME: &str = "finite-asset:";
@@ -69,6 +72,43 @@ pub fn rewrite_urls(value: &str, mut f: impl FnMut(&BlobHash) -> Option<String>)
     }
     out.push_str(rest);
     out
+}
+
+/// `text` with each stored file its URLs point to written inline as a
+/// `data:` URL, since the URLs only work on this server. A file the store
+/// doesn't have stays a URL and gets a diagnostic.
+pub fn inline(text: &str, blobs: &dyn Blobs) -> Result<(String, Vec<Diagnostic>), Error> {
+    let mut diagnostics = Vec::new();
+    let mut failed = None;
+    let text = rewrite_urls(text, |hash| match blobs.get(hash) {
+        Ok(Some(bytes)) => Some(format!(
+            "data:{};base64,{}",
+            media_type(&bytes),
+            STANDARD.encode(&bytes)
+        )),
+        Ok(None) => {
+            diagnostics.push(Diagnostic {
+                node: None,
+                path: url("…", hash),
+                what: "an image".into(),
+                feature: Feature::Image,
+                reason: "the design points at a file its store doesn't have".into(),
+                preserved: Score::No,
+                visual: Score::No,
+                editable: Score::No,
+                quarantined: false,
+            });
+            None
+        }
+        Err(error) => {
+            failed.get_or_insert(error);
+            None
+        }
+    });
+    match failed {
+        Some(error) => Err(error),
+        None => Ok((text, diagnostics)),
+    }
 }
 
 /// Whether a URL can start right after `before`: at the start of a value,

@@ -12,6 +12,7 @@ use std::{
 use finite_design::{
     ActorId, Change, Design, Document, NodeId, Op, Record, Snapshot, Transaction,
     comment::{Anchor, Author, Comment, CommentError},
+    components,
     edit::EditError,
     import::ImportRecord,
     label,
@@ -244,6 +245,7 @@ pub struct DesignHandle {
     id: String,
     store: Arc<dyn Store>,
     state: Mutex<Option<DesignState>>,
+    pub(super) persistence: Mutex<()>,
     /// Kept current while loaded, so the design list never loads a design.
     summary: Mutex<DesignSummary>,
     /// Pinged on every change; the save task waits on it.
@@ -324,6 +326,7 @@ impl DesignHandle {
             id: summary.meta.id.clone(),
             store,
             state: Mutex::new(state),
+            persistence: Mutex::new(()),
             summary: Mutex::new(summary),
             dirty: watch::channel(()).0,
             comments: tokio::sync::Notify::new(),
@@ -437,6 +440,23 @@ impl DesignHandle {
             state.send_viewers_away();
         }
         self.comments.notify_waiters();
+    }
+
+    pub(super) fn delete(&self) -> io::Result<()> {
+        let _saving = self.persistence.lock().unwrap();
+        let mut state = self.lock();
+        if state.life != Life::Live {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "design is no longer available",
+            ));
+        }
+        self.store.delete(&self.id, state.token)?;
+        state.life = Life::Gone;
+        state.pending.clear();
+        state.send_viewers_away();
+        self.comments.notify_waiters();
+        Ok(())
     }
 
     pub fn read<T>(&self, f: impl FnOnce(&Design) -> T) -> T {
@@ -618,6 +638,11 @@ impl DesignHandle {
 
     /// Builds ops from the current document with `build`, then commits them as
     /// one undo step for `actor`.
+    ///
+    /// `build` sees the document as it renders, with instances expanded
+    /// (`Design::view`), so an edit can name a node inside an instance.
+    /// `components::redirect` then turns those ops into overrides on the
+    /// instance, or refuses them.
     pub fn edit<T>(
         &self,
         actor: &Actor,
@@ -627,7 +652,15 @@ impl DesignHandle {
         let now = now_ms();
         let mut state = self.lock();
         state.touch(actor, now);
-        let (ops, output) = build(state.design.doc())?;
+        let (ops, output) = build(state.design.view())?;
+        let doc = state.design.doc();
+        let mut new_id = || loop {
+            let id = random_id(8);
+            if !doc.contains(&id) {
+                return id;
+            }
+        };
+        let ops = components::redirect(doc, ops, &mut new_id)?;
         let change = state.design.commit(&actor.id, label, &ops, now);
         if let Some(change) = &change {
             self.publish_with_comments(&mut state, actor, change);

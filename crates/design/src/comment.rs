@@ -33,6 +33,8 @@ pub const MAX_USER_ID: usize = 64;
 pub const MAX_OPEN: usize = 500;
 /// How many messages one comment's thread can hold.
 pub const MAX_MESSAGES: usize = 200;
+/// How many elements one comment can point at, counting `node_id`.
+pub const MAX_SELECTION: usize = 50;
 /// How many recent changes [`ChangeLog`] remembers.
 const LOG_LIMIT: usize = 512;
 /// How many nodes a [`ChangeRef`] lists.
@@ -88,11 +90,14 @@ pub struct Comment {
     pub artboard_id: Option<NodeId>,
     /// The element the user pointed at, so agents know what the comment is about.
     pub node_id: Option<NodeId>,
+    /// The other elements the user selected with it, in the order they picked them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_node_ids: Vec<NodeId>,
     pub x: f64,
     pub y: f64,
     pub resolved: bool,
     /// When it was last resolved, in milliseconds since the Unix epoch.
-    /// Viewers fade resolved pins out a while after this.
+    /// Viewers no longer read it: a resolved pin leaves the canvas at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_at: Option<u64>,
     pub created_at: u64,
@@ -138,6 +143,8 @@ impl Comment {
 pub struct Anchor {
     pub artboard_id: Option<NodeId>,
     pub node_id: Option<NodeId>,
+    /// More elements in the same artboard. They need a `node_id`.
+    pub extra_node_ids: Vec<NodeId>,
     pub x: f64,
     pub y: f64,
 }
@@ -155,6 +162,9 @@ pub enum CommentError {
     BadPosition,
     TooManyOpen,
     ThreadFull,
+    TooManyNodes,
+    /// The same element twice, or extra elements without a `node_id`.
+    BadSelection,
     /// Only the newest message can be edited, and only by its author.
     NotEditable,
 }
@@ -178,6 +188,12 @@ impl fmt::Display for CommentError {
                 f,
                 "this thread has {MAX_MESSAGES} messages, the most it can have; start a new comment"
             ),
+            Self::TooManyNodes => {
+                write!(f, "a comment can point at {MAX_SELECTION} elements at most")
+            }
+            Self::BadSelection => f.write_str(
+                "a comment's elements must be different, and extra elements need a nodeId",
+            ),
             Self::NotEditable => f.write_str(
                 "only your own message can be edited, while it's the newest in the thread",
             ),
@@ -200,15 +216,29 @@ pub(crate) fn check_body(body: &str) -> Result<String, CommentError> {
 }
 
 /// Checks that a new comment's anchor exists: the artboard is an artboard, and
-/// the node is inside it.
+/// every node is a different element inside it.
 pub(crate) fn check_anchor(doc: &Document, anchor: &Anchor) -> Result<(), CommentError> {
     if !anchor.x.is_finite() || !anchor.y.is_finite() {
         return Err(CommentError::BadPosition);
     }
-    let node_id = anchor.node_id.as_deref();
+    if anchor.node_id.is_none() && !anchor.extra_node_ids.is_empty() {
+        return Err(CommentError::BadSelection);
+    }
+    let nodes: Vec<&str> = anchor
+        .node_id
+        .iter()
+        .chain(&anchor.extra_node_ids)
+        .map(|id| id.as_str())
+        .collect();
+    if nodes.len() > MAX_SELECTION {
+        return Err(CommentError::TooManyNodes);
+    }
+    if nodes.iter().collect::<HashSet<_>>().len() < nodes.len() {
+        return Err(CommentError::BadSelection);
+    }
     let Some(artboard) = anchor.artboard_id.as_deref() else {
-        return match node_id {
-            Some(node) => Err(CommentError::NodeNotFound(node.into())),
+        return match nodes.first() {
+            Some(node) => Err(CommentError::NodeNotFound((*node).into())),
             None => Ok(()),
         };
     };
@@ -216,7 +246,7 @@ pub(crate) fn check_anchor(doc: &Document, anchor: &Anchor) -> Result<(), Commen
         Some(board) if board.is_artboard() => {}
         _ => return Err(CommentError::NodeNotFound(artboard.into())),
     }
-    if let Some(node) = node_id {
+    for node in nodes {
         match doc.artboard_of(node) {
             None => return Err(CommentError::NodeNotFound(node.into())),
             Some(board) if board.id != artboard => {
@@ -313,13 +343,24 @@ impl ChangeLog {
     }
 }
 
-/// The artboards that contain the nodes `ops` target, as of `doc`.
+/// The artboards that contain the nodes `ops` target, as of `doc`. An
+/// edit to a component counts for the artboards its instances are on too,
+/// since it changes what they show.
 pub(crate) fn artboards_of(doc: &Document, ops: &[Op]) -> BTreeSet<NodeId> {
     let mut out = BTreeSet::new();
+    let mut seen = std::collections::HashSet::new();
     for op in ops {
         let mut add = |id: &str| {
+            if !seen.insert(id.to_owned()) {
+                return;
+            }
             if let Some(board) = doc.artboard_of(id) {
                 out.insert(board.id.clone());
+            }
+            for instance in crate::components::affected(doc, id) {
+                if let Some(board) = doc.artboard_of(&instance) {
+                    out.insert(board.id.clone());
+                }
             }
         };
         add(op.id());
@@ -369,8 +410,16 @@ mod tests {
         Anchor {
             artboard_id: artboard.map(Into::into),
             node_id: node.map(Into::into),
+            extra_node_ids: Vec::new(),
             x: 0.0,
             y: 0.0,
+        }
+    }
+
+    fn selection(nodes: &[&str]) -> Anchor {
+        Anchor {
+            extra_node_ids: nodes[1..].iter().map(|&id| id.into()).collect(),
+            ..anchor(Some("board"), nodes.first().copied())
         }
     }
 
@@ -395,6 +444,34 @@ mod tests {
             ..anchor(None, None)
         };
         assert_eq!(check_anchor(&doc, &nowhere), Err(CommentError::BadPosition));
+    }
+
+    #[test]
+    fn a_selection_is_different_elements_in_the_artboard() {
+        let doc = doc();
+        assert_eq!(check_anchor(&doc, &selection(&["child", "board"])), Ok(()));
+        assert_eq!(
+            check_anchor(&doc, &selection(&["child", "child"])),
+            Err(CommentError::BadSelection)
+        );
+        assert!(matches!(
+            check_anchor(&doc, &selection(&["child", "other"])),
+            Err(CommentError::NotInArtboard { .. })
+        ));
+        let headless = Anchor {
+            extra_node_ids: vec!["child".into()],
+            ..anchor(Some("board"), None)
+        };
+        assert_eq!(
+            check_anchor(&doc, &headless),
+            Err(CommentError::BadSelection)
+        );
+        let many: Vec<String> = (0..=MAX_SELECTION).map(|i| format!("n{i}")).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        assert_eq!(
+            check_anchor(&doc, &selection(&many)),
+            Err(CommentError::TooManyNodes)
+        );
     }
 
     #[test]
@@ -444,6 +521,7 @@ mod tests {
             id: "c".into(),
             artboard_id: None,
             node_id: None,
+            extra_node_ids: Vec::new(),
             x: 0.0,
             y: 0.0,
             resolved: false,

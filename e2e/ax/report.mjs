@@ -44,12 +44,16 @@ for (const label of chosen) {
       runs: runs.length,
       checks: `${avg((r) => r.check.passed / r.check.total).toFixed(2)}`,
       calls: avg((r) => r.total).toFixed(1),
+      // The follow-up's calls, for tasks that have one.
+      change: runs.some((r) => r.change) ? avg((r) => r.change?.total).toFixed(1) : "–",
       errors: avg((r) => r.errors.length).toFixed(1),
       outside: avg((r) => r.outside.length).toFixed(1),
       readKChars: (avg((r) => r.resultChars) / 1000).toFixed(1),
       shots: avg((r) => r.screenshots).toFixed(1),
       cost: `$${avg((r) => r.cost).toFixed(2)}`,
       seconds: avg((r) => r.seconds).toFixed(0),
+      // Runs that finished with an artboard's content cut off, of those measured.
+      clipped: `${runs.filter((r) => r.clipped > 0).length}/${runs.filter((r) => r.clipped != null).length}`,
       quality: graded(runs, "quality"),
       fit: graded(runs, "fit"),
     });
@@ -68,12 +72,14 @@ const cols = [
   "runs",
   "checks",
   "calls",
+  "change",
   "errors",
   "outside",
   "readKChars",
   "shots",
   "cost",
   "seconds",
+  "clipped",
   "quality",
   "fit",
 ];

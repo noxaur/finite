@@ -204,6 +204,7 @@ impl Walk<'_> {
             name,
             width,
             height,
+            auto_height: false,
             position,
             styles,
             attrs: BTreeMap::new(),
@@ -225,6 +226,7 @@ impl Walk<'_> {
             styles,
             attrs: BTreeMap::new(),
             children,
+            ..Fragment::empty(NodeKind::Text)
         }
     }
 

@@ -10,6 +10,7 @@ use std::{
 use serde_json::Value;
 
 use crate::{
+    components::{self, Overrides},
     document::{Document, FIRST_PAGE, MAX_DEPTH, MAX_NODES, MAX_PAGES, Op, Page},
     fractional,
     html::{self, Fragment},
@@ -201,11 +202,9 @@ pub fn create_artboard_with(
             1 + height
         ));
     }
-    room_for(
-        doc,
-        0,
-        1 + fragments.iter().map(Fragment::count).sum::<usize>(),
-    )?;
+    let mut fragments = fragments;
+    prepare_instances(doc, &mut fragments, None, &[], new_id)?;
+    room_for(doc, 0, 1 + adds(doc, &fragments))?;
     let indexes = fractional::keys_between(None, None, fragments.len());
     let roots = fragments
         .into_iter()
@@ -263,6 +262,16 @@ pub fn write_fragments(
         return err("the HTML contained no elements or text (scripts and styles are dropped)");
     }
     let target_node = node(doc, target)?;
+    // Rewriting a component that has instances keeps the ids of what it
+    // still holds, so the instances' overrides still find their nodes.
+    if mode != WriteMode::Append
+        && let Some(component) = components::component_of(doc, target)
+        && !components::is_virtual(target)
+        && doc.instances_of(&component.id).next().is_some()
+        && let Some(result) = rewrite_in_place(doc, target, &fragments, mode, new_id)?
+    {
+        return Ok(result);
+    }
     let mut ops = Vec::new();
     let (parent, indexes) = match mode {
         WriteMode::Append => {
@@ -315,13 +324,524 @@ pub fn write_fragments(
         .iter()
         .map(|op| doc.subtree(op.id()).len())
         .sum::<usize>();
-    room_for(doc, removed, fragments.iter().map(Fragment::count).sum())?;
+    let mut fragments = fragments;
+    let replaced: Vec<NodeId> = ops.iter().map(|op| op.id().to_owned()).collect();
+    prepare_instances(doc, &mut fragments, Some(&parent), &replaced, new_id)?;
+    room_for(doc, removed, adds(doc, &fragments))?;
     let roots = fragments
         .into_iter()
         .zip(indexes)
         .map(|(fragment, index)| fragment.create_ops(Some(&parent), index, None, new_id, &mut ops))
         .collect();
     Ok((ops, roots))
+}
+
+/// [`write_fragments`] for content inside a component, as edits to the
+/// nodes already there where they match, so their ids stay. A node matches
+/// a fragment with the same tag and layer name; text matches text. Returns
+/// `None` when it can't, like replacing the root with something else.
+fn rewrite_in_place(
+    doc: &Document,
+    target: &str,
+    fragments: &[Fragment],
+    mode: WriteMode,
+    new_id: &mut impl FnMut() -> NodeId,
+) -> Result<Option<(Vec<Op>, Vec<NodeId>)>> {
+    let mut fragments = fragments.to_vec();
+    let target_node = node(doc, target)?;
+    let mut ops = Vec::new();
+    let roots = match mode {
+        WriteMode::Replace => {
+            let [only] = fragments.as_slice() else {
+                return Ok(None);
+            };
+            if !same_kind(target_node, only) || only.instance_of.is_some() {
+                return Ok(None);
+            }
+            // Written with its own name, it's the component, not an instance of it.
+            if target_node.component
+                && fragments[0].component.as_deref() == Some(&target_node.display_name())
+            {
+                fragments[0].component = None;
+            }
+            if fragments[0].component.is_some() {
+                return Ok(None);
+            }
+            prepare_instances(doc, &mut fragments[0].children, Some(target), &[], new_id)?;
+            update_node(target_node, &fragments[0], true, &mut ops);
+            reconcile(doc, target, &fragments[0].children, &mut ops, new_id);
+            vec![target.to_owned()]
+        }
+        WriteMode::ReplaceChildren => {
+            element(doc, target)?;
+            prepare_instances(doc, &mut fragments, Some(target), &[], new_id)?;
+            reconcile(doc, target, &fragments, &mut ops, new_id)
+        }
+        WriteMode::Append => return Ok(None),
+    };
+    let depth = doc.depth(target) + 1;
+    let height = fragments.iter().map(Fragment::height).max().unwrap_or(0);
+    if depth + height > MAX_DEPTH {
+        return err(format!(
+            "that would nest {} levels deep; the limit is {MAX_DEPTH}",
+            depth + height
+        ));
+    }
+    room_for(doc, doc.subtree(target).len(), adds(doc, &fragments))?;
+    Ok(Some((ops, roots)))
+}
+
+/// Whether `node` and `fragment` are the same kind of node with the same tag.
+fn same_kind(node: &Node, fragment: &Fragment) -> bool {
+    node.kind == fragment.kind && !node.is_instance()
+}
+
+/// Sets on `node` whatever differs from `fragment`. `root`: it's the node
+/// being replaced, so its layer name stays unless the HTML gives one.
+fn update_node(node: &Node, fragment: &Fragment, root: bool, ops: &mut Vec<Op>) {
+    let set = |key: PropKey, value: Option<String>, ops: &mut Vec<Op>| {
+        ops.push(Op::Set {
+            id: node.id.clone(),
+            key,
+            value: value.map(Value::String),
+        });
+    };
+    if node.name != fragment.name && !(root && fragment.name.is_none()) {
+        set(PropKey::Name, fragment.name.clone(), ops);
+    }
+    if node.kind == NodeKind::Text && node.text != fragment.text {
+        set(PropKey::Text, fragment.text.clone(), ops);
+    }
+    for (k, v) in &fragment.styles {
+        if node.styles.get(k) != Some(v) {
+            set(PropKey::Style(k.clone()), Some(v.clone()), ops);
+        }
+    }
+    for k in node
+        .styles
+        .keys()
+        .filter(|k| !fragment.styles.contains_key(*k))
+    {
+        set(PropKey::Style(k.clone()), None, ops);
+    }
+    for (k, v) in &fragment.attrs {
+        if node.attrs.get(k) != Some(v) {
+            set(PropKey::Attr(k.clone()), Some(v.clone()), ops);
+        }
+    }
+    for k in node
+        .attrs
+        .keys()
+        .filter(|k| !fragment.attrs.contains_key(*k))
+    {
+        set(PropKey::Attr(k.clone()), None, ops);
+    }
+}
+
+/// Makes `parent`'s children `fragments`, reusing the children that match
+/// one, in order. Returns the ids of the children, reused or new.
+fn reconcile(
+    doc: &Document,
+    parent: &str,
+    fragments: &[Fragment],
+    ops: &mut Vec<Op>,
+    new_id: &mut impl FnMut() -> NodeId,
+) -> Vec<NodeId> {
+    let old = doc.children(Some(parent));
+    let mut used = vec![false; old.len()];
+    // Match in order: each fragment takes the first unused child after the
+    // last match that has its tag and name, so an inserted element doesn't
+    // shift the rest out of place.
+    let mut cursor = 0;
+    let matches: Vec<Option<usize>> = fragments
+        .iter()
+        .map(|f| {
+            let fits = |n: &Node| {
+                same_kind(n, f)
+                    && f.instance_of.is_none()
+                    && !n.component
+                    && (n.kind == NodeKind::Text || n.name == f.name)
+            };
+            let found = (cursor..old.len()).find(|&j| !used[j] && fits(old[j]));
+            if let Some(j) = found {
+                used[j] = true;
+                cursor = j + 1;
+            }
+            found
+        })
+        .collect();
+    for (j, child) in old.iter().enumerate() {
+        if !used[j] {
+            ops.push(Op::Delete {
+                id: child.id.clone(),
+            });
+        }
+    }
+    let indexes = fractional::keys_between(None, None, fragments.len());
+    let mut ids = Vec::new();
+    for ((fragment, found), index) in fragments.iter().zip(matches).zip(indexes) {
+        match found {
+            Some(j) => {
+                let child = old[j];
+                if child.index != index {
+                    ops.push(Op::Move {
+                        id: child.id.clone(),
+                        parent: Some(parent.to_owned()),
+                        index,
+                    });
+                }
+                update_node(child, fragment, false, ops);
+                if child.kind != NodeKind::Text {
+                    reconcile(doc, &child.id, &fragment.children, ops, new_id);
+                }
+                ids.push(child.id.clone());
+            }
+            None => {
+                ids.push(
+                    fragment
+                        .clone()
+                        .create_ops(Some(parent), index, None, new_id, ops),
+                );
+            }
+        }
+    }
+    ids
+}
+
+/// How many nodes writing `fragments` adds to the expanded design: an
+/// instance adds what its component shows.
+fn adds(doc: &Document, fragments: &[Fragment]) -> usize {
+    fragments
+        .iter()
+        .map(|f| match &f.instance_of {
+            Some(component) => components::expanded_size(doc, component),
+            None => 1 + adds(doc, &f.children),
+        })
+        .sum()
+}
+
+/// Checks each instance in parsed HTML and turns what was written inside
+/// it into its overrides. `parent` is where the HTML goes, and `replaced`
+/// the nodes the write replaces.
+///
+/// An instance is an element with `data-instance-of`, or with
+/// `data-component="Name"` when a component of that name exists or came
+/// earlier in the same HTML. Otherwise `data-component` defines a new
+/// component. One that replaces a component of the same name redefines
+/// it: it keeps the component's id, and the ids of the nodes that match,
+/// so its instances keep following it and keep their overrides.
+///
+/// Refuses an instance of something that isn't a component, one that would
+/// contain itself, and content the component doesn't have, since an
+/// instance can't hold content of its own.
+pub fn prepare_instances(
+    doc: &Document,
+    fragments: &mut [Fragment],
+    parent: Option<&str>,
+    replaced: &[NodeId],
+    new_id: &mut impl FnMut() -> NodeId,
+) -> Result<()> {
+    let mut named = Named::default();
+    for root in replaced {
+        for node in doc.subtree(root).into_iter().filter(|n| n.component) {
+            named.doomed.insert(node.id.clone());
+            named
+                .replaced
+                .entry(node.display_name())
+                .or_insert_with(|| node.id.clone());
+        }
+    }
+    prepare(doc, fragments, parent, &mut named, new_id)
+}
+
+/// Components by name while preparing one write.
+#[derive(Default)]
+struct Named {
+    /// Defined earlier in this HTML, with the ids they'll be created with.
+    defined: std::collections::HashMap<String, Fragment>,
+    /// In the document, inside what this write replaces.
+    replaced: std::collections::HashMap<String, NodeId>,
+    doomed: std::collections::HashSet<NodeId>,
+}
+
+fn prepare(
+    doc: &Document,
+    fragments: &mut [Fragment],
+    parent: Option<&str>,
+    named: &mut Named,
+    new_id: &mut impl FnMut() -> NodeId,
+) -> Result<()> {
+    for fragment in fragments {
+        // Children first, so nested components are instances by the time
+        // their parent is compared with its component.
+        if fragment.instance_of.is_none() {
+            prepare(doc, &mut fragment.children, parent, named, new_id)?;
+        }
+        if let Some(component) = fragment.instance_of.clone() {
+            let node = components::check_component(doc, &component)?;
+            components::check_cycle(doc, &component, parent)?;
+            let (overrides, left_out) = components::overrides_from_html(doc, &component, fragment);
+            if left_out > 0 {
+                return err(format!(
+                    "the HTML for an instance of {:?} #{component} has {left_out} element{} the component doesn't have. \
+                     An instance shows its component's content: elements inside it need the data-id get_html gave them. \
+                     Add new content to the component, or write it outside the instance.",
+                    node.display_name(),
+                    if left_out == 1 { "" } else { "s" }
+                ));
+            }
+            become_instance(fragment, component, node.kind.clone(), overrides);
+            continue;
+        }
+        let Some(name) = fragment.component.clone() else {
+            continue;
+        };
+        if let Some(definition) = named.defined.get(&name) {
+            let mut overrides = Overrides::new();
+            if !fragment.children.is_empty() {
+                differences(definition, fragment, "", &mut overrides)
+                    .map_err(|why| mismatch(&name, None, &why))?;
+            } else {
+                root_additions(definition, fragment, &mut overrides);
+            }
+            let id = definition.id.clone().expect("a definition has its id");
+            become_instance(fragment, id, definition.kind.clone(), overrides);
+            continue;
+        }
+        if let Some(old) = named.replaced.remove(&name) {
+            reuse_ids(doc, &old, fragment, new_id);
+            fragment.name.get_or_insert_with(|| name.clone());
+            named.defined.insert(name, fragment.clone());
+            continue;
+        }
+        let existing = doc
+            .nodes()
+            .filter(|n| n.component && !named.doomed.contains(&n.id) && n.display_name() == name)
+            .min_by(|a, b| a.id.cmp(&b.id));
+        if let Some(existing) = existing {
+            let id = existing.id.clone();
+            components::check_cycle(doc, &id, parent)?;
+            let definition = preview_fragment(doc, &id);
+            let mut overrides = Overrides::new();
+            if !fragment.children.is_empty() {
+                differences(&definition, fragment, "", &mut overrides)
+                    .map_err(|why| mismatch(&name, Some(&id), &why))?;
+            } else {
+                root_additions(&definition, fragment, &mut overrides);
+            }
+            become_instance(fragment, id, existing.kind.clone(), overrides);
+            continue;
+        }
+        assign_ids(fragment, new_id);
+        fragment.name.get_or_insert_with(|| name.clone());
+        named.defined.insert(name, fragment.clone());
+    }
+    Ok(())
+}
+
+fn mismatch(name: &str, id: Option<&str>, why: &str) -> EditError {
+    let at = id.map_or_else(
+        || " where it's first written".to_owned(),
+        |id| format!(" (#{id})"),
+    );
+    EditError(format!(
+        "this data-component={name:?} isn't built like the component{at}: {why}. \
+         An instance can change text, styles and attributes, not its elements. \
+         Write the same elements, give it another name, or change the component itself in place, which changes every instance."
+    ))
+}
+
+/// Makes `fragment` an instance of `component` showing `overrides`.
+fn become_instance(
+    fragment: &mut Fragment,
+    component: NodeId,
+    kind: NodeKind,
+    overrides: Overrides,
+) {
+    fragment.kind = kind;
+    fragment.instance_of = Some(component);
+    fragment.overrides = overrides;
+    fragment.component = None;
+    fragment.styles.clear();
+    fragment.attrs.clear();
+    fragment.text = None;
+    fragment.children.clear();
+}
+
+/// Gives every node of `fragment` the id it'll be created with.
+fn assign_ids(fragment: &mut Fragment, new_id: &mut impl FnMut() -> NodeId) {
+    fragment.id.get_or_insert_with(&mut *new_id);
+    for child in &mut fragment.children {
+        assign_ids(child, new_id);
+    }
+}
+
+/// [`assign_ids`], reusing the ids of `old`'s subtree where a node has the
+/// same tag and layer name, in order, as [`reconcile`] matches them.
+fn reuse_ids(
+    doc: &Document,
+    old: &str,
+    fragment: &mut Fragment,
+    new_id: &mut impl FnMut() -> NodeId,
+) {
+    fragment.id = Some(old.to_owned());
+    let children = doc.children(Some(old));
+    let mut cursor = 0;
+    for child in &mut fragment.children {
+        let found = (cursor..children.len()).find(|&j| {
+            let n = children[j];
+            n.kind == child.kind
+                && !n.is_instance()
+                && child.instance_of.is_none()
+                && (n.kind == NodeKind::Text || n.name == child.name)
+        });
+        match found {
+            Some(j) => {
+                cursor = j + 1;
+                reuse_ids(doc, &children[j].id, child, new_id);
+            }
+            None => assign_ids(child, new_id),
+        }
+    }
+}
+
+/// What a new instance of component `id` shows, as a fragment whose ids are
+/// the paths an override names (`x`, or `n/x` inside nested instance `n`).
+fn preview_fragment(doc: &Document, id: &str) -> Fragment {
+    let nodes = components::preview(doc, id);
+    let mut children: std::collections::HashMap<&str, Vec<usize>> = Default::default();
+    for (i, n) in nodes.iter().enumerate() {
+        if let Some(p) = &n.parent {
+            children.entry(p.as_str()).or_default().push(i);
+        }
+    }
+    fn build(
+        nodes: &[Node],
+        children: &std::collections::HashMap<&str, Vec<usize>>,
+        i: usize,
+    ) -> Fragment {
+        let n = &nodes[i];
+        let path = n.id.strip_prefix("_/").unwrap_or("").to_owned();
+        Fragment {
+            name: n.name.clone(),
+            text: n.text.clone(),
+            styles: n.styles.clone(),
+            attrs: n.attrs.clone(),
+            instance_of: n.instance_of.clone().filter(|_| i > 0),
+            id: Some(path),
+            children: children
+                .get(n.id.as_str())
+                .into_iter()
+                .flatten()
+                .map(|&c| build(nodes, children, c))
+                .collect(),
+            ..Fragment::empty(n.kind.clone())
+        }
+    }
+    if nodes.is_empty() {
+        return Fragment::empty(NodeKind::Element { tag: "div".into() });
+    }
+    build(&nodes, &children, 0)
+}
+
+/// For an instance written without content: the styles and attributes on
+/// its own element that differ from the component's root.
+fn root_additions(definition: &Fragment, fragment: &Fragment, out: &mut Overrides) {
+    for (k, v) in &fragment.styles {
+        if definition.styles.get(k) != Some(v) {
+            out.insert(PropKey::Style(k.clone()).to_string(), Some(v.clone()));
+        }
+    }
+    for (k, v) in &fragment.attrs {
+        if definition.attrs.get(k) != Some(v) {
+            out.insert(PropKey::Attr(k.clone()).to_string(), Some(v.clone()));
+        }
+    }
+}
+
+/// The overrides that make an instance of `definition` look like `copy`,
+/// node by node, in order, with keys under `path`. Fails, saying where, if
+/// they aren't built the same way.
+fn differences(
+    definition: &Fragment,
+    copy: &Fragment,
+    path: &str,
+    out: &mut Overrides,
+) -> std::result::Result<(), String> {
+    let describe = |f: &Fragment| match &f.kind {
+        NodeKind::Element { tag } => format!("<{tag}>"),
+        NodeKind::Text => "text".to_owned(),
+    };
+    let key = |prop: PropKey| PropKey::override_key(path, &prop);
+    if definition.kind != copy.kind {
+        return Err(format!(
+            "it has {} where the component has {}",
+            describe(copy),
+            describe(definition)
+        ));
+    }
+    if let Some(component) = &definition.instance_of {
+        if copy.instance_of.as_ref() == Some(component) {
+            for (k, v) in &copy.overrides {
+                let k = if path.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{path}/{k}")
+                };
+                out.insert(k, v.clone());
+            }
+            return Ok(());
+        }
+        if definition.children.is_empty() {
+            return Err(format!(
+                "it has a plain {} where the component has an instance of another component",
+                describe(copy)
+            ));
+        }
+    }
+    if copy.kind == NodeKind::Text {
+        if definition.text != copy.text {
+            out.insert(key(PropKey::Text), copy.text.clone());
+        }
+        return Ok(());
+    }
+    for (k, v) in &copy.styles {
+        if definition.styles.get(k) != Some(v) {
+            out.insert(key(PropKey::Style(k.clone())), Some(v.clone()));
+        }
+    }
+    for k in definition
+        .styles
+        .keys()
+        .filter(|k| !copy.styles.contains_key(*k))
+    {
+        out.insert(key(PropKey::Style(k.clone())), None);
+    }
+    for (k, v) in &copy.attrs {
+        if definition.attrs.get(k) != Some(v) {
+            out.insert(key(PropKey::Attr(k.clone())), Some(v.clone()));
+        }
+    }
+    for k in definition
+        .attrs
+        .keys()
+        .filter(|k| !copy.attrs.contains_key(*k))
+    {
+        out.insert(key(PropKey::Attr(k.clone())), None);
+    }
+    if definition.children.len() != copy.children.len() {
+        return Err(format!(
+            "a {} in it has {} children where the component's has {}",
+            describe(copy),
+            copy.children.len(),
+            definition.children.len()
+        ));
+    }
+    for (d, c) in definition.children.iter().zip(&copy.children) {
+        let child = d.id.as_deref().unwrap_or("");
+        differences(d, c, child, out)?;
+    }
+    Ok(())
 }
 
 /// Accepts `backgroundColor` as well as `background-color`, and keeps `--custom` properties as is.
@@ -345,7 +865,7 @@ pub fn normalize_style_name(name: &str) -> String {
 /// Longhand properties a shorthand resets. Styles are a map, not an ordered
 /// declaration list, so setting a shorthand must clear these explicitly or the
 /// longhand would keep winning.
-fn longhands(shorthand: &str) -> &'static [&'static str] {
+pub(crate) fn longhands(shorthand: &str) -> &'static [&'static str] {
     match shorthand {
         "background" => &[
             "background-color",
@@ -745,6 +1265,14 @@ pub fn move_nodes(
                 "moving {id:?} there would nest {depth} levels deep; the limit is {MAX_DEPTH}"
             ));
         }
+        // An instance can't end up inside the component it shows.
+        if doc.has_instances() {
+            for inner in doc.subtree(id) {
+                if let Some(component) = &inner.instance_of {
+                    components::check_cycle(doc, component, parent)?;
+                }
+            }
+        }
     }
     let ids = top_level(doc, ids);
     let indexes = doc.insertion_indexes(parent, index, ids.len());
@@ -819,6 +1347,243 @@ pub fn duplicate(
     }
     room_for(doc, 0, ops.len())?;
     Ok((ops, roots))
+}
+
+/// Makes the element `id` a component, named `name` if given, and replaces
+/// each of `replace` with an instance of it, in place. A replaced node
+/// keeps its id, and its differences from the component become the
+/// instance's overrides, so nothing it showed changes. It has to be built
+/// the same way as the component, element for element.
+pub fn create_component(
+    doc: &Document,
+    id: &str,
+    name: Option<&str>,
+    replace: &[NodeId],
+) -> Result<Vec<Op>> {
+    if components::is_virtual(id) {
+        return err(format!(
+            "#{id} is inside an instance; make a component from the component's own nodes, or detach_instance first"
+        ));
+    }
+    let node = element(doc, id)?;
+    if node.is_instance() {
+        return err(format!(
+            "#{id} is already an instance of component #{}",
+            node.instance_of.as_deref().unwrap_or("")
+        ));
+    }
+    let mut ops = Vec::new();
+    if !node.component {
+        ops.push(Op::Set {
+            id: id.to_owned(),
+            key: PropKey::Component,
+            value: Some(Value::Bool(true)),
+        });
+    }
+    if let Some(name) = name {
+        ops.extend(rename(doc, id, Some(name))?);
+    }
+    let mut scratch = doc.clone();
+    scratch.apply_all(&ops);
+    for other in top_level(doc, replace) {
+        let target = node_or_virtual(doc, other)?;
+        if other == id || doc.is_ancestor(id, other) || doc.is_ancestor(other, id) {
+            return err(format!(
+                "#{other} can't be replaced by an instance of #{id}: one is inside the other"
+            ));
+        }
+        if target.is_artboard() {
+            return err(format!(
+                "#{other} is an artboard; replace its content instead"
+            ));
+        }
+        let overrides = components::overrides_to_match(&scratch, id, other).map_err(|why| {
+            EditError(format!(
+                "#{other} isn't built like #{id}, so it can't become an instance of it without losing something: {why}. \
+                 Make it match first, or leave it out and replace it with insert_instance."
+            ))
+        })?;
+        components::check_cycle(&scratch, id, target.parent.as_deref())?;
+        let instance = Node {
+            parent: target.parent.clone(),
+            index: target.index.clone(),
+            name: target
+                .name
+                .clone()
+                .filter(|n| Some(n) != node.name.as_ref()),
+            instance_of: Some(id.to_owned()),
+            overrides,
+            ..Node::element(other.clone(), node.tag().unwrap_or("div"))
+        };
+        let step = [
+            Op::Delete { id: other.clone() },
+            Op::Create { node: instance },
+        ];
+        scratch.apply_all(&step);
+        ops.extend(step);
+    }
+    Ok(ops)
+}
+
+fn node_or_virtual<'a>(doc: &'a Document, id: &str) -> Result<&'a Node> {
+    if components::is_virtual(id) {
+        return err(format!("#{id} is inside an instance"));
+    }
+    node(doc, id)
+}
+
+/// Values for a new instance to show, for one node of its component.
+#[derive(Clone, Debug, Default)]
+pub struct InstanceValues {
+    /// The node of the component: its id, or for a node inside a nested
+    /// instance, the path to it (`n/x`). The component's own id, or
+    /// `None`, is the instance's root.
+    pub node_id: Option<String>,
+    pub text: Option<String>,
+    pub styles: BTreeMap<String, Option<String>>,
+    pub attributes: BTreeMap<String, Option<String>>,
+}
+
+/// Puts a new instance of `component` under `parent`, at `index` or last,
+/// showing `values` where it should differ. Returns the ops and its id.
+pub fn insert_instance(
+    doc: &Document,
+    component: &str,
+    parent: &str,
+    index: Option<usize>,
+    name: Option<&str>,
+    values: &[InstanceValues],
+    new_id: &mut impl FnMut() -> NodeId,
+) -> Result<(Vec<Op>, NodeId)> {
+    let comp = components::check_component(doc, component)?;
+    if components::is_virtual(parent) {
+        return err(format!(
+            "#{parent} is inside an instance, which can't hold content of its own; put the instance in the component instead"
+        ));
+    }
+    let target = element(doc, parent)?;
+    if target.is_instance() {
+        return err(format!(
+            "#{parent} is an instance, which can't hold content of its own"
+        ));
+    }
+    components::check_cycle(doc, component, Some(parent))?;
+    let depth = doc.depth(parent) + 1 + doc.height(component);
+    if depth > MAX_DEPTH {
+        return err(format!(
+            "that would nest {depth} levels deep; the limit is {MAX_DEPTH}"
+        ));
+    }
+    room_for(doc, 0, components::expanded_size(doc, component))?;
+    let overrides = instance_overrides(doc, component, values)?;
+    let id = new_id();
+    let index = doc.insertion_indexes(Some(parent), index, 1).remove(0);
+    let node = Node {
+        parent: Some(parent.to_owned()),
+        index,
+        name: name.map(|n| label::clip(n, label::LAYER_NAME)),
+        instance_of: Some(component.to_owned()),
+        overrides,
+        ..Node::element(id.clone(), comp.tag().unwrap_or("div"))
+    };
+    Ok((vec![Op::Create { node }], id))
+}
+
+/// `values` as override keys, checked against what the component shows.
+fn instance_overrides(
+    doc: &Document,
+    component: &str,
+    values: &[InstanceValues],
+) -> Result<Overrides> {
+    let preview = components::preview(doc, component);
+    let by_id: std::collections::HashMap<&str, &Node> =
+        preview.iter().map(|n| (n.id.as_str(), n)).collect();
+    let mut overrides = Overrides::new();
+    for v in values {
+        // `I/x` from get_html names component node `x` too.
+        let wanted = v.node_id.as_deref().filter(|id| *id != component);
+        let path = match wanted {
+            None => String::new(),
+            Some(id) => {
+                let candidates = [Some(id), components::split(id).map(|(_, rest)| rest)];
+                candidates
+                    .into_iter()
+                    .flatten()
+                    .find(|p| by_id.contains_key(format!("_/{p}").as_str()))
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        EditError(format!(
+                            "component #{component} has no node {id:?}; use the ids get_html shows for it"
+                        ))
+                    })?
+            }
+        };
+        let vid = if path.is_empty() {
+            "_".to_owned()
+        } else {
+            format!("_/{path}")
+        };
+        let shown = by_id[vid.as_str()];
+        let mut put = |path: &str, prop: PropKey, value: Option<String>| {
+            overrides.insert(PropKey::override_key(path, &prop), value);
+        };
+        if let Some(text) = &v.text {
+            let children: Vec<&Node> = preview
+                .iter()
+                .filter(|n| n.parent.as_deref() == Some(vid.as_str()))
+                .collect();
+            match (shown.kind == NodeKind::Text, children.as_slice()) {
+                (true, _) => put(&path, PropKey::Text, Some(text.clone())),
+                (false, [only]) if only.kind == NodeKind::Text => {
+                    put(&only.id[2..], PropKey::Text, Some(text.clone()));
+                }
+                _ => {
+                    return err(format!(
+                        "#{} in the component doesn't hold just text, so an instance can't set its text; set the text of the text node or element inside it",
+                        if path.is_empty() { component } else { &path }
+                    ));
+                }
+            }
+        }
+        for (name, value) in &v.styles {
+            put(
+                &path,
+                PropKey::Style(normalize_style_name(name)),
+                value.as_ref().map(|v| v.trim().to_owned()),
+            );
+        }
+        for (name, value) in &v.attributes {
+            if let Some(value) = value
+                && !html::is_safe_attr(name, value)
+            {
+                return err(format!("{name}={value:?} isn't allowed"));
+            }
+            if !html::is_attr_name(name) || name.eq_ignore_ascii_case("style") {
+                return err(format!("{name:?} isn't an attribute an instance can set"));
+            }
+            put(&path, PropKey::Attr(name.clone()), value.clone());
+        }
+    }
+    Ok(overrides)
+}
+
+/// Turns instances into plain copies of what they show, as one change.
+pub fn detach_instances(
+    doc: &Document,
+    ids: &[NodeId],
+    new_id: &mut impl FnMut() -> NodeId,
+) -> Result<Vec<Op>> {
+    let mut ops = Vec::new();
+    for id in ids {
+        if components::is_virtual(id) {
+            let (root, _) = components::split(id).expect("a virtual id has a root");
+            return err(format!(
+                "#{id} is inside instance #{root}; detach #{root}, or the nested instance from the component it's in"
+            ));
+        }
+        ops.extend(components::detach(doc, id, new_id)?);
+    }
+    Ok(ops)
 }
 
 /// Refuses an edit that would leave the design with more than [`MAX_NODES`].

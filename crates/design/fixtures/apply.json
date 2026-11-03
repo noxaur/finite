@@ -1390,6 +1390,239 @@
           ]
         ]
       }
+    },
+    {
+      "name": "an instance holds no children, and only an element without children becomes one",
+      "nodes": [
+        {
+          "id": "a",
+          "parent": null,
+          "index": "V",
+          "type": "element",
+          "tag": "div",
+          "name": null,
+          "text": null,
+          "x": 0.0,
+          "y": 0.0,
+          "styles": {},
+          "attrs": {}
+        },
+        {
+          "id": "c",
+          "parent": "a",
+          "index": "V",
+          "type": "element",
+          "tag": "div",
+          "name": null,
+          "text": null,
+          "x": null,
+          "y": null,
+          "styles": {},
+          "attrs": {},
+          "component": true
+        },
+        {
+          "id": "i",
+          "parent": "a",
+          "index": "k",
+          "type": "element",
+          "tag": "div",
+          "name": null,
+          "text": null,
+          "x": null,
+          "y": null,
+          "styles": {},
+          "attrs": {},
+          "instanceOf": "c"
+        },
+        {
+          "id": "p",
+          "parent": "a",
+          "index": "z",
+          "type": "element",
+          "tag": "div",
+          "name": null,
+          "text": null,
+          "x": null,
+          "y": null,
+          "styles": {},
+          "attrs": {}
+        },
+        {
+          "id": "q",
+          "parent": "p",
+          "index": "V",
+          "type": "element",
+          "tag": "div",
+          "name": null,
+          "text": null,
+          "x": null,
+          "y": null,
+          "styles": {},
+          "attrs": {}
+        }
+      ],
+      "ops": [
+        {
+          "op": "create",
+          "node": {
+            "id": "x",
+            "parent": "i",
+            "index": "V",
+            "type": "element",
+            "tag": "div",
+            "name": null,
+            "text": null,
+            "x": null,
+            "y": null,
+            "styles": {},
+            "attrs": {}
+          }
+        },
+        {
+          "op": "move",
+          "id": "q",
+          "parent": "i",
+          "index": "V"
+        },
+        {
+          "op": "set",
+          "id": "p",
+          "key": "instanceOf",
+          "value": "c"
+        },
+        {
+          "op": "set",
+          "id": "q",
+          "key": "instanceOf",
+          "value": "c"
+        },
+        {
+          "op": "set",
+          "id": "i",
+          "key": "override:style:color",
+          "value": "red"
+        },
+        {
+          "op": "set",
+          "id": "i",
+          "key": "override:q/style:border",
+          "value": false
+        },
+        {
+          "op": "set",
+          "id": "a",
+          "key": "component",
+          "value": false
+        }
+      ],
+      "expect": {
+        "applied": [
+          false,
+          false,
+          false,
+          true,
+          true,
+          true,
+          false
+        ],
+        "nodes": [
+          {
+            "id": "a",
+            "parent": null,
+            "index": "V",
+            "type": "element",
+            "tag": "div",
+            "name": null,
+            "text": null,
+            "x": 0.0,
+            "y": 0.0,
+            "styles": {},
+            "attrs": {}
+          },
+          {
+            "id": "c",
+            "parent": "a",
+            "index": "V",
+            "type": "element",
+            "tag": "div",
+            "name": null,
+            "text": null,
+            "x": null,
+            "y": null,
+            "styles": {},
+            "attrs": {},
+            "component": true
+          },
+          {
+            "id": "i",
+            "parent": "a",
+            "index": "k",
+            "type": "element",
+            "tag": "div",
+            "name": null,
+            "text": null,
+            "x": null,
+            "y": null,
+            "styles": {},
+            "attrs": {},
+            "instanceOf": "c",
+            "overrides": {
+              "q/style:border": null,
+              "style:color": "red"
+            }
+          },
+          {
+            "id": "p",
+            "parent": "a",
+            "index": "z",
+            "type": "element",
+            "tag": "div",
+            "name": null,
+            "text": null,
+            "x": null,
+            "y": null,
+            "styles": {},
+            "attrs": {}
+          },
+          {
+            "id": "q",
+            "parent": "p",
+            "index": "V",
+            "type": "element",
+            "tag": "div",
+            "name": null,
+            "text": null,
+            "x": null,
+            "y": null,
+            "styles": {},
+            "attrs": {},
+            "instanceOf": "c"
+          }
+        ],
+        "children": [
+          [
+            null,
+            [
+              "a"
+            ]
+          ],
+          [
+            "a",
+            [
+              "c",
+              "i",
+              "p"
+            ]
+          ],
+          [
+            "p",
+            [
+              "q"
+            ]
+          ]
+        ]
+      }
     }
   ]
 }

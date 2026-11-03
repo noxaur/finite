@@ -12,15 +12,51 @@ import { DesignSession, initialSessionState, type SessionState } from "@/design/
 import { loadDesignModel } from "@/design/wasm";
 import { mcpUrl } from "@/lib/mcp";
 import { formatOf } from "@/lib/transfer";
+import { loadPlace, savePlace } from "@/lib/place";
 import { localUser } from "@/lib/user";
 import { timeAgo } from "@/lib/time";
 import { runtime } from "@/runtime";
 import { colors, radii, space } from "@/styles/tokens.stylex";
-import { CommentLayer, type Draft, type Mode, pinPosition, ToolPill } from "./Comments";
+import {
+  CommentLayer,
+  type Draft,
+  type Mode,
+  pinPosition,
+  selectionOf,
+  ToolPill,
+  toggleInDraft,
+} from "./Comments";
 import { CommentsPanel } from "./CommentsPanel";
 import { PagesSidebar } from "./PagesSidebar";
 import { SharedCssPanel } from "./SharedCss";
 import { ExportMenu, ImportButton, ImportResultCard, type ImportState } from "./Transfer";
+
+/** An instance or component under the pointer: what to outline and what to call it. */
+interface Part {
+  /** The instance's root, or the component's. */
+  readonly id: string;
+  readonly label: string;
+}
+
+/** The instance `nodeId` is shown in, or the component it belongs to, if any. */
+function partOf(replica: Replica, nodeId: string): Part | null {
+  const info = replica.componentInfo(nodeId);
+  if (!info) return null;
+  const name = info.componentName ?? "a missing component";
+  if (info.instance) return { id: info.instance, label: `Instance of ${name}` };
+  if (!info.component) return null;
+  const count = `${info.instances} instance${info.instances === 1 ? "" : "s"}`;
+  return { id: info.component, label: `Component ${name} · ${count}` };
+}
+
+/**
+ * Stands in for a framing when the view came from a saved place. It never
+ * equals the camera's view, so nothing reframes over the restored one.
+ */
+const RESTORED: View = { x: NaN, y: NaN, zoom: NaN };
+
+/** How long the view rests before it's saved. */
+const SAVE_PLACE_MS = 300;
 
 /** How long "show what changed" outlines stay up. */
 const FLASH_MS = 1800;
@@ -74,7 +110,7 @@ export function DesignCanvas({ id }: { id: string }) {
   const framesRef = useRef<HTMLDivElement>(null);
   const pressRef = useRef<{ x: number; y: number } | null>(null);
   const hoverFrame = useRef(0);
-  const pointerRef = useRef<{ x: number; y: number } | null>(null);
+  const pointerRef = useRef<{ x: number; y: number; shift: boolean } | null>(null);
   const refreshHover = useRef(() => {});
   const cameraRef = useRef<Camera | null>(null);
   // The view the camera framed the artboards with, until the person moves it.
@@ -85,7 +121,8 @@ export function DesignCanvas({ id }: { id: string }) {
   // Re-rendering on every session update also moves pins with their artboards.
   const [session, setSession] = useState<SessionState>(initialSessionState);
   const { meta, presence, status, activity, comments, working, pages } = session;
-  const [zoom, setZoom] = useState(1);
+  // The zoom percentage, written by the camera so zooming doesn't re-render the canvas.
+  const zoomLabelRef = useRef<HTMLButtonElement>(null);
   const [missing, setMissing] = useState(false);
   const model = useDesignModel();
   const [, setTick] = useState(0);
@@ -93,10 +130,23 @@ export function DesignCanvas({ id }: { id: string }) {
   const [openId, setOpenId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [hover, setHover] = useState<Hit | null>(null);
+  // The instance or component under the pointer, in either mode.
+  const [part, setPart] = useState<Part | null>(null);
+  const partFrame = useRef(0);
   const [flash, setFlash] = useState<ReadonlyArray<string>>([]);
   // The page picked in the sidebar, or `null` for the first. A page that's
   // gone shows the first page, as the renderer does.
   const [pickedPage, setPickedPage] = useState<string | null>(null);
+  // The last view of each page, by page id, so going back to a page shows it as it was left.
+  const viewsRef = useRef<Record<string, View>>({});
+  // The page whose view the camera holds, or `null` before it holds one.
+  const viewedPageRef = useRef<string | null>(null);
+  const rememberPlace = useRef(() => {});
+  const pickPage = (pageId: string) => {
+    setPickedPage(pageId);
+    viewedPageRef.current = pageId;
+    rememberPlace.current();
+  };
   const page = pages.find((p) => p.id === pickedPage) ?? pages[0];
   // The shared CSS, the comments list, the export menu and an import's result open in the
   // same place, one at a time.
@@ -117,9 +167,16 @@ export function DesignCanvas({ id }: { id: string }) {
 
     const camera = new Camera(viewport, world);
     const replica = new Replica();
-    framedRef.current = null;
+    // Open where this browser last was in the design, or frame the artboards.
+    const saved = loadPlace(id);
+    viewsRef.current = { ...saved?.views };
+    const savedView = saved?.page ? saved.views[saved.page] : undefined;
+    if (savedView) camera.set(savedView);
+    framedRef.current = savedView ? RESTORED : null;
+    viewedPageRef.current = savedView ? (saved?.page ?? null) : null;
     const renderer = new Renderer(frames, replica, {
       live: true,
+      toPage: (x, y) => camera.toPage(x, y),
       onWheel: (event) => camera.wheel(event),
       // An auto-height artboard with a script is measured inside its iframe,
       // so its real height arrives after the first frame. Frame it again,
@@ -145,13 +202,56 @@ export function DesignCanvas({ id }: { id: string }) {
     sessionRef.current = session;
     rendererRef.current = renderer;
     cameraRef.current = camera;
-    camera.subscribe((view) => setZoom(view.zoom));
-    // A new renderer starts on the first page.
-    setPickedPage(null);
+    // Hide the artboards outside the view.
+    camera.subscribe(() => renderer.setViewport(camera.visibleWorld()));
+    const showZoom = (view: View) => {
+      if (zoomLabelRef.current)
+        zoomLabelRef.current.textContent = `${Math.round(view.zoom * 100)}%`;
+    };
+    camera.subscribe(showZoom);
+    showZoom(camera.view);
+    let saveTimer: ReturnType<typeof setTimeout> | undefined;
+    const savePlaceNow = () => {
+      clearTimeout(saveTimer);
+      // Until the document loads, the views are the saved ones and there's nothing to prune.
+      if (replica.pages.length === 0) return;
+      // Forget pages that were deleted, so the saved views don't pile up.
+      const views: Record<string, View> = {};
+      for (const { id: pageId } of replica.pages) {
+        const view = viewsRef.current[pageId];
+        if (view) views[pageId] = view;
+      }
+      savePlace(id, { page: renderer.shownPage(), views });
+    };
+    rememberPlace.current = () => {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(savePlaceNow, SAVE_PLACE_MS);
+    };
+    camera.subscribe((view) => {
+      if (viewedPageRef.current) viewsRef.current[viewedPageRef.current] = view;
+      rememberPlace.current();
+    });
+    // A reload can come before the timer fires.
+    window.addEventListener("pagehide", savePlaceNow);
+    const resize = new ResizeObserver(() => renderer.setViewport(camera.visibleWorld()));
+    resize.observe(viewport);
+    // A new renderer starts on the saved page, or the first.
+    renderer.setPage(saved?.page ?? null);
+    setPickedPage(saved?.page ?? null);
 
     // Frame the artboards once, when the first ones appear.
     const unsubscribe = session.subscribe(() => {
       setSession(session.state);
+      // The camera holds no page's view yet, or the page it held was deleted
+      // and the renderer moved to the first: show that page as it was left,
+      // or frame it.
+      const shown = replica.pages.length > 0 ? renderer.shownPage() : null;
+      if (shown && shown !== viewedPageRef.current) {
+        viewedPageRef.current = shown;
+        const seen = viewsRef.current[shown];
+        if (seen) camera.set(seen);
+        framedRef.current = seen ? RESTORED : null;
+      }
       if (framedRef.current) return;
       const bounds = union(renderer.artboardBounds().values());
       if (bounds) {
@@ -201,9 +301,13 @@ export function DesignCanvas({ id }: { id: string }) {
     const ticker = setInterval(() => setTick((t) => t + 1), 15_000);
 
     return () => {
+      savePlaceNow();
+      window.removeEventListener("pagehide", savePlaceNow);
+      rememberPlace.current = () => {};
       unsubscribe();
       close();
       controller.abort();
+      resize.disconnect();
       camera.dispose();
       renderer.dispose();
       // The document lives in WebAssembly memory, which isn't garbage collected.
@@ -211,6 +315,7 @@ export function DesignCanvas({ id }: { id: string }) {
       window.removeEventListener("keydown", onKey);
       clearInterval(ticker);
       cancelAnimationFrame(hoverFrame.current);
+      cancelAnimationFrame(partFrame.current);
       frames.replaceChildren();
     };
   }, [id, model]);
@@ -241,13 +346,32 @@ export function DesignCanvas({ id }: { id: string }) {
   // Read by the renderer's onLayout callback, which outlives this render.
   refreshHover.current = () => {
     const pointer = pointerRef.current;
-    if (mode === "comment" && !draft && pointer) hoverAt(pointer.x, pointer.y);
+    if (mode === "comment" && pointer && (!draft || pointer.shift)) hoverAt(pointer.x, pointer.y);
+  };
+
+  // Names the component part under the pointer: people can't tell from the
+  // design which parts follow a component, and agents edit them differently.
+  const partAt = (clientX: number, clientY: number) => {
+    const hit = rendererRef.current?.hitTest(clientX, clientY) ?? null;
+    const replica = sessionRef.current?.replica;
+    const next = hit && replica ? partOf(replica, hit.nodeId) : null;
+    setPart((prev) => (prev?.id === next?.id && prev?.label === next?.label ? prev : next));
   };
 
   const onCanvasPointerMove = (e: React.PointerEvent) => {
-    if (mode !== "comment" || draft) return;
-    const { clientX, clientY } = e;
-    pointerRef.current = { x: clientX, y: clientY };
+    const { clientX: x, clientY: y } = e;
+    cancelAnimationFrame(partFrame.current);
+    // Not while dragging to pan.
+    if (pressRef.current) setPart(null);
+    else partFrame.current = requestAnimationFrame(() => partAt(x, y));
+    if (mode !== "comment") return;
+    const { clientX, clientY, shiftKey } = e;
+    pointerRef.current = { x: clientX, y: clientY, shift: shiftKey };
+    // With a draft open, outline only what a shift-click would add.
+    if (draft && !shiftKey) {
+      setHover(null);
+      return;
+    }
     cancelAnimationFrame(hoverFrame.current);
     hoverFrame.current = requestAnimationFrame(() => hoverAt(clientX, clientY));
   };
@@ -257,6 +381,13 @@ export function DesignCanvas({ id }: { id: string }) {
     pressRef.current = null;
     const moved = press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > CLICK_SLOP;
     if (moved || (e.target instanceof Element && e.target.closest("[data-camera-ignore]"))) return;
+    // Shift-click adds an element in the draft's artboard, or takes it out.
+    // Only on a sure answer: a stale one could take out the wrong element.
+    if (mode === "comment" && draft?.nodeId && e.shiftKey) {
+      const hit = rendererRef.current?.hitTest(e.clientX, e.clientY, true) ?? null;
+      if (hit?.artboardId === draft.artboardId) setDraft(toggleInDraft(draft, hit.nodeId));
+      return;
+    }
     // A click elsewhere closes the open thread or draft before it starts a new one.
     if (openId || draft) {
       setOpenId(null);
@@ -274,17 +405,24 @@ export function DesignCanvas({ id }: { id: string }) {
         ? {
             artboardId: hit.artboardId,
             nodeId: hit.nodeId,
+            extraNodeIds: [],
             x: point.x - (board.x ?? 0),
             y: point.y - (board.y ?? 0),
           }
-        : { artboardId: null, nodeId: null, ...point },
+        : { artboardId: null, nodeId: null, extraNodeIds: [], ...point },
     );
   };
 
   const postComment = async (body: string) => {
     if (!draft) return undefined;
+    // Leave out elements an agent deleted or moved away while the person typed.
+    const replica = sessionRef.current?.replica;
+    const [nodeId = null, ...extraNodeIds] = selectionOf(draft).filter(
+      (node) => replica?.artboardOf(node)?.id === draft.artboardId,
+    );
+    const pin = { ...draft, nodeId, extraNodeIds };
     const exit = await runtime.runPromiseExit(
-      Api.use((api) => api.createComment(id, { author: localUser(), body, ...draft })),
+      Api.use((api) => api.createComment(id, { author: localUser(), body, ...pin })),
     );
     if (Exit.isFailure(exit)) return unsent(exit.cause);
     sessionRef.current?.upsertComment(exit.value);
@@ -317,20 +455,26 @@ export function DesignCanvas({ id }: { id: string }) {
     });
   };
 
-  /** Shows the artboards on one page, framed in the viewport. */
+  /** Shows the artboards on one page, as it was last seen, or framed in the viewport. */
   const showPage = (pageId: string) => {
-    setPickedPage(pageId);
+    pickPage(pageId);
     const renderer = rendererRef.current;
     if (!renderer) return;
     renderer.setPage(pageId);
+    setDraft(null);
+    setOpenId(null);
+    setHover(null);
+    const seen = viewsRef.current[pageId];
+    if (seen) {
+      cameraRef.current?.set(seen);
+      framedRef.current = RESTORED;
+      return;
+    }
     const bounds = union(renderer.artboardBounds().values());
     if (bounds) cameraRef.current?.fitTo(bounds);
     // So auto-height artboards reframe it as they grow, and an empty page
     // frames its first artboard when one arrives.
     framedRef.current = bounds ? (cameraRef.current?.view ?? null) : null;
-    setDraft(null);
-    setOpenId(null);
-    setHover(null);
   };
 
   // From the comments list: open the thread and bring its pin into view,
@@ -340,7 +484,7 @@ export function DesignCanvas({ id }: { id: string }) {
     const replica = sessionRef.current?.replica;
     const board = comment?.artboardId ? replica?.get(comment.artboardId) : undefined;
     if (board?.parent === null && replica && replica.pageOf(board) !== page?.id) {
-      setPickedPage(replica.pageOf(board));
+      pickPage(replica.pageOf(board));
       rendererRef.current?.setPage(replica.pageOf(board));
     }
     const at = comment && replica ? pinPosition(replica, comment) : null;
@@ -362,7 +506,7 @@ export function DesignCanvas({ id }: { id: string }) {
     if (!format) {
       setImported({
         status: "failed",
-        message: "Pick an .html, .htm, .finite or .figma.json file.",
+        message: "Pick an .html, .htm, .finite, .figma.json or .tar file.",
       });
       setPanel("import");
       return;
@@ -389,12 +533,14 @@ export function DesignCanvas({ id }: { id: string }) {
       });
   };
 
-  // Outline what a comment points at: the draft's target, the open thread's
-  // node, or whatever is under the pointer in comment mode. Rects are
+  // Outline what a comment points at: the draft's elements, the open
+  // thread's, and whatever is under the pointer in comment mode. Rects are
   // converted to canvas coordinates so they pan and zoom with the design.
   const openComment = openId ? comments.get(openId) : undefined;
-  const target =
-    draft?.nodeId ?? openComment?.nodeId ?? (mode === "comment" ? hover?.nodeId : undefined);
+  const targets = new Set([
+    ...(draft ? selectionOf(draft) : openComment ? selectionOf(openComment) : []),
+    ...(mode === "comment" && !openComment && hover ? [hover.nodeId] : []),
+  ]);
   const canvasRect = (nodeId: string) => {
     const rect = rendererRef.current?.nodeRect(nodeId);
     const camera = cameraRef.current;
@@ -404,7 +550,11 @@ export function DesignCanvas({ id }: { id: string }) {
     return { x: a.x, y: a.y, width: b.x - a.x, height: b.y - a.y };
   };
   const outlines = [
-    ...(target ? [{ key: "target", rect: canvasRect(target), flash: false }] : []),
+    ...[...targets].map((nodeId) => ({
+      key: `target:${nodeId}`,
+      rect: canvasRect(nodeId),
+      flash: false,
+    })),
     ...flash.map((nodeId) => ({ key: `flash:${nodeId}`, rect: canvasRect(nodeId), flash: true })),
   ];
 
@@ -444,8 +594,19 @@ export function DesignCanvas({ id }: { id: string }) {
         onPointerDown={(e) => {
           pressRef.current = { x: e.clientX, y: e.clientY };
         }}
+        // Keeps the draft's text box focused through a shift-click.
+        onMouseDown={(e) => {
+          const onCanvas = !(
+            e.target instanceof Element && e.target.closest("[data-camera-ignore]")
+          );
+          if (draft && e.shiftKey && onCanvas) e.preventDefault();
+        }}
         onPointerMove={onCanvasPointerMove}
-        onPointerLeave={() => setHover(null)}
+        onPointerLeave={() => {
+          setHover(null);
+          setPart(null);
+          cancelAnimationFrame(partFrame.current);
+        }}
         onClick={onCanvasClick}
         {...stylex.props(styles.viewport, mode === "comment" && styles.commenting)}
       >
@@ -464,6 +625,23 @@ export function DesignCanvas({ id }: { id: string }) {
                 />
               ),
           )}
+          {part &&
+            (() => {
+              const rect = canvasRect(part.id);
+              return (
+                rect && (
+                  <div
+                    data-outline="component"
+                    {...stylex.props(
+                      styles.outline(rect.x, rect.y, rect.width, rect.height),
+                      styles.part,
+                    )}
+                  >
+                    <span {...stylex.props(styles.partLabel)}>{part.label}</span>
+                  </div>
+                )
+              );
+            })()}
           {sessionRef.current && page && (
             <CommentLayer
               replica={sessionRef.current.replica}
@@ -616,12 +794,11 @@ export function DesignCanvas({ id }: { id: string }) {
         </button>
         <button
           type="button"
+          ref={zoomLabelRef}
           onClick={() => cameraRef.current?.set({ ...cameraRef.current.view, zoom: 1 })}
           {...stylex.props(styles.tool, styles.percent)}
           title="Zoom to 100% (0)"
-        >
-          {Math.round(zoom * 100)}%
-        </button>
+        />
         <button
           type="button"
           onClick={() => cameraRef.current?.zoomBy(1.25)}
@@ -679,6 +856,26 @@ const styles = stylex.create({
     boxShadow: `0 0 0 calc(3px * var(--inv-zoom, 1)) ${colors.halo}`,
     pointerEvents: "none",
   }),
+  part: {
+    outlineColor: colors.component,
+    outlineStyle: "dashed",
+  },
+  partLabel: {
+    position: "absolute",
+    left: 0,
+    bottom: "100%",
+    marginBottom: 2,
+    paddingInline: 6,
+    paddingBlock: 1,
+    borderRadius: 4,
+    backgroundColor: colors.component,
+    color: "white",
+    fontSize: 11,
+    lineHeight: 1.4,
+    whiteSpace: "nowrap",
+    transform: "scale(var(--inv-zoom, 1))",
+    transformOrigin: "bottom left",
+  },
   flash: {
     backgroundColor: "rgba(21, 128, 61, 0.12)",
     outlineColor: colors.ok,

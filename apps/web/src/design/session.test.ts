@@ -60,6 +60,10 @@ class FakeView implements DesignView {
   apply(applied: Applied) {
     this.applied.push(applied);
   }
+  flushes = 0;
+  flush() {
+    this.flushes++;
+  }
   setWorking(working: ReadonlyMap<string, string>) {
     this.working = working;
   }

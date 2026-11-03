@@ -13,16 +13,18 @@ use std::{
 
 use base64::Engine;
 use finite_design::{
-    Change, Document, NodeKind, Op,
+    Change, Document, NodeKind, Op, PropKey,
     comment::{self, Author, AuthorKind},
+    components,
     edit::{self, EditError, NewArtboard, WriteMode},
     html, label,
 };
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, Implementation, MetaObject, ServerCapabilities, ServerConfig,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+        MetaObject, ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
     tool, tool_handler, tool_router,
@@ -30,6 +32,8 @@ use rmcp::{
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     },
 };
+
+use finite_transfer::{assets, jsx};
 
 use crate::{
     hub::{Actor, DesignHandle, Hub, OpenError, SESSION_ACTOR, random_id},
@@ -67,8 +71,9 @@ const SEARCH_INSTRUCTIONS: &str = "Search: find_nodes finds elements by text, na
 /// Whether `FINITE_MCP_EXTRA` (a comma-separated list) turns on a group of
 /// experimental tools. AX experiments (`e2e/ax`) compare agents with and
 /// without a group before it ships to everyone, as the search and shared
-/// styles tools did. No group is experimental right now.
-#[allow(dead_code, reason = "kept for the next experimental group")]
+/// styles tools did. Right now `layout` adds a layout note to results
+/// after `write_html` and `update_styles` (see `watch.rs`), and `components`
+/// is experimental.
 pub(crate) fn extra(group: &str) -> bool {
     static EXTRA: OnceLock<Vec<String>> = OnceLock::new();
     EXTRA
@@ -91,6 +96,10 @@ pub(crate) fn instructions() -> &'static str {
         let mut text = INSTRUCTIONS.trim_end().to_owned();
         text.push_str("\n\n");
         text.push_str(SEARCH_INSTRUCTIONS);
+        if extra("components") {
+            text.push_str("\n\n");
+            text.push_str(component_tools::INSTRUCTIONS);
+        }
         text.push_str("\n\n");
         text.push_str(styles::INSTRUCTIONS);
         text.push_str("\n\n");
@@ -104,6 +113,8 @@ pub(crate) fn instructions() -> &'static str {
 pub struct FiniteMcp {
     hub: Arc<Hub>,
     session: Arc<SessionGuard>,
+    /// Layout notes waiting for this session's next result (`layout` group).
+    watch: Arc<watch::LayoutWatch>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -183,6 +194,17 @@ fn with_note(content: ContentBlock, note: Option<String>) -> Vec<ContentBlock> {
         .collect()
 }
 
+/// A note that the design has shared CSS, which `what` (markup read from the
+/// design) leaves out, so using it outside the design would lose it.
+fn shared_css_note(handle: &DesignHandle, what: &str) -> Option<String> {
+    handle.read(|d| d.doc().css().map(str::len)).map(|chars| {
+        format!(
+            "This design also has shared CSS ({chars} characters, from get_shared_css) that every artboard uses. \
+             {what} leaves it out, so copy it too if you use this markup outside this design."
+        )
+    })
+}
+
 fn json(value: serde_json::Value) -> ToolResult {
     ok(serde_json::to_string_pretty(&value).expect("json values serialize"))
 }
@@ -229,17 +251,19 @@ fn changed(handle: &DesignHandle, change: Option<&Change>, requested: usize) -> 
         return describe(None).into();
     };
     handle.read(|d| {
-        let doc = d.doc();
+        let doc = d.view();
         let mut seen = std::collections::HashSet::new();
         let mut nodes = Vec::new();
         for op in &change.ops {
+            // An override names the node inside the instance it changes.
+            let shown = shown_id(op);
             // A text edit changes a text node; name the element it's in.
-            let id = match doc.get(op.id()) {
-                Some(n) if n.kind == NodeKind::Text => n.parent.as_deref().unwrap_or(op.id()),
-                _ => op.id(),
+            let id = match doc.get(&shown) {
+                Some(n) if n.kind == NodeKind::Text => n.parent.clone().unwrap_or(shown),
+                _ => shown,
             };
-            if doc.contains(id) && seen.insert(id.to_owned()) {
-                nodes.push(id.to_owned());
+            if doc.contains(&id) && seen.insert(id.clone()) {
+                nodes.push(id);
             }
         }
         let values = change
@@ -285,6 +309,229 @@ fn changed(handle: &DesignHandle, change: Option<&Change>, requested: usize) -> 
     })
 }
 
+/// The node an op changes as agents see it: for an override, the node
+/// inside the instance (`I/x`), otherwise the op's own node.
+fn shown_id(op: &Op) -> String {
+    if let Op::Set {
+        id,
+        key: PropKey::Override(key),
+        ..
+    } = op
+        && let Some((path, _)) = PropKey::split_override(key)
+        && !path.is_empty()
+    {
+        return format!("{id}/{path}");
+    }
+    op.id().to_owned()
+}
+
+/// What a change did to components, for the end of an edit's result:
+/// agents can't tell from the HTML whether an edit inside an instance
+/// changed only that instance or the component every instance shows.
+fn component_note(handle: &DesignHandle, change: &Change) -> Option<String> {
+    use std::collections::BTreeMap;
+    handle.read(|d| {
+        let doc = d.doc();
+        if !doc.has_instances() && !doc.nodes().any(|n| n.component) {
+            return None;
+        }
+        let name = |id: &str| {
+            doc.get(id)
+                .map(|n| format!("{:?} #{id}", n.display_name()))
+                .unwrap_or_else(|| format!("#{id}"))
+        };
+        let mut overridden: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+        let mut edited: BTreeMap<String, usize> = BTreeMap::new();
+        let mut detached = Vec::new();
+        // Components this change made: new ones, not edits to old ones.
+        let defined: Vec<&str> = change
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Create { node } if node.component => Some(node.id.as_str()),
+                _ => None,
+            })
+            .collect();
+        for op in &change.ops {
+            match op {
+                Op::Set {
+                    id,
+                    key: PropKey::Override(_),
+                    value,
+                } => {
+                    let entry = overridden.entry(id.as_str()).or_default();
+                    if value.is_some() {
+                        entry.0 += 1;
+                    } else {
+                        entry.1 += 1;
+                    }
+                }
+                Op::Set {
+                    id,
+                    key: PropKey::InstanceOf,
+                    value: None,
+                } => detached.push(id.as_str()),
+                Op::Set {
+                    key: PropKey::Component | PropKey::Name,
+                    ..
+                } => {}
+                _ => {
+                    let id = match op {
+                        Op::Create { node } => node.parent.as_deref().unwrap_or(&node.id),
+                        _ => op.id(),
+                    };
+                    if let Some(component) = components::component_of(doc, id) {
+                        *edited.entry(component.id.clone()).or_default() += 1;
+                    }
+                }
+            }
+        }
+        let mut notes = Vec::new();
+        // Detaching clears an instance's overrides; that's not news.
+        overridden.retain(|id, _| !detached.contains(id));
+        for (instance, (set, cleared)) in overridden {
+            let component = doc
+                .get(instance)
+                .and_then(|n| n.instance_of.as_deref())
+                .map(name)
+                .unwrap_or_default();
+            let mut text = format!("Only instance #{instance} of {component} changed");
+            if set > 0 {
+                text.push_str(&format!(
+                    ": {set} value{} became its overrides",
+                    if set == 1 { "" } else { "s" }
+                ));
+            }
+            if cleared > 0 {
+                text.push_str(&format!(
+                    "{}{cleared} value{} follow{} the component again",
+                    if set > 0 { ", and " } else { ": " },
+                    if cleared == 1 { "" } else { "s" },
+                    if cleared == 1 { "s" } else { "" },
+                ));
+            }
+            text.push_str(". To change every instance, edit the component instead.");
+            notes.push(text);
+        }
+        for id in &defined {
+            let count = doc.instances_of(id).count();
+            if count == 0 && doc.get(id).is_some() {
+                notes.push(format!(
+                    "Defined component {}. Write data-component={:?} again for an instance of it.",
+                    name(id),
+                    doc.get(id).map(|n| n.display_name()).unwrap_or_default()
+                ));
+                edited.remove(*id);
+            }
+        }
+        for (component, _) in edited {
+            let instances: Vec<String> = components::affected(doc, &component)
+                .into_iter()
+                .map(|i| format!("#{i}"))
+                .collect();
+            if instances.is_empty() {
+                notes.push(format!(
+                    "This edited component {}, which has no instances yet.",
+                    name(&component)
+                ));
+                continue;
+            }
+            // New nodes have no overrides yet, so name their ids in each
+            // instance: an agent giving each instance its own text needs them.
+            let added: Vec<&finite_design::Node> = change
+                .ops
+                .iter()
+                .filter_map(|op| match op {
+                    Op::Create { node } => doc.get(&node.id),
+                    _ => None,
+                })
+                .filter(|n| {
+                    n.tag().is_some()
+                        && components::component_of(doc, &n.id).is_some_and(|c| c.id == component)
+                        && n.id != component
+                })
+                .take(4)
+                .collect();
+            let direct: Vec<&str> = doc.instances_of(&component).take(CHANGED_NAMED).collect();
+            for node in &added {
+                let ids: Vec<String> = direct.iter().map(|i| format!("#{i}/{}", node.id)).collect();
+                let line = outline(doc, &node.id, 0);
+                notes.push(format!(
+                    "New in the component: {}. In its instances it's {}: set those to give each instance its own value.",
+                    line.lines().next().unwrap_or("").trim(),
+                    ids.join(", ")
+                ));
+            }
+            let shown: Vec<&str> = instances.iter().take(CHANGED_NAMED).map(String::as_str).collect();
+            notes.push(format!(
+                "This edited component {}, so all {} instance{} show it too ({}{}), except where they override a value.",
+                name(&component),
+                instances.len(),
+                if instances.len() == 1 { "" } else { "s" },
+                shown.join(", "),
+                if instances.len() > shown.len() { ", …" } else { "" }
+            ));
+        }
+        if !detached.is_empty() {
+            let ids: Vec<String> = detached.iter().map(|i| format!("#{i}")).collect();
+            notes.push(format!(
+                "Detached {}: {} plain cop{} now, no longer following a component.",
+                ids.join(", "),
+                if ids.len() == 1 { "it's a" } else { "they're" },
+                if ids.len() == 1 { "y" } else { "ies" }
+            ));
+        }
+        (!notes.is_empty()).then(|| notes.join("\n"))
+    })
+}
+
+/// What get_html's HTML says about components, so an agent knows where an
+/// edit would land: instances show their component's content, and ids
+/// inside one edit only it.
+fn html_component_note(design: &finite_design::Design, id: &str, html: &str) -> Option<String> {
+    let doc = design.doc();
+    let mut notes = Vec::new();
+    if let Some((instance, component)) = components::instance_of(doc, id) {
+        notes.push(format!(
+            "This is inside instance #{} of component {}. Editing it changes only this instance (an override); edit the component to change them all.",
+            instance.id,
+            component.map_or_else(String::new, |c| format!("{:?} #{}", c.display_name(), c.id)),
+        ));
+    } else if let Some(component) = components::component_of(doc, id) {
+        let count = doc.instances_of(&component.id).count();
+        notes.push(format!(
+            "This is {} component {:?} #{}, which {count} instance{} show{}: editing it changes all of them.",
+            if component.id == id { "the root of" } else { "inside" },
+            component.display_name(),
+            component.id,
+            if count == 1 { "" } else { "s" },
+            if count == 1 { "s" } else { "" },
+        ));
+    }
+    if html.contains(html::INSTANCE_ATTR) && !components::is_virtual(id) {
+        notes.push(format!(
+            "Elements with {} are instances: their content comes from that component, and is shown expanded here. Ids inside one look like instanceId/nodeId, and editing those changes only that instance. To copy this HTML into another design, remove the {} attributes: that design doesn't have the component.",
+            html::INSTANCE_ATTR,
+            html::INSTANCE_ATTR
+        ));
+    }
+    (!notes.is_empty()).then(|| notes.join("\n"))
+}
+
+/// For a file or code made from node `id`: instances in it are written as the
+/// elements they show, so the result doesn't follow their components.
+fn instances_note(design: &finite_design::Design, id: &str) -> Option<String> {
+    let doc = design.doc();
+    let count = doc
+        .subtree(components::real_id(id))
+        .into_iter()
+        .filter(|n| n.is_instance())
+        .count();
+    (count > 0).then(|| {
+        "It includes component instances, written as the elements they show; they won't follow their components elsewhere.".to_owned()
+    })
+}
+
 /// How many different nodes a batch of updates names.
 fn distinct<'a>(ids: impl Iterator<Item = &'a String>) -> usize {
     ids.collect::<std::collections::HashSet<_>>().len()
@@ -295,6 +542,9 @@ impl FiniteMcp {
     fn tools() -> ToolRouter<Self> {
         let mut router = Self::tool_router();
         router.merge(Self::search_router());
+        if extra("components") {
+            router.merge(Self::component_router());
+        }
         router.merge(Self::styles_router());
         router.merge(Self::transfer_router());
         router.merge(Self::pages_router());
@@ -308,6 +558,7 @@ impl FiniteMcp {
                 actor: OnceLock::new(),
             }),
             hub,
+            watch: Arc::default(),
             tool_router: Self::tools(),
         }
     }
@@ -390,6 +641,21 @@ impl FiniteMcp {
         build: impl FnOnce(&Document) -> Result<(Vec<Op>, T), EditError>,
         report: impl FnOnce(&DesignHandle, T, Option<&Change>) -> String,
     ) -> ToolResult {
+        self.edit_checked(ctx, design_id, label, false, build, report)
+            .await
+    }
+
+    /// [`Self::edit`], and with `check` and the `layout` group on, a layout
+    /// check on the artboards it touched, for the next result (see `watch.rs`).
+    async fn edit_checked<T>(
+        &self,
+        ctx: &RequestContext<RoleServer>,
+        design_id: &str,
+        label: &str,
+        check: bool,
+        build: impl FnOnce(&Document) -> Result<(Vec<Op>, T), EditError>,
+        report: impl FnOnce(&DesignHandle, T, Option<&Change>) -> String,
+    ) -> ToolResult {
         let handle = match self.design(design_id).await {
             Ok(handle) => handle,
             Err(result) => return Ok(result),
@@ -397,10 +663,26 @@ impl FiniteMcp {
         let actor = self.actor(ctx);
         match handle.edit(&actor, label, build) {
             Ok((output, change)) => {
+                let mut text = report(&handle, output, change.as_ref());
                 if let Some(change) = &change {
                     show_working(&handle, &actor, change);
+                    if let Some(note) = component_note(&handle, change) {
+                        text.push('\n');
+                        text.push_str(&note);
+                    }
+                    if check && extra("layout") {
+                        self.watch.after_edit(design_id, &handle, change).await;
+                        let notes = self.watch.take(design_id);
+                        if !notes.is_empty() {
+                            text.push('\n');
+                            text.push_str(&watch::Taken::text(&notes));
+                        }
+                    } else if !check {
+                        // Any other edit can change what a waiting note says.
+                        self.watch.invalidate(design_id);
+                    }
                 }
-                ok(report(&handle, output, change.as_ref()))
+                ok(text)
             }
             Err(error) => fail(error.to_string()),
         }
@@ -415,7 +697,7 @@ fn show_working(handle: &DesignHandle, actor: &Actor, change: &Change) {
     let boards: Vec<String> = handle.read(|d| {
         let mut boards = Vec::new();
         for op in &change.ops {
-            if let Some(board) = d.doc().artboard_of(op.id())
+            if let Some(board) = d.view().artboard_of(op.id())
                 && !boards.contains(&board.id)
             {
                 boards.push(board.id.clone());
@@ -452,10 +734,12 @@ macro_rules! design {
     };
 }
 
+mod component_tools;
 mod pages;
 mod search;
 mod styles;
 mod transfer;
+mod watch;
 
 #[tool_router]
 impl FiniteMcp {
@@ -516,6 +800,20 @@ impl FiniteMcp {
         ))
     }
 
+    #[tool(
+        description = "Permanently delete a design (canvas), including all its pages, artboards, comments and undo history. This cannot be undone. To delete only an artboard, use delete_nodes instead.",
+        annotations(destructive_hint = true)
+    )]
+    async fn delete_design(&self, Parameters(p): Parameters<DesignParams>) -> ToolResult {
+        let handle = design!(self, &p.design_id);
+        let hub = self.hub.clone();
+        let deleted = tokio::task::spawn_blocking(move || hub.delete(&handle)).await;
+        match deleted.map_err(std::io::Error::other) {
+            Ok(Ok(())) => ok("Deleted the design permanently."),
+            Ok(Err(error)) | Err(error) => fail(format!("Couldn't delete the design: {error}")),
+        }
+    }
+
     #[tool(description = "Rename a design.")]
     async fn rename_design(&self, Parameters(p): Parameters<RenameDesignParams>) -> ToolResult {
         let handle = design!(self, &p.design_id);
@@ -531,7 +829,7 @@ impl FiniteMcp {
         let handle = design!(self, &p.design_id);
         let presence = handle.presence();
         let info = handle.read(|design| {
-            let doc = design.doc();
+            let doc = design.view();
             let all = doc.artboards();
             let pages = doc.pages();
             let artboards: Vec<_> = all
@@ -599,7 +897,7 @@ impl FiniteMcp {
         let handle = design!(self, &p.design_id);
         let depth = p.depth.unwrap_or(4);
         let text = handle.read(|design| {
-            let doc = design.doc();
+            let doc = design.view();
             match &p.node_id {
                 Some(id) if !doc.contains(id) => Err(format!("node {id:?} not found")),
                 Some(id) => Ok(outline(doc, id, depth)),
@@ -647,8 +945,12 @@ impl FiniteMcp {
     )]
     async fn get_node_info(&self, Parameters(p): Parameters<NodesParams>) -> ToolResult {
         let handle = design!(self, &p.design_id);
-        let nodes: Vec<_> =
-            handle.read(|d| p.node_ids.iter().map(|id| node_json(d.doc(), id)).collect());
+        let nodes: Vec<_> = handle.read(|d| {
+            p.node_ids
+                .iter()
+                .map(|id| node_json(d.view(), id))
+                .collect()
+        });
         let total = nodes.len();
         let (content, shown) = fit(nodes.into_iter());
         Ok(CallToolResult::success(with_note(
@@ -668,7 +970,7 @@ impl FiniteMcp {
     async fn get_children(&self, Parameters(p): Parameters<ChildrenParams>) -> ToolResult {
         let handle = design!(self, &p.design_id);
         let children = handle.read(|design| {
-            let doc = design.doc();
+            let doc = design.view();
             if let Some(id) = &p.node_id
                 && !doc.contains(id)
             {
@@ -715,15 +1017,7 @@ impl FiniteMcp {
     )]
     async fn get_html(&self, Parameters(p): Parameters<HtmlParams>) -> ToolResult {
         let handle = design!(self, &p.design_id);
-        // The HTML leaves out the shared CSS its classes and variables may
-        // need, so say it's there: HTML copied elsewhere would lose it.
-        let shared = handle.read(|d| d.doc().css().map(str::len)).map(|chars| {
-            let from = ", from get_shared_css";
-            format!(
-                "This design also has shared CSS ({chars} characters{from}) that every artboard uses. \
-                 The HTML above leaves it out, so copy it too if you use this HTML outside this design."
-            )
-        });
+        let shared = shared_css_note(&handle, "The HTML above");
         let options = html::ExportOptions {
             ids: true,
             styles: p.include_styles.unwrap_or(true),
@@ -733,7 +1027,7 @@ impl FiniteMcp {
             ..Default::default()
         };
         let html = handle.read(|d| {
-            let doc = d.doc();
+            let doc = d.view();
             let (export, depth) = html::export_within(doc, &p.node_id, &options, OUTPUT_LIMIT)?;
             let has_children = !doc.children(Some(&p.node_id)).is_empty();
             if export.html.len() > OUTPUT_LIMIT && !has_children {
@@ -788,6 +1082,10 @@ impl FiniteMcp {
                         if export.shortened == 1 { " was" } else { "s were" },
                 ));
             }
+            if let Some(note) = html_component_note(d, &p.node_id, &out) {
+                out.push('\n');
+                out.push_str(&note);
+            }
             if export.stylesheets > 0 {
                 out.push_str(&format!(
                         "\nThe first {} <style> element{} {} from elsewhere in the artboard, not inside this node.",
@@ -811,6 +1109,78 @@ impl FiniteMcp {
     }
 
     #[tool(
+        description = "A node's subtree as JSX to paste into a React codebase: elements with React's attribute names and each node's styles as an inline style object, or as Tailwind classes with tailwind true. Elements carry their layer name as data-name. <script> elements are left out, and the result says so, as is any !important. Like get_html, it keeps stored images as this server's URLs; export_design with format jsx inlines them. A node with a lot of content returns its outline instead; call get_jsx on a child.",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_jsx(&self, Parameters(p): Parameters<JsxParams>) -> ToolResult {
+        let handle = design!(self, &p.design_id);
+        let options = jsx::Options {
+            tailwind: p.tailwind,
+        };
+        let converted = handle.read(|d| {
+            // The expanded view: an instance has no children of its own.
+            let doc = d.view();
+            let converted = jsx::convert(doc, &p.node_id, &options, 0)?;
+            if converted.jsx.len() > OUTPUT_LIMIT {
+                return Some(Err(cut(
+                    format!(
+                        "This node's JSX is {} characters, more than the {OUTPUT_LIMIT} a call returns. \
+                         Call get_jsx on one of its children instead:\n{}",
+                        converted.jsx.len(),
+                        outline(doc, &p.node_id, 1)
+                    ),
+                    "Use get_children to list them all.",
+                )));
+            }
+            Some(Ok(converted))
+        });
+        let converted = match converted {
+            Some(Ok(converted)) => converted,
+            Some(Err(outline)) => return ok(outline),
+            None => {
+                return fail(node_hint(
+                    format!("node {:?} not found", p.node_id),
+                    &p.design_id,
+                ));
+            }
+        };
+        let mut notes: Vec<String> = converted
+            .diagnostics
+            .iter()
+            .map(|d| {
+                format!(
+                    "Left out {} at #{}: {}.",
+                    d.what,
+                    d.node.as_deref().unwrap_or(""),
+                    d.reason
+                )
+            })
+            .collect();
+        if let Some(note) = handle.read(|d| instances_note(d, &p.node_id)) {
+            notes.push(note);
+        }
+        let mut stored = 0;
+        assets::rewrite_urls(&converted.jsx, |_| {
+            stored += 1;
+            None
+        });
+        if stored > 0 {
+            notes.push(format!(
+                "{stored} image URL{} point{} at this server's stored files, so they only work here. \
+                 export_design with format jsx and an artboardId writes them inline.",
+                if stored == 1 { "" } else { "s" },
+                if stored == 1 { "s" } else { "" },
+            ));
+        }
+        notes.extend(shared_css_note(&handle, "The JSX above"));
+        let note = (!notes.is_empty()).then(|| notes.join("\n"));
+        Ok(CallToolResult::success(with_note(
+            ContentBlock::text(converted.jsx),
+            note,
+        )))
+    }
+
+    #[tool(
         description = "Render artboards, or nodes inside them, to images to check how they look. Each image is cropped to its node's box; with no node, it captures every artboard (up to 10). A whole artboard also gets a layout check that names anything cut off by its edge and text that overflows its box. Pages with scripts or animations are captured about 3 seconds after load; pass settleMs (at most 10000) to take the image later, such as after a transition has finished.",
         annotations(read_only_hint = true)
     )]
@@ -821,7 +1191,7 @@ impl FiniteMcp {
         // whole, so capture its artboards.
         if nodes.is_empty() {
             nodes = handle.read(|d| {
-                d.doc()
+                d.view()
                     .artboards()
                     .iter()
                     .take(screenshot::MAX_SHOTS)
@@ -858,7 +1228,7 @@ impl FiniteMcp {
                 Duration::from_millis(ms).min(screenshot::MAX_SETTLE)
             }),
         };
-        let plan = match handle.read(|d| screenshot::plan(d.doc(), shots, options)) {
+        let plan = match handle.read(|d| screenshot::plan(d.view(), shots, options)) {
             Ok(plan) => plan,
             Err(error) => return fail(node_hint(error, &p.design_id)),
         };
@@ -878,7 +1248,7 @@ impl FiniteMcp {
                     content.push(ContentBlock::text(format::shot(image)));
                     if let Some(boxes) = &image.boxes {
                         let notes =
-                            handle.read(|d| format::layout_notes(d.doc(), &image.artboard, boxes));
+                            handle.read(|d| format::layout_notes(d.view(), &image.artboard, boxes));
                         if !notes.is_empty() {
                             content.push(ContentBlock::text(notes));
                         }
@@ -907,7 +1277,7 @@ impl FiniteMcp {
         let roots: Vec<String> = match p.node_id.filter(|id| !id.trim().is_empty()) {
             Some(id) => vec![id],
             None => handle.read(|d| {
-                d.doc()
+                d.view()
                     .artboards()
                     .iter()
                     .take(screenshot::MAX_SHOTS)
@@ -922,7 +1292,7 @@ impl FiniteMcp {
         for node_id in roots {
             let options = screenshot::Options::default();
             let measurement =
-                match handle.read(|d| screenshot::plan_measurement(d.doc(), &node_id, options)) {
+                match handle.read(|d| screenshot::plan_measurement(d.view(), &node_id, options)) {
                     Ok(m) => m,
                     Err(error) => return fail(node_hint(error, &p.design_id)),
                 };
@@ -931,7 +1301,7 @@ impl FiniteMcp {
                 Err(error) => return fail(error),
             };
             parts.push(handle.read(|d| {
-                let doc = d.doc();
+                let doc = d.view();
                 // A text node's layout is its element's.
                 let root = match doc.get(&node_id) {
                     Some(n) if n.kind == NodeKind::Text => {
@@ -955,7 +1325,7 @@ impl FiniteMcp {
     async fn find_placement(&self, Parameters(p): Parameters<PlacementParams>) -> ToolResult {
         let handle = design!(self, &p.design_id);
         let placed = handle.read(|d| {
-            let doc = d.doc();
+            let doc = d.view();
             let page = p.page_id.as_deref().unwrap_or_else(|| doc.first_page());
             doc.page(page)
                 .map(|_| edit::find_placement(doc, page, p.width, p.height))
@@ -1012,7 +1382,7 @@ impl FiniteMcp {
             },
             |handle, (id, roots), _| {
                 handle.read(|d| {
-                    let doc = d.doc();
+                    let doc = d.view();
                     let Some(board) = doc.get(&id) else {
                         return format!("Created artboard #{id}.");
                     };
@@ -1064,10 +1434,11 @@ impl FiniteMcp {
             Ok(Err(error)) => return fail(error.to_string()),
             Err(error) => return fail(error.to_string()),
         };
-        self.edit(
+        self.edit_checked(
             &ctx,
             &p.design_id,
             "Write HTML",
+            true,
             |doc| {
                 let mut new_id = id_in(doc);
                 edit::write_fragments(doc, &p.target_id, fragments, mode, p.index, &mut new_id)
@@ -1076,7 +1447,7 @@ impl FiniteMcp {
                 handle.read(|d| {
                     let mut text = format!("Wrote {} root node(s):\n", roots.len());
                     for root in &roots {
-                        text.push_str(&outline(d.doc(), root, 3));
+                        text.push_str(&outline(d.view(), root, 3));
                     }
                     text.push_str(&left_out(&dropped));
                     cut(text, "Call get_tree_summary on a root to see it.")
@@ -1099,10 +1470,11 @@ impl FiniteMcp {
             Ok(updates) => updates,
             Err(error) => return fail(error),
         };
-        self.edit(
+        self.edit_checked(
             &ctx,
             &design_id,
             "Update styles",
+            true,
             |doc| {
                 let mut ops = Vec::new();
                 for update in &updates {
@@ -1295,7 +1667,7 @@ impl FiniteMcp {
                 handle.read(|d| {
                     let mut text = format!("Created {} copies:\n", roots.len());
                     for root in &roots {
-                        text.push_str(&outline(d.doc(), root, 3));
+                        text.push_str(&outline(d.view(), root, 3));
                     }
                     cut(
                         text,
@@ -1388,7 +1760,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Comments users pinned to a design, oldest first: what they asked for, which artboard and element it's about, and the thread so far. Open comments only, unless includeResolved is set. A long list comes in parts; the note at the end says which offset to pass next.",
+        description = "Comments users pinned to a design, oldest first: what they asked for, which artboard and element it's about (alsoSelected lists more elements the user picked with it), and the thread so far. Open comments only, unless includeResolved is set. A long list comes in parts; the note at the end says which offset to pass next.",
         annotations(read_only_hint = true)
     )]
     async fn get_comments(&self, Parameters(p): Parameters<CommentsParams>) -> ToolResult {
@@ -1426,10 +1798,10 @@ impl FiniteMcp {
         annotations(read_only_hint = true)
     )]
     async fn wait_for_comments(&self, Parameters(p): Parameters<WaitParams>) -> ToolResult {
-        let handle = design!(self, &p.design_id);
         let timeout = Duration::from_secs(p.timeout_seconds.unwrap_or(60).clamp(1, 300));
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
+            let handle = design!(self, &p.design_id);
             // Register before checking, so a comment that lands in between still wakes us.
             let changed = handle.comments_changed();
             tokio::pin!(changed);
@@ -1520,7 +1892,7 @@ impl FiniteMcp {
             ));
         }
         if let Some(missing) =
-            handle.read(|d| node_ids.iter().find(|id| !d.doc().contains(id)).cloned())
+            handle.read(|d| node_ids.iter().find(|id| !d.view().contains(id)).cloned())
         {
             return fail(format!("node {missing:?} not found"));
         }
@@ -1544,6 +1916,68 @@ impl FiniteMcp {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for FiniteMcp {
+    /// Runs the tool, then adds any layout note waiting on the design it
+    /// names (the `layout` group). The layout tools drop it instead.
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, McpError> {
+        let design = extra("layout")
+            .then(|| {
+                let id = request.arguments.as_ref()?.get("designId")?.as_str()?;
+                Some(id.to_owned())
+            })
+            .flatten();
+        // Tools that report the layout, or change the design, make a waiting
+        // note out of date. Edits through `edit` clear it themselves.
+        let drops_note = matches!(
+            &*request.name,
+            "get_layout" | "get_screenshot" | "undo" | "redo" | "import_design"
+        );
+        let name = request.name.clone();
+        // Before the tool runs: an edit starts a new check, which replaces the note.
+        let notes = design.as_deref().map(|d| {
+            if drops_note {
+                self.watch.invalidate(d);
+                Vec::new()
+            } else {
+                self.watch.take(d)
+            }
+        });
+        let tcc = ToolCallContext::new(self, request, context);
+        let mut response = match self.tool_router.call(tcc).await {
+            Ok(response) => response,
+            Err(error) => {
+                // The router refused the call, so nothing ran: the note still stands.
+                if let (Some(design), Some(notes)) = (design.as_deref(), notes) {
+                    self.watch.restore(design, notes);
+                }
+                return Err(error);
+            }
+        };
+        if let (Some(design), Some(notes)) = (design.as_deref(), notes) {
+            if matches!(&*name, "undo" | "redo" | "import_design") {
+                self.watch.invalidate(design);
+            }
+            match &mut response {
+                CallToolResponse::Complete(result) if result.is_error != Some(true) => {
+                    // An edit that changed an artboard has made its note out
+                    // of date, and the edit reports its own check.
+                    let notes = self.watch.still_current(design, notes);
+                    if !notes.is_empty() {
+                        result
+                            .content
+                            .push(ContentBlock::text(watch::Taken::text(&notes)));
+                    }
+                }
+                // A failed call changed nothing, so the note still stands.
+                _ => self.watch.restore(design, notes),
+            }
+        }
+        Ok(response)
+    }
+
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("finite", env!("CARGO_PKG_VERSION")))
@@ -1566,6 +2000,7 @@ mod tests {
         let all = [
             INSTRUCTIONS.trim_end(),
             SEARCH_INSTRUCTIONS,
+            component_tools::INSTRUCTIONS,
             styles::INSTRUCTIONS,
         ]
         .join("\n\n");

@@ -1,5 +1,6 @@
 import * as stylex from "@stylexjs/stylex";
 import { colors } from "@/styles/tokens.stylex";
+import { Culler, pageBox } from "./culling";
 import { artboardDocument, BASE_LAYER, pixelSize } from "./html";
 import type { Applied, Replica } from "./replica";
 import type { Node } from "./schema";
@@ -34,6 +35,12 @@ const BLOCKED_TAGS = new Set([
 
 /** How long a sandboxed artboard waits for edits to settle before reloading. */
 const RELOAD_DELAY_MS = 150;
+/**
+ * How long a hidden sandboxed artboard keeps its document. Showing it again
+ * before then is instant, and its scripts carry on where they were instead
+ * of starting over, so panning back and forth doesn't reload it each time.
+ */
+const UNLOAD_DELAY_MS = 30_000;
 const MAX_SIDE = 16_000;
 
 const isScript = (node: Node) => node.type === "element" && node.tag?.toLowerCase() === "script";
@@ -51,7 +58,17 @@ interface Frame {
   readonly sharedStyle: HTMLStyleElement | null;
   /** Set for artboards with scripts, rendered in a sandboxed iframe. */
   readonly iframe: HTMLIFrameElement | null;
+  /**
+   * Set while an auto-sized iframe hasn't reported its size: until then it
+   * has a placeholder size, which a restored view far down a tall artboard
+   * could miss, culling it before it can report.
+   */
+  awaitingSize?: boolean;
   reload?: ReturnType<typeof setTimeout>;
+  /** Unloads a hidden iframe once it has stayed hidden for `UNLOAD_DELAY_MS`. */
+  unload?: ReturnType<typeof setTimeout>;
+  /** The iframe's document is unloaded or out of date, so it loads again when shown. */
+  stale?: boolean;
   /** The iframe's latest answer to "what's under this point?", in its own coordinates. */
   hit?: { readonly x: number; readonly y: number; readonly id: string | null };
   /** The point last asked about, so the same question isn't sent twice. */
@@ -100,6 +117,8 @@ export interface RendererOptions {
    * question, which arrives a moment later. Call them again to read the answer.
    */
   readonly onLayout?: () => void;
+  /** Maps a canvas point to a page point, for placing nodes in hidden artboards. */
+  readonly toPage?: (x: number, y: number) => { x: number; y: number };
   /** Called when a sandboxed artboard reports a new size, which an auto-height one does after its scripts run. */
   readonly onResize?: () => void;
 }
@@ -121,10 +140,48 @@ export class Renderer {
   private readonly ids = new WeakMap<Element, string>();
   private readonly frames = new Map<string, Frame>();
   private readonly scripts = new Set<string>();
+  /** Every instance in the design, so a change can find the ones to draw again. */
+  private readonly instances = new Set<string>();
+  /** Whether each instance shows a `<script>` from its component, once asked. */
+  private readonly instanceScripts = new Map<string, boolean>();
+  /** The virtual ids drawn inside each instance, to forget when it's drawn again. */
+  private readonly virtuals = new Map<string, string[]>();
   private working: ReadonlyMap<string, string> = new Map();
   private commenting = false;
   /** The page shown, or `null` for the first page. Only its artboards are mounted. */
   private page: string | null = null;
+  /** Hides artboards outside the view. A hidden sandboxed one has its iframe unloaded. */
+  private readonly culler = new Culler(
+    {
+      measure: (id) => {
+        const frame = this.frames.get(id);
+        if (frame?.awaitingSize) return null;
+        const root = frame?.root;
+        const width = root?.offsetWidth ?? 0;
+        const height = root?.offsetHeight ?? 0;
+        // Zero both ways means it isn't laid out; try again later.
+        return width === 0 && height === 0 ? null : { width, height };
+      },
+      setCulled: (id, culled) => {
+        const frame = this.frames.get(id);
+        if (frame) this.setCulled(id, frame, culled);
+      },
+    },
+    (run) => requestAnimationFrame(run),
+  );
+  /** Tells when an artboard's size changes, by content loading or an edit. */
+  private readonly resizes =
+    typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver((entries) => {
+          for (const entry of entries) {
+            const id = (entry.target as HTMLElement).dataset.artboard;
+            // A hidden artboard reports no size; it's measured when it's shown.
+            if (id && (entry.contentRect.width > 0 || entry.contentRect.height > 0)) {
+              this.culler.touch(id);
+            }
+          }
+        });
   private readonly abort = new AbortController();
 
   constructor(
@@ -142,20 +199,80 @@ export class Renderer {
 
   dispose() {
     this.abort.abort();
-    for (const frame of this.frames.values()) clearTimeout(frame.reload);
+    this.culler.dispose();
+    this.resizes?.disconnect();
+    for (const frame of this.frames.values()) clearTimers(frame);
   }
 
   /** Rebuilds everything from the replica. */
   reset() {
     for (const frame of this.frames.values()) {
-      clearTimeout(frame.reload);
+      clearTimers(frame);
       frame.root.remove();
     }
     this.frames.clear();
+    this.culler.clear();
     this.elements.clear();
     this.scripts.clear();
-    for (const node of this.replica.nodes.values()) if (isScript(node)) this.scripts.add(node.id);
+    this.instances.clear();
+    this.instanceScripts.clear();
+    this.virtuals.clear();
+    for (const node of this.replica.nodes.values()) {
+      if (isScript(node)) this.scripts.add(node.id);
+      if (node.instanceOf !== undefined) this.instances.add(node.id);
+    }
+    // Loading a snapshot marks nothing, but don't let a stale list linger.
+    this.replica.takeDirty();
     for (const board of this.replica.artboards()) this.mount(board);
+  }
+
+  /**
+   * Sets the canvas area that's on screen, plus a margin, and hides the
+   * artboards outside it (`null`: show them all). A hidden artboard costs
+   * no layout or paint, and a sandboxed one is unloaded once it has stayed
+   * hidden for `UNLOAD_DELAY_MS`, which also stops its scripts. Both come
+   * back when the area reaches them.
+   *
+   * An artboard is measured while shown and keeps that size while hidden,
+   * so `artboardBounds` and "fit to view" still see it. Until it's
+   * measured it stays drawn. Passes run once per frame.
+   */
+  setViewport(area: Bounds | null) {
+    this.culler.setArea(area);
+  }
+
+  private setCulled(id: string, frame: Frame, culled: boolean) {
+    if (!culled) {
+      // A component edited while this was hidden may have changed how it
+      // renders (it gained or lost a script): build it the right way now.
+      const node = this.replica.get(id);
+      if (node && (frame.iframe !== null) !== this.isLive(id)) {
+        this.remount(node);
+        return;
+      }
+    }
+    frame.root.style.display = culled ? "none" : "";
+    const iframe = frame.iframe;
+    if (!iframe) return;
+    clearTimeout(frame.unload);
+    if (culled) {
+      // An edit waiting to reload it is loaded when it's shown instead.
+      if (frame.reload !== undefined) frame.stale = true;
+      clearTimeout(frame.reload);
+      delete frame.reload;
+      // Keep the document for a while: a hidden iframe isn't rendered, and
+      // panning back to it shouldn't start its scripts over.
+      frame.unload = setTimeout(() => {
+        if (this.frames.get(id) !== frame || !this.culler.isCulled(id)) return;
+        iframe.srcdoc = "";
+        frame.stale = true;
+        forgetLayout(frame);
+      }, UNLOAD_DELAY_MS);
+    } else if (frame.stale) {
+      frame.stale = false;
+      iframe.srcdoc = artboardDocument(this.replica, id);
+      forgetLayout(frame);
+    }
   }
 
   /** Shows only the artboards on `page` (`null`: the first page). */
@@ -172,6 +289,8 @@ export class Renderer {
 
   /** Mounts the shown page's artboards and unmounts the rest. */
   private syncPage() {
+    // Before the document loads there are no pages, and no artboards to sync.
+    if (this.replica.pages.length === 0) return;
     const page = this.shownPage();
     for (const board of this.replica.artboards()) this.syncBoard(board, page);
   }
@@ -205,7 +324,14 @@ export class Renderer {
     }
     const boards = this.touchedBoards(applied);
     if (applied.op === "create" && isScript(applied.node)) this.scripts.add(applied.node.id);
-    if (applied.op === "delete") for (const id of applied.removed) this.scripts.delete(id);
+    if (applied.op === "delete") {
+      for (const id of applied.removed) {
+        this.scripts.delete(id);
+        this.instances.delete(id);
+        this.instanceScripts.delete(id);
+      }
+    } else if (applied.node.instanceOf !== undefined) this.instances.add(applied.node.id);
+    else this.instances.delete(applied.node.id);
 
     // Patch shadow-root artboards in place. This is a no-op for sandboxed ones.
     this.patch(applied);
@@ -219,8 +345,47 @@ export class Renderer {
       const frame = this.frames.get(id);
       const node = this.replica.get(id);
       if (!frame || !node) continue;
+      if (!layoutOnly) this.culler.touch(id);
       if ((frame.iframe !== null) !== this.isLive(id)) this.remount(node);
       else if (frame.iframe && !layoutOnly) this.scheduleReload(id, frame);
+    }
+  }
+
+  /**
+   * Draws again the instances a change touched: an edit to a component
+   * changes what every instance of it shows, and an instance's overrides
+   * change only it. Call after a change's ops have all applied, since an
+   * instance is expanded from the document as it ends up.
+   */
+  flush() {
+    const boards = new Set<string>();
+    for (const id of this.replica.takeDirty()) {
+      this.instanceScripts.delete(id);
+      const node = this.replica.get(id);
+      const board = this.replica.artboardOf(id);
+      if (!node || !board) continue;
+      boards.add(board.id);
+      const frame = this.frames.get(board.id);
+      if (!frame || frame.iframe) continue;
+      // Draw it again only where it's drawn now.
+      if (node.parent !== null && !this.elements.has(id)) continue;
+      for (const sub of this.replica.subtree(id)) this.unmount(sub);
+      this.mount(node);
+    }
+    for (const id of boards) {
+      const frame = this.frames.get(id);
+      const node = this.replica.get(id);
+      if (!frame || !node) continue;
+      // What the instance shows may be a different size now.
+      this.culler.touch(id);
+      // A hidden artboard is built, or loaded, again when it's shown: the
+      // new content is read then, so a hidden iframe isn't reloaded now.
+      if (this.culler.isCulled(id)) {
+        if (frame.iframe) frame.stale = true;
+        continue;
+      }
+      if ((frame.iframe !== null) !== this.isLive(id)) this.remount(node);
+      else if (frame.iframe) this.scheduleReload(id, frame);
     }
   }
 
@@ -229,18 +394,23 @@ export class Renderer {
     const out = new Map<string, Bounds>();
     for (const [id, frame] of this.frames) {
       const node = this.replica.get(id);
-      out.set(id, {
-        x: node?.x ?? 0,
-        y: node?.y ?? 0,
+      // A hidden artboard has no layout, so it reports the size it had when last shown.
+      const size = (this.culler.isCulled(id) && this.culler.size(id)) || {
         width: frame.root.offsetWidth,
         height: frame.root.offsetHeight,
-      });
+      };
+      out.set(id, { x: node?.x ?? 0, y: node?.y ?? 0, ...size });
     }
     return out;
   }
 
-  /** The topmost artboard under a page point, and the element in it. */
-  hitTest(clientX: number, clientY: number): Hit | null {
+  /**
+   * The topmost artboard under a page point, and the element in it. A
+   * sandboxed artboard answers later, so this returns its latest answer,
+   * even for another point, unless `exact` is set: then it's `null` until
+   * the answer for this point arrives.
+   */
+  hitTest(clientX: number, clientY: number, exact = false): Hit | null {
     const frames = [...this.frames];
     for (let i = frames.length - 1; i >= 0; i--) {
       const [artboardId, frame] = frames[i]!;
@@ -253,8 +423,11 @@ export class Renderer {
       ) {
         continue;
       }
-      if (frame.iframe)
-        return { artboardId, nodeId: this.askHit(frame, clientX, clientY) ?? artboardId };
+      if (frame.iframe) {
+        const nodeId = this.askHit(frame, clientX, clientY, exact);
+        if (exact && nodeId === null) return null;
+        return { artboardId, nodeId: nodeId ?? artboardId };
+      }
       let el = frame.shadow?.elementFromPoint(clientX, clientY) ?? null;
       while (el && !this.ids.has(el)) el = el.parentElement;
       return { artboardId, nodeId: (el && this.ids.get(el)) ?? artboardId };
@@ -266,7 +439,7 @@ export class Renderer {
    * Asks a sandboxed artboard what's under a page point. The answer arrives
    * by message, so this returns the latest one for that point, if any.
    */
-  private askHit(frame: Frame, clientX: number, clientY: number): string | null {
+  private askHit(frame: Frame, clientX: number, clientY: number, exact: boolean): string | null {
     const iframe = frame.iframe!;
     const { left, top, scale } = iframeBox(iframe);
     const x = Math.round((clientX - left) / scale);
@@ -275,7 +448,8 @@ export class Renderer {
       frame.asked = { x, y };
       iframe.contentWindow?.postMessage({ finite: { type: "hit", x, y } }, "*");
     }
-    return frame.hit?.x === x && frame.hit.y === y ? frame.hit.id : (frame.hit?.id ?? null);
+    if (frame.hit?.x === x && frame.hit.y === y) return frame.hit.id;
+    return exact ? null : (frame.hit?.id ?? null);
   }
 
   /**
@@ -283,6 +457,14 @@ export class Renderer {
    * artboard, this is the artboard until the iframe reports the node's position.
    */
   nodeRect(id: string): DOMRect | null {
+    // A hidden artboard has no layout; use the box it had when last shown.
+    const hidden = this.replica.artboardOf(id);
+    if (hidden && this.culler.isCulled(hidden.id)) {
+      const box = this.culler.box(hidden.id);
+      if (!box || !this.options.toPage) return null;
+      const r = pageBox(box, this.options.toPage);
+      return new DOMRect(r.x, r.y, r.width, r.height);
+    }
     const el = this.elements.get(id);
     if (el?.isConnected) {
       if (el instanceof Element) return el.getBoundingClientRect();
@@ -340,6 +522,16 @@ export class Renderer {
   private isLive(board: string) {
     if (!this.options.live) return false;
     for (const id of this.scripts) if (this.replica.artboardOf(id)?.id === board) return true;
+    // An instance runs its component's scripts too.
+    for (const id of this.instances) {
+      if (this.replica.artboardOf(id)?.id !== board) continue;
+      let scripted = this.instanceScripts.get(id);
+      if (scripted === undefined) {
+        scripted = this.replica.expand(id).some(isScript);
+        this.instanceScripts.set(id, scripted);
+      }
+      if (scripted) return true;
+    }
     return false;
   }
 
@@ -389,6 +581,8 @@ export class Renderer {
       this.showWorking(frame, this.working.get(node.id));
       this.showCommenting(frame);
       if (frame.shadow) this.build(node, frame.shadow, false);
+      this.culler.add(node.id, node.x ?? 0, node.y ?? 0);
+      this.resizes?.observe(frame.root);
       return;
     }
     // Nodes in sandboxed artboards have no element here, so this skips them.
@@ -412,6 +606,50 @@ export class Renderer {
 
   /** Creates the DOM for `node` and its descendants. Appends to `container` when given. */
   private build(node: Node, container: ParentNode | null, inSvg: boolean): Element | Text {
+    if (node.instanceOf !== undefined) return this.buildInstance(node, container, inSvg);
+    const el = this.create(node, inSvg);
+    if (el instanceof Element) {
+      const childSvg = (inSvg || node.tag === "svg") && node.tag !== "foreignObject";
+      for (const child of this.replica.children(node.id)) {
+        el.appendChild(this.build(child, null, childSvg));
+      }
+    }
+    container?.appendChild(el);
+    return el;
+  }
+
+  /**
+   * Draws instance `node` as its component, expanded by the Rust rules.
+   * The elements inside it are registered under their virtual ids, so
+   * hit tests and comments can point at them.
+   */
+  private buildInstance(node: Node, container: ParentNode | null, inSvg: boolean): Element | Text {
+    const [root, ...inside] = this.replica.expand(node.id);
+    const children = new Map<string, Node[]>();
+    for (const n of inside) {
+      if (n.parent === null) continue;
+      let list = children.get(n.parent);
+      if (!list) children.set(n.parent, (list = []));
+      list.push(n);
+    }
+    const drawn: string[] = [];
+    const draw = (n: Node, svg: boolean): Element | Text => {
+      const el = this.create(n, svg);
+      if (n.id !== node.id) drawn.push(n.id);
+      if (el instanceof Element) {
+        const childSvg = (svg || n.tag === "svg") && n.tag !== "foreignObject";
+        for (const child of children.get(n.id) ?? []) el.appendChild(draw(child, childSvg));
+      }
+      return el;
+    };
+    const el = draw(root ?? node, inSvg);
+    this.virtuals.set(node.id, drawn);
+    container?.appendChild(el);
+    return el;
+  }
+
+  /** One node's own element or text, registered under its id, without its children. */
+  private create(node: Node, inSvg: boolean): Element | Text {
     let el: Element | Text;
     if (node.type === "text") {
       el = document.createTextNode(node.text ?? "");
@@ -426,38 +664,42 @@ export class Renderer {
         for (const [name, value] of Object.entries(node.attrs)) setAttr(el, name, value);
         for (const [name, value] of Object.entries(node.styles)) setStyle(el, name, value);
       }
-      const childSvg = svg && tag !== "foreignObject";
-      this.elements.set(node.id, el);
       this.ids.set(el, node.id);
-      for (const child of this.replica.children(node.id)) {
-        el.appendChild(this.build(child, null, childSvg));
-      }
     }
     this.elements.set(node.id, el);
-    container?.appendChild(el);
     return el;
   }
 
   private unmount(id: string) {
     const frame = this.frames.get(id);
     if (frame) {
-      clearTimeout(frame.reload);
+      clearTimers(frame);
       frame.root.remove();
       this.frames.delete(id);
+      this.culler.remove(id);
+      this.resizes?.unobserve(frame.root);
     }
     this.elements.get(id)?.remove();
     this.elements.delete(id);
+    for (const inside of this.virtuals.get(id) ?? []) this.elements.delete(inside);
+    this.virtuals.delete(id);
   }
 
   private update(node: Node, key: string) {
     const el = this.elements.get(node.id);
     const frame = this.frames.get(node.id);
+    // An instance shows its component, so `flush` draws it again instead.
+    const instance = node.instanceOf !== undefined || key === "instanceOf";
+    if (instance && !["name", "x", "y"].includes(key)) return;
     if (key === "text") {
       if (el instanceof Text) el.data = node.text ?? "";
     } else if (key === "name") {
       if (frame) frame.label.textContent = labelOf(node);
     } else if (key === "x" || key === "y") {
-      if (frame) positionFrame(frame.root, node);
+      if (frame) {
+        positionFrame(frame.root, node);
+        this.culler.move(node.id, node.x ?? 0, node.y ?? 0);
+      }
     } else if (key.startsWith("style:") && el instanceof Element) {
       const name = key.slice(6);
       const value = node.styles[name];
@@ -507,6 +749,7 @@ export class Renderer {
         commentStyle: null,
         sharedStyle: null,
         iframe,
+        awaitingSize: size.width === null || size.height === null,
         rects: new Map(),
         pendingRects: new Set(),
       };
@@ -553,14 +796,17 @@ export class Renderer {
 
   private scheduleReload(id: string, frame: Frame) {
     clearTimeout(frame.reload);
+    delete frame.reload;
+    // A hidden artboard loads its latest version when it's shown again.
+    if (this.culler.isCulled(id)) {
+      frame.stale = true;
+      return;
+    }
     frame.reload = setTimeout(() => {
-      if (this.frames.get(id) === frame && frame.iframe) {
+      delete frame.reload;
+      if (this.frames.get(id) === frame && frame.iframe && !this.culler.isCulled(id)) {
         frame.iframe.srcdoc = artboardDocument(this.replica, id);
-        // A new document: earlier answers about its layout no longer hold.
-        delete frame.hit;
-        delete frame.asked;
-        frame.rects.clear();
-        frame.pendingRects.clear();
+        forgetLayout(frame);
       }
     }, RELOAD_DELAY_MS);
   }
@@ -616,9 +862,15 @@ export class Renderer {
         before.height !== rect.height;
       if (moved) this.options.onLayout?.();
     } else if (m.type === "size") {
+      // A new document reports zero both ways before its content lays out.
+      // Keep the size it has, or a tiny box could get it culled, and a culled
+      // iframe is unloaded before it can report its real size.
+      if (num("width") === 0 && num("height") === 0) return;
       const fit = (n: number) => `${Math.min(MAX_SIDE, Math.max(1, n))}px`;
       const [width, height] = [fit(num("width")), fit(num("height"))];
       const changed = iframe.style.width !== width || iframe.style.height !== height;
+      frame.awaitingSize = false;
+      this.culler.touch(boardId);
       iframe.style.width = width;
       iframe.style.height = height;
       if (changed) this.options.onResize?.();
@@ -638,6 +890,19 @@ export class Renderer {
       });
     }
   }
+}
+
+function clearTimers(frame: Frame) {
+  clearTimeout(frame.reload);
+  clearTimeout(frame.unload);
+}
+
+/** A new or unloaded document: earlier answers about its layout no longer hold. */
+function forgetLayout(frame: Frame) {
+  delete frame.hit;
+  delete frame.asked;
+  frame.rects.clear();
+  frame.pendingRects.clear();
 }
 
 /** Where an iframe's content sits on the page, and how much the canvas zoom scales it. */

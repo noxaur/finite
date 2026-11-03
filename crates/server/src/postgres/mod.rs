@@ -375,6 +375,9 @@ impl Store for PgStore {
                 )
                 .await?;
             if updated == 0 {
+                if token != 0 {
+                    return Err(Error::Io(fenced()));
+                }
                 let inserted = tx
                     .execute(
                         "INSERT INTO finite_designs (id, snapshot, epoch) VALUES ($1, $2, $3)
@@ -433,6 +436,23 @@ impl Store for PgStore {
             client
                 .execute("DELETE FROM finite_designs WHERE id = $1", &[&id])
                 .await?;
+            Ok(())
+        })
+    }
+
+    fn delete(&self, id: &str, token: Token) -> io::Result<()> {
+        let id = id.to_owned();
+        let token = token as i64;
+        query!(self, |client| {
+            let removed = client
+                .execute(
+                    "DELETE FROM finite_designs WHERE id = $1 AND epoch = $2",
+                    &[&id, &token],
+                )
+                .await?;
+            if removed == 0 {
+                return Err(Error::Io(fenced()));
+            }
             Ok(())
         })
     }

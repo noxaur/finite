@@ -67,7 +67,8 @@ const processes = [];
 const folders = [];
 const start = (args, env) => {
   const child = spawn(bin, args, {
-    env: { ...process.env, RUST_LOG: "warn", ...env },
+    // The component tools are an extra group; the viewer check below uses them.
+    env: { ...process.env, RUST_LOG: "warn", FINITE_MCP_EXTRA: "components", ...env },
     stdio: ["ignore", "inherit", "inherit"],
   });
   processes.push(child);
@@ -172,6 +173,7 @@ try {
     html: `<div data-name="Hero" style="padding:48px;display:flex;flex-direction:column;gap:16px"><h1 data-name="Title" style="margin:0;font:600 36px system-ui">Hello</h1><button data-name="CTA" style="width:160px;height:48px">Start</button></div>`,
   });
   const cta = idAfter(built, '"CTA"');
+  const title = idAfter(built, '"Title"');
   const live = idAfter(
     await agent.call("create_artboard", {
       designId: design,
@@ -234,6 +236,52 @@ try {
     "undo reverts it",
     Boolean(await page.until(`${shadow}.querySelector("button").style.outline === ""`)),
   );
+
+  // Components: an instance draws its component, and an edit to the
+  // component draws every instance again, while an override changes one.
+  const badge = idAfter(
+    await agent.call("write_html", {
+      designId: design,
+      targetId: page1,
+      html: `<span data-name="Badge" style="color: rgb(0, 0, 0)">New</span>`,
+    }),
+    '"Badge"',
+  );
+  await agent.call("create_component", { designId: design, nodeId: badge });
+  const instance = idAfter(
+    await agent.call("write_html", {
+      designId: design,
+      targetId: page1,
+      html: `<span data-instance-of="${badge}"></span>`,
+    }),
+    "span",
+  );
+  const drawn = (id) => `${shadow}.querySelectorAll("span")[${id === badge ? 0 : 1}]`;
+  check(
+    "an instance draws its component",
+    Boolean(await page.until(`${drawn(instance)}?.textContent === "New"`)),
+  );
+  await agent.call("update_styles", {
+    designId: design,
+    updates: [{ nodeIds: [badge], styles: { color: "rgb(0, 128, 0)" } }],
+  });
+  check(
+    "editing the component draws the instance again",
+    Boolean(await page.until(`${drawn(instance)}?.style.color === "rgb(0, 128, 0)"`)),
+  );
+  await agent.call("set_text_content", {
+    designId: design,
+    updates: [{ nodeId: instance, text: "Sale" }],
+  });
+  check(
+    "an override changes only the instance",
+    Boolean(
+      await page.until(
+        `${drawn(instance)}?.textContent === "Sale" && ${drawn(badge)}.textContent === "New"`,
+      ),
+    ),
+  );
+  await agent.call("delete_nodes", { designId: design, nodeIds: [badge, instance] });
 
   // A dropped connection resumes: the page gets what it missed, and the
   // artboards aren't rebuilt (a snapshot would replace the iframe).
@@ -385,10 +433,24 @@ try {
   const textarea = await rectOf(`document.querySelector("textarea")`);
   await page.click(textarea.x + 10, textarea.y + 10);
   await page.type("Make it orange");
+  // Shift-click adds the title to what the comment points at.
+  const heading = await rectOf(`${shadow}.querySelector("h1")`);
+  // Its left end: the comment box opens over the rest.
+  await page.click(heading.x + 5, heading.y + heading.h / 2, { shift: true });
+  await page.until(`document.querySelector('[data-selection-count="2"]')`);
+  check(
+    "shift-click outlines both elements",
+    (await page.eval(`document.querySelectorAll('[data-outline="target"]').length`)) === 2,
+  );
+  check(
+    "and keeps the comment box focused",
+    await page.eval(`document.activeElement?.value === "Make it orange"`),
+  );
   await page.key("Enter", "Enter", 13);
   await page.until(`document.querySelectorAll('button[aria-label^="Comment:"]').length === 1`);
   const [posted] = await comments(design);
   check("the comment points at the button", posted?.nodeId === cta);
+  check("and the title picked with it", posted?.extraNodeIds?.[0] === title);
   check("under the name the person set", posted?.messages[0].author.name === "Tester");
 
   // The agent picks it up, changes the button, and replies.
@@ -402,7 +464,6 @@ try {
     designId: design,
     commentId: posted.id,
     message: "Done",
-    resolve: true,
   });
   check("the reply links the agent's change", replied.includes("1 change"), replied);
 
@@ -419,6 +480,21 @@ try {
   );
   await page.until(`!document.querySelector('[data-outline="flash"]')`);
   await page.key("Escape", "Escape", 27);
+
+  // A resolved pin leaves the canvas at once, and reopening brings it back.
+  const pins = `document.querySelectorAll('button[aria-label^="Comment:"]').length`;
+  const setResolved = (resolved) =>
+    fetch(`${base}/api/designs/${design}/comments/${posted.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ resolved }),
+    });
+  await setResolved(true);
+  await page.until(`${pins} === 0`);
+  check("a resolved pin leaves the canvas", true);
+  await setResolved(false);
+  await page.until(`${pins} === 1`);
+  check("and returns when the comment reopens", true);
 
   // A comment inside the sandboxed artboard points at the element there.
   // Comment mode turns off the iframe's pointer events, but Chrome routes the
@@ -660,6 +736,166 @@ try {
     ),
   );
   await page.send("Network.setBlockedURLs", { urls: [] });
+
+  const deleteSearch = await rectOf(`document.querySelector('input[type="search"]')`);
+  await page.click(deleteSearch.x + 10, deleteSearch.y + 5);
+  await page.eval(`document.querySelector('input[type="search"]').select()`);
+  await page.type("E2E");
+  check(
+    "the design to delete is found by search",
+    Boolean(
+      await page.until(
+        `document.querySelectorAll("main li").length === 1 && document.querySelector("main li").textContent.includes("E2E")`,
+      ),
+    ),
+  );
+  await agent.call("delete_design", { designId: design });
+  check(
+    "deletion refreshes active search results",
+    Boolean(await page.until(`document.querySelectorAll("main li").length === 0`)),
+  );
+
+  // Artboards outside the view are hidden. A sandboxed one keeps its
+  // document for a while, so showing it again doesn't start its scripts
+  // over. "Fit to view" still counts the hidden ones, and an auto-height one
+  // keeps the height it had when it was shown.
+  const wide = (await agent.call("create_design", { name: "Culling" })).match(
+    /designId "([a-z0-9]+)"/,
+  )[1];
+  const near = idAfter(
+    await agent.call("create_artboard", { designId: wide, name: "Near", width: 600, height: 400 }),
+    "artboard",
+  );
+  const far = idAfter(
+    await agent.call("create_artboard", {
+      designId: wide,
+      name: "Far",
+      width: 600,
+      x: 30_000,
+      y: 0,
+    }),
+    "artboard",
+  );
+  await agent.call("write_html", {
+    designId: wide,
+    targetId: far,
+    html: `<div data-name="Tall" style="height:900px;background:#eee"></div>`,
+  });
+  const farLive = idAfter(
+    await agent.call("create_artboard", {
+      designId: wide,
+      name: "Far live",
+      width: 600,
+      height: 400,
+      x: 0,
+      y: 30_000,
+    }),
+    "artboard",
+  );
+  await agent.call("write_html", {
+    designId: wide,
+    targetId: farLive,
+    html: `<div data-name="Box" style="width:100px;height:100px;animation:spin 1s infinite"></div><style>@keyframes spin{to{opacity:.5}}</style><script>document.title="on";parent.postMessage({boot:1},"*")</script>`,
+  });
+  await page.goto(`${base}/design/?id=${wide}`);
+  await page.until(`document.querySelectorAll("[data-artboard]").length === 3`, 10_000);
+  const hidden = (id) =>
+    page.eval(`document.querySelector('[data-artboard="${id}"]').style.display === "none"`);
+  const loaded = () =>
+    page.eval(`document.querySelector('[data-artboard="${farLive}"] iframe').srcdoc.length > 0`);
+  const zoom = () =>
+    page.eval(
+      `getComputedStyle(document.querySelector("[data-artboard]").parentElement.parentElement).transform`,
+    );
+  await page.until(`!!document.querySelector('[data-artboard="${farLive}"] iframe')`, 10_000);
+  await page.sleep(300);
+  // Counts the times the sandboxed artboard's script starts from here on.
+  await page.eval(
+    `window.boots = 0; addEventListener("message", (e) => { if (e.data?.boot) window.boots++; })`,
+  );
+  check(
+    "zoomed out to fit, every artboard is drawn",
+    !(await hidden(near)) && !(await hidden(far)) && !(await hidden(farLive)) && (await loaded()),
+  );
+  const fitted = await zoom();
+  await page.key("0");
+  check(
+    "at 100%, artboards outside the view are hidden and their iframe stays loaded",
+    Boolean(
+      await page.until(
+        `document.querySelector('[data-artboard="${far}"]').style.display === "none" && document.querySelector('[data-artboard="${farLive}"]').style.display === "none"`,
+        5000,
+      ),
+    ) &&
+      !(await hidden(near)) &&
+      (await loaded()),
+  );
+  await page.key("!", "Digit1");
+  check(
+    "fit to view counts the hidden artboards, so it frames the same view",
+    Boolean(
+      await page.until(
+        `document.querySelector('[data-artboard="${far}"]').style.display === ""`,
+        5000,
+      ),
+    ) && (await zoom()) === fitted,
+  );
+  await page.sleep(300);
+  check(
+    "showing the sandboxed artboard again doesn't restart its script",
+    (await loaded()) && (await page.eval("window.boots")) === 0,
+  );
+
+  // Editing a component draws its instances in hidden artboards too, without
+  // reloading a hidden sandboxed one, and the index learns the new size.
+  const swatch = idAfter(
+    await agent.call("write_html", {
+      designId: wide,
+      targetId: near,
+      html: `<div data-name="Swatch" style="height:20px;background:rgb(0, 0, 255)"></div>`,
+    }),
+    '"Swatch"',
+  );
+  await agent.call("create_component", { designId: wide, nodeId: swatch });
+  for (const target of [far, farLive]) {
+    await agent.call("write_html", {
+      designId: wide,
+      targetId: target,
+      html: `<div data-instance-of="${swatch}"></div>`,
+    });
+  }
+  await page.key("0");
+  await page.until(
+    `document.querySelector('[data-artboard="${far}"]').style.display === "none" && document.querySelector('[data-artboard="${farLive}"]').style.display === "none"`,
+    5000,
+  );
+  await agent.call("update_styles", {
+    designId: wide,
+    updates: [{ nodeIds: [swatch], styles: { background: "rgb(0, 128, 0)" } }],
+  });
+  await page.sleep(600);
+  check(
+    "a hidden sandboxed artboard isn't reloaded when its component changes",
+    !(await page.eval(
+      `document.querySelector('[data-artboard="${farLive}"] iframe').srcdoc.includes("rgb(0, 128, 0)")`,
+    )),
+  );
+  check(
+    "a hidden artboard's instance is drawn again",
+    await page.eval(
+      `[...document.querySelector('[data-artboard="${far}"]').querySelectorAll("*")].map((e) => e.shadowRoot).find(Boolean).innerHTML.includes("rgb(0, 128, 0)")`,
+    ),
+  );
+  await page.key("!", "Digit1");
+  check(
+    "the sandboxed artboard loads the changed component once it's in view",
+    Boolean(
+      await page.until(
+        `document.querySelector('[data-artboard="${farLive}"] iframe').srcdoc.includes("rgb(0, 128, 0)")`,
+        5000,
+      ),
+    ),
+  );
 
   check("no errors on the page", page.errors.length === 0, page.errors.join(" | "));
 } catch (error) {

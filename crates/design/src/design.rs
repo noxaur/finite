@@ -130,6 +130,9 @@ pub struct Design {
     comment_updates: Vec<String>,
     /// Every import, oldest first. See [`Design::import`].
     imports: Vec<ImportRecord>,
+    /// The document with its instances expanded, made when first asked for
+    /// after a change. See [`Design::view`].
+    view: std::sync::OnceLock<Document>,
 }
 
 /// An edit being staged by [`Design::import`]. Ops apply as soon as they're
@@ -178,6 +181,7 @@ impl Design {
             log: ChangeLog::default(),
             comment_updates: Vec::new(),
             imports: Vec::new(),
+            view: Default::default(),
         }
     }
 
@@ -193,6 +197,7 @@ impl Design {
             log: snapshot.log.unwrap_or_default(),
             comment_updates: Vec::new(),
             imports: snapshot.imports,
+            view: Default::default(),
         }
     }
 
@@ -225,6 +230,18 @@ impl Design {
 
     pub fn doc(&self) -> &Document {
         &self.doc
+    }
+
+    /// The document as it renders: every instance shows its component's
+    /// content, as nodes with virtual ids (see [`crate::components`]). It's
+    /// the document itself when there are no instances. Tools that read
+    /// the design read this, and edits are built against it.
+    pub fn view(&self) -> &Document {
+        if !self.doc.has_instances() {
+            return &self.doc;
+        }
+        self.view
+            .get_or_init(|| crate::components::expand(&self.doc).into_owned())
     }
 
     pub fn seq(&self) -> u64 {
@@ -270,6 +287,7 @@ impl Design {
         if applied.is_empty() {
             return None;
         }
+        self.view.take();
         self.history_mut(actor).record(label.to_owned(), inverse);
         reattach(
             &self.doc,
@@ -302,12 +320,15 @@ impl Design {
             Ok(built) => built,
             Err(error) => {
                 tx.roll_back();
+                self.view.take();
                 return Err(error);
             }
         };
         let Transaction {
             applied, inverse, ..
         } = tx;
+        // The expanded view was made before the import's nodes existed.
+        self.view.take();
         self.imports.push(import);
         if applied.is_empty() {
             return Ok((None, output));
@@ -348,6 +369,7 @@ impl Design {
             if applied.is_empty() {
                 continue;
             }
+            self.view.take();
             reattach(
                 &self.doc,
                 &mut self.comments,
@@ -426,6 +448,7 @@ impl Design {
                 // rather than undo the wrong thing.
                 self.histories.clear();
             }
+            self.view.take();
             self.seq = change.seq;
             self.log.record(&change, &self.doc, before);
         }
@@ -500,7 +523,7 @@ impl Design {
         now: u64,
     ) -> Result<&Comment, CommentError> {
         let body = comment::check_body(body)?;
-        comment::check_anchor(&self.doc, &anchor)?;
+        comment::check_anchor(self.view(), &anchor)?;
         self.check_room_to_open()?;
         let id = loop {
             let id = new_id();
@@ -512,6 +535,7 @@ impl Design {
             id,
             artboard_id: anchor.artboard_id,
             node_id: anchor.node_id,
+            extra_node_ids: anchor.extra_node_ids,
             x: anchor.x,
             y: anchor.y,
             resolved: false,
@@ -730,6 +754,45 @@ mod tests {
     }
 
     #[test]
+    fn an_import_shows_in_the_view_that_was_read_before_it() {
+        let mut d = design();
+        let mut ops = vec![create("a", None), create("bar", Some("a"))];
+        ops.push(Op::Set {
+            id: "bar".into(),
+            key: PropKey::Component,
+            value: Some(json!(true)),
+        });
+        let mut instance = Node::element("i", "div");
+        instance.parent = Some("a".into());
+        instance.index = "W".into();
+        instance.instance_of = Some("bar".into());
+        ops.push(Op::Create { node: instance });
+        d.commit("alice", "setup", &ops, 1);
+        // Reading the expanded view caches it.
+        assert!(d.view().get("b").is_none());
+
+        let record = crate::import::ImportRecord {
+            id: "imp".into(),
+            artifact: crate::import::BlobHash::of(b"x"),
+            format: "html".into(),
+            input_kind: "html".into(),
+            file_name: None,
+            received_at: 0,
+            nodes: Default::default(),
+            dependencies: Vec::new(),
+            quarantined: Vec::new(),
+        };
+        let (change, ()) = d
+            .import::<_, Rejected>("alice", "Import", 2, |tx| {
+                tx.apply(&[create("b", None)])?;
+                Ok((record, ()))
+            })
+            .unwrap();
+        assert!(change.is_some());
+        assert!(d.view().get("b").is_some(), "the import is in the view");
+    }
+
+    #[test]
     fn undo_only_reverses_own_changes() {
         let mut d = design();
         d.commit("alice", "board", &[create("a", None)], 1);
@@ -822,6 +885,7 @@ mod tests {
         let anchor = Anchor {
             artboard_id: Some(artboard.into()),
             node_id: Some(artboard.into()),
+            extra_node_ids: Vec::new(),
             x: 10.0,
             y: 20.0,
         };
@@ -987,6 +1051,7 @@ mod tests {
         let anchor = Anchor {
             artboard_id: Some("a".into()),
             node_id: None,
+            extra_node_ids: Vec::new(),
             x: 0.0,
             y: 0.0,
         };
@@ -1033,6 +1098,7 @@ mod tests {
         let anchor = Anchor {
             artboard_id: Some("missing".into()),
             node_id: None,
+            extra_node_ids: Vec::new(),
             x: 0.0,
             y: 0.0,
         };

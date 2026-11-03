@@ -98,6 +98,7 @@ async fn wire_messages_match_the_fixture() {
     let anchor = Anchor {
         artboard_id: Some("board".into()),
         node_id: Some("n1".into()),
+        extra_node_ids: Vec::new(),
         x: 24.0,
         y: 16.0,
     };
@@ -144,6 +145,7 @@ async fn wire_messages_match_the_fixture() {
     let anchor = Anchor {
         artboard_id: Some("scratch".into()),
         node_id: None,
+        extra_node_ids: Vec::new(),
         x: 5.0,
         y: 5.0,
     };
@@ -161,6 +163,21 @@ async fn wire_messages_match_the_fixture() {
             Ok((edit::set_css(":root { --brand: orange; }")?, ()))
         })
         .unwrap();
+    // The button becomes a component, and an instance of it removes its padding.
+    handle
+        .edit(&agent, "Create component", |doc| {
+            Ok((edit::create_component(doc, "n1", Some("CTA"), &[])?, ()))
+        })
+        .unwrap();
+    handle
+        .edit(&agent, "Insert instance", |doc| {
+            let values = [edit::InstanceValues {
+                styles: BTreeMap::from([("padding".to_owned(), None)]),
+                ..Default::default()
+            }];
+            edit::insert_instance(doc, "n1", "board", None, None, &values, &mut new_id)
+        })
+        .unwrap();
     handle.rename("Landing v2".into());
     let user = Author {
         id: "user:1".into(),
@@ -170,6 +187,7 @@ async fn wire_messages_match_the_fixture() {
     let anchor = Anchor {
         artboard_id: None,
         node_id: None,
+        extra_node_ids: Vec::new(),
         x: 0.0,
         y: 0.0,
     };

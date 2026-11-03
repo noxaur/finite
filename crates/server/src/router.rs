@@ -586,6 +586,15 @@ async fn relay_lobby(
                     lists[at] = list_of(&message);
                     merged(&lists)
                 } else {
+                    if message["type"] == "design" {
+                        let (list, total) = &mut lists[at];
+                        let design = &message["design"];
+                        list.retain(|d| d["id"] != design["id"]);
+                        list.push(design.clone());
+                        *total = (*total).max(list.len() as u64);
+                        sort_newest_first(list);
+                        list.truncate(LOBBY_LIMIT);
+                    }
                     message.to_string()
                 };
                 if !heartbeat::send(&mut client, ws::Message::text(out)).await {

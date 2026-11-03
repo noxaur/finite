@@ -94,6 +94,7 @@ impl Walk<'_> {
                 styles,
                 attrs: BTreeMap::new(),
                 children: self.characters(&characters[start..end], format!("{path}/characters")),
+                ..Fragment::empty(NodeKind::Text)
             });
             (done, done_units) = (end, run.end);
         }
@@ -158,6 +159,7 @@ impl Walk<'_> {
             styles: BTreeMap::new(),
             attrs: BTreeMap::new(),
             children: Vec::new(),
+            ..Fragment::empty(NodeKind::Text)
         }]
     }
 }

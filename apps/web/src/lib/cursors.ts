@@ -1,6 +1,7 @@
 /**
  * Hand-inked cursors as CSS custom properties on :root. Each renders at 24px (the comment pin at 28)
- * with an ink stroke, a white halo and a small wobble filter, so they stay sharp and under 32px.
+ * in black ink with a white outline, a small wobble filter and a soft drop shadow, so they stay
+ * sharp, readable on any background and under 32px.
  */
 
 const INK = "#1a1a18";
@@ -10,11 +11,11 @@ export const PIN_PATH =
   "M3 34C5 31 7 28 8 25C4 22 2 18 2 14C2 7 10 2 20 2C30 2 38 7 38 14C38 22 30 27 20 27C17 27 15 27 13 26C10 30 6 33 3 34Z";
 
 const HAND_POINTER =
-  "M10.5 19V4.5A2.5 2.5 0 0 1 15.5 4.5V12.5A1.75 1.75 0 0 1 19 12.5V13A1.75 1.75 0 0 1 22.5 13.5A1.75 1.75 0 0 1 26 15V22C26 26.5 23.5 29 19.5 29H17C14 29 12.5 27.5 11 25.5L6.5 20.5C5.5 19.2 6 17.5 7.5 17.5C8.5 17.5 9.5 18 10.5 19Z";
+  "M11 18.6V7A1.8 1.8 0 0 1 14.6 7V14.6L15.1 15.6L15.6 14.6A2 2 0 0 1 19.6 14.6L20.1 15.6L20.6 14.8A1.9 1.9 0 0 1 24.4 14.8L24.9 15.8L25.4 16.2A1.6 1.6 0 0 1 28.6 16.2V21.5C28.6 26.5 25.6 29.6 21 29.6H17C14 29.6 12.4 28.2 10.9 26L6 19.8C4.9 18.4 5.8 16.4 7.6 16.6C9 16.8 10.1 17.6 11 18.6Z";
 const OPEN_HAND =
-  "M16 23V12A2.75 2.75 0 0 1 21.5 12V9.5A2.75 2.75 0 0 1 27 9.5V11A2.75 2.75 0 0 1 32.5 11V15A2.25 2.25 0 0 1 37 15V29C37 37 34.5 41.5 28.5 41.5H24.5C20.5 41.5 18 39.5 16 36.5L10.5 29A2.75 2.75 0 0 1 14.5 25.5L16 26.5Z";
+  "M10 18.6V8.8A1.8 1.8 0 0 1 13.6 8.8V14L14.3 15.2L15 14V6.8A1.8 1.8 0 0 1 18.6 6.8V14L19.3 15.2L20 14V7.8A1.8 1.8 0 0 1 23.6 7.8V14.4L24.3 15.6L25 14.4V11.1A1.6 1.6 0 0 1 28.2 11.1V21.5C28.2 26.5 25.4 29.6 21 29.6H16.6C13.6 29.6 12 28.2 10.4 26L5 19.6C3.9 18.2 4.8 16.2 6.6 16.4C8 16.6 9.2 17.6 10 18.6Z";
 const CLOSED_HAND =
-  "M13 18.5C13 12 19 12.5 19 17C19 11.5 25 11.5 25 17C25 11.5 31 11.5 31 17C31 12.5 37 12.5 37 18L37.5 30C37.5 35 34.5 38 30 38L20 38C16 38 14 36 13 32.5L10.5 26.5C9.5 23.5 11.5 21.5 13.5 22.5Z";
+  "M9.6 15.2L9.4 12.4A2 2 0 0 1 13.4 12.4L13.8 13.4L14.2 11.6A2 2 0 0 1 18.2 11.6L18.6 12.8L19 12A2 2 0 0 1 23 12L23.4 13.2L23.8 13.4A1.8 1.8 0 0 1 27.4 13.4V20C27.4 25 25 27.6 21 27.6H15.6C12.8 27.6 11.2 26.4 10 24.4L6.4 20.4C5.2 19 5.4 16.8 7.2 16C8 15.6 8.9 15.4 9.6 15.2Z";
 
 type Point = readonly [number, number];
 
@@ -59,14 +60,18 @@ const HOURGLASS =
 const circle = (cx: number, cy: number, r: number) =>
   `M${cx} ${cy - r}A${r} ${r} 0 1 0 ${cx} ${cy + r}A${r} ${r} 0 1 0 ${cx} ${cy - r}Z`;
 
-/** One inked stroke. Every layer gets a white halo (`halo: false` opts out) under the ink pass. */
+/**
+ * One inked stroke. Every layer gets a white outline under the ink pass; `halo: false` marks a
+ * detail drawn over a filled shape, which is inked in white instead.
+ */
 interface Layer {
   readonly d: string;
   /** Ink stroke width in viewBox units. */
   readonly width: number;
   readonly fill?: string;
-  readonly dash?: string;
   readonly halo?: boolean;
+  /** How far the white outline reaches past the ink edge; defaults to half the ink width. */
+  readonly outline?: number;
 }
 
 interface Frame {
@@ -84,30 +89,35 @@ function cursor(frame: Frame, layers: ReadonlyArray<Layer>) {
   const px = frame.size / bw;
   const height = Math.round(bh * px);
   const wobble = 'filter="url(#w)"';
-  const stroke = (l: Layer, color: string, width: number) =>
-    `stroke="${color}" stroke-linecap="round" stroke-linejoin="round" stroke-width="${width}"` +
-    (l.dash ? ` stroke-dasharray="${l.dash}"` : "");
+  const stroke = (color: string, width: number) =>
+    `stroke="${color}" stroke-linecap="round" stroke-linejoin="round" stroke-width="${width}"`;
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="${frame.size}" height="${height}" viewBox="${frame.box.join(" ")}">` +
     `<filter id="w" x="-20%" y="-20%" width="140%" height="140%">` +
     `<feTurbulence type="fractalNoise" baseFrequency="${+(0.07 * px).toFixed(4)}" numOctaves="1" seed="3"/>` +
     `<feDisplacementMap in="SourceGraphic" scale="${+(1.3 / px).toFixed(2)}" xChannelSelector="R" yChannelSelector="G"/></filter>` +
+    `<filter id="s" x="-30%" y="-30%" width="160%" height="160%">` +
+    `<feDropShadow dx="0" dy="${+(0.8 / px).toFixed(2)}" stdDeviation="${+(0.7 / px).toFixed(2)}" flood-color="#000" flood-opacity="0.35"/></filter>` +
+    `<g filter="url(#s)">` +
     layers
       .filter((l) => l.halo !== false)
-      .map((l) => `<path d="${l.d}" fill="none" ${wobble} ${stroke(l, "#fff", l.width * 2)}/>`)
+      .map(
+        (l) =>
+          `<path d="${l.d}" fill="none" ${wobble} ${stroke("#fff", l.width + 2 * (l.outline ?? l.width / 2))}/>`,
+      )
       .join("") +
     layers
       .map(
-        (l) => `<path d="${l.d}" fill="${l.fill ?? "none"}" ${wobble} ${stroke(l, INK, l.width)}/>`,
+        (l) =>
+          `<path d="${l.d}" fill="${l.fill ?? "none"}" ${wobble} ${stroke(l.halo === false ? "#fff" : INK, l.width)}/>`,
       )
       .join("") +
-    `</svg>`;
+    `</g></svg>`;
   const x = Math.round((frame.hotspot[0] - bx) * px);
   const y = Math.round((frame.hotspot[1] - by) * px);
   return `url("data:image/svg+xml,${encodeURIComponent(svg)}") ${x} ${y}, ${frame.fallback}`;
 }
 
-const W = "#fff";
 const unit = (hotspot: Point, fallback: string): Frame => ({
   box: [0, 0, 24, 24],
   size: 24,
@@ -117,78 +127,72 @@ const unit = (hotspot: Point, fallback: string): Frame => ({
 const CENTER: Point = [12, 12];
 
 const CURSORS: Record<string, string> = {
-  arrow: cursor(unit([4, 3], "default"), [{ d: ARROW, fill: W, width: 1.5 }]),
-  pointer: cursor({ box: [0, -1, 32, 32], size: 24, hotspot: [13, 2], fallback: "pointer" }, [
-    { d: HAND_POINTER, fill: W, width: 2.4 },
-    { d: "M15.5 13V16M19 13.5V16M22.5 14V16.5", width: 2, halo: false },
+  arrow: cursor(unit([4, 3], "default"), [{ d: ARROW, fill: INK, width: 1.5 }]),
+  // The hands are thin-inked with a wide outline, so the notches between fingers show white.
+  pointer: cursor({ box: [1, 2, 30, 30], size: 24, hotspot: [12.8, 5.5], fallback: "pointer" }, [
+    { d: HAND_POINTER, fill: INK, width: 0.6, outline: 1 },
   ]),
-  grab: cursor({ box: [5, 3, 41, 41], size: 24, hotspot: [24, 26], fallback: "grab" }, [
-    { d: OPEN_HAND, fill: W, width: 3 },
-    { d: "M21.5 12.5V21M27 11.5V21M32.5 15.5V21", width: 2.5, halo: false },
+  grab: cursor({ box: [1, 2, 30, 30], size: 24, hotspot: [19, 18], fallback: "grab" }, [
+    { d: OPEN_HAND, fill: INK, width: 0.6, outline: 1 },
   ]),
-  grabbing: cursor({ box: [6, 7, 36, 36], size: 24, hotspot: [24, 25], fallback: "grabbing" }, [
-    { d: CLOSED_HAND, fill: W, width: 2.9 },
-    {
-      d: "M19 17V20.5M25 17V20.5M31 17V20.5M13.5 22.5C16 24 19 24.5 22 24",
-      width: 2.3,
-      halo: false,
-    },
+  grabbing: cursor({ box: [3, 3, 30, 30], size: 24, hotspot: [18, 17], fallback: "grabbing" }, [
+    { d: CLOSED_HAND, fill: INK, width: 0.6, outline: 1 },
   ]),
   // The comment tool's cursor is the draft pin, so the bubble you place lands where its tail tip is.
   comment: cursor({ box: [-2, -1, 44, 40], size: 28, hotspot: [3, 34], fallback: "crosshair" }, [
-    { d: PIN_PATH, fill: W, width: 2.5, dash: "4 3" },
+    { d: PIN_PATH, fill: INK, width: 2.5 },
   ]),
   text: cursor(unit(CENTER, "text"), [{ d: "M8.5 4H15.5M12 4V20M8.5 20H15.5", width: 1.5 }]),
   crosshair: cursor(unit(CENTER, "crosshair"), [
     { d: "M12 3V9M12 15V21M3 12H9M15 12H21", width: 1.5 },
-    { d: "M12 12H12.01", width: 1.5, halo: false },
+    { d: "M12 12H12.01", width: 1.5 },
   ]),
   "not-allowed": cursor(unit(CENTER, "not-allowed"), [
-    { d: circle(12, 12, 7.5), fill: W, width: 1.6 },
+    { d: circle(12, 12, 7.5), fill: INK, width: 1.6 },
     { d: "M6.7 6.7L17.3 17.3", width: 1.6, halo: false },
   ]),
   wait: cursor(unit(CENTER, "wait"), [
-    { d: HOURGLASS, fill: W, width: 1.5 },
+    { d: HOURGLASS, fill: INK, width: 1.5 },
     { d: "M9.6 17.6H14.4", width: 1.5, halo: false },
   ]),
   progress: cursor(unit([4, 3], "progress"), [
-    { d: ARROW_SMALL, fill: W, width: 1.5 },
-    { d: circle(16.5, 16.5, 4.5), fill: W, width: 1.5 },
+    { d: ARROW_SMALL, fill: INK, width: 1.5 },
+    { d: circle(16.5, 16.5, 4.5), fill: INK, width: 1.5 },
     { d: "M16.5 13.9V16.5H18.5", width: 1.4, halo: false },
   ]),
   help: cursor(unit([4, 3], "help"), [
-    { d: ARROW_SMALL, fill: W, width: 1.5 },
+    { d: ARROW_SMALL, fill: INK, width: 1.5 },
     {
       d: "M13.6 11.6C13.8 9.2 18.6 9.2 18.6 12.1C18.6 14 16.2 14.2 16.2 16.2M16.2 19.6H16.21",
       width: 1.6,
     },
   ]),
-  move: cursor(unit(CENTER, "move"), [{ d: MOVE, fill: W, width: 1.4 }]),
+  move: cursor(unit(CENTER, "move"), [{ d: MOVE, fill: INK, width: 1.4 }]),
   "zoom-in": cursor(unit([10, 10], "zoom-in"), [
     { d: "M14.6 14.6L20 20", width: 2.2 },
-    { d: circle(10, 10, 6), fill: W, width: 1.5 },
+    { d: circle(10, 10, 6), fill: INK, width: 1.5 },
     { d: "M7.2 10H12.8M10 7.2V12.8", width: 1.4, halo: false },
   ]),
   "zoom-out": cursor(unit([10, 10], "zoom-out"), [
     { d: "M14.6 14.6L20 20", width: 2.2 },
-    { d: circle(10, 10, 6), fill: W, width: 1.5 },
+    { d: circle(10, 10, 6), fill: INK, width: 1.5 },
     { d: "M7.2 10H12.8", width: 1.4, halo: false },
   ]),
   "resize-ew": cursor(unit(CENTER, "ew-resize"), [
-    { d: polygon(DOUBLE_ARROW), fill: W, width: 1.4 },
+    { d: polygon(DOUBLE_ARROW), fill: INK, width: 1.4 },
   ]),
   "resize-ns": cursor(unit(CENTER, "ns-resize"), [
-    { d: polygon(DOUBLE_ARROW, 90), fill: W, width: 1.4 },
+    { d: polygon(DOUBLE_ARROW, 90), fill: INK, width: 1.4 },
   ]),
   "resize-nwse": cursor(unit(CENTER, "nwse-resize"), [
-    { d: polygon(DOUBLE_ARROW, 45), fill: W, width: 1.4 },
+    { d: polygon(DOUBLE_ARROW, 45), fill: INK, width: 1.4 },
   ]),
   "resize-nesw": cursor(unit(CENTER, "nesw-resize"), [
-    { d: polygon(DOUBLE_ARROW, -45), fill: W, width: 1.4 },
+    { d: polygon(DOUBLE_ARROW, -45), fill: INK, width: 1.4 },
   ]),
   copy: cursor(unit([4, 3], "copy"), [
-    { d: ARROW_SMALL, fill: W, width: 1.5 },
-    { d: "M13 13H21V21H13Z", fill: W, width: 1.4 },
+    { d: ARROW_SMALL, fill: INK, width: 1.5 },
+    { d: "M13 13H21V21H13Z", fill: INK, width: 1.4 },
     { d: "M17 15V19M15 17H19", width: 1.3, halo: false },
   ]),
 };

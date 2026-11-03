@@ -14,6 +14,10 @@ use crate::node::{Node, NodeId, NodeKind, PropKey};
 /// Serialized with its kind in `op`, as in `{"op": "delete", "id": "4biyjm26"}`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "ops are built and applied in place; boxing the node would touch every one"
+)]
 pub enum Op {
     /// Inserts one node. Children are separate `Create` ops that follow their parent.
     Create { node: Node },
@@ -146,12 +150,22 @@ impl Op {
                     + node.index.len()
                     + node.name.as_ref().map_or(0, String::len)
                     + node.text.as_ref().map_or(0, String::len)
+                    + node.instance_of.as_ref().map_or(0, String::len)
                     + strings(&node.styles)
                     + strings(&node.attrs)
+                    + node
+                        .overrides
+                        .iter()
+                        .map(|(k, v)| k.len() + v.as_ref().map_or(0, String::len) + 8)
+                        .sum::<usize>()
             }
             Op::Delete { id } => BASE + id.len(),
-            Op::Set { id, value, .. } => {
-                BASE + id.len() + value.as_ref().and_then(Value::as_str).map_or(16, str::len)
+            Op::Set { id, key, value } => {
+                let key = match key {
+                    PropKey::Override(k) => k.len(),
+                    _ => 0,
+                };
+                BASE + id.len() + key + value.as_ref().and_then(Value::as_str).map_or(16, str::len)
             }
             Op::Move { id, index, .. } => BASE + id.len() + index.len(),
             Op::Css { css } => BASE + css.as_ref().map_or(0, String::len),
@@ -225,6 +239,9 @@ pub struct Document {
     nodes: HashMap<NodeId, Node>,
     /// Children of each parent (`None` for artboards), sorted by `(index, id)`.
     child_index: HashMap<Option<NodeId>, BTreeSet<(String, NodeId)>>,
+    /// The instances of each component, by the component's id. A component
+    /// that's gone can still have instances here, until they're detached.
+    instances: HashMap<NodeId, BTreeSet<NodeId>>,
     /// The shared stylesheet: CSS every artboard renders with, before its own
     /// `<style>` blocks and inline styles, so those still override it.
     css: Option<String>,
@@ -332,7 +349,26 @@ impl Document {
                     .insert(node.parent.clone(), BTreeSet::from([key]));
             }
         }
+        if let Some(component) = &node.instance_of {
+            self.link_instance(component, &node.id);
+        }
         self.nodes.insert(node.id.clone(), node);
+    }
+
+    fn link_instance(&mut self, component: &str, id: &str) {
+        self.instances
+            .entry(component.to_owned())
+            .or_default()
+            .insert(id.to_owned());
+    }
+
+    fn unlink_instance(&mut self, component: &str, id: &str) {
+        if let Some(ids) = self.instances.get_mut(component) {
+            ids.remove(id);
+            if ids.is_empty() {
+                self.instances.remove(component);
+            }
+        }
     }
 
     fn remove(&mut self, id: &str) -> Option<Node> {
@@ -343,7 +379,31 @@ impl Document {
                 self.child_index.remove(&node.parent);
             }
         }
+        if let Some(component) = &node.instance_of {
+            self.unlink_instance(component, id);
+        }
         Some(node)
+    }
+
+    /// Whether any node is an instance of a component.
+    pub fn has_instances(&self) -> bool {
+        !self.instances.is_empty()
+    }
+
+    /// The ids of `component`'s instances, in id order.
+    pub fn instances_of(&self, component: &str) -> impl Iterator<Item = &str> {
+        self.instances
+            .get(component)
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+    }
+
+    /// Every component that has instances, with their ids.
+    pub fn instance_lists(&self) -> impl Iterator<Item = (&str, impl Iterator<Item = &str>)> {
+        self.instances
+            .iter()
+            .map(|(c, ids)| (c.as_str(), ids.iter().map(String::as_str)))
     }
 
     pub fn get(&self, id: &str) -> Option<&Node> {
@@ -484,13 +544,15 @@ impl Document {
         crate::fractional::keys_between(before, after, n)
     }
 
+    /// Whether a node can go under `parent`: an element, but not an
+    /// instance, whose content comes from its component.
     fn can_parent(&self, parent: Option<&str>) -> bool {
         match parent {
             None => true,
-            Some(p) => matches!(
-                self.nodes.get(p).map(|n| &n.kind),
-                Some(NodeKind::Element { .. })
-            ),
+            Some(p) => self
+                .nodes
+                .get(p)
+                .is_some_and(|n| matches!(n.kind, NodeKind::Element { .. }) && !n.is_instance()),
         }
     }
 
@@ -517,6 +579,9 @@ impl Document {
                 if !self.can_parent(node.parent.as_deref()) {
                     return Err(Rejected::NoParent(node.id.clone()));
                 }
+                if (node.is_instance() || node.component) && node.kind == NodeKind::Text {
+                    return Err(Rejected::Invalid(node.id.clone()));
+                }
                 self.insert(node.clone());
                 Ok(Changed(vec![Op::Delete {
                     id: node.id.clone(),
@@ -538,17 +603,47 @@ impl Document {
                 ))
             }
             Op::Set { id, key, value } => {
+                // `false` is how a component flag reads when it's unset.
+                let unset = |v: &Value| v.is_null() || (*key == PropKey::Component && *v == false);
+                let value = value.clone().filter(|v| !unset(v));
+                let element = matches!(
+                    self.nodes
+                        .get(id)
+                        .ok_or_else(|| Rejected::Missing(id.clone()))?
+                        .kind,
+                    NodeKind::Element { .. }
+                );
+                match key {
+                    // Only an element without children can become an
+                    // instance, and only an element can be a component.
+                    PropKey::InstanceOf if value.is_some() => {
+                        if !element || self.child_index.contains_key(&Some(id.clone())) {
+                            return Err(Rejected::Invalid(id.clone()));
+                        }
+                    }
+                    PropKey::Component if !element => return Err(Rejected::Invalid(id.clone())),
+                    _ => {}
+                }
                 let node = self
                     .nodes
                     .get_mut(id)
                     .ok_or_else(|| Rejected::Missing(id.clone()))?;
-                let value = value.clone().filter(|v| !v.is_null());
                 let previous = node.get(key);
                 if previous == value {
                     return Ok(Unchanged);
                 }
+                let before = node.instance_of.clone();
                 node.set(key, value)
                     .map_err(|_| Rejected::Invalid(id.clone()))?;
+                if *key == PropKey::InstanceOf {
+                    let after = node.instance_of.clone();
+                    if let Some(c) = before {
+                        self.unlink_instance(&c, id);
+                    }
+                    if let Some(c) = after {
+                        self.link_instance(&c, id);
+                    }
+                }
                 Ok(Changed(vec![Op::Set {
                     id: id.clone(),
                     key: key.clone(),

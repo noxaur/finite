@@ -178,6 +178,71 @@ async fn agents_answer_comments_and_link_their_changes() {
     assert!(info.contains("\"openComments\": 0"), "{info}");
 }
 
+/// A comment can point at several elements, and agents see each of them.
+#[tokio::test]
+async fn a_comment_points_at_several_elements() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Claude").await;
+    let created = agent
+        .ok("create_design", json!({ "name": "Landing" }))
+        .await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .unwrap()
+        .to_owned();
+    let board = agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Home", "width": 400, "height": 300 }),
+        )
+        .await;
+    let board = id_after(&board, "Created artboard");
+    let wrote = agent
+        .ok(
+            "write_html",
+            json!({ "designId": design, "targetId": board,
+                    "html": "<h1 data-name=\"Title\">Hi</h1><button data-name=\"CTA\">Go</button>" }),
+        )
+        .await;
+    let title = id_after(&wrote, "Title");
+    let cta = id_after(&wrote, "CTA");
+
+    let post = |extra: Value| {
+        let app = app.clone();
+        let req = Request::post(format!("/api/designs/{design}/comments"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "author": { "id": "u1", "name": "Guest" }, "body": "Line these up",
+                        "artboardId": board, "nodeId": title, "extraNodeIds": extra,
+                        "x": 10, "y": 10 })
+                .to_string(),
+            ))
+            .unwrap();
+        async move { app.oneshot(req).await.unwrap().status() }
+    };
+    assert_eq!(post(json!([title])).await, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(post(json!([cta])).await, StatusCode::CREATED);
+
+    let comments = agent
+        .ok("get_comments", json!({ "designId": design }))
+        .await;
+    let comment: Value = serde_json::from_str(&comments).unwrap();
+    assert_eq!(comment[0]["nodeId"], title.as_str());
+    assert_eq!(
+        comment[0]["alsoSelected"][0]["nodeId"],
+        cta.as_str(),
+        "{comments}"
+    );
+    assert!(
+        comment[0]["alsoSelected"][0]["node"]
+            .as_str()
+            .unwrap()
+            .contains("CTA"),
+        "{comments}"
+    );
+}
+
 #[tokio::test]
 async fn an_agent_waits_for_the_next_comment() {
     let app = test_app();
@@ -1414,4 +1479,227 @@ async fn agents_keep_components_on_their_own_page() {
         .ok("get_basic_info", json!({ "designId": design }))
         .await;
     assert!(info.contains("\"artboardCount\": 2"), "{info}");
+}
+
+#[tokio::test]
+async fn an_agent_deletes_a_design_permanently() {
+    let store = std::sync::Arc::new(finite_server::store::MemoryStore::default());
+    let hub = finite_server::Hub::new(store.clone()).unwrap();
+    let app = finite_server::app(hub.clone(), None);
+    let mut agent = Agent::connect(&app, "Alice").await;
+    let doomed = hub.create("Draft");
+    let kept = hub.create("Keep");
+    let id = &doomed.meta.id;
+    agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": id, "name": "Home", "width": 390 }),
+        )
+        .await;
+    let handle = hub.get(id).unwrap();
+    let (_, _, mut viewer) = handle.subscribe();
+    let (_, mut lobby) = hub.subscribe_lobby();
+    let tools = agent.rpc("tools/list", None).await;
+    let tool = tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "delete_design")
+        .unwrap();
+    assert_eq!(tool["annotations"]["destructiveHint"], true);
+    let deleted = agent.ok("delete_design", json!({ "designId": id })).await;
+    assert_eq!(deleted, "Deleted the design permanently.");
+    assert!(viewer.recv().await.is_err());
+    let message: Value = serde_json::from_str(&lobby.recv().await.unwrap().json).unwrap();
+    assert_eq!(message["type"], "designs");
+    assert_eq!(message["total"], 1);
+    assert_eq!(message["designs"][0]["id"], kept.meta.id);
+    for tool in ["get_basic_info", "undo", "delete_design"] {
+        let (text, error) = agent.call(tool, json!({ "designId": id })).await;
+        assert!(error && text.contains("not found"), "{tool}: {text}");
+    }
+    let listed = agent.ok("list_designs", json!({})).await;
+    assert!(!listed.contains(id));
+    assert!(listed.contains(&kept.meta.id));
+    hub.flush();
+    let restored = finite_server::Hub::new(store).unwrap();
+    assert!(restored.get(id).is_none());
+    assert!(restored.get(&kept.meta.id).is_some());
+}
+
+#[tokio::test]
+async fn deleting_a_design_ends_a_pending_comment_wait() {
+    let hub = finite_server::Hub::new(std::sync::Arc::new(
+        finite_server::store::MemoryStore::default(),
+    ))
+    .unwrap();
+    let design = hub.create("Waiting").meta.id;
+    let app = finite_server::app(hub.clone(), None);
+    let mut waiter = Agent::connect(&app, "Waiter").await;
+    let waiting_id = design.clone();
+    let waiting = tokio::spawn(async move {
+        waiter
+            .call(
+                "wait_for_comments",
+                json!({ "designId": waiting_id, "timeoutSeconds": 3 }),
+            )
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let handle = hub.get(&design).unwrap();
+    hub.delete(&handle).unwrap();
+    let (text, error) = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+        .await
+        .expect("deletion must end the wait promptly")
+        .unwrap();
+    assert!(error && text.contains("not found"), "{text}");
+}
+
+#[tokio::test]
+async fn an_agent_gets_jsx_for_a_node() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Dev").await;
+    let created = agent.ok("create_design", json!({ "name": "Code" })).await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .unwrap()
+        .to_owned();
+    let hash = "a".repeat(64);
+    let html = format!(
+        "<div data-name=\"Card\" class=\"card\" style=\"display: flex; gap: 8px; background-color: #fff; color: red !important\"><label for=\"a\">Name</label><img src=\"/api/designs/{design}/assets/{hash}\"><script>go()</script></div>"
+    );
+    let board = agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Card", "width": 390, "height": 400, "html": html }),
+        )
+        .await;
+    let board = id_after(&board, "Created artboard");
+    let card = agent
+        .ok(
+            "get_children",
+            json!({ "designId": design, "nodeId": board }),
+        )
+        .await;
+    let card: Value = serde_json::from_str(&card).unwrap();
+    let card = card[0]["id"].as_str().unwrap().to_owned();
+
+    let jsx = agent
+        .ok("get_jsx", json!({ "designId": design, "nodeId": card }))
+        .await;
+    assert!(
+        jsx.contains("className=\"card\"")
+            && jsx.contains("htmlFor=\"a\"")
+            && jsx.contains("backgroundColor: \"#fff\"")
+            && jsx.contains("gap: \"8px\""),
+        "{jsx}"
+    );
+    assert!(jsx.contains("Left out <script>"), "{jsx}");
+    assert!(jsx.contains("Left out !important on color"), "{jsx}");
+    assert!(!jsx.contains("important\""), "{jsx}");
+    // Stored images keep their server URLs, as in get_html, and the result says so.
+    assert!(
+        jsx.contains(&format!("/api/designs/{design}/assets/{hash}")),
+        "{jsx}"
+    );
+    assert!(
+        jsx.contains("1 image URL points at this server's stored files"),
+        "{jsx}"
+    );
+
+    let tailwind = agent
+        .ok(
+            "get_jsx",
+            json!({ "designId": design, "nodeId": card, "tailwind": true }),
+        )
+        .await;
+    assert!(
+        tailwind.contains("className=\"card ")
+            && tailwind.contains(" flex ")
+            && tailwind.contains("gap-[8px]")
+            && tailwind.contains("[background-color:#fff]")
+            && !tailwind.contains("style={{"),
+        "{tailwind}"
+    );
+
+    let (error, failed) = agent
+        .call(
+            "get_jsx",
+            json!({ "designId": design, "nodeId": "missing" }),
+        )
+        .await;
+    assert!(failed && error.contains("not found"), "{error}");
+}
+
+/// A node too big for one result returns its outline, and JSX is a format
+/// that only exports, so it fails clearly where the others work.
+#[tokio::test]
+async fn jsx_results_are_cut_and_the_format_only_exports() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Dev").await;
+    let created = agent.ok("create_design", json!({ "name": "Big" })).await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .unwrap()
+        .to_owned();
+    let board = agent
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Grid", "width": 1440, "height": 900 }),
+        )
+        .await;
+    let board = id_after(&board, "Created artboard");
+    let card = r#"<div data-name="Card" style="padding: 8px"><p>A product with a long description</p></div>"#;
+    agent
+        .ok(
+            "write_html",
+            json!({ "designId": design, "targetId": board, "html": card.repeat(3_000) }),
+        )
+        .await;
+    let jsx = agent
+        .ok("get_jsx", json!({ "designId": design, "nodeId": board }))
+        .await;
+    assert!(jsx.len() < 60_000 + 200, "get_jsx said {} chars", jsx.len());
+    assert!(
+        jsx.contains("Call get_jsx on one of its children"),
+        "{}",
+        tail(&jsx)
+    );
+
+    // The whole design doesn't fit in one component file.
+    let (error, failed) = agent
+        .call(
+            "export_design",
+            json!({ "designId": design, "format": "jsx" }),
+        )
+        .await;
+    assert!(failed && error.contains("pick one"), "{error}");
+    let exported = agent
+        .ok(
+            "export_design",
+            json!({ "designId": design, "format": "jsx", "artboardId": board }),
+        )
+        .await;
+    assert!(exported.contains("grid.jsx"), "{}", tail(&exported));
+
+    let (error, failed) = agent
+        .call(
+            "import_design",
+            json!({ "designId": design, "format": "jsx", "content": "<div/>" }),
+        )
+        .await;
+    assert!(failed && error.contains("can only be exported"), "{error}");
+    // An unknown format lists jsx among the ones that exist.
+    let (error, failed) = agent
+        .call(
+            "export_design",
+            json!({ "designId": design, "format": "nope" }),
+        )
+        .await;
+    assert!(
+        failed && error.contains("html, finite, figma, jsx, repo"),
+        "{error}"
+    );
 }

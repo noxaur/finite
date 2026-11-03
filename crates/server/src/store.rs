@@ -124,6 +124,10 @@ pub trait Store: Send + Sync + 'static {
     fn append(&self, id: &str, records: &[Record], token: Token) -> io::Result<()>;
     /// Deletes a design's snapshot and journal, after it moved to another server.
     fn remove(&self, id: &str) -> io::Result<()>;
+    /// Deletes a design held with `token`. Shared stores must check the token.
+    fn delete(&self, id: &str, _token: Token) -> io::Result<()> {
+        self.remove(id)
+    }
 
     /// Stores a blob and returns its hash. Putting bytes that are already
     /// stored changes nothing. The blob is durable when this returns. Fails
@@ -393,7 +397,7 @@ impl Store for FileStore {
                 _ => {}
             }
         }
-        Ok(())
+        self.sync_dir()
     }
 
     /// Written like a snapshot: to a temporary file, synced, renamed into
@@ -538,6 +542,9 @@ impl Store for MemoryStore {
         let mut shared = self.lock()?;
         let id = &snapshot.meta.id;
         if !shared.designs.contains_key(id) {
+            if token != 0 {
+                return Err(fenced());
+            }
             let entry = Entry {
                 snapshot: snapshot.clone(),
                 journal: Vec::new(),
@@ -563,6 +570,13 @@ impl Store for MemoryStore {
 
     fn remove(&self, id: &str) -> io::Result<()> {
         self.lock()?.designs.remove(id);
+        Ok(())
+    }
+
+    fn delete(&self, id: &str, token: Token) -> io::Result<()> {
+        let mut state = self.lock()?;
+        state.fenced(id, token)?;
+        state.designs.remove(id);
         Ok(())
     }
 
@@ -842,6 +856,8 @@ pub mod contract {
         assert!(is_fenced(&refused), "an append with an old token is fenced");
         let refused = a.save(&snapshot("d", 7), t1).unwrap_err();
         assert!(is_fenced(&refused), "a save with an old token is fenced");
+        let refused = a.delete("d", t1).unwrap_err();
+        assert!(is_fenced(&refused), "a delete with an old token is fenced");
         b.append("d", &[rename("d", "Fresh")], t2).unwrap();
         let stored = a.load("d").unwrap().unwrap();
         assert_eq!(stored.snapshot.seq, 1, "the fenced save changed nothing");
@@ -865,6 +881,19 @@ pub mod contract {
             panic!("a holder can claim its own lease again");
         };
         assert!(t4 > t3, "which raises the token too");
+        a.delete("d", t4).unwrap();
+        assert!(a.load("d").unwrap().is_none());
+        assert!(b.load("d").unwrap().is_none());
+        let refused = b.save(&snapshot("d", 9), t2).unwrap_err();
+        assert!(
+            is_fenced(&refused),
+            "a stale save cannot recreate a deleted design"
+        );
+        let refused = a.save(&snapshot("d", 9), t4).unwrap_err();
+        assert!(
+            is_fenced(&refused),
+            "a queued save cannot recreate a deleted design"
+        );
         a.leave().unwrap();
 
         let hash = a.put_blob(b"shared").unwrap();
