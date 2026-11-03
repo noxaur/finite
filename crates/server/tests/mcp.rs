@@ -1384,6 +1384,59 @@ async fn an_agent_imports_and_exports_a_file() {
     assert!(is_error && refused.contains("no format"), "{refused}");
 }
 
+/// A real page links dozens of stylesheets and fonts, each quarantined. The
+/// result says so in one line per kind, and the import record keeps them all.
+#[tokio::test]
+async fn a_big_pages_diagnostics_come_grouped() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Importer").await;
+    let created = agent.ok("create_design", json!({ "name": "Big" })).await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .unwrap()
+        .to_owned();
+    let links = "<link rel=\"stylesheet\" href=\"https://x/a.css\">".repeat(40);
+    let page = format!(
+        "<!doctype html><html><head>{links}</head><body><p>Hi</p><script>a()</script></body></html>"
+    );
+    let imported = agent
+        .ok(
+            "import_design",
+            json!({ "designId": design, "format": "html", "content": page }),
+        )
+        .await;
+    assert!(
+        imported.contains("41 diagnostic(s) of 2 kind(s)")
+            && imported.contains("- 40 × <link> at /0/0, /0/1, /0/2 and 37 more: ")
+            && imported.contains("- <script> at /1/1: "),
+        "{imported}"
+    );
+    assert!(
+        imported.contains(&format!("GET /api/designs/{design}/imports")),
+        "{imported}"
+    );
+    assert!(imported.len() < 1000, "{imported}");
+
+    let req = Request::get(format!("/api/designs/{design}/imports"))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let records: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(records[0]["quarantined"].as_array().unwrap().len(), 41);
+
+    // The artboard grows to fit the page instead of cutting it off at 900px.
+    let board = id_after(&imported, "Imported");
+    let info = agent
+        .ok(
+            "get_node_info",
+            json!({ "designId": design, "nodeId": board }),
+        )
+        .await;
+    assert!(info.contains("\"height\": \"auto\""), "{info}");
+}
+
 /// A script that changes the page after 5 seconds is only seen in an image
 /// when the agent asks for a later capture with settleMs.
 #[tokio::test]

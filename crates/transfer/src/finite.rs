@@ -334,8 +334,14 @@ fn board(i: usize, layer: Layer, diagnostics: &mut Vec<(Anchor, Diagnostic)>) ->
         styles: layer.styles.clone(),
         ..Node::element("", "div")
     };
+    // An artboard without a height, or with `auto`, grows to fit.
+    let auto_height = layer
+        .styles
+        .get("height")
+        .is_none_or(|h| h.trim().eq_ignore_ascii_case("auto"));
     let (width, height) = match pixel_size(&probe) {
         (Some(w), Some(h)) if w > 0.0 && h > 0.0 => (w, h),
+        (Some(w), None) if w > 0.0 && auto_height => (w, FALLBACK.1),
         _ => {
             diagnostics.push((
                 Anchor {
@@ -373,8 +379,9 @@ fn board(i: usize, layer: Layer, diagnostics: &mut Vec<(Anchor, Diagnostic)>) ->
         name: layer.name.unwrap_or_else(|| format!("Artboard {}", i + 1)),
         width,
         height,
-        auto_height: false,
+        auto_height,
         mode: None,
+        look_in_css: false,
         position: layer.x.zip(layer.y),
         styles: layer.styles,
         attrs,

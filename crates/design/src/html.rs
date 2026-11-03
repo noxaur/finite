@@ -488,6 +488,16 @@ impl Walk {
         for (name, value) in el.attrs() {
             match name {
                 "style" => page.styles.extend(parse_style(value)),
+                // Both elements become the artboard, so it carries both's classes.
+                "class" => match page.attrs.get_mut("class") {
+                    Some(class) => {
+                        class.push(' ');
+                        class.push_str(value);
+                    }
+                    None => {
+                        page.attrs.insert(name.to_owned(), value.to_owned());
+                    }
+                },
                 _ if is_safe_attr(name, value) => {
                     page.attrs.insert(name.to_owned(), value.to_owned());
                 }

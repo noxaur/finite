@@ -19,23 +19,67 @@ fn score(score: Score) -> &'static str {
     }
 }
 
-/// One line per diagnostic: what, where, why, and its three scores.
-fn diagnostics(text: &mut String, diagnostics: &[Diagnostic]) {
+/// How many paths a line of diagnostics shows before it says how many more.
+const EXAMPLES: usize = 3;
+
+/// One line per kind of diagnostic (what, why and its three scores), with
+/// how many there are and where the first few are, so a page with hundreds
+/// of `<link>`s still reads in a few lines. `record` says where to find
+/// every path, if a line leaves some out.
+fn diagnostics(text: &mut String, diagnostics: &[Diagnostic], record: Option<&str>) {
     if diagnostics.is_empty() {
         text.push_str("No conversion issues reported.\n");
         return;
     }
-    text.push_str(&format!("{} diagnostic(s):\n", diagnostics.len()));
+    let mut kinds: Vec<(&Diagnostic, Vec<&str>)> = Vec::new();
     for d in diagnostics {
+        let same = |k: &&mut (&Diagnostic, Vec<&str>)| {
+            let k = k.0;
+            (&k.what, &k.reason, k.preserved, k.visual, k.editable)
+                == (&d.what, &d.reason, d.preserved, d.visual, d.editable)
+        };
+        match kinds.iter_mut().find(same) {
+            Some((_, paths)) => paths.push(&d.path),
+            None => kinds.push((d, vec![&d.path])),
+        }
+    }
+    text.push_str(&format!(
+        "{} diagnostic(s) of {} kind(s):\n",
+        diagnostics.len(),
+        kinds.len()
+    ));
+    let mut cut_short = false;
+    for (d, paths) in &kinds {
+        let count = match paths.len() {
+            1 => String::new(),
+            n => format!("{n} × "),
+        };
+        let shown: Vec<&str> = paths
+            .iter()
+            .copied()
+            .filter(|p| !p.is_empty())
+            .take(EXAMPLES)
+            .collect();
+        let at = match (shown.len(), paths.len() - shown.len()) {
+            (0, _) => String::new(),
+            (_, 0) => format!(" at {}", shown.join(", ")),
+            (_, more) => {
+                cut_short = true;
+                format!(" at {} and {more} more", shown.join(", "))
+            }
+        };
         text.push_str(&format!(
-            "- {} at {}: {} (preserved {}, visual {}, editable {})\n",
+            "- {count}{}{at}: {} (preserved {}, visual {}, editable {})\n",
             d.what,
-            d.path,
             d.reason,
             score(d.preserved),
             score(d.visual),
             score(d.editable)
         ));
+    }
+    if cut_short && let Some(record) = record {
+        text.push_str(record);
+        text.push('\n');
     }
 }
 
@@ -92,7 +136,11 @@ impl FiniteMcp {
             }
             text
         });
-        diagnostics(&mut text, &result.diagnostics);
+        let record = format!(
+            "The import record lists every quarantined item with its path: GET /api/designs/{}/imports.",
+            p.design_id
+        );
+        diagnostics(&mut text, &result.diagnostics, Some(&record));
         text.push_str(&format!(
             "Import #{}. Finite keeps the original file's bytes.",
             result.import.id
@@ -126,7 +174,7 @@ impl FiniteMcp {
             Err(error) => return fail(error.to_string()),
         };
         let mut text = String::new();
-        diagnostics(&mut text, &exported.diagnostics);
+        diagnostics(&mut text, &exported.diagnostics, None);
         // A tar archive is padded with NULs, which are valid UTF-8 but not text to read.
         let file = match exported.media_type {
             "application/x-tar" => None,
