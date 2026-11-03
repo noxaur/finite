@@ -42,6 +42,9 @@ const BLOCKED_TAGS = new Set([
   "template",
 ]);
 
+/** A bitmap is drawn again only once the zoom needs it at this many times its scale; until then CSS scales it. */
+const BLUR_FACTOR = 2;
+
 /** How long a sandboxed artboard waits for edits to settle before reloading. */
 const RELOAD_DELAY_MS = 150;
 const MAX_SIDE = 16_000;
@@ -276,10 +279,13 @@ export class Renderer {
    */
   setViewport(area: Bounds | null, zoom = 1) {
     this.culler.setArea(area);
+    const zoomed = zoom !== this.zoom;
     this.zoom = zoom;
     this.center = area && { x: area.x + area.width / 2, y: area.y + area.height / 2 };
     const bitmaps = area !== null && wantsBitmaps(zoom, this.bitmaps);
-    if (bitmaps !== this.bitmaps || bitmaps) {
+    // A pan changes which artboards are in view, which the culler reports one by one;
+    // only a new mode or zoom asks every artboard.
+    if (bitmaps !== this.bitmaps || (bitmaps && zoomed)) {
       this.bitmaps = bitmaps;
       this.syncBitmaps();
     }
@@ -425,12 +431,12 @@ export class Renderer {
     return bitmapScale(size.width, size.height, window.devicePixelRatio || 1, this.zoom);
   }
 
-  /** Whether the bitmap was drawn at a lower scale than the zoom now calls for. */
+  /** Whether the bitmap was drawn at less than 1/BLUR_FACTOR of the scale the zoom now calls for. */
   private blurry(frame: Frame): boolean {
     return (
       frame.bitmapSize !== undefined &&
       frame.bitmapScale !== undefined &&
-      frame.bitmapScale < this.scaleFor(frame.bitmapSize)
+      frame.bitmapScale * BLUR_FACTOR < this.scaleFor(frame.bitmapSize)
     );
   }
 

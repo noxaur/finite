@@ -106,14 +106,25 @@ await page.send("Performance.enable");
 const metrics = async () => {
   const { metrics } = await page.send("Performance.getMetrics");
   const get = (name) => metrics.find((m) => m.name === name).value * 1000;
-  return { script: get("ScriptDuration"), task: get("TaskDuration") };
+  return {
+    script: get("ScriptDuration"),
+    task: get("TaskDuration"),
+    style: get("RecalcStyleDuration"),
+    layout: get("LayoutDuration"),
+  };
 };
 /** Main-thread script and task time spent while `work` runs. */
 const busy = async (work) => {
   const before = await metrics();
   const result = await work();
   const after = await metrics();
-  return { ...result, script: after.script - before.script, task: after.task - before.task };
+  return {
+    ...result,
+    script: after.script - before.script,
+    task: after.task - before.task,
+    style: after.style - before.style,
+    layout: after.layout - before.layout,
+  };
 };
 const settle = () =>
   page.eval(`new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(0))))`);
