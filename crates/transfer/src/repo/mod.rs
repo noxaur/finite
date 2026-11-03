@@ -350,7 +350,9 @@ fn stem(name: &str) -> String {
             slug.push('-');
         }
     }
-    let mut slug: String = slug.trim_end_matches('-').chars().take(STEM).collect();
+    // Cutting to length can leave a dash at the end, so trim after.
+    let mut slug: String = slug.chars().take(STEM).collect();
+    slug.truncate(slug.trim_end_matches('-').len());
     let hashed = slug.is_empty() || !name.is_ascii();
     if slug.is_empty() {
         slug = "artboard".into();
@@ -1224,6 +1226,7 @@ mod tests {
             ("i", "Home"),
             ("j", "Home"),
             ("k", &"Long name ".repeat(30)),
+            ("l", &format!("{} tail", "a".repeat(STEM - 1))),
         ];
         for (id, name) in names {
             add_board(&mut source, id, name, 100.0, Some(100.0), None);
@@ -1236,6 +1239,7 @@ mod tests {
         };
         let before = files(&source);
         assert_eq!(before.len(), names.len());
+        assert!(before.iter().all(|p| !p.ends_with("-.html")), "{before:?}");
         for path in &before {
             assert!(path.is_ascii() && path.len() <= 80, "{path}");
             let stem = path
