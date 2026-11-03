@@ -263,15 +263,32 @@ pub fn write_fragments(
         return err("the HTML contained no elements or text (scripts and styles are dropped)");
     }
     let target_node = node(doc, target)?;
-    // Rewriting a component that has instances keeps the ids of what it
-    // still holds, so the instances' overrides still find their nodes.
-    if mode != WriteMode::Append
-        && let Some(component) = components::component_of(doc, target)
-        && !components::is_virtual(target)
-        && doc.instances_of(&component.id).next().is_some()
-        && let Some(result) = rewrite_in_place(doc, target, &fragments, mode, new_id)?
-    {
-        return Ok(result);
+    // A rewrite keeps the nodes the HTML names by data-id, so their ids,
+    // comment pins and undo history stay. Rewriting a component that has
+    // instances also keeps nodes by tag and layer name, so the instances'
+    // overrides still find them.
+    if mode != WriteMode::Append && !components::is_virtual(target) {
+        let in_component = components::component_of(doc, target)
+            .is_some_and(|c| doc.instances_of(&c.id).next().is_some());
+        let keyed = || {
+            let named = |ids: &[&Node]| {
+                fragments
+                    .iter()
+                    .any(|f| ids.iter().any(|n| f.source.as_deref() == Some(&n.id)))
+            };
+            let matched = match mode {
+                WriteMode::Replace => named(&[target_node]),
+                _ => named(&doc.children(Some(target))),
+            };
+            // Components are redefined by name instead (see `prepare_instances`).
+            matched && !doc.subtree(target).iter().any(|n| n.component)
+        };
+        if (in_component || keyed())
+            && let Some(result) =
+                rewrite_in_place(doc, target, &fragments, mode, in_component, new_id)?
+        {
+            return Ok(result);
+        }
     }
     let mut ops = Vec::new();
     let (parent, indexes) = match mode {
@@ -337,15 +354,18 @@ pub fn write_fragments(
     Ok((ops, roots))
 }
 
-/// [`write_fragments`] for content inside a component, as edits to the
-/// nodes already there where they match, so their ids stay. A node matches
-/// a fragment with the same tag and layer name; text matches text. Returns
-/// `None` when it can't, like replacing the root with something else.
+/// [`write_fragments`] as edits to the nodes already there where they
+/// match, so their ids stay. A node matches a fragment written with its
+/// data-id and tag, and text matches text in order. `by_name`, for content
+/// inside a component: a node also matches a fragment with the same tag
+/// and layer name, in order. Returns `None` when it can't, like replacing
+/// the root with something else.
 fn rewrite_in_place(
     doc: &Document,
     target: &str,
     fragments: &[Fragment],
     mode: WriteMode,
+    by_name: bool,
     new_id: &mut impl FnMut() -> NodeId,
 ) -> Result<Option<(Vec<Op>, Vec<NodeId>)>> {
     let mut fragments = fragments.to_vec();
@@ -356,7 +376,10 @@ fn rewrite_in_place(
             let [only] = fragments.as_slice() else {
                 return Ok(None);
             };
-            if !same_kind(target_node, only) || only.instance_of.is_some() {
+            if !same_kind(target_node, only)
+                || only.instance_of.is_some()
+                || !(by_name || only.source.as_deref() == Some(target))
+            {
                 return Ok(None);
             }
             // Written with its own name, it's the component, not an instance of it.
@@ -370,13 +393,20 @@ fn rewrite_in_place(
             }
             prepare_instances(doc, &mut fragments[0].children, Some(target), &[], new_id)?;
             update_node(target_node, &fragments[0], true, &mut ops);
-            reconcile(doc, target, &fragments[0].children, &mut ops, new_id);
+            reconcile(
+                doc,
+                target,
+                &fragments[0].children,
+                by_name,
+                &mut ops,
+                new_id,
+            );
             vec![target.to_owned()]
         }
         WriteMode::ReplaceChildren => {
             element(doc, target)?;
             prepare_instances(doc, &mut fragments, Some(target), &[], new_id)?;
-            reconcile(doc, target, &fragments, &mut ops, new_id)
+            reconcile(doc, target, &fragments, by_name, &mut ops, new_id)
         }
         WriteMode::Append => return Ok(None),
     };
@@ -440,37 +470,53 @@ fn update_node(node: &Node, fragment: &Fragment, root: bool, ops: &mut Vec<Op>) 
 }
 
 /// Makes `parent`'s children `fragments`, reusing the children that match
-/// one, in order. Returns the ids of the children, reused or new.
+/// one (see [`rewrite_in_place`]). Returns the ids of the children, reused or new.
 fn reconcile(
     doc: &Document,
     parent: &str,
     fragments: &[Fragment],
+    by_name: bool,
     ops: &mut Vec<Op>,
     new_id: &mut impl FnMut() -> NodeId,
 ) -> Vec<NodeId> {
     let old = doc.children(Some(parent));
     let mut used = vec![false; old.len()];
-    // Match in order: each fragment takes the first unused child after the
-    // last match that has its tag and name, so an inserted element doesn't
-    // shift the rest out of place.
-    let mut cursor = 0;
-    let matches: Vec<Option<usize>> = fragments
+    let reusable =
+        |n: &Node, f: &Fragment| same_kind(n, f) && f.instance_of.is_none() && !n.component;
+    // By data-id first, wherever the child moved to.
+    let position: HashMap<&str, usize> = old
+        .iter()
+        .enumerate()
+        .map(|(j, n)| (n.id.as_str(), j))
+        .collect();
+    let mut matches: Vec<Option<usize>> = fragments
         .iter()
         .map(|f| {
-            let fits = |n: &Node| {
-                same_kind(n, f)
-                    && f.instance_of.is_none()
-                    && !n.component
-                    && (n.kind == NodeKind::Text || n.name == f.name)
-            };
-            let found = (cursor..old.len()).find(|&j| !used[j] && fits(old[j]));
-            if let Some(j) = found {
+            let j = *position.get(f.source.as_deref()?)?;
+            (!used[j] && reusable(old[j], f)).then(|| {
                 used[j] = true;
-                cursor = j + 1;
-            }
-            found
+                j
+            })
         })
         .collect();
+    // Then in order: each fragment takes the first unused child after the
+    // last match that fits, so an inserted element doesn't shift the rest
+    // out of place.
+    let mut cursor = 0;
+    for (f, found) in fragments.iter().zip(&mut matches) {
+        if let Some(j) = *found {
+            cursor = j + 1;
+            continue;
+        }
+        let fits = |n: &Node| {
+            reusable(n, f) && (n.kind == NodeKind::Text || (by_name && n.name == f.name))
+        };
+        *found = (cursor..old.len()).find(|&j| !used[j] && fits(old[j]));
+        if let Some(j) = *found {
+            used[j] = true;
+            cursor = j + 1;
+        }
+    }
     for (j, child) in old.iter().enumerate() {
         if !used[j] {
             ops.push(Op::Delete {
@@ -478,7 +524,7 @@ fn reconcile(
             });
         }
     }
-    let indexes = fractional::keys_between(None, None, fragments.len());
+    let indexes = keep_order(&old, &matches);
     let mut ids = Vec::new();
     for ((fragment, found), index) in fragments.iter().zip(matches).zip(indexes) {
         match found {
@@ -493,7 +539,7 @@ fn reconcile(
                 }
                 update_node(child, fragment, false, ops);
                 if child.kind != NodeKind::Text {
-                    reconcile(doc, &child.id, &fragment.children, ops, new_id);
+                    reconcile(doc, &child.id, &fragment.children, by_name, ops, new_id);
                 }
                 ids.push(child.id.clone());
             }
@@ -507,6 +553,54 @@ fn reconcile(
         }
     }
     ids
+}
+
+/// The index for each fragment [`reconcile`] writes, where `matches` names
+/// the old child each one reuses. The longest run of reused children still
+/// in order keep their indexes, so only the ones that moved get a `Move`,
+/// and the rest get indexes between their neighbours.
+fn keep_order(old: &[&Node], matches: &[Option<usize>]) -> Vec<String> {
+    // Longest strictly increasing run of old indexes, by patience sorting:
+    // `tails[k]` ends the best run of length k + 1 found so far.
+    let reused: Vec<(usize, &str)> = matches
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| m.map(|j| (i, old[j].index.as_str())))
+        .collect();
+    let mut tails: Vec<usize> = Vec::new();
+    let mut prev: Vec<Option<usize>> = vec![None; reused.len()];
+    for (r, &(_, index)) in reused.iter().enumerate() {
+        let k = tails.partition_point(|&t| reused[t].1 < index);
+        prev[r] = k.checked_sub(1).map(|k| tails[k]);
+        if k == tails.len() {
+            tails.push(r);
+        } else {
+            tails[k] = r;
+        }
+    }
+    let mut kept: Vec<Option<&str>> = vec![None; matches.len()];
+    let mut at = tails.last().copied();
+    while let Some(r) = at {
+        kept[reused[r].0] = Some(reused[r].1);
+        at = prev[r];
+    }
+    let mut out = Vec::with_capacity(matches.len());
+    let mut i = 0;
+    while i < matches.len() {
+        if let Some(index) = kept[i] {
+            out.push(index.to_owned());
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < matches.len() && kept[i].is_none() {
+            i += 1;
+        }
+        let low = start.checked_sub(1).and_then(|s| kept[s]);
+        let high = kept.get(i).copied().flatten();
+        out.extend(fractional::keys_between(low, high, i - start));
+    }
+    out
 }
 
 /// How many nodes writing `fragments` adds to the expanded design: an

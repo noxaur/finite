@@ -28,8 +28,9 @@ pub struct Fragment {
     pub instance_of: Option<NodeId>,
     /// For an instance, the values it changes (see [`Node::overrides`]).
     pub overrides: BTreeMap<String, Option<String>>,
-    /// The [`ID_ATTR`] it was written with, kept only inside an instance,
-    /// where it says which node of the component this element shows.
+    /// The [`ID_ATTR`] it was written with. A rewrite keeps the node with
+    /// that id; inside an instance, it says which node of the component this
+    /// element shows.
     pub source: Option<NodeId>,
     /// The component name it was written with ([`COMPONENT_ATTR`]): the
     /// first element with a name defines that component, and later ones are
@@ -265,6 +266,9 @@ pub const ID_ATTR: &str = "data-id";
 pub const INSTANCE_ATTR: &str = "data-instance-of";
 /// Marks a component's root in exported HTML.
 pub const COMPONENT_ATTR: &str = "data-component";
+/// The design's change counter when `get_html` read the HTML, on its root.
+/// Written back, it's the base of a three-way merge (see [`Parsed::read_at`]).
+pub const READ_ATTR: &str = "data-read-at";
 
 /// Parses an HTML fragment into detached subtrees.
 ///
@@ -297,6 +301,9 @@ pub struct Parsed {
     /// Where each kept fragment was in the source, numbered like
     /// [`Dropped::anchor`].
     pub paths: Vec<String>,
+    /// The oldest [`READ_ATTR`] on any element: when the author read what it
+    /// rewrites, so a rewrite can keep what others changed since.
+    pub read_at: Option<u64>,
 }
 
 /// A whole HTML page parsed with [`parse_page`]: its body as fragments,
@@ -353,6 +360,7 @@ pub fn parse_page(html: &str, policy: Policy) -> Result<Page, TooDeep> {
             fragments: Vec::new(),
             dropped: Vec::new(),
             paths: Vec::new(),
+            read_at: None,
         },
     };
     walk.wrapper(*root, "", &mut page);
@@ -458,8 +466,9 @@ struct Walk {
     dropped: Vec<Dropped>,
     /// The source path of each fragment kept so far. Its length numbers the next one.
     paths: Vec<String>,
-    /// Inside an instance: the children's [`ID_ATTR`]s are kept as [`Fragment::source`].
+    /// Inside an instance, where an [`ID_ATTR`] names a component's node.
     in_instance: bool,
+    read_at: Option<u64>,
 }
 
 impl Walk {
@@ -469,6 +478,7 @@ impl Walk {
             dropped: Vec::new(),
             paths: Vec::new(),
             in_instance: false,
+            read_at: None,
         }
     }
 
@@ -477,6 +487,7 @@ impl Walk {
             fragments,
             dropped: self.dropped,
             paths: self.paths,
+            read_at: self.read_at,
         }
     }
 
@@ -582,10 +593,17 @@ impl Walk {
                     match name {
                         "style" => fragment.styles.extend(parse_style(value)),
                         NAME_ATTR => fragment.name = Some(label::clip(value, label::LAYER_NAME)),
-                        // Node ids come from the document, but inside an
-                        // instance they say which node of the component an
-                        // element shows.
-                        ID_ATTR if self.in_instance => fragment.source = Some(value.to_owned()),
+                        // Node ids come from the document: a rewrite keeps
+                        // the node, and inside an instance they say which
+                        // node of the component an element shows.
+                        ID_ATTR if !value.trim().is_empty() => {
+                            fragment.source = Some(value.trim().to_owned());
+                        }
+                        READ_ATTR => {
+                            if let Ok(seq) = value.trim().parse::<u64>() {
+                                self.read_at = Some(self.read_at.map_or(seq, |r| r.min(seq)));
+                            }
+                        }
                         COMPONENT_ATTR if !value.trim().is_empty() => {
                             fragment.component = Some(label::clip(value, label::LAYER_NAME));
                         }
@@ -847,6 +865,8 @@ pub struct ExportOptions {
     /// Indents nested elements one per line. Without it, the HTML is written
     /// exactly as it renders, with no whitespace between elements.
     pub indent: bool,
+    /// Writes [`READ_ATTR`] with this value on the root.
+    pub read_at: Option<u64>,
 }
 
 impl Default for ExportOptions {
@@ -859,6 +879,7 @@ impl Default for ExportOptions {
             max_value_len: None,
             stylesheets: false,
             indent: true,
+            read_at: None,
         }
     }
 }
@@ -892,6 +913,7 @@ pub fn export_with(doc: &Document, id: &str, options: &ExportOptions) -> Option<
         out: String::new(),
         collapsed: 0,
         shortened: 0,
+        read_at: None,
     };
     let mut stylesheets = 0;
     if options.stylesheets && node.parent.is_some() {
@@ -900,6 +922,7 @@ pub fn export_with(doc: &Document, id: &str, options: &ExportOptions) -> Option<
             stylesheets += 1;
         }
     }
+    writer.read_at = options.read_at;
     writer.node(node, 0);
     Some(Export {
         html: writer.out,
@@ -993,6 +1016,8 @@ struct Writer<'a> {
     out: String,
     collapsed: usize,
     shortened: usize,
+    /// [`ExportOptions::read_at`], until the root is written.
+    read_at: Option<u64>,
 }
 
 impl Writer<'_> {
@@ -1044,6 +1069,9 @@ impl Writer<'_> {
                 let name = node.display_name();
                 let _ = write!(self.out, " {COMPONENT_ATTR}=\"{}\"", escape(&name, true));
             }
+        }
+        if let Some(seq) = self.read_at.take() {
+            let _ = write!(self.out, " {READ_ATTR}=\"{seq}\"");
         }
         if self.options.names
             && let Some(name) = &node.name

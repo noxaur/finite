@@ -13,7 +13,7 @@ use std::{
 
 use base64::Engine;
 use finite_design::{
-    Change, Document, NodeKind, Op, PropKey,
+    Change, Design, Document, Kept, NodeKind, Op, PropKey,
     comment::{self, Author, AuthorKind},
     components,
     edit::{self, EditError, NewArtboard, WriteMode},
@@ -247,6 +247,56 @@ const CHANGED_NAMED: usize = 12;
 /// What an edit changed: how many values on which nodes, with each node's
 /// outline line, so an agent can check its ids hit what it meant without
 /// reading the tree again. `requested` is how many nodes the call named.
+/// Names the values a merged rewrite kept because another agent set them
+/// after the HTML was read (see `Design::merge`).
+fn kept_note(doc: &Document, kept: &[Kept]) -> String {
+    let mut text = String::new();
+    for k in kept.iter().take(CHANGED_NAMED) {
+        let Some(node) = doc.get(&k.id) else { continue };
+        let value = match node.get(&k.key) {
+            Some(serde_json::Value::String(s)) => Some(s),
+            Some(v) => Some(v.to_string()),
+            None => None,
+        };
+        let what = match (&k.key, value) {
+            (PropKey::Style(name), Some(v)) => format!("{name}: {v}"),
+            (PropKey::Attr(name), Some(v)) => format!("{name}=\"{v}\""),
+            (PropKey::Text, Some(v)) => format!("the text {v:?}"),
+            (PropKey::Name, Some(v)) => format!("the layer name {v:?}"),
+            (key, Some(v)) => format!("{key} {v:?}"),
+            (PropKey::Style(name) | PropKey::Attr(name), None) => format!("{name} unset"),
+            (key, None) => format!("{key} unset"),
+        };
+        let element = match node.kind {
+            NodeKind::Text => node.parent.as_deref().unwrap_or(&node.id),
+            _ => &node.id,
+        };
+        let on = outline(doc, element, 0);
+        let _ = std::fmt::Write::write_fmt(
+            &mut text,
+            format_args!(
+                "\nNote: kept {what} on {}, which another agent set after you read it{}",
+                on.lines().next().unwrap_or("").trim(),
+                if k.conflict {
+                    ", instead of your change. Set it again if you meant to replace theirs."
+                } else {
+                    "."
+                }
+            ),
+        );
+    }
+    if kept.len() > CHANGED_NAMED {
+        let _ = std::fmt::Write::write_fmt(
+            &mut text,
+            format_args!(
+                "\n…and {} more values kept the same way.",
+                kept.len() - CHANGED_NAMED
+            ),
+        );
+    }
+    text
+}
+
 fn changed(handle: &DesignHandle, change: Option<&Change>, requested: usize) -> String {
     let Some(change) = change else {
         return describe(None).into();
@@ -642,6 +692,7 @@ impl FiniteMcp {
         build: impl FnOnce(&Document) -> Result<(Vec<Op>, T), EditError>,
         report: impl FnOnce(&DesignHandle, T, Option<&Change>) -> String,
     ) -> ToolResult {
+        let build = |design: &Design| build(design.view());
         self.edit_checked(ctx, design_id, label, false, build, report)
             .await
     }
@@ -654,7 +705,7 @@ impl FiniteMcp {
         design_id: &str,
         label: &str,
         check: bool,
-        build: impl FnOnce(&Document) -> Result<(Vec<Op>, T), EditError>,
+        build: impl FnOnce(&Design) -> Result<(Vec<Op>, T), EditError>,
         report: impl FnOnce(&DesignHandle, T, Option<&Change>) -> String,
     ) -> ToolResult {
         let handle = match self.design(design_id).await {
@@ -662,7 +713,7 @@ impl FiniteMcp {
             Err(result) => return Ok(result),
         };
         let actor = self.actor(ctx);
-        match handle.edit(&actor, label, build) {
+        match handle.edit_design(&actor, label, build) {
             Ok((output, change)) => {
                 let mut text = report(&handle, output, change.as_ref());
                 if let Some(change) = &change {
@@ -1018,7 +1069,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "A node's subtree as HTML with inline styles. Every element carries data-id, so you can target it in later calls.",
+        description = "A node's subtree as HTML with inline styles. Every element carries data-id, so you can target it in later calls. The root carries data-read-at: to rewrite the node, edit this HTML and write it back with write_html, keeping both, so its elements keep their ids and comments, and changes others made since you read it stay.",
         annotations(read_only_hint = true)
     )]
     async fn get_html(&self, Parameters(p): Parameters<HtmlParams>) -> ToolResult {
@@ -1034,6 +1085,10 @@ impl FiniteMcp {
         };
         let html = handle.read(|d| {
             let doc = d.view();
+            let options = html::ExportOptions {
+                read_at: Some(d.seq()),
+                ..options
+            };
             let (export, depth) = html::export_within(doc, &p.node_id, &options, OUTPUT_LIMIT)?;
             let has_children = !doc.children(Some(&p.node_id)).is_empty();
             if export.html.len() > OUTPUT_LIMIT && !has_children {
@@ -1425,7 +1480,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Write HTML into the design. mode \"append\" (default) inserts it as children of targetId, \"replace-children\" replaces the target's children, and \"replace\" replaces the target node. Use inline styles or <style> blocks with classes; <script> is allowed for motion and interaction. Name layers with data-name. Returns the new nodes' outline with ids."
+        description = "Write HTML into the design. mode \"append\" (default) inserts it as children of targetId, \"replace-children\" replaces the target's children, and \"replace\" replaces the target node. When replacing, an element written with the data-id get_html gave it keeps its node, id, comments and history; one without is new. With data-read-at from get_html, values others changed after that read keep theirs, and the result names them. Use inline styles or <style> blocks with classes; <script> is allowed for motion and interaction. Name layers with data-name. Returns the new nodes' outline with ids."
     )]
     async fn write_html(
         &self,
@@ -1441,25 +1496,50 @@ impl FiniteMcp {
         // few MB of HTML, parsing is most of the work.
         let html = p.html;
         let parsed = tokio::task::spawn_blocking(move || edit::parse_html_reporting(&html)).await;
-        let (fragments, dropped) = match parsed {
-            Ok(Ok(parsed)) => (parsed.fragments, parsed.dropped),
+        let (fragments, dropped, read_at) = match parsed {
+            Ok(Ok(parsed)) => (parsed.fragments, parsed.dropped, parsed.read_at),
             Ok(Err(error)) => return fail(error.to_string()),
             Err(error) => return fail(error.to_string()),
         };
+        let actor = self.actor(&ctx).id;
         self.edit_checked(
             &ctx,
             &p.design_id,
             "Write HTML",
             true,
-            |doc| {
+            |design| {
+                let doc = design.view();
                 let mut new_id = id_in(doc);
-                edit::write_fragments(doc, &p.target_id, fragments, mode, p.index, &mut new_id)
+                let (ops, roots) =
+                    edit::write_fragments(doc, &p.target_id, fragments, mode, p.index, &mut new_id)?;
+                // A rewrite of HTML from get_html keeps what others changed since.
+                let merged = match read_at {
+                    Some(seq) if mode != WriteMode::Append => design.merge(&actor, seq, ops),
+                    _ => finite_design::Merged {
+                        ops,
+                        kept: Vec::new(),
+                        reached: true,
+                    },
+                };
+                Ok((merged.ops, (roots, merged.kept, merged.reached)))
             },
-            |handle, roots, _| {
+            |handle, (roots, kept, reached), _| {
                 handle.read(|d| {
-                    let mut text = format!("Wrote {} root node(s):\n", roots.len());
+                    let doc = d.view();
+                    let mut text = if mode == WriteMode::Replace && roots == [p.target_id.as_str()] {
+                        "Rewrote it in place: elements that kept their data-id kept their ids, comments and history.\n".to_owned()
+                    } else {
+                        format!("Wrote {} root node(s):\n", roots.len())
+                    };
                     for root in &roots {
-                        text.push_str(&outline(d.view(), root, 3));
+                        text.push_str(&outline(doc, root, 3));
+                    }
+                    text.push_str(&kept_note(doc, &kept));
+                    if !reached {
+                        text.push_str(
+                            "\nNote: your data-read-at is older than the changes this server remembers, \
+                             so values in your HTML replaced any that others changed since you read it.",
+                        );
                     }
                     text.push_str(&left_out(&dropped));
                     cut(text, "Call get_tree_summary on a root to see it.")
@@ -1487,7 +1567,8 @@ impl FiniteMcp {
             &design_id,
             "Update styles",
             true,
-            |doc| {
+            |design| {
+                let doc = design.view();
                 let mut ops = Vec::new();
                 for update in &updates {
                     ops.extend(edit::update_styles(doc, &update.node_ids, &update.styles)?);

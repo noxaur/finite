@@ -675,10 +675,21 @@ impl DesignHandle {
         label: &str,
         build: impl FnOnce(&Document) -> Result<(Vec<Op>, T), EditError>,
     ) -> Result<Edited<T>, EditError> {
+        self.edit_design(actor, label, |design| build(design.view()))
+    }
+
+    /// [`Self::edit`], with `build` seeing the whole design, for an edit
+    /// that also reads its history, like a merged rewrite ([`Design::merge`]).
+    pub fn edit_design<T>(
+        &self,
+        actor: &Actor,
+        label: &str,
+        build: impl FnOnce(&Design) -> Result<(Vec<Op>, T), EditError>,
+    ) -> Result<Edited<T>, EditError> {
         let now = now_ms();
         let mut state = self.lock();
         state.touch(actor, now);
-        let (ops, output) = build(state.design.view())?;
+        let (ops, output) = build(&state.design)?;
         let doc = state.design.doc();
         let mut new_id = || loop {
             let id = random_id(8);

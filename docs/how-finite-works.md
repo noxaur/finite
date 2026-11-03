@@ -140,6 +140,8 @@ Say Alice and Bob are both agents on one design:
 
 The test `undo_only_reverses_own_changes` in `design.rs` runs exactly this.
 
+A rewrite with `write_html` keeps the nodes its HTML names by `data-id`, so it doesn't break another agent's undo either. "Rewriting HTML in place" below covers it.
+
 ### One set of rules for server and browser
 
 The browser applies ops too, and it used to do that with a TypeScript copy of the rules. The copies drifted. The first test that compared them found three ways the browser disagreed. It cleared `x` when an op set it to the string `"10"`. It also accepted invalid indexes like `"V0"`, and moves to where a node already was. HTML export drifted too. Screenshots used the indented export, so `<b>Bold</b><i>Italic</i>` showed as "Bold Italic" in a screenshot but "BoldItalic" in the browser.
@@ -191,6 +193,37 @@ A test in `edit.rs` writes 1,000,000 levels on a thread with a Tokio worker's 2 
 
 A design also holds at most 100,000 nodes (`MAX_NODES`), and `write_html` and `duplicate` refuse edits that would pass it. When `write_html` replaces nodes, the ones it removes count against what it adds. For scale, the `big_design` example's 20,201-node artboard is already a big design. Without a limit, the largest `write_html` one MCP call can carry, 4 MB of `<i></i>`, made about 600,000 nodes. Its ops came to 92 MB of JSON, which the server journals and sends to every viewer, and an agent stuck in a loop could keep going. `cargo run --release -p finite-design --example big_design` now shows that write refused in about 0.2 seconds, most of it parsing.
 
+### Rewriting HTML in place
+
+An agent changes a section by reading it with `get_html`, editing the HTML and writing it back with `write_html` in mode `replace` or `replace-children`. That rewrite is a **keyed reconciliation**, like React's keyed lists: an element written with the `data-id` that `get_html` gave it keeps its node. `rewrite_in_place` and `reconcile` in `edit.rs` turn the rewrite into ops on the nodes already there. A changed value is a `set`, a reordered child a `move`, a new element a `create` and a missing one a `delete`. So the elements keep their ids, the comments pinned to them and every agent's undo steps on them.
+
+Before, a rewrite deleted every node and created new ones. A person's comment then pointed at a node that no longer existed, and another agent's undo said "Nothing to undo", because its step targeted a deleted node.
+
+A few rules decide what matches:
+
+- An element matches the child of the same parent with its `data-id` and tag. A tag change, such as `<button>` to `<a>`, makes a new node, since a node's kind is fixed. So does an element moved to another parent.
+- Text matches text in order, so changing a button's label is one `set`.
+- Children that kept their order keep their indexes (`keep_order` finds the longest run of them still in order), so a reorder moves only what moved.
+- When no element names a node there, the write deletes and creates, as before. So does a rewrite whose subtree holds a component's root, which is redefined by name instead (see Components).
+
+The parser keeps a `data-id` as `Fragment::source`. Inside an instance it already said which component node an element shows.
+
+#### Merging a stale rewrite
+
+Keeping ids isn't enough on its own. Say agent A reads a section, agent B rounds its button, and A writes back its copy with only the text changed. A's HTML has no `border-radius`, so a plain rewrite would clear B's. The server can't tell "A removed it" from "A never saw it" without knowing what A read.
+
+So `get_html` marks its root with a **read mark**, `data-read-at="57"`: the design's `seq` when it was read. Agents copy the HTML back with the attribute in it, which is why the mark is an attribute rather than a separate argument. `write_html` takes the oldest mark on any element in its HTML, and `Design::merge` runs a **three-way merge** on each `set` the rewrite would do, with the design at the mark as the base:
+
+- The HTML has the value the base had: A didn't change it, so B's value stays.
+- A changed it and another agent changed it since: theirs stays.
+- A changed it and A made the last change since: A's wins.
+
+Every value kept from another agent is named in the result, like "kept border-radius: 999px on button "Buy" #8679e5zm, which another agent set after you read it". The agent can set it again on purpose. Without a mark, the HTML wins, as with any other edit.
+
+The base comes from a **set log** (`SetLog` in `design.rs`): for each recent change that set a value, the old value of each property, taken from the change's inverse. It holds the last 512 such changes, up to about 8 MB of values. It's kept in memory only, and loading a design or replaying its journal starts it empty. A mark older than what it holds can't be merged, so the result says the HTML replaced values others changed since the read. Merging scans the log from the mark once, so it costs about as much as the changes since the read.
+
+Only values merge. Nodes another agent added after the read aren't in the HTML, so a rewrite still deletes them.
+
 ## Components
 
 Agents building several screens used to copy the same top bar into each one, and a later change meant editing every copy. A **component** fixes that. It's one definition, and its **instances** follow it, each changing only the values it **overrides**. `crates/design/src/components.rs` holds the rules.
@@ -231,7 +264,7 @@ Agents can't tell from the HTML which of these happened, so every edit's result 
 
 Agents mostly make components without a tool, by naming them in HTML. The first element written with `data-component="Top bar"` defines a component called "Top bar". A later element with the same name, in the same HTML or another call, becomes an instance of it. Its text, styles and attributes can differ, and the differences become its overrides, but its elements have to match. So an agent that pastes the same bar into each screen, with each screen's title, gets one component and two instances, for no extra call. `get_html` writes a component's root with its name, so HTML read back and written again means the same component.
 
-A component changes by being rewritten in place. `write_html` with `replace` or `replace-children` inside a component edits the nodes that are already there, wherever a new element has the same tag and layer name as an old one, in order (`rewrite_in_place` in `edit.rs`). Those nodes keep their ids, so the instances' overrides still find them. Before, a rewrite made new nodes, and every instance quietly lost its own title. A screen rewritten with its `data-component` element redefines the component under the same id, so its instances keep following it.
+A component changes by being rewritten in place. `write_html` with `replace` or `replace-children` inside a component edits the nodes that are already there. A new element matches an old one by its `data-id`, as in any rewrite, and otherwise by the same tag and layer name, in order (`rewrite_in_place` in `edit.rs`). Those nodes keep their ids, so the instances' overrides still find them. Before, a rewrite made new nodes, and every instance quietly lost its own title. A screen rewritten with its `data-component` element redefines the component under the same id, so its instances keep following it.
 
 `write_html` understands that marker: `<header data-instance-of="4biyjm26"></header>` writes an instance. HTML that `get_html` returned for an instance can be written back too. Elements inside it carry their virtual `data-id`, and where they differ from the component, the differences become overrides. An element without one isn't in the component, so `write_html` refuses the HTML rather than drop the element. `duplicate_nodes` copies an instance as an instance. It copies a component's root as a new instance of it, so a copied screen keeps following its top bar.
 
