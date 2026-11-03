@@ -275,11 +275,14 @@ pub struct CreateArtboardParams {
     /// The page to put it on, from get_basic_info or create_page. Omit for the first page.
     #[serde(default)]
     pub(super) page_id: Option<String>,
+    /// The token mode it renders in, by name, like "Dark". Omit for the first mode.
+    #[serde(default)]
+    pub(super) mode: Option<String>,
     /// Extra CSS for the artboard, like {"background-color": "#0b0b0b", "padding": "48px"}.
     #[serde(default)]
     pub(super) styles: BTreeMap<String, String>,
     /// Class names for the artboard's own element, like "screen dark", so
-    /// a <style> block or the shared CSS can style the artboard itself.
+    /// a <style> block can style the artboard itself.
     #[serde(default)]
     pub(super) class: Option<String>,
     /// Content to write into the new artboard, as write_html would, so a
@@ -592,12 +595,36 @@ pub struct ReplaceParams {
     pub(super) dry_run: bool,
 }
 
+/// A token's new value: one CSS value for every mode, or values by mode
+/// name, where null removes that mode's value.
+#[derive(Deserialize, JsonSchema, Clone, Debug)]
+#[serde(untagged)]
+pub enum TokenValue {
+    All(String),
+    Modes(BTreeMap<String, Option<String>>),
+}
+
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct SharedCssParams {
+pub struct SetTokensParams {
     pub(super) design_id: String,
-    /// The whole stylesheet, like ":root { --brand: #f97316 } .btn { padding: 12px 20px; border-radius: 999px }". Replaces the current one; pass "" to clear it.
-    pub(super) css: String,
+    /// Tokens by name, like {"--brand": "#c2410c", "--font-body": "'Inter', sans-serif", "--bg": {"Light": "#fff", "Dark": "#111"}, "--old": null}. A value is plain CSS and can use other tokens, like "var(--brand)". Fonts come from the fonts installed on the machine.
+    #[serde(default, deserialize_with = "lenient")]
+    pub(super) tokens: BTreeMap<String, Option<TokenValue>>,
+    /// The design's modes by name, in order, like ["Light", "Dark"]. Omit to keep them.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub(super) modes: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtboardModeParams {
+    pub(super) design_id: String,
+    #[serde(alias = "nodeIds", alias = "artboardId", deserialize_with = "lenient")]
+    pub(super) artboard_ids: Vec<String>,
+    /// The mode's name, like "Dark". Omit for the first mode.
+    #[serde(default)]
+    pub(super) mode: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -703,7 +730,7 @@ pub struct CreatePageParams {
 #[serde(rename_all = "camelCase")]
 pub struct ExportParams {
     pub(super) design_id: String,
-    /// "html", "finite" (a Finite bundle), "repo" (a tar of text files: one HTML file per artboard, the shared CSS and a manifest) or "figma" (a .figma.json file for the Finite Figma plugin).
+    /// "html", "finite" (a Finite bundle), "repo" (a tar of text files: one HTML file per artboard and a manifest with the tokens) or "figma" (a .figma.json file for the Finite Figma plugin).
     pub(super) format: String,
     /// One artboard to export. Omit for the whole design.
     #[serde(default)]

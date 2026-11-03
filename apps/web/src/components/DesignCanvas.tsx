@@ -28,7 +28,7 @@ import {
 } from "./Comments";
 import { CommentsPanel } from "./CommentsPanel";
 import { PagesSidebar } from "./PagesSidebar";
-import { SharedCssPanel } from "./SharedCss";
+import { type TokensActions, TokensPanel } from "./TokensPanel";
 import { ExportMenu, ImportButton, ImportResultCard, type ImportState } from "./Transfer";
 
 /** An instance or component under the pointer: what to outline and what to call it. */
@@ -71,7 +71,7 @@ const isTyping = (target: EventTarget | null) =>
  * the renderer patches the DOM; this component adds the camera, comments and
  * keyboard shortcuts. Users can't edit the design's artboards, but in comment
  * mode they pin comments that agents pick up over MCP, and they can edit the
- * shared CSS every artboard uses.
+ * design's tokens, which every artboard uses.
  */
 
 /** Why a comment or edit didn’t go through: the server’s reason, or a connection problem. */
@@ -147,10 +147,10 @@ export function DesignCanvas({ id }: { id: string }) {
     rememberPlace.current();
   };
   const page = pages.find((p) => p.id === pickedPage) ?? pages[0];
-  // The shared CSS, the comments list, the export menu and an import's result open in the
+  // The tokens, the comments list, the export menu and an import's result open in the
   // same place, one at a time.
-  const [panel, setPanel] = useState<"css" | "comments" | "export" | "import" | null>(null);
-  const togglePanel = (name: "css" | "comments" | "export") =>
+  const [panel, setPanel] = useState<"tokens" | "comments" | "export" | "import" | null>(null);
+  const togglePanel = (name: "tokens" | "comments" | "export") =>
     setPanel((open) => (open === name ? null : name));
   const [imported, setImported] = useState<ImportState | null>(null);
 
@@ -488,11 +488,25 @@ export function DesignCanvas({ id }: { id: string }) {
     setOpenId(commentId);
   };
 
-  const saveCss = async (css: string) => {
-    const exit = await runtime.runPromiseExit(
-      Api.use((api) => api.setSharedCss(id, localUser(), css)),
-    );
-    return Exit.isFailure(exit) ? unsent(exit.cause) : undefined;
+  const tokenActions: TokensActions = {
+    save: async (change) => {
+      const exit = await runtime.runPromiseExit(
+        Api.use((api) => api.setTokens(id, localUser(), change)),
+      );
+      return Exit.isFailure(exit) ? unsent(exit.cause) : undefined;
+    },
+    deleteMode: async (modeId) => {
+      const exit = await runtime.runPromiseExit(
+        Api.use((api) => api.deleteMode(id, localUser(), modeId)),
+      );
+      return Exit.isFailure(exit) ? unsent(exit.cause) : undefined;
+    },
+    setArtboardMode: async (boardId, modeId) => {
+      const exit = await runtime.runPromiseExit(
+        Api.use((api) => api.setArtboardMode(id, localUser(), [boardId], modeId)),
+      );
+      return Exit.isFailure(exit) ? unsent(exit.cause) : undefined;
+    },
   };
 
   // The new artboards arrive over the socket, so all this shows is how the import went.
@@ -672,12 +686,12 @@ export function DesignCanvas({ id }: { id: string }) {
         <span {...stylex.props(styles.spacer)} />
         <button
           type="button"
-          aria-pressed={panel === "css"}
-          onClick={() => togglePanel("css")}
+          aria-pressed={panel === "tokens"}
+          onClick={() => togglePanel("tokens")}
           {...stylex.props(styles.tool)}
-          title="CSS every artboard uses"
+          title="CSS variables every artboard uses, in each mode"
         >
-          Shared CSS
+          Tokens
         </button>
         <button
           type="button"
@@ -744,8 +758,16 @@ export function DesignCanvas({ id }: { id: string }) {
         </ol>
       )}
 
-      {panel === "css" && (
-        <SharedCssPanel css={session.css} onSave={saveCss} onClose={() => setPanel(null)} />
+      {panel === "tokens" && sessionRef.current && (
+        <TokensPanel
+          table={session.tokens}
+          artboards={sessionRef.current.replica
+            .artboards()
+            .filter((board) => sessionRef.current?.replica.pageOf(board) === page?.id)}
+          modeOf={(board) => sessionRef.current?.replica.modeOf(board) ?? ""}
+          actions={tokenActions}
+          onClose={() => setPanel(null)}
+        />
       )}
       {panel === "comments" && sessionRef.current && (
         <CommentsPanel

@@ -1,6 +1,6 @@
 ---
 name: verify-finite
-description: Prove a Finite feature works in the real app and keep the evidence. Launches an isolated headless run (Rust server, static web app, headless Chrome, MCP agents), drives the browser and the MCP tools the way a person and an agent would, and saves transcripts and screenshots to .verify/<run>/. Use before saying a change to the canvas, design list, comments, shared CSS, pages, import/export or an MCP tool works, before saying a bug is fixed, or when asked to verify, prove or demo one.
+description: Prove a Finite feature works in the real app and keep the evidence. Launches an isolated headless run (Rust server, static web app, headless Chrome, MCP agents), drives the browser and the MCP tools the way a person and an agent would, and saves transcripts and screenshots to .verify/<run>/. Use before saying a change to the canvas, design list, comments, tokens, pages, import/export or an MCP tool works, before saying a bug is fixed, or when asked to verify, prove or demo one.
 ---
 
 # Verify Finite
@@ -78,15 +78,15 @@ $V h $RUN api GET /api/designs/<designId>             # the stored design, comme
 
 Use these stable handles. They're the app's accessible names and titles:
 
-| Where            | Handle                                                                                                                                                                                                                 |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Design list      | heading `Designs`, button `New design`, searchbox `Search designs by name`, one `link` per design card                                                                                                                 |
-| Canvas top bar   | link `← Designs`, `button[title="CSS every artboard uses"]` (Shared CSS), `button[title="Every comment, open and resolved"]` (Comments, with the open count in its name), `Import`, `Export`, a chip per agent present |
-| Canvas tools     | toolbar `Tools`: `button[title="Pointer (V)"]`, `button[title="Comment (C)"]`; keys `v`, `c`, `Shift+1` (fit), `=`/`-` (zoom)                                                                                          |
-| Comment box      | textbox `Add a comment`, `button[title="Change your name"]`, `[data-selection-count]`, button `Send`, pins named `Comment: <first message>`                                                                            |
-| Comment thread   | `[role=dialog]` named `Comment thread`: buttons `Delete`, `Resolve`/`Reopen`, `Close`, `Edit` on your newest message, textbox `Reply`                                                                                  |
-| Panels           | `aside[aria-label=Comments]` with tabs `Open N` / `Resolved N`; `form[aria-label="Shared CSS"]`; `nav[aria-label=Pages]`; `[role=menu][aria-label=Export]`; `aside[aria-label=Import]` with a `status`                 |
-| Artboard content | `[data-artboard="<artboardId>"] >>> <css>`; agents' `data-name` attributes survive into the DOM                                                                                                                        |
+| Where            | Handle                                                                                                                                                                                                                                     |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Design list      | heading `Designs`, button `New design`, searchbox `Search designs by name`, one `link` per design card                                                                                                                                     |
+| Canvas top bar   | link `← Designs`, `button[title="CSS variables every artboard uses, in each mode"]` (Tokens), `button[title="Every comment, open and resolved"]` (Comments, with the open count in its name), `Import`, `Export`, a chip per agent present |
+| Canvas tools     | toolbar `Tools`: `button[title="Pointer (V)"]`, `button[title="Comment (C)"]`; keys `v`, `c`, `Shift+1` (fit), `=`/`-` (zoom)                                                                                                              |
+| Comment box      | textbox `Add a comment`, `button[title="Change your name"]`, `[data-selection-count]`, button `Send`, pins named `Comment: <first message>`                                                                                                |
+| Comment thread   | `[role=dialog]` named `Comment thread`: buttons `Delete`, `Resolve`/`Reopen`, `Close`, `Edit` on your newest message, textbox `Reply`                                                                                                      |
+| Panels           | `aside[aria-label=Comments]` with tabs `Open N` / `Resolved N`; `section[aria-label=Tokens]` with `form[aria-label="Add a token"]`; `nav[aria-label=Pages]`; `[role=menu][aria-label=Export]`; `aside[aria-label=Import]` with a `status`  |
+| Artboard content | `[data-artboard="<artboardId>"] >>> <css>`; agents' `data-name` attributes survive into the DOM                                                                                                                                            |
 
 Prefer these to coordinates. Coordinates are only for sandboxed (script) artboards, which selectors can't reach. `click` takes CSS, not text, so buttons without a title are picked by position: `[role=dialog] button --nth 1`, with `query` listing the order.
 

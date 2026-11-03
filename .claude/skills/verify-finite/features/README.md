@@ -39,27 +39,27 @@ Each feature file starts with an H1 title and one paragraph on what a person or 
 
 Run every feature your diff's paths point to. A path in more than one row needs every feature in those rows.
 
-| Changed path                                                                        | Features to run                                                                                                                    |
-| ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `crates/server/src/mcp/` (a tool, its params, its result text)                      | The feature that uses the tool (search this folder's files for the tool's name), plus [Live canvas](./live-canvas.md)              |
-| `crates/server/src/mcp/instructions.md`                                             | None in this map: measure it with an AX run (`e2e/ax`)                                                                             |
-| `crates/design/src/edit.rs`, `node.rs`, `document.rs`, `html.rs`, `fractional.rs`   | [Live canvas](./live-canvas.md)                                                                                                    |
-| `crates/design/src/history.rs`, `design.rs`                                         | [Live canvas](./live-canvas.md) (`canvas-undo`)                                                                                    |
-| `crates/design/src/comment.rs`                                                      | [Comments](./comments.md)                                                                                                          |
-| `crates/design/src/search.rs`, `crates/server/src/mcp/search.rs`                    | [Live canvas](./live-canvas.md), with `find_nodes` and `replace_values` calls                                                      |
-| `crates/server/src/mcp/styles.rs`                                                   | [Shared CSS](./shared-css.md)                                                                                                      |
-| `crates/wasm/`, `apps/web/src/design/` (socket, session, replica, renderer, camera) | [Live canvas](./live-canvas.md), [Comments](./comments.md)                                                                         |
-| `crates/server/src/hub/`, `store.rs`                                                | [Live canvas](./live-canvas.md), [Design list](./design-list.md)                                                                   |
-| `crates/server/src/api.rs`, `guard.rs`, `heartbeat.rs`                              | [Design list](./design-list.md), [Comments](./comments.md), [Shared CSS](./shared-css.md), [Import and export](./import-export.md) |
-| `crates/server/src/screenshot/`                                                     | [Live canvas](./live-canvas.md) (`canvas-screenshot`)                                                                              |
-| `crates/transfer/`, `crates/server/src/transfer.rs`                                 | [Import and export](./import-export.md)                                                                                            |
-| `apps/web/src/components/DesignGrid.tsx`, `Thumbnail.tsx`, `app/page.tsx`           | [Design list](./design-list.md)                                                                                                    |
-| `apps/web/src/components/DesignCanvas.tsx`, `app/design/`                           | [Live canvas](./live-canvas.md), [Comments](./comments.md)                                                                         |
-| `apps/web/src/components/Comments.tsx`, `CommentsPanel.tsx`, `PinIcon.tsx`          | [Comments](./comments.md)                                                                                                          |
-| `apps/web/src/components/SharedCss.tsx`                                             | [Shared CSS](./shared-css.md)                                                                                                      |
-| `apps/web/src/components/PagesSidebar.tsx`                                          | [Pages](./pages.md)                                                                                                                |
-| `apps/web/src/components/Transfer.tsx`                                              | [Import and export](./import-export.md)                                                                                            |
-| `apps/web/src/styles/`                                                              | Every feature with a screen: take a `shot` of each                                                                                 |
+| Changed path                                                                        | Features to run                                                                                                            |
+| ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `crates/server/src/mcp/` (a tool, its params, its result text)                      | The feature that uses the tool (search this folder's files for the tool's name), plus [Live canvas](./live-canvas.md)      |
+| `crates/server/src/mcp/instructions.md`                                             | None in this map: measure it with an AX run (`e2e/ax`)                                                                     |
+| `crates/design/src/edit.rs`, `node.rs`, `document.rs`, `html.rs`, `fractional.rs`   | [Live canvas](./live-canvas.md)                                                                                            |
+| `crates/design/src/history.rs`, `design.rs`                                         | [Live canvas](./live-canvas.md) (`canvas-undo`)                                                                            |
+| `crates/design/src/comment.rs`                                                      | [Comments](./comments.md)                                                                                                  |
+| `crates/design/src/search.rs`, `crates/server/src/mcp/search.rs`                    | [Live canvas](./live-canvas.md), with `find_nodes` and `replace_values` calls                                              |
+| `crates/design/src/tokens.rs`, `crates/server/src/mcp/tokens.rs`                    | [Tokens](./tokens.md)                                                                                                      |
+| `crates/wasm/`, `apps/web/src/design/` (socket, session, replica, renderer, camera) | [Live canvas](./live-canvas.md), [Comments](./comments.md)                                                                 |
+| `crates/server/src/hub/`, `store.rs`                                                | [Live canvas](./live-canvas.md), [Design list](./design-list.md)                                                           |
+| `crates/server/src/api.rs`, `guard.rs`, `heartbeat.rs`                              | [Design list](./design-list.md), [Comments](./comments.md), [Tokens](./tokens.md), [Import and export](./import-export.md) |
+| `crates/server/src/screenshot/`                                                     | [Live canvas](./live-canvas.md) (`canvas-screenshot`)                                                                      |
+| `crates/transfer/`, `crates/server/src/transfer.rs`                                 | [Import and export](./import-export.md)                                                                                    |
+| `apps/web/src/components/DesignGrid.tsx`, `Thumbnail.tsx`, `app/page.tsx`           | [Design list](./design-list.md)                                                                                            |
+| `apps/web/src/components/DesignCanvas.tsx`, `app/design/`                           | [Live canvas](./live-canvas.md), [Comments](./comments.md)                                                                 |
+| `apps/web/src/components/Comments.tsx`, `CommentsPanel.tsx`, `PinIcon.tsx`          | [Comments](./comments.md)                                                                                                  |
+| `apps/web/src/components/TokensPanel.tsx`                                           | [Tokens](./tokens.md)                                                                                                      |
+| `apps/web/src/components/PagesSidebar.tsx`                                          | [Pages](./pages.md)                                                                                                        |
+| `apps/web/src/components/Transfer.tsx`                                              | [Import and export](./import-export.md)                                                                                    |
+| `apps/web/src/styles/`                                                              | Every feature with a screen: take a `shot` of each                                                                         |
 
 ## Not covered yet
 
@@ -75,6 +75,6 @@ This map has no recipe for these. Report them as not covered, and say what you c
 - [Design list](./design-list.md): browse, create and open designs, and search them by name.
 - [Live canvas](./live-canvas.md): an agent's edits appear on a person's canvas as they happen, with presence chips and undo per agent.
 - [Comments](./comments.md): a person pins a comment to one or more elements, an agent waiting on it answers and resolves it, and the person edits, reopens or deletes it.
-- [Shared CSS](./shared-css.md): CSS every artboard uses, edited by a person in the panel or by an agent.
+- [Tokens](./tokens.md): CSS variables every artboard uses, with a value per mode, edited by a person in the panel or by an agent.
 - [Pages](./pages.md): an agent splits a design into pages, and a person switches between them in the sidebar.
 - [Import and export](./import-export.md): a person imports a file as artboards and downloads an artboard or the whole design, and agents do the same over MCP.

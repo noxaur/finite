@@ -86,9 +86,9 @@ A quarantined `onclick` scores preserved yes, visual unknown and editable no. St
 
 Export reads one revision. The server copies the design under its lock, then the codec writes from the copy without the lock, so a slow export never holds up edits.
 
-The HTML codec writes one artboard as a standalone page: the base styles, the design's shared CSS, and the artboard with its layer names. The page carries the same content security policy the viewer uses. Importing the page gives back the artboard as a `<div>` inside a new artboard. The page's `<meta>` and `<title>` act on the page rather than the design, so they're quarantined.
+The HTML codec writes one artboard as a standalone page: the base styles, the design's tokens in the artboard's mode, and the artboard with its layer names. The page carries the same content security policy the viewer uses. Importing the page gives back the artboard as a `<div>` inside a new artboard. The page's `<meta>` and `<title>` act on the page rather than the design, so they're quarantined.
 
-Figma has no CSS, so Figma export reads how the artboard actually rendered. The headless Chrome the screenshot pipeline already runs measures every element's box and computed styles, through the `Measure` trait (`crates/transfer/src/scene.rs`). That measurement is a `Scene`, which is derived data: it's built for one revision, thrown away after the export, and never written back as CSS. Computed styles already account for classes and the shared CSS, so the codec maps what the browser drew, not what the inline styles say.
+Figma has no CSS, so Figma export reads how the artboard actually rendered. The headless Chrome the screenshot pipeline already runs measures every element's box and computed styles, through the `Measure` trait (`crates/transfer/src/scene.rs`). That measurement is a `Scene`, which is derived data: it's built for one revision, thrown away after the export, and never written back as CSS. Computed styles already account for classes and tokens, so the codec maps what the browser drew, not what the inline styles say.
 
 Flexbox becomes auto layout only when auto layout would put every child where the browser did. The codec lays the children out the way Figma would and compares; if any child is more than a pixel off, because of margins, `order` or `flex-basis`, say, the frame keeps the measured positions and reports it. Grid always exports as measured positions.
 
@@ -97,15 +97,14 @@ Flexbox becomes auto layout only when auto layout would put every child where th
 The `repo` codec writes a design as a folder of text files, so it can sit next to the code and show up in pull requests:
 
 ```text
-finite.json          name, pages, and each artboard's file, page and position
-shared.css           the shared CSS, if the design has any
+finite.json          name, pages, modes, tokens, and each artboard's file, page, mode and position
 artboards/home.html  one artboard: its <div> and everything inside, one tag per line
 assets/<sha256>.png  files the design points to, such as images
 ```
 
-A codec returns one file, so the export is one tar archive of that folder. Unpack it with `tar -xf`, commit the files, and pack them again with `tar -cf design.tar finite.json shared.css artboards assets` to import them (one folder around those is fine). The archive is deterministic: an unchanged design writes the same bytes, so a re-export of an unedited design leaves no diff.
+A codec returns one file, so the export is one tar archive of that folder. Unpack it with `tar -xf`, commit the files, and pack them again with `tar -cf design.tar finite.json artboards assets` to import them (one folder around those is fine). The archive is deterministic: an unchanged design writes the same bytes, so a re-export of an unedited design leaves no diff.
 
-Import back is exact for what Finite edits: layer names, styles, attributes, text and nesting, plus each artboard's size (an auto-height artboard stays auto-height), position and page, and the page list. A test exports a design with mixed text and inline elements and checks that the imported document matches node for node. What doesn't come back:
+Import back is exact for what Finite edits: layer names, styles, attributes, text and nesting, plus each artboard's size (an auto-height artboard stays auto-height), position, page and mode, the page list and the tokens. A folder from before tokens can hold a `shared.css`; importing it moves the CSS into tokens and each new artboard's `<style>`, as loading an old design does. A test exports a design with mixed text and inline elements and checks that the imported document matches node for node. What doesn't come back:
 
 - **Scripts.** A `<script>` is written to the file, but import quarantines it like any imported file's scripts, so it stays out of the document and is listed in the import's diagnostics. The original tar stays downloadable.
 - Node ids, undo history, comments and import records. The export reports the import records, as a bundle does.

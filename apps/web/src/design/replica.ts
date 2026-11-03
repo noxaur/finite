@@ -1,4 +1,4 @@
-import type { Node, Op, Snapshot } from "./schema";
+import type { Node, Op, Snapshot, TokenValues } from "./schema";
 import { designModel, type WasmDocument } from "./wasm";
 
 /** What a node is to components, from `components::info` in Rust. */
@@ -29,9 +29,16 @@ export type Applied =
     }
   | { readonly op: "set"; readonly node: Node; readonly key: string }
   | { readonly op: "move"; readonly node: Node; readonly from: string | null }
-  | { readonly op: "css"; readonly css: string | null }
+  /** A token or mode changed; `Replica.tokens` has the new table. */
+  | { readonly op: "tokens" }
   /** A page was added, renamed, reordered or removed; `Replica.pages` has the new list. */
   | { readonly op: "page" };
+
+/** The design's tokens: its modes in order, and each token's values by mode id. */
+export interface TokenTable {
+  readonly modes: ReadonlyArray<{ readonly id: string; readonly name: string }>;
+  readonly tokens: Readonly<Record<string, TokenValues>>;
+}
 
 /** A page as the viewer lists it. */
 export interface PageEntry {
@@ -50,7 +57,9 @@ type Touched =
       readonly from: string | null;
       readonly before: string | null;
     }
-  | { readonly op: "css"; readonly css: string | null }
+  | { readonly op: "css" }
+  | { readonly op: "token" }
+  | { readonly op: "mode" }
   | { readonly op: "page" }
   | null;
 
@@ -80,8 +89,8 @@ export class Replica {
   private lastFound = 0;
   private readonly doc: WasmDocument = designModel().newDocument();
   seq = 0;
-  /** The design's shared CSS, which every artboard renders with. */
-  css: string | null = null;
+  /** The design's tokens and modes, which every artboard renders with. */
+  tokens: TokenTable = { modes: [], tokens: {} };
   /** The pages in order, never empty: a design without pages has its implicit first page. */
   pages: ReadonlyArray<PageEntry> = [];
 
@@ -94,23 +103,44 @@ export class Replica {
     for (const node of snapshot.nodes) this.nodes.set(node.id, node);
     for (const [parent, ids] of order) this.childIds.set(parent, ids);
     this.seq = snapshot.seq;
-    // Loading clears the stylesheet and pages, so set them as the server would.
-    this.css = null;
+    // Loading clears the pages, tokens and modes, so set them as the server would.
     this.applyAll([
-      { op: "css", css: snapshot.css ?? null },
       ...Object.entries(snapshot.pages ?? {}).map(([id, page]) => ({
         op: "page" as const,
         id,
         page,
       })),
+      ...Object.entries(snapshot.modes ?? {}).map(([id, mode]) => ({
+        op: "mode" as const,
+        id,
+        mode,
+      })),
+      ...Object.entries(snapshot.tokens ?? {}).map(([name, values]) => ({
+        op: "token" as const,
+        name,
+        values,
+      })),
     ]);
     this.pages = JSON.parse(this.doc.pages()) as PageEntry[];
+    this.tokens = JSON.parse(this.doc.tokens()) as TokenTable;
   }
 
   /** The id of the page an artboard is on: its own page if that exists, else the first page. */
   pageOf(board: Node): string {
     const { page } = board;
     return page !== undefined && this.pages.some((p) => p.id === page) ? page : this.pages[0]!.id;
+  }
+
+  /** The id of the mode an artboard renders in: its own mode if that exists, else the first mode. */
+  modeOf(board: Node): string {
+    const { mode } = board;
+    const { modes } = this.tokens;
+    return mode !== undefined && modes.some((m) => m.id === mode) ? mode : (modes[0]?.id ?? "");
+  }
+
+  /** Artboard `id`'s tokens in its mode, as a `<style>`'s text; empty without tokens. */
+  tokenStyle(id: string, shadow: boolean): string {
+    return this.doc.tokenStyle(id, shadow);
   }
 
   /** Frees the WebAssembly side. The replica can't be used afterwards. */
@@ -238,9 +268,12 @@ export class Replica {
         this.nodes.set(touched.node.id, touched.node);
         this.link(touched.node, touched.before);
         return { op: "move", node: touched.node, from: touched.from };
+      // The old shared CSS draws nothing, but refreshing the tokens is harmless.
       case "css":
-        this.css = touched.css;
-        return { op: "css", css: touched.css };
+      case "token":
+      case "mode":
+        this.tokens = JSON.parse(this.doc.tokens()) as TokenTable;
+        return { op: "tokens" };
       case "page":
         this.pages = JSON.parse(this.doc.pages()) as PageEntry[];
         return { op: "page" };

@@ -70,8 +70,7 @@ const SEARCH_INSTRUCTIONS: &str = "Search: find_nodes finds elements by text, na
 
 /// Whether `FINITE_MCP_EXTRA` (a comma-separated list) turns on a group of
 /// experimental tools. AX experiments (`e2e/ax`) compare agents with and
-/// without a group before it ships to everyone, as the search and shared
-/// styles tools did. Right now `layout` adds a layout note to results
+/// without a group before it ships to everyone, as the search tools did. Right now `layout` adds a layout note to results
 /// after `write_html` and `update_styles` (see `watch.rs`), and `components`
 /// is experimental.
 pub(crate) fn extra(group: &str) -> bool {
@@ -101,7 +100,7 @@ pub(crate) fn instructions() -> &'static str {
             text.push_str(component_tools::INSTRUCTIONS);
         }
         text.push_str("\n\n");
-        text.push_str(styles::INSTRUCTIONS);
+        text.push_str(tokens::INSTRUCTIONS);
         text.push_str("\n\n");
         text.push_str(pages::INSTRUCTIONS);
         text.push('\n');
@@ -194,13 +193,15 @@ fn with_note(content: ContentBlock, note: Option<String>) -> Vec<ContentBlock> {
         .collect()
 }
 
-/// A note that the design has shared CSS, which `what` (markup read from the
-/// design) leaves out, so using it outside the design would lose it.
-fn shared_css_note(handle: &DesignHandle, what: &str) -> Option<String> {
-    handle.read(|d| d.doc().css().map(str::len)).map(|chars| {
+/// A note that the design has tokens, which `what` (markup read from the
+/// design) leaves out, so using it outside the design would lose them.
+fn tokens_note(handle: &DesignHandle, what: &str) -> Option<String> {
+    let count = handle.read(|d| d.doc().tokens().len());
+    (count > 0).then(|| {
         format!(
-            "This design also has shared CSS ({chars} characters, from get_shared_css) that every artboard uses. \
-             {what} leaves it out, so copy it too if you use this markup outside this design."
+            "This design also has {count} token{} (get_tokens) that its var(--…) values read. \
+             {what} leaves them out, so copy them too if you use this markup outside this design.",
+            if count == 1 { "" } else { "s" }
         )
     })
 }
@@ -545,7 +546,7 @@ impl FiniteMcp {
         if extra("components") {
             router.merge(Self::component_router());
         }
-        router.merge(Self::styles_router());
+        router.merge(Self::tokens_router());
         router.merge(Self::transfer_router());
         router.merge(Self::pages_router());
         router
@@ -737,7 +738,9 @@ macro_rules! design {
 mod component_tools;
 mod pages;
 mod search;
-mod styles;
+mod tokens;
+
+pub(crate) use self::{params::TokenValue, tokens::token_ops};
 mod transfer;
 mod watch;
 
@@ -822,7 +825,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Overview of a design: its name, its pages, its artboards (id, name, position, size, page) and which agents are working on what.",
+        description = "Overview of a design: its name, its pages, its artboards (id, name, position, size, page, mode), how many tokens it has and which agents are working on what.",
         annotations(read_only_hint = true)
     )]
     async fn get_basic_info(&self, Parameters(p): Parameters<DesignParams>) -> ToolResult {
@@ -850,6 +853,9 @@ impl FiniteMcp {
                     if pages.len() > 1 {
                         board["pageId"] = doc.page_of(a).into();
                     }
+                    if let Some(mode) = a.mode.as_deref().and_then(|m| doc.mode_map().get(m)) {
+                        board["mode"] = mode.name.clone().into();
+                    }
                     board
                 })
                 .collect();
@@ -875,8 +881,8 @@ impl FiniteMcp {
             })
         });
         let mut info = info;
-        // So agents needn't call get_shared_css to find out there's none.
-        info["sharedCssChars"] = handle.read(|d| d.doc().css().map_or(0, str::len)).into();
+        // So agents needn't call get_tokens to find out there are none.
+        info["tokenCount"] = handle.read(|d| d.doc().tokens().len()).into();
         let count = info["artboardCount"].as_u64().unwrap_or(0) as usize;
         Ok(CallToolResult::success(with_note(
             ContentBlock::text(serde_json::to_string_pretty(&info).expect("json values serialize")),
@@ -1017,7 +1023,7 @@ impl FiniteMcp {
     )]
     async fn get_html(&self, Parameters(p): Parameters<HtmlParams>) -> ToolResult {
         let handle = design!(self, &p.design_id);
-        let shared = shared_css_note(&handle, "The HTML above");
+        let shared = tokens_note(&handle, "The HTML above");
         let options = html::ExportOptions {
             ids: true,
             styles: p.include_styles.unwrap_or(true),
@@ -1172,7 +1178,7 @@ impl FiniteMcp {
                 if stored == 1 { "s" } else { "" },
             ));
         }
-        notes.extend(shared_css_note(&handle, "The JSX above"));
+        notes.extend(tokens_note(&handle, "The JSX above"));
         let note = (!notes.is_empty()).then(|| notes.join("\n"));
         Ok(CallToolResult::success(with_note(
             ContentBlock::text(converted.jsx),
@@ -1338,7 +1344,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Create an artboard: a frame on the canvas that holds a screen or component. Give a height for a fixed size, or omit it to grow with the content. Pass html to fill it in the same call (same rules as write_html), and class to style the artboard itself from CSS. Omit x and y to place it beside the existing artboards. Pass pageId to put it on another page. Returns its id, position and size, and the content's outline with ids."
+        description = "Create an artboard: a frame on the canvas that holds a screen or component. Give a height for a fixed size, or omit it to grow with the content. Pass html to fill it in the same call (same rules as write_html), and class to style the artboard itself from CSS. Omit x and y to place it beside the existing artboards. Pass pageId to put it on another page, and mode to render it in a token mode like \"Dark\". Returns its id, position and size, and the content's outline with ids."
     )]
     async fn create_artboard(
         &self,
@@ -1366,6 +1372,7 @@ impl FiniteMcp {
             page: p.page_id,
             styles: p.styles,
         };
+        let mode = p.mode;
         self.edit(
             &ctx,
             &p.design_id,
@@ -1375,8 +1382,13 @@ impl FiniteMcp {
                 let id = new_id();
                 let (mut ops, roots) =
                     edit::create_artboard_with(doc, id.clone(), spec, fragments, &mut new_id)?;
-                if let (Some(class), Some(Op::Create { node })) = (&class, ops.first_mut()) {
-                    node.attrs.insert("class".into(), class.trim().to_owned());
+                if let Some(Op::Create { node }) = ops.first_mut() {
+                    if let Some(class) = &class {
+                        node.attrs.insert("class".into(), class.trim().to_owned());
+                    }
+                    if let Some(mode) = &mode {
+                        node.mode = edit::artboard_mode(doc, mode)?;
+                    }
                 }
                 Ok((ops, (id, roots)))
             },
@@ -2001,7 +2013,7 @@ mod tests {
             INSTRUCTIONS.trim_end(),
             SEARCH_INSTRUCTIONS,
             component_tools::INSTRUCTIONS,
-            styles::INSTRUCTIONS,
+            tokens::INSTRUCTIONS,
         ]
         .join("\n\n");
         assert!(

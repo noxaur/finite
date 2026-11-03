@@ -6,10 +6,15 @@ use crate::{
     NodeId,
     comment::{self, Anchor, Author, AuthorKind, ChangeLog, Comment, CommentError, Message, Point},
     document::{Applied, Document, Op, Page, Rejected},
+    edit::{self, EditError},
     history::{Entry, History},
     import::ImportRecord,
     node::Node,
+    tokens::{Mode, Values},
 };
+
+/// The actor that commits [`Design::migrate_css`]. Nobody undoes it.
+pub const MIGRATION_ACTOR: &str = "finite";
 
 /// Identifies whoever made a change: an agent's MCP session today, a user's tab later.
 pub type ActorId = String;
@@ -32,9 +37,16 @@ pub struct Snapshot {
     pub meta: DesignMeta,
     pub seq: u64,
     pub nodes: Vec<Node>,
-    /// The shared stylesheet (see [`Document::css`]).
+    /// The old shared stylesheet, in designs saved before tokens. Loading
+    /// one migrates it (see [`Design::migrate_css`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub css: Option<String>,
+    /// The design's tokens by name (see [`crate::tokens`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tokens: BTreeMap<String, Values>,
+    /// The design's modes by id. Absent when it has only its implicit first mode.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub modes: BTreeMap<String, Mode>,
     /// The design's pages by id (see [`Page`]). Absent when it has only its
     /// implicit first page.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -190,7 +202,8 @@ impl Design {
             meta: snapshot.meta,
             doc: Document::from_nodes(snapshot.nodes)
                 .with_css(snapshot.css)
-                .with_pages(snapshot.pages),
+                .with_pages(snapshot.pages)
+                .with_tokens(snapshot.tokens, snapshot.modes),
             seq: snapshot.seq,
             comments: snapshot.comments,
             histories: snapshot.histories.unwrap_or_default(),
@@ -210,6 +223,8 @@ impl Design {
             nodes,
             css: self.doc.css().map(str::to_owned),
             pages: self.doc.page_map().clone(),
+            tokens: self.doc.tokens().clone(),
+            modes: self.doc.mode_map().clone(),
             comments: self.comments.clone(),
             histories: None,
             log: None,
@@ -230,6 +245,33 @@ impl Design {
 
     pub fn doc(&self) -> &Document {
         &self.doc
+    }
+
+    /// Moves a design's old shared CSS into tokens and its artboards'
+    /// `<style>`s, once, after it loads (see [`edit::migrate_css`]). The
+    /// saved undo steps may set the old CSS again, so they're dropped.
+    /// Returns the change to save, or `None` when there was nothing to move.
+    /// `new_id` can return an id that's taken; it's asked again.
+    pub fn migrate_css(
+        &mut self,
+        now: u64,
+        new_id: &mut impl FnMut() -> NodeId,
+    ) -> Result<Option<Change>, EditError> {
+        if self.doc.css().is_none() {
+            return Ok(None);
+        }
+        let doc = &self.doc;
+        let mut fresh = || loop {
+            let id = new_id();
+            if !doc.contains(&id) {
+                return id;
+            }
+        };
+        let ops = edit::migrate_css(doc, &mut fresh)?;
+        self.histories.clear();
+        let change = self.commit(MIGRATION_ACTOR, "Moved shared CSS into tokens", &ops, now);
+        self.forget_actor(MIGRATION_ACTOR);
+        Ok(change)
     }
 
     /// The document as it renders: every instance shows its component's

@@ -124,9 +124,10 @@ impl DesignState {
         self.events = broadcast::channel(1).0;
     }
 
-    /// Rebuilds a stored design. A replayed journal is compacted on the next save.
+    /// Rebuilds a stored design. A replayed journal is compacted on the next
+    /// save, and so is a design whose old shared CSS moved into tokens.
     pub(super) fn restore(stored: Stored) -> Self {
-        let needs_snapshot = !stored.journal.is_empty();
+        let mut needs_snapshot = !stored.journal.is_empty();
         let mut design = Design::from_snapshot(stored.snapshot);
         // The journal doesn't say when its changes were made, so their actors
         // count as active now.
@@ -141,6 +142,13 @@ impl DesignState {
                 journaled.insert(change.actor.clone());
             }
             design.replay(record);
+        }
+        let id = design.meta.id.clone();
+        match design.migrate_css(now_ms(), &mut || random_id(8)) {
+            Ok(migrated) => needs_snapshot |= migrated.is_some(),
+            Err(error) => {
+                tracing::error!(design = id, %error, "couldn't move shared CSS into tokens")
+            }
         }
         let mut state = Self::new(design, needs_snapshot);
         let now = now_ms();

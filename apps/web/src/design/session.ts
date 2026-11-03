@@ -1,4 +1,4 @@
-import { type Applied, type PageEntry, Replica } from "./replica";
+import { type Applied, type PageEntry, Replica, type TokenTable } from "./replica";
 import type { Change, Comment, DesignMessage, DesignMeta, Presence } from "./schema";
 import { connectDesign, type SocketStatus } from "./socket";
 
@@ -33,8 +33,8 @@ export interface SessionState {
   /** Recent changes, newest first. */
   readonly activity: ReadonlyArray<Activity>;
   readonly artboardCount: number;
-  /** The design's shared CSS, or `null` when it has none. */
-  readonly css: string | null;
+  /** The design's tokens and modes. */
+  readonly tokens: TokenTable;
   /** The design's pages in order, with how many artboards each has. */
   readonly pages: ReadonlyArray<PageEntry & { readonly artboardCount: number }>;
   /** Bumps after every snapshot or change, so anything positioned on the design can follow it. */
@@ -52,7 +52,7 @@ export const initialSessionState: SessionState = {
   comments: new Map(),
   activity: [],
   artboardCount: 0,
-  css: null,
+  tokens: { modes: [], tokens: {} },
   pages: [],
   version: 0,
 };
@@ -198,7 +198,7 @@ export class DesignSession {
     }
     return {
       artboardCount: boards.length,
-      css: this.replica.css,
+      tokens: this.replica.tokens,
       pages: this.replica.pages.map((p) => ({ ...p, artboardCount: counts.get(p.id) ?? 0 })),
       version: this.current.version + 1,
     };

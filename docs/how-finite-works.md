@@ -80,22 +80,30 @@ Next to the map, `Document` keeps a **child index**: for each parent, its childr
 
 ## Ops and their inverses
 
-There are only six ops:
+There are only eight ops:
 
-| Op       | What it does                               | Its inverse                    |
-| -------- | ------------------------------------------ | ------------------------------ |
-| `create` | Inserts one node                           | `delete` that node             |
-| `delete` | Removes a node and its whole subtree       | `create` every removed node    |
-| `set`    | Sets or clears one property                | `set` it back to the old value |
-| `move`   | Gives a node a new parent and/or index     | `move` it back                 |
-| `css`    | Replaces or clears the design's shared CSS | `css` with the old stylesheet  |
-| `page`   | Sets or removes one page                   | `page` with the old page       |
+| Op       | What it does                                  | Its inverse                    |
+| -------- | --------------------------------------------- | ------------------------------ |
+| `create` | Inserts one node                              | `delete` that node             |
+| `delete` | Removes a node and its whole subtree          | `create` every removed node    |
+| `set`    | Sets or clears one property                   | `set` it back to the old value |
+| `move`   | Gives a node a new parent and/or index        | `move` it back                 |
+| `page`   | Sets or removes one page                      | `page` with the old page       |
+| `token`  | Sets one token's values, or deletes the token | `token` with the old values    |
+| `mode`   | Sets or removes one mode                      | `mode` with the old mode       |
+| `css`    | Sets the old shared CSS, from before tokens   | `css` with the old stylesheet  |
 
-The **shared CSS** is one stylesheet for the whole design, so agents define classes like `.btn` and variables like `--brand` once instead of in every artboard. It and `page` are the only ops that target the design rather than a node, so `Op::id` is empty for them. The document holds it next to the nodes, and snapshots carry it as `css`, so it's saved, sent to viewers and undone like any edit. Every artboard renders with it inside a **cascade layer**, `finite-shared`. Styles outside any layer beat layered ones whatever their specificity, so an artboard's own `<style>` blocks and inline styles override the shared CSS, even a more specific shared selector. The cascade reverses that for `!important`, so a shared `!important` beats the artboard's. Leading `@import`s can't go inside a layer block, so they get `layer(finite-shared)` instead. The base styles sit in an earlier layer, `finite-base`, so the shared CSS can override them, like the font a shadow root's `all: initial` resets.
+`page`, `token`, `mode` and `css` target the design rather than a node, so `Op::id` is empty for them.
 
-`html::shared_style` writes the stylesheet out, and screenshots, the viewer's shadow roots and sandboxed iframes, and thumbnails all use it, the viewer through WebAssembly. It breaks up any `</style` so the CSS can't end its element, whichever way it reached the document. In a shadow root, `:root` matches nothing, so there it writes `:root` selectors as `:host`, and variables like `--brand` still reach the artboard. `set_shared_css` and the web API refuse CSS over 100,000 characters or with `</style` in it (`edit::set_css`).
+**Design tokens** are the design's CSS variables, like `--brand`, which any artboard can read with `var(--brand)` (`crates/design/src/tokens.rs`). A token is a CSS custom property with one value per **mode**, like Light and Dark, and each artboard renders in one mode, as frames do in Figma. The document holds tokens by name and modes by id, next to the pages, and snapshots carry them as `tokens` and `modes`, so they're saved, sent to viewers and undone like any edit. Each `token` op changes one token and each `mode` op one mode, so two agents adding tokens at once don't undo each other's.
 
-**Pages** group artboards, and the viewer shows one page at a time, so a design can keep components or drafts away from its screens. A page is a name and a fractional index, keyed by id; the document holds them next to the shared CSS, and snapshots carry them as `pages`. An artboard's `page` property names its page. A design without pages has one implicit page, `page-1` ("Page 1"), so older designs need no migration, and `create_page` first saves that page for real so its artboards stay on it. An artboard whose `page` is missing or names a page that's gone is on the first page (`Document::page_of`), so undoing someone's `create_page` never hides artboards. Each `page` op touches one page, so two agents adding pages at once don't undo each other's. `delete_page` deletes the page's artboards with it, and a design keeps at least one page. Placing an artboard automatically (`find_placement`, `duplicate`, `move_nodes` to the canvas, `move_to_page`) looks only at the artboards on its page. The viewer's renderer mounts only the shown page's artboards, and the pages sidebar on the left switches between them. Comment pins on other pages' artboards are hidden; picking one in the comments list switches to its page.
+A design without modes has one implicit mode, `mode-1` ("Default"), the way it has an implicit page. An artboard's `mode` property names its mode, and a missing mode, or one that's gone, means the first mode (`Document::mode_of`). A token without a value in a mode takes its value in the first mode, so a Dark mode needs only the values that change. `edit::set_modes` names the modes in order: the first name renames the first mode, and names past the last add modes. `delete_mode` takes that mode's values out of every token, and a design keeps at least one mode.
+
+`tokens::style` writes an artboard's tokens in its mode as one rule, `:host { --brand: …; }` in a shadow root and `:root { … }` in screenshots, sandboxed iframes and HTML export. It sits in a **cascade layer**, `finite-tokens`, after the base styles' `finite-base`. Styles outside any layer beat layered ones, so an artboard's own `<style>` or inline style that sets `--brand` wins over the token. A value that could end its declaration or the `<style>` it's in is refused: a `;`, `{`, `}` or `!` outside a string, an open bracket, string or comment, or `</style` (`tokens::check_value`). `Document::try_apply` checks that too, so an op from an import or a journal can't get around it. Fonts come from the fonts installed where the artboard renders.
+
+Tokens replaced the **shared CSS**, one stylesheet every artboard rendered with. Classes in it let one artboard's markup depend on rules it didn't carry, and components now share repeated parts instead. The `css` op stays so journals from before tokens still replay. When a design with shared CSS loads, `Design::migrate_css` moves it once (`edit::migrate_css`). Each custom property in a top-level `:root` rule becomes a token in the first mode. The rest, `@import`s included, goes into a `<style>` at the start of every artboard, inside the old `finite-shared` layer (`html::layered_style`), so artboards look as they did. The migration commits as the `finite` actor and drops every saved undo step, since an old step could set the shared CSS again. Old `.finite` bundles and repo folders migrate the same way when they're imported.
+
+**Pages** group artboards, and the viewer shows one page at a time, so a design can keep components or drafts away from its screens. A page is a name and a fractional index, keyed by id; the document holds them next to the tokens, and snapshots carry them as `pages`. An artboard's `page` property names its page. A design without pages has one implicit page, `page-1` ("Page 1"), so older designs need no migration, and `create_page` first saves that page for real so its artboards stay on it. An artboard whose `page` is missing or names a page that's gone is on the first page (`Document::page_of`), so undoing someone's `create_page` never hides artboards. Each `page` op touches one page, so two agents adding pages at once don't undo each other's. `delete_page` deletes the page's artboards with it, and a design keeps at least one page. Placing an artboard automatically (`find_placement`, `duplicate`, `move_nodes` to the canvas, `move_to_page`) looks only at the artboards on its page. The viewer's renderer mounts only the shown page's artboards, and the pages sidebar on the left switches between them. Comment pins on other pages' artboards are hidden; picking one in the comments list switches to its page.
 
 `Document::apply` runs one op and returns its inverse, read from the document at that moment. This is the **command pattern**.
 
@@ -228,7 +236,7 @@ A component changes by being rewritten in place. `write_html` with `replace` or 
 
 The component tools and the instructions about them are on only with `FINITE_MCP_EXTRA=components`, until AX runs show they help (`mcp/component_tools.rs`). `create_component` marks an element and can replace its copies in place. Each copy has to be built the same way, and its differences become overrides. The other tools are `insert_instance`, `get_components` and `detach_instance`. Everything else here applies whether or not the tools are on.
 
-A `<style>` block styles only its own artboard, and that catches agents out. In the first AX runs of `screens-change`, one agent styled its top bar with classes from each artboard's `<style>`. Then it had to recolor three blocks after all. The design's shared CSS reaches every artboard, and a `<style>` inside the component is part of it, so every instance carries either one. `create_component` names the classes a component takes from `<style>` blocks outside it and suggests both, and the instructions say to style a component inline or with shared CSS.
+A `<style>` block styles only its own artboard, and that catches agents out. In the first AX runs of `screens-change`, one agent styled its top bar with classes from each artboard's `<style>`. Then it had to recolor three blocks after all. A `<style>` inside the component is part of it, so every instance carries it, and tokens reach every artboard. `create_component` names the classes a component takes from `<style>` blocks outside it and suggests a `<style>` inside it, or inline styles with tokens.
 
 ### Components in the viewer
 
@@ -292,7 +300,7 @@ On startup, the hub reads every stored design to build the list, then drops each
 - `format.rs` writes the compact outlines that tools like `get_tree_summary` return, and the layout notes under screenshots.
 - `search.rs` has `find_nodes` and `replace_values`, over `finite_design::search`. They shipped behind a flag first, until AX runs showed they help.
 - `component_tools.rs` has `create_component`, `insert_instance`, `get_components` and `detach_instance`, behind `FINITE_MCP_EXTRA=components` (see "Components").
-- `styles.rs` has `set_shared_css` and `get_shared_css`, for the design's shared CSS. They shipped behind `FINITE_MCP_EXTRA=shared-styles` until AX runs showed agents use them, and now every agent gets them. `get_html` notes when a design has shared CSS, since HTML copied elsewhere would lose it.
+- `tokens.rs` has `set_tokens`, `get_tokens` and `set_artboard_mode`, and `token_ops`, which the web API's token route uses too. `set_tokens` takes a token's one value, its values by mode name, or `null`, and `modes` to name the modes. `get_tokens` returns them in that shape. `create_artboard` takes a `mode`, and `get_basic_info` shows each artboard's mode and the `tokenCount`. `get_html` and `get_jsx` note when a design has tokens, since markup copied elsewhere would lose them.
 - `watch.rs` adds a layout note to `write_html` and `update_styles` results when `FINITE_MCP_EXTRA=layout`. An edit measures the artboards it touched in Chrome (the first 3, and the note says when there were more) and waits up to a second; `FINITE_LAYOUT_WAIT_MS` changes that. If the browser is slower (the first call takes about 2 s, since each measurement launches Chrome), the note goes on the agent's next result for that design instead. Measurements run one at a time, and one whose artboard was edited again meanwhile is skipped. Any other edit, `undo`, `redo`, `get_layout` and `get_screenshot` drop a waiting note; a call that fails leaves it.
 - `instructions.md` is the text agents read when they connect. It's plain Markdown, so you can edit the workflow without touching Rust. Keep it short: Claude Code keeps the first 4,096 characters of a server's instructions and silently drops the rest. A test checks that the instructions, with every extra group's section added, stay under 4,000.
 
@@ -351,7 +359,9 @@ Every viewer shows the names and notes agents write, so they're cut to a fixed l
 | `GET /api/designs/{id}/ws?epoch=…&since=…`                        | The same socket, resuming after a reconnect         |
 | `POST …/comments`, `…/replies`, `PATCH …/comments/{cid}`          | Comment, reply, resolve                             |
 | `PATCH …/comments/{cid}/messages/last`, `DELETE …/comments/{cid}` | Edit your newest message, delete a comment          |
-| `PUT /api/designs/{id}/css`                                       | Replace the shared CSS, as the person's own edit    |
+| `PUT /api/designs/{id}/tokens`                                    | Name the modes and set tokens, as the person's edit |
+| `DELETE /api/designs/{id}/modes/{mode}`                           | Delete a mode and its values                        |
+| `PUT /api/designs/{id}/artboards/mode`                            | Set the mode artboards render in                    |
 | `POST /api/designs/{id}/import?format=…&name=…&strict=…`          | Import a file as new artboards                      |
 | `GET /api/designs/{id}/export?format=…&artboard=…`                | Download the design, or one artboard, as a file     |
 | `GET /api/designs/{id}/imports`, `…/imports/{iid}/original`       | The import records, and an import's exact bytes     |
@@ -816,6 +826,8 @@ The guide explains each limit where it applies. This is the list in one place. M
 | Fencing token | The design's `epoch`. The store refuses a write with an older one.               |
 | Fenced        | What a stale server's write gets: another server took the design over.           |
 | Router        | `finite-server router`: the front door that sends requests to each owner.        |
+| Token         | A design's CSS variable, like `--brand`, with a value per mode.                  |
+| Mode          | A set of token values, like Light or Dark. Each artboard renders in one.         |
 | Component     | A subtree marked `component`: one definition that instances show.                |
 | Instance      | A node with `instanceOf`: it shows its component, with its own overrides.        |
 | Override      | A value one instance shows differently, keyed by path and property.              |

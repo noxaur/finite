@@ -119,6 +119,12 @@ pub extern "C" fn replica_pages(handle: u32) -> i32 {
     with_replica(handle, |replica| Ok(replica.pages()))
 }
 
+/// [`Replica::tokens`].
+#[unsafe(no_mangle)]
+pub extern "C" fn replica_tokens(handle: u32) -> i32 {
+    with_replica(handle, |replica| Ok(replica.tokens()))
+}
+
 /// [`Replica::expand`] for the instance id in the first `len` input bytes.
 #[unsafe(no_mangle)]
 pub extern "C" fn replica_expand(handle: u32, len: usize) -> i32 {
@@ -153,13 +159,13 @@ pub extern "C" fn is_safe_attr(name_len: usize, value_len: usize) -> u32 {
     )
 }
 
-/// [`html::shared_style`] for the CSS in the first `len` input bytes, for a
-/// shadow root when `shadow` is 1.
+/// [`Replica::token_style`] for the artboard id in the first `len` input
+/// bytes, for a shadow root when `shadow` is 1.
 #[unsafe(no_mangle)]
-pub extern "C" fn shared_style(len: usize, shadow: u32) -> i32 {
-    respond(with_input(|input| {
-        Ok(html::shared_style(text(input, 0, len)?, shadow != 0))
-    }))
+pub extern "C" fn replica_token_style(handle: u32, len: usize, shadow: u32) -> i32 {
+    with_replica(handle, |replica| {
+        with_input(|input| Ok(replica.token_style(text(input, 0, len)?, shadow != 0)))
+    })
 }
 
 /// [`html::BASE_CSS`], the styles every artboard renders with.

@@ -18,6 +18,8 @@ export const Node = Schema.Struct({
   y: Schema.NullOr(Schema.Number),
   /** The artboard's page. Absent, or a page that's gone, means the first page. */
   page: Schema.optionalKey(Schema.String),
+  /** The token mode the artboard renders in. Absent, or a mode that's gone, means the first mode. */
+  mode: Schema.optionalKey(Schema.String),
   styles: Schema.Record(Schema.String, Schema.String),
   attrs: Schema.Record(Schema.String, Schema.String),
   /** Set on a component's root: instances elsewhere show this subtree. */
@@ -43,6 +45,18 @@ export const Page = Schema.Struct({
 });
 export type Page = typeof Page.Type;
 
+/** A set of token values, like Light or Dark. Each artboard renders in one. */
+export const Mode = Schema.Struct({
+  name: Schema.String,
+  /** Fractional index: modes sort by this string. */
+  index: Schema.String,
+});
+export type Mode = typeof Mode.Type;
+
+/** A token's CSS values, by mode id. */
+export const TokenValues = Schema.Record(Schema.String, Schema.String);
+export type TokenValues = typeof TokenValues.Type;
+
 export const Op = Schema.Union([
   Schema.Struct({ op: Schema.Literal("create"), node: Node }),
   Schema.Struct({ op: Schema.Literal("delete"), id: Schema.String }),
@@ -59,8 +73,23 @@ export const Op = Schema.Union([
     parent: Schema.NullOr(Schema.String),
     index: Schema.String,
   }),
-  /** Replaces the design's shared CSS, or removes it when `null`. */
-  Schema.Struct({ op: Schema.Literal("css"), css: Schema.NullOr(Schema.String) }),
+  /** Replaces the old shared CSS. Only journals from before tokens hold it. */
+  Schema.Struct({
+    op: Schema.Literal("css"),
+    css: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  }),
+  /** Sets a token's values, or deletes it when `values` is `null`. */
+  Schema.Struct({
+    op: Schema.Literal("token"),
+    name: Schema.String,
+    values: Schema.NullOr(TokenValues),
+  }),
+  /** Creates, renames or reorders a mode, or removes it when `mode` is `null`. */
+  Schema.Struct({
+    op: Schema.Literal("mode"),
+    id: Schema.String,
+    mode: Schema.NullOr(Mode),
+  }),
   /** Creates, renames or reorders a page, or removes it when `page` is `null`. */
   Schema.Struct({
     op: Schema.Literal("page"),
@@ -131,10 +160,12 @@ export const Snapshot = Schema.Struct({
   meta: DesignMeta,
   seq: Schema.Number,
   nodes: Schema.Array(Node),
-  /** CSS every artboard renders with, before its own styles. Absent when there's none. */
-  css: Schema.optionalKey(Schema.String),
   /** Pages by id. Absent when the design has only its implicit first page. */
   pages: Schema.optionalKey(Schema.Record(Schema.String, Page)),
+  /** Token values by name. Absent when there are none. */
+  tokens: Schema.optionalKey(Schema.Record(Schema.String, TokenValues)),
+  /** Modes by id. Absent when the design has only its implicit first mode. */
+  modes: Schema.optionalKey(Schema.Record(Schema.String, Mode)),
   comments: Schema.Array(Comment),
 });
 export type Snapshot = typeof Snapshot.Type;
