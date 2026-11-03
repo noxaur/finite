@@ -15,6 +15,9 @@ export interface View {
 const MIN_ZOOM = 0.02;
 const MAX_ZOOM = 8;
 
+/** How long after the view last moved the world stops being its own compositor layer. */
+const SETTLE_MS = 200;
+
 const clampZoom = (zoom: number) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom));
 
 /** Smallest box containing every bound, or `null` when there are none. */
@@ -66,6 +69,7 @@ export class Camera {
   dragToPan = true;
   private readonly listeners = new Set<(view: View) => void>();
   private readonly abort = new AbortController();
+  private settle: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
     private readonly viewport: HTMLElement,
@@ -89,6 +93,7 @@ export class Camera {
   dispose() {
     this.abort.abort();
     this.listeners.clear();
+    clearTimeout(this.settle);
   }
 
   subscribe(listener: (view: View) => void) {
@@ -135,6 +140,13 @@ export class Camera {
     const { x, y, zoom } = this.view;
     this.world.style.transform = `translate(${x}px, ${y}px) scale(${zoom})`;
     this.world.style.setProperty("--inv-zoom", String(1 / zoom));
+    // While the view moves, the world is a compositor layer, so each frame
+    // moves the pixels it already drew instead of redrawing every artboard
+    // (heavy SVG filters made that lag). Once it settles, the layer goes and
+    // the browser redraws it sharp at the new zoom.
+    this.world.style.willChange = "transform";
+    clearTimeout(this.settle);
+    this.settle = setTimeout(() => (this.world.style.willChange = ""), SETTLE_MS);
     for (const listener of this.listeners) listener(this.view);
   }
 
