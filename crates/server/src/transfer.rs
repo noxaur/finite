@@ -246,7 +246,7 @@ pub async fn export(
                 blobs: &blobs,
                 measure: &measure,
             };
-            format.codec().write(&revision, &scope)
+            finite_transfer::export(format, &revision, &scope)
         })
         .await,
     )?

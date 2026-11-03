@@ -22,6 +22,24 @@ import { PagesSidebar } from "./PagesSidebar";
 import { SharedCssPanel } from "./SharedCss";
 import { ExportMenu, ImportButton, ImportResultCard, type ImportState } from "./Transfer";
 
+/** An instance or component under the pointer: what to outline and what to call it. */
+interface Part {
+  /** The instance's root, or the component's. */
+  readonly id: string;
+  readonly label: string;
+}
+
+/** The instance `nodeId` is shown in, or the component it belongs to, if any. */
+function partOf(replica: Replica, nodeId: string): Part | null {
+  const info = replica.componentInfo(nodeId);
+  if (!info) return null;
+  const name = info.componentName ?? "a missing component";
+  if (info.instance) return { id: info.instance, label: `Instance of ${name}` };
+  if (!info.component) return null;
+  const count = `${info.instances} instance${info.instances === 1 ? "" : "s"}`;
+  return { id: info.component, label: `Component ${name} · ${count}` };
+}
+
 /** How long "show what changed" outlines stay up. */
 const FLASH_MS = 1800;
 /** A press that moves farther than this is a drag, not a click. */
@@ -93,6 +111,9 @@ export function DesignCanvas({ id }: { id: string }) {
   const [openId, setOpenId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [hover, setHover] = useState<Hit | null>(null);
+  // The instance or component under the pointer, in either mode.
+  const [part, setPart] = useState<Part | null>(null);
+  const partFrame = useRef(0);
   const [flash, setFlash] = useState<ReadonlyArray<string>>([]);
   // The page picked in the sidebar, or `null` for the first. A page that's
   // gone shows the first page, as the renderer does.
@@ -217,6 +238,7 @@ export function DesignCanvas({ id }: { id: string }) {
       window.removeEventListener("keydown", onKey);
       clearInterval(ticker);
       cancelAnimationFrame(hoverFrame.current);
+      cancelAnimationFrame(partFrame.current);
       frames.replaceChildren();
     };
   }, [id, model]);
@@ -250,7 +272,21 @@ export function DesignCanvas({ id }: { id: string }) {
     if (mode === "comment" && !draft && pointer) hoverAt(pointer.x, pointer.y);
   };
 
+  // Names the component part under the pointer: people can't tell from the
+  // design which parts follow a component, and agents edit them differently.
+  const partAt = (clientX: number, clientY: number) => {
+    const hit = rendererRef.current?.hitTest(clientX, clientY) ?? null;
+    const replica = sessionRef.current?.replica;
+    const next = hit && replica ? partOf(replica, hit.nodeId) : null;
+    setPart((prev) => (prev?.id === next?.id && prev?.label === next?.label ? prev : next));
+  };
+
   const onCanvasPointerMove = (e: React.PointerEvent) => {
+    const { clientX: x, clientY: y } = e;
+    cancelAnimationFrame(partFrame.current);
+    // Not while dragging to pan.
+    if (pressRef.current) setPart(null);
+    else partFrame.current = requestAnimationFrame(() => partAt(x, y));
     if (mode !== "comment" || draft) return;
     const { clientX, clientY } = e;
     pointerRef.current = { x: clientX, y: clientY };
@@ -451,7 +487,11 @@ export function DesignCanvas({ id }: { id: string }) {
           pressRef.current = { x: e.clientX, y: e.clientY };
         }}
         onPointerMove={onCanvasPointerMove}
-        onPointerLeave={() => setHover(null)}
+        onPointerLeave={() => {
+          setHover(null);
+          setPart(null);
+          cancelAnimationFrame(partFrame.current);
+        }}
         onClick={onCanvasClick}
         {...stylex.props(styles.viewport, mode === "comment" && styles.commenting)}
       >
@@ -470,6 +510,23 @@ export function DesignCanvas({ id }: { id: string }) {
                 />
               ),
           )}
+          {part &&
+            (() => {
+              const rect = canvasRect(part.id);
+              return (
+                rect && (
+                  <div
+                    data-outline="component"
+                    {...stylex.props(
+                      styles.outline(rect.x, rect.y, rect.width, rect.height),
+                      styles.part,
+                    )}
+                  >
+                    <span {...stylex.props(styles.partLabel)}>{part.label}</span>
+                  </div>
+                )
+              );
+            })()}
           {sessionRef.current && page && (
             <CommentLayer
               replica={sessionRef.current.replica}
@@ -685,6 +742,26 @@ const styles = stylex.create({
     boxShadow: `0 0 0 calc(3px * var(--inv-zoom, 1)) ${colors.halo}`,
     pointerEvents: "none",
   }),
+  part: {
+    outlineColor: colors.component,
+    outlineStyle: "dashed",
+  },
+  partLabel: {
+    position: "absolute",
+    left: 0,
+    bottom: "100%",
+    marginBottom: 2,
+    paddingInline: 6,
+    paddingBlock: 1,
+    borderRadius: 4,
+    backgroundColor: colors.component,
+    color: "white",
+    fontSize: 11,
+    lineHeight: 1.4,
+    whiteSpace: "nowrap",
+    transform: "scale(var(--inv-zoom, 1))",
+    transformOrigin: "bottom left",
+  },
   flash: {
     backgroundColor: "rgba(21, 128, 61, 0.12)",
     outlineColor: colors.ok,

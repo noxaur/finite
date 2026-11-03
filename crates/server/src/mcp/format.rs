@@ -49,6 +49,19 @@ fn outline_into(doc: &Document, id: &str, depth: usize, max_depth: usize, out: &
                 let _ = write!(out, " {name:?}");
             }
             let _ = write!(out, " #{}", node.id);
+            if let Some(component) = &node.instance_of {
+                match doc.get(component) {
+                    Some(c) => {
+                        let _ = write!(out, " (instance of {:?} #{component})", c.display_name());
+                    }
+                    None => {
+                        let _ = write!(out, " (instance of missing component #{component})");
+                    }
+                }
+            }
+            if node.component {
+                out.push_str(" (component)");
+            }
             if node.is_artboard() {
                 let _ = write!(
                     out,
@@ -115,7 +128,7 @@ pub(super) fn node_json(doc: &Document, id: &str) -> serde_json::Value {
             .map(|(k, v)| (k.clone(), short(v)))
             .collect::<std::collections::BTreeMap<_, _>>()
     };
-    serde_json::json!({
+    let mut json = serde_json::json!({
         "id": node.id,
         "type": if node.kind == NodeKind::Text { "text" } else { "element" },
         "tag": node.tag(),
@@ -129,7 +142,26 @@ pub(super) fn node_json(doc: &Document, id: &str) -> serde_json::Value {
         "attributes": shorten(&node.attrs),
         "childCount": children.len(),
         "childIds": child_ids,
-    })
+    });
+    if node.component {
+        json["component"] = true.into();
+        // The view also counts instances shown inside other instances.
+        json["instanceCount"] = doc
+            .instances_of(&node.id)
+            .filter(|i| !finite_design::components::is_virtual(i))
+            .count()
+            .into();
+    }
+    if let Some(component) = &node.instance_of {
+        json["instanceOf"] = component.clone().into();
+        if !node.overrides.is_empty() {
+            json["overrides"] = serde_json::to_value(&node.overrides).expect("strings serialize");
+        }
+    }
+    if let Some((instance, _)) = finite_design::components::split(id) {
+        json["insideInstance"] = instance.into();
+    }
+    json
 }
 
 /// How many child ids `get_node_info` lists; `get_children` pages through the rest.
@@ -165,7 +197,7 @@ pub(super) fn comments_json<'a>(
     design: &Design,
     comments: impl Iterator<Item = &'a Comment>,
 ) -> Vec<serde_json::Value> {
-    let doc = design.doc();
+    let doc = design.view();
     comments
         .map(|c| {
             let artboard = c.artboard_id.as_deref().and_then(|id| doc.get(id));

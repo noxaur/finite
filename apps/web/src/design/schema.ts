@@ -20,10 +20,19 @@ export const Node = Schema.Struct({
   page: Schema.optionalKey(Schema.String),
   styles: Schema.Record(Schema.String, Schema.String),
   attrs: Schema.Record(Schema.String, Schema.String),
+  /** Set on a component's root: instances elsewhere show this subtree. */
+  component: Schema.optionalKey(Schema.Boolean),
+  /** On an instance, the component it shows. It has no children of its own. */
+  instanceOf: Schema.optionalKey(Schema.String),
+  /** On an instance, what it shows differently, keyed by `<path>/<property>`. `null` removes a value. */
+  overrides: Schema.optionalKey(Schema.Record(Schema.String, Schema.NullOr(Schema.String))),
 });
 export type Node = typeof Node.Type;
 
-/** `name`, `text`, `x`, `y`, `page`, `style:<css-property>` or `attr:<attribute>`. */
+/**
+ * `name`, `text`, `x`, `y`, `style:<css-property>` or `attr:<attribute>`,
+ * and for components `component`, `instanceOf` and `override:<key>`.
+ */
 export type PropKey = string;
 
 /** A named group of artboards; the viewer shows one page at a time. */
@@ -41,7 +50,8 @@ export const Op = Schema.Union([
     op: Schema.Literal("set"),
     id: Schema.String,
     key: Schema.String,
-    value: Schema.NullOr(Schema.Union([Schema.String, Schema.Number])),
+    /** `true` marks a component; `false` is a value an instance removes. */
+    value: Schema.NullOr(Schema.Union([Schema.String, Schema.Number, Schema.Boolean])),
   }),
   Schema.Struct({
     op: Schema.Literal("move"),

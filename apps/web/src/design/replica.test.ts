@@ -136,6 +136,33 @@ describe("Replica", () => {
     expect(r.artboardOf("d")?.id).toBe("a");
   });
 
+  it("expands instances with the Rust rules and says which to draw again", () => {
+    const r = replica();
+    r.applyAll([
+      { op: "set", id: "b", key: "component", value: true },
+      { op: "create", node: { ...node("i", "c"), instanceOf: "b" } },
+      { op: "set", id: "i", key: "override:d/style:color", value: "red" },
+    ]);
+    expect(r.takeDirty()).toEqual(["i"]);
+    const [root, inside] = r.expand("i");
+    expect(root?.id).toBe("i");
+    expect(inside).toMatchObject({ id: "i/d", parent: "i", styles: { color: "red" } });
+    // A node inside an instance is on the instance's artboard.
+    expect(r.artboardOf("i/d")?.id).toBe("a");
+    expect(r.componentInfo("i/d")).toEqual({
+      instance: "i",
+      component: "b",
+      componentName: "div",
+      instances: 1,
+    });
+    // Editing the component marks the instance, not the component's own artboard.
+    r.apply({ op: "set", id: "d", key: "style:padding", value: "4px" });
+    expect(r.takeDirty()).toEqual(["i"]);
+    expect(r.exportHtml("c")).toBe(
+      '<div><div><div style="color: red; padding: 4px"></div></div></div>',
+    );
+  });
+
   it("keeps the shared CSS from the snapshot and from changes", () => {
     const r = new Replica();
     const snapshot = {

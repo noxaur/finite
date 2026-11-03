@@ -3,7 +3,10 @@
 //! read a third of the context, where before they read every artboard's
 //! HTML and picked out each use by eye.
 
-use finite_design::search::{self, Places, Query};
+use finite_design::{
+    Op, components,
+    search::{self, Places, Query},
+};
 use rmcp::{
     handler::server::wrapper::Parameters,
     service::{RequestContext, RoleServer},
@@ -39,7 +42,7 @@ impl FiniteMcp {
             return super::fail("pass at least one of text, name, tag, style or attribute");
         }
         let text = handle.read(|d| {
-            let doc = d.doc();
+            let doc = d.view();
             if let Some(id) = &p.within
                 && !doc.contains(id)
             {
@@ -111,7 +114,7 @@ impl FiniteMcp {
                     for r in &replaced {
                         text.push_str("  ");
                         text.push_str(
-                            outline(d.doc(), &r.id, 0)
+                            outline(d.view(), &r.id, 0)
                                 .lines()
                                 .next()
                                 .unwrap_or("")
@@ -129,7 +132,7 @@ impl FiniteMcp {
             let handle = design!(self, &p.design_id);
             let result = handle.read(|d| {
                 search::replace(
-                    d.doc(),
+                    d.view(),
                     p.within.as_deref(),
                     &p.find,
                     &p.replace,
@@ -148,7 +151,23 @@ impl FiniteMcp {
             &p.design_id,
             &label,
             |doc| search::replace(doc, p.within.as_deref(), &p.find, &p.replace, places, p.all),
-            |handle, replaced, _| report(handle, replaced, false),
+            |handle, replaced, change| {
+                // A match inside an instance that its component's change
+                // already covers didn't change the instance itself.
+                let replaced = replaced
+                    .into_iter()
+                    .filter(|r| {
+                        !components::is_virtual(&r.id)
+                            || change.is_some_and(|c| {
+                                c.ops.iter().any(|op| {
+                                    matches!(op, Op::Set { id, value: Some(_), .. }
+                                        if id == components::real_id(&r.id))
+                                })
+                            })
+                    })
+                    .collect();
+                report(handle, replaced, false)
+            },
         )
         .await
     }

@@ -110,6 +110,10 @@ impl Codec for Finite {
             (Feature::Embed, Export) => Unsupported,
             // A bundle holds the design, not how it got there.
             (Feature::ImportHistory, Import | Export) => Unsupported,
+            // A bundle has no components, so an instance is written as the
+            // elements it shows.
+            (Feature::Instance, Import) => Unsupported,
+            (Feature::Instance, Export) => Approximate,
         }
     }
 
@@ -373,6 +377,7 @@ impl Walk<'_> {
                 styles: BTreeMap::new(),
                 attrs: BTreeMap::new(),
                 children: Vec::new(),
+                ..Fragment::empty(NodeKind::Text)
             });
         };
         let lower = tag.to_ascii_lowercase();
@@ -404,6 +409,7 @@ impl Walk<'_> {
             styles: layer.styles,
             attrs,
             children,
+            ..Fragment::empty(NodeKind::Text)
         })
     }
 

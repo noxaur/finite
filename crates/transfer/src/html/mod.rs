@@ -45,6 +45,10 @@ impl Codec for Html {
             (Feature::Embed, Export) => Unsupported,
             // A page is the design, not how it got there.
             (Feature::ImportHistory, Import | Export) => Unsupported,
+            // `data-instance-of` would point at a component the file's reader
+            // doesn't have, so an instance is written as the elements it shows.
+            (Feature::Instance, Import) => Unsupported,
+            (Feature::Instance, Export) => Approximate,
         }
     }
 

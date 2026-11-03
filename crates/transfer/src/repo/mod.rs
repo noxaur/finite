@@ -111,6 +111,10 @@ impl Codec for Repo {
             (Feature::Embed, Export) => Unsupported,
             // The folder holds the design, not how it got there.
             (Feature::ImportHistory, Import | Export) => Unsupported,
+            // The folder has no components, so an instance is written as the
+            // elements it shows.
+            (Feature::Instance, Import) => Unsupported,
+            (Feature::Instance, Export) => Approximate,
         }
     }
 
@@ -606,6 +610,7 @@ fn board(
             styles: BTreeMap::new(),
             attrs: BTreeMap::new(),
             children: Vec::new(),
+            ..Fragment::empty(NodeKind::Text)
         },
     );
     let probe = finite_design::Node {

@@ -602,6 +602,62 @@ pub struct SharedCssParams {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+pub struct CreateComponentParams {
+    pub(super) design_id: String,
+    /// The element to make a component, like a top bar you already built.
+    /// It stays where it is, and editing it edits every instance.
+    pub(super) node_id: String,
+    /// The component's name, like "Top bar". Defaults to its layer name.
+    #[serde(default)]
+    pub(super) name: Option<String>,
+    /// Copies of it elsewhere, like the same top bar on other screens, to
+    /// replace with instances in place. Each must be built the same way;
+    /// where its text, styles or attributes differ, those become the
+    /// instance's overrides, so nothing changes on screen.
+    #[serde(default, deserialize_with = "lenient")]
+    pub(super) replace_node_ids: Vec<String>,
+}
+
+/// What one node of the component shows differently in this instance.
+#[derive(Deserialize, JsonSchema, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct InstanceOverride {
+    /// The node of the component, by the id get_html shows for it in the
+    /// component. Omit for the instance's root.
+    #[serde(default)]
+    pub(super) node_id: Option<String>,
+    /// New text, for a text node or an element that holds only text.
+    #[serde(default)]
+    pub(super) text: Option<String>,
+    /// CSS properties to set; a null value removes one in this instance.
+    #[serde(default, deserialize_with = "lenient")]
+    pub(super) styles: BTreeMap<String, Option<String>>,
+    /// Attributes to set; a null value removes one in this instance.
+    #[serde(default, deserialize_with = "lenient")]
+    pub(super) attributes: BTreeMap<String, Option<String>>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct InsertInstanceParams {
+    pub(super) design_id: String,
+    /// The component to show.
+    pub(super) component_id: String,
+    /// The element to put the instance in, like an artboard.
+    pub(super) parent_id: String,
+    /// Position among the parent's children. Omit to append.
+    #[serde(default)]
+    pub(super) index: Option<usize>,
+    /// A layer name for this instance. Defaults to the component's name.
+    #[serde(default)]
+    pub(super) name: Option<String>,
+    /// Where this instance differs from the component, like its title text.
+    #[serde(default, deserialize_with = "lenient")]
+    pub(super) overrides: Vec<InstanceOverride>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct LayoutParams {
     pub(super) design_id: String,
     /// An artboard, or a node inside one to see just its part. Omit for every artboard (up to 10).

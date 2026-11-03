@@ -67,7 +67,8 @@ const processes = [];
 const folders = [];
 const start = (args, env) => {
   const child = spawn(bin, args, {
-    env: { ...process.env, RUST_LOG: "warn", ...env },
+    // The component tools are an extra group; the viewer check below uses them.
+    env: { ...process.env, RUST_LOG: "warn", FINITE_MCP_EXTRA: "components", ...env },
     stdio: ["ignore", "inherit", "inherit"],
   });
   processes.push(child);
@@ -234,6 +235,52 @@ try {
     "undo reverts it",
     Boolean(await page.until(`${shadow}.querySelector("button").style.outline === ""`)),
   );
+
+  // Components: an instance draws its component, and an edit to the
+  // component draws every instance again, while an override changes one.
+  const badge = idAfter(
+    await agent.call("write_html", {
+      designId: design,
+      targetId: page1,
+      html: `<span data-name="Badge" style="color: rgb(0, 0, 0)">New</span>`,
+    }),
+    '"Badge"',
+  );
+  await agent.call("create_component", { designId: design, nodeId: badge });
+  const instance = idAfter(
+    await agent.call("write_html", {
+      designId: design,
+      targetId: page1,
+      html: `<span data-instance-of="${badge}"></span>`,
+    }),
+    "span",
+  );
+  const drawn = (id) => `${shadow}.querySelectorAll("span")[${id === badge ? 0 : 1}]`;
+  check(
+    "an instance draws its component",
+    Boolean(await page.until(`${drawn(instance)}?.textContent === "New"`)),
+  );
+  await agent.call("update_styles", {
+    designId: design,
+    updates: [{ nodeIds: [badge], styles: { color: "rgb(0, 128, 0)" } }],
+  });
+  check(
+    "editing the component draws the instance again",
+    Boolean(await page.until(`${drawn(instance)}?.style.color === "rgb(0, 128, 0)"`)),
+  );
+  await agent.call("set_text_content", {
+    designId: design,
+    updates: [{ nodeId: instance, text: "Sale" }],
+  });
+  check(
+    "an override changes only the instance",
+    Boolean(
+      await page.until(
+        `${drawn(instance)}?.textContent === "Sale" && ${drawn(badge)}.textContent === "New"`,
+      ),
+    ),
+  );
+  await agent.call("delete_nodes", { designId: design, nodeIds: [badge, instance] });
 
   // A dropped connection resumes: the page gets what it missed, and the
   // artboards aren't rebuilt (a snapshot would replace the iframe).
@@ -760,6 +807,52 @@ try {
     ) && (await zoom()) === fitted,
   );
   check("the iframe loads again once it's in view", await loaded());
+
+  // Editing a component draws its instances in hidden artboards too, without
+  // loading a hidden sandboxed one, and the index learns the new size.
+  const swatch = idAfter(
+    await agent.call("write_html", {
+      designId: wide,
+      targetId: near,
+      html: `<div data-name="Swatch" style="height:20px;background:rgb(0, 0, 255)"></div>`,
+    }),
+    '"Swatch"',
+  );
+  await agent.call("create_component", { designId: wide, nodeId: swatch });
+  for (const target of [far, farLive]) {
+    await agent.call("write_html", {
+      designId: wide,
+      targetId: target,
+      html: `<div data-instance-of="${swatch}"></div>`,
+    });
+  }
+  await page.key("0");
+  await page.until(
+    `document.querySelector('[data-artboard="${far}"]').style.display === "none" && document.querySelector('[data-artboard="${farLive}"]').style.display === "none"`,
+    5000,
+  );
+  await agent.call("update_styles", {
+    designId: wide,
+    updates: [{ nodeIds: [swatch], styles: { background: "rgb(0, 128, 0)" } }],
+  });
+  await page.sleep(600);
+  check("a hidden sandboxed artboard stays unloaded when its component changes", !(await loaded()));
+  check(
+    "a hidden artboard's instance is drawn again",
+    await page.eval(
+      `[...document.querySelector('[data-artboard="${far}"]').querySelectorAll("*")].map((e) => e.shadowRoot).find(Boolean).innerHTML.includes("rgb(0, 128, 0)")`,
+    ),
+  );
+  await page.key("!", "Digit1");
+  check(
+    "the sandboxed artboard loads the changed component once it's in view",
+    Boolean(
+      await page.until(
+        `document.querySelector('[data-artboard="${farLive}"] iframe').srcdoc.includes("rgb(0, 128, 0)")`,
+        5000,
+      ),
+    ),
+  );
 
   check("no errors on the page", page.errors.length === 0, page.errors.join(" | "));
 } catch (error) {

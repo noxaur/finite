@@ -44,6 +44,8 @@ for (const label of chosen) {
       runs: runs.length,
       checks: `${avg((r) => r.check.passed / r.check.total).toFixed(2)}`,
       calls: avg((r) => r.total).toFixed(1),
+      // The follow-up's calls, for tasks that have one.
+      change: runs.some((r) => r.change) ? avg((r) => r.change?.total).toFixed(1) : "–",
       errors: avg((r) => r.errors.length).toFixed(1),
       outside: avg((r) => r.outside.length).toFixed(1),
       readKChars: (avg((r) => r.resultChars) / 1000).toFixed(1),
@@ -70,6 +72,7 @@ const cols = [
   "runs",
   "checks",
   "calls",
+  "change",
   "errors",
   "outside",
   "readKChars",

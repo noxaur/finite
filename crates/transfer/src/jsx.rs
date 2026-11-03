@@ -33,6 +33,8 @@ impl Codec for Jsx {
             // With Tailwind they become classes, which a stylesheet rule can
             // outrank, and `!important` can't be carried either way.
             (Feature::Frame | Feature::SolidFill | Feature::FlexLayout, Export) => Approximate,
+            // An instance is written as the elements it shows.
+            (Feature::Instance, Export) => Approximate,
             // A component has no place for a script, so it's left out.
             (Feature::Script | Feature::Embed | Feature::ImportHistory, Export) => Unsupported,
         }

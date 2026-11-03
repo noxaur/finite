@@ -5,11 +5,13 @@
 //! - [`Design`] owns a document plus each actor's undo and redo stacks.
 //! - [`html`] converts between node trees and HTML.
 //! - [`comment`] holds the threads users pin to the canvas.
+//! - [`components`] expands instances of components and turns edits inside them into overrides.
 //!
 //! This crate has no I/O, so the same rules can later run in a client (via WASM)
 //! for optimistic local edits.
 
 pub mod comment;
+pub mod components;
 mod design;
 mod document;
 pub mod edit;

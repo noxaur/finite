@@ -22,6 +22,9 @@ interface Exports {
   replica_apply(handle: number, len: number): number;
   replica_export(handle: number, len: number, ids: number): number;
   replica_pages(handle: number): number;
+  replica_expand(handle: number, len: number): number;
+  replica_take_dirty(handle: number): number;
+  replica_component_info(handle: number, len: number): number;
   is_safe_attr(nameLen: number, valueLen: number): number;
   shared_style(len: number, shadow: number): number;
   base_css(): number;
@@ -176,6 +179,21 @@ export class WasmDocument {
   /** JSON: the pages in order, as `{id, name}`, with the implicit first page when there are none. */
   pages(): string {
     return this.model.callNoArgs((e) => e.replica_pages(this.handle));
+  }
+
+  /** Instance `id` as it renders: JSON nodes, its root first, then what's inside it, parents first. */
+  expand(id: string): string {
+    return this.model.callWith(id, (e, len) => e.replica_expand(this.handle, len));
+  }
+
+  /** JSON ids of the instances whose content changed since the last call. */
+  takeDirty(): string {
+    return this.model.callNoArgs((e) => e.replica_take_dirty(this.handle));
+  }
+
+  /** JSON: the instance and component a node belongs to, or `null`. */
+  componentInfo(id: string): string {
+    return this.model.callWith(id, (e, len) => e.replica_component_info(this.handle, len));
   }
 
   free() {

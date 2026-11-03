@@ -12,7 +12,7 @@ node e2e/ax/grade.mjs              # blind 1-10 grades of each final screenshot
 node e2e/ax/report.mjs --tools     # one row per label and task, plus calls per tool
 ```
 
-Pass `--env FINITE_MCP_EXTRA=shared-styles` to try a tool group that's off by default. Results go to `e2e/ax/results/<label>/<task>-<n>/`, which git ignores. Each run folder holds `transcript.jsonl`, `feedback.md` (the agent's own account), `metrics.json` and `final.png`. Runs cost real money and use your Claude plan, about $0.05 to $0.80 each. A full round of 18 runs per variant can reach a 5-hour usage limit. A run cut off by a limit is marked `api error` in `metrics.json`, and `report.mjs` leaves it out. `--budget` caps each run at $4 by default.
+Pass `--env FINITE_MCP_EXTRA=shared-styles` or `--env FINITE_MCP_EXTRA=components` to try a tool group that's off by default. Results go to `e2e/ax/results/<label>/<task>-<n>/`, which git ignores. Each run folder holds `transcript.jsonl`, `feedback.md` (the agent's own account), `metrics.json` and `final.png`. Runs cost real money and use your Claude plan, about $0.05 to $0.80 each. A full round of 18 runs per variant can reach a 5-hour usage limit. A run cut off by a limit is marked `api error` in `metrics.json`, and `report.mjs` leaves it out. `--budget` caps each run at $4 by default.
 
 ## Trying a tool design before building it
 
@@ -36,21 +36,42 @@ Real tools keep the real server's argument checks. For a schema a spec writes, t
 
 `tasks.mjs` defines them. Each one has a prompt, a seed and a check.
 
-| Task             | What the agent does                                                                 | What it tests                 |
-| ---------------- | ----------------------------------------------------------------------------------- | ----------------------------- |
-| `delete-design`  | Delete one design while keeping another                                             | Design deletion and discovery |
-| `restyle`        | Swap a brand color on one landing page, round the buttons, fix a typo               | Finding things                |
-| `rebrand`        | Swap the color across three artboards, including a `<style>` block and an rgba tint | Finding things at scale       |
-| `mobile`         | Make a 390 px version of a desktop page                                             | Copying, layout, verifying    |
-| `comments`       | Handle two pinned comments                                                          | The comment loop              |
-| `screens`        | Build a consistent three-screen mobile flow                                         | Building, reuse               |
-| `ui-states`      | Draw every state of Finite's own web app, from its source                           | A long session                |
-| `pins`           | Put numbered pins over a button and a heading the agent didn't size                 | Finding where things rendered |
-| `overlap`        | Fix a small badge overlapping the frame name above it                               | Spotting and fixing overlaps  |
-| `sections`       | Fill a fixed-height artboard with six sections, one `write_html` call each          | Overflow after an edit        |
-| `screens-change` | Build three screens, then change their shared top bar in the same session           | Keeping a design up to date   |
-| `import-page`    | Import a web page with scripts, handlers and an embed onto a named page             | Importing safely              |
-| `export-figma`   | Export a design as a file for the Finite Figma plugin                               | Getting a file out            |
+| Task                  | What the agent does                                                                 | What it tests                 |
+| --------------------- | ----------------------------------------------------------------------------------- | ----------------------------- |
+| `delete-design`       | Delete one design while keeping another                                             | Design deletion and discovery |
+| `restyle`             | Swap a brand color on one landing page, round the buttons, fix a typo               | Finding things                |
+| `rebrand`             | Swap the color across three artboards, including a `<style>` block and an rgba tint | Finding things at scale       |
+| `mobile`              | Make a 390 px version of a desktop page                                             | Copying, layout, verifying    |
+| `comments`            | Handle two pinned comments                                                          | The comment loop              |
+| `screens`             | Build a consistent three-screen mobile flow                                         | Building, reuse               |
+| `ui-states`           | Draw every state of Finite's own web app, from its source                           | A long session                |
+| `pins`                | Put numbered pins over a button and a heading the agent didn't size                 | Finding where things rendered |
+| `overlap`             | Fix a small badge overlapping the frame name above it                               | Spotting and fixing overlaps  |
+| `sections`            | Fill a fixed-height artboard with six sections, one `write_html` call each          | Overflow after an edit        |
+| `screens-change`      | Build three screens, then change their shared top bar in the same session           | Keeping a design up to date   |
+| `import-page`         | Import a web page with scripts, handlers and an embed onto a named page             | Importing safely              |
+| `screens-restructure` | `screens-change`, but the change adds elements to the bar, which shared CSS can't   | Components                    |
+| `export-figma`        | Export a design as a file for the Finite Figma plugin                               | Getting a file out            |
+
+## Trying an idea cheaply first
+
+A full run costs about $0.30 and builds a design from nothing. Most ideas change one step, so `micro.mjs` seeds the design as it is just before that step, and any agent with a shell does the step through a small CLI that logs every call:
+
+```bash
+node e2e/ax/micro.mjs start /tmp/micro/a --scenario change-component --env FINITE_MCP_EXTRA=components
+node e2e/ax/micro.mjs brief /tmp/micro/a     # the task, the server's instructions and every tool's schema
+node e2e/ax/micro.mjs call /tmp/micro/a get_tree_summary '{"designId":"…"}'
+node e2e/ax/micro.mjs check /tmp/micro/a     # the checks, and calls, edits and errors per phase
+node e2e/ax/micro.mjs stop /tmp/micro/a
+```
+
+An idea goes through three steps, each cheaper to skip past than the next:
+
+1. Walk the shortest path by hand with `call`. It costs nothing, and counts the calls an idea needs at best. For components, that's how a bug showed up: rewriting a component in one call made every screen lose its own title.
+2. Hand the brief to a few agents of another model, like Codex, and compare the logged calls and edits. They take more calls than Claude agents, mostly status and re-reading, so compare edits, not totals.
+3. Confirm the winner with `run.mjs` and real Claude agents.
+
+The scenarios are `change-copies`, `change-component` and `build`. In the first comparison, changing three screens' top bar took 7 edits with copies, 3 with a component made by `create_component`, and 1 with a component named in the HTML and rewritten in place. Claude agents on `screens-restructure` then named the bar in their HTML in every run. In the first two runs, the change took 7 calls: the rewrite added a title element with no per-screen value yet, and the agents read the tree to find its id in each instance. Since edits name those ids, it took 4 and 5 calls, against 5 and 6 without components.
 
 ## What the metrics mean
 
@@ -84,7 +105,7 @@ Smaller changes: edits name the nodes they changed instead of "Done.", `duplicat
 Agents also asked for two features Finite didn't have:
 
 - **Shared styles across artboards.** `set_shared_css` and `get_shared_css` (`crates/server/src/mcp/styles.rs`) started as a demo that kept the CSS in the server's memory. Now the CSS is part of the design ([issue #8](https://github.com/noxaur/finite/issues/8)), and every agent gets the tools (see below).
-- **Components with instances.** Agents on `screens` and `ui-states` asked for them about as often as for shared styles. [Issue #11](https://github.com/noxaur/finite/issues/11) tracks them.
+- **Components with instances.** Agents on `screens` and `ui-states` asked for them about as often as for shared styles. [Issue #11](https://github.com/noxaur/finite/issues/11) added them, with the tools behind `FINITE_MCP_EXTRA=components`. `screens-change` measures them: a task with a follow-up prompt runs it in the same session, and `report.mjs` shows its calls in the `change` column.
 
 ## What the second study found
 

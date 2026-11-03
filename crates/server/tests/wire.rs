@@ -161,6 +161,21 @@ async fn wire_messages_match_the_fixture() {
             Ok((edit::set_css(":root { --brand: orange; }")?, ()))
         })
         .unwrap();
+    // The button becomes a component, and an instance of it removes its padding.
+    handle
+        .edit(&agent, "Create component", |doc| {
+            Ok((edit::create_component(doc, "n1", Some("CTA"), &[])?, ()))
+        })
+        .unwrap();
+    handle
+        .edit(&agent, "Insert instance", |doc| {
+            let values = [edit::InstanceValues {
+                styles: BTreeMap::from([("padding".to_owned(), None)]),
+                ..Default::default()
+            }];
+            edit::insert_instance(doc, "n1", "board", None, None, &values, &mut new_id)
+        })
+        .unwrap();
     handle.rename("Landing v2".into());
     let user = Author {
         id: "user:1".into(),
