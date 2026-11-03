@@ -5,7 +5,7 @@ import { Cause, Exit } from "effect";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { Api, Refused } from "@/api/Api";
-import { Camera, union, type View } from "@/design/camera";
+import { Camera, mostVisible, union, type View } from "@/design/camera";
 import { type Hit, Renderer } from "@/design/renderer";
 import { Replica } from "@/design/replica";
 import { DesignSession, initialSessionState, type SessionState } from "@/design/session";
@@ -19,11 +19,14 @@ import { colors, radii, space } from "@/styles/tokens.stylex";
 import { CommentLayer, type Draft, type Mode, pinPosition, ToolPill } from "./Comments";
 import { CommentsPanel } from "./CommentsPanel";
 import { PagesSidebar } from "./PagesSidebar";
+import { Preview } from "./Preview";
 import { SharedCssPanel } from "./SharedCss";
 import { ExportMenu, ImportButton, ImportResultCard, type ImportState } from "./Transfer";
 
 /** How long "show what changed" outlines stay up. */
 const FLASH_MS = 1800;
+/** How long the view rests before the focused artboard is worked out again. */
+const FOCUS_DELAY_MS = 100;
 /** A press that moves farther than this is a drag, not a click. */
 const CLICK_SLOP = 4;
 
@@ -76,6 +79,7 @@ export function DesignCanvas({ id }: { id: string }) {
   const hoverFrame = useRef(0);
   const pointerRef = useRef<{ x: number; y: number } | null>(null);
   const refreshHover = useRef(() => {});
+  const refocusRef = useRef(() => {});
   const cameraRef = useRef<Camera | null>(null);
   // The view the camera framed the artboards with, until the person moves it.
   const framedRef = useRef<View | null>(null);
@@ -104,6 +108,11 @@ export function DesignCanvas({ id }: { id: string }) {
   const togglePanel = (name: "css" | "comments" | "export") =>
     setPanel((open) => (open === name ? null : name));
   const [imported, setImported] = useState<ImportState | null>(null);
+  // The artboard that fills most of the viewport, which the play buttons preview.
+  const [focused, setFocused] = useState<string | null>(null);
+  // The artboard shown in preview mode, or `null` on the canvas.
+  const [previewId, setPreviewId] = useState<string | null>(null);
+  const previewRef = useRef(false);
 
   // Whether a draft or thread is open, for the window key handler.
   const popupRef = useRef(false);
@@ -120,6 +129,7 @@ export function DesignCanvas({ id }: { id: string }) {
     framedRef.current = null;
     const renderer = new Renderer(frames, replica, {
       live: true,
+      onPreview: setPreviewId,
       onWheel: (event) => camera.wheel(event),
       // An auto-height artboard with a script is measured inside its iframe,
       // so its real height arrives after the first frame. Frame it again,
@@ -145,13 +155,27 @@ export function DesignCanvas({ id }: { id: string }) {
     sessionRef.current = session;
     rendererRef.current = renderer;
     cameraRef.current = camera;
-    camera.subscribe((view) => setZoom(view.zoom));
+    let focusTimer: ReturnType<typeof setTimeout> | undefined;
+    const refocus = () => {
+      clearTimeout(focusTimer);
+      focusTimer = setTimeout(() => {
+        const next = mostVisible(renderer.artboardBounds(), camera.visibleBounds());
+        renderer.setFocused(next);
+        setFocused(next);
+      }, FOCUS_DELAY_MS);
+    };
+    refocusRef.current = refocus;
+    camera.subscribe((view) => {
+      setZoom(view.zoom);
+      refocus();
+    });
     // A new renderer starts on the first page.
     setPickedPage(null);
 
     // Frame the artboards once, when the first ones appear.
     const unsubscribe = session.subscribe(() => {
       setSession(session.state);
+      refocus();
       if (framedRef.current) return;
       const bounds = union(renderer.artboardBounds().values());
       if (bounds) {
@@ -173,6 +197,8 @@ export function DesignCanvas({ id }: { id: string }) {
       });
 
     const onKey = (e: KeyboardEvent) => {
+      // Preview mode handles its own keys.
+      if (previewRef.current) return;
       if (isTyping(e.target) || e.metaKey || e.ctrlKey || e.altKey) {
         if (e.key === "Escape") {
           setDraft(null);
@@ -196,6 +222,7 @@ export function DesignCanvas({ id }: { id: string }) {
       e.preventDefault();
     };
     window.addEventListener("keydown", onKey);
+    window.addEventListener("resize", refocus);
 
     // Keeps "2 minutes ago" labels fresh.
     const ticker = setInterval(() => setTick((t) => t + 1), 15_000);
@@ -209,7 +236,9 @@ export function DesignCanvas({ id }: { id: string }) {
       // The document lives in WebAssembly memory, which isn't garbage collected.
       replica.free();
       window.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", refocus);
       clearInterval(ticker);
+      clearTimeout(focusTimer);
       cancelAnimationFrame(hoverFrame.current);
       frames.replaceChildren();
     };
@@ -323,6 +352,8 @@ export function DesignCanvas({ id }: { id: string }) {
     const renderer = rendererRef.current;
     if (!renderer) return;
     renderer.setPage(pageId);
+    // An empty page moves neither the camera nor the session.
+    refocusRef.current();
     const bounds = union(renderer.artboardBounds().values());
     if (bounds) cameraRef.current?.fitTo(bounds);
     // So auto-height artboards reframe it as they grow, and an empty page
@@ -409,6 +440,23 @@ export function DesignCanvas({ id }: { id: string }) {
   ];
 
   const openCount = [...comments.values()].filter((c) => !c.resolved).length;
+
+  // Preview mode steps through the shown page's artboards in reading order.
+  const replica = sessionRef.current?.replica;
+  const pageBoards =
+    replica && page
+      ? replica
+          .artboards()
+          .filter((board) => replica.pageOf(board) === page.id)
+          .sort((a, b) => (a.y ?? 0) - (b.y ?? 0) || (a.x ?? 0) - (b.x ?? 0))
+          .map((board) => board.id)
+      : [];
+  // An artboard deleted or moved to another page while previewed closes the preview.
+  const previewing = previewId !== null && pageBoards.includes(previewId) ? previewId : null;
+  previewRef.current = previewing !== null;
+  useEffect(() => {
+    if (previewId !== null && previewing === null) setPreviewId(null);
+  }, [previewId, previewing]);
 
   const fitAll = () => {
     const renderer = rendererRef.current;
@@ -497,6 +545,18 @@ export function DesignCanvas({ id }: { id: string }) {
           <code {...stylex.props(styles.code)}>{id}</code>
         </span>
         <span {...stylex.props(styles.spacer)} />
+        <button
+          type="button"
+          disabled={!focused}
+          onClick={() => setPreviewId(focused)}
+          {...stylex.props(styles.tool, styles.play)}
+          title="Preview the artboard in view"
+        >
+          <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+            <path d="M2 1.2v7.6L8.6 5z" fill="currentColor" />
+          </svg>
+          Preview
+        </button>
         <button
           type="button"
           aria-pressed={panel === "css"}
@@ -639,6 +699,17 @@ export function DesignCanvas({ id }: { id: string }) {
           Fit
         </button>
       </div>
+
+      {previewing && replica && (
+        <Preview
+          replica={replica}
+          boards={pageBoards}
+          current={previewing}
+          version={session.version}
+          onSelect={setPreviewId}
+          onClose={() => setPreviewId(null)}
+        />
+      )}
     </main>
   );
 }
@@ -776,6 +847,12 @@ const styles = stylex.create({
     color: "inherit",
     font: "inherit",
     cursor: "var(--cursor-pointer, pointer)",
+  },
+  play: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    ":disabled": { color: colors.muted, cursor: "default" },
   },
   count: {
     marginLeft: 6,

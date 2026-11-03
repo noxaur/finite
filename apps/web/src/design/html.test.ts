@@ -49,6 +49,15 @@ describe("artboardDocument", () => {
     expect(shared).toBeGreaterThan(page.indexOf(designModel().baseCss));
     expect(shared).toBeLessThan(page.indexOf("<body>"));
   });
+
+  it("lets a preview page scroll instead of forwarding the wheel to the canvas", () => {
+    const r = replica([el("a", null, "div")]);
+    expect(artboardDocument(r, "a")).toContain('type: "wheel"');
+    const preview = artboardDocument(r, "a", true);
+    expect(preview).not.toContain('type: "wheel"');
+    expect(preview).toContain('type: "key"');
+    expect(preview).toContain('<body><div data-finite-id="a"></div></body>');
+  });
 });
 
 describe("pixelSize", () => {
