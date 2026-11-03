@@ -670,11 +670,21 @@ pub async fn layout(m: Measurement) -> Result<Vec<ElementBox>, String> {
         .await
         .map_err(|_| "layout is shutting down")?;
     let dir = std::env::temp_dir().join(format!("finite-layout-{}", random_id(10)));
-    let (browser, mut tab) = cdp::Browser::launch(&chrome, dir.clone()).await?;
-    let result = measure_page(&mut tab, &dir, &m).await;
-    browser.close(tab).await;
-    result
+    let run = async {
+        let (browser, mut tab) = cdp::Browser::launch(&chrome, dir.clone()).await?;
+        let result = measure_page(&mut tab, &dir, &m).await;
+        browser.close(tab).await;
+        result
+    };
+    // Dropping the run on a timeout kills the browser and removes its profile.
+    tokio::time::timeout(LAYOUT_LIMIT, run)
+        .await
+        .map_err(|_| "the browser took too long to lay out the page".to_owned())?
 }
+
+/// The longest a layout measurement may take, so a hung browser can't hold a
+/// turn in [`browsers`] for good. It includes the page's settle time.
+const LAYOUT_LIMIT: Duration = Duration::from_secs(30);
 
 async fn measure_page(
     tab: &mut cdp::Tab,

@@ -321,6 +321,17 @@ async function runOnce(taskName, index, outDir) {
       if (image) fs.writeFileSync(path.join(dir, "final.png"), Buffer.from(image.data, "base64"));
     }
 
+    // Artboards the agent left with content cut off by their edge, by the
+    // server's own layout check, so a variant that warns about clipping can
+    // be compared with one that doesn't.
+    let clipped = null;
+    if (design) {
+      try {
+        const layout = await checker.call("get_layout", { designId: design, depth: 0 });
+        clipped = layout.split("Layout: content is cut off by the artboard's edge").length - 1;
+      } catch {}
+    }
+
     let feedback = "";
     if (!opts["no-feedback"] && last?.session_id) {
       const fb = await claude(
@@ -350,6 +361,7 @@ async function runOnce(taskName, index, outDir) {
           ? change.stop
           : (result?.subtype ?? "no result"),
       check,
+      clipped,
       ...metrics,
       // The follow-up on its own: calls, errors and cost for the change.
       change,

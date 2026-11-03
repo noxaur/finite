@@ -284,6 +284,46 @@ setInterval(next, 3000);
     },
   },
 
+  // Fill a fixed-height artboard a section at a time. Six sections don't fit
+  // in 700 px unless the agent makes them small or the artboard taller, which
+  // is what the layout note on write_html results (FINITE_MCP_EXTRA=layout)
+  // is meant to prompt. run.mjs counts the artboards left clipped.
+  sections: {
+    workdir: "none",
+    async seed(mcp) {
+      const design = (await mcp.call("create_design", { name: "Pocket app" })).match(
+        /designId "([^"]+)"/,
+      )[1];
+      const board = idAfter(
+        await mcp.call("create_artboard", {
+          designId: design,
+          name: "Landing",
+          width: 390,
+          height: 700,
+          x: 0,
+          y: 0,
+        }),
+        "artboard",
+      );
+      return { design, board };
+    },
+    prompt: () =>
+      `Use the Finite MCP tools. The Finite design "Pocket app" has an empty 390 px wide phone artboard named "Landing". ` +
+      `Build a landing page for a budgeting app called Pocket in it, one write_html call per section, with these six sections in order: ` +
+      `a header with the logo and a menu, a hero with a headline and a sign-up button, three feature cards, a testimonial, a pricing card, and a footer with links. ` +
+      `Stop when you're done.`,
+    async check(mcp, ctx) {
+      const html = await mcp.call("get_html", { designId: ctx.design, nodeId: ctx.board });
+      const checks = [
+        /pocket/i.test(html),
+        /<button/i.test(html),
+        (html.match(/<footer|data-name="Footer/gi) ?? []).length >= 1,
+        /pric/i.test(html) && /testimonial|“|"/i.test(html),
+      ];
+      return { passed: checks.filter(Boolean).length, total: checks.length, notes: [] };
+    },
+  },
+
   // Comments users pinned to elements.
   comments: {
     workdir: "none",

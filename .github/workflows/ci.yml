@@ -107,7 +107,11 @@ jobs:
           done
           cat "$RUNNER_TEMP/postgres.log"
           exit 1
-      - run: cargo test -p finite-server --features postgres
+      # FINITE_REQUIRE_BROWSER: the layout note tests fail, not skip, if the
+      # runner has no Chrome (the runner image ships it).
+      - env:
+          FINITE_REQUIRE_BROWSER: "1"
+        run: cargo test -p finite-server --features postgres
 
       # The three end-to-end runs at once: they spend most of their time
       # waiting on the browser, and each uses its own ports and folders. One
