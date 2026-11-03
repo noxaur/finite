@@ -193,19 +193,49 @@ impl Codec for Repo {
             indent: false,
             ..ExportOptions::default()
         };
+        // Pages can share a name in a design, but the manifest refers to
+        // them by name, so a repeat is written under a new one.
+        let mut diagnostics = Vec::new();
+        let mut labels: BTreeMap<&str, String> = BTreeMap::new();
+        let mut used: Vec<String> = Vec::new();
+        for (id, page) in doc.pages() {
+            let mut label = page.name.clone();
+            let mut n = 1;
+            while used.contains(&label) {
+                n += 1;
+                label = format!("{} ({n})", page.name);
+            }
+            if label != page.name {
+                diagnostics.push(Diagnostic {
+                    node: None,
+                    path: MANIFEST.into(),
+                    what: format!("the page {:?}", page.name),
+                    feature: Feature::Frame,
+                    reason: format!(
+                        "another page has the same name, so this one is written as {label:?}"
+                    ),
+                    preserved: Score::No,
+                    visual: Score::Yes,
+                    editable: Score::Yes,
+                    quarantined: false,
+                });
+            }
+            used.push(label.clone());
+            labels.insert(id, label);
+        }
+        let boards = revision.artboards(scope)?;
+        let names = file_names(&boards);
         let mut files = Vec::new();
         let mut artboards = Vec::new();
-        let mut taken = Vec::new();
-        for board in revision.artboards(scope)? {
+        for (board, file) in boards.into_iter().zip(names) {
             let export = html::export_with(doc, &board.id, &options)
                 .ok_or_else(|| Error(format!("{:?} isn't an artboard", board.id)))?;
-            let file = unique_file(&board.display_name(), &mut taken);
             files.push(tar::Entry {
                 path: file.clone(),
                 bytes: lay_out(&portable(&export.html)).into_bytes(),
             });
             let page = match scope {
-                Scope::Design => doc.page(doc.page_of(board)).map(|p| p.name.clone()),
+                Scope::Design => labels.get(doc.page_of(board)).cloned(),
                 Scope::Artboard(_) => None,
             };
             artboards.push(Artboard {
@@ -219,7 +249,7 @@ impl Codec for Repo {
             Scope::Design => doc
                 .pages()
                 .into_iter()
-                .map(|(_, p)| p.name.clone())
+                .map(|(id, _)| labels[id].clone())
                 .collect(),
             Scope::Artboard(_) => Vec::new(),
         };
@@ -245,7 +275,6 @@ impl Codec for Repo {
         }));
         entries.extend(files);
 
-        let mut diagnostics = Vec::new();
         hashes.sort();
         hashes.dedup();
         for hash in hashes {
@@ -293,17 +322,73 @@ impl Codec for Repo {
     }
 }
 
-/// `artboards/<name>.html`, with a number added if `taken` has the name.
-fn unique_file(name: &str, taken: &mut Vec<String>) -> String {
-    let stem: String = file_stem(name).chars().take(STEM).collect();
-    let mut file = format!("artboards/{stem}.html");
-    let mut n = 1;
-    while taken.contains(&file) {
-        n += 1;
-        file = format!("artboards/{stem}-{n}.html");
+/// The first six characters of the sha256 of `text`: short, and the same
+/// every time for the same text.
+fn short(text: &str) -> String {
+    BlobHash::of(text.as_bytes()).to_string()[..6].to_owned()
+}
+
+/// Names Windows won't let a file have, whatever its extension.
+fn is_reserved(stem: &str) -> bool {
+    matches!(stem, "con" | "prn" | "aux" | "nul")
+        || ["com", "lpt"].iter().any(|p| {
+            stem.strip_prefix(p)
+                .is_some_and(|n| matches!(n.as_bytes(), [b'1'..=b'9']))
+        })
+}
+
+/// A file name stem for an artboard called `name`: ASCII letters, digits
+/// and dashes. A name with other characters, or none, gets a hash of the
+/// name added, so two names that reduce to the same letters stay apart and
+/// the stem changes only when the name does.
+fn stem(name: &str) -> String {
+    let mut slug = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        } else if !slug.ends_with('-') && !slug.is_empty() {
+            slug.push('-');
+        }
     }
-    taken.push(file.clone());
-    file
+    let mut slug: String = slug.trim_end_matches('-').chars().take(STEM).collect();
+    let hashed = slug.is_empty() || !name.is_ascii();
+    if slug.is_empty() {
+        slug = "artboard".into();
+    } else if is_reserved(&slug) {
+        slug.push_str("-artboard");
+    }
+    if hashed {
+        slug = format!("{slug}-{}", short(name));
+    }
+    slug
+}
+
+/// `artboards/<name>.html` for each of `boards`. A name used by several
+/// artboards gets each one's id hashed on, so deleting one leaves the
+/// others' files where they were; a unique name stays plain.
+fn file_names(boards: &[&finite_design::Node]) -> Vec<String> {
+    let stems: Vec<String> = boards.iter().map(|b| stem(&b.display_name())).collect();
+    let mut taken: Vec<String> = Vec::new();
+    boards
+        .iter()
+        .zip(&stems)
+        .map(|(board, stem)| {
+            let shared = stems.iter().filter(|other| *other == stem).count() > 1;
+            let base = if shared {
+                format!("{stem}-{}", short(&board.id))
+            } else {
+                stem.clone()
+            };
+            let mut file = format!("artboards/{base}.html");
+            let mut n = 1;
+            while taken.contains(&file) {
+                n += 1;
+                file = format!("artboards/{base}-{n}.html");
+            }
+            taken.push(file.clone());
+            file
+        })
+        .collect()
 }
 
 /// Tags that have no end tag.
@@ -327,6 +412,8 @@ fn lay_out(compact: &str) -> String {
     let mut out = String::with_capacity(compact.len() + compact.len() / 8);
     let (mut depth, mut i) = (0usize, 0usize);
     let (mut after_tag, mut after_open) = (false, false);
+    // Whether each open element has had text directly in it.
+    let mut texted: Vec<bool> = Vec::new();
     while i < compact.len() {
         let Some(open) = compact[i..].find('<').map(|n| n + i) else {
             out.push_str(&compact[i..]);
@@ -335,6 +422,9 @@ fn lay_out(compact: &str) -> String {
         if open > i {
             out.push_str(&compact[i..open]);
             (after_tag, after_open) = (false, false);
+            if let Some(last) = texted.last_mut() {
+                *last = true;
+            }
         }
         let mut end = open + 1;
         let mut quote = None;
@@ -360,10 +450,13 @@ fn lay_out(compact: &str) -> String {
             .collect::<String>()
             .to_ascii_lowercase();
         let void = tag.ends_with("/>") || VOID.contains(&name.as_str());
+        let mut had_text = false;
         if closing {
             depth = depth.saturating_sub(1);
+            had_text = texted.pop().unwrap_or(false);
         }
-        if after_tag && !(closing && after_open) {
+        // A closing tag stays on the line of an element that holds text.
+        if after_tag && !(closing && (after_open || had_text)) {
             out.push('\n');
             out.push_str(&"  ".repeat(depth));
         }
@@ -373,6 +466,7 @@ fn lay_out(compact: &str) -> String {
         after_open = !closing && !void;
         if after_open {
             depth += 1;
+            texted.push(false);
             if VERBATIM.contains(&name.as_str()) {
                 let close = format!("</{name}");
                 let lower = compact[i..].to_ascii_lowercase();
@@ -516,32 +610,45 @@ fn board(
         styles: root.styles.clone(),
         ..finite_design::Node::element("", "div")
     };
-    let (width, height) = match pixel_size(&probe) {
-        (Some(w), Some(h)) if w > 0.0 && h > 0.0 => (w, h),
-        _ => {
-            diagnostics.push((
-                Anchor {
-                    board: i,
-                    node: None,
-                },
-                Diagnostic {
-                    node: None,
-                    path: file.clone(),
-                    what: "the artboard's size".into(),
-                    feature: Feature::Frame,
-                    reason: format!(
-                        "it isn't in pixels, so the artboard is {} × {}",
-                        FALLBACK.0, FALLBACK.1
-                    ),
-                    preserved: Score::No,
-                    visual: Score::No,
-                    editable: Score::Yes,
-                    quarantined: false,
-                },
-            ));
-            FALLBACK
-        }
-    };
+    // A missing height, or `auto`, is an artboard that grows to fit.
+    let (w, h) = pixel_size(&probe);
+    let auto_height = h.is_none()
+        && root
+            .styles
+            .get("height")
+            .is_none_or(|v| v.trim().eq_ignore_ascii_case("auto"));
+    let width = w.filter(|w| *w > 0.0);
+    let height = h.filter(|h| *h > 0.0);
+    let mut fallen = Vec::new();
+    if width.is_none() {
+        fallen.push(format!("{} wide", FALLBACK.0));
+    }
+    if height.is_none() && !auto_height {
+        fallen.push(format!("{} tall", FALLBACK.1));
+    }
+    if !fallen.is_empty() {
+        diagnostics.push((
+            Anchor {
+                board: i,
+                node: None,
+            },
+            Diagnostic {
+                node: None,
+                path: file.clone(),
+                what: "the artboard's size".into(),
+                feature: Feature::Frame,
+                reason: format!(
+                    "it isn't in pixels, so the artboard is {}",
+                    fallen.join(" and ")
+                ),
+                preserved: Score::No,
+                visual: Score::No,
+                editable: Score::Yes,
+                quarantined: false,
+            },
+        ));
+    }
+    let (width, height) = (width.unwrap_or(FALLBACK.0), height.unwrap_or(FALLBACK.1));
     // The artboard is fragment 0 of the parse; the content starts at 1.
     for mut dropped in parsed.dropped {
         dropped.anchor = dropped.anchor.and_then(|n| n.checked_sub(1));
@@ -555,6 +662,7 @@ fn board(
         name: root.name.unwrap_or_else(|| format!("Artboard {}", i + 1)),
         width,
         height,
+        auto_height,
         position: entry.x.zip(entry.y),
         styles: root.styles,
         attrs: root.attrs,
@@ -684,23 +792,32 @@ mod tests {
         assert_eq!(exported.media_type, "application/x-tar");
         let files = Files::of(tar::read(&exported.bytes).unwrap()).unwrap().0;
         let png = format!("assets/{}.png", BlobHash::of(PNG));
-        assert_eq!(
-            files.keys().map(String::as_str).collect::<Vec<_>>(),
-            [
-                "artboards/home-2.html",
-                "artboards/home.html",
-                "artboards/settings.html",
-                png.as_str(),
-                "finite.json",
-                "shared.css"
-            ]
-        );
+        // Two artboards are named Home, so each file name carries a hash of its id.
+        let names: Vec<&str> = files.keys().map(String::as_str).collect();
+        let homes: Vec<&&str> = names
+            .iter()
+            .filter(|n| n.starts_with("artboards/home-"))
+            .collect();
+        assert_eq!(homes.len(), 2, "{names:?}");
+        for expected in [
+            "artboards/settings.html",
+            "finite.json",
+            "shared.css",
+            png.as_str(),
+        ] {
+            assert!(names.contains(&expected), "{expected} in {names:?}");
+        }
+        assert_eq!(names.len(), 6, "{names:?}");
         // Files are text a person can read, with no server URLs in them.
-        let home = String::from_utf8(files["artboards/home.html"].clone()).unwrap();
-        assert!(
-            home.contains("\n  <p>Hi <b>there</b></p>") || home.contains("<p>"),
-            "{home}"
-        );
+        let home = files
+            .iter()
+            .find(|(path, bytes)| {
+                path.starts_with("artboards/home-")
+                    && String::from_utf8_lossy(bytes).contains("Logo")
+            })
+            .map(|(_, bytes)| String::from_utf8(bytes.clone()).unwrap())
+            .unwrap();
+        assert!(home.contains("\n  <p>Hi <b>there</b></p>\n"), "{home}");
         assert!(home.contains("data-name=\"Logo\""), "{home}");
         assert!(!home.contains("/api/designs"), "{home}");
         let manifest = String::from_utf8(files["finite.json"].clone()).unwrap();
@@ -771,16 +888,21 @@ mod tests {
                 .map(|css| css.replace("/designs/old/", "/designs/new/"))
         );
 
-        // And exporting that gives the folder it came from.
+        // And exporting that gives the folder it came from. Artboards that
+        // share a name are told apart by node id, and the copy has new ids, so
+        // compare the files by content.
         let again = write(&target, &Scope::Design, &[PNG]);
-        let strip = |tar: &[u8]| -> Vec<(String, String)> {
-            tar::read(tar)
+        let contents = |tar: &[u8]| -> Vec<String> {
+            let mut files: Vec<String> = tar::read(tar)
                 .unwrap()
                 .into_iter()
-                .map(|e| (e.path, String::from_utf8_lossy(&e.bytes).into_owned()))
-                .collect()
+                .filter(|e| e.path != MANIFEST)
+                .map(|e| String::from_utf8_lossy(&e.bytes).into_owned())
+                .collect();
+            files.sort();
+            files
         };
-        assert_eq!(strip(&again.bytes), strip(&exported.bytes));
+        assert_eq!(contents(&again.bytes), contents(&exported.bytes));
     }
 
     /// The files are laid out on many lines, and still read back as the
@@ -990,5 +1112,321 @@ mod tests {
         ))
         .unwrap_err();
         assert!(error.0.contains("version 2"), "{error}");
+    }
+
+    /// Adds an empty artboard called `name` to `design`, on `page`.
+    fn add_board(
+        design: &mut Design,
+        id: &str,
+        name: &str,
+        width: f64,
+        height: Option<f64>,
+        page: Option<&str>,
+    ) {
+        let ops = edit::create_artboard(
+            design.doc(),
+            id.into(),
+            edit::NewArtboard {
+                name: name.into(),
+                width,
+                height,
+                position: None,
+                page: page.map(str::to_owned),
+                styles: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        design.commit("agent", "Board", &ops, 1);
+    }
+
+    fn files_of(exported: &Exported) -> BTreeMap<String, Vec<u8>> {
+        Files::of(tar::read(&exported.bytes).unwrap()).unwrap().0
+    }
+
+    #[test]
+    fn an_auto_height_artboard_keeps_its_width_and_its_auto_height() {
+        let mut source = design("old");
+        add_board(&mut source, "phone", "Phone", 390.0, None, None);
+        add_board(&mut source, "fixed", "Fixed", 800.0, Some(300.0), None);
+        let exported = write(&source, &Scope::Design, &[]);
+        let imported = read(&exported.bytes).unwrap();
+        let mut target = design("new");
+        let (_, placed) = place(&mut target, imported, None);
+        assert!(placed.diagnostics.is_empty(), "{:?}", placed.diagnostics);
+        let styles = |name: &str| {
+            let doc = target.doc();
+            let board = doc
+                .artboards()
+                .into_iter()
+                .find(|b| b.name.as_deref() == Some(name));
+            let styles = &board.unwrap().styles;
+            (styles["width"].clone(), styles["height"].clone())
+        };
+        assert_eq!(styles("Phone"), ("390px".into(), "auto".into()));
+        assert_eq!(styles("Fixed"), ("800px".into(), "300px".into()));
+    }
+
+    #[test]
+    fn scripts_are_written_but_not_read_back() {
+        let mut source = design("old");
+        add_board(&mut source, "b", "Live", 400.0, Some(300.0), None);
+        let fragments = html::parse("<p>Hi</p><script>run()</script>").unwrap();
+        let mut n = 0;
+        let (ops, _) = edit::create_artboard_with(
+            source.doc(),
+            "c".into(),
+            edit::NewArtboard {
+                name: "Scripted".into(),
+                width: 400.0,
+                height: Some(300.0),
+                position: None,
+                page: None,
+                styles: BTreeMap::new(),
+            },
+            fragments,
+            &mut || {
+                n += 1;
+                format!("s{n}")
+            },
+        )
+        .unwrap();
+        source.commit("agent", "Script", &ops, 2);
+        let exported = write(&source, &Scope::Design, &[]);
+        let files = files_of(&exported);
+        let file = String::from_utf8(files["artboards/scripted.html"].clone()).unwrap();
+        assert!(file.contains("<script>run()</script>"), "{file}");
+
+        let mut target = design("new");
+        let (record, placed) = place(&mut target, read(&exported.bytes).unwrap(), None);
+        assert!(target.doc().nodes().all(|n| n.tag() != Some("script")));
+        let quarantined: Vec<_> = record.quarantined.iter().map(|q| q.what.as_str()).collect();
+        assert_eq!(quarantined, ["<script>"]);
+        assert!(
+            placed
+                .diagnostics
+                .iter()
+                .any(|d| d.feature == Feature::Script)
+        );
+    }
+
+    #[test]
+    fn file_names_are_portable_and_stable() {
+        let mut source = design("old");
+        let names = [
+            ("a", "Café"),
+            ("b", "日本語"),
+            ("c", "日本語 2"),
+            ("d", "!!!"),
+            ("e", "con"),
+            ("f", "NUL"),
+            ("g", "Com1"),
+            ("h", "Settings"),
+            ("i", "Home"),
+            ("j", "Home"),
+            ("k", &"Long name ".repeat(30)),
+        ];
+        for (id, name) in names {
+            add_board(&mut source, id, name, 100.0, Some(100.0), None);
+        }
+        let files = |d: &Design| -> Vec<String> {
+            files_of(&write(d, &Scope::Design, &[]))
+                .into_keys()
+                .filter(|p| p.starts_with("artboards/"))
+                .collect()
+        };
+        let before = files(&source);
+        assert_eq!(before.len(), names.len());
+        for path in &before {
+            assert!(path.is_ascii() && path.len() <= 80, "{path}");
+            let stem = path
+                .trim_start_matches("artboards/")
+                .trim_end_matches(".html");
+            assert!(!is_reserved(stem), "{path}");
+        }
+        assert!(
+            before.contains(&"artboards/con-artboard.html".to_owned()),
+            "{before:?}"
+        );
+        assert!(
+            before.contains(&"artboards/nul-artboard.html".to_owned()),
+            "{before:?}"
+        );
+        assert!(
+            before.contains(&"artboards/com1-artboard.html".to_owned()),
+            "{before:?}"
+        );
+        assert!(
+            before.contains(&"artboards/settings.html".to_owned()),
+            "{before:?}"
+        );
+        assert!(
+            before.iter().any(|p| p.starts_with("artboards/caf-")),
+            "{before:?}"
+        );
+        assert!(
+            before.iter().any(|p| p.starts_with("artboards/artboard-")),
+            "{before:?}"
+        );
+
+        // Deleting one of the two Homes leaves every other file where it was.
+        // The other Home was told apart from it by id, and now has the name to itself.
+        let ops = edit::delete(source.doc(), &["i".to_owned()]).unwrap();
+        source.commit("agent", "Delete", &ops, 3);
+        let after = files(&source);
+        assert_eq!(after.len(), before.len() - 1);
+        for path in &after {
+            let survivor = path == "artboards/home.html";
+            assert!(
+                survivor || before.contains(path),
+                "{path} is new after a delete"
+            );
+        }
+        assert!(
+            after.contains(&"artboards/home.html".to_owned()),
+            "{after:?}"
+        );
+    }
+
+    #[test]
+    fn pages_that_share_a_name_stay_apart() {
+        let mut source = design("old");
+        for id in ["p1", "p2"] {
+            let ops = edit::create_page(source.doc(), id.into(), "Drafts").unwrap();
+            source.commit("agent", "Page", &ops, 1);
+        }
+        add_board(&mut source, "a", "One", 100.0, Some(100.0), Some("p1"));
+        add_board(&mut source, "b", "Two", 100.0, Some(100.0), Some("p2"));
+        let exported = write(&source, &Scope::Design, &[]);
+        let note = &exported.diagnostics[0];
+        assert!(
+            note.what.contains("Drafts") && note.reason.contains("Drafts (2)"),
+            "{note:?}"
+        );
+        let imported = read(&exported.bytes).unwrap();
+        assert_eq!(imported.pages, ["Page 1", "Drafts", "Drafts (2)"]);
+
+        let mut target = design("new");
+        place(&mut target, imported, None);
+        let doc = target.doc();
+        let on = |name: &str| {
+            let id = doc
+                .pages()
+                .into_iter()
+                .find(|(_, p)| p.name == name)
+                .unwrap()
+                .0;
+            doc.artboards_on(id)
+                .iter()
+                .filter_map(|b| b.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(on("Drafts"), ["One"]);
+        assert_eq!(on("Drafts (2)"), ["Two"]);
+    }
+
+    fn tar_available() -> bool {
+        std::process::Command::new("tar")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "finite-repo-{tag}-{}-{}",
+            std::process::id(),
+            short(&format!("{:?}", std::time::Instant::now()))
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The system's `tar` unpacks what we write, and what it packs from that
+    /// folder, with directory entries and its own header style, reads back.
+    #[test]
+    fn the_system_tar_reads_and_writes_the_same_archives() {
+        if !tar_available() {
+            return;
+        }
+        let source = source();
+        let exported = write(&source, &Scope::Design, &[PNG]);
+        let dir = scratch("tar");
+        let archive = dir.join("in.tar");
+        std::fs::write(&archive, &exported.bytes).unwrap();
+        let folder = dir.join("design");
+        std::fs::create_dir_all(&folder).unwrap();
+        let run = |args: &[&std::ffi::OsStr]| {
+            let out = std::process::Command::new("tar")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&[
+            "-xf".as_ref(),
+            archive.as_os_str(),
+            "-C".as_ref(),
+            folder.as_os_str(),
+        ]);
+        assert!(folder.join("finite.json").is_file());
+        assert!(folder.join("shared.css").is_file());
+        let listed = std::fs::read_dir(folder.join("artboards")).unwrap().count();
+        assert_eq!(listed, 3);
+
+        // Packed as a person would: the folder itself, and its contents with "./".
+        for (name, root) in [
+            ("whole.tar", dir.join("design")),
+            ("dot.tar", dir.join("design")),
+        ] {
+            let packed = dir.join(name);
+            let mut args: Vec<&std::ffi::OsStr> = vec!["-cf".as_ref(), packed.as_os_str()];
+            let dot = name == "dot.tar";
+            args.extend([
+                "-C".as_ref(),
+                if dot {
+                    root.as_os_str()
+                } else {
+                    dir.as_os_str()
+                },
+            ]);
+            args.push(if dot { ".".as_ref() } else { "design".as_ref() });
+            run(&args);
+            let imported = read(&std::fs::read(&packed).unwrap()).unwrap();
+            assert_eq!(imported.boards.len(), 3, "{name}");
+            assert_eq!(imported.blobs, [PNG.to_vec()], "{name}");
+            assert_eq!(imported.pages, ["Page 1", "Drafts"], "{name}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn long_names_from_a_pax_archive_are_refused_clearly() {
+        if !tar_available() {
+            return;
+        }
+        let dir = scratch("pax");
+        let long = dir.join("src").join("a".repeat(120));
+        std::fs::create_dir_all(long.parent().unwrap()).unwrap();
+        std::fs::write(&long, "x").unwrap();
+        std::fs::write(dir.join("src").join("finite.json"), "{}").unwrap();
+        let packed = dir.join("long.tar");
+        let status = std::process::Command::new("tar")
+            .args(["--format=pax", "-cf"])
+            .arg(&packed)
+            .arg("-C")
+            .arg(dir.join("src"))
+            .arg("finite.json")
+            .arg("a".repeat(120))
+            .status()
+            .unwrap();
+        if status.success() {
+            let error = read(&std::fs::read(&packed).unwrap()).unwrap_err();
+            assert!(error.0.contains("long file names"), "{error}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -50,6 +50,11 @@ pub fn write(entries: &[Entry]) -> Result<Vec<u8>, Error> {
 /// The files in a tar archive, in order.
 pub fn read(bytes: &[u8]) -> Result<Vec<Entry>, Error> {
     let bad = |what: &str| Error(format!("this isn't a readable tar archive: {what}"));
+    let long = || {
+        bad(
+            "it uses long file names (a pax or GNU extension), which a Finite folder doesn't need; repack it with `tar --format=ustar`",
+        )
+    };
     let mut entries = Vec::new();
     let mut at = 0;
     while at + BLOCK <= bytes.len() {
@@ -98,7 +103,12 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Entry>, Error> {
                 bytes: bytes[start..end].to_vec(),
             }),
             // Directories, and the pax headers that precede a file.
-            b'5' | b'x' | b'g' => {}
+            b'5' | b'g' => {}
+            // A pax header holds the next file's real name when it's too long
+            // for the header, which would leave this reader with a cut-off name.
+            b'x' if renames(&bytes[start..end]) => return Err(long()),
+            b'x' => {}
+            b'L' | b'K' => return Err(long()),
             other => {
                 return Err(bad(&format!(
                     "{path:?} is a {:?} entry, and only files are allowed",
@@ -109,6 +119,27 @@ pub fn read(bytes: &[u8]) -> Result<Vec<Entry>, Error> {
         at = end.next_multiple_of(BLOCK);
     }
     Ok(entries)
+}
+
+/// Whether a pax header's records give a file a different name or link
+/// target. Each record is `<length> <key>=<value>\n`, the length counting
+/// the whole record.
+fn renames(mut records: &[u8]) -> bool {
+    while let Some(space) = records.iter().position(|b| *b == b' ') {
+        let length = std::str::from_utf8(&records[..space])
+            .ok()
+            .and_then(|n| n.parse::<usize>().ok())
+            .filter(|n| (space + 1..=records.len()).contains(n));
+        let Some(length) = length else {
+            return false;
+        };
+        let key = records[space + 1..length].split(|b| *b == b'=').next();
+        if matches!(key, Some(b"path" | b"linkpath")) {
+            return true;
+        }
+        records = &records[length..];
+    }
+    false
 }
 
 #[cfg(test)]

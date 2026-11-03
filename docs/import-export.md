@@ -105,13 +105,17 @@ assets/<sha256>.png  files the design points to, such as images
 
 A codec returns one file, so the export is one tar archive of that folder. Unpack it with `tar -xf`, commit the files, and pack them again with `tar -cf design.tar finite.json shared.css artboards assets` to import them (one folder around those is fine). The archive is deterministic: an unchanged design writes the same bytes, so a re-export of an unedited design leaves no diff.
 
-Import back is exact for what Finite edits: layer names, styles, attributes, text and nesting, plus each artboard's size, position and page, and the page list. A test exports a design with mixed text and inline elements and checks that the imported document matches node for node. What doesn't come back:
+Import back is exact for what Finite edits: layer names, styles, attributes, text and nesting, plus each artboard's size (an auto-height artboard stays auto-height), position and page, and the page list. A test exports a design with mixed text and inline elements and checks that the imported document matches node for node. What doesn't come back:
 
+- **Scripts.** A `<script>` is written to the file, but import quarantines it like any imported file's scripts, so it stays out of the document and is listed in the import's diagnostics. The original tar stays downloadable.
 - Node ids, undo history, comments and import records. The export reports the import records, as a bundle does.
 - Whitespace-only text that contains a newline. HTML import treats it as source indentation, here and in every other codec.
 - An artboard whose root isn't a `<div>`. Artboards are created as `<div>`s.
+- Two pages with the same name. The manifest refers to pages by name, so the second is written as `Name (2)` and the export says so.
 
-Reading applies the HTML import rules: scripts, handlers and embeds are quarantined, with their path in the file. Because the files are meant to be edited, the importer also checks the manifest against the files: a listed file must exist, and an asset's name must match its sha256. Images in files are `finite-asset:<sha256>` references to the `assets/` folder, not paths, so the HTML files show a missing image if opened directly in a browser.
+File names come from layer names, as ASCII letters, digits and dashes. A name with other characters, like `Café` or `日本語`, gets a short hash of the name added (`caf-1a2b3c.html`), so different names never share a file. Names Windows reserves (`con`, `nul`, `com1`…) get `-artboard` added. Artboards that share a name get a hash of each one's node id instead, so deleting one doesn't renumber the rest; the one left then takes the plain name. Renaming an artboard renames its file, and the importer reads the manifest, not the file name, so a renamed file still imports once the manifest says so.
+
+Reading applies the HTML import rules: scripts, handlers and embeds are quarantined, with their path in the file. Because the files are meant to be edited, the importer also checks the manifest against the files: a listed file must exist, and an asset's name must match its sha256. Archives that use pax or GNU long names are refused with a message (repack with `tar --format=ustar`), since a cut-off name would point at the wrong file. Images in files are `finite-asset:<sha256>` references to the `assets/` folder, not paths, so the HTML files show a missing image if opened directly in a browser.
 
 This is export and import only. Changing a file and importing it adds new artboards; it doesn't update the ones already in the design. A sync mode would build on the import record's node-to-path map, and isn't built.
 

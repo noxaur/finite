@@ -194,6 +194,8 @@ pub struct Board {
     pub name: String,
     pub width: f64,
     pub height: f64,
+    /// The artboard grows to fit its content, so `height` isn't used.
+    pub auto_height: bool,
     /// Where on the canvas, or `None` to place it beside the others.
     pub position: Option<(f64, f64)>,
     /// The name of the page it goes on, or `None` for the import's page.
@@ -284,7 +286,7 @@ impl Imported {
             let spec = NewArtboard {
                 name: board.name,
                 width: board.width,
-                height: Some(board.height),
+                height: (!board.auto_height).then_some(board.height),
                 position: board.position,
                 page,
                 styles: board.styles,
