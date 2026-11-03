@@ -20,6 +20,19 @@ These are the things we can't compromise on. They make us what we are today and 
 - If a short request has two possible meanings, ask one question before you start.
 - Do not say a bug is fixed until a test, log or recording shows it.
 
+## Hit every surface
+
+The most common defect in this repo is a feature that works on the path you tested and is missing everywhere else. Before you call a change done, walk this list and say which entries applied:
+
+- **Agent and person.** Agents edit through MCP tools and people watch in the viewer, so a feature needs both halves. A new tool needs the viewer to render its result, and a new viewer behavior needs a tool or a comment that can trigger it. Put the logic in `edit.rs` so every tool shares it.
+- **Tools.** A change to one tool often applies to its neighbors. Check `write_html`, `update_styles`, `set_attributes`, `replace_values`, `duplicate_nodes`, `move_nodes` and `import_design`, and update `instructions.md` and the tool descriptions so agents learn about it.
+- **Both renderers.** Artboards render in a shadow root, or in a sandboxed iframe when they contain a `<script>`. The screenshot renderer is a third path. Test a plain artboard and a script artboard.
+- **Wasm.** The server and the browser run the same document model. A new call needs an export in `crates/wasm/src/lib.rs` and a method in `apps/web/src/design/wasm.ts`.
+- **Undo and live edits.** Every op returns its inverse, and several agents edit at once. Check that undo, redo and a concurrent edit still work, and that comments, which sit outside the document, stay untouched.
+- **Both stores and many servers.** The folder store and the Postgres store both save snapshots and journals. With several servers, `cluster.rs` and `router.rs` send each request to the design's owner. A feature that reads or writes designs must work for each.
+- **Reverse states.** If you added a way in, add the way out and the way to see it. Delete needs restore, and resolve needs reopen. A one-way door is a bug.
+- **Docs.** Check whether the change makes `docs/how-finite-works.md` or the README inaccurate.
+
 ## How it works
 
 Read `docs/how-finite-works.md` before you change the document model, the server or the viewer. An agent calls an MCP tool at `/mcp` (`crates/server/src/mcp/`). The tool runs an edit command (`crates/design/src/edit.rs`), which reads the document and returns ops but never changes it. `DesignHandle::edit` (`hub/design.rs`) locks the design, commits the ops through `Design::commit`, broadcasts the change to every WebSocket and queues it for saving. Applying an op returns its inverse, and undo applies that inverse as a new change, so each agent undoes only its own work. `store.rs` saves a snapshot plus an append-only journal for each design. The browser runs the same Rust document model compiled to WebAssembly (`crates/wasm`): `socket.ts` receives the change, `DesignSession` feeds it to the `Replica`, and the `Renderer` patches only the DOM nodes each op touched. Artboards render in a shadow root, or in a sandboxed iframe when they contain a `<script>`. Comments are stored with the design but aren't part of the document, so undo never touches them. With several servers, `cluster.rs` picks each design's owner by rendezvous hashing and `router.rs` sends each request to it.
