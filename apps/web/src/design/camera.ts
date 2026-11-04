@@ -36,6 +36,25 @@ export function union(bounds: Iterable<Bounds>): Bounds | null {
   return minX === Infinity ? null : { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
+/**
+ * The artboard that covers the most of `visible`, or `null` when none is in
+ * it. Ties go to the first.
+ */
+export function mostVisible(bounds: ReadonlyMap<string, Bounds>, visible: Bounds): string | null {
+  let best: string | null = null;
+  let bestArea = 0;
+  for (const [id, b] of bounds) {
+    const width = Math.min(b.x + b.width, visible.x + visible.width) - Math.max(b.x, visible.x);
+    const height = Math.min(b.y + b.height, visible.y + visible.height) - Math.max(b.y, visible.y);
+    const area = width > 0 && height > 0 ? width * height : 0;
+    if (area > bestArea) {
+      best = id;
+      bestArea = area;
+    }
+  }
+  return best;
+}
+
 /** The view that centers `bounds` in a `width` × `height` viewport with `padding` around it. */
 export function fit(
   bounds: Bounds,

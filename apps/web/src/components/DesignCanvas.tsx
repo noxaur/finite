@@ -5,7 +5,7 @@ import { Cause, Exit } from "effect";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { Api, Refused } from "@/api/Api";
-import { Camera, union, type View } from "@/design/camera";
+import { Camera, mostVisible, union, type View } from "@/design/camera";
 import { Editor } from "@/design/editing/editor";
 import { type Hit, Renderer } from "@/design/renderer";
 import { Replica } from "@/design/replica";
@@ -28,10 +28,12 @@ import {
   toggleInDraft,
 } from "./Comments";
 import { CommentsPanel } from "./CommentsPanel";
+import { Icon } from "./Icons";
 import { PagesSidebar } from "./PagesSidebar";
 import { Inspector } from "./Inspector";
 import { EditorNotice, SelectionLayer } from "./SelectionLayer";
 import { type TokensActions, TokensPanel } from "./TokensPanel";
+import { Preview } from "./Preview";
 import { ExportMenu, ImportButton, ImportResultCard, type ImportState } from "./Transfer";
 
 /** An instance or component under the pointer: what to outline and what to call it. */
@@ -63,6 +65,8 @@ const SAVE_PLACE_MS = 300;
 
 /** How long "show what changed" outlines stay up. */
 const FLASH_MS = 1800;
+/** How long the view rests before the focused artboard is worked out again. */
+const FOCUS_DELAY_MS = 100;
 /** A press that moves farther than this is a drag, not a click. */
 const CLICK_SLOP = 4;
 
@@ -115,6 +119,7 @@ export function DesignCanvas({ id }: { id: string }) {
   const hoverFrame = useRef(0);
   const pointerRef = useRef<{ x: number; y: number; shift: boolean } | null>(null);
   const refreshHover = useRef(() => {});
+  const refocusRef = useRef(() => {});
   const cameraRef = useRef<Camera | null>(null);
   // The view the camera framed the artboards with, until the person moves it.
   const framedRef = useRef<View | null>(null);
@@ -158,6 +163,11 @@ export function DesignCanvas({ id }: { id: string }) {
   const togglePanel = (name: "tokens" | "comments" | "export") =>
     setPanel((open) => (open === name ? null : name));
   const [imported, setImported] = useState<ImportState | null>(null);
+  // The artboard that fills most of the viewport, which the play buttons preview.
+  const [focused, setFocused] = useState<string | null>(null);
+  // The artboard shown in preview mode, or `null` on the canvas.
+  const [previewId, setPreviewId] = useState<string | null>(null);
+  const previewRef = useRef(false);
 
   // Whether a draft or thread is open, for the window key handler.
   const popupRef = useRef(false);
@@ -181,6 +191,7 @@ export function DesignCanvas({ id }: { id: string }) {
     const renderer = new Renderer(frames, replica, {
       live: true,
       toPage: (x, y) => camera.toPage(x, y),
+      onPreview: setPreviewId,
       onWheel: (event) => camera.wheel(event),
       // An auto-height artboard with a script is measured inside its iframe,
       // so its real height arrives after the first frame. Frame it again,
@@ -243,6 +254,17 @@ export function DesignCanvas({ id }: { id: string }) {
     window.addEventListener("pagehide", savePlaceNow);
     const resize = new ResizeObserver(() => renderer.setViewport(camera.visibleWorld()));
     resize.observe(viewport);
+    let focusTimer: ReturnType<typeof setTimeout> | undefined;
+    const refocus = () => {
+      clearTimeout(focusTimer);
+      focusTimer = setTimeout(() => {
+        const next = mostVisible(renderer.artboardBounds(), camera.visibleWorld(0));
+        renderer.setFocused(next);
+        setFocused(next);
+      }, FOCUS_DELAY_MS);
+    };
+    refocusRef.current = refocus;
+    camera.subscribe(refocus);
     // A new renderer starts on the saved page, or the first.
     renderer.setPage(saved?.page ?? null);
     setPickedPage(saved?.page ?? null);
@@ -260,6 +282,7 @@ export function DesignCanvas({ id }: { id: string }) {
         if (seen) camera.set(seen);
         framedRef.current = seen ? RESTORED : null;
       }
+      refocus();
       if (framedRef.current) return;
       const bounds = union(renderer.artboardBounds().values());
       if (bounds) {
@@ -281,6 +304,8 @@ export function DesignCanvas({ id }: { id: string }) {
       });
 
     const onKey = (e: KeyboardEvent) => {
+      // Preview mode handles its own keys.
+      if (previewRef.current) return;
       if (isTyping(e.target) || e.metaKey || e.ctrlKey || e.altKey) {
         if (e.key === "Escape") {
           setDraft(null);
@@ -304,6 +329,7 @@ export function DesignCanvas({ id }: { id: string }) {
       e.preventDefault();
     };
     window.addEventListener("keydown", onKey);
+    window.addEventListener("resize", refocus);
 
     // Keeps "2 minutes ago" labels fresh.
     const ticker = setInterval(() => setTick((t) => t + 1), 15_000);
@@ -323,7 +349,9 @@ export function DesignCanvas({ id }: { id: string }) {
       // The document lives in WebAssembly memory, which isn't garbage collected.
       replica.free();
       window.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", refocus);
       clearInterval(ticker);
+      clearTimeout(focusTimer);
       cancelAnimationFrame(hoverFrame.current);
       cancelAnimationFrame(partFrame.current);
       frames.replaceChildren();
@@ -335,7 +363,6 @@ export function DesignCanvas({ id }: { id: string }) {
     const commenting = mode === "comment";
     if (cameraRef.current) cameraRef.current.dragToPan = !commenting;
     rendererRef.current?.setCommenting(commenting);
-    editorRef.current?.setEnabled(!commenting);
     if (!commenting) {
       setDraft(null);
       setHover(null);
@@ -475,6 +502,8 @@ export function DesignCanvas({ id }: { id: string }) {
     setDraft(null);
     setOpenId(null);
     setHover(null);
+    // An empty page moves neither the camera nor the session.
+    refocusRef.current();
     const seen = viewsRef.current[pageId];
     if (seen) {
       cameraRef.current?.set(seen);
@@ -584,6 +613,28 @@ export function DesignCanvas({ id }: { id: string }) {
   ];
 
   const openCount = [...comments.values()].filter((c) => !c.resolved).length;
+
+  // Preview mode steps through the shown page's artboards in reading order.
+  const replica = sessionRef.current?.replica;
+  const pageBoards =
+    replica && page
+      ? replica
+          .artboards()
+          .filter((board) => replica.pageOf(board) === page.id)
+          .sort((a, b) => (a.y ?? 0) - (b.y ?? 0) || (a.x ?? 0) - (b.x ?? 0))
+          .map((board) => board.id)
+      : [];
+  // An artboard deleted or moved to another page while previewed closes the preview.
+  const previewing = previewId !== null && pageBoards.includes(previewId) ? previewId : null;
+  previewRef.current = previewing !== null;
+  useEffect(() => {
+    if (previewId !== null && previewing === null) setPreviewId(null);
+  }, [previewId, previewing]);
+  // People edit the canvas only in pointer mode, and not behind the preview,
+  // whose arrow keys and Escape would move or deselect what's selected.
+  useEffect(() => {
+    editorRef.current?.setEnabled(mode !== "comment" && previewing === null);
+  }, [mode, previewing]);
 
   const fitAll = () => {
     const renderer = rendererRef.current;
@@ -708,6 +759,16 @@ export function DesignCanvas({ id }: { id: string }) {
           <code {...stylex.props(styles.code)}>{id}</code>
         </span>
         <span {...stylex.props(styles.spacer)} />
+        <button
+          type="button"
+          disabled={!focused}
+          onClick={() => setPreviewId(focused)}
+          {...stylex.props(styles.tool, styles.play)}
+          title="Preview the artboard in view"
+        >
+          <Icon name="play" size={10} />
+          Preview
+        </button>
         <button
           type="button"
           aria-pressed={panel === "tokens"}
@@ -866,6 +927,17 @@ export function DesignCanvas({ id }: { id: string }) {
           Fit
         </button>
       </div>
+
+      {previewing && replica && (
+        <Preview
+          replica={replica}
+          boards={pageBoards}
+          current={previewing}
+          version={session.version}
+          onSelect={setPreviewId}
+          onClose={() => setPreviewId(null)}
+        />
+      )}
     </main>
   );
 }
@@ -1023,6 +1095,12 @@ const styles = stylex.create({
     color: "inherit",
     font: "inherit",
     cursor: "var(--cursor-pointer, pointer)",
+  },
+  play: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    ":disabled": { color: colors.muted, cursor: "default" },
   },
   count: {
     marginLeft: 6,
