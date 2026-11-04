@@ -882,7 +882,11 @@ mod pages;
 mod search;
 mod tokens;
 
-pub(crate) use self::{params::TokenValue, tokens::token_ops};
+pub(crate) use self::{
+    doc6::{inexact_delete, resolve_design},
+    params::TokenValue,
+    tokens::token_ops,
+};
 mod transfer;
 mod watch;
 

@@ -217,6 +217,29 @@ fn escape_ids(source: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
+/// Whether `:has(` appears inside another `:has(`.
+fn nested_has(source: &str) -> bool {
+    let lower = source.to_ascii_lowercase();
+    let mut open: Vec<bool> = Vec::new();
+    let bytes = lower.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'(' => {
+                let has = lower[..i].ends_with(":has");
+                if has && open.iter().any(|&h| h) {
+                    return true;
+                }
+                open.push(has);
+            }
+            b')' => {
+                open.pop();
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 fn error(parser: &Parser, source: &str, e: ParseError<Bad>) -> SelectError {
     let message = match e.kind {
         ParseErrorKind::Custom(Bad::State(name)) => format!(
@@ -228,6 +251,11 @@ fn error(parser: &Parser, source: &str, e: ParseError<Bad>) -> SelectError {
         ParseErrorKind::Custom(Bad::Unsupported(name)) => {
             format!("\":{name}\" isn't supported in a selector (in \"{source}\")")
         }
+        // CSS doesn't allow :has() inside :has(), which selectors rejects
+        // without saying why.
+        _ if nested_has(source) => format!(
+            "can't read \"{source}\" as a CSS selector: :has() can't hold another :has(). Use one :has() with a longer selector inside, like :has(> div > #k3x9a2bq)."
+        ),
         _ => match mistake(parser, source) {
             Some(at) => format!(
                 "can't read \"{source}\" as a CSS selector (at \"{}\")",

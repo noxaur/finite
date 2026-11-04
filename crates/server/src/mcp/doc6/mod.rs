@@ -416,62 +416,91 @@ pub(super) fn page_id(
     ))
 }
 
+/// The id of the design `given` names among `designs` (each one's id and
+/// name, most recently edited first): its id, its exact name ignoring case
+/// when only one design has it, or the start of one design's id. An id that
+/// `elsewhere` says another server answers for goes through. The router's
+/// relay resolves names this way too, across every server's designs.
+pub(crate) fn resolve_design(
+    given: &str,
+    designs: &[(&str, &str)],
+    elsewhere: impl Fn(&str) -> bool,
+) -> Result<String, String> {
+    let want = given.trim();
+    if designs.iter().any(|(id, _)| *id == want) {
+        return Ok(want.to_owned());
+    }
+    let named: Vec<_> = designs
+        .iter()
+        .filter(|(_, name)| name.trim().eq_ignore_ascii_case(want))
+        .collect();
+    if let [(id, _)] = named.as_slice() {
+        return Ok((*id).to_owned());
+    }
+    let prefixed: Vec<_> = designs
+        .iter()
+        .filter(|(id, _)| !want.is_empty() && id.starts_with(want))
+        .collect();
+    if named.is_empty()
+        && let [(id, _)] = prefixed.as_slice()
+    {
+        return Ok((*id).to_owned());
+    }
+    if named.is_empty() && elsewhere(want) {
+        return Ok(want.to_owned());
+    }
+    let lower = want.to_lowercase();
+    let near: Vec<String> = if named.len() > 1 {
+        named
+            .iter()
+            .map(|(id, name)| format!("{name:?} ({id})"))
+            .collect()
+    } else {
+        designs
+            .iter()
+            .filter(|(_, name)| name.to_lowercase().contains(&lower))
+            .take(5)
+            .map(|(id, name)| format!("{name:?} ({id})"))
+            .collect()
+    };
+    let hint = if near.is_empty() {
+        " Call designs to list them.".to_owned()
+    } else {
+        format!(" Did you mean {}?", near.join(", "))
+    };
+    Err(format!(
+        "there's no design {want:?}{}.{hint}",
+        if named.len() > 1 {
+            " with one name: several have it, so pass the id"
+        } else {
+            ""
+        }
+    ))
+}
+
+/// Why `given` mustn't delete the design `id` named `name` it resolved to.
+/// Deleting can't be undone, so only an exact id or name will do: an id
+/// prefix or a mistyped name could pick another design.
+pub(crate) fn inexact_delete(given: &str, id: &str, name: &str) -> Option<String> {
+    let given = given.trim();
+    (id != given && !name.trim().eq_ignore_ascii_case(given)).then(|| {
+        format!(
+            "\"{given}\" isn't a design's exact id or name, so nothing was deleted. Did you mean {name:?} ({id})? Pass its id to delete it."
+        )
+    })
+}
+
 impl FiniteMcp {
-    /// The id of the design `given` names: its id, its exact name ignoring
-    /// case when only one design has it, or the start of one design's id.
+    /// The id of the design `given` names on this server ([`resolve_design`]).
     /// An id this server doesn't list goes through, for another server to
     /// answer.
     pub(super) fn design_named(&self, given: &str) -> Result<String, String> {
-        let want = given.trim();
         let all = self.hub.list();
-        if all.iter().any(|d| d.meta.id == want) {
-            return Ok(want.to_owned());
-        }
-        let named: Vec<_> = all
+        let designs: Vec<_> = all
             .iter()
-            .filter(|d| d.meta.name.trim().eq_ignore_ascii_case(want))
+            .map(|d| (d.meta.id.as_str(), d.meta.name.as_str()))
             .collect();
-        if let [one] = named.as_slice() {
-            return Ok(one.meta.id.clone());
-        }
-        let prefixed: Vec<_> = all
-            .iter()
-            .filter(|d| !want.is_empty() && d.meta.id.starts_with(want))
-            .collect();
-        if named.is_empty()
-            && let [one] = prefixed.as_slice()
-        {
-            return Ok(one.meta.id.clone());
-        }
-        if named.is_empty() && self.hub.elsewhere(want).is_some() {
-            return Ok(want.to_owned());
-        }
-        let lower = want.to_lowercase();
-        let near: Vec<String> = if named.len() > 1 {
-            named
-                .iter()
-                .map(|d| format!("{:?} ({})", d.meta.name, d.meta.id))
-                .collect()
-        } else {
-            all.iter()
-                .filter(|d| d.meta.name.to_lowercase().contains(&lower))
-                .take(5)
-                .map(|d| format!("{:?} ({})", d.meta.name, d.meta.id))
-                .collect()
-        };
-        let hint = if near.is_empty() {
-            " Call designs to list them.".to_owned()
-        } else {
-            format!(" Did you mean {}?", near.join(", "))
-        };
-        Err(format!(
-            "there's no design {want:?}{}.{hint}",
-            if named.len() > 1 {
-                " with one name: several have it, so pass the id"
-            } else {
-                ""
-            }
-        ))
+        resolve_design(given, &designs, |id| self.hub.elsewhere(id).is_some())
     }
 
     /// Shows people `status` on the artboards `boards`, or on every
@@ -527,13 +556,8 @@ impl FiniteMcp {
             };
             let handle = design!(self, &id);
             let name = handle.summary().meta.name;
-            // Deleting can't be undone, so only an exact id or name will do:
-            // an id prefix or a mistyped name could pick another design.
-            if id != given.trim() && !name.trim().eq_ignore_ascii_case(given.trim()) {
-                return fail(format!(
-                    "\"{}\" isn't a design's exact id or name, so nothing was deleted. Did you mean {name:?} ({id})? Pass its id to delete it.",
-                    given.trim()
-                ));
+            if let Some(error) = inexact_delete(&given, &id, &name) {
+                return fail(error);
             }
             let hub = self.hub.clone();
             let deleted = tokio::task::spawn_blocking(move || hub.delete(&handle)).await;

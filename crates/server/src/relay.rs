@@ -12,11 +12,19 @@
 //! with a shared session store ([`DirSessionStore`]), a session can move to
 //! another router mid-conversation and keep its undo history.
 //!
-//! - `list_designs` asks every server at once and merges the lists. A server
-//!   that doesn't answer, or answers with an error, is named at the end
-//!   instead of failing the call. Only when none answers does the call fail.
-//! - `create_design` takes turns between servers, like `POST /api/designs`.
-//! - Every other tool goes to the owner of its `designId`.
+//! - `list_designs`, and doc6's `designs` with no `create`, `rename` or
+//!   `delete`, ask every server at once and merge the lists. A server that
+//!   doesn't answer, or answers with an error, is named at the end instead
+//!   of failing the call. Only when none answers does the call fail.
+//! - `create_design`, and `designs` with `create`, take turns between
+//!   servers, like `POST /api/designs`.
+//! - Every other tool goes to the owner of its `designId`, and `designs`
+//!   with `delete` to the owner of that design.
+//!
+//! doc6 takes a design's exact name or the start of its id for its id, and
+//! each server only knows its own designs. So on doc6 the relay resolves a
+//! `designId` it hasn't seen in a list against every server's designs, the
+//! way one server would ([`resolve_design`]), and passes the real id on.
 //!
 //! A server that restarts forgets its sessions. rmcp's client notices (the
 //! server answers 404) and opens a new session by itself, and the relay opens
@@ -24,7 +32,7 @@
 //! its session, so the agent's undo history there carries on.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -52,12 +60,12 @@ use rmcp::{
         },
     },
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::{
     cluster::Members,
-    mcp::{ID_MATCH_NOTE, params::ListParams},
+    mcp::{ID_MATCH_NOTE, Surface, inexact_delete, params::ListParams, resolve_design},
     mcp::{OWNER_META, instructions},
     router::UPSTREAM_TIMEOUT,
 };
@@ -77,6 +85,32 @@ pub struct Relay {
     backends: std::sync::Mutex<HashMap<String, Arc<Mutex<Option<Backend>>>>>,
     /// The backends' endpoint this relays to: `/mcp`, or `/mcp/classic`.
     path: &'static str,
+    /// The tools the backends serve at `path`. The router reads
+    /// `FINITE_MCP_SURFACE` as the servers do, so they must agree.
+    surface: Surface,
+    /// Every design id a list has shown this session, so a call by id needs
+    /// no lookup on doc6. Ids never change owner by name, so one that was
+    /// deleted since just gets the owner's "not found".
+    known: std::sync::Mutex<HashSet<String>>,
+}
+
+/// The servers' design lists, merged ([`Relay::gather`]).
+struct Gathered<'a> {
+    /// Every design the servers sent, most recently edited first.
+    designs: Vec<Value>,
+    /// The servers that didn't answer.
+    missing: Vec<&'a str>,
+    /// Whether a server left some out of its list.
+    cut: bool,
+}
+
+impl Gathered<'_> {
+    fn pairs(&self) -> Vec<(&str, &str)> {
+        self.designs
+            .iter()
+            .filter_map(|d| Some((d["designId"].as_str()?, d["name"].as_str()?)))
+            .collect()
+    }
 }
 
 /// The router's MCP endpoint, to mount at `path` (`/mcp` or `/mcp/classic`),
@@ -91,6 +125,11 @@ pub fn service(
         StreamableHttpServerConfig::default().with_allowed_hosts(members.now().allowed_hosts());
     config.session_store = sessions;
     let next = Arc::new(AtomicUsize::new(0));
+    let surface = if path == "/mcp/classic" {
+        Surface::Classic
+    } else {
+        Surface::from_env()
+    };
     StreamableHttpService::new(
         move || {
             Ok(Relay {
@@ -98,6 +137,8 @@ pub fn service(
                 next: next.clone(),
                 backends: Default::default(),
                 path,
+                surface,
+                known: Default::default(),
             })
         },
         Arc::new(crate::mcp::sessions()),
@@ -192,6 +233,16 @@ impl Relay {
                 .map_err(|e| unreachable(base, e))
         };
         let backend = in_time(base, connect).await?;
+        let theirs = backend
+            .peer_info()
+            .and_then(|info| info.instructions.clone());
+        if theirs.as_deref() != Some(instructions(self.surface)) {
+            tracing::warn!(
+                base,
+                path = self.path,
+                "this Finite server's MCP instructions differ from the router's; give both the same FINITE_MCP_SURFACE and FINITE_MCP_EXTRA"
+            );
+        }
         Ok(slot.insert(Arc::new(backend)).clone())
     }
 
@@ -237,20 +288,60 @@ impl Relay {
         }
     }
 
-    /// Calls `list_designs` on every server at once and merges the JSON
-    /// arrays, newest first. Each server applies the `query` and `limit`, so
-    /// the merged list is cut to the limit again. Servers that don't answer
-    /// are named after the list.
+    /// Calls a list tool (`list_designs`, or doc6's `designs`) on every
+    /// server at once and merges the JSON arrays, newest first. Servers that
+    /// don't answer are left out and named. The ids go into `known`.
+    async fn gather<'a>(
+        &self,
+        cluster: &'a crate::cluster::Cluster,
+        params: CallToolRequestParams,
+        ctx: &RequestContext<RoleServer>,
+    ) -> Gathered<'a> {
+        let calls = cluster
+            .nodes()
+            .iter()
+            .map(|base| in_time(base, self.call(base, params.clone(), ctx)));
+        let mut gathered = Gathered {
+            designs: Vec::new(),
+            missing: Vec::new(),
+            cut: false,
+        };
+        for (base, result) in cluster.nodes().iter().zip(join_all(calls).await) {
+            // A server whose call failed answers with its error, not a list.
+            let Some(result) = result.ok().filter(|r| r.is_error != Some(true)) else {
+                gathered.missing.push(base.as_str());
+                continue;
+            };
+            for block in &result.content {
+                let Some(text) = block.as_text() else {
+                    continue;
+                };
+                match serde_json::from_str(&text.text) {
+                    Ok(Value::Array(list)) => gathered.designs.extend(list),
+                    // A server's own note about its list, which is redone below.
+                    _ if text.text.starts_with("The query matched") => {}
+                    _ => gathered.cut = true,
+                }
+            }
+        }
+        gathered
+            .designs
+            .sort_by_key(|d| std::cmp::Reverse(d["updatedAt"].as_u64().unwrap_or(0)));
+        let mut known = self.known.lock().unwrap();
+        for (id, _) in gathered.pairs() {
+            known.insert(id.to_owned());
+        }
+        gathered
+    }
+
+    /// Lists every server's designs as one list. Each server applies the
+    /// `query` and `limit`, so the merged list is cut to the limit again.
     async fn list_designs(
         &self,
         params: CallToolRequestParams,
         ctx: &RequestContext<RoleServer>,
     ) -> CallToolResult {
         let cluster = self.members.now();
-        let calls = cluster
-            .nodes()
-            .iter()
-            .map(|base| in_time(base, self.call(base, params.clone(), ctx)));
         let limit = params
             .arguments
             .as_ref()
@@ -259,38 +350,6 @@ impl Relay {
             .map_or(ListParams::DEFAULT_LIMIT, |n| {
                 (n as usize).clamp(1, ListParams::MAX_LIMIT)
             });
-        let mut designs: Vec<Value> = Vec::new();
-        let mut missing = Vec::new();
-        // Whether a server left some out, so the merged list is partial too.
-        let mut cut = false;
-        for (base, result) in cluster.nodes().iter().zip(join_all(calls).await) {
-            // A server whose call failed answers with its error, not a list.
-            let Some(result) = result.ok().filter(|r| r.is_error != Some(true)) else {
-                missing.push(base.as_str());
-                continue;
-            };
-            for block in &result.content {
-                let Some(text) = block.as_text() else {
-                    continue;
-                };
-                match serde_json::from_str(&text.text) {
-                    Ok(Value::Array(list)) => designs.extend(list),
-                    // A server's own note about its list, which is redone below.
-                    _ if text.text.starts_with("The query matched") => {}
-                    _ => cut = true,
-                }
-            }
-        }
-        if missing.len() == cluster.nodes().len() {
-            return CallToolResult::error(vec![ContentBlock::text(format!(
-                "No Finite server answered: {}",
-                missing.join(", ")
-            ))]);
-        }
-        designs.sort_by_key(|d| std::cmp::Reverse(d["updatedAt"].as_u64().unwrap_or(0)));
-        // Judged on every design the servers sent, before the cut below. A
-        // server that cut its own list may have left a name match out, so
-        // then the relay says nothing rather than something wrong.
         let query = ListParams::with_query(
             params
                 .arguments
@@ -299,6 +358,20 @@ impl Relay {
                 .and_then(Value::as_str)
                 .map(str::to_owned),
         );
+        let Gathered {
+            mut designs,
+            missing,
+            mut cut,
+        } = self.gather(&cluster, params, ctx).await;
+        if missing.len() == cluster.nodes().len() {
+            return CallToolResult::error(vec![ContentBlock::text(format!(
+                "No Finite server answered: {}",
+                missing.join(", ")
+            ))]);
+        }
+        // Judged on every design the servers sent, before the cut below. A
+        // server that cut its own list may have left a name match out, so
+        // then the relay says nothing rather than something wrong.
         let only_by_id = !cut
             && query.only_by_id(
                 designs
@@ -325,6 +398,59 @@ impl Relay {
         }
         CallToolResult::success(content)
     }
+
+    /// Creates a design on the server whose turn it is.
+    async fn create(
+        &self,
+        nodes: &[String],
+        request: CallToolRequestParams,
+        ctx: &RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let turn = self.next.fetch_add(1, Ordering::Relaxed);
+        for i in 0..nodes.len() - 1 {
+            let base = &nodes[(turn + i) % nodes.len()];
+            // A server we can't open a session with never saw the call, so
+            // the next one can take it.
+            if self.backend(base, ctx).await.is_ok() {
+                return self.call(base, request, ctx).await;
+            }
+        }
+        let last = &nodes[(turn + nodes.len() - 1) % nodes.len()];
+        self.call(last, request, ctx).await
+    }
+
+    /// The id of the design doc6's `given` names, across every server: an id
+    /// a list showed this session as it is, or else what [`resolve_design`]
+    /// finds among every server's designs that match it. With `exact`, for
+    /// a delete, only an exact id or name will do. An id no server lists
+    /// goes through while a server is missing, for its owner to answer.
+    async fn resolve(
+        &self,
+        given: &str,
+        exact: bool,
+        ctx: &RequestContext<RoleServer>,
+    ) -> Result<String, CallToolResult> {
+        let want = given.trim();
+        if self.known.lock().unwrap().contains(want) {
+            return Ok(want.to_owned());
+        }
+        let cluster = self.members.now();
+        let args = json!({ "query": want, "limit": ListParams::MAX_LIMIT });
+        let list = CallToolRequestParams::new("designs")
+            .with_arguments(args.as_object().expect("an object").clone());
+        let gathered = self.gather(&cluster, list, ctx).await;
+        let designs = gathered.pairs();
+        let refuse = |text: String| CallToolResult::error(vec![ContentBlock::text(text)]);
+        let id =
+            resolve_design(want, &designs, |_| !gathered.missing.is_empty()).map_err(refuse)?;
+        if exact
+            && let Some((_, name)) = designs.iter().find(|(d, _)| *d == id)
+            && let Some(error) = inexact_delete(want, &id, name)
+        {
+            return Err(refuse(error));
+        }
+        Ok(id)
+    }
 }
 
 impl ServerHandler for Relay {
@@ -334,11 +460,7 @@ impl ServerHandler for Relay {
                 "finite-router",
                 env!("CARGO_PKG_VERSION"),
             ))
-            .with_instructions(instructions(if self.path == "/mcp/classic" {
-                crate::mcp::Surface::Classic
-            } else {
-                crate::mcp::Surface::from_env()
-            }))
+            .with_instructions(instructions(self.surface))
     }
 
     /// Every server has the same tools, so the first that answers lists them.
@@ -372,15 +494,18 @@ impl ServerHandler for Relay {
 
     async fn call_tool(
         &self,
-        request: CallToolRequestParams,
+        mut request: CallToolRequestParams,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
-        let design_id = request
-            .arguments
-            .as_ref()
-            .and_then(|args| args.get("designId"))
-            .and_then(Value::as_str)
-            .map(str::to_owned);
+        let arg = |name: &str| {
+            request
+                .arguments
+                .as_ref()
+                .and_then(|args| args.get(name))
+                .filter(|v| !v.is_null())
+                .cloned()
+        };
+        let mut design_id = arg("designId").and_then(|v| v.as_str().map(str::to_owned));
         let cluster = self.members.now();
         let nodes = cluster.nodes();
         if nodes.is_empty() {
@@ -389,23 +514,37 @@ impl ServerHandler for Relay {
             )])
             .into());
         }
+        let designs = request.name == "designs";
+        if designs && arg("create").is_some() {
+            return Ok(self.create(nodes, request, &ctx).await?.into());
+        }
+        // doc6's delete names its design in `delete`, by exact id or name.
+        if designs && let Some(Value::String(given)) = arg("delete") {
+            let id = match self.resolve(&given, true, &ctx).await {
+                Ok(id) => id,
+                Err(refused) => return Ok(refused.into()),
+            };
+            if let Some(args) = request.arguments.as_mut() {
+                args.insert("delete".into(), id.clone().into());
+            }
+            design_id = Some(id);
+        } else if designs && arg("rename").is_none() {
+            return Ok(self.list_designs(request, &ctx).await.into());
+        } else if self.surface.doc6()
+            && let Some(given) = &design_id
+        {
+            let id = match self.resolve(given, false, &ctx).await {
+                Ok(id) => id,
+                Err(refused) => return Ok(refused.into()),
+            };
+            if let Some(args) = request.arguments.as_mut() {
+                args.insert("designId".into(), id.clone().into());
+            }
+            design_id = Some(id);
+        }
         let result = match (request.name.as_ref(), design_id) {
             ("list_designs", _) => self.list_designs(request, &ctx).await,
-            ("create_design", _) => {
-                let turn = self.next.fetch_add(1, Ordering::Relaxed);
-                let mut created = None;
-                for i in 0..nodes.len() {
-                    let base = &nodes[(turn + i) % nodes.len()];
-                    // A server we can't open a session with never saw the
-                    // call, so the next one can take it.
-                    if i + 1 < nodes.len() && self.backend(base, &ctx).await.is_err() {
-                        continue;
-                    }
-                    created = Some(self.call(base, request.clone(), &ctx).await?);
-                    break;
-                }
-                created.expect("the last server is always tried")
-            }
+            ("create_design", _) => self.create(nodes, request, &ctx).await?,
             (_, Some(id)) => {
                 let owner = cluster.owner_url(&id).expect("some server is live");
                 self.call(owner, request, &ctx).await?
