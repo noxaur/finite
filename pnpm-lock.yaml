@@ -203,9 +203,6 @@ catalogs:
     next:
       specifier: ^16.4.3
       version: 16.4.3
-    postcss:
-      specifier: ^8.5.32
-      version: 8.5.32
     react:
       specifier: ^19.3.1
       version: 19.3.1
@@ -226,9 +223,6 @@ importers:
 
   .:
     devDependencies:
-      postcss:
-        specifier: 'catalog:'
-        version: 8.5.32
       vite-plus:
         specifier: 'catalog:'
         version: 1.4.0(@types/node@24.19.2)(@vitest/ui@5.0.5)(jiti@2.7.0)(typescript@7.0.2)(yaml@2.9.1)

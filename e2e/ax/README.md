@@ -124,41 +124,30 @@ What made the difference:
 - **Shared CSS for every agent.** With the tools on, every `screens-change` agent put the top bar's styles in the shared CSS. The change was then one `set_shared_css` and one screenshot. Without them, agents edited each screen.
 - **Accepting what agents meant.** `get_screenshot` and `get_layout` with only a `designId` now cover every artboard, which every `overlap` agent on the old build tried, and got an error. Passing the `designId` as a `nodeId` says so. `create_artboard` takes `class`, because two agents styled `.screen` in a `<style>` block and found the artboard itself had no class.
 
-## A six-tool redesign, tried as a mock (experimental)
+## What the third study found: six tools
 
-`surfaces/doc6.mjs` mocks a redesign of the whole surface as 6 tools: `designs`, `read`, `edit`, `render`, `comments` and `undo`. Elements are addressed with CSS selectors, and `edit` takes a list of ops that apply all together or not at all, as one undo step. Pages and imports are `edit` ops, JSX and file exports are `read` views, and `designs` deletes. The spec's header lists what it only approximates in JavaScript.
+Finite's ~35 tools cost an agent a call for nearly every element it touched. The redesign, doc6, has six: `designs`, `read`, `edit`, `render`, `comments` and `undo`. Elements are addressed with CSS selectors, and one `edit` call is a list of ops that apply all or nothing, as one change and one undo step. It was tried first as a mock surface (`--surface`, PR #41), against a 24-tool design with the same parameter names everywhere. doc6 took 123 calls to the other's 149 and today's 198 on Haiku, with level grades, so it was built (#75, #76, #78) and is now what `/mcp` serves. `--env FINITE_MCP_SURFACE=classic` runs today's tools instead, for comparisons.
 
-The first round tried it against a 24-tool spec with the same parameter names everywhere. doc6 took 123 calls to the other's 149 and today's 198, with the same errors and grades, so the 24-tool spec was dropped. A second round, after pages, import and export, `get_jsx` and `delete_design` shipped, ran 9 tasks: the first round's 6 plus `delete-design`, `import-page` and `export-figma`.
+On the real build, every task passed every check on both surfaces:
 
-| Model, runs per task | Surface      | Runs passed | Calls      | Errors | Outside MCP | Cost  | Quality / fit |
-| -------------------- | ------------ | ----------- | ---------- | ------ | ----------- | ----- | ------------- |
-| Haiku low, 3         | today        | 27/27       | 264        | 2      | 15          | $0.26 | 7.1 / 7.2     |
-| Haiku low, 3         | doc6 round 1 | 20/27       | 203        | 2      | 38          | $0.25 | –             |
-| Haiku low, 3         | doc6         | 27/27       | 165 (−38%) | 3      | 17          | $0.22 | 7.1 / 7.4     |
-| Sonnet medium, 2     | today        | 18/18       | 135        | 0      | 15          | $2.54 | 7.3 / 7.6     |
-| Sonnet medium, 2     | doc6         | 18/18       | 89 (−34%)  | 0      | 4           | $2.26 | 7.1 / 7.7     |
+| Tasks                                       | Model         | Classic calls | doc6 calls   |
+| ------------------------------------------- | ------------- | ------------- | ------------ |
+| 9 small-design tasks × 2                    | Haiku low     | 181, 7 errors | 102, 1 error |
+| 9 small-design tasks × 2                    | Sonnet medium | 143           | 91 (−36%)    |
+| `big-edit` and `big-wiki` × 2 (large pages) | Sonnet medium | 156           | 56 (−64%)    |
 
-The round-1 spec failed `delete-design` and `import-page`, which it had no tools for. What round 2 changed, each from a round-1 transcript or feedback:
+The small tasks are the first study's six plus `delete-design`, `import-page` and `export-figma`. The gap is widest on large pages, because classic agents read and edit them element by element. One Haiku agent took 119 calls to change a word through the Wikipedia article, which is one `replace` op on doc6.
 
-- **A design's name works as its `designId`.** 2 of 3 round-1 `rebrand` agents passed "Acme site" and got an error.
-- **`check` is on by default.** Agents set it on almost every round-1 edit.
-- **`dryRun` on `edit`.** Four round-1 agents asked to preview a broad `replace`.
-- **An `artboard` op with `from`** starts a screen as a copy of another, for mobile versions.
-- **Rewriting HTML keeps ids.** An `html` op with mode `inner` or `replace` updates elements that keep their `data-id` in place, and keeps values another agent changed since this agent read them. On today's server, the same rewrite gives every element a new id, leaves a comment pinned to a node that no longer exists, and silently wipes the other agent's newer change ([issue #68](https://github.com/noxaur/finite/issues/68)).
+`big-edit` and `big-wiki` edit inside real websites saved as one HTML file each, with their CSS inlined: Stripe's home page (4,800 nodes, 560 KB of CSS) and Wikipedia's Typography article (6,700 nodes). Third-party pages aren't committed, so save your own and point `FINITE_AX_PAGES` at their folder. To save one, open the page in a browser, inline every `document.styleSheets` rule into one `<style>` (fetch cross-origin sheets yourself), and save `document.documentElement.outerHTML`.
 
-### Large designs
+What the rounds changed, each from a transcript or an agent's feedback:
 
-`big-edit` and `big-wiki` edit inside real websites saved as one HTML file each, with their CSS inlined: Stripe's home page (4,800 nodes, 560 KB of CSS) and Wikipedia's Typography article (6,700 nodes). Third-party pages aren't committed, so save your own and point `FINITE_AX_PAGES` at their folder. To save one, open the page in a browser, inline every `document.styleSheets` rule into one `<style>` (fetch cross-origin sheets separately), and save `document.documentElement.outerHTML`.
+- **A design's name works as its `designId`.** 2 of 3 `rebrand` agents on the first mock passed "Acme site" and got an error.
+- **The layout check runs after every edit**, because agents asked for it on almost every edit. It waits up to 5 s for a cold browser: with a 1 s wait it often came back empty, and agents rendered to find out.
+- **`dryRun`.** Four agents asked to preview a broad `replace` before applying it.
+- **A rewrite keeps ids.** An `html` op with mode `inner` or `replace` updates the elements that keep their `data-id`, and keeps what another agent changed since this one read them (#68, #70, #73). Before, a rewrite gave every element a new id, left comment pins on deleted nodes, and could wipe another agent's newer change.
+- **`replace` can look only in text.** A Sonnet agent renamed "typeface" through the article with `includeText`, which also rewrote 30 links, ids and titles. It spent 215 s and five `Bash` calls putting them back. With `in: "text"` (#79), the same task took 6 or 7 calls and 16 s.
+- **A `remove` whose matches nest is refused.** `:has(…)` matches every ancestor of its target, and a dry run of one such remove would have deleted a whole imported page.
+- **Large imports work.** Imported pages were cut to 900 px, lost their `html`/`body`/`:root` CSS, and returned 51 KB of diagnostics (#71).
 
-| Model, runs per task | Surface | Runs passed | Calls     | Errors | Cost  |
-| -------------------- | ------- | ----------- | --------- | ------ | ----- |
-| Sonnet medium, 2     | today   | 4/4         | 137       | 0      | $1.34 |
-| Sonnet medium, 2     | doc6    | 4/4         | 41 (−70%) | 0      | $0.76 |
-| Haiku low, 3         | today   | 2/6         | 222       | 6      | $0.30 |
-| Haiku low, 3         | doc6    | 3/6         | 88 (−60%) | 4      | $0.24 |
-
-The gap is wider than on small designs because today's agents read and edit large pages element by element. One Haiku agent took 119 calls to change a word through the article, which is one `replace` op on doc6. Haiku's failures were the same on both surfaces: giving up on the article, and deleting the whole section around a card the first prompt called a "section". With "card", `big-edit` passed 3/3 on doc6 in 49 calls and 2/3 on today's tools in 84.
-
-Large pages also showed two things the mock had to handle: `get_html` cuts a big subtree to fit one result, so the mock fetches the cut parts to match selectors against the whole page, and `:has(…)` matches every ancestor of its target, so a `remove` whose matches nest inside each other is refused instead of deleting the page.
-
-Two things it still can't show: a real `edit` would label its change with its `status`, where the mock's comment replies link "Write HTML, Write HTML", which three agents found unclear. And its all-or-nothing rollback undoes real steps, so another agent could see, or build on, an edit that later rolls back. A server-side `edit` can stage its ops with the `Transaction` that `Design::import` already uses.
+When a mock and a real build disagree, read the transcripts before trusting either: the real build's first round was 13 calls worse than the mock, from the layout check's short wait and a missing overlap check, both found in transcripts.
