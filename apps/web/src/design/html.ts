@@ -46,6 +46,29 @@ const RUNTIME = `(() => {
 })();`;
 
 /**
+ * Runs first in an artboard shown in preview mode. Links and forms do
+ * nothing, as on the canvas, and the keys that leave or step through the
+ * preview reach the page even after a click inside the artboard.
+ */
+const PREVIEW_RUNTIME = `(() => {
+  addEventListener("click", (e) => {
+    // The whole path, so a link around or inside a shadow root counts too.
+    if (e.composedPath().some((el) => el instanceof Element && el.matches("a[href], area[href]"))) e.preventDefault();
+  }, true);
+  addEventListener("submit", (e) => e.preventDefault(), true);
+  // Escape always leaves. The arrows step only when the artboard didn't use
+  // them, outside fields and editable text (inside shadow roots too). The
+  // check waits until the event has reached the artboard's own listeners.
+  const editing = (el) => el instanceof Element && (el.isContentEditable || el.closest("input, textarea, select"));
+  addEventListener("keydown", (e) => {
+    if (e.key === "Escape") return parent.postMessage({ finite: { type: "key", key: e.key } }, "*");
+    if ((e.key !== "ArrowLeft" && e.key !== "ArrowRight") || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+    if (editing(e.composedPath()[0])) return;
+    setTimeout(() => e.defaultPrevented || parent.postMessage({ finite: { type: "key", key: e.key } }, "*"));
+  });
+})();`;
+
+/**
  * The cascade layer for base styles, before the tokens', so an artboard's
  * styles override them (`html::BASE_LAYER`).
  */
@@ -55,12 +78,13 @@ export const BASE_LAYER = "finite-base";
  * A standalone page that shows one artboard, for a sandboxed iframe's
  * `srcdoc`. The design's tokens in the artboard's mode come before the
  * artboard, in a layer the artboard's own styles override, as in screenshots.
+ * A `preview` page scrolls and takes clicks like a real page, for preview mode.
  */
-export function artboardDocument(replica: Replica, id: string): string {
+export function artboardDocument(replica: Replica, id: string, preview = false): string {
   const { csp, baseCss } = designModel();
   const tokens = replica.tokenStyle(id, false);
   const shared = tokens === "" ? "" : `<style>${tokens}</style>`;
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>@layer ${BASE_LAYER} { ${baseCss} html, body { margin: 0; } }</style>${shared}<script>${RUNTIME}</script></head><body>${replica.exportHtml(id, true)}</body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>@layer ${BASE_LAYER} { ${baseCss} html, body { margin: 0; } }</style>${shared}<script>${preview ? PREVIEW_RUNTIME : RUNTIME}</script></head><body>${replica.exportHtml(id, true)}</body></html>`;
 }
 
 /** An element's `width` and `height` styles, when they're plain pixels. */
