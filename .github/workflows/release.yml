@@ -4,6 +4,11 @@
 # (apps/desktop/src/updates.ts). This repo is private, and electron-updater
 # downloads without a token, so the updater can't read its releases.
 #
+# The release also carries the Figma plugin as finite-figma-plugin.zip,
+# which the web app's Export menu links to through
+# releases/latest/download/, so its name has no version. Only the GitHub
+# release gets it: the updater doesn't read it.
+#
 # The version is the major and minor from package.json, then the number of
 # commits on main: 0.0.152 for the 152nd commit. Pushes that skip CI (only
 # Markdown or docs/) don't release.
@@ -134,8 +139,31 @@ jobs:
             apps/desktop/release/latest*.yml
           if-no-files-found: error
 
+  # The plugin is the same on every platform, so it builds once. Figma loads
+  # a plugin from its manifest, so the zip holds manifest.json and the
+  # dist/ files it names, at the paths it names them.
+  figma-plugin:
+    needs: version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SHA }}
+      - uses: voidzero-dev/setup-vp@v1.21.2
+        with:
+          node-version: "24"
+          cache: true
+      - run: vp run -F figma-plugin build
+      - working-directory: apps/figma-plugin
+        run: zip "$RUNNER_TEMP/finite-figma-plugin.zip" manifest.json dist/code.js dist/ui.html
+      - uses: actions/upload-artifact@v4
+        with:
+          name: figma-plugin
+          path: ${{ runner.temp }}/finite-figma-plugin.zip
+          if-no-files-found: error
+
   publish:
-    needs: [version, build]
+    needs: [version, build, figma-plugin]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -147,12 +175,17 @@ jobs:
           pattern: release-*
           path: release
           merge-multiple: true
+      # Beside release/, which the bucket upload below copies whole.
+      - uses: actions/download-artifact@v4
+        with:
+          name: figma-plugin
+          path: figma-plugin
       # The tag is made on the released commit. A rerun finds the release
       # and uploads the files again.
       - run: |
           gh release view "v$VERSION" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1 ||
             gh release create "v$VERSION" -R "$GITHUB_REPOSITORY" --target "$SHA" --title "Finite $VERSION" --generate-notes
-          gh release upload "v$VERSION" -R "$GITHUB_REPOSITORY" --clobber release/*
+          gh release upload "v$VERSION" -R "$GITHUB_REPOSITORY" --clobber release/* figma-plugin/finite-figma-plugin.zip
         env:
           GH_TOKEN: ${{ github.token }}
       # Deletes the oldest versions' builds until the bucket, with this

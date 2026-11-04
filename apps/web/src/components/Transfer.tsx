@@ -5,8 +5,10 @@ import { useRef } from "react";
 import type { ImportResult } from "@/api/Api";
 import {
   exportHref,
+  FIGMA_PLUGIN_URL,
   figmaHref,
   IMPORT_ACCEPT,
+  jsxHref,
   originalHref,
   repoHref,
   summarize,
@@ -49,7 +51,11 @@ export function ImportButton({ busy, onFile }: { busy: boolean; onFile: (file: F
   );
 }
 
-/** What the Export button opens: a link per artboard as HTML and for Figma, and the whole design as `.finite`. */
+/**
+ * What the Export button opens: a link per artboard as HTML, as JSX and for
+ * Figma, the whole design as `.finite` or text files, and where to get the
+ * Figma plugin that opens the Figma files.
+ */
 export function ExportMenu({
   designId,
   artboards,
@@ -83,6 +89,16 @@ export function ExportMenu({
             {label} as HTML
           </a>,
           <a
+            key={`${id}:jsx`}
+            role="menuitem"
+            href={jsxHref(designId, id)}
+            download
+            onClick={onClose}
+            {...stylex.props(styles.item)}
+          >
+            {label} as JSX
+          </a>,
+          <a
             key={`${id}:figma`}
             role="menuitem"
             href={figmaHref(designId, id)}
@@ -112,6 +128,18 @@ export function ExportMenu({
       >
         Whole design as text files (.tar)
       </a>
+      <p {...stylex.props(styles.note)}>
+        Files for Figma open in the Finite Figma plugin.{" "}
+        <a
+          href={FIGMA_PLUGIN_URL}
+          target="_blank"
+          rel="noreferrer"
+          onClick={onClose}
+          {...stylex.props(styles.link)}
+        >
+          Get the plugin
+        </a>
+      </p>
     </div>
   );
 }
@@ -215,6 +243,16 @@ const styles = stylex.create({
     color: "inherit",
     textDecoration: "none",
   },
+  note: {
+    margin: 0,
+    paddingTop: space.sm,
+    paddingInline: space.sm,
+    borderTopWidth: 1,
+    borderTopStyle: "solid",
+    borderTopColor: colors.border,
+    color: colors.muted,
+  },
+  link: { color: colors.text },
   title: { margin: 0, fontWeight: 500 },
   failed: { color: colors.danger, fontWeight: 400 },
   muted: { color: colors.muted },

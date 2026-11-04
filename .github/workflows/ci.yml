@@ -87,9 +87,10 @@ jobs:
       - run: cargo test -p finite-server --test no_postgres
       - run: cp target/debug/finite-server "$RUNNER_TEMP/finite-server"
       - run: cargo test -p finite-design
+      - run: cargo test -p finite-transfer
       - run: cargo test -p finite-wasm
-      - run: vp run -F web -F desktop test
-      - run: vp run -F web... -F desktop build
+      - run: vp run -F web -F desktop -F figma-plugin test
+      - run: vp run -F web... -F desktop -F figma-plugin build
       - if: github.ref == 'refs/heads/main'
         run: cargo build --release -p finite-server
 

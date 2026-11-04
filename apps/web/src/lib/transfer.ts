@@ -38,6 +38,15 @@ export function figmaHref(designId: string, artboardId: string): string {
   return `${designPath(designId)}/export?format=figma&artboard=${encodeURIComponent(artboardId)}`;
 }
 
+/** The link that downloads one artboard as a React component (`.jsx`). */
+export function jsxHref(designId: string, artboardId: string): string {
+  return `${designPath(designId)}/export?format=jsx&artboard=${encodeURIComponent(artboardId)}`;
+}
+
+/** The Finite Figma plugin, zipped, from the latest release. The release workflow uploads it under this name. */
+export const FIGMA_PLUGIN_URL =
+  "https://github.com/noxaur/finite/releases/latest/download/finite-figma-plugin.zip";
+
 /** The link that downloads the exact bytes an import received. */
 export function originalHref(designId: string, importId: string): string {
   return `${designPath(designId)}/imports/${encodeURIComponent(importId)}/original`;
