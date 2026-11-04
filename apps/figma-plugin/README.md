@@ -4,6 +4,10 @@ A Figma plugin that moves designs between Figma and Finite as files. It has two 
 
 The plugin only copies values between the Plugin API and the payload, a JSON format defined in `crates/transfer/src/figma/payload.rs` and mirrored in `src/payload.ts`. All conversion between that payload and Finite's artboards happens in the server. See `docs/import-export.md` for how that works.
 
+## Get it
+
+Every Finite release attaches the plugin, built, as [`finite-figma-plugin.zip`](https://github.com/noxaur/finite/releases/latest/download/finite-figma-plugin.zip). The web app's Export menu links to the same file. Unzip it, then load the `manifest.json` inside as described under [Load it in Figma](#load-it-in-figma). To use a change before it's released, build it from source.
+
 ## Build
 
 From the repository root:
@@ -13,11 +17,11 @@ vp install
 vp run -F figma-plugin build
 ```
 
-This writes `dist/code.js` and `dist/ui.html`, which `manifest.json` points at. Figma loads the plugin's code in a sandbox and its UI as one HTML string, so `vp pack` bundles each into a single script with no imports, and `scripts/inline-ui.mjs` puts the UI script inside `ui.html`. Run `vp test` in this folder to run the tests.
+This writes `dist/code.js` and `dist/ui.html`, which `manifest.json` points at. Figma loads the plugin's code in a sandbox and its UI as one HTML string, so `vp pack` bundles each into a single script with no imports, and `scripts/inline-ui.mjs` puts the UI script inside `ui.html`. Run `vp test` in this folder to run the tests. CI runs the tests and the build, and the release workflow (`.github/workflows/release.yml`) zips `manifest.json`, `dist/code.js` and `dist/ui.html` into the release.
 
 ## Load it in Figma
 
-You need the Figma desktop app. Open any design file, then choose **Plugins → Development → Import plugin from manifest…** and pick `apps/figma-plugin/manifest.json`. After that, **Plugins → Development → Finite** runs it. Rebuild after a code change and run the plugin again.
+You need the Figma desktop app. Open any design file, then choose **Plugins → Development → Import plugin from manifest…** and pick `manifest.json`: the one in the unzipped release, or `apps/figma-plugin/manifest.json` for a build from source. After that, **Plugins → Development → Finite** runs it. With a build from source, rebuild after a code change and run the plugin again. With a release, unzip the newer one over the old folder.
 
 ## Use it with Finite
 
