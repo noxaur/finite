@@ -107,6 +107,49 @@ jobs:
           done
           cat "$RUNNER_TEMP/postgres.log"
           exit 1
+      - name: Diagnose Chrome startup
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          import pathlib
+          import select
+          import signal
+          import subprocess
+          import tempfile
+          import time
+
+          chrome = next(path for path in ["/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser"] if pathlib.Path(path).exists())
+          subprocess.run([chrome, "--version"], check=True, timeout=10)
+          for clear_dbus in [False, True]:
+              env = dict(os.environ)
+              if clear_dbus:
+                  env.pop("DBUS_SESSION_BUS_ADDRESS", None)
+              with tempfile.TemporaryDirectory() as profile:
+                  args = [chrome, "--headless", "--disable-gpu", "--enable-unsafe-swiftshader",
+                          "--hide-scrollbars", "--no-first-run", "--no-default-browser-check",
+                          "--mute-audio", "--disable-extensions", "--disable-background-networking",
+                          "--disable-sync", f"--user-data-dir={profile}", "--remote-debugging-port=0", "about:blank"]
+                  started = time.monotonic()
+                  process = subprocess.Popen(args, env=env, stdin=subprocess.DEVNULL,
+                                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                             start_new_session=True)
+                  log = b""
+                  try:
+                      while time.monotonic() - started < 60:
+                          if select.select([process.stderr], [], [], 1)[0]:
+                              chunk = os.read(process.stderr.fileno(), 65536)
+                              if not chunk:
+                                  break
+                              log += chunk
+                              if b"DevTools listening on " in log:
+                                  break
+                      print(f"clear_dbus={clear_dbus} ready={b'DevTools listening on ' in log} elapsed={time.monotonic() - started:.2f}s", flush=True)
+                      print(log.decode(errors="replace")[-6000:], flush=True)
+                  finally:
+                      os.killpg(process.pid, signal.SIGTERM)
+                      process.wait(timeout=10)
+          PYTHON
+
       # FINITE_REQUIRE_BROWSER: the layout note tests fail, not skip, if the
       # runner has no Chrome (the runner image ships it).
       - env:
