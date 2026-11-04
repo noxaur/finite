@@ -959,3 +959,6 @@ fn strip_nulls(mut value: Value) -> Value {
     }
     value
 }
+
+#[cfg(test)]
+mod selector_verification;
