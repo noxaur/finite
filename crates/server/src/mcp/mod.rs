@@ -551,6 +551,8 @@ fn component_note(handle: &DesignHandle, change: &Change) -> Option<String> {
             }
             // New nodes have no overrides yet, so name their ids in each
             // instance: an agent giving each instance its own text needs them.
+            // A component this change made is new all through; that's no news.
+            let made = defined.contains(&component.as_str());
             let added: Vec<&finite_design::Node> = change
                 .ops
                 .iter()
@@ -559,7 +561,8 @@ fn component_note(handle: &DesignHandle, change: &Change) -> Option<String> {
                     _ => None,
                 })
                 .filter(|n| {
-                    n.tag().is_some()
+                    !made
+                        && n.tag().is_some()
                         && components::component_of(doc, &n.id).is_some_and(|c| c.id == component)
                         && n.id != component
                 })

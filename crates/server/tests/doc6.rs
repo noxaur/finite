@@ -949,6 +949,7 @@ async fn components_are_made_used_and_detached_in_edits() {
     )
     .await;
     assert!(made.contains("is a component"), "{made}");
+    assert!(!made.contains("New in the component"), "{made}");
     assert!(made.contains("Replaced 1 copy with instances"), "{made}");
     assert!(
         made.contains("#") && made.contains(": 1 override"),
