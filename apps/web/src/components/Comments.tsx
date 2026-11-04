@@ -327,7 +327,9 @@ function AudiencePicker({
       <option value="people">{audienceLabel({ kind: "people" })}</option>
       {options.map((agent) => (
         <option key={agent.id} value={agent.id}>
-          {audienceLabel({ kind: "agent", ...agent })}
+          {value.kind === "agent" && value.id === agent.id
+            ? routeLabel(comment)
+            : audienceLabel({ kind: "agent", ...agent })}
         </option>
       ))}
     </select>

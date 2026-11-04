@@ -31,6 +31,9 @@ describe("audienceOf", () => {
     expect(routeLabel(comment({ takenBy: agent, audience: { kind: "people" } }))).toBe(
       "People only",
     );
+    const ada = { kind: "agent", id: "agent:ada", name: "Ada" } as const;
+    expect(routeLabel(comment({ audience: ada }))).toBe("For Ada");
+    expect(routeLabel(comment({ audience: ada, takenBy: agent }))).toBe("For Ada, with Designer");
   });
 
   it("names the agent a comment is for", () => {

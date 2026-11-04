@@ -20,13 +20,18 @@ export function audienceLabel(audience: Audience): string {
 }
 
 /**
- * Where a comment went: a person's pick, or else "With Designer" for the
- * agent that took it. The server sends it there while that agent listens.
+ * Where a comment went: "With Designer" for the agent that took it, after
+ * the person's pick if they made one. The agent that took it keeps it while
+ * it listens, even when a person picked another agent that was away.
  */
 export function routeLabel(comment: Comment): string {
   const audience = audienceOf(comment);
-  if (audience.kind === "agents" && comment.takenBy) return `With ${comment.takenBy.name}`;
-  return audienceLabel(audience);
+  const taken = comment.takenBy;
+  if (audience.kind === "people" || !taken) return audienceLabel(audience);
+  if (audience.kind === "agents") return `With ${taken.name}`;
+  return taken.id === audience.id
+    ? audienceLabel(audience)
+    : `For ${audience.name}, with ${taken.name}`;
 }
 
 export interface KnownAgent {
