@@ -5,7 +5,7 @@ description: Prove a Finite feature works in the real app and keep the evidence.
 
 # Verify Finite
 
-Finite has two surfaces, and most features need both. **Agents** edit designs through MCP tools at `/mcp`. **People** watch in the browser: the design list at `/` and the canvas at `/design/?id=<designId>`. A proof drives the agent side with `call` and checks the person's side in the page, or the other way round for comments.
+Finite has two surfaces, and most features need both. **Agents** edit designs through MCP tools at `/mcp` (the six doc6 tools; `call` drives the classic tools at `/mcp/classic`). **People** watch in the browser: the design list at `/` and the canvas at `/design/?id=<designId>`. A proof drives the agent side with `call` and checks the person's side in the page, or the other way round for comments.
 
 The harness is `e2e/headless.mjs`. `.agents/skills/finite-headless/SKILL.md` is its command reference (selectors that reach into shadow roots, sandboxed iframes, `--agent`, Python). Read it once before your first drive. This skill adds isolation, a doctor, an evidence folder, before-and-after runs and the feature map.
 

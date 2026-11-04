@@ -249,7 +249,7 @@ async fn the_design_list_survives_a_server_being_down() {
             streamable_http_client::StreamableHttpClientTransportConfig,
         },
     };
-    let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp"));
+    let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp/classic"));
     let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
     for _ in 0..2 {
         let params = rmcp::model::CallToolRequestParams::new("create_design")
@@ -387,7 +387,7 @@ mod relay {
             http::HeaderName::from_static("x-finite-agent"),
             http::HeaderValue::from_static("Alice"),
         );
-        let config = StreamableHttpClientTransportConfig::with_uri(format!("{front}/mcp"))
+        let config = StreamableHttpClientTransportConfig::with_uri(format!("{front}/mcp/classic"))
             .custom_headers(headers);
         let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
 
@@ -487,7 +487,7 @@ mod relay {
     #[tokio::test]
     async fn the_relay_follows_a_server_that_says_its_elsewhere() {
         let (front, id) = lagging_router().await;
-        let config = StreamableHttpClientTransportConfig::with_uri(format!("{front}/mcp"));
+        let config = StreamableHttpClientTransportConfig::with_uri(format!("{front}/mcp/classic"));
         let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
         let info = call(&client, "get_basic_info", json!({ "designId": id })).await;
         assert!(info.contains("On B"), "{info}");
@@ -545,7 +545,8 @@ mod relay {
         let routes = router::app(nodes.clone(), None);
         tokio::spawn(async move { axum::serve(front, routes).await });
 
-        let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp"));
+        let config =
+            StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp/classic"));
         let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
         // Creation takes turns: the first design is A's, the second B's.
         let on_a = design_id(&call(&client, "create_design", json!({ "name": "On A" })).await);
@@ -590,7 +591,7 @@ mod failover {
         async fn post(&mut self, base: &str, body: Value) -> (u16, Option<Value>) {
             let mut req = self
                 .http
-                .post(format!("{base}/mcp"))
+                .post(format!("{base}/mcp/classic"))
                 .header("accept", "application/json, text/event-stream")
                 .header("mcp-protocol-version", "2025-06-18")
                 .json(&body);
@@ -878,7 +879,7 @@ async fn tools_are_listed_while_the_first_server_is_down() {
     let routes = router::app(nodes, None);
     tokio::spawn(async move { axum::serve(front, routes).await });
 
-    let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp"));
+    let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp/classic"));
     let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
     let tools = client.list_all_tools().await.unwrap();
     assert!(tools.iter().any(|t| t.name == "write_html"));
@@ -912,7 +913,7 @@ async fn list_designs_fails_when_no_server_answers() {
     let (front, front_url) = listen().await;
     let routes = router::app(vec!["http://127.0.0.1:9".to_owned()], None);
     tokio::spawn(async move { axum::serve(front, routes).await });
-    let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp"));
+    let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp/classic"));
     let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
     let result = client
         .call_tool(rmcp::model::CallToolRequestParams::new("list_designs"))
@@ -1005,7 +1006,7 @@ async fn agents_get_past_a_stuck_server() {
     let routes = router::app(nodes, None);
     tokio::spawn(async move { axum::serve(front, routes).await });
 
-    let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp"));
+    let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp/classic"));
     let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
     let both = async {
         let tools = client.list_all_tools().await.unwrap();
