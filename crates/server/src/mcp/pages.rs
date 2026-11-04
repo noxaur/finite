@@ -11,7 +11,7 @@ use rmcp::{
 use super::{FiniteMcp, ToolResult, changed, describe, params::*};
 use crate::hub::random_id;
 
-pub(super) const INSTRUCTIONS: &str = "Pages: a design starts with one page, and people see one page at a time. To keep components or drafts away from the screens, create_page, then create_artboard with its pageId or move_to_page. get_basic_info lists the pages.";
+pub(super) const INSTRUCTIONS: &str = "Pages: people see one page at a time. To keep drafts away from the screens, create_page, then create_artboard with its pageId or move_to_page. get_basic_info lists the pages.";
 
 #[tool_router(router = pages_router, vis = "pub(super)")]
 impl FiniteMcp {

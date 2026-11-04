@@ -144,6 +144,25 @@ export class Editor {
     if (result.kind === "refused") this.say(result.message);
   }
 
+  /**
+   * What a person can do to `id` with components: make it one, or detach
+   * the instance it is. Nothing for an artboard, a component, or a node
+   * inside an instance, which only overrides it.
+   */
+  componentAction(id: string): "make" | "detach" | null {
+    const node = id.includes("/") ? undefined : this.session.replica.get(id);
+    if (!node || node.type !== "element" || node.parent === null) return null;
+    if (node.instanceOf !== undefined) return "detach";
+    return node.component ? null : "make";
+  }
+
+  /** Makes `id` a component, or detaches it if it's an instance. */
+  toggleComponent(id: string) {
+    const action = this.componentAction(id);
+    if (action === "make") void this.commit([{ kind: "makeComponent", id, name: null }]);
+    else if (action === "detach") void this.commit([{ kind: "detach", ids: [id] }]);
+  }
+
   dispose() {
     this.cancel();
     this.abort.abort();
@@ -400,6 +419,14 @@ export class Editor {
         return some ? () => this.duplicate(selection) : null;
       case "KeyG":
         return some ? () => (e.shiftKey ? this.ungroup(selection) : this.group(selection)) : null;
+      // ⌥⌘K makes a component and ⌥⌘B detaches an instance, as in Figma.
+      case "KeyK":
+      case "KeyB": {
+        const [id] = selection;
+        const want = e.code === "KeyK" ? "make" : "detach";
+        if (!e.altKey || selection.length !== 1 || id === undefined || this.run) return null;
+        return this.componentAction(id) === want ? () => this.toggleComponent(id) : null;
+      }
       case "BracketRight":
       case "BracketLeft": {
         const [id] = selection;

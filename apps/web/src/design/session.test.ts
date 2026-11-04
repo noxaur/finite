@@ -256,6 +256,13 @@ describe("a person's edits", () => {
     expect(s.replica.get("b")?.styles.left).toBe("4px");
   });
 
+  it("makes a component and detaches an instance with the server's plan", () => {
+    const { s } = editing();
+    expect(s.draft([{ kind: "makeComponent", id: "b", name: "Card" }]).error).toBeNull();
+    expect(s.replica.get("b")).toMatchObject({ component: true, name: "Card" });
+    expect(s.draft([{ kind: "detach", ids: ["b"] }]).error).toMatch(/isn't an instance/);
+  });
+
   it("keeps its edit on top of someone else's change to the same node", () => {
     const { s, sent } = editing();
     void s.commit(move("4px"));

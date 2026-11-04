@@ -677,6 +677,10 @@ impl FiniteMcp {
         };
         let mut text = edit::result(head, sections);
         if let Some(change) = &change {
+            if let Some(note) = super::component_note(&handle, change) {
+                text.push('\n');
+                text.push_str(&note);
+            }
             if p.check != Some(false) {
                 let clean = self.watch.after_edit(&p.design_id, &handle, change).await;
                 let notes = self.watch.take(&p.design_id);

@@ -66,13 +66,12 @@ pub const OWNER_META: &str = "finite/owner";
 const INSTRUCTIONS: &str = include_str!("instructions.md");
 
 /// What the search tools add to the instructions.
-const SEARCH_INSTRUCTIONS: &str = "Search: find_nodes finds elements by text, name, tag, CSS or attribute, across artboards and <style> blocks. replace_values finds and replaces text or a value in one call: a brand color in any notation everywhere, or part of a <style> or <script> with within (not set_text_content with the whole CSS). Use them instead of reading whole artboards.";
+const SEARCH_INSTRUCTIONS: &str = "Search: find_nodes finds elements by text, name, tag, CSS or attribute, across artboards and <style> blocks. replace_values replaces text or a value everywhere in one call, like a brand color in any notation. Use them instead of reading whole artboards.";
 
 /// Whether `FINITE_MCP_EXTRA` (a comma-separated list) turns on a group of
 /// experimental tools. AX experiments (`e2e/ax`) compare agents with and
 /// without a group before it ships to everyone, as the search tools did. Right now `layout` adds a layout note to results
-/// after `write_html` and `update_styles` (see `watch.rs`), and `components`
-/// is experimental.
+/// after `write_html` and `update_styles` (see `watch.rs`).
 pub(crate) fn extra(group: &str) -> bool {
     static EXTRA: OnceLock<Vec<String>> = OnceLock::new();
     EXTRA
@@ -123,10 +122,6 @@ pub(crate) fn instructions(surface: Surface) -> &'static str {
         let mut text = INSTRUCTIONS.trim_end().to_owned();
         text.push_str("\n\n");
         text.push_str(SEARCH_INSTRUCTIONS);
-        if extra("components") {
-            text.push_str("\n\n");
-            text.push_str(component_tools::INSTRUCTIONS);
-        }
         text.push_str("\n\n");
         text.push_str(tokens::INSTRUCTIONS);
         text.push_str("\n\n");
@@ -462,6 +457,11 @@ fn component_note(handle: &DesignHandle, change: &Change) -> Option<String> {
             .iter()
             .filter_map(|op| match op {
                 Op::Create { node } if node.component => Some(node.id.as_str()),
+                Op::Set {
+                    id,
+                    key: PropKey::Component,
+                    value: Some(_),
+                } => Some(id.as_str()),
                 _ => None,
             })
             .collect();
@@ -551,6 +551,8 @@ fn component_note(handle: &DesignHandle, change: &Change) -> Option<String> {
             }
             // New nodes have no overrides yet, so name their ids in each
             // instance: an agent giving each instance its own text needs them.
+            // A component this change made is new all through; that's no news.
+            let made = defined.contains(&component.as_str());
             let added: Vec<&finite_design::Node> = change
                 .ops
                 .iter()
@@ -559,7 +561,8 @@ fn component_note(handle: &DesignHandle, change: &Change) -> Option<String> {
                     _ => None,
                 })
                 .filter(|n| {
-                    n.tag().is_some()
+                    !made
+                        && n.tag().is_some()
                         && components::component_of(doc, &n.id).is_some_and(|c| c.id == component)
                         && n.id != component
                 })
@@ -658,9 +661,7 @@ impl FiniteMcp {
         }
         let mut router = Self::tool_router();
         router.merge(Self::search_router());
-        if extra("components") {
-            router.merge(Self::component_router());
-        }
+        router.merge(Self::component_router());
         router.merge(Self::tokens_router());
         router.merge(Self::transfer_router());
         router.merge(Self::pages_router());
@@ -2185,23 +2186,16 @@ mod tests {
 
     /// Claude Code keeps the first 4,096 characters of a server's
     /// instructions and drops the rest without telling the agent. AX runs
-    /// found the end of these cut off, so with every extra group on, they
-    /// stay under this.
+    /// found the end of these cut off, so they stay under this.
     const INSTRUCTIONS_LIMIT: usize = 4_000;
 
     #[test]
     fn instructions_fit_what_clients_keep() {
-        let all = [
-            INSTRUCTIONS.trim_end(),
-            SEARCH_INSTRUCTIONS,
-            component_tools::INSTRUCTIONS,
-            tokens::INSTRUCTIONS,
-        ]
-        .join("\n\n");
-        for (surface, text) in [("classic", all.as_str()), ("doc6", doc6::INSTRUCTIONS)] {
+        for surface in [Surface::Classic, Surface::Doc6] {
+            let text = instructions(surface);
             assert!(
                 text.chars().count() <= INSTRUCTIONS_LIMIT,
-                "{surface}: {} characters: Claude Code would cut the end off",
+                "{surface:?}: {} characters: Claude Code would cut the end off",
                 text.chars().count()
             );
         }

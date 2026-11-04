@@ -64,5 +64,16 @@
     "id": "title",
     "kind": "setText",
     "text": "Hello"
+  },
+  {
+    "id": "card",
+    "kind": "makeComponent",
+    "name": "Card"
+  },
+  {
+    "ids": [
+      "instance"
+    ],
+    "kind": "detach"
   }
 ]

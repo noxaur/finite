@@ -132,6 +132,14 @@ export const UserEdit = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("ungroup"), ids: Schema.Array(Schema.String) }),
   /** Replaces the text of a text node, or of an element holding only text. */
   Schema.Struct({ kind: Schema.Literal("setText"), id: Schema.String, text: Schema.String }),
+  /** Makes an element a component, which instances can follow. */
+  Schema.Struct({
+    kind: Schema.Literal("makeComponent"),
+    id: Schema.String,
+    name: Schema.NullOr(Schema.String),
+  }),
+  /** Turns instances into plain copies of what they show. */
+  Schema.Struct({ kind: Schema.Literal("detach"), ids: Schema.Array(Schema.String) }),
 ]);
 export type UserEdit = typeof UserEdit.Type;
 

@@ -1,9 +1,6 @@
 //! Components: one definition that instances on every artboard follow, so
-//! a top bar shared by five screens changes in one edit. The tools ship
-//! when `FINITE_MCP_EXTRA` includes `components`, so AX runs (`e2e/ax`) can
-//! measure them before every agent gets them. The document model is in
-//! `finite_design::components`, and edits inside instances become
-//! overrides whether or not the tools are on.
+//! a top bar shared by five screens changes in one edit. The document
+//! model is in `finite_design::components`.
 
 use finite_design::{
     Document, Node,
@@ -17,8 +14,6 @@ use rmcp::{
 };
 
 use super::{FiniteMcp, ToolResult, cut, fit, id_in, ok, outline, params::*, with_note};
-
-pub(super) const INSTRUCTIONS: &str = "Components: repeat data-component=\"Top bar\"; the first defines it, later ones are instances. Edit the first to change all.";
 
 /// How many instances get_components lists for each component.
 const INSTANCES_SHOWN: usize = 50;
@@ -231,7 +226,7 @@ impl FiniteMcp {
 /// The classes used inside component `id` that a `<style>` block in its
 /// artboard, outside the component, mentions. Instances on other
 /// artboards don't get those rules.
-fn classes_styled_outside(doc: &Document, id: &str) -> Vec<String> {
+pub(super) fn classes_styled_outside(doc: &Document, id: &str) -> Vec<String> {
     let inside: Vec<&Node> = doc.subtree(id);
     let mut classes: Vec<String> = inside
         .iter()

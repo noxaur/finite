@@ -18,6 +18,8 @@ type Field = "x" | "y" | "w" | "h";
  * positioned element's are its `left` and `top`. An element in the flow
  * is placed by its layout, so its X and Y only show where it is.
  * `version` changes with the design, so the values follow every edit.
+ * Next to them, a button makes the element a component, or detaches the
+ * instance it is.
  */
 export function Inspector({
   editor,
@@ -63,6 +65,7 @@ export function Inspector({
     h: height,
   };
   const movable = board || isPositioned(facts);
+  const action = editor.componentAction(node.id);
 
   /** The edit that gives `field` the value `n`. */
   const editFor = (field: Field, n: number): UserEdit | null => {
@@ -123,6 +126,16 @@ export function Inspector({
           </label>
         );
       })}
+      {action && (
+        <button
+          type="button"
+          onClick={() => editor.toggleComponent(node.id)}
+          title={action === "make" ? "Make component (⌥⌘K)" : "Detach instance (⌥⌘B)"}
+          {...stylex.props(styles.action)}
+        >
+          {action === "make" ? "Make component" : "Detach"}
+        </button>
+      )}
     </div>
   );
 }
@@ -150,6 +163,20 @@ const styles = stylex.create({
     gap: 4,
   },
   name: { color: colors.muted, width: 10 },
+  action: {
+    height: 24,
+    paddingInline: space.sm,
+    borderWidth: 1,
+    borderStyle: "solid",
+    borderColor: colors.border,
+    borderRadius: radii.sm,
+    backgroundColor: { default: colors.bg, ":hover": colors.surface },
+    color: colors.component,
+    font: "inherit",
+    whiteSpace: "nowrap",
+    cursor: "pointer",
+    outline: { default: "none", ":focus-visible": `2px solid ${colors.accent}` },
+  },
   input: {
     width: 52,
     height: 24,
