@@ -6,6 +6,7 @@ import {
   figmaHref,
   formatOf,
   IMPORT_ACCEPT,
+  jsxHref,
   LISTED,
   originalHref,
   summarize,
@@ -68,6 +69,7 @@ suite("links", () => {
 
   it("export one artboard for the Figma plugin", () => {
     expect(figmaHref("d 1", "a/1")).toBe("/api/designs/d%201/export?format=figma&artboard=a%2F1");
+    expect(jsxHref("d 1", "a/1")).toBe("/api/designs/d%201/export?format=jsx&artboard=a%2F1");
   });
 
   it("point at an import's original bytes", () => {

@@ -80,12 +80,14 @@ Sibling order uses fractional indexes, so inserting or moving a node rewrites on
 | `apps/web`            | Next.js + StyleX + Effect frontend, built as a static export into `out/`                                |
 | `apps/web/src/design` | The canvas client: schemas, `Replica` (document copy), `Renderer` (DOM), `Camera` (pan/zoom)            |
 | `apps/desktop`        | Electron main and preload processes, bundled with `vp pack`                                             |
+| `apps/figma-plugin`   | The Finite plugin for Figma, which trades `.figma.json` files with Finite's Import and Export           |
 | `crates/design`       | The document model with no I/O: nodes, ops and inverses, history, edit commands, HTML import/export     |
+| `crates/transfer`     | Import and export: the HTML, `.finite`, repo, Figma and JSX codecs (`docs/import-export.md`)            |
 | `crates/wasm`         | The same model built as WebAssembly (`dist/finite.wasm`), which the web app loads                       |
 | `crates/server`       | Rust server (axum). Serves `/api/*`, the MCP endpoint at `/mcp`, and the built frontend in release mode |
 | `Cargo.toml`          | Cargo workspace for everything in `crates/`                                                             |
 
-`crates/server/package.json`, `crates/design/package.json` and `crates/wasm/package.json` wrap the Cargo commands, so `vp run` can start, test and build the Rust crates along with the JS packages. The web app lists `wasm` as a dependency, so `vp run -r build` builds `finite.wasm` before the web app.
+Each crate's `package.json` wraps its Cargo commands, so `vp run` can start, test and build the Rust crates along with the JS packages. The web app lists `wasm` as a dependency, so `vp run -r build` builds `finite.wasm` before the web app.
 
 ## Commands
 
@@ -95,7 +97,7 @@ vp run dev              # web on http://localhost:5310, Rust API on :4100
 vp run dev:desktop      # same, plus an Electron window pointed at the dev server
 vp run start:desktop    # release build of everything, then Electron with the Rust sidecar
 vp run package:desktop  # package the desktop app for this machine into apps/desktop/release
-vp run test             # cargo test for both crates, plus the web app's Vitest suite
+vp run test             # cargo test for every crate, plus the web app's, desktop app's and Figma plugin's Vitest suites
 vp run e2e              # build, start a server, and drive the app in headless Chrome
 vp run e2e:router       # the same checks through a router in front of two servers
 vp run e2e:shared       # the same, with both servers on one Postgres
@@ -142,7 +144,7 @@ Every push to main that passes CI is a release. `.github/workflows/release.yml` 
 
 The version is the major and minor from the root `package.json`, then the number of commits on main. The 152nd commit is `0.0.152`. To start `0.1.x`, change the root `package.json` to `0.1.0`. The patch keeps counting commits, so it never goes back down.
 
-Each release is a GitHub release in this repo, tagged `v0.0.152` on the released commit, with notes generated from the merged pull requests. This repo is private, and electron-updater downloads without a token, so the updater can't read those. It reads an S3-compatible bucket instead, like Cloudflare R2 or AWS S3. The workflow uploads the builds there first, then the `latest*.yml` files the updater reads, with `Cache-Control: no-cache`. So the updater never sees a version with one platform's files missing. The bucket's URL is built into each app's `app-update.yml` (`-c.publish.url`). A local `vp run package:desktop` has no feed, so it doesn't update.
+Each release is a GitHub release in this repo, tagged `v0.0.152` on the released commit, with notes generated from the merged pull requests. It also holds the Figma plugin as `finite-figma-plugin.zip`, built once on Linux. The name has no version, so `releases/latest/download/finite-figma-plugin.zip` always fetches the newest, and the web app's Export menu links there. The plugin only goes to the GitHub release, not the bucket. This repo is private, and electron-updater downloads without a token, so the updater can't read those. It reads an S3-compatible bucket instead, like Cloudflare R2 or AWS S3. The workflow uploads the builds there first, then the `latest*.yml` files the updater reads, with `Cache-Control: no-cache`. So the updater never sees a version with one platform's files missing. The bucket's URL is built into each app's `app-update.yml` (`-c.publish.url`). A local `vp run package:desktop` has no feed, so it doesn't update.
 
 The workflow needs these secrets and variables:
 
