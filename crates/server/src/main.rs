@@ -43,13 +43,6 @@ async fn main() -> std::io::Result<()> {
                 Arc::new(Members::fixed(Cluster::observer(nodes)))
             }
         };
-        // The relay lists and creates designs with the classic tools' names,
-        // and routes by designId, so doc6 needs one server for now.
-        if finite_server::mcp::Surface::from_env() != finite_server::mcp::Surface::Classic {
-            fail(
-                "FINITE_MCP_SURFACE=doc6 works on a single server only; the router can't relay it yet",
-            );
-        }
         let listener =
             tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await?;
         tracing::info!(nodes = ?members.now().nodes(), "routing on http://{}", listener.local_addr()?);
