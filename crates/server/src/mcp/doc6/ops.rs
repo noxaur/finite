@@ -25,10 +25,11 @@ pub(super) enum Kind {
     Page,
     Tokens,
     Import,
+    Component,
 }
 
 impl Kind {
-    const ALL: [Kind; 10] = [
+    const ALL: [Kind; 11] = [
         Kind::Artboard,
         Kind::Html,
         Kind::Css,
@@ -39,6 +40,7 @@ impl Kind {
         Kind::Page,
         Kind::Tokens,
         Kind::Import,
+        Kind::Component,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -53,6 +55,7 @@ impl Kind {
             Kind::Page => "page",
             Kind::Tokens => "tokens",
             Kind::Import => "import",
+            Kind::Component => "component",
         }
     }
 
@@ -83,6 +86,9 @@ impl Kind {
             Kind::Import => {
                 r#"{"op": "import", "name": "landing.html", "content": "<!doctype html>…", "page": "Inbox"}"#
             }
+            Kind::Component => {
+                r#"{"op": "component", "select": "[data-name=Nav]", "name": "Top bar"}"#
+            }
         }
     }
 
@@ -99,6 +105,7 @@ impl Kind {
             "pages" | "create_page" => "page",
             "set_tokens" | "token" => "tokens",
             "import_design" => "import",
+            "create_component" | "components" | "detach" | "detach_instance" => "component",
             other => other,
         };
         Kind::ALL.into_iter().find(|k| k.name() == alias)
@@ -230,6 +237,8 @@ fn kind_of(fields: &Fields) -> Result<Kind, String> {
     let has = |k: &str| fields.get(k).is_some_and(|v| !v.is_null());
     Ok(if (has("width") || has("from")) && has("name") {
         Kind::Artboard
+    } else if has("detach") {
+        Kind::Component
     } else if has("content") || has("contentBase64") {
         Kind::Import
     } else if has("set") && !has("select") {
@@ -462,6 +471,11 @@ pub(super) fn summary(steps: &[Step]) -> String {
                         .unwrap_or_default();
                     format!("tokens {}", names.join(", ")).trim_end().to_owned()
                 }
+                Kind::Component if flag(f, "detach") => format!("detach {}", select(f)),
+                Kind::Component => match text(f, "name") {
+                    Some(name) => format!("component {name:?}"),
+                    None => format!("component {}", select(f)),
+                },
                 Kind::Import => match step.import.as_ref() {
                     Some(import) => {
                         format!("import {}", import.label().trim_start_matches("Import "))

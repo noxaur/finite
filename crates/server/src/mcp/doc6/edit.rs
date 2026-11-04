@@ -21,7 +21,10 @@ use super::{
 };
 use crate::{
     hub::random_id,
-    mcp::{TokenValue, cut, kept_nodes_note, kept_note, left_out, outline, token_ops, transfer},
+    mcp::{
+        TokenValue, component_tools::classes_styled_outside, cut, kept_nodes_note, kept_note,
+        left_out, outline, token_ops, transfer,
+    },
 };
 
 type Refs = HashMap<String, NodeId>;
@@ -75,6 +78,7 @@ fn apply(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String, O
         Kind::Page => page(tx, &step.fields, refs),
         Kind::Tokens => tokens(tx, &step.fields).map(|t| (t, None)),
         Kind::Import => import(tx, step, refs),
+        Kind::Component => component(tx, &step.fields, refs),
     }
 }
 
@@ -962,6 +966,104 @@ fn refuse_nesting(doc: &Document, selector: &str, ids: &[NodeId]) -> Result<()> 
         describe(doc, &outer),
         if outer.len() == 1 { "it" } else { "them" }
     ))
+}
+
+/// A component op: the first match (or the one that's already a component)
+/// becomes the component, and the other matches become its instances in
+/// place. With `detach`, every match that's an instance becomes a plain copy.
+fn component(
+    tx: &mut Transaction<'_>,
+    f: &Fields,
+    refs: &Refs,
+) -> Result<(String, Option<NodeId>)> {
+    let detach = flag(f, "detach")
+        || text(f, "op").is_some_and(|op| op.to_ascii_lowercase().starts_with("detach"));
+    let (selector, ids) = selected(tx.view(), Kind::Component, f, refs)?;
+    if detach {
+        let ops = {
+            let t = &*tx;
+            edit::detach_instances(t.view(), &ids, &mut || fresh(t)).map_err(|e| e.to_string())?
+        };
+        if ops.is_empty() {
+            return Err(format!(
+                "{selector:?} matches no instance: {}. An instance is an element with data-instance-of in read's html",
+                describe(tx.view(), &ids)
+            ));
+        }
+        stage(tx, ops)?;
+        let doc = tx.view();
+        let detached: Vec<NodeId> = ids.into_iter().filter(|id| doc.get(id).is_some()).collect();
+        return Ok((
+            format!(
+                "Detached {} instance{}; they no longer follow a component:\n{}",
+                detached.len(),
+                plural(detached.len()),
+                outlines(doc, &detached, 2)
+            ),
+            None,
+        ));
+    }
+    let doc = tx.view();
+    let id = ids
+        .iter()
+        .find(|id| doc.get(id).is_some_and(|n| n.component))
+        .unwrap_or(&ids[0])
+        .clone();
+    // Instances of it already, and nodes they show, are what it'd make.
+    let copies: Vec<NodeId> = ids
+        .iter()
+        .filter(|other| {
+            **other != id
+                && !finite_design::components::is_virtual(other)
+                && doc.get(other).and_then(|n| n.instance_of.as_deref()) != Some(id.as_str())
+        })
+        .cloned()
+        .collect();
+    let name = text(f, "name");
+    let ops = edit::create_component(doc, &id, name.as_deref(), &copies).map_err(|e| {
+        e.to_string()
+            .replace(
+                "replace it with insert_instance",
+                "write it as <div data-instance-of=\"…\"></div>",
+            )
+            .replace("detach_instance first", "detach it first")
+    })?;
+    stage(tx, ops)?;
+    let doc = tx.view();
+    let mut text = format!(
+        "{} is a component. Edit it, or anything inside it, to change every instance.",
+        label(doc, &id)
+    );
+    if !copies.is_empty() {
+        text.push_str(&format!(
+            "\nReplaced {} cop{} with instances, keeping their ids:",
+            copies.len(),
+            if copies.len() == 1 { "y" } else { "ies" }
+        ));
+        for copy in &copies {
+            let overrides = tx.doc().get(copy).map_or(0, |n| n.overrides.len());
+            text.push_str(&format!(
+                "\n  #{copy}: {overrides} override{}",
+                plural(overrides)
+            ));
+        }
+        text.push_str(&format!(
+            "\nInside an instance, ids look like #{}/<id>: editing those changes only that instance.",
+            copies[0]
+        ));
+    } else {
+        text.push_str(&format!(
+            " Add an instance with an html op: <div data-instance-of=\"{id}\"></div>."
+        ));
+    }
+    let outside = classes_styled_outside(tx.doc(), &id);
+    if !outside.is_empty() {
+        text.push_str(&format!(
+            "\nIts classes {} are styled by <style> blocks outside it. A <style> only styles its own artboard, so instances elsewhere don't follow changes to those rules. Move the rules into a <style> inside the component, or style it inline with tokens.",
+            outside.iter().map(|c| format!(".{c}")).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    Ok((text, Some(id)))
 }
 
 fn remove(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<String> {

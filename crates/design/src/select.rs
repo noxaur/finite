@@ -186,25 +186,40 @@ fn parse_list(
 
 /// Escapes the digit after a `#` outside strings: CSS reads `#4kx92mab` as a
 /// hash that isn't an id, since an identifier can't start with a digit, and
-/// node ids often do.
+/// node ids often do. It escapes the `/` in a virtual id too, so
+/// `#k2n0d9xa/9qd2h0ce` names a node inside an instance.
 fn escape_ids(source: &str) -> Cow<'_, str> {
     let bytes = source.as_bytes();
     let mut out = String::new();
     let mut copied = 0;
     let mut quote = None;
+    let mut hash = false;
     let mut i = 0;
     while i < bytes.len() {
-        match (quote, bytes[i]) {
+        let b = bytes[i];
+        let ident = |b: &u8| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_';
+        if hash && !(ident(&b) || b == b'/') {
+            hash = false;
+        }
+        match (quote, b) {
             (_, b'\\') => i += 1,
             (Some(q), b) if b == q => quote = None,
-            (None, b'"' | b'\'') => quote = Some(bytes[i]),
-            (None, b'#') if bytes.get(i + 1).is_some_and(u8::is_ascii_digit) => {
-                out.push_str(&source[copied..=i]);
-                out.push_str("\\3");
-                out.push(bytes[i + 1] as char);
-                out.push(' ');
-                copied = i + 2;
-                i += 1;
+            (None, b'"' | b'\'') => quote = Some(b),
+            (None, b'#') => {
+                hash = true;
+                if bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
+                    out.push_str(&source[copied..=i]);
+                    out.push_str("\\3");
+                    out.push(bytes[i + 1] as char);
+                    out.push(' ');
+                    copied = i + 2;
+                    i += 1;
+                }
+            }
+            (None, b'/') if hash && bytes.get(i + 1).is_some_and(ident) => {
+                out.push_str(&source[copied..i]);
+                out.push_str("\\/");
+                copied = i + 1;
             }
             _ => {}
         }

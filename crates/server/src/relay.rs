@@ -240,7 +240,7 @@ impl Relay {
             tracing::warn!(
                 base,
                 path = self.path,
-                "this Finite server's MCP instructions differ from the router's; give both the same FINITE_MCP_SURFACE and FINITE_MCP_EXTRA"
+                "this Finite server's MCP instructions differ from the router's; give both the same FINITE_MCP_SURFACE"
             );
         }
         Ok(slot.insert(Arc::new(backend)).clone())

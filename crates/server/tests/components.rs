@@ -1,9 +1,5 @@
 //! Components over MCP, the way an agent uses them: build two screens with
 //! the same top bar, make it a component, and change it once for both.
-//!
-//! The component tools are an extra group (`FINITE_MCP_EXTRA=components`),
-//! read once per process, so they're tested in their own binary, in one
-//! test that turns them on before anything starts.
 
 use std::sync::Arc;
 
@@ -139,8 +135,6 @@ fn top_bar(title: &str) -> String {
 
 #[tokio::test]
 async fn a_component_changes_every_screen_in_one_edit() {
-    // SAFETY: this binary's only test sets it before starting anything.
-    unsafe { std::env::set_var("FINITE_MCP_EXTRA", "components") };
     let app = app(Hub::new(Arc::new(MemoryStore::default())).unwrap(), None);
     let mut agent = Agent::connect(&app, "Ada").await;
 

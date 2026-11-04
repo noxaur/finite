@@ -15,8 +15,8 @@ use super::{ReadParams, describe, label, line, matched, ops::Kind, page_id, sele
 use crate::{
     hub::{Actor, DesignHandle},
     mcp::{
-        FiniteMcp, ToolResult, cut, fail, format::OUTPUT_LIMIT, ok, outline, params::ExportParams,
-        search::found_text, tokens::listed,
+        FiniteMcp, ToolResult, cut, fail, format::OUTPUT_LIMIT, html_component_note, ok, outline,
+        params::ExportParams, search::found_text, tokens::listed,
     },
 };
 
@@ -166,6 +166,9 @@ fn overview(
     if open > 0 {
         lines.push("Open comments: call comments to read them.".into());
     }
+    if let Some(list) = components_line(design.doc()) {
+        lines.push(list);
+    }
     if boards.is_empty() {
         lines.push(format!(
             "No artboards yet. Add one with edit: {}",
@@ -200,6 +203,42 @@ fn overview(
         text,
         "read with select on one artboard, or a smaller depth, shows the rest.",
     )
+}
+
+/// The design's components, with how many instances each has, for the
+/// overview. `None` when it has none.
+fn components_line(doc: &Document) -> Option<String> {
+    const LISTED: usize = 20;
+    let mut found: Vec<_> = doc.nodes().filter(|n| n.component).collect();
+    if found.is_empty() {
+        return None;
+    }
+    found.sort_by(|a, b| {
+        a.display_name()
+            .cmp(&b.display_name())
+            .then(a.id.cmp(&b.id))
+    });
+    let total = found.len();
+    let mut listed: Vec<String> = found
+        .into_iter()
+        .take(LISTED)
+        .map(|c| {
+            let n = doc.instances_of(&c.id).count();
+            format!(
+                "{:?} #{} ({n} instance{})",
+                c.display_name(),
+                c.id,
+                if n == 1 { "" } else { "s" }
+            )
+        })
+        .collect();
+    if total > LISTED {
+        listed.push(format!("and {} more", total - LISTED));
+    }
+    Some(format!(
+        "Components: {}. Edit a component to change its instances; <div data-instance-of=\"id\"></div> in html adds one.",
+        listed.join(", ")
+    ))
 }
 
 fn outline_view(doc: &Document, ids: &[NodeId], depth: Option<usize>) -> String {
@@ -292,6 +331,10 @@ fn html_of(design: &Design, id: &str, depth: Option<usize>, limit: usize) -> Str
                 "s were"
             },
         ));
+    }
+    if let Some(note) = html_component_note(design, id, &out) {
+        out.push('\n');
+        out.push_str(&note);
     }
     if export.stylesheets > 0 {
         out.push_str(&format!(

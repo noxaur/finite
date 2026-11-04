@@ -923,3 +923,128 @@ async fn render_and_the_layout_check_after_an_edit() {
         .await;
     assert!(!error, "{shot}");
 }
+
+/// A component op makes one top bar the component and its copies on the
+/// other screens instances, in the same edit that built the screens, and an
+/// edit to the component reaches every instance.
+#[tokio::test]
+async fn components_are_made_used_and_detached_in_edits() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Builder").await;
+    let id = design(&mut agent, "App").await;
+    let nav = |title: &str| {
+        format!(
+            "<header data-name=\"Nav\" style=\"background: #111827\"><h1 data-name=\"Title\">{title}</h1></header>"
+        )
+    };
+    let made = edit(
+        &mut agent,
+        &id,
+        json!([
+            { "op": "artboard", "name": "Home", "width": 400, "height": 300, "html": nav("Home") },
+            { "op": "artboard", "name": "Settings", "width": 400, "height": 300, "html": nav("Settings") },
+            { "op": "component", "select": "[data-name=Nav]", "name": "Top bar", "as": "bar" },
+            { "op": "css", "select": "@bar", "css": "background: #f97316" },
+        ]),
+    )
+    .await;
+    assert!(made.contains("is a component"), "{made}");
+    assert!(made.contains("Replaced 1 copy with instances"), "{made}");
+    assert!(
+        made.contains("#") && made.contains(": 1 override"),
+        "{made}"
+    );
+    let home = id_after(&made, "Created artboard");
+    let bar = id_after(&made, "3. component: header");
+    let instance = id_after(&made, "Replaced 1 copy with instances, keeping their ids:");
+
+    // The overview lists it, and the instance shows the component's new
+    // color with its own title.
+    let overview = agent.ok("read", json!({ "designId": id })).await;
+    assert!(
+        overview.contains(&format!("Components: \"Top bar\" #{bar} (1 instance)")),
+        "{overview}"
+    );
+    let shown = html(&mut agent, &id, &format!("#{instance}")).await;
+    assert!(
+        shown.contains("#f97316") && shown.contains("Settings"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("Elements with data-instance-of are instances"),
+        "{shown}"
+    );
+    let root = html(&mut agent, &id, &format!("#{bar}")).await;
+    assert!(root.contains("which 1 instance shows"), "{root}");
+
+    // An edit to the component says it reached the instance, and one
+    // inside the instance says only it changed.
+    let recolored = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "css", "select": &format!("#{bar}"), "css": "color: #fff" }]),
+    )
+    .await;
+    assert!(
+        recolored.contains("so all 1 instance show it too"),
+        "{recolored}"
+    );
+    let marker = format!("data-id=\"{instance}/");
+    let at = shown.find(&marker).expect("a node inside the instance") + marker.len();
+    let title: String = shown[at..]
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
+    let own = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "css", "select": &format!("#{instance}/{title}"), "css": "color: #22c55e" }]),
+    )
+    .await;
+    assert!(own.contains(&format!("Only instance #{instance}")), "{own}");
+
+    // data-instance-of in html adds another instance.
+    let added = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Profile", "width": 400, "height": 300,
+                 "html": format!("<header data-instance-of=\"{bar}\"></header>") }]),
+    )
+    .await;
+    assert!(
+        added.contains(&format!("instance of \"Top bar\" #{bar}")),
+        "{added}"
+    );
+
+    // Detach makes it a plain copy, and undo makes it an instance again.
+    let detached = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "component", "select": &format!("#{instance}"), "detach": true }]),
+    )
+    .await;
+    assert!(detached.contains("Detached 1 instance"), "{detached}");
+    let plain = html(&mut agent, &id, &format!("#{instance}")).await;
+    assert!(
+        !plain.contains("data-instance-of") && plain.contains("Settings"),
+        "{plain}"
+    );
+    agent.ok("undo", json!({ "designId": id })).await;
+    let back = html(&mut agent, &id, &format!("#{instance}")).await;
+    assert!(back.contains("data-instance-of"), "{back}");
+
+    // A copy built differently can't become an instance, and nothing changes.
+    let refusal = refused(
+        &mut agent,
+        &id,
+        json!([
+            { "op": "html", "select": format!("#{home}"), "html": "<header data-name=\"Nav\"><p>Other</p></header>" },
+            { "op": "component", "select": "[data-name=\"Top bar\"], [data-name=Nav]" },
+        ]),
+    )
+    .await;
+    assert!(
+        refusal.contains("op 2 (component)") && refusal.contains("Nothing was changed"),
+        "{refusal}"
+    );
+}

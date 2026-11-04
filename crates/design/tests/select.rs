@@ -432,3 +432,33 @@ fn nested_has_says_why() {
     );
     assert!(select::parse(":has(> div > #k3x9a2bq)").is_ok());
 }
+
+/// `#instance/node` names a node inside an instance, as `get_html` writes
+/// its `data-id`.
+#[test]
+fn virtual_ids_name_nodes_inside_instances() {
+    let mut design = design(&[(
+        "board",
+        None,
+        r#"<header data-name="Nav" data-component="Bar"><h1 data-name="Title">Home</h1></header><header data-name="Nav" data-component="Bar"><h1 data-name="Title">Settings</h1></header>"#,
+    )]);
+    let doc = design.doc();
+    let instance = doc
+        .nodes()
+        .find(|n| n.is_instance())
+        .expect("the second bar is an instance")
+        .id
+        .clone();
+    let view = design.view().clone();
+    let title = view
+        .children(Some(&instance))
+        .first()
+        .expect("the instance shows the title")
+        .id
+        .clone();
+    assert!(title.contains('/'), "{title}");
+    let list = select::parse(&format!("#{title}, #{title} > *")).unwrap();
+    let found = Matcher::new(&view, Scope::Design).select(&list);
+    assert_eq!(found, vec![title]);
+    let _ = &mut design;
+}
