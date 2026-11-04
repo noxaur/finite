@@ -1,4 +1,4 @@
-//! The six-tool surface, `FINITE_MCP_SURFACE=doc6`, driven over MCP the way
+//! The six-tool surface, served at `/mcp` by default, driven over MCP the way
 //! an agent drives it: every tool, and every op of `edit`.
 
 mod agent;
@@ -11,13 +11,8 @@ use finite_design::comment::{Anchor, Author, AuthorKind};
 use finite_server::{Hub, app, store::MemoryStore};
 use serde_json::{Value, json};
 
-/// A server with the doc6 tools. The surface is read once per process, and
-/// every test here wants doc6, so the first one to start sets it.
+/// A server, whose `/mcp` serves the doc6 tools by default.
 fn doc6() -> (Router, Arc<Hub>) {
-    static SURFACE: std::sync::Once = std::sync::Once::new();
-    // SAFETY: every test calls this before anything reads the environment,
-    // and only the first sets it, while the others wait on the Once.
-    SURFACE.call_once(|| unsafe { std::env::set_var("FINITE_MCP_SURFACE", "doc6") });
     let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
     (app(hub.clone(), None), hub)
 }
@@ -81,7 +76,7 @@ async fn landing(agent: &mut Agent) -> (String, String) {
 #[tokio::test]
 async fn it_serves_exactly_six_tools_and_their_instructions() {
     let (app, _) = doc6();
-    let mut agent = Agent::connect(&app, "Six").await;
+    let mut agent = Agent::connect_doc6(&app, "Six").await;
     let tools = agent.rpc("tools/list", None).await;
     let mut names: Vec<&str> = tools["tools"]
         .as_array()
@@ -94,7 +89,7 @@ async fn it_serves_exactly_six_tools_and_their_instructions() {
         names,
         ["comments", "designs", "edit", "read", "render", "undo"]
     );
-    let mut fresh = Agent::connect(&app, "Fresh").await;
+    let mut fresh = Agent::connect_doc6(&app, "Fresh").await;
     let init = fresh
         .rpc(
             "initialize",
@@ -115,7 +110,7 @@ async fn scripts_keep_todays_tools_at_mcp_classic() {
         .ok("create_design", json!({ "name": "Seeded" }))
         .await;
     assert!(created.contains("Next: create_artboard."), "{created}");
-    let mut agent = Agent::connect(&app, "Six").await;
+    let mut agent = Agent::connect_doc6(&app, "Six").await;
     let read = agent.ok("read", json!({ "designId": "Seeded" })).await;
     assert!(read.contains("No artboards yet"), "{read}");
 }
@@ -123,7 +118,7 @@ async fn scripts_keep_todays_tools_at_mcp_classic() {
 #[tokio::test]
 async fn designs_are_listed_created_renamed_and_deleted() {
     let (app, _) = doc6();
-    let mut agent = Agent::connect(&app, "Lister").await;
+    let mut agent = Agent::connect_doc6(&app, "Lister").await;
     let id = design(&mut agent, "Acme site").await;
     assert!(
         agent
@@ -146,7 +141,7 @@ async fn designs_are_listed_created_renamed_and_deleted() {
 #[tokio::test]
 async fn replace_in_text_leaves_attributes_alone() {
     let (app, _) = doc6();
-    let mut agent = Agent::connect(&app, "Replacer").await;
+    let mut agent = Agent::connect_doc6(&app, "Replacer").await;
     let id = design(&mut agent, "Article").await;
     edit(
         &mut agent,
@@ -187,7 +182,7 @@ async fn replace_in_text_leaves_attributes_alone() {
 #[tokio::test]
 async fn move_with_copy_places_the_copy() {
     let (app, _) = doc6();
-    let mut agent = Agent::connect(&app, "Copier").await;
+    let mut agent = Agent::connect_doc6(&app, "Copier").await;
     let id = design(&mut agent, "Copies").await;
     let made = edit(
         &mut agent,
@@ -213,7 +208,7 @@ async fn move_with_copy_places_the_copy() {
 #[tokio::test]
 async fn delete_takes_only_an_exact_id_or_name() {
     let (app, _) = doc6();
-    let mut agent = Agent::connect(&app, "Deleter").await;
+    let mut agent = Agent::connect_doc6(&app, "Deleter").await;
     let id = design(&mut agent, "Keep me").await;
     let (refused, error) = agent.call("designs", json!({ "delete": &id[..6] })).await;
     assert!(
@@ -228,7 +223,7 @@ async fn delete_takes_only_an_exact_id_or_name() {
 #[tokio::test]
 async fn design_ids_take_a_name_or_the_start_of_an_id() {
     let (app, _) = doc6();
-    let mut agent = Agent::connect(&app, "Namer").await;
+    let mut agent = Agent::connect_doc6(&app, "Namer").await;
     let id = design(&mut agent, "Checkout flow").await;
     for given in ["Checkout flow", "checkout FLOW", &id, &id[..6]] {
         let read = agent.ok("read", json!({ "designId": given })).await;
@@ -251,7 +246,7 @@ async fn design_ids_take_a_name_or_the_start_of_an_id() {
 #[tokio::test]
 async fn read_shows_an_overview_outline_html_css_and_search() {
     let (app, _) = doc6();
-    let mut agent = Agent::connect(&app, "Reader").await;
+    let mut agent = Agent::connect_doc6(&app, "Reader").await;
     let (id, board) = landing(&mut agent).await;
     let overview = agent.ok("read", json!({ "designId": id })).await;
     assert!(
@@ -337,7 +332,7 @@ async fn read_shows_an_overview_outline_html_css_and_search() {
 #[tokio::test]
 async fn every_op_runs_in_one_edit() {
     let (app, _) = doc6();
-    let mut agent = Agent::connect(&app, "Builder").await;
+    let mut agent = Agent::connect_doc6(&app, "Builder").await;
     let (id, board) = landing(&mut agent).await;
     let text = edit(
         &mut agent,
@@ -458,7 +453,7 @@ async fn every_op_runs_in_one_edit() {
 #[tokio::test]
 async fn a_flat_op_and_old_habits_work() {
     let (app, _) = doc6();
-    let mut agent = Agent::connect(&app, "Habits").await;
+    let mut agent = Agent::connect_doc6(&app, "Habits").await;
     let (id, _) = landing(&mut agent).await;
     let flat = agent
         .ok(
@@ -485,7 +480,7 @@ async fn a_flat_op_and_old_habits_work() {
 #[tokio::test]
 async fn an_edit_is_one_undo_step_and_one_broadcast() {
     let (app, hub) = doc6();
-    let mut agent = Agent::connect(&app, "Atomic").await;
+    let mut agent = Agent::connect_doc6(&app, "Atomic").await;
     let (id, board) = landing(&mut agent).await;
     let handle = hub.open(&id).await.unwrap();
     let (_, seq, mut changes) = handle.subscribe();
@@ -549,7 +544,7 @@ async fn an_edit_is_one_undo_step_and_one_broadcast() {
 #[tokio::test]
 async fn a_failing_op_changes_nothing_and_nobody_sees_it() {
     let (app, hub) = doc6();
-    let mut agent = Agent::connect(&app, "Careful").await;
+    let mut agent = Agent::connect_doc6(&app, "Careful").await;
     let (id, _) = landing(&mut agent).await;
     let handle = hub.open(&id).await.unwrap();
     let before = handle.read(|d| d.seq());
@@ -588,7 +583,7 @@ async fn a_failing_op_changes_nothing_and_nobody_sees_it() {
 #[tokio::test]
 async fn a_dry_run_changes_nothing() {
     let (app, hub) = doc6();
-    let mut agent = Agent::connect(&app, "Dry").await;
+    let mut agent = Agent::connect_doc6(&app, "Dry").await;
     let (id, _) = landing(&mut agent).await;
     let handle = hub.open(&id).await.unwrap();
     let before = handle.read(|d| d.seq());
@@ -612,7 +607,7 @@ async fn a_dry_run_changes_nothing() {
 #[tokio::test]
 async fn refs_name_what_earlier_ops_made() {
     let (app, _) = doc6();
-    let mut agent = Agent::connect(&app, "Refs").await;
+    let mut agent = Agent::connect_doc6(&app, "Refs").await;
     let id = design(&mut agent, "Refs").await;
     // A ref inside a quoted string is text, not a ref.
     edit(
@@ -650,7 +645,7 @@ async fn refs_name_what_earlier_ops_made() {
 #[tokio::test]
 async fn remove_refuses_matches_nested_inside_each_other() {
     let (app, _) = doc6();
-    let mut agent = Agent::connect(&app, "Guard").await;
+    let mut agent = Agent::connect_doc6(&app, "Guard").await;
     let (id, _) = landing(&mut agent).await;
     // :has(p) matches the artboard and both cards.
     let error = refused(
@@ -676,7 +671,7 @@ async fn remove_refuses_matches_nested_inside_each_other() {
 #[tokio::test]
 async fn html_inner_and_replace_take_one_match() {
     let (app, _) = doc6();
-    let mut agent = Agent::connect(&app, "One").await;
+    let mut agent = Agent::connect_doc6(&app, "One").await;
     let (id, _) = landing(&mut agent).await;
     let error = refused(
         &mut agent,
@@ -693,8 +688,8 @@ async fn html_inner_and_replace_take_one_match() {
 #[tokio::test]
 async fn a_stale_rewrite_keeps_another_agents_change() {
     let (app, _) = doc6();
-    let mut alice = Agent::connect(&app, "Alice").await;
-    let mut bob = Agent::connect(&app, "Bob").await;
+    let mut alice = Agent::connect_doc6(&app, "Alice").await;
+    let mut bob = Agent::connect_doc6(&app, "Bob").await;
     let (id, _) = landing(&mut alice).await;
     let read = html(&mut alice, &id, "[data-name=One]").await;
     let card = read.trim().to_owned();
@@ -727,8 +722,8 @@ async fn a_stale_rewrite_keeps_another_agents_change() {
 #[tokio::test]
 async fn two_agents_edit_at_once() {
     let (app, _) = doc6();
-    let mut alice = Agent::connect(&app, "Alice").await;
-    let mut bob = Agent::connect(&app, "Bob").await;
+    let mut alice = Agent::connect_doc6(&app, "Alice").await;
+    let mut bob = Agent::connect_doc6(&app, "Bob").await;
     let (id, _) = landing(&mut alice).await;
     let a = json!({ "designId": id, "check": false, "ops": [
         { "op": "html", "select": "[data-name=One]", "html": "<b>alice</b>" },
@@ -756,7 +751,7 @@ async fn two_agents_edit_at_once() {
 #[tokio::test]
 async fn jsx_and_export_are_read_views() {
     let (app, _) = doc6();
-    let mut agent = Agent::connect(&app, "Exporter").await;
+    let mut agent = Agent::connect_doc6(&app, "Exporter").await;
     let (id, board) = landing(&mut agent).await;
     let jsx = agent
         .ok(
@@ -788,7 +783,7 @@ async fn jsx_and_export_are_read_views() {
 #[tokio::test]
 async fn comments_are_listed_awaited_and_answered() {
     let (app, hub) = doc6();
-    let mut agent = Agent::connect(&app, "Helper").await;
+    let mut agent = Agent::connect_doc6(&app, "Helper").await;
     let (id, board) = landing(&mut agent).await;
     let handle = hub.open(&id).await.unwrap();
     let h1 = handle.read(|d| {
@@ -852,7 +847,7 @@ async fn comments_are_listed_awaited_and_answered() {
 #[tokio::test]
 async fn render_and_the_layout_check_after_an_edit() {
     let (app, _) = doc6();
-    let mut agent = Agent::connect(&app, "Checker").await;
+    let mut agent = Agent::connect_doc6(&app, "Checker").await;
     let (id, board) = landing(&mut agent).await;
     let (probe, _) = agent
         .call("render", json!({ "designId": id, "output": "layout" }))

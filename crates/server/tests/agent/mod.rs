@@ -25,7 +25,13 @@ pub struct Agent {
 }
 
 impl Agent {
+    /// Connects to today's tools at `/mcp/classic`, which most tests drive.
     pub async fn connect(app: &Router, name: &'static str) -> Self {
+        Self::connect_at(app, name, "/mcp/classic").await
+    }
+
+    /// Connects to `/mcp`, which serves the doc6 tools by default.
+    pub async fn connect_doc6(app: &Router, name: &'static str) -> Self {
         Self::connect_at(app, name, "/mcp").await
     }
 

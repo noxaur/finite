@@ -88,23 +88,23 @@ pub(crate) fn extra(group: &str) -> bool {
         .any(|g| g == group)
 }
 
-/// Which tools an endpoint serves: today's (`Classic`), or the six of
-/// `doc6`. `/mcp` serves what `FINITE_MCP_SURFACE` names, so AX runs
-/// (`e2e/ax`) can compare both on one build, and `/mcp/classic` always
-/// serves today's tools, for scripts written against them.
+/// Which tools an endpoint serves: the six of `doc6`, or today's
+/// (`Classic`). `/mcp` serves doc6 unless `FINITE_MCP_SURFACE=classic`, so
+/// AX runs (`e2e/ax`) can compare both on one build, and `/mcp/classic`
+/// always serves today's tools, for scripts written against them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Surface {
-    #[default]
     Classic,
+    #[default]
     Doc6,
 }
 
 impl Surface {
-    /// `FINITE_MCP_SURFACE`: `doc6`, or `classic` when unset.
+    /// `FINITE_MCP_SURFACE`: `classic` for today's tools, otherwise `doc6`.
     pub fn from_env() -> Self {
         match std::env::var("FINITE_MCP_SURFACE") {
-            Ok(s) if s.trim().eq_ignore_ascii_case("doc6") => Self::Doc6,
-            _ => Self::Classic,
+            Ok(s) if s.trim().eq_ignore_ascii_case("classic") => Self::Classic,
+            _ => Self::Doc6,
         }
     }
 

@@ -44,7 +44,7 @@ impl Agent {
 
     fn request(&self, body: Value) -> Request<Body> {
         // rmcp checks Host to block DNS rebinding, so send what a local client would.
-        let mut req = Request::post("/mcp")
+        let mut req = Request::post("/mcp/classic")
             .header(header::HOST, "127.0.0.1:4100")
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::ACCEPT, "application/json, text/event-stream");
