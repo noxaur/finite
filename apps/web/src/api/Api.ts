@@ -19,7 +19,6 @@ export interface NewComment {
   readonly x: number;
   readonly y: number;
   /** Who it's for. Any agent when left out. */
-  readonly audience?: Audience;
 }
 
 /** What an edit made: its change's `seq`, or `null` when nothing changed. */

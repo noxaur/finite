@@ -453,7 +453,7 @@ export function DesignCanvas({ id }: { id: string }) {
     );
   };
 
-  const postComment = async (body: string, audience: Audience) => {
+  const postComment = async (body: string) => {
     if (!draft) return undefined;
     // Leave out elements an agent deleted or moved away while the person typed.
     const replica = sessionRef.current?.replica;
@@ -462,7 +462,7 @@ export function DesignCanvas({ id }: { id: string }) {
     );
     const pin = { ...draft, nodeId, extraNodeIds };
     const exit = await runtime.runPromiseExit(
-      Api.use((api) => api.createComment(id, { author: localUser(), body, audience, ...pin })),
+      Api.use((api) => api.createComment(id, { author: localUser(), body, ...pin })),
     );
     if (Exit.isFailure(exit)) return unsent(exit.cause);
     sessionRef.current?.upsertComment(exit.value);

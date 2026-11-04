@@ -11,7 +11,7 @@ use std::{
 
 use finite_design::{
     ActorId, Change, Design, Document, NodeId, Op, Record, Snapshot, Transaction,
-    comment::{Anchor, Audience, Author, Comment, CommentError},
+    comment::{Anchor, Audience, Author, AuthorKind, Comment, CommentError},
     components,
     edit::EditError,
     label,
@@ -30,6 +30,9 @@ pub(super) struct DesignState {
     pub(super) design: Design,
     presence: BTreeMap<ActorId, Presence>,
     last_seen: HashMap<ActorId, u64>,
+    /// When each agent last asked for comments. An agent that asked within
+    /// [`PRESENCE_TTL`] is listening, so comments can go to it.
+    listening: HashMap<ActorId, u64>,
     /// Records not yet written to the store.
     pending: Vec<Record>,
     /// Records in the store's journal since the last snapshot.
@@ -106,6 +109,7 @@ impl DesignState {
             design,
             presence: BTreeMap::new(),
             last_seen: HashMap::new(),
+            listening: HashMap::new(),
             pending: Vec::new(),
             journaled: 0,
             journal_bytes: 0,
@@ -923,14 +927,91 @@ impl DesignHandle {
     ) -> Result<Comment, CommentError> {
         let mut state = self.lock();
         let comment = f(&mut state.design)?.clone();
-        let message = DesignMessage::Comment { comment: &comment };
+        self.send_comment(&mut state, &comment);
+        self.comments.notify_waiters();
+        Ok(comment)
+    }
+
+    fn send_comment(&self, state: &mut DesignState, comment: &Comment) {
+        let message = DesignMessage::Comment { comment };
         let _ = state.events.send(Outgoing::new(None, &message));
         let record = Record::Comment {
             comment: comment.clone(),
         };
-        self.record(&mut state, record);
-        self.comments.notify_waiters();
-        Ok(comment)
+        self.record(state, record);
+    }
+
+    /// Runs `f` with the design and which agents are listening, to see where
+    /// comments go. See [`Design::routed_to`].
+    pub fn with_routes<T>(&self, f: impl FnOnce(&Design, &dyn Fn(&str) -> bool) -> T) -> T {
+        let state = self.lock();
+        let now = now_ms();
+        let ttl = PRESENCE_TTL.as_millis() as u64;
+        let listening = |id: &str| {
+            state
+                .listening
+                .get(id)
+                .is_some_and(|at| now.saturating_sub(*at) < ttl)
+        };
+        f(&state.design, &listening)
+    }
+
+    /// Marks `agent` as listening, then takes every comment waiting for it
+    /// that `admit` lets through, oldest first, so no other agent gets them too.
+    pub fn take_waiting(
+        &self,
+        agent: &Actor,
+        admit: impl Fn(&Document, &Comment) -> bool,
+    ) -> Vec<Comment> {
+        let mut state = self.lock();
+        let now = now_ms();
+        state.touch(agent, now);
+        state.listening.insert(agent.id.clone(), now);
+        let ttl = PRESENCE_TTL.as_millis() as u64;
+        let listening = |id: &str| {
+            state
+                .listening
+                .get(id)
+                .is_some_and(|at| now.saturating_sub(*at) < ttl)
+        };
+        let design = &state.design;
+        let ids: Vec<String> = design
+            .comments()
+            .iter()
+            .filter(|c| design.awaits(c, &agent.id, listening) && admit(design.view(), c))
+            .map(|c| c.id.clone())
+            .collect();
+        let me = Author {
+            id: agent.id.clone(),
+            name: agent.name.clone(),
+            kind: AuthorKind::Agent,
+        };
+        let mut taken = Vec::new();
+        let mut changed = false;
+        for id in ids {
+            let Some(before) = state
+                .design
+                .comments()
+                .iter()
+                .find(|c| c.id == id)
+                .map(|c| c.rev)
+            else {
+                continue;
+            };
+            let Ok(comment) = state.design.take(&id, me.clone()) else {
+                continue;
+            };
+            let comment = comment.clone();
+            if comment.rev != before {
+                self.send_comment(&mut state, &comment);
+                changed = true;
+            }
+            taken.push(comment);
+        }
+        if changed {
+            self.comments.notify_waiters();
+        }
+        taken
     }
 
     pub fn set_presence(&self, actor: &Actor, node_ids: Vec<NodeId>, status: Option<String>) {
@@ -1007,6 +1088,7 @@ impl DesignHandle {
         }
         state.design.forget_actor(actor);
         state.last_seen.remove(actor);
+        state.listening.remove(actor);
     }
 
     /// Expires stale presence and the histories of long-idle actors. Asks for
@@ -1024,6 +1106,9 @@ impl DesignHandle {
         if state.presence.len() != before {
             let _ = state.events.send(state.presence_message());
         }
+        state
+            .listening
+            .retain(|_, at| now.saturating_sub(*at) < ttl);
         let ttl = HISTORY_TTL.as_millis() as u64;
         let idle: Vec<ActorId> = state
             .last_seen

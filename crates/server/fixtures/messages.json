@@ -220,6 +220,11 @@
         "resolved": true,
         "resolvedAt": 0,
         "rev": 1,
+        "takenBy": {
+          "id": "agent:Claude",
+          "kind": "agent",
+          "name": "Claude"
+        },
         "x": 24.0,
         "y": 16.0
       },
@@ -783,6 +788,11 @@
           "resolved": true,
           "resolvedAt": 0,
           "rev": 1,
+          "takenBy": {
+            "id": "agent:Claude",
+            "kind": "agent",
+            "name": "Claude"
+          },
           "x": 24.0,
           "y": 16.0
         },
@@ -894,6 +904,11 @@
             "resolved": true,
             "resolvedAt": 0,
             "rev": 1,
+            "takenBy": {
+              "id": "agent:Claude",
+              "kind": "agent",
+              "name": "Claude"
+            },
             "x": 24.0,
             "y": 16.0
           },

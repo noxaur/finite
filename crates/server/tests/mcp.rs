@@ -294,14 +294,14 @@ async fn an_agent_waits_for_the_next_comment() {
         .unwrap();
     assert!(woke.contains("Add a footer"), "{woke}");
 
-    // A comment already waiting comes back right away.
-    let now = agent
+    // The waiter took it, so the first agent doesn't start on it too.
+    let theirs = agent
         .ok(
             "wait_for_comments",
-            json!({ "designId": design, "timeoutSeconds": 10 }),
+            json!({ "designId": design, "timeoutSeconds": 1 }),
         )
         .await;
-    assert!(now.contains("Add a footer"), "{now}");
+    assert!(theirs.contains("No comments arrived"), "{theirs}");
 }
 
 /// A person edits tokens and modes in the app. They're saved in the

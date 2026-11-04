@@ -201,6 +201,7 @@ const THREAD_SHOWN: usize = 10;
 pub(super) fn comments_json<'a>(
     design: &Design,
     me: &str,
+    listening: &dyn Fn(&str) -> bool,
     comments: impl Iterator<Item = &'a Comment>,
 ) -> Vec<serde_json::Value> {
     let doc = design.view();
@@ -274,12 +275,12 @@ pub(super) fn comments_json<'a>(
             if !also.is_empty() {
                 comment["alsoSelected"] = also.into();
             }
-            // Left out for the default, any agent.
-            let audience = match &c.audience {
-                Audience::Agents => None,
-                Audience::People => Some("people".to_owned()),
-                Audience::Agent { id, .. } if id == me => Some("you".to_owned()),
-                Audience::Agent { name, .. } => Some(format!("{name} (another agent)")),
+            // Left out when it goes to whichever agent asks first.
+            let audience = match (&c.audience, design.routed_to(c, listening)) {
+                (Audience::People, _) => Some("people".to_owned()),
+                (_, Some(to)) if to == me => Some("you".to_owned()),
+                (_, Some(to)) => Some(format!("{} (another agent)", c.agent_name(to))),
+                (_, None) => None,
             };
             if let Some(audience) = audience {
                 comment["for"] = audience.into();

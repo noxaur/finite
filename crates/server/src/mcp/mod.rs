@@ -983,6 +983,13 @@ impl FiniteMcp {
         let me = self.actor(&ctx).id;
         let handle = design!(self, &p.design_id);
         let presence = handle.presence();
+        let waiting = handle.with_routes(|design, listening| {
+            design
+                .comments()
+                .iter()
+                .filter(|c| design.awaits(c, &me, listening))
+                .count()
+        });
         let info = handle.read(|design| {
             let doc = design.view();
             let all = doc.artboards();
@@ -1030,7 +1037,7 @@ impl FiniteMcp {
                 "artboards": artboards,
                 "agentsWorking": presence,
                 "openComments": design.comments().iter().filter(|c| !c.resolved).count(),
-                "commentsWaitingForYou": design.comments().iter().filter(|c| c.awaits(&me)).count(),
+                "commentsWaitingForYou": waiting,
             })
         });
         let mut info = info;
@@ -1971,13 +1978,14 @@ impl FiniteMcp {
         ctx: RequestContext<RoleServer>,
     ) -> ToolResult {
         let handle = design!(self, &p.design_id);
-        let me = self.actor(&ctx).id;
-        let comments = handle.read(|design| {
+        let actor = self.actor(&ctx);
+        handle.take_waiting(&actor, |_, _| true);
+        let comments = handle.with_routes(|design, listening| {
             let shown = design
                 .comments()
                 .iter()
                 .filter(|c| p.include_resolved || !c.resolved);
-            comments_json(design, &me, shown)
+            comments_json(design, &actor.id, listening, shown)
         });
         if comments.len() <= p.offset {
             return ok(match (comments.is_empty(), p.include_resolved) {
@@ -2001,7 +2009,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Wait for users to ask for something. Returns as soon as a comment or reply is waiting for you (open, a user's message last, and not a note for people or a comment for another agent), with those comments in the same form as get_comments. Returns right away if some already are, or with a message saying none arrived when timeoutSeconds (default 60, at most 300) runs out. Call it in a loop to keep taking feedback.",
+        description = "Wait for users to ask for something. Returns as soon as a comment or reply is waiting for you (open, a user's message last, not a note for people, and not another agent's), and takes it so other agents leave it to you, with those comments in the same form as get_comments. Returns right away if some already are, or with a message saying none arrived when timeoutSeconds (default 60, at most 300) runs out. Call it in a loop to keep taking feedback.",
         annotations(read_only_hint = true)
     )]
     async fn wait_for_comments(
@@ -2009,7 +2017,7 @@ impl FiniteMcp {
         Parameters(p): Parameters<WaitParams>,
         ctx: RequestContext<RoleServer>,
     ) -> ToolResult {
-        let me = self.actor(&ctx).id;
+        let actor = self.actor(&ctx);
         let timeout = Duration::from_secs(p.timeout_seconds.unwrap_or(60).clamp(1, 300));
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -2018,12 +2026,9 @@ impl FiniteMcp {
             let changed = handle.comments_changed();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            let waiting = handle.read(|design| {
-                comments_json(
-                    design,
-                    &me,
-                    design.comments().iter().filter(|c| c.awaits(&me)),
-                )
+            let taken = handle.take_waiting(&actor, |_, _| true);
+            let waiting = handle.with_routes(|design, listening| {
+                comments_json(design, &actor.id, listening, taken.iter())
             });
             if !waiting.is_empty() {
                 let total = waiting.len();

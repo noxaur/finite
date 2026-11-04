@@ -197,9 +197,12 @@ pub struct CommentsDoc6Params {
     /// Only comments a person addressed to you.
     #[serde(default)]
     mentions: bool,
-    /// Comments to leave to others: they stop waking you until a person writes in them again.
+    /// Comments to leave to others: they go to another agent and stop waking you until a person writes in them again.
     #[serde(default)]
     pass: Option<Vec<String>>,
+    /// Comments that are notes between people, not requests: no agent gets them. A person can change that back.
+    #[serde(default)]
+    for_people: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -794,7 +797,7 @@ impl FiniteMcp {
 
     #[tool(
         name = "comments",
-        description = "The comments people pinned to a design, and your replies to them.\n\n- {\"designId\": \"…\"}: open comments, oldest first: what was asked, the artboard, the element (its select and HTML), and the thread so far. includeResolved: true adds resolved ones; offset pages through a long list.\n- {\"designId\": \"…\", \"wait\": 60}: blocks until a comment or reply is waiting for you (open, a person's message last, for any agent or for you), then returns those. Returns at once if some already are, or says none arrived after wait seconds (at most 300). Loop on it to keep taking feedback.\n- {\"designId\": \"…\", \"reply\": [{\"commentId\": \"…\", \"message\": \"Made it an underlined link.\", \"resolve\": true}]}: replies, one or several at once. Say what you changed, with resolve: true, or ask a question and leave it open. A reply links your edits to the comment's artboard since the thread's last message.\n\nListen to part of a design: page (name or id) and select (comments pinned to matching elements or inside them) narrow both the list and wait; mentions: true keeps only comments a person addressed to you. pass: [\"commentId\"] leaves comments to others: they stop waking you until a person writes in them again. It runs before wait, so {\"pass\": [\"…\"], \"wait\": 60} works.\n\nEach comment's \"for\" says who it's for when that isn't any agent: \"you\", another agent, or \"people\" (a note between people: don't act on it). passedBy lists agents that passed.\n\nExamples: {\"designId\": \"…\", \"page\": \"Mobile\", \"wait\": 120} · {\"designId\": \"…\", \"select\": \"#ab12cd34\", \"wait\": 60} · {\"designId\": \"…\", \"mentions\": true, \"wait\": 60}",
+        description = "The comments people pinned to a design, and your replies to them. Each waiting comment goes to one agent: the one a person picked, the one already on it, or the one that last edited its artboard, while it's listening; otherwise the first to ask. Calling this takes the comments waiting for you, so other agents leave them to you.\n\n- {\"designId\": \"…\"}: open comments, oldest first: what was asked, the artboard, the element (its select and HTML), and the thread so far. includeResolved: true adds resolved ones; offset pages through a long list.\n- {\"designId\": \"…\", \"wait\": 60}: blocks until a comment or reply is waiting for you (open, a person's message last, and not another agent's), then returns those. Returns at once if some already are, or says none arrived after wait seconds (at most 300). Loop on it to keep taking feedback.\n- {\"designId\": \"…\", \"reply\": [{\"commentId\": \"…\", \"message\": \"Made it an underlined link.\", \"resolve\": true}]}: replies, one or several at once. Say what you changed, with resolve: true, or ask a question and leave it open. A reply links your edits to the comment's artboard since the thread's last message.\n\npass: [\"commentId\"] leaves comments to another agent: they stop waking you until a person writes in them again. forPeople: [\"commentId\"] marks notes between people (\"ask the client about blue\"), so no agent gets them. Both run before wait, so {\"pass\": [\"…\"], \"wait\": 60} works.\n\nEach comment's \"for\" says who it goes to when that's settled: \"you\", another agent (leave it), or \"people\" (don't act on it). passedBy lists agents that passed.\n\nOptional filters narrow both the list and wait: page (name or id), select (comments pinned to matching elements or inside them), mentions: true (only comments a person picked you for). Example: {\"designId\": \"…\", \"page\": \"Mobile\", \"wait\": 120}",
         annotations(read_only_hint = false)
     )]
     async fn doc6_comments(
@@ -852,6 +855,25 @@ impl FiniteMcp {
                 passed.join(", ")
             )),
         };
+        let mut noted = Vec::new();
+        for id in p.for_people.iter().flatten() {
+            if let Err(error) = handle.set_audience(id, finite_design::comment::Audience::People) {
+                let before = match noted.is_empty() {
+                    true => String::new(),
+                    false => format!(" Marked {} as notes before it.", noted.join(", ")),
+                };
+                return fail(format!("{id}: {error}.{before}"));
+            }
+            noted.push(id.as_str());
+        }
+        let noted = (!noted.is_empty()).then(|| {
+            format!(
+                "Marked {} as for people: no agent gets {}.",
+                noted.join(", "),
+                if noted.len() == 1 { "it" } else { "them" }
+            )
+        });
+        let passed = joined([passed, noted]);
         let selector = match p.select.as_ref() {
             Some(select) => match selector_text(&select.value(), &HashMap::new()) {
                 Ok(selector) => Some(selector),
@@ -860,7 +882,7 @@ impl FiniteMcp {
             None => None,
         };
         // Built again on every look, since artboards come and go while an agent waits.
-        let listening = |doc: &Document| -> Result<Listening, String> {
+        let scope_in = |doc: &Document| -> Result<Listening, String> {
             let page = p
                 .page
                 .as_deref()
@@ -896,19 +918,14 @@ impl FiniteMcp {
                 let changed = handle.comments_changed();
                 tokio::pin!(changed);
                 changed.as_mut().enable();
-                let waiting = handle.read(|design| {
-                    let doc = design.view();
-                    let listening = listening(doc)?;
-                    let mine = design
-                        .comments()
-                        .iter()
-                        .filter(|c| c.awaits(&actor.id) && listening.admits(doc, c, &actor.id));
-                    Ok::<_, String>(comments_json(design, &actor.id, mine))
-                });
-                let waiting = match waiting {
-                    Ok(waiting) => waiting,
+                let scope = match handle.read(|design| scope_in(design.view())) {
+                    Ok(scope) => scope,
                     Err(error) => return fail(error),
                 };
+                let taken = handle.take_waiting(&actor, |doc, c| scope.admits(doc, c, &actor.id));
+                let waiting = handle.with_routes(|design, listening| {
+                    comments_json(design, &actor.id, listening, taken.iter())
+                });
                 if !waiting.is_empty() {
                     let total = waiting.len();
                     let (content, shown) = fit(waiting.into_iter().map(selects));
@@ -928,18 +945,21 @@ impl FiniteMcp {
                 }
             }
         }
-        let comments = handle.read(|design| {
-            let doc = design.view();
-            let listening = listening(doc)?;
-            let shown = design.comments().iter().filter(|c| {
-                (p.include_resolved || !c.resolved) && listening.admits(doc, c, &actor.id)
-            });
-            Ok::<_, String>(comments_json(design, &actor.id, shown))
-        });
-        let comments = match comments {
-            Ok(comments) => comments,
+        let scope = match handle.read(|design| scope_in(design.view())) {
+            Ok(scope) => scope,
             Err(error) => return fail(error),
         };
+        // Listing takes what's waiting for this agent too, so another agent
+        // doesn't start on the same comment.
+        handle.take_waiting(&actor, |doc, c| scope.admits(doc, c, &actor.id));
+        let comments = handle.with_routes(|design, listening| {
+            let doc = design.view();
+            let shown = design
+                .comments()
+                .iter()
+                .filter(|c| (p.include_resolved || !c.resolved) && scope.admits(doc, c, &actor.id));
+            comments_json(design, &actor.id, listening, shown)
+        });
         if comments.len() <= p.offset {
             let none = match (comments.is_empty(), p.include_resolved) {
                 (false, _) => "No more comments.",

@@ -11,11 +11,15 @@
 //!   current state unless it asks to resolve or reopen.
 //! - A person can edit their own message while it's the thread's newest, so
 //!   never one an agent has already answered.
-//! - A comment's [`Audience`] says which agents should act on it: any agent,
-//!   one agent, or none (a note between people). [`Comment::awaits`] is the
-//!   one rule for "should this agent act now".
-//! - An agent can pass on a comment, so it stops waking that agent. A
-//!   person's new message, an edit of it, or a new audience clears the passes.
+//! - A waiting comment goes to one agent, picked by [`Comment::routed_to`]:
+//!   the agent a person picked, else the agent that took it, else the agent
+//!   that last edited its artboard, as long as that agent is listening.
+//!   Otherwise the first listening agent to ask takes it.
+//!   [`crate::Design::awaits`] is the one rule for "should this agent act now".
+//! - A comment's [`Audience`] can make it a note between people, which never
+//!   goes to an agent. An agent that reads a note can mark it so.
+//! - An agent can pass on a comment, so it goes to another agent. A person's
+//!   new message, an edit of it, or a new audience clears the passes.
 
 use std::{
     collections::{BTreeSet, HashSet, VecDeque},
@@ -59,20 +63,20 @@ pub struct Author {
     pub kind: AuthorKind,
 }
 
-/// Who a comment is for, picked by the person who posts it. Any person can
-/// change it later with [`crate::Design::set_audience`]. It holds for the
-/// whole thread.
+/// Who a comment is for. It's any agent unless someone changes it with
+/// [`crate::Design::set_audience`]. It holds for the whole thread.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Audience {
-    /// Any agent may act on it. The default, so comments saved before
-    /// audiences existed still wake agents.
+    /// Whichever agent [`Comment::routed_to`] picks. The default, so
+    /// comments saved before audiences existed still wake agents.
     #[default]
     Agents,
     /// A note between people. It never wakes an agent.
     People,
-    /// One agent, by actor id (`agent:…` or `mcp:…`). `name` is its name when
-    /// it was picked, so a viewer can label the pin after the agent has gone.
+    /// One agent, by actor id (`agent:…` or `mcp:…`), while it's listening.
+    /// `name` is its name when it was picked, so a viewer can label the pin
+    /// after the agent has gone.
     Agent { id: ActorId, name: String },
 }
 
@@ -80,15 +84,11 @@ impl Audience {
     pub fn is_agents(&self) -> bool {
         matches!(self, Self::Agents)
     }
+}
 
-    /// Whether `agent` is among the agents asked to act.
-    pub fn admits(&self, agent: &str) -> bool {
-        match self {
-            Self::Agents => true,
-            Self::People => false,
-            Self::Agent { id, .. } => id == agent,
-        }
-    }
+/// Whether `id` is an agent's actor id: `agent:…` or `mcp:…`.
+pub fn is_agent(id: &str) -> bool {
+    id.starts_with("agent:") || id.starts_with("mcp:")
 }
 
 /// Checks an audience a person picked: one agent must have an agent's id.
@@ -97,10 +97,10 @@ pub(crate) fn check_audience(audience: Audience) -> Result<Audience, CommentErro
     let Audience::Agent { id, name } = audience else {
         return Ok(audience);
     };
-    let rest = id
-        .strip_prefix("agent:")
-        .or_else(|| id.strip_prefix("mcp:"));
-    if rest.is_none_or(|rest| rest.is_empty() || rest.chars().count() > MAX_USER_ID) {
+    let rest = id.split_once(':').map(|(_, rest)| rest);
+    if !is_agent(&id)
+        || rest.is_none_or(|rest| rest.is_empty() || rest.chars().count() > MAX_USER_ID)
+    {
         return Err(CommentError::BadAudience);
     }
     let name = match crate::label::clip(&name, MAX_NAME) {
@@ -173,6 +173,10 @@ pub struct Comment {
     /// Agents that passed on it since a person last wrote in it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub passed_by: Vec<Author>,
+    /// The agent that last took it to work on or replied in it, so a
+    /// person's follow-up goes back to the same agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taken_by: Option<Author>,
 }
 
 /// A point on the canvas.
@@ -188,22 +192,52 @@ impl Comment {
         self.messages.last().map_or(0, |m| m.seq)
     }
 
-    /// Which agents are expected to act: it's open, a person wrote last, and
+    /// Whether an agent should act on it: it's open, a person wrote last, and
     /// it isn't a note for people.
-    pub fn waiting_for(&self) -> Option<&Audience> {
+    pub fn waiting(&self) -> bool {
         let person_last = self
             .messages
             .last()
             .is_some_and(|m| m.author.kind == AuthorKind::User);
-        (!self.resolved && person_last && self.audience != Audience::People)
-            .then_some(&self.audience)
+        !self.resolved && person_last && self.audience != Audience::People
     }
 
-    /// Whether `agent` should act on this now: it's waiting for that agent,
-    /// and that agent hasn't passed on it.
-    pub fn awaits(&self, agent: &str) -> bool {
-        self.waiting_for().is_some_and(|a| a.admits(agent))
-            && !self.passed_by.iter().any(|p| p.id == agent)
+    pub fn passed(&self, agent: &str) -> bool {
+        self.passed_by.iter().any(|p| p.id == agent)
+    }
+
+    /// The agent this comment goes to, or `None` for the first agent that
+    /// asks. It's the first of these that is `listening` and hasn't passed on
+    /// it: the agent a person picked, the agent that took it, and
+    /// `last_editor`, the agent that last edited its artboard.
+    pub fn routed_to<'a>(
+        &'a self,
+        last_editor: Option<&'a str>,
+        listening: impl Fn(&str) -> bool,
+    ) -> Option<&'a str> {
+        let picked = match &self.audience {
+            Audience::Agent { id, .. } => Some(id.as_str()),
+            _ => None,
+        };
+        [
+            picked,
+            self.taken_by.as_ref().map(|a| a.id.as_str()),
+            last_editor,
+        ]
+        .into_iter()
+        .flatten()
+        .find(|id| listening(id) && !self.passed(id))
+    }
+
+    /// The name of agent `id`, as this comment knows it, or the id.
+    pub fn agent_name<'a>(&'a self, id: &'a str) -> &'a str {
+        match &self.audience {
+            Audience::Agent { id: a, name } if a == id => name,
+            _ => match &self.taken_by {
+                Some(a) if a.id == id => &a.name,
+                _ => id,
+            },
+        }
     }
 }
 
@@ -452,6 +486,15 @@ impl ChangeLog {
         }
     }
 
+    /// The agent that made the latest logged change to `artboard`.
+    pub(crate) fn last_agent_on(&self, artboard: &str) -> Option<&str> {
+        self.entries
+            .iter()
+            .rev()
+            .find(|e| is_agent(&e.actor) && e.artboards.contains(artboard))
+            .map(|e| e.actor.as_str())
+    }
+
     /// `actor`'s changes after `seq`, oldest first. With `artboard`, only the
     /// changes that touched it.
     pub(crate) fn since(&self, actor: &str, seq: u64, artboard: Option<&str>) -> Vec<ChangeRef> {
@@ -658,40 +701,54 @@ mod tests {
             rev: 0,
             audience,
             passed_by: Vec::new(),
+            taken_by: None,
         }
     }
 
     #[test]
-    fn a_comment_awaits_an_agent_until_one_answers() {
+    fn a_comment_waits_until_an_agent_answers() {
         let mut comment = comment(Audience::Agents);
-        assert!(comment.awaits("agent:a"));
+        assert!(comment.waiting());
         comment.messages.push(message(AuthorKind::Agent));
-        assert!(!comment.awaits("agent:a"), "an agent answered");
+        assert!(!comment.waiting(), "an agent answered");
         comment.messages.push(message(AuthorKind::User));
-        assert!(comment.awaits("agent:a"), "the user replied");
+        assert!(comment.waiting(), "the user replied");
         comment.resolved = true;
-        assert!(!comment.awaits("agent:a"), "resolved");
+        assert!(!comment.waiting(), "resolved");
+        assert!(!self::comment(Audience::People).waiting(), "a note");
     }
 
     #[test]
-    fn the_audience_picks_the_agents() {
-        let people = comment(Audience::People);
-        assert_eq!(people.waiting_for(), None);
-        assert!(!people.awaits("agent:a"));
-        let one = comment(Audience::Agent {
-            id: "agent:a".into(),
-            name: "A".into(),
-        });
-        assert!(one.awaits("agent:a"));
-        assert!(!one.awaits("agent:b"));
-        let mut any = comment(Audience::Agents);
-        any.passed_by.push(Author {
-            id: "agent:a".into(),
-            name: "A".into(),
+    fn a_comment_goes_to_the_first_listening_agent_in_line() {
+        let agent = |id: &str| Author {
+            id: id.into(),
+            name: id.into(),
             kind: AuthorKind::Agent,
-        });
-        assert!(!any.awaits("agent:a"), "it passed");
-        assert!(any.awaits("agent:b"));
+        };
+        let all = |_: &str| true;
+        let mut c = comment(Audience::Agents);
+        assert_eq!(c.routed_to(None, all), None, "anyone");
+        assert_eq!(c.routed_to(Some("agent:e"), all), Some("agent:e"));
+        c.taken_by = Some(agent("agent:t"));
+        assert_eq!(c.routed_to(Some("agent:e"), all), Some("agent:t"));
+        c.audience = Audience::Agent {
+            id: "agent:p".into(),
+            name: "P".into(),
+        };
+        assert_eq!(c.routed_to(Some("agent:e"), all), Some("agent:p"));
+        assert_eq!(c.agent_name("agent:p"), "P");
+        assert_eq!(
+            c.routed_to(Some("agent:e"), |id| id != "agent:p"),
+            Some("agent:t"),
+            "the picked agent isn't listening"
+        );
+        c.passed_by.push(agent("agent:t"));
+        assert_eq!(
+            c.routed_to(Some("agent:e"), |id| id != "agent:p"),
+            Some("agent:e"),
+            "the agent that took it passed"
+        );
+        assert_eq!(c.routed_to(None, |id| id != "agent:p"), None);
     }
 
     #[test]

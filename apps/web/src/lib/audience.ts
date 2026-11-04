@@ -7,16 +7,26 @@ export function audienceOf(comment: Comment): Audience {
   return comment.audience ?? ANY_AGENT;
 }
 
-/** "For any agent", "People only" or "For Designer". */
+/** "Any agent", "People only" or "For Designer". */
 export function audienceLabel(audience: Audience): string {
   switch (audience.kind) {
     case "agents":
-      return "For any agent";
+      return "Any agent";
     case "people":
       return "People only";
     case "agent":
       return `For ${audience.name}`;
   }
+}
+
+/**
+ * Where a comment went: a person's pick, or else "With Designer" for the
+ * agent that took it. The server sends it there while that agent listens.
+ */
+export function routeLabel(comment: Comment): string {
+  const audience = audienceOf(comment);
+  if (audience.kind === "agents" && comment.takenBy) return `With ${comment.takenBy.name}`;
+  return audienceLabel(audience);
 }
 
 export interface KnownAgent {

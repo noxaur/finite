@@ -78,7 +78,9 @@ pub(super) async fn read(
         ),
         (_, None) => {
             let presence = handle.presence();
-            ok(handle.read(|d| overview(d, &presence, actor, page.as_deref(), p.depth)))
+            ok(handle.with_routes(|d, listening| {
+                overview(d, listening, &presence, actor, page.as_deref(), p.depth)
+            }))
         }
         (Some("html"), Some(ids)) => ok(handle.read(|d| html_view(d, &ids, p.depth))),
         (Some("outline") | None, Some(ids)) => {
@@ -118,6 +120,7 @@ fn more(ids: &[NodeId]) -> String {
 
 fn overview(
     design: &Design,
+    listening: &dyn Fn(&str) -> bool,
     presence: &[crate::hub::Presence],
     me: &Actor,
     page: Option<&str>,
@@ -130,7 +133,7 @@ fn overview(
     let mine = design
         .comments()
         .iter()
-        .filter(|c| c.awaits(&me.id))
+        .filter(|c| design.awaits(c, &me.id, listening))
         .count();
     let comments = match open {
         0 => count(open, "open comment"),

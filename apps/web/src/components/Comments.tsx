@@ -4,7 +4,7 @@ import * as stylex from "@stylexjs/stylex";
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Replica } from "@/design/replica";
 import type { Audience, Comment } from "@/design/schema";
-import { ANY_AGENT, audienceLabel, audienceOf, type KnownAgent } from "@/lib/audience";
+import { audienceLabel, audienceOf, routeLabel, type KnownAgent } from "@/lib/audience";
 import { COMMENT_LIMIT, NAME_LIMIT, SELECTION_LIMIT } from "@/lib/limits";
 import { isLocalUser, useLocalName } from "@/lib/user";
 import { timeAgo } from "@/lib/time";
@@ -137,7 +137,7 @@ interface LayerProps {
   readonly agents: ReadonlyArray<KnownAgent>;
   readonly onOpen: (id: string | null) => void;
   /** Resolves to nothing once sent, or to why it wasn't, to show. */
-  readonly onPost: (body: string, audience: Audience) => Promise<string | undefined>;
+  readonly onPost: (body: string) => Promise<string | undefined>;
   readonly onCancelDraft: () => void;
   readonly onReply: (id: string, body: string) => Promise<string | undefined>;
   readonly onResolve: (id: string, resolved: boolean) => void;
@@ -213,14 +213,7 @@ export function CommentLayer(props: LayerProps) {
   );
 }
 
-function DraftPin({
-  replica,
-  draft,
-  agents,
-  onPost,
-  onCancelDraft,
-}: LayerProps & { draft: Draft }) {
-  const [audience, setAudience] = useState(ANY_AGENT);
+function DraftPin({ replica, draft, onPost, onCancelDraft }: LayerProps & { draft: Draft }) {
   const at = pinPosition(replica, draft);
   if (!at) return null;
   return (
@@ -232,12 +225,11 @@ function DraftPin({
         <NameLine />
         {draft.nodeId !== null && <SelectionLine count={selectionOf(draft).length} />}
         <Composer
-          placeholder={audience.kind === "people" ? "Add a note for people" : "Add a comment"}
+          placeholder="Add a comment"
           autoFocus
-          onSubmit={(body) => onPost(body, audience)}
+          onSubmit={onPost}
           onCancel={onCancelDraft}
         />
-        <AudiencePicker value={audience} agents={agents} onChange={setAudience} />
       </Popover>
     </div>
   );
@@ -302,18 +294,20 @@ function NameLine() {
 }
 
 /**
- * Who a comment is for: any agent, one agent, or people only. An agent that
- * has gone stays in the list while the comment is for it.
+ * Where a comment went, as a label a person can open to send it elsewhere:
+ * any agent (or the agent that took it), one agent, or people only. An agent
+ * that has gone stays in the list while the comment is for it.
  */
 function AudiencePicker({
-  value,
+  comment,
   agents,
   onChange,
 }: {
-  value: Audience;
+  comment: Comment;
   agents: ReadonlyArray<KnownAgent>;
   onChange: (audience: Audience) => void;
 }) {
+  const value = audienceOf(comment);
   const gone = value.kind === "agent" && !agents.some((a) => a.id === value.id);
   const options = gone ? [...agents, { id: value.id, name: value.name }] : agents;
   return (
@@ -329,7 +323,7 @@ function AudiencePicker({
       }}
       {...stylex.props(styles.audience)}
     >
-      <option value="agents">{audienceLabel(ANY_AGENT)}</option>
+      <option value="agents">{value.kind === "agents" ? routeLabel(comment) : "Any agent"}</option>
       <option value="people">{audienceLabel({ kind: "people" })}</option>
       {options.map((agent) => (
         <option key={agent.id} value={agent.id}>
@@ -437,7 +431,7 @@ function Thread({
     <Popover label="Comment thread">
       <div {...stylex.props(styles.threadHead)}>
         <span {...stylex.props(styles.muted)}>{comment.resolved ? "Resolved" : "Open"}</span>
-        <AudiencePicker value={audienceOf(comment)} agents={agents} onChange={onAudience} />
+        <AudiencePicker comment={comment} agents={agents} onChange={onAudience} />
         <span {...stylex.props(styles.spacer)} />
         <button
           type="button"

@@ -213,6 +213,8 @@ export const Comment = Schema.Struct({
   audience: Schema.optionalKey(Audience),
   /** Agents that passed on it since a person last wrote in it. */
   passedBy: Schema.optionalKey(Schema.Array(Author)),
+  /** The agent that took it or last replied, so a follow-up goes back to it. */
+  takenBy: Schema.optionalKey(Author),
 });
 export type Comment = typeof Comment.Type;
 

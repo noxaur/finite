@@ -1051,7 +1051,7 @@ async fn components_are_made_used_and_detached_in_edits() {
 }
 
 #[tokio::test]
-async fn agents_hear_only_the_comments_for_them() {
+async fn each_comment_goes_to_one_agent() {
     let (app, hub) = doc6();
     let mut ada = Agent::connect_doc6(&app, "Ada").await;
     let mut bo = Agent::connect_doc6(&app, "Bo").await;
@@ -1077,64 +1077,33 @@ async fn agents_hear_only_the_comments_for_them() {
     };
     let wait = json!({ "designId": id, "wait": 1 });
 
-    // A note between people wakes nobody, but the list shows it as one.
-    let note = post(Audience::People, "Ask the client about blue");
+    let none = |reply: String| reply.contains("No comments arrived");
+    // Both agents listen. Ada made the board, so its comments go to Ada.
+    assert!(none(ada.ok("comments", wait.clone()).await));
+    assert!(none(bo.ok("comments", wait.clone()).await));
+    let orange = post(Audience::Agents, "Make it orange");
+    assert!(none(bo.ok("comments", wait.clone()).await));
+    let mine = ada.ok("comments", wait.clone()).await;
     assert!(
-        ada.ok("comments", wait.clone())
-            .await
-            .contains("No comments arrived")
+        mine.contains("Make it orange") && mine.contains("\"for\": \"you\""),
+        "{mine}"
     );
-    let listed = ada.ok("comments", json!({ "designId": id })).await;
-    assert!(listed.contains("\"for\": \"people\""), "{listed}");
-    let overview = ada.ok("read", json!({ "designId": id })).await;
+    let listed = bo.ok("comments", json!({ "designId": id })).await;
     assert!(
-        overview.contains("1 open comment (0 waiting for you)"),
-        "{overview}"
-    );
-    assert!(
-        !overview.contains("waiting for you: call comments"),
-        "{overview}"
+        listed.contains("\"for\": \"Ada (another agent)\""),
+        "{listed}"
     );
 
-    // A comment for one agent wakes only that one.
-    handle
-        .set_audience(
-            &note.id,
-            Audience::Agent {
-                id: "agent:Bo".into(),
-                name: "Bo".into(),
-            },
-        )
-        .unwrap();
-    assert!(
-        ada.ok("comments", wait.clone())
-            .await
-            .contains("No comments arrived")
-    );
-    let mine = bo.ok("comments", wait.clone()).await;
-    assert!(mine.contains("\"for\": \"you\""), "{mine}");
-    let mentions = json!({ "designId": id, "mentions": true, "wait": 1 });
-    assert!(
-        bo.ok("comments", mentions.clone())
-            .await
-            .contains("Ask the client")
-    );
-    assert!(
-        ada.ok("comments", mentions)
-            .await
-            .contains("No comments arrived")
-    );
-
-    // Passing stops a comment waking you until a person writes in it again.
-    let any = post(Audience::Agents, "Make it orange");
+    // Passing hands it to the other agent, and a person's follow-up goes
+    // back to the agent that took it.
     let passed = ada
         .ok(
             "comments",
-            json!({ "designId": id, "pass": [any.id], "wait": 1 }),
+            json!({ "designId": id, "pass": [orange.id], "wait": 1 }),
         )
         .await;
     assert!(
-        passed.contains("Passed on") && passed.contains("No comments arrived"),
+        passed.contains("Passed on") && none(passed.clone()),
         "{passed}"
     );
     let theirs = bo.ok("comments", wait.clone()).await;
@@ -1143,21 +1112,63 @@ async fn agents_hear_only_the_comments_for_them() {
         "{theirs}"
     );
     handle
-        .reply(&any.id, person.clone(), "Darker, please", None)
+        .reply(&orange.id, person.clone(), "Darker, please", None)
         .unwrap();
+    assert!(none(ada.ok("comments", wait.clone()).await));
     assert!(
-        ada.ok("comments", wait.clone())
+        bo.ok("comments", wait.clone())
             .await
             .contains("Darker, please")
     );
 
-    // Listening to another page hears nothing from this one.
-    let drafts = json!({ "designId": id, "page": "Drafts", "wait": 1 });
+    // A person's pick wins.
+    handle
+        .set_audience(
+            &orange.id,
+            Audience::Agent {
+                id: "agent:Ada".into(),
+                name: "Ada".into(),
+            },
+        )
+        .unwrap();
+    assert!(none(bo.ok("comments", wait.clone()).await));
+    let mentions = json!({ "designId": id, "mentions": true, "wait": 1 });
     assert!(
-        ada.ok("comments", drafts)
+        ada.ok("comments", mentions)
             .await
-            .contains("No comments arrived")
+            .contains("Darker, please")
     );
+
+    // An agent marks a note between people, and then nobody gets it.
+    let note = post(Audience::Agents, "Ask the client about blue");
+    let marked = ada
+        .ok(
+            "comments",
+            json!({ "designId": id, "forPeople": [note.id], "wait": 1 }),
+        )
+        .await;
+    assert!(
+        marked.contains("Marked") && !marked.contains("Ask the client"),
+        "{marked}"
+    );
+    let listed = bo.ok("comments", json!({ "designId": id })).await;
+    assert!(listed.contains("\"for\": \"people\""), "{listed}");
+    let overview = bo.ok("read", json!({ "designId": id })).await;
+    assert!(
+        overview.contains("2 open comments (0 waiting for you)"),
+        "{overview}"
+    );
+    assert!(
+        !overview.contains("waiting for you: call comments"),
+        "{overview}"
+    );
+
+    // Filters narrow what an agent hears.
+    handle
+        .reply(&orange.id, person.clone(), "Even darker", None)
+        .unwrap();
+    let drafts = json!({ "designId": id, "page": "Drafts", "wait": 1 });
+    assert!(none(ada.ok("comments", drafts).await));
     let home = json!({ "designId": id, "select": format!("#{board}"), "wait": 1 });
-    assert!(ada.ok("comments", home).await.contains("Darker, please"));
+    assert!(ada.ok("comments", home).await.contains("Even darker"));
 }

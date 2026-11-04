@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import type { Author, Comment } from "@/design/schema";
-import { audienceLabel, audienceOf, knownAgents } from "./audience";
+import { audienceLabel, audienceOf, knownAgents, routeLabel } from "./audience";
 
 const person: Author = { id: "user:ada", name: "Ada", kind: "user" };
 const agent: Author = { id: "agent:designer", name: "Designer", kind: "agent" };
@@ -23,7 +23,14 @@ function comment(over: Partial<Comment> = {}): Comment {
 describe("audienceOf", () => {
   it("is any agent for comments from before audiences", () => {
     expect(audienceOf(comment())).toEqual({ kind: "agents" });
-    expect(audienceLabel(audienceOf(comment()))).toBe("For any agent");
+    expect(audienceLabel(audienceOf(comment()))).toBe("Any agent");
+  });
+
+  it("names the agent that took a comment, unless a person picked one", () => {
+    expect(routeLabel(comment({ takenBy: agent }))).toBe("With Designer");
+    expect(routeLabel(comment({ takenBy: agent, audience: { kind: "people" } }))).toBe(
+      "People only",
+    );
   });
 
   it("names the agent a comment is for", () => {
