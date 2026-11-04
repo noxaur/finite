@@ -985,8 +985,16 @@ impl DesignHandle {
             at: now,
             scope,
         };
-        if state.listening.insert(agent.id.clone(), listener).is_none() {
-            let _ = state.events.send(state.presence_message());
+        match state.listening.insert(agent.id.clone(), listener) {
+            None => {
+                let _ = state.events.send(state.presence_message());
+            }
+            // It listens to something else now, so comments it held may go
+            // to agents already waiting.
+            Some(before) if state.listening[&agent.id].scope != before.scope => {
+                self.comments.notify_waiters();
+            }
+            Some(_) => {}
         }
         let ids: Vec<String> = {
             let listening = listening_for(&state, now);

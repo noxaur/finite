@@ -244,7 +244,7 @@ impl Comment {
 
 /// What an agent listens to, for one `comments` call. The default admits
 /// every comment.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Listening {
     /// Elements. A comment is in scope when its artboard or one of its
     /// elements is one of these or inside one.
