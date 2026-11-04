@@ -123,3 +123,31 @@ What made the difference:
 - **`get_layout`.** It lists every element with where it rendered, and flags content cut off by the artboard's edge, text overflowing its box, and text overlapping other text. It takes no picture and answers in about 0.4 s. Agents used it in every `pins` and `overlap` run and stopped taking screenshots to find positions. Its first version gave only element boxes. A heading's box can span the page while its text is 70 px wide, so agents centered pins on empty space. Now it also says where an element's text sits when that's much smaller than its box.
 - **Shared CSS for every agent.** With the tools on, every `screens-change` agent put the top bar's styles in the shared CSS. The change was then one `set_shared_css` and one screenshot. Without them, agents edited each screen.
 - **Accepting what agents meant.** `get_screenshot` and `get_layout` with only a `designId` now cover every artboard, which every `overlap` agent on the old build tried, and got an error. Passing the `designId` as a `nodeId` says so. `create_artboard` takes `class`, because two agents styled `.screen` in a `<style>` block and found the artboard itself had no class.
+
+## What the third study found: six tools
+
+Finite's ~35 tools cost an agent a call for nearly every element it touched. The redesign, doc6, has six: `designs`, `read`, `edit`, `render`, `comments` and `undo`. Elements are addressed with CSS selectors, and one `edit` call is a list of ops that apply all or nothing, as one change and one undo step. It was tried first as a mock surface (`--surface`, PR #41), against a 24-tool design with the same parameter names everywhere. doc6 took 123 calls to the other's 149 and today's 198 on Haiku, with level grades, so it was built (#75, #76, #78) and is now what `/mcp` serves. `--env FINITE_MCP_SURFACE=classic` runs today's tools instead, for comparisons.
+
+On the real build, every task passed every check on both surfaces:
+
+| Tasks                                       | Model         | Classic calls | doc6 calls   |
+| ------------------------------------------- | ------------- | ------------- | ------------ |
+| 9 small-design tasks × 2                    | Haiku low     | 181, 7 errors | 102, 1 error |
+| 9 small-design tasks × 2                    | Sonnet medium | 143           | 91 (−36%)    |
+| `big-edit` and `big-wiki` × 2 (large pages) | Sonnet medium | 156           | 56 (−64%)    |
+
+The small tasks are the first study's six plus `delete-design`, `import-page` and `export-figma`. The gap is widest on large pages, because classic agents read and edit them element by element. One Haiku agent took 119 calls to change a word through the Wikipedia article, which is one `replace` op on doc6.
+
+`big-edit` and `big-wiki` edit inside real websites saved as one HTML file each, with their CSS inlined: Stripe's home page (4,800 nodes, 560 KB of CSS) and Wikipedia's Typography article (6,700 nodes). Third-party pages aren't committed, so save your own and point `FINITE_AX_PAGES` at their folder. To save one, open the page in a browser, inline every `document.styleSheets` rule into one `<style>` (fetch cross-origin sheets yourself), and save `document.documentElement.outerHTML`.
+
+What the rounds changed, each from a transcript or an agent's feedback:
+
+- **A design's name works as its `designId`.** 2 of 3 `rebrand` agents on the first mock passed "Acme site" and got an error.
+- **The layout check runs after every edit**, because agents asked for it on almost every edit. It waits up to 5 s for a cold browser: with a 1 s wait it often came back empty, and agents rendered to find out.
+- **`dryRun`.** Four agents asked to preview a broad `replace` before applying it.
+- **A rewrite keeps ids.** An `html` op with mode `inner` or `replace` updates the elements that keep their `data-id`, and keeps what another agent changed since this one read them (#68, #70, #73). Before, a rewrite gave every element a new id, left comment pins on deleted nodes, and could wipe another agent's newer change.
+- **`replace` can look only in text.** A Sonnet agent renamed "typeface" through the article with `includeText`, which also rewrote 30 links, ids and titles. It spent 215 s and five `Bash` calls putting them back. With `in: "text"` (#79), the same task took 6 or 7 calls and 16 s.
+- **A `remove` whose matches nest is refused.** `:has(…)` matches every ancestor of its target, and a dry run of one such remove would have deleted a whole imported page.
+- **Large imports work.** Imported pages were cut to 900 px, lost their `html`/`body`/`:root` CSS, and returned 51 KB of diagnostics (#71).
+
+When a mock and a real build disagree, read the transcripts before trusting either: the real build's first round was 13 calls worse than the mock, from the layout check's short wait and a missing overlap check, both found in transcripts.

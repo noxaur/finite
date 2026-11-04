@@ -68,9 +68,12 @@ const freePort = () =>
 /** A Chromium for get_screenshot, if the server wouldn't find one itself. */
 function defaultChrome() {
   return (
-    ["/opt/helium-browser-bin/chrome", "/usr/bin/google-chrome", "/usr/bin/chromium"].find((p) =>
-      fs.existsSync(p),
-    ) ?? ""
+    [
+      "/opt/helium-browser-bin/chrome",
+      "/usr/bin/google-chrome",
+      "/usr/bin/chromium",
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    ].find((p) => fs.existsSync(p)) ?? ""
   );
 }
 
@@ -119,7 +122,8 @@ async function startServer(bin) {
     api,
     stop() {
       child.kill();
-      fs.rmSync(data, { recursive: true, force: true });
+      // The server may still be writing its last save as it exits.
+      fs.rmSync(data, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     },
   };
 }
