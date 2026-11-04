@@ -28,8 +28,8 @@ use crate::{
 pub use design::{Busy, DesignHandle, Edited, Since};
 use design::{DesignState, Life, Save};
 pub use messages::{
-    Actor, DesignMessage, DesignSummary, LobbyMessage, Missed, Outgoing, Presence, SESSION_ACTOR,
-    Stamp,
+    Actor, DesignMessage, DesignSummary, Listener, LobbyMessage, Missed, Outgoing, Presence,
+    SESSION_ACTOR, Stamp,
 };
 
 /// How long an agent's "working on" indicator lasts without activity.

@@ -40,6 +40,18 @@ pub struct Presence {
     pub automatic: bool,
 }
 
+/// An agent that's checking a design for comments, so people can send
+/// comments to it before it has done anything there.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Listener {
+    pub actor: ActorId,
+    pub name: String,
+    /// When it last asked for comments.
+    #[serde(skip)]
+    pub at: u64,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesignSummary {
@@ -72,6 +84,7 @@ pub enum DesignMessage<'a> {
     Snapshot {
         snapshot: &'a Snapshot,
         presence: Vec<&'a Presence>,
+        listening: Vec<&'a Listener>,
         /// Names this load of the design. A viewer that reconnects sends it
         /// back with its `seq` to resume (see [`super::Since`]).
         epoch: &'a str,
@@ -82,6 +95,7 @@ pub enum DesignMessage<'a> {
         changes: Vec<Missed<'a>>,
         comments: &'a [Comment],
         presence: Vec<&'a Presence>,
+        listening: Vec<&'a Listener>,
         meta: &'a DesignMeta,
     },
     Change {
@@ -102,8 +116,10 @@ pub enum DesignMessage<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// Who's working on what, and which agents are listening for comments.
     Presence {
         presence: Vec<&'a Presence>,
+        listening: Vec<&'a Listener>,
     },
     Meta {
         meta: &'a DesignMeta,

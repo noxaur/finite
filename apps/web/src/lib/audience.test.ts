@@ -40,21 +40,26 @@ describe("audienceOf", () => {
 });
 
 describe("knownAgents", () => {
-  it("lists agents from threads and presence once, by name, without people", () => {
+  it("lists agents from threads, listening and presence once, by name, without people", () => {
     const thread = comment({
       messages: [
         { author: person, body: "Hi", at: 0, seq: 0 },
         { author: agent, body: "Done", at: 1, seq: 1 },
       ],
     });
-    const agents = knownAgents(new Map([["c1", thread]]), [
-      { actor: "agent:designer", name: "Designer 2", nodeIds: [], status: null, updatedAt: 0 },
-      { actor: "mcp:s1", name: "Claude", nodeIds: [], status: null, updatedAt: 0 },
-      { actor: "user:bo", name: "Bo", nodeIds: [], status: null, updatedAt: 0 },
-    ]);
+    const agents = knownAgents(
+      new Map([["c1", thread]]),
+      [
+        { actor: "agent:designer", name: "Designer 2", nodeIds: [], status: null, updatedAt: 0 },
+        { actor: "mcp:s1", name: "Claude", nodeIds: [], status: null, updatedAt: 0 },
+        { actor: "user:bo", name: "Bo", nodeIds: [], status: null, updatedAt: 0 },
+      ],
+      [{ actor: "agent:quiet", name: "Quiet" }],
+    );
     expect(agents).toEqual([
       { id: "mcp:s1", name: "Claude" },
       { id: "agent:designer", name: "Designer 2" },
+      { id: "agent:quiet", name: "Quiet" },
     ]);
   });
 });

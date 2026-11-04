@@ -1,4 +1,4 @@
-import type { Audience, Comment, Presence } from "@/design/schema";
+import type { Audience, Comment, Listener, Presence } from "@/design/schema";
 
 export const ANY_AGENT: Audience = { kind: "agents" };
 
@@ -35,12 +35,13 @@ export interface KnownAgent {
 }
 
 /**
- * Agents a person can direct a comment at: agents that wrote in this
- * design's threads, and agents here now, by name.
+ * Agents a person can send a comment to: agents that wrote in this design's
+ * threads, agents listening for comments, and agents here now, by name.
  */
 export function knownAgents(
   comments: ReadonlyMap<string, Comment>,
   presence: ReadonlyArray<Presence>,
+  listening: ReadonlyArray<Listener>,
 ): ReadonlyArray<KnownAgent> {
   const agents = new Map<string, string>();
   for (const comment of comments.values()) {
@@ -48,6 +49,7 @@ export function knownAgents(
       if (author.kind === "agent") agents.set(author.id, author.name);
     }
   }
+  for (const l of listening) agents.set(l.actor, l.name);
   // Presence has the newest name, so it goes last.
   for (const p of presence) {
     if (p.actor.startsWith("agent:") || p.actor.startsWith("mcp:")) agents.set(p.actor, p.name);

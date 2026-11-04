@@ -27,6 +27,7 @@ const snapshot = (presence: ReadonlyArray<Presence> = []): DesignMessage => ({
     comments: [],
   },
   presence,
+  listening: [],
   epoch: "e1",
 });
 
@@ -101,6 +102,7 @@ describe("DesignSession", () => {
       changes: [...changes.slice(0, 1), ...changes],
       comments: [pin],
       presence: [presence(["b"])],
+      listening: [],
       meta: { id: "d", name: "Renamed", createdAt: 0, updatedAt: 0 },
     });
     expect(view.resets).toBe(1);
@@ -146,7 +148,7 @@ describe("DesignSession", () => {
     const { view, session: s } = session();
     s.receive(snapshot([presence(["b"])]));
     expect(view.working).toEqual(new Map([["a", "Claude: Building"]]));
-    s.receive({ type: "presence", presence: [] });
+    s.receive({ type: "presence", presence: [], listening: [] });
     expect(s.state.working.size).toBe(0);
   });
 
@@ -314,6 +316,7 @@ describe("a person's edits", () => {
       changes: [],
       comments: [],
       presence: [],
+      listening: [],
       meta: { id: "d", name: "Landing", createdAt: 0, updatedAt: 0 },
     });
     expect(sent.map((m) => m.type)).toEqual(["mutate"]);

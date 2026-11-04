@@ -21,8 +21,8 @@ use tokio::sync::{broadcast, watch};
 
 use super::{
     Actor, COMPACT_AFTER, COMPACT_BYTES, DesignMessage, DesignSummary, EVENT_BUFFER, HISTORY_TTL,
-    Missed, Outgoing, PRESENCE_TTL, Presence, RESUME_BYTES, RESUME_LIMIT, SESSION_ACTOR, Stamp,
-    UNLOAD_AFTER, now_ms, random_id,
+    Listener, Missed, Outgoing, PRESENCE_TTL, Presence, RESUME_BYTES, RESUME_LIMIT, SESSION_ACTOR,
+    Stamp, UNLOAD_AFTER, now_ms, random_id,
 };
 use crate::store::{Claim, Store, Stored, Token};
 
@@ -32,7 +32,7 @@ pub(super) struct DesignState {
     last_seen: HashMap<ActorId, u64>,
     /// When each agent last asked for comments. An agent that asked within
     /// [`PRESENCE_TTL`] is listening, so comments can go to it.
-    listening: HashMap<ActorId, u64>,
+    listening: BTreeMap<ActorId, Listener>,
     /// Records not yet written to the store.
     pending: Vec<Record>,
     /// Records in the store's journal since the last snapshot.
@@ -109,7 +109,7 @@ impl DesignState {
             design,
             presence: BTreeMap::new(),
             last_seen: HashMap::new(),
-            listening: HashMap::new(),
+            listening: BTreeMap::new(),
             pending: Vec::new(),
             journaled: 0,
             journal_bytes: 0,
@@ -238,7 +238,14 @@ impl DesignState {
 
     pub(super) fn presence_message(&self) -> Outgoing {
         let presence = self.presence.values().collect();
-        Outgoing::new(None, &DesignMessage::Presence { presence })
+        let listening = self.listening.values().collect();
+        Outgoing::new(
+            None,
+            &DesignMessage::Presence {
+                presence,
+                listening,
+            },
+        )
     }
 
     pub(super) fn touch(&mut self, actor: &Actor, now: u64) {
@@ -512,11 +519,13 @@ impl DesignHandle {
         let rx = state.events.subscribe();
         let seq = state.design.seq();
         let presence = state.presence.values().collect();
+        let listening = state.listening.values().collect();
         if let Some(missed) = since.and_then(|since| state.missed_since(since)) {
             let message = DesignMessage::Resume {
                 changes: missed,
                 comments: state.design.comments(),
                 presence,
+                listening,
                 meta: &state.design.meta,
             };
             return (Outgoing::new(None, &message), seq, rx);
@@ -525,6 +534,7 @@ impl DesignHandle {
         let message = DesignMessage::Snapshot {
             snapshot: &snapshot,
             presence,
+            listening,
             epoch: &state.epoch,
         };
         (Outgoing::new(None, &message), seq, rx)
@@ -951,7 +961,7 @@ impl DesignHandle {
             state
                 .listening
                 .get(id)
-                .is_some_and(|at| now.saturating_sub(*at) < ttl)
+                .is_some_and(|l| now.saturating_sub(l.at) < ttl)
         };
         f(&state.design, &listening)
     }
@@ -966,13 +976,20 @@ impl DesignHandle {
         let mut state = self.lock();
         let now = now_ms();
         state.touch(agent, now);
-        state.listening.insert(agent.id.clone(), now);
+        let listener = Listener {
+            actor: agent.id.clone(),
+            name: agent.name.clone(),
+            at: now,
+        };
+        if state.listening.insert(agent.id.clone(), listener).is_none() {
+            let _ = state.events.send(state.presence_message());
+        }
         let ttl = PRESENCE_TTL.as_millis() as u64;
         let listening = |id: &str| {
             state
                 .listening
                 .get(id)
-                .is_some_and(|at| now.saturating_sub(*at) < ttl)
+                .is_some_and(|l| now.saturating_sub(l.at) < ttl)
         };
         let design = &state.design;
         let ids: Vec<String> = design
@@ -1083,12 +1100,12 @@ impl DesignHandle {
     pub(super) fn forget(&self, actor: &str) {
         let mut state = self.raw();
         let Some(state) = state.as_mut() else { return };
-        if state.presence.remove(actor).is_some() {
+        let present = state.presence.remove(actor).is_some();
+        if state.listening.remove(actor).is_some() || present {
             let _ = state.events.send(state.presence_message());
         }
         state.design.forget_actor(actor);
         state.last_seen.remove(actor);
-        state.listening.remove(actor);
     }
 
     /// Expires stale presence and the histories of long-idle actors. Asks for
@@ -1099,16 +1116,16 @@ impl DesignHandle {
         let Some(state) = state.as_mut() else { return };
         let ttl = PRESENCE_TTL.as_millis() as u64;
         let auto_ttl = super::AUTO_PRESENCE_TTL.as_millis() as u64;
-        let before = state.presence.len();
+        let before = (state.presence.len(), state.listening.len());
         state.presence.retain(|_, p| {
             now.saturating_sub(p.updated_at) < if p.automatic { auto_ttl } else { ttl }
         });
-        if state.presence.len() != before {
-            let _ = state.events.send(state.presence_message());
-        }
         state
             .listening
-            .retain(|_, at| now.saturating_sub(*at) < ttl);
+            .retain(|_, l| now.saturating_sub(l.at) < ttl);
+        if (state.presence.len(), state.listening.len()) != before {
+            let _ = state.events.send(state.presence_message());
+        }
         let ttl = HISTORY_TTL.as_millis() as u64;
         let idle: Vec<ActorId> = state
             .last_seen

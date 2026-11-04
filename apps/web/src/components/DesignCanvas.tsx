@@ -131,7 +131,7 @@ export function DesignCanvas({ id }: { id: string }) {
 
   // Re-rendering on every session update also moves pins with their artboards.
   const [session, setSession] = useState<SessionState>(initialSessionState);
-  const { meta, presence, status, activity, comments, working, pages } = session;
+  const { meta, presence, listening, status, activity, comments, working, pages } = session;
   // The zoom percentage, written by the camera so zooming doesn't re-render the canvas.
   const zoomLabelRef = useRef<HTMLButtonElement>(null);
   const [missing, setMissing] = useState(false);
@@ -744,7 +744,7 @@ export function DesignCanvas({ id }: { id: string }) {
               openId={openId}
               draft={draft}
               working={working}
-              agents={knownAgents(comments, presence)}
+              agents={knownAgents(comments, presence, listening)}
               onOpen={(commentId) => {
                 setDraft(null);
                 setOpenId(commentId);
