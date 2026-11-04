@@ -3,7 +3,8 @@
 import { useEffect } from "react";
 import { PIN_PATH } from "../lib/cursors";
 
-export type PinState = "waiting" | "working" | "replied" | "resolved" | "draft";
+/** `note` is an open comment for people only, which no agent acts on. */
+export type PinState = "waiting" | "working" | "replied" | "resolved" | "note" | "draft";
 
 const INK = "#1a1a18";
 const BLUE = "#2563eb";
@@ -14,6 +15,7 @@ const LOOK: Record<PinState, { fill: string; stroke: string; dots: boolean }> = 
   working: { fill: INK, stroke: INK, dots: true },
   replied: { fill: BLUE, stroke: BLUE, dots: true },
   resolved: { fill: GREEN, stroke: GREEN, dots: false },
+  note: { fill: "#fafbfd", stroke: INK, dots: false },
   draft: { fill: "#fff", stroke: INK, dots: false },
 };
 

@@ -1,6 +1,6 @@
 import { Context, Effect, flow, Layer, Schema } from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
-import { Comment, DesignSummary, Snapshot } from "@/design/schema";
+import { type Audience, Comment, DesignSummary, Snapshot } from "@/design/schema";
 
 /** Who is commenting. Users have no accounts yet; see `@/lib/user`. */
 export interface CommentAuthor {
@@ -18,6 +18,7 @@ export interface NewComment {
   readonly extraNodeIds: ReadonlyArray<string>;
   readonly x: number;
   readonly y: number;
+  /** Who it's for. Any agent when left out. */
 }
 
 /** What an edit made: its change's `seq`, or `null` when nothing changed. */
@@ -123,6 +124,12 @@ export class Api extends Context.Service<
       designId: string,
       commentId: string,
       resolved: boolean,
+    ): Effect.Effect<Comment, ApiError | Refused>;
+    /** Changes who a comment is for, open or resolved. */
+    setCommentAudience(
+      designId: string,
+      commentId: string,
+      audience: Audience,
     ): Effect.Effect<Comment, ApiError | Refused>;
     /** Replaces the thread's newest message, which `author` must have written. */
     editLastMessage(
@@ -274,6 +281,15 @@ export class Api extends Context.Service<
         return yield* sendComment(HttpClientRequest.patch(path), { resolved });
       });
 
+      const setCommentAudience = Effect.fn("Api.setCommentAudience")(function* (
+        designId: string,
+        commentId: string,
+        audience: Audience,
+      ) {
+        const path = `${comments(designId)}/${encodeURIComponent(commentId)}`;
+        return yield* sendComment(HttpClientRequest.patch(path), { audience });
+      });
+
       const editLastMessage = Effect.fn("Api.editLastMessage")(function* (
         designId: string,
         commentId: string,
@@ -355,6 +371,7 @@ export class Api extends Context.Service<
         createComment,
         replyToComment,
         setCommentResolved,
+        setCommentAudience,
         editLastMessage,
         deleteComment,
         importFile,

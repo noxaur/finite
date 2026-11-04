@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use finite_design::{
     Design, DesignMeta, KeptNode, Merged, Op, PropKey, Snapshot,
-    comment::{Anchor, Author, AuthorKind},
+    comment::{Anchor, Audience, Author, AuthorKind},
     edit::{self, NewArtboard, WriteMode},
     html::{self, ExportOptions},
 };
@@ -179,7 +179,14 @@ fn a_comment_pinned_to_a_rewritten_element_still_finds_it() {
         y: 10.0,
     };
     b.design
-        .add_comment(author, anchor, "Say Upgrade", &mut || "c".into(), 0)
+        .add_comment(
+            author,
+            anchor,
+            Audience::Agents,
+            "Say Upgrade",
+            &mut || "c".into(),
+            0,
+        )
         .unwrap();
     let html = b.read(&section).replace(">Buy<", ">Upgrade<");
     b.write("A", &section, &html, WriteMode::Replace);

@@ -3,6 +3,7 @@
   "design": [
     {
       "epoch": "epoch1",
+      "listening": [],
       "presence": [],
       "snapshot": {
         "comments": [],
@@ -99,6 +100,7 @@
       "type": "change"
     },
     {
+      "listening": [],
       "presence": [
         {
           "actor": "agent:Claude",
@@ -220,6 +222,11 @@
         "resolved": true,
         "resolvedAt": 0,
         "rev": 1,
+        "takenBy": {
+          "id": "agent:Claude",
+          "kind": "agent",
+          "name": "Claude"
+        },
         "x": 24.0,
         "y": 16.0
       },
@@ -783,6 +790,11 @@
           "resolved": true,
           "resolvedAt": 0,
           "rev": 1,
+          "takenBy": {
+            "id": "agent:Claude",
+            "kind": "agent",
+            "name": "Claude"
+          },
           "x": 24.0,
           "y": 16.0
         },
@@ -814,6 +826,7 @@
           "y": 5.0
         }
       ],
+      "listening": [],
       "meta": {
         "createdAt": 0,
         "id": "design1",
@@ -835,6 +848,7 @@
     },
     {
       "epoch": "epoch1",
+      "listening": [],
       "presence": [
         {
           "actor": "agent:Claude",
@@ -894,6 +908,11 @@
             "resolved": true,
             "resolvedAt": 0,
             "rev": 1,
+            "takenBy": {
+              "id": "agent:Claude",
+              "kind": "agent",
+              "name": "Claude"
+            },
             "x": 24.0,
             "y": 16.0
           },

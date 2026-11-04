@@ -78,7 +78,9 @@ pub(super) async fn read(
         ),
         (_, None) => {
             let presence = handle.presence();
-            ok(handle.read(|d| overview(d, &presence, actor, page.as_deref(), p.depth)))
+            ok(handle.with_routes(|d, listening| {
+                overview(d, listening, &presence, actor, page.as_deref(), p.depth)
+            }))
         }
         (Some("html"), Some(ids)) => ok(handle.read(|d| html_view(d, &ids, p.depth))),
         (Some("outline") | None, Some(ids)) => {
@@ -118,6 +120,7 @@ fn more(ids: &[NodeId]) -> String {
 
 fn overview(
     design: &Design,
+    listening: &dyn Fn(&str, &finite_design::comment::Comment) -> bool,
     presence: &[crate::hub::Presence],
     me: &Actor,
     page: Option<&str>,
@@ -127,13 +130,21 @@ fn overview(
     let count = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
     let boards = doc.artboards();
     let open = design.comments().iter().filter(|c| !c.resolved).count();
+    let mine = design
+        .comments()
+        .iter()
+        .filter(|c| design.awaits(c, &me.id, |id| listening(id, c)))
+        .count();
+    let comments = match open {
+        0 => count(open, "open comment"),
+        _ => format!("{} ({mine} waiting for you)", count(open, "open comment")),
+    };
     let mut lines = vec![format!(
-        "Design {:?} (designId {:?}): {}, {}, {}, {}.",
+        "Design {:?} (designId {:?}): {}, {}, {comments}, {}.",
         design.meta.name,
         design.meta.id,
         count(boards.len(), "artboard"),
         count(doc.len(), "node"),
-        count(open, "open comment"),
         count(doc.tokens().len(), "token"),
     )];
     let pages = doc.pages();
@@ -163,8 +174,12 @@ fn overview(
                 .unwrap_or_default()
         ));
     }
-    if open > 0 {
-        lines.push("Open comments: call comments to read them.".into());
+    match mine {
+        0 => {}
+        1 => lines.push("1 comment is waiting for you: call comments to read it.".into()),
+        n => lines.push(format!(
+            "{n} comments are waiting for you: call comments to read them."
+        )),
     }
     if let Some(list) = components_line(design.doc()) {
         lines.push(list);

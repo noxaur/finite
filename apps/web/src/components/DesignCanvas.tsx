@@ -9,6 +9,8 @@ import { Camera, mostVisible, union, type View } from "@/design/camera";
 import { Editor } from "@/design/editing/editor";
 import { type Hit, Renderer } from "@/design/renderer";
 import { Replica } from "@/design/replica";
+import type { Audience } from "@/design/schema";
+import { knownAgents } from "@/lib/audience";
 import { DesignSession, initialSessionState, type SessionState } from "@/design/session";
 import { loadDesignModel } from "@/design/wasm";
 import { mcpUrl } from "@/lib/mcp";
@@ -129,7 +131,7 @@ export function DesignCanvas({ id }: { id: string }) {
 
   // Re-rendering on every session update also moves pins with their artboards.
   const [session, setSession] = useState<SessionState>(initialSessionState);
-  const { meta, presence, status, activity, comments, working, pages } = session;
+  const { meta, presence, listening, status, activity, comments, working, pages } = session;
   // The zoom percentage, written by the camera so zooming doesn't re-render the canvas.
   const zoomLabelRef = useRef<HTMLButtonElement>(null);
   const [missing, setMissing] = useState(false);
@@ -579,6 +581,14 @@ export function DesignCanvas({ id }: { id: string }) {
     setPanel("import");
   };
 
+  const setAudience = (commentId: string, audience: Audience) => {
+    void runtime
+      .runPromiseExit(Api.use((api) => api.setCommentAudience(id, commentId, audience)))
+      .then((exit) => {
+        if (Exit.isSuccess(exit)) sessionRef.current?.upsertComment(exit.value);
+      });
+  };
+
   const resolve = (commentId: string, resolved: boolean) => {
     void runtime
       .runPromiseExit(Api.use((api) => api.setCommentResolved(id, commentId, resolved)))
@@ -734,6 +744,7 @@ export function DesignCanvas({ id }: { id: string }) {
               openId={openId}
               draft={draft}
               working={working}
+              agents={knownAgents(comments, presence, listening)}
               onOpen={(commentId) => {
                 setDraft(null);
                 setOpenId(commentId);
@@ -742,6 +753,7 @@ export function DesignCanvas({ id }: { id: string }) {
               onCancelDraft={() => setDraft(null)}
               onReply={reply}
               onResolve={resolve}
+              onAudience={setAudience}
               onEdit={editMessage}
               onDelete={deleteComment}
               onShowChange={(nodeIds) => setFlash([...nodeIds])}

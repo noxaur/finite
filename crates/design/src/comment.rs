@@ -11,6 +11,15 @@
 //!   current state unless it asks to resolve or reopen.
 //! - A person can edit their own message while it's the thread's newest, so
 //!   never one an agent has already answered.
+//! - A waiting comment goes to one agent, picked by [`Comment::routed_to`]:
+//!   the agent that took it, else the agent a person picked, else the agent
+//!   that last edited its artboard, as long as that agent is listening.
+//!   Otherwise the first listening agent to ask takes it.
+//!   [`crate::Design::awaits`] is the one rule for "should this agent act now".
+//! - A comment's [`Audience`] can make it a note between people, which never
+//!   goes to an agent. An agent that reads a note can mark it so.
+//! - An agent can pass on a comment, so it goes to another agent. A person's
+//!   new message, an edit of it, or a new audience clears the passes.
 
 use std::{
     collections::{BTreeSet, HashSet, VecDeque},
@@ -52,6 +61,53 @@ pub struct Author {
     pub id: ActorId,
     pub name: String,
     pub kind: AuthorKind,
+}
+
+/// Who a comment is for. It's any agent unless someone changes it with
+/// [`crate::Design::set_audience`]. It holds for the whole thread.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Audience {
+    /// Whichever agent [`Comment::routed_to`] picks. The default, so
+    /// comments saved before audiences existed still wake agents.
+    #[default]
+    Agents,
+    /// A note between people. It never wakes an agent.
+    People,
+    /// One agent, by actor id (`agent:…` or `mcp:…`), while it's listening.
+    /// `name` is its name when it was picked, so a viewer can label the pin
+    /// after the agent has gone.
+    Agent { id: ActorId, name: String },
+}
+
+impl Audience {
+    pub fn is_agents(&self) -> bool {
+        matches!(self, Self::Agents)
+    }
+}
+
+/// Whether `id` is an agent's actor id: `agent:…` or `mcp:…`.
+pub fn is_agent(id: &str) -> bool {
+    id.starts_with("agent:") || id.starts_with("mcp:")
+}
+
+/// Checks an audience a person picked: one agent must have an agent's id.
+/// An empty name becomes the id, and a long one is clipped.
+pub(crate) fn check_audience(audience: Audience) -> Result<Audience, CommentError> {
+    let Audience::Agent { id, name } = audience else {
+        return Ok(audience);
+    };
+    let rest = id.split_once(':').map(|(_, rest)| rest);
+    if !is_agent(&id)
+        || rest.is_none_or(|rest| rest.is_empty() || rest.chars().count() > MAX_USER_ID)
+    {
+        return Err(CommentError::BadAudience);
+    }
+    let name = match crate::label::clip(&name, MAX_NAME) {
+        name if name.is_empty() => crate::label::clip(&id, MAX_NAME),
+        name => name,
+    };
+    Ok(Audience::Agent { id, name })
 }
 
 /// An edit linked from a reply: its change `seq`, label, and the outermost
@@ -112,6 +168,15 @@ pub struct Comment {
     /// keeps whichever copy is newer.
     #[serde(default)]
     pub rev: u64,
+    #[serde(default, skip_serializing_if = "Audience::is_agents")]
+    pub audience: Audience,
+    /// Agents that passed on it since a person last wrote in it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passed_by: Vec<Author>,
+    /// The agent that last took it to work on or replied in it, so a
+    /// person's follow-up goes back to the same agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taken_by: Option<Author>,
 }
 
 /// A point on the canvas.
@@ -127,13 +192,99 @@ impl Comment {
         self.messages.last().map_or(0, |m| m.seq)
     }
 
-    /// Whether an agent should act on this: it's open, and a user wrote last.
-    pub fn awaits_agent(&self) -> bool {
-        !self.resolved
-            && self
-                .messages
-                .last()
-                .is_some_and(|m| m.author.kind == AuthorKind::User)
+    /// Whether an agent should act on it: it's open, a person wrote last, and
+    /// it isn't a note for people.
+    pub fn waiting(&self) -> bool {
+        let person_last = self
+            .messages
+            .last()
+            .is_some_and(|m| m.author.kind == AuthorKind::User);
+        !self.resolved && person_last && self.audience != Audience::People
+    }
+
+    pub fn passed(&self, agent: &str) -> bool {
+        self.passed_by.iter().any(|p| p.id == agent)
+    }
+
+    /// The agent this comment goes to, or `None` for the first agent that
+    /// asks. It's the first of these that is `listening` and hasn't passed on
+    /// it: the agent that took it (so it never goes to two agents at once),
+    /// the agent a person picked, and `last_editor`, the agent that last
+    /// edited its artboard. Picking an agent clears who took it.
+    pub fn routed_to<'a>(
+        &'a self,
+        last_editor: Option<&'a str>,
+        listening: impl Fn(&str) -> bool,
+    ) -> Option<&'a str> {
+        let picked = match &self.audience {
+            Audience::Agent { id, .. } => Some(id.as_str()),
+            _ => None,
+        };
+        [
+            self.taken_by.as_ref().map(|a| a.id.as_str()),
+            picked,
+            last_editor,
+        ]
+        .into_iter()
+        .flatten()
+        .find(|id| listening(id) && !self.passed(id))
+    }
+
+    /// The name of agent `id`, as this comment knows it, or the id.
+    pub fn agent_name<'a>(&'a self, id: &'a str) -> &'a str {
+        match &self.audience {
+            Audience::Agent { id: a, name } if a == id => name,
+            _ => match &self.taken_by {
+                Some(a) if a.id == id => &a.name,
+                _ => id,
+            },
+        }
+    }
+}
+
+/// What an agent listens to, for one `comments` call. The default admits
+/// every comment.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Listening {
+    /// Elements. A comment is in scope when its artboard or one of its
+    /// elements is one of these or inside one.
+    pub within: Option<HashSet<NodeId>>,
+    /// A page id. A comment is in scope when its artboard is on that page.
+    pub page: Option<String>,
+    /// Only comments a person addressed to the agent itself.
+    pub mentions: bool,
+}
+
+impl Listening {
+    pub fn admits(&self, doc: &Document, comment: &Comment, me: &str) -> bool {
+        if self.mentions && !matches!(&comment.audience, Audience::Agent { id, .. } if id == me) {
+            return false;
+        }
+        let board = comment.artboard_id.as_deref().and_then(|id| doc.get(id));
+        if let Some(page) = &self.page
+            && board.is_none_or(|board| board.parent.is_some() || doc.page_of(board) != page)
+        {
+            return false;
+        }
+        let Some(within) = &self.within else {
+            return true;
+        };
+        let inside = |id: &str| {
+            let mut at = Some(id);
+            while let Some(id) = at {
+                if within.contains(id) {
+                    return true;
+                }
+                at = doc.get(id).and_then(|n| n.parent.as_deref());
+            }
+            false
+        };
+        comment
+            .artboard_id
+            .iter()
+            .chain(&comment.node_id)
+            .chain(&comment.extra_node_ids)
+            .any(|id| doc.contains(id) && inside(id))
     }
 }
 
@@ -167,6 +318,8 @@ pub enum CommentError {
     BadSelection,
     /// Only the newest message can be edited, and only by its author.
     NotEditable,
+    /// One agent named by an id that isn't an agent's.
+    BadAudience,
 }
 
 impl fmt::Display for CommentError {
@@ -196,6 +349,9 @@ impl fmt::Display for CommentError {
             ),
             Self::NotEditable => f.write_str(
                 "only your own message can be edited, while it's the newest in the thread",
+            ),
+            Self::BadAudience => f.write_str(
+                "a comment can be for agents, for people, or for one agent by its id (agent:… or mcp:…)",
             ),
         }
     }
@@ -329,6 +485,15 @@ impl ChangeLog {
         if self.entries.len() > LOG_LIMIT {
             self.entries.pop_front();
         }
+    }
+
+    /// The agent that made the latest logged change to `artboard`.
+    pub(crate) fn last_agent_on(&self, artboard: &str) -> Option<&str> {
+        self.entries
+            .iter()
+            .rev()
+            .find(|e| is_agent(&e.actor) && e.artboards.contains(artboard))
+            .map(|e| e.actor.as_str())
     }
 
     /// `actor`'s changes after `seq`, oldest first. With `artboard`, only the
@@ -506,9 +671,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_comment_awaits_an_agent_until_one_answers() {
-        let message = |kind| Message {
+    fn message(kind: AuthorKind) -> Message {
+        Message {
             author: Author {
                 id: "x".into(),
                 name: "X".into(),
@@ -519,11 +683,14 @@ mod tests {
             seq: 0,
             changes: Vec::new(),
             edited_at: None,
-        };
-        let mut comment = Comment {
+        }
+    }
+
+    fn comment(audience: Audience) -> Comment {
+        Comment {
             id: "c".into(),
-            artboard_id: None,
-            node_id: None,
+            artboard_id: Some("board".into()),
+            node_id: Some("child".into()),
             extra_node_ids: Vec::new(),
             x: 0.0,
             y: 0.0,
@@ -533,13 +700,146 @@ mod tests {
             messages: vec![message(AuthorKind::User)],
             detached_at: None,
             rev: 0,
-        };
-        assert!(comment.awaits_agent());
+            audience,
+            passed_by: Vec::new(),
+            taken_by: None,
+        }
+    }
+
+    #[test]
+    fn a_comment_waits_until_an_agent_answers() {
+        let mut comment = comment(Audience::Agents);
+        assert!(comment.waiting());
         comment.messages.push(message(AuthorKind::Agent));
-        assert!(!comment.awaits_agent(), "an agent answered");
+        assert!(!comment.waiting(), "an agent answered");
         comment.messages.push(message(AuthorKind::User));
-        assert!(comment.awaits_agent(), "the user replied");
+        assert!(comment.waiting(), "the user replied");
         comment.resolved = true;
-        assert!(!comment.awaits_agent(), "resolved");
+        assert!(!comment.waiting(), "resolved");
+        assert!(!self::comment(Audience::People).waiting(), "a note");
+    }
+
+    #[test]
+    fn a_comment_goes_to_the_first_listening_agent_in_line() {
+        let agent = |id: &str| Author {
+            id: id.into(),
+            name: id.into(),
+            kind: AuthorKind::Agent,
+        };
+        let all = |_: &str| true;
+        let mut c = comment(Audience::Agents);
+        assert_eq!(c.routed_to(None, all), None, "anyone");
+        assert_eq!(c.routed_to(Some("agent:e"), all), Some("agent:e"));
+        c.taken_by = Some(agent("agent:t"));
+        assert_eq!(c.routed_to(Some("agent:e"), all), Some("agent:t"));
+        c.audience = Audience::Agent {
+            id: "agent:p".into(),
+            name: "P".into(),
+        };
+        assert_eq!(
+            c.routed_to(Some("agent:e"), all),
+            Some("agent:t"),
+            "the picked agent came back after another took it"
+        );
+        assert_eq!(c.agent_name("agent:p"), "P");
+        assert_eq!(
+            c.routed_to(Some("agent:e"), |id| id != "agent:t"),
+            Some("agent:p"),
+            "the agent that took it stopped listening"
+        );
+        c.passed_by.push(agent("agent:t"));
+        assert_eq!(
+            c.routed_to(Some("agent:e"), |id| id != "agent:p"),
+            Some("agent:e"),
+            "the agent that took it passed"
+        );
+        assert_eq!(c.routed_to(None, |id| id != "agent:p"), None);
+    }
+
+    #[test]
+    fn an_audience_names_an_agent_by_its_id() {
+        let agent = |id: &str, name: &str| Audience::Agent {
+            id: id.into(),
+            name: name.into(),
+        };
+        assert_eq!(
+            check_audience(agent("agent:a", "  ")),
+            Ok(agent("agent:a", "agent:a"))
+        );
+        assert_eq!(
+            check_audience(agent("mcp:s1", "Claude")),
+            Ok(agent("mcp:s1", "Claude"))
+        );
+        for id in ["", "agent:", "b7f3", "user:x"] {
+            assert_eq!(
+                check_audience(agent(id, "X")),
+                Err(CommentError::BadAudience),
+                "{id:?}"
+            );
+        }
+        assert_eq!(check_audience(Audience::People), Ok(Audience::People));
+    }
+
+    #[test]
+    fn old_comments_are_for_agents() {
+        let mut json = serde_json::to_value(comment(Audience::Agents)).unwrap();
+        assert!(json.get("audience").is_none(), "the default isn't written");
+        json.as_object_mut().unwrap().remove("passedBy");
+        let loaded: Comment = serde_json::from_value(json).unwrap();
+        assert_eq!(loaded.audience, Audience::Agents);
+        assert!(loaded.passed_by.is_empty());
+        let people = serde_json::to_value(comment(Audience::People)).unwrap();
+        assert_eq!(people["audience"], serde_json::json!({"kind": "people"}));
+    }
+
+    #[test]
+    fn listening_admits_comments_on_its_part() {
+        let doc = doc();
+        let on_board = comment(Audience::Agents);
+        let elsewhere = Comment {
+            artboard_id: Some("other".into()),
+            node_id: None,
+            ..comment(Audience::Agents)
+        };
+        let canvas = Comment {
+            artboard_id: None,
+            node_id: None,
+            ..comment(Audience::Agents)
+        };
+        let all = Listening::default();
+        assert!(all.admits(&doc, &on_board, "agent:a"));
+        assert!(all.admits(&doc, &canvas, "agent:a"));
+
+        let within = |ids: &[&str]| Listening {
+            within: Some(ids.iter().map(|&id| id.to_owned()).collect()),
+            ..Listening::default()
+        };
+        assert!(within(&["board"]).admits(&doc, &on_board, "agent:a"));
+        assert!(within(&["child"]).admits(&doc, &on_board, "agent:a"));
+        assert!(!within(&["text"]).admits(&doc, &on_board, "agent:a"));
+        assert!(!within(&["board"]).admits(&doc, &elsewhere, "agent:a"));
+        assert!(!within(&["board"]).admits(&doc, &canvas, "agent:a"));
+
+        let page = Listening {
+            page: Some(crate::FIRST_PAGE.into()),
+            ..Listening::default()
+        };
+        assert!(page.admits(&doc, &on_board, "agent:a"));
+        assert!(
+            !page.admits(&doc, &canvas, "agent:a"),
+            "canvas pins are on no page"
+        );
+
+        let mentions = Listening {
+            mentions: true,
+            ..Listening::default()
+        };
+        assert!(!mentions.admits(&doc, &on_board, "agent:a"));
+        let mine = comment(Audience::Agent {
+            id: "agent:a".into(),
+            name: "A".into(),
+        });
+        assert!(mentions.admits(&doc, &mine, "agent:a"));
+        assert!(!mentions.admits(&doc, &mine, "agent:b"));
     }
 }

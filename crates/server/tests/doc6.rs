@@ -7,7 +7,7 @@ use std::{sync::Arc, time::Duration};
 
 use agent::{Agent, id_after};
 use axum::Router;
-use finite_design::comment::{Anchor, Author, AuthorKind};
+use finite_design::comment::{Anchor, Audience, Author, AuthorKind};
 use finite_server::{Hub, app, store::MemoryStore};
 use serde_json::{Value, json};
 
@@ -808,7 +808,7 @@ async fn comments_are_listed_awaited_and_answered() {
         y: 10.0,
     };
     let comment = handle
-        .add_comment(person, anchor, "Make it orange")
+        .add_comment(person, anchor, Audience::Agents, "Make it orange")
         .unwrap();
     let listed = agent.ok("comments", json!({ "designId": id })).await;
     assert!(
@@ -1047,5 +1047,138 @@ async fn components_are_made_used_and_detached_in_edits() {
     assert!(
         refusal.contains("op 2 (component)") && refusal.contains("Nothing was changed"),
         "{refusal}"
+    );
+}
+
+#[tokio::test]
+async fn each_comment_goes_to_one_agent() {
+    let (app, hub) = doc6();
+    let mut ada = Agent::connect_doc6(&app, "Ada").await;
+    let mut bo = Agent::connect_doc6(&app, "Bo").await;
+    let (id, board) = landing(&mut ada).await;
+    edit(&mut ada, &id, json!([{ "op": "page", "create": "Drafts" }])).await;
+    let handle = hub.open(&id).await.unwrap();
+    let person = Author {
+        id: "user:cy".into(),
+        name: "Cy".into(),
+        kind: AuthorKind::User,
+    };
+    let anchor = Anchor {
+        artboard_id: Some(board.clone()),
+        node_id: None,
+        extra_node_ids: Vec::new(),
+        x: 10.0,
+        y: 10.0,
+    };
+    let post = |audience, body| {
+        handle
+            .add_comment(person.clone(), anchor.clone(), audience, body)
+            .unwrap()
+    };
+    let wait = json!({ "designId": id, "wait": 1 });
+
+    let none = |reply: String| reply.contains("No comments arrived");
+    // Both agents listen. Ada made the board, so its comments go to Ada.
+    assert!(none(ada.ok("comments", wait.clone()).await));
+    assert!(none(bo.ok("comments", wait.clone()).await));
+    let orange = post(Audience::Agents, "Make it orange");
+    assert!(none(bo.ok("comments", wait.clone()).await));
+    let mine = ada.ok("comments", wait.clone()).await;
+    assert!(
+        mine.contains("Make it orange") && mine.contains("\"for\": \"you\""),
+        "{mine}"
+    );
+    let listed = bo.ok("comments", json!({ "designId": id })).await;
+    assert!(
+        listed.contains("\"for\": \"Ada (another agent)\""),
+        "{listed}"
+    );
+
+    // Passing hands it to the other agent, and a person's follow-up goes
+    // back to the agent that took it.
+    let passed = ada
+        .ok(
+            "comments",
+            json!({ "designId": id, "pass": [orange.id], "wait": 1 }),
+        )
+        .await;
+    assert!(
+        passed.contains("Passed on") && none(passed.clone()),
+        "{passed}"
+    );
+    let theirs = bo.ok("comments", wait.clone()).await;
+    assert!(
+        theirs.contains("Make it orange") && theirs.contains("passedBy"),
+        "{theirs}"
+    );
+    handle
+        .reply(&orange.id, person.clone(), "Darker, please", None)
+        .unwrap();
+    assert!(none(ada.ok("comments", wait.clone()).await));
+    assert!(
+        bo.ok("comments", wait.clone())
+            .await
+            .contains("Darker, please")
+    );
+
+    // A person's pick wins.
+    handle
+        .set_audience(
+            &orange.id,
+            Audience::Agent {
+                id: "agent:Ada".into(),
+                name: "Ada".into(),
+            },
+        )
+        .unwrap();
+    assert!(none(bo.ok("comments", wait.clone()).await));
+    let mentions = json!({ "designId": id, "mentions": true, "wait": 1 });
+    assert!(
+        ada.ok("comments", mentions)
+            .await
+            .contains("Darker, please")
+    );
+
+    // An agent marks a note between people, and then nobody gets it.
+    let note = post(Audience::Agents, "Ask the client about blue");
+    let marked = ada
+        .ok(
+            "comments",
+            json!({ "designId": id, "forPeople": [note.id], "wait": 1 }),
+        )
+        .await;
+    assert!(
+        marked.contains("Marked") && !marked.contains("Ask the client"),
+        "{marked}"
+    );
+    let listed = bo.ok("comments", json!({ "designId": id })).await;
+    assert!(listed.contains("\"for\": \"people\""), "{listed}");
+    let overview = bo.ok("read", json!({ "designId": id })).await;
+    assert!(
+        overview.contains("2 open comments (0 waiting for you)"),
+        "{overview}"
+    );
+    assert!(
+        !overview.contains("waiting for you: call comments"),
+        "{overview}"
+    );
+
+    // Filters narrow what an agent hears.
+    handle
+        .reply(&orange.id, person.clone(), "Even darker", None)
+        .unwrap();
+    let drafts = json!({ "designId": id, "page": "Drafts", "wait": 1 });
+    assert!(none(ada.ok("comments", drafts).await));
+    let home = json!({ "designId": id, "select": format!("#{board}"), "wait": 1 });
+    assert!(ada.ok("comments", home).await.contains("Even darker"));
+
+    // An agent listening to another page doesn't hold up comments here.
+    let drafts = json!({ "designId": id, "page": "Drafts", "wait": 1 });
+    assert!(none(ada.ok("comments", drafts).await));
+    post(Audience::Agents, "Make it pink");
+    assert!(
+        bo.ok("comments", wait.clone())
+            .await
+            .contains("Make it pink")
     );
 }

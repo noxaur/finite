@@ -10,7 +10,7 @@
 use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc};
 
 use finite_design::{
-    comment::{Anchor, Author, AuthorKind},
+    comment::{Anchor, Audience, Author, AuthorKind},
     edit::{self, NewArtboard, WriteMode},
     user_edit::{Position, UserEdit},
 };
@@ -103,7 +103,9 @@ async fn wire_messages_match_the_fixture() {
         x: 24.0,
         y: 16.0,
     };
-    let comment = handle.add_comment(user, anchor, "Make it orange").unwrap();
+    let comment = handle
+        .add_comment(user, anchor, Audience::Agents, "Make it orange")
+        .unwrap();
     handle
         .edit(&agent, "Update styles", |doc| {
             let styles = BTreeMap::from([("background".to_owned(), Some("orange".to_owned()))]);
@@ -150,7 +152,9 @@ async fn wire_messages_match_the_fixture() {
         x: 5.0,
         y: 5.0,
     };
-    let scratch_comment = handle.add_comment(user, anchor, "Remove this?").unwrap();
+    let scratch_comment = handle
+        .add_comment(user, anchor, Audience::Agents, "Remove this?")
+        .unwrap();
     handle
         .edit_message(&scratch_comment.id, "user:1", "Remove this artboard?")
         .unwrap();
@@ -217,7 +221,9 @@ async fn wire_messages_match_the_fixture() {
         x: 0.0,
         y: 0.0,
     };
-    let stray = handle.add_comment(user, anchor, "Oops").unwrap();
+    let stray = handle
+        .add_comment(user, anchor, Audience::Agents, "Oops")
+        .unwrap();
     handle.delete_comment(&stray.id).unwrap();
 
     let first = |o: Outgoing| serde_json::from_str::<Value>(&o.json).unwrap();

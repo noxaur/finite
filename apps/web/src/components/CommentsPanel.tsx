@@ -7,6 +7,7 @@ import type { Comment } from "@/design/schema";
 import { isLocalUser } from "@/lib/user";
 import { timeAgo } from "@/lib/time";
 import { colors, radii, space } from "@/styles/tokens.stylex";
+import { ANY_AGENT, audienceLabel, routeLabel } from "@/lib/audience";
 import { pinState } from "./Comments";
 import { PinIcon } from "./PinIcon";
 
@@ -124,6 +125,8 @@ export function CommentsPanel({
                     <span {...stylex.props(styles.muted)}>
                       {where}
                       {replies > 0 && ` · ${replies} ${replies === 1 ? "reply" : "replies"}`}
+                      {routeLabel(comment) !== audienceLabel(ANY_AGENT) &&
+                        ` · ${routeLabel(comment)}`}
                     </span>
                   </span>
                 </button>

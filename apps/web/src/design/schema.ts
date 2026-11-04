@@ -181,6 +181,14 @@ export const CommentMessage = Schema.Struct({
 });
 export type CommentMessage = typeof CommentMessage.Type;
 
+/** Who a comment is for. Mirrors `Audience` in crates/design/src/comment.rs. */
+export const Audience = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("agents") }),
+  Schema.Struct({ kind: Schema.Literal("people") }),
+  Schema.Struct({ kind: Schema.Literal("agent"), id: Schema.String, name: Schema.String }),
+]);
+export type Audience = typeof Audience.Type;
+
 export const Comment = Schema.Struct({
   id: Schema.String,
   /** The artboard the pin sits on. `x` and `y` are relative to it, or to the canvas when `null`. */
@@ -201,6 +209,12 @@ export const Comment = Schema.Struct({
   detachedAt: Schema.optionalKey(Schema.Struct({ x: Schema.Number, y: Schema.Number })),
   /** Goes up by one with every change, so of two copies the higher one is newer. */
   rev: Schema.Number,
+  /** Who it's for. Absent means any agent. */
+  audience: Schema.optionalKey(Audience),
+  /** Agents that passed on it since a person last wrote in it. */
+  passedBy: Schema.optionalKey(Schema.Array(Author)),
+  /** The agent that took it or last replied, so a follow-up goes back to it. */
+  takenBy: Schema.optionalKey(Author),
 });
 export type Comment = typeof Comment.Type;
 
@@ -236,6 +250,10 @@ export const Presence = Schema.Struct({
 });
 export type Presence = typeof Presence.Type;
 
+/** An agent checking this design for comments, so comments can go to it. */
+export const Listener = Schema.Struct({ actor: Schema.String, name: Schema.String });
+export type Listener = typeof Listener.Type;
+
 export const DesignSummary = Schema.Struct({
   id: Schema.String,
   name: Schema.String,
@@ -253,6 +271,7 @@ export const DesignMessage = Schema.Union([
     type: Schema.Literal("snapshot"),
     snapshot: Snapshot,
     presence: Schema.Array(Presence),
+    listening: Schema.Array(Listener),
     /** Names this load of the design on the server. Send it back to resume. */
     epoch: Schema.String,
   }),
@@ -268,6 +287,7 @@ export const DesignMessage = Schema.Union([
     ),
     comments: Schema.Array(Comment),
     presence: Schema.Array(Presence),
+    listening: Schema.Array(Listener),
     meta: DesignMeta,
   }),
   Schema.Struct({
@@ -287,7 +307,11 @@ export const DesignMessage = Schema.Union([
     seq: Schema.Number,
     error: Schema.optionalKey(Schema.String),
   }),
-  Schema.Struct({ type: Schema.Literal("presence"), presence: Schema.Array(Presence) }),
+  Schema.Struct({
+    type: Schema.Literal("presence"),
+    presence: Schema.Array(Presence),
+    listening: Schema.Array(Listener),
+  }),
   Schema.Struct({ type: Schema.Literal("meta"), meta: DesignMeta }),
   Schema.Struct({ type: Schema.Literal("comment"), comment: Comment }),
   Schema.Struct({ type: Schema.Literal("commentDeleted"), id: Schema.String }),

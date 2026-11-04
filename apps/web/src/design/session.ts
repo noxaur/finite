@@ -11,6 +11,7 @@ import type {
   Comment,
   DesignMessage,
   DesignMeta,
+  Listener,
   Presence,
   Stamp,
   UserEdit,
@@ -42,6 +43,8 @@ export interface SessionState {
   /** `null` until the first snapshot arrives. */
   readonly meta: DesignMeta | null;
   readonly presence: ReadonlyArray<Presence>;
+  /** Agents checking this design for comments. */
+  readonly listening: ReadonlyArray<Listener>;
   /** The label shown on each artboard an agent is working on, keyed by artboard id. */
   readonly working: ReadonlyMap<string, string>;
   readonly comments: ReadonlyMap<string, Comment>;
@@ -78,6 +81,7 @@ export const initialSessionState: SessionState = {
   status: "connecting",
   meta: null,
   presence: [],
+  listening: [],
   working: new Map(),
   comments: new Map(),
   activity: [],
@@ -253,6 +257,7 @@ export class DesignSession {
         this.update({
           meta: message.snapshot.meta,
           comments: new Map(message.snapshot.comments.map((c) => [c.id, c])),
+          listening: message.listening,
           ...this.withPresence(message.presence),
           ...this.synced(),
         });
@@ -269,6 +274,7 @@ export class DesignSession {
           meta: message.meta,
           comments: new Map(message.comments.map((c) => [c.id, c])),
           activity: [...missed.reverse(), ...this.current.activity].slice(0, ACTIVITY_LIMIT),
+          listening: message.listening,
           ...this.withPresence(message.presence),
           ...this.synced(),
         });
@@ -290,7 +296,7 @@ export class DesignSession {
         return;
       }
       case "presence":
-        this.update(this.withPresence(message.presence));
+        this.update({ listening: message.listening, ...this.withPresence(message.presence) });
         return;
       case "meta":
         this.update({ meta: message.meta });

@@ -11,7 +11,7 @@ use std::{
 
 use finite_design::{
     ActorId, Change, Design, Document, NodeId, Op, Record, Snapshot, Transaction,
-    comment::{Anchor, Author, Comment, CommentError},
+    comment::{Anchor, Audience, Author, AuthorKind, Comment, CommentError, Listening},
     components,
     edit::EditError,
     label,
@@ -21,8 +21,8 @@ use tokio::sync::{broadcast, watch};
 
 use super::{
     Actor, COMPACT_AFTER, COMPACT_BYTES, DesignMessage, DesignSummary, EVENT_BUFFER, HISTORY_TTL,
-    Missed, Outgoing, PRESENCE_TTL, Presence, RESUME_BYTES, RESUME_LIMIT, SESSION_ACTOR, Stamp,
-    UNLOAD_AFTER, now_ms, random_id,
+    Listener, Missed, Outgoing, PRESENCE_TTL, Presence, RESUME_BYTES, RESUME_LIMIT, SESSION_ACTOR,
+    Stamp, UNLOAD_AFTER, now_ms, random_id,
 };
 use crate::store::{Claim, Store, Stored, Token};
 
@@ -30,6 +30,9 @@ pub(super) struct DesignState {
     pub(super) design: Design,
     presence: BTreeMap<ActorId, Presence>,
     last_seen: HashMap<ActorId, u64>,
+    /// When each agent last asked for comments. An agent that asked within
+    /// [`PRESENCE_TTL`] is listening, so comments can go to it.
+    listening: BTreeMap<ActorId, Listener>,
     /// Records not yet written to the store.
     pending: Vec<Record>,
     /// Records in the store's journal since the last snapshot.
@@ -106,6 +109,7 @@ impl DesignState {
             design,
             presence: BTreeMap::new(),
             last_seen: HashMap::new(),
+            listening: BTreeMap::new(),
             pending: Vec::new(),
             journaled: 0,
             journal_bytes: 0,
@@ -234,7 +238,14 @@ impl DesignState {
 
     pub(super) fn presence_message(&self) -> Outgoing {
         let presence = self.presence.values().collect();
-        Outgoing::new(None, &DesignMessage::Presence { presence })
+        let listening = self.listening.values().collect();
+        Outgoing::new(
+            None,
+            &DesignMessage::Presence {
+                presence,
+                listening,
+            },
+        )
     }
 
     pub(super) fn touch(&mut self, actor: &Actor, now: u64) {
@@ -242,6 +253,17 @@ impl DesignState {
         if let Some(p) = self.presence.get_mut(&actor.id) {
             p.updated_at = now;
         }
+    }
+}
+
+/// Whether agent `id` listens for `comment`: it asked for comments within
+/// [`PRESENCE_TTL`], about a part of the design that holds the comment.
+fn listening_for(state: &DesignState, now: u64) -> impl Fn(&str, &Comment) -> bool + '_ {
+    let ttl = PRESENCE_TTL.as_millis() as u64;
+    move |id, comment| {
+        state.listening.get(id).is_some_and(|l| {
+            now.saturating_sub(l.at) < ttl && l.scope.admits(state.design.view(), comment, id)
+        })
     }
 }
 
@@ -508,11 +530,13 @@ impl DesignHandle {
         let rx = state.events.subscribe();
         let seq = state.design.seq();
         let presence = state.presence.values().collect();
+        let listening = state.listening.values().collect();
         if let Some(missed) = since.and_then(|since| state.missed_since(since)) {
             let message = DesignMessage::Resume {
                 changes: missed,
                 comments: state.design.comments(),
                 presence,
+                listening,
                 meta: &state.design.meta,
             };
             return (Outgoing::new(None, &message), seq, rx);
@@ -521,6 +545,7 @@ impl DesignHandle {
         let message = DesignMessage::Snapshot {
             snapshot: &snapshot,
             presence,
+            listening,
             epoch: &state.epoch,
         };
         (Outgoing::new(None, &message), seq, rx)
@@ -855,10 +880,18 @@ impl DesignHandle {
         &self,
         author: Author,
         anchor: Anchor,
+        audience: Audience,
         body: &str,
     ) -> Result<Comment, CommentError> {
         self.update_comment(|design| {
-            design.add_comment(author, anchor, body, &mut || random_id(8), now_ms())
+            design.add_comment(
+                author,
+                anchor,
+                audience,
+                body,
+                &mut || random_id(8),
+                now_ms(),
+            )
         })
     }
 
@@ -887,6 +920,16 @@ impl DesignHandle {
         self.update_comment(|design| design.edit_message(id, author_id, body, now_ms()))
     }
 
+    /// Changes who a comment is for. See [`Design::set_audience`].
+    pub fn set_audience(&self, id: &str, audience: Audience) -> Result<Comment, CommentError> {
+        self.update_comment(|design| design.set_audience(id, audience))
+    }
+
+    /// An agent steps back from a comment. See [`Design::pass`].
+    pub fn pass(&self, id: &str, agent: Author) -> Result<Comment, CommentError> {
+        self.update_comment(|design| design.pass(id, agent))
+    }
+
     /// Deletes a comment, then tells viewers.
     pub fn delete_comment(&self, id: &str) -> Result<(), CommentError> {
         let mut state = self.lock();
@@ -905,14 +948,96 @@ impl DesignHandle {
     ) -> Result<Comment, CommentError> {
         let mut state = self.lock();
         let comment = f(&mut state.design)?.clone();
-        let message = DesignMessage::Comment { comment: &comment };
+        self.send_comment(&mut state, &comment);
+        self.comments.notify_waiters();
+        Ok(comment)
+    }
+
+    fn send_comment(&self, state: &mut DesignState, comment: &Comment) {
+        let message = DesignMessage::Comment { comment };
         let _ = state.events.send(Outgoing::new(None, &message));
         let record = Record::Comment {
             comment: comment.clone(),
         };
-        self.record(&mut state, record);
-        self.comments.notify_waiters();
-        Ok(comment)
+        self.record(state, record);
+    }
+
+    /// Runs `f` with the design and whether an agent listens for a comment, to
+    /// see where comments go. See [`Design::routed_to`].
+    pub fn with_routes<T>(
+        &self,
+        f: impl FnOnce(&Design, &dyn Fn(&str, &Comment) -> bool) -> T,
+    ) -> T {
+        let state = self.lock();
+        let listening = listening_for(&state, now_ms());
+        f(&state.design, &listening)
+    }
+
+    /// Marks `agent` as listening to `scope`, then takes every comment in it
+    /// waiting for that agent, oldest first, so no other agent gets them too.
+    pub fn take_waiting(&self, agent: &Actor, scope: Listening) -> Vec<Comment> {
+        let mut state = self.lock();
+        let now = now_ms();
+        state.touch(agent, now);
+        let listener = Listener {
+            actor: agent.id.clone(),
+            name: agent.name.clone(),
+            at: now,
+            scope,
+        };
+        match state.listening.insert(agent.id.clone(), listener) {
+            None => {
+                let _ = state.events.send(state.presence_message());
+            }
+            // It listens to something else now, so comments it held may go
+            // to agents already waiting.
+            Some(before) if state.listening[&agent.id].scope != before.scope => {
+                self.comments.notify_waiters();
+            }
+            Some(_) => {}
+        }
+        let ids: Vec<String> = {
+            let listening = listening_for(&state, now);
+            let design = &state.design;
+            design
+                .comments()
+                .iter()
+                .filter(|c| listening(&agent.id, c))
+                .filter(|c| design.awaits(c, &agent.id, |id| listening(id, c)))
+                .map(|c| c.id.clone())
+                .collect()
+        };
+        let me = Author {
+            id: agent.id.clone(),
+            name: agent.name.clone(),
+            kind: AuthorKind::Agent,
+        };
+        let mut taken = Vec::new();
+        let mut changed = false;
+        for id in ids {
+            let Some(before) = state
+                .design
+                .comments()
+                .iter()
+                .find(|c| c.id == id)
+                .map(|c| c.rev)
+            else {
+                continue;
+            };
+            let Ok(comment) = state.design.take(&id, me.clone()) else {
+                continue;
+            };
+            let comment = comment.clone();
+            if comment.rev != before {
+                self.send_comment(&mut state, &comment);
+                changed = true;
+            }
+            taken.push(comment);
+        }
+        if changed {
+            self.comments.notify_waiters();
+        }
+        taken
     }
 
     pub fn set_presence(&self, actor: &Actor, node_ids: Vec<NodeId>, status: Option<String>) {
@@ -984,8 +1109,14 @@ impl DesignHandle {
     pub(super) fn forget(&self, actor: &str) {
         let mut state = self.raw();
         let Some(state) = state.as_mut() else { return };
-        if state.presence.remove(actor).is_some() {
+        let present = state.presence.remove(actor).is_some();
+        let listened = state.listening.remove(actor).is_some();
+        if listened || present {
             let _ = state.events.send(state.presence_message());
+        }
+        if listened {
+            // Its comments go to other agents now, and some may be waiting.
+            self.comments.notify_waiters();
         }
         state.design.forget_actor(actor);
         state.last_seen.remove(actor);
@@ -999,12 +1130,18 @@ impl DesignHandle {
         let Some(state) = state.as_mut() else { return };
         let ttl = PRESENCE_TTL.as_millis() as u64;
         let auto_ttl = super::AUTO_PRESENCE_TTL.as_millis() as u64;
-        let before = state.presence.len();
+        let before = (state.presence.len(), state.listening.len());
         state.presence.retain(|_, p| {
             now.saturating_sub(p.updated_at) < if p.automatic { auto_ttl } else { ttl }
         });
-        if state.presence.len() != before {
+        state
+            .listening
+            .retain(|_, l| now.saturating_sub(l.at) < ttl);
+        if (state.presence.len(), state.listening.len()) != before {
             let _ = state.events.send(state.presence_message());
+        }
+        if state.listening.len() != before.1 {
+            self.comments.notify_waiters();
         }
         let ttl = HISTORY_TTL.as_millis() as u64;
         let idle: Vec<ActorId> = state

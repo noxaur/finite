@@ -28,8 +28,8 @@ use crate::{
 pub use design::{Busy, DesignHandle, Edited, Since};
 use design::{DesignState, Life, Save};
 pub use messages::{
-    Actor, DesignMessage, DesignSummary, LobbyMessage, Missed, Outgoing, Presence, SESSION_ACTOR,
-    Stamp,
+    Actor, DesignMessage, DesignSummary, Listener, LobbyMessage, Missed, Outgoing, Presence,
+    SESSION_ACTOR, Stamp,
 };
 
 /// How long an agent's "working on" indicator lasts without activity.
@@ -1011,7 +1011,7 @@ async fn persist(hub: Weak<Hub>, design: Weak<DesignHandle>, mut dirty: watch::R
 mod tests {
     use std::collections::BTreeMap;
 
-    use finite_design::comment::{Anchor, Author};
+    use finite_design::comment::{Anchor, Audience, Author};
 
     use super::*;
     use crate::{blob::BlobHash, store::MemoryStore};
@@ -1074,7 +1074,9 @@ mod tests {
             x: 1.0,
             y: 2.0,
         };
-        let comment = handle.add_comment(author, anchor, "Hello").unwrap();
+        let comment = handle
+            .add_comment(author, anchor, Audience::Agents, "Hello")
+            .unwrap();
         let message: serde_json::Value =
             serde_json::from_str(&rx.try_recv().unwrap().json).unwrap();
         assert_eq!(message["type"], "comment");
@@ -1118,7 +1120,9 @@ mod tests {
             x: 1.0,
             y: 2.0,
         };
-        handle.add_comment(author, anchor, "Hello").unwrap();
+        handle
+            .add_comment(author, anchor, Audience::Agents, "Hello")
+            .unwrap();
 
         let (_, _, mut rx) = handle.subscribe();
         let mut sent = || -> Vec<(String, bool)> {
@@ -1338,7 +1342,9 @@ mod tests {
             x: 1.0,
             y: 2.0,
         };
-        handle.add_comment(author, anchor, "Hello").unwrap();
+        handle
+            .add_comment(author, anchor, Audience::Agents, "Hello")
+            .unwrap();
         handle.rename("Renamed".into());
         settle().await;
         assert!(

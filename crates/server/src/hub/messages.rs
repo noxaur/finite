@@ -1,7 +1,10 @@
 //! What the hub tells viewers: who's acting, who's working on what, and the
 //! messages sent on a design's WebSocket and on the design list's.
 
-use finite_design::{ActorId, Change, Design, DesignMeta, NodeId, Snapshot, comment::Comment};
+use finite_design::{
+    ActorId, Change, Design, DesignMeta, NodeId, Snapshot,
+    comment::{Comment, Listening},
+};
 use serde::{Deserialize, Serialize};
 
 /// The id prefix of an agent known only by its MCP session on this server.
@@ -40,6 +43,22 @@ pub struct Presence {
     pub automatic: bool,
 }
 
+/// An agent that's checking a design for comments, so people can send
+/// comments to it before it has done anything there.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Listener {
+    pub actor: ActorId,
+    pub name: String,
+    /// When it last asked for comments.
+    #[serde(skip)]
+    pub at: u64,
+    /// The part of the design it asked about then. Only comments in it can
+    /// go to this agent, or a comment it never hears would wait for it.
+    #[serde(skip)]
+    pub scope: Listening,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesignSummary {
@@ -72,6 +91,7 @@ pub enum DesignMessage<'a> {
     Snapshot {
         snapshot: &'a Snapshot,
         presence: Vec<&'a Presence>,
+        listening: Vec<&'a Listener>,
         /// Names this load of the design. A viewer that reconnects sends it
         /// back with its `seq` to resume (see [`super::Since`]).
         epoch: &'a str,
@@ -82,6 +102,7 @@ pub enum DesignMessage<'a> {
         changes: Vec<Missed<'a>>,
         comments: &'a [Comment],
         presence: Vec<&'a Presence>,
+        listening: Vec<&'a Listener>,
         meta: &'a DesignMeta,
     },
     Change {
@@ -102,8 +123,10 @@ pub enum DesignMessage<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// Who's working on what, and which agents are listening for comments.
     Presence {
         presence: Vec<&'a Presence>,
+        listening: Vec<&'a Listener>,
     },
     Meta {
         meta: &'a DesignMeta,

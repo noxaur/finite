@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     NodeId,
-    comment::{self, Anchor, Author, AuthorKind, ChangeLog, Comment, CommentError, Message, Point},
+    comment::{
+        self, Anchor, Audience, Author, AuthorKind, ChangeLog, Comment, CommentError, Message,
+        Point,
+    },
     document::{Applied, Document, Op, Page, Rejected},
     edit::{self, EditError},
     history::{Entry, History},
@@ -127,7 +130,8 @@ pub enum Record {
 /// so it is the single source of truth. All edits go through [`Design::commit`],
 /// [`Design::transact`], [`Design::undo`] or [`Design::redo`], and all comment updates through
 /// [`Design::add_comment`], [`Design::reply`], [`Design::set_resolved`],
-/// [`Design::edit_message`] or [`Design::delete_comment`].
+/// [`Design::edit_message`], [`Design::set_audience`], [`Design::take`],
+/// [`Design::pass`] or [`Design::delete_comment`].
 #[derive(Debug)]
 pub struct Design {
     pub meta: DesignMeta,
@@ -857,18 +861,20 @@ impl Design {
         &self.comments
     }
 
-    /// Pins a new comment, with `body` as its first message. `new_id` must
-    /// return a fresh random id; it's called again if the id is taken.
+    /// Pins a new comment for `audience`, with `body` as its first message.
+    /// `new_id` must return a fresh random id; it's called again if the id is taken.
     pub fn add_comment(
         &mut self,
         author: Author,
         anchor: Anchor,
+        audience: Audience,
         body: &str,
         new_id: &mut impl FnMut() -> String,
         now: u64,
     ) -> Result<&Comment, CommentError> {
         let body = comment::check_body(body)?;
         comment::check_anchor(self.view(), &anchor)?;
+        let audience = comment::check_audience(audience)?;
         self.check_room_to_open()?;
         let id = loop {
             let id = new_id();
@@ -896,13 +902,17 @@ impl Design {
             }],
             detached_at: None,
             rev: 0,
+            audience,
+            passed_by: Vec::new(),
+            taken_by: None,
         });
         Ok(self.comments.last().expect("just pushed"))
     }
 
     /// Adds a reply to comment `id`. See [`crate::comment`] for how replies
     /// link changes and change the resolved state. `resolve` sets the state
-    /// explicitly.
+    /// explicitly. A person's reply clears the passes, and an agent's reply
+    /// makes the thread that agent's.
     pub fn reply(
         &mut self,
         id: &str,
@@ -922,12 +932,18 @@ impl Design {
             room_to_open?;
         }
         let changes = match author.kind {
-            AuthorKind::Agent => self.log.since(
-                &author.id,
-                comment.last_seq(),
-                comment.artboard_id.as_deref(),
-            ),
-            AuthorKind::User => Vec::new(),
+            AuthorKind::Agent => {
+                comment.taken_by = Some(author.clone());
+                self.log.since(
+                    &author.id,
+                    comment.last_seq(),
+                    comment.artboard_id.as_deref(),
+                )
+            }
+            AuthorKind::User => {
+                comment.passed_by.clear();
+                Vec::new()
+            }
         };
         mark_resolved(comment, resolved, now);
         comment.messages.push(Message {
@@ -959,7 +975,7 @@ impl Design {
     }
 
     /// Replaces the body of comment `id`'s newest message, which must be by
-    /// `author_id`.
+    /// `author_id`. A person's edit clears the passes, since the request changed.
     pub fn edit_message(
         &mut self,
         id: &str,
@@ -976,7 +992,74 @@ impl Design {
             .ok_or(CommentError::NotEditable)?;
         message.body = body;
         message.edited_at = Some(now);
+        if message.author.kind == AuthorKind::User {
+            comment.passed_by.clear();
+        }
         comment.rev += 1;
+        Ok(comment)
+    }
+
+    /// Changes who comment `id` is for, open or resolved, and clears the
+    /// passes and who took it. The same audience again changes nothing.
+    pub fn set_audience(&mut self, id: &str, audience: Audience) -> Result<&Comment, CommentError> {
+        let audience = comment::check_audience(audience)?;
+        let comment = find(&mut self.comments, id)?;
+        if comment.audience != audience {
+            comment.audience = audience;
+            comment.passed_by.clear();
+            comment.taken_by = None;
+            comment.rev += 1;
+        }
+        Ok(comment)
+    }
+
+    /// The agent comment `comment` goes to, given which agents are
+    /// `listening`. See [`Comment::routed_to`].
+    pub fn routed_to<'a>(
+        &'a self,
+        comment: &'a Comment,
+        listening: impl Fn(&str) -> bool,
+    ) -> Option<&'a str> {
+        let editor = comment
+            .artboard_id
+            .as_deref()
+            .and_then(|board| self.log.last_agent_on(board));
+        comment.routed_to(editor, listening)
+    }
+
+    /// Whether `agent` should act on `comment` now: it's waiting, `agent`
+    /// hasn't passed on it, and it goes to `agent` or to whoever asks first.
+    pub fn awaits(&self, comment: &Comment, agent: &str, listening: impl Fn(&str) -> bool) -> bool {
+        comment.waiting()
+            && !comment.passed(agent)
+            && self
+                .routed_to(comment, listening)
+                .is_none_or(|to| to == agent)
+    }
+
+    /// `agent` takes comment `id` to work on, so it goes to that agent until
+    /// it passes or stops listening. Check [`Design::awaits`] first.
+    pub fn take(&mut self, id: &str, agent: Author) -> Result<&Comment, CommentError> {
+        let comment = find(&mut self.comments, id)?;
+        if comment.taken_by.as_ref().is_none_or(|a| a.id != agent.id) {
+            comment.taken_by = Some(agent);
+            comment.rev += 1;
+        }
+        Ok(comment)
+    }
+
+    /// `agent` steps back from comment `id`, so it goes to another agent and
+    /// stops waking `agent` until a person writes in it again. Passing on a
+    /// comment that isn't waiting changes nothing.
+    pub fn pass(&mut self, id: &str, agent: Author) -> Result<&Comment, CommentError> {
+        let comment = find(&mut self.comments, id)?;
+        if comment.waiting() && !comment.passed(&agent.id) {
+            if comment.taken_by.as_ref().is_some_and(|a| a.id == agent.id) {
+                comment.taken_by = None;
+            }
+            comment.passed_by.push(agent);
+            comment.rev += 1;
+        }
         Ok(comment)
     }
 
@@ -1344,7 +1427,7 @@ mod tests {
             n += 1;
             format!("c{n}")
         };
-        d.add_comment(user, anchor, "Make it red", &mut ids, 0)
+        d.add_comment(user, anchor, Audience::Agents, "Make it red", &mut ids, 0)
             .unwrap()
             .id
             .clone()
@@ -1385,6 +1468,59 @@ mod tests {
         assert!(!reopened.resolved);
         assert!(reopened.messages.last().unwrap().changes.is_empty());
         assert_eq!(d.snapshot().comments.len(), 1);
+    }
+
+    #[test]
+    fn a_comment_goes_to_the_agent_that_edited_its_artboard() {
+        let mut d = design();
+        d.commit(
+            "agent:e",
+            "boards",
+            &[create("a", None), create("b", None)],
+            1,
+        );
+        d.commit("agent:f", "b red", &[color("b", "red")], 2);
+        d.commit("user:1", "a blue", &[color("a", "blue")], 3);
+        let id = pin(&mut d, "a");
+        let all = |_: &str| true;
+        let comment = d.comments()[0].clone();
+        assert_eq!(
+            d.routed_to(&comment, all),
+            Some("agent:e"),
+            "people's edits don't count"
+        );
+        assert!(d.awaits(&comment, "agent:e", all));
+        assert!(!d.awaits(&comment, "agent:f", all));
+        assert!(
+            d.awaits(&comment, "agent:f", |id| id != "agent:e"),
+            "e stopped listening"
+        );
+
+        let taken = d
+            .take(&id, author("agent:f", AuthorKind::Agent))
+            .unwrap()
+            .clone();
+        assert!(
+            d.awaits(&taken, "agent:f", all),
+            "f took it while e was away"
+        );
+        let passed = d
+            .pass(&id, author("agent:f", AuthorKind::Agent))
+            .unwrap()
+            .clone();
+        assert_eq!(passed.taken_by, None);
+        assert!(d.awaits(&passed, "agent:e", all));
+        assert!(!d.awaits(&passed, "agent:f", all), "f passed");
+
+        let replied = d.reply(&id, author("agent:e", AuthorKind::Agent), "Done", None, 4);
+        assert_eq!(
+            replied.unwrap().taken_by.as_ref().map(|a| a.id.as_str()),
+            Some("agent:e")
+        );
+        let back = d
+            .reply(&id, author("user:1", AuthorKind::User), "Darker", None, 5)
+            .unwrap();
+        assert!(back.passed_by.is_empty(), "a person wrote again");
     }
 
     #[test]
@@ -1508,6 +1644,7 @@ mod tests {
         let more = d.add_comment(
             user.clone(),
             anchor.clone(),
+            Audience::Agents,
             "One more",
             &mut || "z".into(),
             0,
@@ -1516,8 +1653,15 @@ mod tests {
 
         // Resolving one makes room, and reopening it is refused once that room is taken.
         d.set_resolved(&ids[0], true, 0).unwrap();
-        d.add_comment(user.clone(), anchor, "One more", &mut || "z".into(), 0)
-            .unwrap();
+        d.add_comment(
+            user.clone(),
+            anchor,
+            Audience::Agents,
+            "One more",
+            &mut || "z".into(),
+            0,
+        )
+        .unwrap();
         assert_eq!(
             d.set_resolved(&ids[0], false, 0).unwrap_err(),
             CommentError::TooManyOpen
@@ -1552,7 +1696,7 @@ mod tests {
             y: 0.0,
         };
         let user = author("user:1", AuthorKind::User);
-        let result = d.add_comment(user, anchor, "Hi", &mut || "c".into(), 0);
+        let result = d.add_comment(user, anchor, Audience::Agents, "Hi", &mut || "c".into(), 0);
         assert!(matches!(result, Err(CommentError::NodeNotFound(_))));
         let agent = author("agent", AuthorKind::Agent);
         assert!(matches!(
