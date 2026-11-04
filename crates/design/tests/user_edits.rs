@@ -220,6 +220,49 @@ fn duplicate_and_text_edits() {
     assert_eq!(text, ["Hi"]);
 }
 
+/// A person makes an element a component and detaches an instance of it,
+/// and undo reverses each.
+#[test]
+fn components_are_made_and_detached() {
+    let mut d = design();
+    let make = [UserEdit::MakeComponent {
+        id: "a".into(),
+        name: Some("Card".into()),
+    }];
+    assert_eq!(user_edit::label(&make), "Make component");
+    apply(&mut d, &make);
+    let a = d.doc().get("a").unwrap();
+    assert!(a.component);
+    assert_eq!(a.name.as_deref(), Some("Card"));
+    let (ops, instance) =
+        finite_design::edit::insert_instance(d.doc(), "a", "board", None, None, &[], &mut || {
+            "i".to_owned()
+        })
+        .unwrap();
+    d.commit("agent", "Instance", &ops, 0).unwrap();
+    // A component can't be made from inside an instance, nor detached from one.
+    assert!(
+        plan(
+            &d,
+            &[UserEdit::Detach {
+                ids: vec!["a".into()]
+            }]
+        )
+        .is_err()
+    );
+    apply(
+        &mut d,
+        &[UserEdit::Detach {
+            ids: vec![instance.clone()],
+        }],
+    );
+    assert!(!d.doc().get(&instance).unwrap().is_instance());
+    d.undo("user:p", 0).unwrap();
+    assert!(d.doc().get(&instance).unwrap().is_instance());
+    d.undo("user:p", 0).unwrap();
+    assert!(!d.doc().get("a").unwrap().component);
+}
+
 #[test]
 fn labels_name_the_gesture() {
     let delete = UserEdit::Delete {

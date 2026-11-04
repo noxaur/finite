@@ -63,6 +63,15 @@ pub enum UserEdit {
         id: NodeId,
         text: String,
     },
+    /// Makes an element a component, which instances can follow.
+    MakeComponent {
+        id: NodeId,
+        name: Option<String>,
+    },
+    /// Turns instances into plain copies of what they show.
+    Detach {
+        ids: Vec<NodeId>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -163,6 +172,10 @@ pub fn plan(
                 }
                 edit::set_text(view, id, text, new_id)?
             }
+            UserEdit::MakeComponent { id, name } => {
+                edit::create_component(view, id, name.as_deref(), &[])?
+            }
+            UserEdit::Detach { ids } => edit::detach_instances(view, ids, new_id)?,
         });
     }
     components::redirect(doc, ops, new_id)
@@ -178,6 +191,8 @@ pub fn label(edits: &[UserEdit]) -> &'static str {
         UserEdit::Group { .. } => "Group",
         UserEdit::Ungroup { .. } => "Ungroup",
         UserEdit::SetText { .. } => "Edit text",
+        UserEdit::MakeComponent { .. } => "Make component",
+        UserEdit::Detach { .. } => "Detach instance",
     });
     let first = kinds.next().unwrap_or("Edit");
     if kinds.all(|k| k == first) {
@@ -197,8 +212,11 @@ impl UserEdit {
             | Self::Delete { ids }
             | Self::Duplicate { ids }
             | Self::Group { ids }
-            | Self::Ungroup { ids } => Box::new(ids.iter()),
-            Self::SetText { id, .. } => Box::new(std::iter::once(id)),
+            | Self::Ungroup { ids }
+            | Self::Detach { ids } => Box::new(ids.iter()),
+            Self::SetText { id, .. } | Self::MakeComponent { id, .. } => {
+                Box::new(std::iter::once(id))
+            }
         }
     }
 
@@ -245,6 +263,13 @@ impl UserEdit {
             Self::SetText {
                 id: "title".into(),
                 text: "Hello".into(),
+            },
+            Self::MakeComponent {
+                id: "card".into(),
+                name: Some("Card".into()),
+            },
+            Self::Detach {
+                ids: vec!["instance".into()],
             },
         ]
     }

@@ -306,6 +306,8 @@ The browser runs the same expansion through WebAssembly. The renderer draws an i
 
 People need to know which parts follow a component, since their edits inside an instance only override it. If you hover over one, the canvas outlines the instance in dashes and names it, like "Instance of Top bar". Hovering over a component names it and counts its instances.
 
+People can make components and detach instances too. With one element selected, the Inspector shows **Make component**, or **Detach** for an instance, and ⌥⌘K and ⌥⌘B do the same, as in Figma (`Editor.componentAction` in `editing/editor.ts`). They send the `makeComponent` and `detach` user edits, so the browser shows them at once and undo reverses them like any other edit. An artboard, a component's root and a node inside an instance get neither, since an edit inside an instance only overrides it.
+
 ## The server
 
 ### The hub
@@ -486,7 +488,7 @@ update_styles({ "designId": "k7jo11y14e",
 
 People select things on the canvas (a click, Shift-click, a selection box on the empty canvas, ⌘A), drag and resize them with snapping to what's around them, type into text with a double-click, set exact X, Y, W and H in a panel, delete, duplicate (⌘D), copy and paste (⌘C, ⌘V), group (⌘G, ⌘⇧G), restack (⌘], ⌘[, with ⌥ to the front or back), nudge with the arrow keys, and undo their own edits with ⌘Z. Space held down pans. A gesture becomes one change, made by the person's actor, `user:<id>`, with the same id their comments use. So it lands in its own undo history, and undo keeps the person's and the agents' work apart the way it keeps two agents' apart.
 
-A gesture doesn't send ops. It sends **user edits**, a small closed list in `crates/design/src/user_edit.rs`: `setPosition` for artboards, `setStyles` for inline styles, `place` to move nodes before a sibling, `delete`, `duplicate`, `group`, `ungroup` and `setText`. Each says where things end up, like "left is 132px" or "before #p9", never by how much they change. `user_edit::plan` turns them into ops with the edit commands agents use (`update_styles`, `move_before`, `set_position`, `delete`, `duplicate`, `group`, `ungroup`, `set_text`), then `components::redirect`, so a change inside an instance becomes an override, as it does for agents. A `place` names the sibling to go before rather than a position, so a sibling an agent adds meanwhile can't shift where the node lands, and if that sibling is gone, the node goes last.
+A gesture doesn't send ops. It sends **user edits**, a small closed list in `crates/design/src/user_edit.rs`: `setPosition` for artboards, `setStyles` for inline styles, `place` to move nodes before a sibling, `delete`, `duplicate`, `group`, `ungroup`, `setText`, `makeComponent` and `detach`. Each says where things end up, like "left is 132px" or "before #p9", never by how much they change. `user_edit::plan` turns them into ops with the edit commands agents use (`update_styles`, `move_before`, `set_position`, `delete`, `duplicate`, `group`, `ungroup`, `set_text`, `create_component`, `detach_instances`), then `components::redirect`, so a change inside an instance becomes an override, as it does for agents. A `place` names the sibling to go before rather than a position, so a sibling an agent adds meanwhile can't shift where the node lands, and if that sibling is gone, the node goes last.
 
 ### One drag, end to end
 
