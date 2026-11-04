@@ -12,7 +12,7 @@ node e2e/ax/grade.mjs              # blind 1-10 grades of each final screenshot
 node e2e/ax/report.mjs --tools     # one row per label and task, plus calls per tool
 ```
 
-Pass `--env FINITE_MCP_EXTRA=shared-styles` or `--env FINITE_MCP_EXTRA=components` to try a tool group that's off by default. Results go to `e2e/ax/results/<label>/<task>-<n>/`, which git ignores. Each run folder holds `transcript.jsonl`, `feedback.md` (the agent's own account), `metrics.json` and `final.png`. Runs cost real money and use your Claude plan, about $0.05 to $0.80 each. A full round of 18 runs per variant can reach a 5-hour usage limit. A run cut off by a limit is marked `api error` in `metrics.json`, and `report.mjs` leaves it out. `--budget` caps each run at $4 by default.
+Pass `--env FINITE_MCP_EXTRA=layout` to try a tool group that's off by default. Results go to `e2e/ax/results/<label>/<task>-<n>/`, which git ignores. Each run folder holds `transcript.jsonl`, `feedback.md` (the agent's own account), `metrics.json` and `final.png`. Runs cost real money and use your Claude plan, about $0.05 to $0.80 each. A full round of 18 runs per variant can reach a 5-hour usage limit. A run cut off by a limit is marked `api error` in `metrics.json`, and `report.mjs` leaves it out. `--budget` caps each run at $4 by default.
 
 ## Trying a tool design before building it
 
@@ -58,7 +58,7 @@ Real tools keep the real server's argument checks. For a schema a spec writes, t
 A full run costs about $0.30 and builds a design from nothing. Most ideas change one step, so `micro.mjs` seeds the design as it is just before that step, and any agent with a shell does the step through a small CLI that logs every call:
 
 ```bash
-node e2e/ax/micro.mjs start /tmp/micro/a --scenario change-component --env FINITE_MCP_EXTRA=components
+node e2e/ax/micro.mjs start /tmp/micro/a --scenario change-component
 node e2e/ax/micro.mjs brief /tmp/micro/a     # the task, the server's instructions and every tool's schema
 node e2e/ax/micro.mjs call /tmp/micro/a get_tree_summary '{"designId":"…"}'
 node e2e/ax/micro.mjs check /tmp/micro/a     # the checks, and calls, edits and errors per phase
@@ -105,7 +105,7 @@ Smaller changes: edits name the nodes they changed instead of "Done.", `duplicat
 Agents also asked for two features Finite didn't have:
 
 - **Shared styles across artboards.** `set_shared_css` and `get_shared_css` (`crates/server/src/mcp/styles.rs`) started as a demo that kept the CSS in the server's memory. Now the CSS is part of the design ([issue #8](https://github.com/noxaur/finite/issues/8)), and every agent gets the tools (see below).
-- **Components with instances.** Agents on `screens` and `ui-states` asked for them about as often as for shared styles. [Issue #11](https://github.com/noxaur/finite/issues/11) added them, with the tools behind `FINITE_MCP_EXTRA=components`. `screens-change` measures them: a task with a follow-up prompt runs it in the same session, and `report.mjs` shows its calls in the `change` column.
+- **Components with instances.** Agents on `screens` and `ui-states` asked for them about as often as for shared styles. [Issue #11](https://github.com/noxaur/finite/issues/11) added them, with the tools behind `FINITE_MCP_EXTRA=components` at first; they load by default now, and doc6 has a `component` op. `screens-change` measures them: a task with a follow-up prompt runs it in the same session, and `report.mjs` shows its calls in the `change` column.
 
 ## What the second study found
 

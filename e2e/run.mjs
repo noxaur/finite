@@ -67,8 +67,7 @@ const processes = [];
 const folders = [];
 const start = (args, env) => {
   const child = spawn(bin, args, {
-    // The component tools are an extra group; the viewer check below uses them.
-    env: { ...process.env, RUST_LOG: "warn", FINITE_MCP_EXTRA: "components", ...env },
+    env: { ...process.env, RUST_LOG: "warn", ...env },
     stdio: ["ignore", "inherit", "inherit"],
   });
   processes.push(child);
