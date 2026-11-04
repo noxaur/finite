@@ -12,7 +12,7 @@
 //! - A person can edit their own message while it's the thread's newest, so
 //!   never one an agent has already answered.
 //! - A waiting comment goes to one agent, picked by [`Comment::routed_to`]:
-//!   the agent a person picked, else the agent that took it, else the agent
+//!   the agent that took it, else the agent a person picked, else the agent
 //!   that last edited its artboard, as long as that agent is listening.
 //!   Otherwise the first listening agent to ask takes it.
 //!   [`crate::Design::awaits`] is the one rule for "should this agent act now".
@@ -208,8 +208,9 @@ impl Comment {
 
     /// The agent this comment goes to, or `None` for the first agent that
     /// asks. It's the first of these that is `listening` and hasn't passed on
-    /// it: the agent a person picked, the agent that took it, and
-    /// `last_editor`, the agent that last edited its artboard.
+    /// it: the agent that took it (so it never goes to two agents at once),
+    /// the agent a person picked, and `last_editor`, the agent that last
+    /// edited its artboard. Picking an agent clears who took it.
     pub fn routed_to<'a>(
         &'a self,
         last_editor: Option<&'a str>,
@@ -220,8 +221,8 @@ impl Comment {
             _ => None,
         };
         [
-            picked,
             self.taken_by.as_ref().map(|a| a.id.as_str()),
+            picked,
             last_editor,
         ]
         .into_iter()
@@ -735,12 +736,16 @@ mod tests {
             id: "agent:p".into(),
             name: "P".into(),
         };
-        assert_eq!(c.routed_to(Some("agent:e"), all), Some("agent:p"));
+        assert_eq!(
+            c.routed_to(Some("agent:e"), all),
+            Some("agent:t"),
+            "the picked agent came back after another took it"
+        );
         assert_eq!(c.agent_name("agent:p"), "P");
         assert_eq!(
-            c.routed_to(Some("agent:e"), |id| id != "agent:p"),
-            Some("agent:t"),
-            "the picked agent isn't listening"
+            c.routed_to(Some("agent:e"), |id| id != "agent:t"),
+            Some("agent:p"),
+            "the agent that took it stopped listening"
         );
         c.passed_by.push(agent("agent:t"));
         assert_eq!(

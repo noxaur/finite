@@ -1,7 +1,10 @@
 //! What the hub tells viewers: who's acting, who's working on what, and the
 //! messages sent on a design's WebSocket and on the design list's.
 
-use finite_design::{ActorId, Change, Design, DesignMeta, NodeId, Snapshot, comment::Comment};
+use finite_design::{
+    ActorId, Change, Design, DesignMeta, NodeId, Snapshot,
+    comment::{Comment, Listening},
+};
 use serde::{Deserialize, Serialize};
 
 /// The id prefix of an agent known only by its MCP session on this server.
@@ -50,6 +53,10 @@ pub struct Listener {
     /// When it last asked for comments.
     #[serde(skip)]
     pub at: u64,
+    /// The part of the design it asked about then. Only comments in it can
+    /// go to this agent, or a comment it never hears would wait for it.
+    #[serde(skip)]
+    pub scope: Listening,
 }
 
 #[derive(Clone, Debug, Serialize)]

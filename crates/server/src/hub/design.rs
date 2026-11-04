@@ -11,7 +11,7 @@ use std::{
 
 use finite_design::{
     ActorId, Change, Design, Document, NodeId, Op, Record, Snapshot, Transaction,
-    comment::{Anchor, Audience, Author, AuthorKind, Comment, CommentError},
+    comment::{Anchor, Audience, Author, AuthorKind, Comment, CommentError, Listening},
     components,
     edit::EditError,
     label,
@@ -253,6 +253,17 @@ impl DesignState {
         if let Some(p) = self.presence.get_mut(&actor.id) {
             p.updated_at = now;
         }
+    }
+}
+
+/// Whether agent `id` listens for `comment`: it asked for comments within
+/// [`PRESENCE_TTL`], about a part of the design that holds the comment.
+fn listening_for(state: &DesignState, now: u64) -> impl Fn(&str, &Comment) -> bool + '_ {
+    let ttl = PRESENCE_TTL.as_millis() as u64;
+    move |id, comment| {
+        state.listening.get(id).is_some_and(|l| {
+            now.saturating_sub(l.at) < ttl && l.scope.admits(state.design.view(), comment, id)
+        })
     }
 }
 
@@ -951,28 +962,20 @@ impl DesignHandle {
         self.record(state, record);
     }
 
-    /// Runs `f` with the design and which agents are listening, to see where
-    /// comments go. See [`Design::routed_to`].
-    pub fn with_routes<T>(&self, f: impl FnOnce(&Design, &dyn Fn(&str) -> bool) -> T) -> T {
+    /// Runs `f` with the design and whether an agent listens for a comment, to
+    /// see where comments go. See [`Design::routed_to`].
+    pub fn with_routes<T>(
+        &self,
+        f: impl FnOnce(&Design, &dyn Fn(&str, &Comment) -> bool) -> T,
+    ) -> T {
         let state = self.lock();
-        let now = now_ms();
-        let ttl = PRESENCE_TTL.as_millis() as u64;
-        let listening = |id: &str| {
-            state
-                .listening
-                .get(id)
-                .is_some_and(|l| now.saturating_sub(l.at) < ttl)
-        };
+        let listening = listening_for(&state, now_ms());
         f(&state.design, &listening)
     }
 
-    /// Marks `agent` as listening, then takes every comment waiting for it
-    /// that `admit` lets through, oldest first, so no other agent gets them too.
-    pub fn take_waiting(
-        &self,
-        agent: &Actor,
-        admit: impl Fn(&Document, &Comment) -> bool,
-    ) -> Vec<Comment> {
+    /// Marks `agent` as listening to `scope`, then takes every comment in it
+    /// waiting for that agent, oldest first, so no other agent gets them too.
+    pub fn take_waiting(&self, agent: &Actor, scope: Listening) -> Vec<Comment> {
         let mut state = self.lock();
         let now = now_ms();
         state.touch(agent, now);
@@ -980,24 +983,22 @@ impl DesignHandle {
             actor: agent.id.clone(),
             name: agent.name.clone(),
             at: now,
+            scope,
         };
         if state.listening.insert(agent.id.clone(), listener).is_none() {
             let _ = state.events.send(state.presence_message());
         }
-        let ttl = PRESENCE_TTL.as_millis() as u64;
-        let listening = |id: &str| {
-            state
-                .listening
-                .get(id)
-                .is_some_and(|l| now.saturating_sub(l.at) < ttl)
+        let ids: Vec<String> = {
+            let listening = listening_for(&state, now);
+            let design = &state.design;
+            design
+                .comments()
+                .iter()
+                .filter(|c| listening(&agent.id, c))
+                .filter(|c| design.awaits(c, &agent.id, |id| listening(id, c)))
+                .map(|c| c.id.clone())
+                .collect()
         };
-        let design = &state.design;
-        let ids: Vec<String> = design
-            .comments()
-            .iter()
-            .filter(|c| design.awaits(c, &agent.id, listening) && admit(design.view(), c))
-            .map(|c| c.id.clone())
-            .collect();
         let me = Author {
             id: agent.id.clone(),
             name: agent.name.clone(),
@@ -1101,8 +1102,13 @@ impl DesignHandle {
         let mut state = self.raw();
         let Some(state) = state.as_mut() else { return };
         let present = state.presence.remove(actor).is_some();
-        if state.listening.remove(actor).is_some() || present {
+        let listened = state.listening.remove(actor).is_some();
+        if listened || present {
             let _ = state.events.send(state.presence_message());
+        }
+        if listened {
+            // Its comments go to other agents now, and some may be waiting.
+            self.comments.notify_waiters();
         }
         state.design.forget_actor(actor);
         state.last_seen.remove(actor);
@@ -1125,6 +1131,9 @@ impl DesignHandle {
             .retain(|_, l| now.saturating_sub(l.at) < ttl);
         if (state.presence.len(), state.listening.len()) != before {
             let _ = state.events.send(state.presence_message());
+        }
+        if state.listening.len() != before.1 {
+            self.comments.notify_waiters();
         }
         let ttl = HISTORY_TTL.as_millis() as u64;
         let idle: Vec<ActorId> = state

@@ -649,8 +649,8 @@ You can edit your own message while it's the newest in its thread (`Design::edit
 
 **Where a comment goes.** The server **routes** each waiting comment to one agent, so people needn't say who it's for and agents don't race for it. `Comment::routed_to` picks the first agent in this list that is listening and hasn't passed on the comment:
 
-1. the agent a person picked (an `Agent` audience);
-2. the agent in `takenBy`: the one that took the comment, or replied in it last, so a person's follow-up goes back to it;
+1. the agent in `takenBy`: the one that took the comment, or replied in it last, so a person's follow-up goes back to it, and a comment never goes to two agents at once;
+2. the agent a person picked (an `Agent` audience). Picking one clears `takenBy`, so the pick wins from then on;
 3. the agent that made the latest change to the comment's artboard (`ChangeLog::last_agent_on`; people's edits don't count).
 
 If none of them is listening, the comment goes to the first listening agent that asks. An agent is **listening** while it called `comments` (or `get_comments` or `wait_for_comments`) within the presence timeout, 5 minutes. The server keeps that per design in memory (`listening` in `hub/design.rs`), so after a restart comments go to whoever asks first until agents call again. An agent that only edits never gets comments routed to it, so it can't hold up a comment it will never read. Each `comments` call **takes** the comments it returns (`DesignHandle::take_waiting`, which checks and sets `takenBy` under one lock), so a second agent waiting at the same moment doesn't get the same one. `Design::awaits` is the one rule for "should this agent act now", and the `for` field in the comment JSON says `"you"`, another agent's name, or nothing when the comment goes to whoever asks first.

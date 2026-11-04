@@ -987,7 +987,7 @@ impl FiniteMcp {
             design
                 .comments()
                 .iter()
-                .filter(|c| design.awaits(c, &me, listening))
+                .filter(|c| design.awaits(c, &me, |id| listening(id, c)))
                 .count()
         });
         let info = handle.read(|design| {
@@ -1979,7 +1979,7 @@ impl FiniteMcp {
     ) -> ToolResult {
         let handle = design!(self, &p.design_id);
         let actor = self.actor(&ctx);
-        handle.take_waiting(&actor, |_, _| true);
+        handle.take_waiting(&actor, Default::default());
         let comments = handle.with_routes(|design, listening| {
             let shown = design
                 .comments()
@@ -2026,7 +2026,7 @@ impl FiniteMcp {
             let changed = handle.comments_changed();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            let taken = handle.take_waiting(&actor, |_, _| true);
+            let taken = handle.take_waiting(&actor, Default::default());
             let waiting = handle.with_routes(|design, listening| {
                 comments_json(design, &actor.id, listening, taken.iter())
             });

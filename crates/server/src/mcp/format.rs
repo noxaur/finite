@@ -201,7 +201,7 @@ const THREAD_SHOWN: usize = 10;
 pub(super) fn comments_json<'a>(
     design: &Design,
     me: &str,
-    listening: &dyn Fn(&str) -> bool,
+    listening: &dyn Fn(&str, &Comment) -> bool,
     comments: impl Iterator<Item = &'a Comment>,
 ) -> Vec<serde_json::Value> {
     let doc = design.view();
@@ -276,7 +276,7 @@ pub(super) fn comments_json<'a>(
                 comment["alsoSelected"] = also.into();
             }
             // Left out when it goes to whichever agent asks first.
-            let audience = match (&c.audience, design.routed_to(c, listening)) {
+            let audience = match (&c.audience, design.routed_to(c, |id| listening(id, c))) {
                 (Audience::People, _) => Some("people".to_owned()),
                 (_, Some(to)) if to == me => Some("you".to_owned()),
                 (_, Some(to)) => Some(format!("{} (another agent)", c.agent_name(to))),

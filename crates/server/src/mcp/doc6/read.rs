@@ -120,7 +120,7 @@ fn more(ids: &[NodeId]) -> String {
 
 fn overview(
     design: &Design,
-    listening: &dyn Fn(&str) -> bool,
+    listening: &dyn Fn(&str, &finite_design::comment::Comment) -> bool,
     presence: &[crate::hub::Presence],
     me: &Actor,
     page: Option<&str>,
@@ -133,7 +133,7 @@ fn overview(
     let mine = design
         .comments()
         .iter()
-        .filter(|c| design.awaits(c, &me.id, listening))
+        .filter(|c| design.awaits(c, &me.id, |id| listening(id, c)))
         .count();
     let comments = match open {
         0 => count(open, "open comment"),

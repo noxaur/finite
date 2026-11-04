@@ -1171,4 +1171,14 @@ async fn each_comment_goes_to_one_agent() {
     assert!(none(ada.ok("comments", drafts).await));
     let home = json!({ "designId": id, "select": format!("#{board}"), "wait": 1 });
     assert!(ada.ok("comments", home).await.contains("Even darker"));
+
+    // An agent listening to another page doesn't hold up comments here.
+    let drafts = json!({ "designId": id, "page": "Drafts", "wait": 1 });
+    assert!(none(ada.ok("comments", drafts).await));
+    post(Audience::Agents, "Make it pink");
+    assert!(
+        bo.ok("comments", wait.clone())
+            .await
+            .contains("Make it pink")
+    );
 }
