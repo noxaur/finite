@@ -15,7 +15,7 @@ use axum::{
 };
 use finite_design::{
     Document, Op, Snapshot,
-    comment::{self, Anchor, Author, AuthorKind, Comment, CommentError},
+    comment::{self, Anchor, Audience, Author, AuthorKind, Comment, CommentError},
     edit::{self, EditError},
     import::ImportRecord,
     user_edit::UserEdit,
@@ -394,6 +394,9 @@ struct CreateComment {
     extra_node_ids: Vec<String>,
     x: f64,
     y: f64,
+    /// Who it's for. Any agent when left out.
+    #[serde(default)]
+    audience: Audience,
 }
 
 #[derive(Deserialize)]
@@ -402,9 +405,13 @@ struct Reply {
     body: String,
 }
 
+/// Resolves or reopens a comment, or changes who it's for: one of the two.
 #[derive(Deserialize)]
 struct UpdateComment {
-    resolved: bool,
+    #[serde(default)]
+    resolved: Option<bool>,
+    #[serde(default)]
+    audience: Option<Audience>,
 }
 
 #[derive(Deserialize)]
@@ -427,10 +434,12 @@ async fn create_comment(
         x: body.x,
         y: body.y,
     };
-    let comment =
-        open(&hub, &id)
-            .await?
-            .add_comment(body.author.into_author(), anchor, &body.body)?;
+    let comment = open(&hub, &id).await?.add_comment(
+        body.author.into_author(),
+        anchor,
+        body.audience,
+        &body.body,
+    )?;
     Ok((StatusCode::CREATED, Json(comment)))
 }
 
@@ -451,9 +460,16 @@ async fn update_comment(
     Path((id, comment)): Path<(String, String)>,
     Json(body): Json<UpdateComment>,
 ) -> CommentResult {
-    let comment = open(&hub, &id)
-        .await?
-        .set_resolved(&comment, body.resolved)?;
+    let handle = open(&hub, &id).await?;
+    let comment = match (body.resolved, body.audience) {
+        (Some(resolved), None) => handle.set_resolved(&comment, resolved)?,
+        (None, Some(audience)) => handle.set_audience(&comment, audience)?,
+        _ => {
+            return Err(ApiError::Unprocessable(
+                "send either resolved or audience".into(),
+            ));
+        }
+    };
     Ok((StatusCode::OK, Json(comment)))
 }
 

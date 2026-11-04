@@ -11,6 +11,11 @@
 //!   current state unless it asks to resolve or reopen.
 //! - A person can edit their own message while it's the thread's newest, so
 //!   never one an agent has already answered.
+//! - A comment's [`Audience`] says which agents should act on it: any agent,
+//!   one agent, or none (a note between people). [`Comment::awaits`] is the
+//!   one rule for "should this agent act now".
+//! - An agent can pass on a comment, so it stops waking that agent. A
+//!   person's new message, an edit of it, or a new audience clears the passes.
 
 use std::{
     collections::{BTreeSet, HashSet, VecDeque},
@@ -52,6 +57,57 @@ pub struct Author {
     pub id: ActorId,
     pub name: String,
     pub kind: AuthorKind,
+}
+
+/// Who a comment is for, picked by the person who posts it. Any person can
+/// change it later with [`crate::Design::set_audience`]. It holds for the
+/// whole thread.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Audience {
+    /// Any agent may act on it. The default, so comments saved before
+    /// audiences existed still wake agents.
+    #[default]
+    Agents,
+    /// A note between people. It never wakes an agent.
+    People,
+    /// One agent, by actor id (`agent:…` or `mcp:…`). `name` is its name when
+    /// it was picked, so a viewer can label the pin after the agent has gone.
+    Agent { id: ActorId, name: String },
+}
+
+impl Audience {
+    pub fn is_agents(&self) -> bool {
+        matches!(self, Self::Agents)
+    }
+
+    /// Whether `agent` is among the agents asked to act.
+    pub fn admits(&self, agent: &str) -> bool {
+        match self {
+            Self::Agents => true,
+            Self::People => false,
+            Self::Agent { id, .. } => id == agent,
+        }
+    }
+}
+
+/// Checks an audience a person picked: one agent must have an agent's id.
+/// An empty name becomes the id, and a long one is clipped.
+pub(crate) fn check_audience(audience: Audience) -> Result<Audience, CommentError> {
+    let Audience::Agent { id, name } = audience else {
+        return Ok(audience);
+    };
+    let rest = id
+        .strip_prefix("agent:")
+        .or_else(|| id.strip_prefix("mcp:"));
+    if rest.is_none_or(|rest| rest.is_empty() || rest.chars().count() > MAX_USER_ID) {
+        return Err(CommentError::BadAudience);
+    }
+    let name = match crate::label::clip(&name, MAX_NAME) {
+        name if name.is_empty() => crate::label::clip(&id, MAX_NAME),
+        name => name,
+    };
+    Ok(Audience::Agent { id, name })
 }
 
 /// An edit linked from a reply: its change `seq`, label, and the outermost
@@ -112,6 +168,11 @@ pub struct Comment {
     /// keeps whichever copy is newer.
     #[serde(default)]
     pub rev: u64,
+    #[serde(default, skip_serializing_if = "Audience::is_agents")]
+    pub audience: Audience,
+    /// Agents that passed on it since a person last wrote in it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passed_by: Vec<Author>,
 }
 
 /// A point on the canvas.
@@ -127,13 +188,68 @@ impl Comment {
         self.messages.last().map_or(0, |m| m.seq)
     }
 
-    /// Whether an agent should act on this: it's open, and a user wrote last.
-    pub fn awaits_agent(&self) -> bool {
-        !self.resolved
-            && self
-                .messages
-                .last()
-                .is_some_and(|m| m.author.kind == AuthorKind::User)
+    /// Which agents are expected to act: it's open, a person wrote last, and
+    /// it isn't a note for people.
+    pub fn waiting_for(&self) -> Option<&Audience> {
+        let person_last = self
+            .messages
+            .last()
+            .is_some_and(|m| m.author.kind == AuthorKind::User);
+        (!self.resolved && person_last && self.audience != Audience::People)
+            .then_some(&self.audience)
+    }
+
+    /// Whether `agent` should act on this now: it's waiting for that agent,
+    /// and that agent hasn't passed on it.
+    pub fn awaits(&self, agent: &str) -> bool {
+        self.waiting_for().is_some_and(|a| a.admits(agent))
+            && !self.passed_by.iter().any(|p| p.id == agent)
+    }
+}
+
+/// What an agent listens to, for one `comments` call. The default admits
+/// every comment.
+#[derive(Clone, Debug, Default)]
+pub struct Listening {
+    /// Elements. A comment is in scope when its artboard or one of its
+    /// elements is one of these or inside one.
+    pub within: Option<HashSet<NodeId>>,
+    /// A page id. A comment is in scope when its artboard is on that page.
+    pub page: Option<String>,
+    /// Only comments a person addressed to the agent itself.
+    pub mentions: bool,
+}
+
+impl Listening {
+    pub fn admits(&self, doc: &Document, comment: &Comment, me: &str) -> bool {
+        if self.mentions && !matches!(&comment.audience, Audience::Agent { id, .. } if id == me) {
+            return false;
+        }
+        let board = comment.artboard_id.as_deref().and_then(|id| doc.get(id));
+        if let Some(page) = &self.page
+            && board.is_none_or(|board| board.parent.is_some() || doc.page_of(board) != page)
+        {
+            return false;
+        }
+        let Some(within) = &self.within else {
+            return true;
+        };
+        let inside = |id: &str| {
+            let mut at = Some(id);
+            while let Some(id) = at {
+                if within.contains(id) {
+                    return true;
+                }
+                at = doc.get(id).and_then(|n| n.parent.as_deref());
+            }
+            false
+        };
+        comment
+            .artboard_id
+            .iter()
+            .chain(&comment.node_id)
+            .chain(&comment.extra_node_ids)
+            .any(|id| doc.contains(id) && inside(id))
     }
 }
 
@@ -167,6 +283,8 @@ pub enum CommentError {
     BadSelection,
     /// Only the newest message can be edited, and only by its author.
     NotEditable,
+    /// One agent named by an id that isn't an agent's.
+    BadAudience,
 }
 
 impl fmt::Display for CommentError {
@@ -196,6 +314,9 @@ impl fmt::Display for CommentError {
             ),
             Self::NotEditable => f.write_str(
                 "only your own message can be edited, while it's the newest in the thread",
+            ),
+            Self::BadAudience => f.write_str(
+                "a comment can be for agents, for people, or for one agent by its id (agent:… or mcp:…)",
             ),
         }
     }
@@ -506,9 +627,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_comment_awaits_an_agent_until_one_answers() {
-        let message = |kind| Message {
+    fn message(kind: AuthorKind) -> Message {
+        Message {
             author: Author {
                 id: "x".into(),
                 name: "X".into(),
@@ -519,11 +639,14 @@ mod tests {
             seq: 0,
             changes: Vec::new(),
             edited_at: None,
-        };
-        let mut comment = Comment {
+        }
+    }
+
+    fn comment(audience: Audience) -> Comment {
+        Comment {
             id: "c".into(),
-            artboard_id: None,
-            node_id: None,
+            artboard_id: Some("board".into()),
+            node_id: Some("child".into()),
             extra_node_ids: Vec::new(),
             x: 0.0,
             y: 0.0,
@@ -533,13 +656,128 @@ mod tests {
             messages: vec![message(AuthorKind::User)],
             detached_at: None,
             rev: 0,
-        };
-        assert!(comment.awaits_agent());
+            audience,
+            passed_by: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_comment_awaits_an_agent_until_one_answers() {
+        let mut comment = comment(Audience::Agents);
+        assert!(comment.awaits("agent:a"));
         comment.messages.push(message(AuthorKind::Agent));
-        assert!(!comment.awaits_agent(), "an agent answered");
+        assert!(!comment.awaits("agent:a"), "an agent answered");
         comment.messages.push(message(AuthorKind::User));
-        assert!(comment.awaits_agent(), "the user replied");
+        assert!(comment.awaits("agent:a"), "the user replied");
         comment.resolved = true;
-        assert!(!comment.awaits_agent(), "resolved");
+        assert!(!comment.awaits("agent:a"), "resolved");
+    }
+
+    #[test]
+    fn the_audience_picks_the_agents() {
+        let people = comment(Audience::People);
+        assert_eq!(people.waiting_for(), None);
+        assert!(!people.awaits("agent:a"));
+        let one = comment(Audience::Agent {
+            id: "agent:a".into(),
+            name: "A".into(),
+        });
+        assert!(one.awaits("agent:a"));
+        assert!(!one.awaits("agent:b"));
+        let mut any = comment(Audience::Agents);
+        any.passed_by.push(Author {
+            id: "agent:a".into(),
+            name: "A".into(),
+            kind: AuthorKind::Agent,
+        });
+        assert!(!any.awaits("agent:a"), "it passed");
+        assert!(any.awaits("agent:b"));
+    }
+
+    #[test]
+    fn an_audience_names_an_agent_by_its_id() {
+        let agent = |id: &str, name: &str| Audience::Agent {
+            id: id.into(),
+            name: name.into(),
+        };
+        assert_eq!(
+            check_audience(agent("agent:a", "  ")),
+            Ok(agent("agent:a", "agent:a"))
+        );
+        assert_eq!(
+            check_audience(agent("mcp:s1", "Claude")),
+            Ok(agent("mcp:s1", "Claude"))
+        );
+        for id in ["", "agent:", "b7f3", "user:x"] {
+            assert_eq!(
+                check_audience(agent(id, "X")),
+                Err(CommentError::BadAudience),
+                "{id:?}"
+            );
+        }
+        assert_eq!(check_audience(Audience::People), Ok(Audience::People));
+    }
+
+    #[test]
+    fn old_comments_are_for_agents() {
+        let mut json = serde_json::to_value(comment(Audience::Agents)).unwrap();
+        assert!(json.get("audience").is_none(), "the default isn't written");
+        json.as_object_mut().unwrap().remove("passedBy");
+        let loaded: Comment = serde_json::from_value(json).unwrap();
+        assert_eq!(loaded.audience, Audience::Agents);
+        assert!(loaded.passed_by.is_empty());
+        let people = serde_json::to_value(comment(Audience::People)).unwrap();
+        assert_eq!(people["audience"], serde_json::json!({"kind": "people"}));
+    }
+
+    #[test]
+    fn listening_admits_comments_on_its_part() {
+        let doc = doc();
+        let on_board = comment(Audience::Agents);
+        let elsewhere = Comment {
+            artboard_id: Some("other".into()),
+            node_id: None,
+            ..comment(Audience::Agents)
+        };
+        let canvas = Comment {
+            artboard_id: None,
+            node_id: None,
+            ..comment(Audience::Agents)
+        };
+        let all = Listening::default();
+        assert!(all.admits(&doc, &on_board, "agent:a"));
+        assert!(all.admits(&doc, &canvas, "agent:a"));
+
+        let within = |ids: &[&str]| Listening {
+            within: Some(ids.iter().map(|&id| id.to_owned()).collect()),
+            ..Listening::default()
+        };
+        assert!(within(&["board"]).admits(&doc, &on_board, "agent:a"));
+        assert!(within(&["child"]).admits(&doc, &on_board, "agent:a"));
+        assert!(!within(&["text"]).admits(&doc, &on_board, "agent:a"));
+        assert!(!within(&["board"]).admits(&doc, &elsewhere, "agent:a"));
+        assert!(!within(&["board"]).admits(&doc, &canvas, "agent:a"));
+
+        let page = Listening {
+            page: Some(crate::FIRST_PAGE.into()),
+            ..Listening::default()
+        };
+        assert!(page.admits(&doc, &on_board, "agent:a"));
+        assert!(
+            !page.admits(&doc, &canvas, "agent:a"),
+            "canvas pins are on no page"
+        );
+
+        let mentions = Listening {
+            mentions: true,
+            ..Listening::default()
+        };
+        assert!(!mentions.admits(&doc, &on_board, "agent:a"));
+        let mine = comment(Audience::Agent {
+            id: "agent:a".into(),
+            name: "A".into(),
+        });
+        assert!(mentions.admits(&doc, &mine, "agent:a"));
+        assert!(!mentions.admits(&doc, &mine, "agent:b"));
     }
 }

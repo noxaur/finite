@@ -11,7 +11,7 @@ use std::{
 
 use finite_design::{
     ActorId, Change, Design, Document, NodeId, Op, Record, Snapshot, Transaction,
-    comment::{Anchor, Author, Comment, CommentError},
+    comment::{Anchor, Audience, Author, Comment, CommentError},
     components,
     edit::EditError,
     label,
@@ -855,10 +855,18 @@ impl DesignHandle {
         &self,
         author: Author,
         anchor: Anchor,
+        audience: Audience,
         body: &str,
     ) -> Result<Comment, CommentError> {
         self.update_comment(|design| {
-            design.add_comment(author, anchor, body, &mut || random_id(8), now_ms())
+            design.add_comment(
+                author,
+                anchor,
+                audience,
+                body,
+                &mut || random_id(8),
+                now_ms(),
+            )
         })
     }
 
@@ -885,6 +893,16 @@ impl DesignHandle {
         body: &str,
     ) -> Result<Comment, CommentError> {
         self.update_comment(|design| design.edit_message(id, author_id, body, now_ms()))
+    }
+
+    /// Changes who a comment is for. See [`Design::set_audience`].
+    pub fn set_audience(&self, id: &str, audience: Audience) -> Result<Comment, CommentError> {
+        self.update_comment(|design| design.set_audience(id, audience))
+    }
+
+    /// An agent steps back from a comment. See [`Design::pass`].
+    pub fn pass(&self, id: &str, agent: Author) -> Result<Comment, CommentError> {
+        self.update_comment(|design| design.pass(id, agent))
     }
 
     /// Deletes a comment, then tells viewers.

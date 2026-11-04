@@ -975,7 +975,12 @@ impl FiniteMcp {
         description = "Overview of a design: its name, its pages, its artboards (id, name, position, size, page, mode), how many tokens it has and which agents are working on what.",
         annotations(read_only_hint = true)
     )]
-    async fn get_basic_info(&self, Parameters(p): Parameters<DesignParams>) -> ToolResult {
+    async fn get_basic_info(
+        &self,
+        Parameters(p): Parameters<DesignParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> ToolResult {
+        let me = self.actor(&ctx).id;
         let handle = design!(self, &p.design_id);
         let presence = handle.presence();
         let info = handle.read(|design| {
@@ -1025,6 +1030,7 @@ impl FiniteMcp {
                 "artboards": artboards,
                 "agentsWorking": presence,
                 "openComments": design.comments().iter().filter(|c| !c.resolved).count(),
+                "commentsWaitingForYou": design.comments().iter().filter(|c| c.awaits(&me)).count(),
             })
         });
         let mut info = info;
@@ -1959,14 +1965,19 @@ impl FiniteMcp {
         description = "Comments users pinned to a design, oldest first: what they asked for, which artboard and element it's about (alsoSelected lists more elements the user picked with it), and the thread so far. Open comments only, unless includeResolved is set. A long list comes in parts; the note at the end says which offset to pass next.",
         annotations(read_only_hint = true)
     )]
-    async fn get_comments(&self, Parameters(p): Parameters<CommentsParams>) -> ToolResult {
+    async fn get_comments(
+        &self,
+        Parameters(p): Parameters<CommentsParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> ToolResult {
         let handle = design!(self, &p.design_id);
+        let me = self.actor(&ctx).id;
         let comments = handle.read(|design| {
             let shown = design
                 .comments()
                 .iter()
                 .filter(|c| p.include_resolved || !c.resolved);
-            comments_json(design, shown)
+            comments_json(design, &me, shown)
         });
         if comments.len() <= p.offset {
             return ok(match (comments.is_empty(), p.include_resolved) {
@@ -1990,10 +2001,15 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Wait for users to ask for something. Returns as soon as a comment or reply is waiting for an agent (open, with a user's message last), with those comments in the same form as get_comments. Returns right away if some already are, or with a message saying none arrived when timeoutSeconds (default 60, at most 300) runs out. Call it in a loop to keep taking feedback.",
+        description = "Wait for users to ask for something. Returns as soon as a comment or reply is waiting for you (open, a user's message last, and not a note for people or a comment for another agent), with those comments in the same form as get_comments. Returns right away if some already are, or with a message saying none arrived when timeoutSeconds (default 60, at most 300) runs out. Call it in a loop to keep taking feedback.",
         annotations(read_only_hint = true)
     )]
-    async fn wait_for_comments(&self, Parameters(p): Parameters<WaitParams>) -> ToolResult {
+    async fn wait_for_comments(
+        &self,
+        Parameters(p): Parameters<WaitParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> ToolResult {
+        let me = self.actor(&ctx).id;
         let timeout = Duration::from_secs(p.timeout_seconds.unwrap_or(60).clamp(1, 300));
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -2005,7 +2021,8 @@ impl FiniteMcp {
             let waiting = handle.read(|design| {
                 comments_json(
                     design,
-                    design.comments().iter().filter(|c| c.awaits_agent()),
+                    &me,
+                    design.comments().iter().filter(|c| c.awaits(&me)),
                 )
             });
             if !waiting.is_empty() {

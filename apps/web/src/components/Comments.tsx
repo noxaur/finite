@@ -3,7 +3,8 @@
 import * as stylex from "@stylexjs/stylex";
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Replica } from "@/design/replica";
-import type { Comment } from "@/design/schema";
+import type { Audience, Comment } from "@/design/schema";
+import { ANY_AGENT, audienceLabel, audienceOf, type KnownAgent } from "@/lib/audience";
 import { COMMENT_LIMIT, NAME_LIMIT, SELECTION_LIMIT } from "@/lib/limits";
 import { isLocalUser, useLocalName } from "@/lib/user";
 import { timeAgo } from "@/lib/time";
@@ -61,6 +62,7 @@ export function pinPosition(
 /** What a comment's pin shows. `working` is the agent label on its artboard, if any. */
 export function pinState(comment: Comment, working: string | undefined): PinState {
   if (comment.resolved) return "resolved";
+  if (audienceOf(comment).kind === "people") return "note";
   if (working) return "working";
   return comment.messages.at(-1)?.author.kind === "agent" ? "replied" : "waiting";
 }
@@ -131,12 +133,15 @@ interface LayerProps {
   readonly draft: Draft | null;
   /** Agent labels by artboard id, for the artboards agents are working on. */
   readonly working: ReadonlyMap<string, string>;
+  /** The agents a comment can be for, besides any agent. */
+  readonly agents: ReadonlyArray<KnownAgent>;
   readonly onOpen: (id: string | null) => void;
   /** Resolves to nothing once sent, or to why it wasn't, to show. */
-  readonly onPost: (body: string) => Promise<string | undefined>;
+  readonly onPost: (body: string, audience: Audience) => Promise<string | undefined>;
   readonly onCancelDraft: () => void;
   readonly onReply: (id: string, body: string) => Promise<string | undefined>;
   readonly onResolve: (id: string, resolved: boolean) => void;
+  readonly onAudience: (id: string, audience: Audience) => void;
   /** Replaces the newest message, which must be this browser's. */
   readonly onEdit: (id: string, body: string) => Promise<string | undefined>;
   readonly onDelete: (id: string) => void;
@@ -190,9 +195,11 @@ export function CommentLayer(props: LayerProps) {
               <Thread
                 comment={comment}
                 working={comment.artboardId === null ? undefined : working.get(comment.artboardId)}
+                agents={props.agents}
                 onClose={() => props.onOpen(null)}
                 onReply={(body) => props.onReply(comment.id, body)}
                 onResolve={(resolved) => props.onResolve(comment.id, resolved)}
+                onAudience={(audience) => props.onAudience(comment.id, audience)}
                 onEdit={(body) => props.onEdit(comment.id, body)}
                 onDelete={() => props.onDelete(comment.id)}
                 onShowChange={props.onShowChange}
@@ -206,7 +213,14 @@ export function CommentLayer(props: LayerProps) {
   );
 }
 
-function DraftPin({ replica, draft, onPost, onCancelDraft }: LayerProps & { draft: Draft }) {
+function DraftPin({
+  replica,
+  draft,
+  agents,
+  onPost,
+  onCancelDraft,
+}: LayerProps & { draft: Draft }) {
+  const [audience, setAudience] = useState(ANY_AGENT);
   const at = pinPosition(replica, draft);
   if (!at) return null;
   return (
@@ -218,11 +232,12 @@ function DraftPin({ replica, draft, onPost, onCancelDraft }: LayerProps & { draf
         <NameLine />
         {draft.nodeId !== null && <SelectionLine count={selectionOf(draft).length} />}
         <Composer
-          placeholder="Add a comment"
+          placeholder={audience.kind === "people" ? "Add a note for people" : "Add a comment"}
           autoFocus
-          onSubmit={onPost}
+          onSubmit={(body) => onPost(body, audience)}
           onCancel={onCancelDraft}
         />
+        <AudiencePicker value={audience} agents={agents} onChange={setAudience} />
       </Popover>
     </div>
   );
@@ -286,6 +301,45 @@ function NameLine() {
   );
 }
 
+/**
+ * Who a comment is for: any agent, one agent, or people only. An agent that
+ * has gone stays in the list while the comment is for it.
+ */
+function AudiencePicker({
+  value,
+  agents,
+  onChange,
+}: {
+  value: Audience;
+  agents: ReadonlyArray<KnownAgent>;
+  onChange: (audience: Audience) => void;
+}) {
+  const gone = value.kind === "agent" && !agents.some((a) => a.id === value.id);
+  const options = gone ? [...agents, { id: value.id, name: value.name }] : agents;
+  return (
+    <select
+      aria-label="Who it's for"
+      title="Who it's for"
+      value={value.kind === "agent" ? value.id : value.kind}
+      onChange={(e) => {
+        const picked = e.currentTarget.value;
+        if (picked === "agents" || picked === "people") return onChange({ kind: picked });
+        const agent = options.find((a) => a.id === picked);
+        if (agent) onChange({ kind: "agent", id: agent.id, name: agent.name });
+      }}
+      {...stylex.props(styles.audience)}
+    >
+      <option value="agents">{audienceLabel(ANY_AGENT)}</option>
+      <option value="people">{audienceLabel({ kind: "people" })}</option>
+      {options.map((agent) => (
+        <option key={agent.id} value={agent.id}>
+          {audienceLabel({ kind: "agent", ...agent })}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 /** Room kept between a popover and the window's edge, in pixels. */
 const EDGE = 8;
 /** The top bar's height: popovers flip below their pin rather than slide under it. */
@@ -328,18 +382,22 @@ function Popover({ label, children }: { label?: string; children: ReactNode }) {
 function Thread({
   comment,
   working,
+  agents,
   onClose,
   onReply,
   onResolve,
+  onAudience,
   onEdit,
   onDelete,
   onShowChange,
 }: {
   comment: Comment;
   working: string | undefined;
+  agents: ReadonlyArray<KnownAgent>;
   onClose: () => void;
   onReply: (body: string) => Promise<string | undefined>;
   onResolve: (resolved: boolean) => void;
+  onAudience: (audience: Audience) => void;
   onEdit: (body: string) => Promise<string | undefined>;
   onDelete: () => void;
   onShowChange: (nodeIds: ReadonlyArray<string>) => void;
@@ -379,6 +437,7 @@ function Thread({
     <Popover label="Comment thread">
       <div {...stylex.props(styles.threadHead)}>
         <span {...stylex.props(styles.muted)}>{comment.resolved ? "Resolved" : "Open"}</span>
+        <AudiencePicker value={audienceOf(comment)} agents={agents} onChange={onAudience} />
         <span {...stylex.props(styles.spacer)} />
         <button
           type="button"
@@ -458,6 +517,11 @@ function Thread({
           </li>
         ))}
       </ol>
+      {comment.passedBy && comment.passedBy.length > 0 && (
+        <p {...stylex.props(styles.muted)}>
+          Passed: {comment.passedBy.map((agent) => agent.name).join(", ")}
+        </p>
+      )}
       {working && (
         <p {...stylex.props(styles.working)}>
           <span {...stylex.props(styles.workingDot)} /> {working}
@@ -637,6 +701,18 @@ const styles = stylex.create({
   threadHead: { display: "flex", alignItems: "center", gap: space.xs },
   spacer: { flexGrow: 1 },
   muted: { color: colors.muted, fontSize: 12 },
+  audience: {
+    maxWidth: 160,
+    height: 22,
+    paddingInline: 4,
+    borderWidth: 0,
+    borderRadius: 4,
+    backgroundColor: { default: "transparent", ":hover": colors.bg },
+    color: colors.muted,
+    font: "inherit",
+    fontSize: 12,
+    cursor: "var(--cursor-pointer, pointer)",
+  },
   nameButton: {
     padding: 0,
     borderWidth: 0,

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use finite_design::{
     Design, DesignMeta, Op, PropKey, Rejected,
-    comment::{Anchor, Author, AuthorKind},
+    comment::{Anchor, Audience, Author, AuthorKind},
     edit::{self, EditError, NewArtboard, WriteMode},
     html::{self, ExportOptions},
     import::{BlobHash, ImportRecord},
@@ -216,7 +216,14 @@ fn a_comment_reply_links_the_transaction_by_its_label() {
         kind: AuthorKind::User,
     };
     let comment = design
-        .add_comment(user, anchor, "Fill it in", &mut || "c1".into(), 1)
+        .add_comment(
+            user,
+            anchor,
+            Audience::Agents,
+            "Fill it in",
+            &mut || "c1".into(),
+            1,
+        )
         .unwrap()
         .id
         .clone();
@@ -268,7 +275,7 @@ fn deleting_an_artboard_in_a_transaction_leaves_its_pins_where_they_were() {
         kind: AuthorKind::User,
     };
     design
-        .add_comment(user, anchor, "Hm", &mut || "c1".into(), 1)
+        .add_comment(user, anchor, Audience::Agents, "Hm", &mut || "c1".into(), 1)
         .unwrap();
     design
         .transact("A", "Move and delete", 2, |tx| {

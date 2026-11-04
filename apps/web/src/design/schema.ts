@@ -181,6 +181,14 @@ export const CommentMessage = Schema.Struct({
 });
 export type CommentMessage = typeof CommentMessage.Type;
 
+/** Who a comment is for. Mirrors `Audience` in crates/design/src/comment.rs. */
+export const Audience = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("agents") }),
+  Schema.Struct({ kind: Schema.Literal("people") }),
+  Schema.Struct({ kind: Schema.Literal("agent"), id: Schema.String, name: Schema.String }),
+]);
+export type Audience = typeof Audience.Type;
+
 export const Comment = Schema.Struct({
   id: Schema.String,
   /** The artboard the pin sits on. `x` and `y` are relative to it, or to the canvas when `null`. */
@@ -201,6 +209,10 @@ export const Comment = Schema.Struct({
   detachedAt: Schema.optionalKey(Schema.Struct({ x: Schema.Number, y: Schema.Number })),
   /** Goes up by one with every change, so of two copies the higher one is newer. */
   rev: Schema.Number,
+  /** Who it's for. Absent means any agent. */
+  audience: Schema.optionalKey(Audience),
+  /** Agents that passed on it since a person last wrote in it. */
+  passedBy: Schema.optionalKey(Schema.Array(Author)),
 });
 export type Comment = typeof Comment.Type;
 

@@ -7,7 +7,7 @@ use std::{sync::Arc, time::Duration};
 
 use agent::{Agent, id_after};
 use axum::Router;
-use finite_design::comment::{Anchor, Author, AuthorKind};
+use finite_design::comment::{Anchor, Audience, Author, AuthorKind};
 use finite_server::{Hub, app, store::MemoryStore};
 use serde_json::{Value, json};
 
@@ -808,7 +808,7 @@ async fn comments_are_listed_awaited_and_answered() {
         y: 10.0,
     };
     let comment = handle
-        .add_comment(person, anchor, "Make it orange")
+        .add_comment(person, anchor, Audience::Agents, "Make it orange")
         .unwrap();
     let listed = agent.ok("comments", json!({ "designId": id })).await;
     assert!(
@@ -1048,4 +1048,116 @@ async fn components_are_made_used_and_detached_in_edits() {
         refusal.contains("op 2 (component)") && refusal.contains("Nothing was changed"),
         "{refusal}"
     );
+}
+
+#[tokio::test]
+async fn agents_hear_only_the_comments_for_them() {
+    let (app, hub) = doc6();
+    let mut ada = Agent::connect_doc6(&app, "Ada").await;
+    let mut bo = Agent::connect_doc6(&app, "Bo").await;
+    let (id, board) = landing(&mut ada).await;
+    edit(&mut ada, &id, json!([{ "op": "page", "create": "Drafts" }])).await;
+    let handle = hub.open(&id).await.unwrap();
+    let person = Author {
+        id: "user:cy".into(),
+        name: "Cy".into(),
+        kind: AuthorKind::User,
+    };
+    let anchor = Anchor {
+        artboard_id: Some(board.clone()),
+        node_id: None,
+        extra_node_ids: Vec::new(),
+        x: 10.0,
+        y: 10.0,
+    };
+    let post = |audience, body| {
+        handle
+            .add_comment(person.clone(), anchor.clone(), audience, body)
+            .unwrap()
+    };
+    let wait = json!({ "designId": id, "wait": 1 });
+
+    // A note between people wakes nobody, but the list shows it as one.
+    let note = post(Audience::People, "Ask the client about blue");
+    assert!(
+        ada.ok("comments", wait.clone())
+            .await
+            .contains("No comments arrived")
+    );
+    let listed = ada.ok("comments", json!({ "designId": id })).await;
+    assert!(listed.contains("\"for\": \"people\""), "{listed}");
+    let overview = ada.ok("read", json!({ "designId": id })).await;
+    assert!(
+        overview.contains("1 open comment (0 waiting for you)"),
+        "{overview}"
+    );
+    assert!(
+        !overview.contains("waiting for you: call comments"),
+        "{overview}"
+    );
+
+    // A comment for one agent wakes only that one.
+    handle
+        .set_audience(
+            &note.id,
+            Audience::Agent {
+                id: "agent:Bo".into(),
+                name: "Bo".into(),
+            },
+        )
+        .unwrap();
+    assert!(
+        ada.ok("comments", wait.clone())
+            .await
+            .contains("No comments arrived")
+    );
+    let mine = bo.ok("comments", wait.clone()).await;
+    assert!(mine.contains("\"for\": \"you\""), "{mine}");
+    let mentions = json!({ "designId": id, "mentions": true, "wait": 1 });
+    assert!(
+        bo.ok("comments", mentions.clone())
+            .await
+            .contains("Ask the client")
+    );
+    assert!(
+        ada.ok("comments", mentions)
+            .await
+            .contains("No comments arrived")
+    );
+
+    // Passing stops a comment waking you until a person writes in it again.
+    let any = post(Audience::Agents, "Make it orange");
+    let passed = ada
+        .ok(
+            "comments",
+            json!({ "designId": id, "pass": [any.id], "wait": 1 }),
+        )
+        .await;
+    assert!(
+        passed.contains("Passed on") && passed.contains("No comments arrived"),
+        "{passed}"
+    );
+    let theirs = bo.ok("comments", wait.clone()).await;
+    assert!(
+        theirs.contains("Make it orange") && theirs.contains("passedBy"),
+        "{theirs}"
+    );
+    handle
+        .reply(&any.id, person.clone(), "Darker, please", None)
+        .unwrap();
+    assert!(
+        ada.ok("comments", wait.clone())
+            .await
+            .contains("Darker, please")
+    );
+
+    // Listening to another page hears nothing from this one.
+    let drafts = json!({ "designId": id, "page": "Drafts", "wait": 1 });
+    assert!(
+        ada.ok("comments", drafts)
+            .await
+            .contains("No comments arrived")
+    );
+    let home = json!({ "designId": id, "select": format!("#{board}"), "wait": 1 });
+    assert!(ada.ok("comments", home).await.contains("Darker, please"));
 }

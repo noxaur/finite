@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use finite_design::{Document, NodeId, NodeKind, select};
+use finite_design::{Document, NodeId, NodeKind, comment::Listening, select};
 use rmcp::{
     RoleServer,
     handler::server::wrapper::Parameters,
@@ -188,6 +188,18 @@ pub struct CommentsDoc6Params {
     /// Skip this many comments, to page through a long list.
     #[serde(default)]
     offset: usize,
+    /// Only comments pinned to these elements or inside them, like read's select.
+    #[serde(default)]
+    select: Option<Select>,
+    /// Only comments on this page's artboards: its name or id.
+    #[serde(default)]
+    page: Option<String>,
+    /// Only comments a person addressed to you.
+    #[serde(default)]
+    mentions: bool,
+    /// Comments to leave to others: they stop waking you until a person writes in them again.
+    #[serde(default)]
+    pass: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -782,7 +794,7 @@ impl FiniteMcp {
 
     #[tool(
         name = "comments",
-        description = "The comments people pinned to a design, and your replies to them.\n\n- {\"designId\": \"…\"}: open comments, oldest first: what was asked, the artboard, the element (its select and HTML), and the thread so far. includeResolved: true adds resolved ones; offset pages through a long list.\n- {\"designId\": \"…\", \"wait\": 60}: blocks until a comment or reply is waiting for an agent (open, with a person's message last), then returns those. Returns at once if some already are, or says none arrived after wait seconds (at most 300). Loop on it to keep taking feedback.\n- {\"designId\": \"…\", \"reply\": [{\"commentId\": \"…\", \"message\": \"Made it an underlined link.\", \"resolve\": true}]}: replies, one or several at once. Say what you changed, with resolve: true, or ask a question and leave it open. A reply links your edits to the comment's artboard since the thread's last message.",
+        description = "The comments people pinned to a design, and your replies to them.\n\n- {\"designId\": \"…\"}: open comments, oldest first: what was asked, the artboard, the element (its select and HTML), and the thread so far. includeResolved: true adds resolved ones; offset pages through a long list.\n- {\"designId\": \"…\", \"wait\": 60}: blocks until a comment or reply is waiting for you (open, a person's message last, for any agent or for you), then returns those. Returns at once if some already are, or says none arrived after wait seconds (at most 300). Loop on it to keep taking feedback.\n- {\"designId\": \"…\", \"reply\": [{\"commentId\": \"…\", \"message\": \"Made it an underlined link.\", \"resolve\": true}]}: replies, one or several at once. Say what you changed, with resolve: true, or ask a question and leave it open. A reply links your edits to the comment's artboard since the thread's last message.\n\nListen to part of a design: page (name or id) and select (comments pinned to matching elements or inside them) narrow both the list and wait; mentions: true keeps only comments a person addressed to you. pass: [\"commentId\"] leaves comments to others: they stop waking you until a person writes in them again. It runs before wait, so {\"pass\": [\"…\"], \"wait\": 60} works.\n\nEach comment's \"for\" says who it's for when that isn't any agent: \"you\", another agent, or \"people\" (a note between people: don't act on it). passedBy lists agents that passed.\n\nExamples: {\"designId\": \"…\", \"page\": \"Mobile\", \"wait\": 120} · {\"designId\": \"…\", \"select\": \"#ab12cd34\", \"wait\": 60} · {\"designId\": \"…\", \"mentions\": true, \"wait\": 60}",
         annotations(read_only_hint = false)
     )]
     async fn doc6_comments(
@@ -791,17 +803,17 @@ impl FiniteMcp {
         ctx: RequestContext<RoleServer>,
     ) -> ToolResult {
         let handle = design!(self, &p.design_id);
+        let actor = self.actor(&ctx);
+        let me = || finite_design::comment::Author {
+            id: actor.id.clone(),
+            name: actor.name.clone(),
+            kind: finite_design::comment::AuthorKind::Agent,
+        };
         if let Some(replies) = p.reply {
-            let actor = self.actor(&ctx);
             let many = replies.len() > 1;
             let mut out = Vec::new();
             for reply in replies {
-                let author = finite_design::comment::Author {
-                    id: actor.id.clone(),
-                    name: actor.name.clone(),
-                    kind: finite_design::comment::AuthorKind::Agent,
-                };
-                match handle.reply(&reply.comment_id, author, &reply.message, reply.resolve) {
+                match handle.reply(&reply.comment_id, me(), &reply.message, reply.resolve) {
                     Ok(comment) if many => {
                         out.push(format!("{}: {}", reply.comment_id, replied(&comment)))
                     }
@@ -818,6 +830,60 @@ impl FiniteMcp {
             }
             return ok(out.join("\n"));
         }
+        let mut passed = Vec::new();
+        for id in p.pass.iter().flatten() {
+            if let Err(error) = handle.pass(id, me()) {
+                let before = match passed.is_empty() {
+                    true => String::new(),
+                    false => format!(" Passed on {} before it.", passed.join(", ")),
+                };
+                return fail(format!("{id}: {error}.{before}"));
+            }
+            passed.push(id.as_str());
+        }
+        let passed = match passed.len() {
+            0 => None,
+            1 => Some(format!(
+                "Passed on {}: it won't wake you again until a person writes in it.",
+                passed[0]
+            )),
+            _ => Some(format!(
+                "Passed on {}: they won't wake you again until a person writes in them.",
+                passed.join(", ")
+            )),
+        };
+        let selector = match p.select.as_ref() {
+            Some(select) => match selector_text(&select.value(), &HashMap::new()) {
+                Ok(selector) => Some(selector),
+                Err(error) => return fail(error),
+            },
+            None => None,
+        };
+        // Built again on every look, since artboards come and go while an agent waits.
+        let listening = |doc: &Document| -> Result<Listening, String> {
+            let page = p
+                .page
+                .as_deref()
+                .map(|page| page_id(doc, page, &HashMap::new()))
+                .transpose()?;
+            let within = match selector.as_deref() {
+                Some(selector) => {
+                    let ids = matched(doc, selector, page.as_deref())?;
+                    if ids.is_empty() {
+                        return Err(format!(
+                            "{selector:?} matches no element. read with no select shows the outline with every id."
+                        ));
+                    }
+                    Some(ids.into_iter().collect())
+                }
+                None => None,
+            };
+            Ok(Listening {
+                within,
+                page,
+                mentions: p.mentions,
+            })
+        };
         let wait = match p.wait {
             Some(Wait::Seconds(s)) => Some(s),
             Some(Wait::Flag(true)) => Some(60),
@@ -831,56 +897,69 @@ impl FiniteMcp {
                 tokio::pin!(changed);
                 changed.as_mut().enable();
                 let waiting = handle.read(|design| {
-                    comments_json(
-                        design,
-                        design.comments().iter().filter(|c| c.awaits_agent()),
-                    )
+                    let doc = design.view();
+                    let listening = listening(doc)?;
+                    let mine = design
+                        .comments()
+                        .iter()
+                        .filter(|c| c.awaits(&actor.id) && listening.admits(doc, c, &actor.id));
+                    Ok::<_, String>(comments_json(design, &actor.id, mine))
                 });
+                let waiting = match waiting {
+                    Ok(waiting) => waiting,
+                    Err(error) => return fail(error),
+                };
                 if !waiting.is_empty() {
                     let total = waiting.len();
                     let (content, shown) = fit(waiting.into_iter().map(selects));
+                    let more = (shown < total).then(|| {
+                        format!(
+                            "Showing the oldest {shown} of {total} waiting comments. Reply to these, then call again for the rest."
+                        )
+                    });
                     return Ok(CallToolResult::success(with_note(
                         content,
-                        (shown < total).then(|| {
-                            format!(
-                                "Showing the oldest {shown} of {total} waiting comments. Reply to these, then call again for the rest."
-                            )
-                        }),
+                        joined([passed, more]),
                     )));
                 }
                 if tokio::time::timeout_at(deadline, changed).await.is_err() {
-                    return ok(format!(
-                        "No comments arrived in {} seconds.",
-                        seconds.clamp(1, 300)
-                    ));
+                    let none = format!("No comments arrived in {} seconds.", seconds.clamp(1, 300));
+                    return ok(joined([passed, Some(none)]).unwrap_or_default());
                 }
             }
         }
         let comments = handle.read(|design| {
-            let shown = design
-                .comments()
-                .iter()
-                .filter(|c| p.include_resolved || !c.resolved);
-            comments_json(design, shown)
+            let doc = design.view();
+            let listening = listening(doc)?;
+            let shown = design.comments().iter().filter(|c| {
+                (p.include_resolved || !c.resolved) && listening.admits(doc, c, &actor.id)
+            });
+            Ok::<_, String>(comments_json(design, &actor.id, shown))
         });
+        let comments = match comments {
+            Ok(comments) => comments,
+            Err(error) => return fail(error),
+        };
         if comments.len() <= p.offset {
-            return ok(match (comments.is_empty(), p.include_resolved) {
+            let none = match (comments.is_empty(), p.include_resolved) {
                 (false, _) => "No more comments.",
                 (true, true) => "This design has no comments.",
                 (true, false) => "No open comments.",
-            });
+            };
+            return ok(joined([passed, Some(none.to_owned())]).unwrap_or_default());
         }
         let total = comments.len();
         let (content, shown) = fit(comments.into_iter().skip(p.offset).map(selects));
         let to = p.offset + shown;
+        let more = (to < total).then(|| {
+            format!(
+                "Showing comments {} to {to} of {total}, oldest first. Pass offset {to} for the rest.",
+                p.offset + 1
+            )
+        });
         Ok(CallToolResult::success(with_note(
             content,
-            (to < total).then(|| {
-                format!(
-                    "Showing comments {} to {to} of {total}, oldest first. Pass offset {to} for the rest.",
-                    p.offset + 1
-                )
-            }),
+            joined([passed, more]),
         )))
     }
 
@@ -920,6 +999,12 @@ impl FiniteMcp {
             )),
         }
     }
+}
+
+/// The notes that are there, one per line.
+fn joined(notes: [Option<String>; 2]) -> Option<String> {
+    let notes: Vec<String> = notes.into_iter().flatten().collect();
+    (!notes.is_empty()).then(|| notes.join("\n"))
 }
 
 /// A comment as doc6 shows it: its element as a selector, `#id`, rather

@@ -127,13 +127,21 @@ fn overview(
     let count = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
     let boards = doc.artboards();
     let open = design.comments().iter().filter(|c| !c.resolved).count();
+    let mine = design
+        .comments()
+        .iter()
+        .filter(|c| c.awaits(&me.id))
+        .count();
+    let comments = match open {
+        0 => count(open, "open comment"),
+        _ => format!("{} ({mine} waiting for you)", count(open, "open comment")),
+    };
     let mut lines = vec![format!(
-        "Design {:?} (designId {:?}): {}, {}, {}, {}.",
+        "Design {:?} (designId {:?}): {}, {}, {comments}, {}.",
         design.meta.name,
         design.meta.id,
         count(boards.len(), "artboard"),
         count(doc.len(), "node"),
-        count(open, "open comment"),
         count(doc.tokens().len(), "token"),
     )];
     let pages = doc.pages();
@@ -163,8 +171,12 @@ fn overview(
                 .unwrap_or_default()
         ));
     }
-    if open > 0 {
-        lines.push("Open comments: call comments to read them.".into());
+    match mine {
+        0 => {}
+        1 => lines.push("1 comment is waiting for you: call comments to read it.".into()),
+        n => lines.push(format!(
+            "{n} comments are waiting for you: call comments to read them."
+        )),
     }
     if let Some(list) = components_line(design.doc()) {
         lines.push(list);

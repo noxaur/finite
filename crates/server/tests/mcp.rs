@@ -1798,3 +1798,70 @@ async fn jsx_results_are_cut_and_the_format_only_exports() {
         "{error}"
     );
 }
+
+/// A person posts a note for people over HTTP, then turns it back into a
+/// request for agents, and the classic tools follow.
+#[tokio::test]
+async fn people_choose_who_a_comment_is_for() {
+    let app = test_app();
+    let mut agent = Agent::connect(&app, "Alice").await;
+    let created = agent.ok("create_design", json!({ "name": "Notes" })).await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .expect("a design id")
+        .to_owned();
+    let send = |method: &str, path: String, body: Value| {
+        let app = app.clone();
+        let req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        async move { app.oneshot(req).await.unwrap() }
+    };
+    let me = json!({ "id": "u1", "name": "Per" });
+    let res = send(
+        "POST",
+        format!("/api/designs/{design}/comments"),
+        json!({ "author": me, "body": "Ask the client", "x": 1, "y": 2,
+                "audience": { "kind": "people" } }),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let comment: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(comment["audience"], json!({ "kind": "people" }));
+    let id = comment["id"].as_str().unwrap();
+    let wait = json!({ "designId": design, "timeoutSeconds": 1 });
+    let none = agent.ok("wait_for_comments", wait.clone()).await;
+    assert!(none.contains("No comments arrived"), "{none}");
+    let info = agent
+        .ok("get_basic_info", json!({ "designId": design }))
+        .await;
+    assert!(info.contains(r#""commentsWaitingForYou": 0"#), "{info}");
+
+    let path = format!("/api/designs/{design}/comments/{id}");
+    let res = send(
+        "PATCH",
+        path.clone(),
+        json!({ "audience": { "kind": "agent", "id": "b7" } }),
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "not an agent's id"
+    );
+    let res = send("PATCH", path.clone(), json!({})).await;
+    assert_eq!(
+        res.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "nothing to change"
+    );
+    let res = send("PATCH", path, json!({ "audience": { "kind": "agents" } })).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let waited = agent.ok("wait_for_comments", wait).await;
+    assert!(waited.contains("Ask the client"), "{waited}");
+}

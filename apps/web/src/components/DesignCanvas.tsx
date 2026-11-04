@@ -9,6 +9,8 @@ import { Camera, mostVisible, union, type View } from "@/design/camera";
 import { Editor } from "@/design/editing/editor";
 import { type Hit, Renderer } from "@/design/renderer";
 import { Replica } from "@/design/replica";
+import type { Audience } from "@/design/schema";
+import { knownAgents } from "@/lib/audience";
 import { DesignSession, initialSessionState, type SessionState } from "@/design/session";
 import { loadDesignModel } from "@/design/wasm";
 import { mcpUrl } from "@/lib/mcp";
@@ -451,7 +453,7 @@ export function DesignCanvas({ id }: { id: string }) {
     );
   };
 
-  const postComment = async (body: string) => {
+  const postComment = async (body: string, audience: Audience) => {
     if (!draft) return undefined;
     // Leave out elements an agent deleted or moved away while the person typed.
     const replica = sessionRef.current?.replica;
@@ -460,7 +462,7 @@ export function DesignCanvas({ id }: { id: string }) {
     );
     const pin = { ...draft, nodeId, extraNodeIds };
     const exit = await runtime.runPromiseExit(
-      Api.use((api) => api.createComment(id, { author: localUser(), body, ...pin })),
+      Api.use((api) => api.createComment(id, { author: localUser(), body, audience, ...pin })),
     );
     if (Exit.isFailure(exit)) return unsent(exit.cause);
     sessionRef.current?.upsertComment(exit.value);
@@ -577,6 +579,14 @@ export function DesignCanvas({ id }: { id: string }) {
         : { status: "failed", message: unsent(exit.cause) },
     );
     setPanel("import");
+  };
+
+  const setAudience = (commentId: string, audience: Audience) => {
+    void runtime
+      .runPromiseExit(Api.use((api) => api.setCommentAudience(id, commentId, audience)))
+      .then((exit) => {
+        if (Exit.isSuccess(exit)) sessionRef.current?.upsertComment(exit.value);
+      });
   };
 
   const resolve = (commentId: string, resolved: boolean) => {
@@ -734,6 +744,7 @@ export function DesignCanvas({ id }: { id: string }) {
               openId={openId}
               draft={draft}
               working={working}
+              agents={knownAgents(comments, presence)}
               onOpen={(commentId) => {
                 setDraft(null);
                 setOpenId(commentId);
@@ -742,6 +753,7 @@ export function DesignCanvas({ id }: { id: string }) {
               onCancelDraft={() => setDraft(null)}
               onReply={reply}
               onResolve={resolve}
+              onAudience={setAudience}
               onEdit={editMessage}
               onDelete={deleteComment}
               onShowChange={(nodeIds) => setFlash([...nodeIds])}

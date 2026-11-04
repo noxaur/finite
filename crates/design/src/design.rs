@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     NodeId,
-    comment::{self, Anchor, Author, AuthorKind, ChangeLog, Comment, CommentError, Message, Point},
+    comment::{
+        self, Anchor, Audience, Author, AuthorKind, ChangeLog, Comment, CommentError, Message,
+        Point,
+    },
     document::{Applied, Document, Op, Page, Rejected},
     edit::{self, EditError},
     history::{Entry, History},
@@ -127,7 +130,8 @@ pub enum Record {
 /// so it is the single source of truth. All edits go through [`Design::commit`],
 /// [`Design::transact`], [`Design::undo`] or [`Design::redo`], and all comment updates through
 /// [`Design::add_comment`], [`Design::reply`], [`Design::set_resolved`],
-/// [`Design::edit_message`] or [`Design::delete_comment`].
+/// [`Design::edit_message`], [`Design::set_audience`], [`Design::pass`] or
+/// [`Design::delete_comment`].
 #[derive(Debug)]
 pub struct Design {
     pub meta: DesignMeta,
@@ -857,18 +861,20 @@ impl Design {
         &self.comments
     }
 
-    /// Pins a new comment, with `body` as its first message. `new_id` must
-    /// return a fresh random id; it's called again if the id is taken.
+    /// Pins a new comment for `audience`, with `body` as its first message.
+    /// `new_id` must return a fresh random id; it's called again if the id is taken.
     pub fn add_comment(
         &mut self,
         author: Author,
         anchor: Anchor,
+        audience: Audience,
         body: &str,
         new_id: &mut impl FnMut() -> String,
         now: u64,
     ) -> Result<&Comment, CommentError> {
         let body = comment::check_body(body)?;
         comment::check_anchor(self.view(), &anchor)?;
+        let audience = comment::check_audience(audience)?;
         self.check_room_to_open()?;
         let id = loop {
             let id = new_id();
@@ -896,13 +902,15 @@ impl Design {
             }],
             detached_at: None,
             rev: 0,
+            audience,
+            passed_by: Vec::new(),
         });
         Ok(self.comments.last().expect("just pushed"))
     }
 
     /// Adds a reply to comment `id`. See [`crate::comment`] for how replies
     /// link changes and change the resolved state. `resolve` sets the state
-    /// explicitly.
+    /// explicitly. A person's reply clears the passes.
     pub fn reply(
         &mut self,
         id: &str,
@@ -927,7 +935,10 @@ impl Design {
                 comment.last_seq(),
                 comment.artboard_id.as_deref(),
             ),
-            AuthorKind::User => Vec::new(),
+            AuthorKind::User => {
+                comment.passed_by.clear();
+                Vec::new()
+            }
         };
         mark_resolved(comment, resolved, now);
         comment.messages.push(Message {
@@ -959,7 +970,7 @@ impl Design {
     }
 
     /// Replaces the body of comment `id`'s newest message, which must be by
-    /// `author_id`.
+    /// `author_id`. A person's edit clears the passes, since the request changed.
     pub fn edit_message(
         &mut self,
         id: &str,
@@ -976,7 +987,35 @@ impl Design {
             .ok_or(CommentError::NotEditable)?;
         message.body = body;
         message.edited_at = Some(now);
+        if message.author.kind == AuthorKind::User {
+            comment.passed_by.clear();
+        }
         comment.rev += 1;
+        Ok(comment)
+    }
+
+    /// Changes who comment `id` is for, open or resolved, and clears the
+    /// passes. The same audience again changes nothing.
+    pub fn set_audience(&mut self, id: &str, audience: Audience) -> Result<&Comment, CommentError> {
+        let audience = comment::check_audience(audience)?;
+        let comment = find(&mut self.comments, id)?;
+        if comment.audience != audience {
+            comment.audience = audience;
+            comment.passed_by.clear();
+            comment.rev += 1;
+        }
+        Ok(comment)
+    }
+
+    /// `agent` steps back from comment `id`, so it stops waking that agent
+    /// until a person writes in it again. Passing on a comment that doesn't
+    /// await `agent` changes nothing.
+    pub fn pass(&mut self, id: &str, agent: Author) -> Result<&Comment, CommentError> {
+        let comment = find(&mut self.comments, id)?;
+        if comment.awaits(&agent.id) {
+            comment.passed_by.push(agent);
+            comment.rev += 1;
+        }
         Ok(comment)
     }
 
@@ -1344,7 +1383,7 @@ mod tests {
             n += 1;
             format!("c{n}")
         };
-        d.add_comment(user, anchor, "Make it red", &mut ids, 0)
+        d.add_comment(user, anchor, Audience::Agents, "Make it red", &mut ids, 0)
             .unwrap()
             .id
             .clone()
@@ -1508,6 +1547,7 @@ mod tests {
         let more = d.add_comment(
             user.clone(),
             anchor.clone(),
+            Audience::Agents,
             "One more",
             &mut || "z".into(),
             0,
@@ -1516,8 +1556,15 @@ mod tests {
 
         // Resolving one makes room, and reopening it is refused once that room is taken.
         d.set_resolved(&ids[0], true, 0).unwrap();
-        d.add_comment(user.clone(), anchor, "One more", &mut || "z".into(), 0)
-            .unwrap();
+        d.add_comment(
+            user.clone(),
+            anchor,
+            Audience::Agents,
+            "One more",
+            &mut || "z".into(),
+            0,
+        )
+        .unwrap();
         assert_eq!(
             d.set_resolved(&ids[0], false, 0).unwrap_err(),
             CommentError::TooManyOpen
@@ -1552,7 +1599,7 @@ mod tests {
             y: 0.0,
         };
         let user = author("user:1", AuthorKind::User);
-        let result = d.add_comment(user, anchor, "Hi", &mut || "c".into(), 0);
+        let result = d.add_comment(user, anchor, Audience::Agents, "Hi", &mut || "c".into(), 0);
         assert!(matches!(result, Err(CommentError::NodeNotFound(_))));
         let agent = author("agent", AuthorKind::Agent);
         assert!(matches!(

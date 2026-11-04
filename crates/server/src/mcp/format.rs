@@ -2,7 +2,10 @@
 
 use std::fmt::Write;
 
-use finite_design::{Design, Document, NodeKind, comment::Comment};
+use finite_design::{
+    Design, Document, NodeKind,
+    comment::{Audience, Comment},
+};
 
 /// The most text one tool result returns, about 15,000 tokens. Claude Code
 /// cuts MCP results at 25,000 tokens by default, wherever that falls, and a
@@ -193,8 +196,11 @@ const COMMENT_NODE_HTML: usize = 2_000;
 const THREAD_SHOWN: usize = 10;
 
 /// Comments as agents see them: what was asked, where, and the thread so far.
+/// Comments as agents read them. `me` is the reading agent, so each comment
+/// can say who it's for.
 pub(super) fn comments_json<'a>(
     design: &Design,
+    me: &str,
     comments: impl Iterator<Item = &'a Comment>,
 ) -> Vec<serde_json::Value> {
     let doc = design.view();
@@ -267,6 +273,20 @@ pub(super) fn comments_json<'a>(
                 .collect();
             if !also.is_empty() {
                 comment["alsoSelected"] = also.into();
+            }
+            // Left out for the default, any agent.
+            let audience = match &c.audience {
+                Audience::Agents => None,
+                Audience::People => Some("people".to_owned()),
+                Audience::Agent { id, .. } if id == me => Some("you".to_owned()),
+                Audience::Agent { name, .. } => Some(format!("{name} (another agent)")),
+            };
+            if let Some(audience) = audience {
+                comment["for"] = audience.into();
+            }
+            if !c.passed_by.is_empty() {
+                let names: Vec<_> = c.passed_by.iter().map(|a| a.name.as_str()).collect();
+                comment["passedBy"] = names.into();
             }
             comment
         })
