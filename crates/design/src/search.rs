@@ -92,11 +92,26 @@ pub fn find(doc: &Document, within: Option<&str>, query: &Query) -> Vec<Found> {
                 .filter(|d| matches(d))
                 .collect();
             if is_raw_text(node_tag) {
-                hits.extend(
-                    css_lines(&own_text(doc, node))
-                        .filter(|line| matches(line))
-                        .map(|line| format!("css: {line}")),
-                );
+                let code = own_text(doc, node);
+                let script = node_tag.eq_ignore_ascii_case("script");
+                let before = hits.len();
+                // A script is code, not CSS: match it literally, as a code
+                // replace does, so `#abc` in `div#abc` is found.
+                if !script {
+                    hits.extend(
+                        css_lines(&code)
+                            .filter(|line| matches(line))
+                            .map(|line| format!("css: {line}")),
+                    );
+                }
+                // A match that spans `;`, `{` or `}` is in no single line. A
+                // color in CSS still needs a whole color, as in `replace`.
+                if hits.len() == before && (script || color.is_none()) {
+                    let label = if script { "script" } else { "css" };
+                    hits.extend(
+                        code_matches(&code, style).map(|snippet| format!("{label}: {snippet}")),
+                    );
+                }
             }
             if hits.is_empty() {
                 continue;
@@ -411,6 +426,35 @@ fn css_lines(css: &str) -> impl Iterator<Item = String> + '_ {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
+}
+
+/// Each case-insensitive match of `needle` (already lowercase) in `code`, with
+/// up to 30 characters of code on either side.
+fn code_matches<'a>(code: &'a str, needle: &'a str) -> impl Iterator<Item = String> + 'a {
+    let lower = code.to_lowercase();
+    // Lowercasing can move byte offsets outside ASCII; show the lowercase
+    // code then, so the offsets stay valid.
+    let shown = if code.is_ascii() {
+        code.to_owned()
+    } else {
+        lower.clone()
+    };
+    let snippets: Vec<String> = lower
+        .match_indices(needle)
+        .map(|(at, _)| {
+            let start = shown[..at]
+                .char_indices()
+                .rev()
+                .nth(29)
+                .map_or(0, |(i, _)| i);
+            let end = shown[at + needle.len()..]
+                .char_indices()
+                .nth(30)
+                .map_or(shown.len(), |(i, _)| at + needle.len() + i);
+            shown[start..end].to_owned()
+        })
+        .collect();
+    snippets.into_iter()
 }
 
 /// Each match of `from` in `code` with up to 30 characters of code on either
@@ -883,6 +927,32 @@ mod tests {
             .filter_map(|h| doc.get(&h.id).and_then(|n| n.tag()))
             .collect();
         assert_eq!(code_tags, ["script", "style", "style"], "{code:?}");
+    }
+
+    #[test]
+    fn style_search_finds_code_across_statements_and_color_shaped_selectors() {
+        let (doc, board) = design(
+            r##"<script>first(); second(); document.querySelector('div#abc')</script>
+<style>.a { color: #abcdef }</style>"##,
+        );
+        let tags = |style: &str| -> Vec<String> {
+            find(
+                &doc,
+                Some(&board),
+                &Query {
+                    style: Some(style.into()),
+                    ..Default::default()
+                },
+            )
+            .iter()
+            .filter_map(|h| doc.get(&h.id).and_then(|n| n.tag()).map(str::to_owned))
+            .collect()
+        };
+        assert_eq!(tags("first(); second()"), ["script"]);
+        assert_eq!(tags("div#abc"), ["script"]);
+        // In a script `#abc` is code; in CSS it isn't the color #abcdef.
+        assert_eq!(tags("#abc"), ["script"]);
+        assert_eq!(tags("#ABCDEF"), ["style"]);
     }
 
     #[test]
