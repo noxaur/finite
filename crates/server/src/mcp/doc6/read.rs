@@ -170,8 +170,9 @@ async fn computed(
         Ok(props) => props,
         Err(error) => return fail(error),
     };
-    // A text node has its parent's values.
-    let planned = handle.read(|d| -> Result<Vec<(screenshot::Measurement, Vec<NodeId>)>, String> {
+    // What the browser measures, and the labels and modes to show beside it,
+    // from one look at the design, so they agree whatever happens meanwhile.
+    let planned = handle.read(|d| -> Result<Snapshot, String> {
         let doc = d.view();
         if ids.len() > screenshot::MAX_SHOTS {
             return Err(format!(
@@ -181,39 +182,63 @@ async fn computed(
                 describe(doc, &ids)
             ));
         }
+        let many = ids.len() > 1;
         let mut boards: Vec<(NodeId, Vec<NodeId>)> = Vec::new();
-        for id in &ids {
+        let mut entries = Vec::new();
+        for (i, id) in ids.iter().enumerate() {
+            // A text node has its parent's values.
             let element = match doc.get(id) {
-                Some(n) if n.kind == NodeKind::Text => n.parent.clone().unwrap_or_else(|| id.clone()),
+                Some(n) if n.kind == NodeKind::Text => {
+                    n.parent.clone().unwrap_or_else(|| id.clone())
+                }
                 _ => id.clone(),
             };
             let board = doc
                 .artboard_of(&element)
-                .ok_or_else(|| format!("#{id} isn't in an artboard."))?
-                .id
-                .clone();
-            match boards.iter_mut().find(|(b, _)| *b == board) {
+                .ok_or_else(|| format!("#{id} isn't in an artboard."))?;
+            let mode = (doc.modes().len() > 1)
+                .then_some(board)
+                .map(|board| {
+                    let mode = doc.mode_of(board);
+                    let name = doc.mode_map().get(mode).map_or(mode, |m| m.name.as_str());
+                    format!(" (mode {name:?})")
+                })
+                .unwrap_or_default();
+            let mut head = if many {
+                heading(doc, &ids, i)
+            } else {
+                String::new()
+            };
+            let _ = writeln!(head, "{}{mode}", label(doc, &element));
+            entries.push((head, element.clone(), board.id.clone()));
+            match boards.iter_mut().find(|(b, _)| *b == board.id) {
                 Some((_, list)) => list.push(element),
-                None => boards.push((board, vec![element])),
+                None => boards.push((board.id.clone(), vec![element])),
             }
         }
-        boards
+        let measurements = boards
             .into_iter()
             .map(|(board, list)| {
                 screenshot::plan_measurement(doc, &board, screenshot::Options::default())
                     .map(|m| (m, list))
             })
-            .collect()
+            .collect::<Result<_, _>>()?;
+        Ok(Snapshot {
+            seq: d.seq(),
+            entries,
+            measurements,
+        })
     });
-    let planned = match planned {
-        Ok(planned) => planned,
+    let snapshot = match planned {
+        Ok(snapshot) => snapshot,
         Err(error) => return fail(error),
     };
     // One browser for each artboard, without the design's lock.
     let results = futures::future::join_all(
-        planned
-            .into_iter()
-            .map(|(m, list)| screenshot::computed(m, list, props.clone())),
+        snapshot
+            .measurements
+            .iter()
+            .map(|(m, list)| screenshot::computed(m, list.clone(), props.clone())),
     )
     .await;
     let mut values = HashMap::new();
@@ -223,45 +248,56 @@ async fn computed(
             Err(error) => return fail(error),
         }
     }
-    ok(handle.read(|d| {
+    // The browser measured the design as it was; say so where it has changed since.
+    let changed = handle.read(|d| {
         let doc = d.view();
-        let many = ids.len() > 1;
-        let mut text = String::new();
-        for (i, id) in ids.iter().enumerate() {
-            let element = match doc.get(id) {
-                Some(n) if n.kind == NodeKind::Text => n.parent.as_ref().unwrap_or(id),
-                _ => id,
-            };
-            let mode = doc
-                .artboard_of(element)
-                .filter(|_| doc.modes().len() > 1)
-                .map(|board| {
-                    let mode = doc.mode_of(board);
-                    let name = doc.mode_map().get(mode).map_or(mode, |m| m.name.as_str());
-                    format!(" (mode {name:?})")
-                })
-                .unwrap_or_default();
-            if many {
-                text.push_str(&heading(doc, &ids, i));
-            }
-            let _ = writeln!(text, "{}{mode}", label(doc, element));
-            match values.get(element) {
-                Some(Some(list)) => {
-                    for (name, value) in list {
-                        let shown = if value.is_empty() { "(not set)" } else { value };
-                        let _ = writeln!(text, "  {name}: {shown}");
-                    }
+        if d.seq() == snapshot.seq {
+            return Vec::new();
+        }
+        snapshot
+            .measurements
+            .iter()
+            .filter(|(m, _)| !m.is_current(doc, screenshot::Options::default()))
+            .map(|(m, _)| m.artboard().to_owned())
+            .collect()
+    });
+    let mut text = String::new();
+    for (head, element, board) in &snapshot.entries {
+        text.push_str(head);
+        match values.get(element) {
+            Some(Some(list)) => {
+                for (name, value) in list {
+                    let shown = if value.is_empty() { "(not set)" } else { value };
+                    let _ = writeln!(text, "  {name}: {shown}");
                 }
-                _ => text.push_str("  not on the page any more: the design changed meanwhile. Read again.\n"),
+                if changed.contains(board) {
+                    let _ = writeln!(
+                        text,
+                        "  The design changed while the browser measured; these values are from change {}. Read again for the current ones.",
+                        snapshot.seq
+                    );
+                }
             }
+            _ => text.push_str(
+                "  not on the page any more: the design changed meanwhile. Read again.\n",
+            ),
         }
-        if defaulted {
-            text.push_str(
-                "\nPass properties for others, like [\"--bg\", \"font-size\", \"margin\"]. Values are what the browser computes with the artboard's mode applied.",
-            );
-        }
-        text
-    }))
+    }
+    if defaulted {
+        text.push_str(
+            "\nPass properties for others, like [\"--bg\", \"font-size\", \"margin\"]. Values are what the browser computes with the artboard's mode applied.",
+        );
+    }
+    ok(text)
+}
+
+/// What `as: "computed"` measures, with how to show it, as the design was at
+/// change `seq`.
+struct Snapshot {
+    seq: u64,
+    /// For each match: its heading and label, the element measured, and its artboard.
+    entries: Vec<(String, NodeId, NodeId)>,
+    measurements: Vec<(screenshot::Measurement, Vec<NodeId>)>,
 }
 
 /// The comment before each match when there are several, naming its artboard.

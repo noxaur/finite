@@ -1,6 +1,6 @@
 //! How tools describe the document to agents: compact outlines and node JSON.
 
-use std::{borrow::Cow, fmt::Write};
+use std::{borrow::Cow, cell::OnceCell, fmt::Write};
 
 use finite_design::{
     Design, Document, NodeKind,
@@ -35,11 +35,19 @@ pub(super) fn cut(text: String, hint: &str) -> String {
 /// One line per node, indented by depth: `tag "Name" #id [width×height] "text"`.
 pub(super) fn outline(doc: &Document, id: &str, max_depth: usize) -> String {
     let mut out = String::new();
-    outline_into(doc, id, 0, max_depth, &mut out);
+    outline_into(doc, id, 0, max_depth, &OnceCell::new(), &mut out);
     out
 }
 
-fn outline_into(doc: &Document, id: &str, depth: usize, max_depth: usize, out: &mut String) {
+/// `sheets` holds the artboard's `<style>` text once an element needs it.
+fn outline_into(
+    doc: &Document,
+    id: &str,
+    depth: usize,
+    max_depth: usize,
+    sheets: &OnceCell<String>,
+    out: &mut String,
+) {
     let Some(node) = doc.get(id) else { return };
     let pad = "  ".repeat(depth);
     match &node.kind {
@@ -76,7 +84,10 @@ fn outline_into(doc: &Document, id: &str, depth: usize, max_depth: usize, out: &
             }
             let size = |k: &str| node.styles.get(k).map(String::as_str);
             if let (Some(w), Some(h)) = (size("width"), size("height")) {
-                let (w, h) = (resolve_vars(doc, node, w), resolve_vars(doc, node, h));
+                let (w, h) = (
+                    resolve_vars(doc, node, w, sheets),
+                    resolve_vars(doc, node, h, sheets),
+                );
                 let _ = write!(out, " [{w} × {h}]");
             }
             if let Some(display) = size("display") {
@@ -97,7 +108,7 @@ fn outline_into(doc: &Document, id: &str, depth: usize, max_depth: usize, out: &
         _ => {
             out.push('\n');
             for child in children {
-                outline_into(doc, &child.id, depth + 1, max_depth, out);
+                outline_into(doc, &child.id, depth + 1, max_depth, sheets, out);
             }
         }
     }
@@ -106,19 +117,63 @@ fn outline_into(doc: &Document, id: &str, depth: usize, max_depth: usize, out: &
 /// `value` with each `var(--token)` the design defines replaced by the
 /// token's value in the mode of `node`'s artboard, so an outline shows
 /// `44px` where the style says `var(--button-h)`. A `var()` naming no token
-/// takes its fallback, or stays as it is.
-fn resolve_vars<'a>(doc: &Document, node: &finite_design::Node, value: &'a str) -> Cow<'a, str> {
+/// takes its fallback, or stays as it is. A `var()` stays as written where
+/// `node` or an ancestor sets that property in its style attribute, or the
+/// artboard's `<style>` blocks mention setting it: the renderers compute
+/// something else there, and the outline doesn't evaluate stylesheets.
+fn resolve_vars<'a>(
+    doc: &Document,
+    node: &finite_design::Node,
+    value: &'a str,
+    sheets: &OnceCell<String>,
+) -> Cow<'a, str> {
     if !value.contains("var(") {
         return Cow::Borrowed(value);
     }
     let mode = doc.artboard_of(&node.id).map(|board| doc.mode_of(board));
-    Cow::Owned(substitute(doc, mode.unwrap_or(doc.first_mode()), value, 0))
+    let mode = mode.unwrap_or(doc.first_mode());
+    let set_nearer = |name: &str| {
+        let mut at = Some(node);
+        while let Some(n) = at {
+            if n.styles.contains_key(name) {
+                return true;
+            }
+            at = n.parent.as_deref().and_then(|p| doc.get(p));
+        }
+        let sheets = sheets.get_or_init(|| {
+            let mut text = doc.css().unwrap_or("").to_owned();
+            if let Some(board) = doc.artboard_of(&node.id) {
+                for n in doc.subtree(&board.id) {
+                    if n.tag().is_some_and(|t| t.eq_ignore_ascii_case("style")) {
+                        for child in doc.children(Some(&n.id)) {
+                            text.push_str(child.text.as_deref().unwrap_or(""));
+                        }
+                    }
+                }
+            }
+            text
+        });
+        sets_property(sheets, name)
+    };
+    Cow::Owned(substitute(doc, mode, value, 0, &set_nearer))
+}
+
+/// Whether `css` declares the custom property `name`, as in `--name: 1px`.
+fn sets_property(css: &str, name: &str) -> bool {
+    css.match_indices(name)
+        .any(|(i, _)| css[i + name.len()..].trim_start().starts_with(':'))
 }
 
 /// How deep a token's value may itself use `var()` before it stays as written.
 const VAR_DEPTH: usize = 4;
 
-fn substitute(doc: &Document, mode: &str, text: &str, depth: usize) -> String {
+fn substitute(
+    doc: &Document,
+    mode: &str,
+    text: &str,
+    depth: usize,
+    set_nearer: &dyn Fn(&str) -> bool,
+) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find("var(") {
@@ -139,14 +194,17 @@ fn substitute(doc: &Document, mode: &str, text: &str, depth: usize) -> String {
             Some((name, fallback)) => (name.trim(), Some(fallback.trim())),
             None => (inner[..end].trim(), None),
         };
-        let value = doc
-            .tokens()
-            .get(name)
-            .and_then(|values| tokens::value(doc, values, mode))
-            .or(fallback);
+        let value = if set_nearer(name) {
+            None
+        } else {
+            doc.tokens()
+                .get(name)
+                .and_then(|values| tokens::value(doc, values, mode))
+                .or(fallback)
+        };
         match value {
             Some(value) if depth < VAR_DEPTH => {
-                out.push_str(&substitute(doc, mode, value, depth + 1))
+                out.push_str(&substitute(doc, mode, value, depth + 1, set_nearer))
             }
             _ => out.push_str(&rest[start..start + 4 + end + 1]),
         }

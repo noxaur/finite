@@ -659,6 +659,18 @@ pub struct Measurement {
     texts: Vec<TextRuns>,
 }
 
+impl Measurement {
+    /// The artboard being measured.
+    pub fn artboard(&self) -> &str {
+        &self.artboard
+    }
+
+    /// Whether the artboard in `doc` still builds the page this measured.
+    pub fn is_current(&self, doc: &Document, options: Options) -> bool {
+        page_html(doc, &self.artboard, &options).is_some_and(|built| built.html == self.html)
+    }
+}
+
 /// Where an element's text nodes are on the page. Text nodes have no
 /// [`VIEWER_ID_ATTR`] to find them by, so each is located in its parent:
 /// the parent's `k`th DOM text node, characters `start..end` in UTF-16
@@ -910,7 +922,7 @@ async fn scene_page(
 /// page as [`layout`] does, so a value is what a screenshot shows, whichever
 /// way the artboard renders in the viewer.
 pub async fn computed(
-    m: Measurement,
+    m: &Measurement,
     ids: Vec<NodeId>,
     props: Vec<String>,
 ) -> Result<BTreeMap<NodeId, Option<Vec<(String, String)>>>, String> {
@@ -925,7 +937,7 @@ pub async fn computed(
     let run = async {
         let (browser, mut tab) =
             cdp::Browser::launch(&chrome, dir.clone(), Policy::default()).await?;
-        let result = computed_page(&mut tab, &dir, &m, &ids, &props).await;
+        let result = computed_page(&mut tab, &dir, m, &ids, &props).await;
         browser.close(tab).await;
         result
     };
