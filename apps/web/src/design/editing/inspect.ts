@@ -167,7 +167,10 @@ export function parseDeclarations(
   return changes;
 }
 
-/** Splits at `;` and line breaks outside quotes and brackets, so `url("data:…;base64,…")` stays whole. */
+/**
+ * Splits at `;` and line breaks outside quotes, comments and brackets, so
+ * `url("data:…;base64,…")` and a comment holding `;` stay whole.
+ */
 function splitDeclarations(text: string): string[] {
   const parts: string[] = [];
   let depth = 0;
@@ -178,9 +181,12 @@ function splitDeclarations(text: string): string[] {
     if (quote) {
       if (c === "\\") i++;
       else if (c === quote) quote = null;
+    } else if (c === "/" && text[i + 1] === "*") {
+      const end = text.indexOf("*/", i + 2);
+      i = end === -1 ? text.length : end + 1;
     } else if (c === '"' || c === "'") quote = c;
-    else if (c === "(" || c === "[") depth++;
-    else if ((c === ")" || c === "]") && depth > 0) depth--;
+    else if (c === "(" || c === "[" || c === "{") depth++;
+    else if ((c === ")" || c === "]" || c === "}") && depth > 0) depth--;
     else if ((c === ";" || c === "\n") && depth === 0) {
       parts.push(text.slice(start, i));
       start = i + 1;

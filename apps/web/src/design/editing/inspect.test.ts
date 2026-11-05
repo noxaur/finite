@@ -96,4 +96,15 @@ describe("declarations", () => {
       color: "green",
     });
   });
+
+  it("keeps comments and braces in a value whole", () => {
+    const before = {
+      color: "red /* ; blue */",
+      "--theme": "{ color: red; padding: 4px; }",
+      gap: "1px",
+    };
+    expect(parseDeclarations(declarations(before).replace("1px", "2px"), before)).toEqual({
+      gap: "2px",
+    });
+  });
 });

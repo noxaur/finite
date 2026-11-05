@@ -336,19 +336,24 @@ function StyleField({
 function CssField({ scope }: { scope: Scope }) {
   const own = scope.targets[0]?.styles ?? {};
   const text = declarations(own);
-  const [typing, setTyping] = useState<string | null>(null);
+  // What's typed, and the styles it started from: saving changes only what
+  // the person changed, so an agent's edit meanwhile stays.
+  const [typing, setTyping] = useState<{
+    text: string;
+    base: Readonly<Record<string, string>>;
+  } | null>(null);
   return (
     <textarea
       aria-label="Inline CSS"
       spellCheck={false}
       rows={Math.min(Math.max(text.split("\n").length + 1, 3), 16)}
-      value={typing ?? text}
+      value={typing?.text ?? text}
       placeholder="color: var(--fg);"
-      onChange={(e) => setTyping(e.target.value)}
+      onChange={(e) => setTyping({ text: e.target.value, base: typing?.base ?? own })}
       onBlur={() => {
         if (typing === null) return;
         setTyping(null);
-        const changes = parseDeclarations(typing, own);
+        const changes = parseDeclarations(typing.text, typing.base);
         if (Object.keys(changes).length > 0) scope.commit(changes);
       }}
       {...stylex.props(styles.input, styles.css)}
