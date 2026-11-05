@@ -94,7 +94,13 @@ export class Editor {
     viewport.addEventListener("pointermove", (e) => this.onMove(e), options);
     viewport.addEventListener("pointerup", (e) => this.onUp(e), options);
     viewport.addEventListener("pointercancel", () => this.cancel(), options);
-    viewport.addEventListener("pointerleave", () => this.update({ hover: null }), options);
+    // Only leaving the viewport itself: listening in the capture phase also
+    // hears every element inside it, like the selection redrawn under a click.
+    viewport.addEventListener(
+      "pointerleave",
+      (e) => e.target === viewport && this.update({ hover: null }),
+      options,
+    );
     viewport.addEventListener("dblclick", (e) => this.onDoubleClick(e), options);
     window.addEventListener("keydown", (e) => this.onKey(e), { signal: this.abort.signal });
     window.addEventListener(

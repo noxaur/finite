@@ -3,6 +3,7 @@ import { iconMarkup } from "@/components/Icons";
 import { colors } from "@/styles/tokens.stylex";
 import { Culler, pageBox } from "./culling";
 import { artboardDocument, BASE_LAYER, pixelSize } from "./html";
+import { type Outset, strokeOutset } from "./outset";
 import type { Applied, Replica } from "./replica";
 import type { Node } from "./schema";
 import { designModel } from "./wasm";
@@ -149,6 +150,8 @@ export interface Bounds {
   readonly y: number;
   readonly width: number;
   readonly height: number;
+  /** How far the node's strokes reach past the box, from a sandboxed artboard. */
+  readonly outset?: Outset;
 }
 
 /** A wheel event forwarded out of a sandboxed artboard, in page coordinates. */
@@ -756,6 +759,18 @@ export class Renderer {
    * artboard, this is the artboard until the iframe reports the node's position.
    */
   nodeRect(id: string): DOMRect | null {
+    return this.rectOf(id, false);
+  }
+
+  /**
+   * Like `nodeRect`, grown to take in the node's outline and its stroke-like
+   * shadows, so a line drawn around it sits outside everything it paints.
+   */
+  outerRect(id: string): DOMRect | null {
+    return this.rectOf(id, true);
+  }
+
+  private rectOf(id: string, outer: boolean): DOMRect | null {
     // A hidden artboard has no layout; use the box it had when last shown.
     const hidden = this.replica.artboardOf(id);
     if (hidden && this.culler.isCulled(hidden.id)) {
@@ -766,7 +781,13 @@ export class Renderer {
     }
     const el = this.elements.get(id);
     if (el?.isConnected) {
-      if (el instanceof Element) return el.getBoundingClientRect();
+      if (el instanceof Element) {
+        const rect = el.getBoundingClientRect();
+        if (!outer) return rect;
+        // The outset is in the element's own pixels; the camera's zoom scales it.
+        const own = el instanceof HTMLElement ? el.offsetWidth : 0;
+        return grow(rect, strokeOutset(getComputedStyle(el)), own > 0 ? rect.width / own : 1);
+      }
       const range = document.createRange();
       range.selectNodeContents(el);
       return range.getBoundingClientRect();
@@ -783,12 +804,13 @@ export class Renderer {
       if (known) {
         const { left, top, scale } = iframeBox(frame.iframe);
         const r = known.rect;
-        return new DOMRect(
+        const rect = new DOMRect(
           left + r.x * scale,
           top + r.y * scale,
           r.width * scale,
           r.height * scale,
         );
+        return outer && r.outset ? grow(rect, r.outset, scale) : rect;
       }
     }
     return frame.content.getBoundingClientRect();
@@ -1515,12 +1537,21 @@ export class Renderer {
     const bounds = (value: unknown): Bounds | null => {
       const r = value as Record<string, unknown> | null;
       const ok = (k: string) => typeof r?.[k] === "number" && Number.isFinite(r[k]);
+      const o = r?.outset as Record<string, unknown> | undefined;
+      const side = (k: string) =>
+        typeof o?.[k] === "number" && Number.isFinite(o[k]) ? Math.max(0, o[k] as number) : 0;
       return r && ok("x") && ok("y") && ok("width") && ok("height")
         ? {
             x: r.x as number,
             y: r.y as number,
             width: r.width as number,
             height: r.height as number,
+            outset: {
+              top: side("top"),
+              right: side("right"),
+              bottom: side("bottom"),
+              left: side("left"),
+            },
           }
         : null;
     };
@@ -1654,6 +1685,16 @@ function forgetLayout(frame: Frame) {
 }
 
 /** Where an iframe's content sits on the page, and how much the canvas zoom scales it. */
+/** `rect` grown by `outset`, which is in pixels `scale` times smaller than the page's. */
+function grow(rect: DOMRect, outset: Outset, scale: number) {
+  return new DOMRect(
+    rect.x - outset.left * scale,
+    rect.y - outset.top * scale,
+    rect.width + (outset.left + outset.right) * scale,
+    rect.height + (outset.top + outset.bottom) * scale,
+  );
+}
+
 function iframeBox(iframe: HTMLIFrameElement) {
   const rect = iframe.getBoundingClientRect();
   const scale = iframe.offsetWidth > 0 ? rect.width / iframe.offsetWidth : 1;

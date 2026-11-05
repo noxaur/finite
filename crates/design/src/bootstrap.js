@@ -286,9 +286,31 @@
     if (root) new ResizeObserver(report).observe(root);
   });
   // Elements carry their node id in data-finite-id.
+  // How far its outline and unblurred outer shadows reach past the box,
+  // as strokeOutset in apps/web/src/design/outset.ts works it out.
+  const outset = (el) => {
+    const css = getComputedStyle(el);
+    const o = { top: 0, right: 0, bottom: 0, left: 0 };
+    if (css.outlineStyle !== "none") {
+      const reach = (parseFloat(css.outlineWidth) || 0) + (parseFloat(css.outlineOffset) || 0);
+      o.top = o.right = o.bottom = o.left = Math.max(0, reach);
+    }
+    for (const shadow of css.boxShadow.split(/,(?![^(]*\))/)) {
+      if (/\binset\b/.test(shadow)) continue;
+      const [x = 0, y = 0, blur = 0, spread = 0] = (shadow.match(/-?[\d.]+px/g) || []).map(
+        parseFloat,
+      );
+      if (blur > 0) continue;
+      o.top = Math.max(o.top, spread - y);
+      o.right = Math.max(o.right, spread + x);
+      o.bottom = Math.max(o.bottom, spread + y);
+      o.left = Math.max(o.left, spread - x);
+    }
+    return o;
+  };
   const place = (el) => {
     const r = el.getBoundingClientRect();
-    return { x: r.left, y: r.top, width: r.width, height: r.height };
+    return { x: r.left, y: r.top, width: r.width, height: r.height, outset: outset(el) };
   };
 
   const receive = (m) => {
