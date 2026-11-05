@@ -160,8 +160,12 @@ fn resolve_vars<'a>(
 
 /// Whether `css` declares the custom property `name`, as in `--name: 1px`.
 fn sets_property(css: &str, name: &str) -> bool {
-    css.match_indices(name)
-        .any(|(i, _)| css[i + name.len()..].trim_start().starts_with(':'))
+    // A whole name: `--gap` isn't set by `--component--gap: 24px`.
+    let ident = |c: char| c.is_alphanumeric() || c == '-' || c == '_' || !c.is_ascii();
+    css.match_indices(name).any(|(i, _)| {
+        !css[..i].chars().next_back().is_some_and(ident)
+            && css[i + name.len()..].trim_start().starts_with(':')
+    })
 }
 
 /// How deep a token's value may itself use `var()` before it stays as written.

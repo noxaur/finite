@@ -496,6 +496,23 @@ impl ChangeLog {
             .map(|e| e.actor.as_str())
     }
 
+    /// The artboards the changes after `seq` touched, or `None` when the log
+    /// no longer reaches back to `seq` or a change touched no artboard (a
+    /// token or a mode, which can change what every artboard shows).
+    pub(crate) fn artboards_since(&self, seq: u64) -> Option<BTreeSet<NodeId>> {
+        if self.entries.front().is_none_or(|e| e.change.seq > seq + 1) {
+            return None;
+        }
+        let mut out = BTreeSet::new();
+        for e in self.entries.iter().filter(|e| e.change.seq > seq) {
+            if e.artboards.is_empty() {
+                return None;
+            }
+            out.extend(e.artboards.iter().cloned());
+        }
+        Some(out)
+    }
+
     /// `actor`'s changes after `seq`, oldest first. With `artboard`, only the
     /// changes that touched it.
     pub(crate) fn since(&self, actor: &str, seq: u64, artboard: Option<&str>) -> Vec<ChangeRef> {

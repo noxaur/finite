@@ -664,11 +664,6 @@ impl Measurement {
     pub fn artboard(&self) -> &str {
         &self.artboard
     }
-
-    /// Whether the artboard in `doc` still builds the page this measured.
-    pub fn is_current(&self, doc: &Document, options: Options) -> bool {
-        page_html(doc, &self.artboard, &options).is_some_and(|built| built.html == self.html)
-    }
 }
 
 /// Where an element's text nodes are on the page. Text nodes have no

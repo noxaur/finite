@@ -518,6 +518,12 @@ impl Design {
         self.seq
     }
 
+    /// The artboards changed after change `seq`, or `None` when that isn't
+    /// known or a change (such as a token's) may have changed them all.
+    pub fn artboards_changed_since(&self, seq: u64) -> Option<BTreeSet<NodeId>> {
+        self.log.artboards_since(seq)
+    }
+
     pub fn history(&self, actor: &str) -> Option<&History> {
         self.histories.get(actor)
     }

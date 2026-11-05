@@ -248,17 +248,19 @@ async fn computed(
             Err(error) => return fail(error),
         }
     }
-    // The browser measured the design as it was; say so where it has changed since.
-    let changed = handle.read(|d| {
-        let doc = d.view();
+    // The browser measured the design as it was; say so where it has changed
+    // since. The change log answers that without rebuilding pages under the lock.
+    let changed: Vec<NodeId> = handle.read(|d| {
         if d.seq() == snapshot.seq {
             return Vec::new();
         }
+        let since = d.artboards_changed_since(snapshot.seq);
         snapshot
             .measurements
             .iter()
-            .filter(|(m, _)| !m.is_current(doc, screenshot::Options::default()))
-            .map(|(m, _)| m.artboard().to_owned())
+            .map(|(m, _)| m.artboard())
+            .filter(|board| since.as_ref().is_none_or(|s| s.contains(*board)))
+            .map(str::to_owned)
             .collect()
     });
     let mut text = String::new();

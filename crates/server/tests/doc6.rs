@@ -1173,6 +1173,21 @@ async fn the_outline_keeps_var_where_the_cascade_sets_it() {
         )
         .await;
     assert!(outline.contains("[100px × var(--button-h)]"), "{outline}");
+    // A longer name that ends the same way doesn't set it.
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Suffix", "width": 300, "height": 100, "html":
+            "<style>.x { --big--button-h: 90px }</style><button data-name=\"Plain\" style=\"width:100px;height:var(--button-h)\">Plain</button>" }]),
+    )
+    .await;
+    let outline = agent
+        .ok(
+            "read",
+            json!({ "designId": id, "select": "[data-name=Suffix]", "depth": 3 }),
+        )
+        .await;
+    assert!(outline.contains("[100px × 44px]"), "{outline}");
 }
 
 /// A component op makes one top bar the component and its copies on the
