@@ -75,11 +75,17 @@ pub const BASE_CSS: &str = "*, *::before, *::after { box-sizing: border-box; }";
 pub const CSP: &str = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https:; connect-src https: wss:; style-src 'unsafe-inline' https:; img-src https: http: data: blob:; font-src https: data:; media-src https: data: blob:; worker-src blob:; form-action 'none'; frame-src 'none'; base-uri 'none'";
 
 /// Runs first in every artboard that runs scripts, before the artboard's own
-/// code: a function expression that hosts call with a config,
-/// `(BOOTSTRAP)({"nonce": "…", "storage": {…}})`. It holds the private channel
+/// code: a function expression that hosts call with a config, through
+/// [`bootstrap`]: `(…)({"nonce": "…", "storage": {…}})`. It holds the private channel
 /// to the viewer, the design's `localStorage`, and the limits on audio, focus
 /// and fullscreen. See the file for what it does.
 pub const BOOTSTRAP: &str = include_str!("bootstrap.js");
+
+/// [`BOOTSTRAP`] as an expression to call. The formatter ends the file
+/// with `;`, which `(…)(config)` can't hold.
+pub fn bootstrap() -> &'static str {
+    BOOTSTRAP.trim().trim_end_matches(';')
+}
 
 /// Whether a `<script>`'s `src` may load: only from an `https:` URL.
 pub fn is_safe_script_src(value: &str) -> bool {

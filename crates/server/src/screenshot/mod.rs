@@ -22,7 +22,7 @@ use base64::Engine;
 use finite_design::{
     Document, NodeId, NodeKind,
     edit::pixel_size,
-    html::{self, BASE_CSS, BASE_LAYER, BOOTSTRAP, CSP, VIEWER_ID_ATTR},
+    html::{self, BASE_CSS, BASE_LAYER, CSP, VIEWER_ID_ATTR},
     tokens,
 };
 use finite_transfer::scene::{COMPUTED, Measure, Resolved, Scene};
@@ -423,7 +423,7 @@ const FRAME_PERMISSIONS: &str = "autoplay 'none'; fullscreen 'none'";
 ///
 /// An artboard with a `<script>` renders as the viewer does: the page above
 /// is the `srcdoc` of a sandboxed `<iframe>` in a bare wrapper, with the
-/// viewer's [`BOOTSTRAP`] running first. It then runs with the same limits,
+/// viewer's [`html::bootstrap`] running first. It then runs with the same limits,
 /// an opaque origin and a `localStorage` that lasts only for the capture.
 /// An artboard without one loads directly, since nothing in it runs and the
 /// sandbox would change nothing, and its measurements need no second frame.
@@ -479,7 +479,7 @@ fn page_html(doc: &Document, artboard: &str, options: &Options) -> Option<Built>
             .to_string()
             .replace('<', "\\u003c");
         // A trailing `;` after the function would end the parentheses early.
-        let function = BOOTSTRAP.trim().trim_end_matches(';');
+        let function = html::bootstrap();
         format!("<script>({function})({config})</script>")
     } else {
         String::new()

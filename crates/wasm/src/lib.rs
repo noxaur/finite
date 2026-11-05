@@ -239,10 +239,10 @@ pub extern "C" fn csp() -> i32 {
     respond(Ok(html::CSP.to_owned()))
 }
 
-/// [`html::BOOTSTRAP`], the script that runs first in artboards that run scripts.
+/// [`html::bootstrap`], the script that runs first in artboards that run scripts.
 #[unsafe(no_mangle)]
 pub extern "C" fn bootstrap() -> i32 {
-    respond(Ok(html::BOOTSTRAP.to_owned()))
+    respond(Ok(html::bootstrap().to_owned()))
 }
 
 fn with_input<T>(f: impl FnOnce(&[u8]) -> T) -> T {

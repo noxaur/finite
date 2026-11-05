@@ -5,9 +5,10 @@ import { Cause, Exit } from "effect";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { Api, Refused } from "@/api/Api";
-import { Camera, mostVisible, union, type View } from "@/design/camera";
+import { Camera, union, type View } from "@/design/camera";
 import { Editor } from "@/design/editing/editor";
-import { type Hit, Renderer } from "@/design/renderer";
+import { Presenter, type PresenterState } from "@/design/presenter";
+import { type FrameKey, type Hit, Renderer } from "@/design/renderer";
 import { Replica } from "@/design/replica";
 import type { Audience } from "@/design/schema";
 import { knownAgents } from "@/lib/audience";
@@ -16,6 +17,7 @@ import { loadDesignModel } from "@/design/wasm";
 import { mcpUrl } from "@/lib/mcp";
 import { formatOf } from "@/lib/transfer";
 import { loadPlace, savePlace } from "@/lib/place";
+import { pageStorage } from "@/lib/pageStorage";
 import { localUser } from "@/lib/user";
 import { timeAgo } from "@/lib/time";
 import { runtime } from "@/runtime";
@@ -35,7 +37,7 @@ import { PagesSidebar } from "./PagesSidebar";
 import { Inspector } from "./Inspector";
 import { EditorNotice, SelectionLayer } from "./SelectionLayer";
 import { type TokensActions, TokensPanel } from "./TokensPanel";
-import { Preview } from "./Preview";
+import { InteractivePill } from "./InteractivePill";
 import { ExportMenu, ImportButton, ImportResultCard, type ImportState } from "./Transfer";
 
 /** An instance or component under the pointer: what to outline and what to call it. */
@@ -67,13 +69,58 @@ const SAVE_PLACE_MS = 300;
 
 /** How long "show what changed" outlines stay up. */
 const FLASH_MS = 1800;
-/** How long the view rests before the focused artboard is worked out again. */
-const FOCUS_DELAY_MS = 100;
 /** A press that moves farther than this is a drag, not a click. */
 const CLICK_SLOP = 4;
+/** How long "Updated by …" stays in interactive mode's pill. */
+const UPDATED_MS = 1800;
+/** How long a notice, like a link to a missing artboard, stays up. */
+const NOTICE_MS = 2400;
 
-const isTyping = (target: EventTarget | null) =>
-  target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
+/** Whether a key event is typing into a field, in a shadow-root artboard too. */
+const isTyping = (e: Event) => {
+  const target = e.composedPath()[0] ?? e.target;
+  return (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement ||
+    (target instanceof HTMLElement && target.isContentEditable)
+  );
+};
+
+/** The artboards a selection is in, once each, in selection order. */
+function boardsOf(replica: Replica, selection: ReadonlyArray<string>): string[] {
+  const boards: string[] = [];
+  for (const id of selection) {
+    const board = replica.artboardOf(id)?.id;
+    if (board && !boards.includes(board)) boards.push(board);
+  }
+  return boards;
+}
+
+/**
+ * The part of the viewport no app chrome covers, in viewport coordinates:
+ * chrome along an edge (sidebars, panels, the pill) takes that edge.
+ */
+function freeRect(viewport: HTMLElement): { x: number; y: number; width: number; height: number } {
+  const box = viewport.getBoundingClientRect();
+  let [left, top, right, bottom] = [box.left, box.top, box.right, box.bottom];
+  const near = 24;
+  for (const el of document.querySelectorAll("[data-canvas-chrome]")) {
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) continue;
+    const tall = r.height > r.width;
+    if (tall && r.left - box.left < near) left = Math.max(left, r.right);
+    else if (tall && box.right - r.right < near) right = Math.min(right, r.left);
+    else if (r.top - box.top < near) top = Math.max(top, r.bottom);
+    else if (box.bottom - r.bottom < near) bottom = Math.min(bottom, r.top);
+  }
+  return {
+    x: left - box.left,
+    y: top - box.top,
+    width: Math.max(right - left, 1),
+    height: Math.max(bottom - top, 1),
+  };
+}
 
 /**
  * A live view of one design. `DesignSession` streams it from the server and
@@ -128,6 +175,7 @@ export function DesignCanvas({ id }: { id: string }) {
   const rendererRef = useRef<Renderer | null>(null);
   const sessionRef = useRef<DesignSession | null>(null);
   const editorRef = useRef<Editor | null>(null);
+  const presenterRef = useRef<Presenter | null>(null);
 
   // Re-rendering on every session update also moves pins with their artboards.
   const [session, setSession] = useState<SessionState>(initialSessionState);
@@ -165,11 +213,28 @@ export function DesignCanvas({ id }: { id: string }) {
   const togglePanel = (name: "tokens" | "comments" | "export") =>
     setPanel((open) => (open === name ? null : name));
   const [imported, setImported] = useState<ImportState | null>(null);
-  // The artboard that fills most of the viewport, which the play buttons preview.
-  const [focused, setFocused] = useState<string | null>(null);
-  // The artboard shown in preview mode, or `null` on the canvas.
-  const [previewId, setPreviewId] = useState<string | null>(null);
-  const previewRef = useRef(false);
+  // Interactive mode: the artboard zoomed onto, running as a page.
+  const [presented, setPresented] = useState<PresenterState | null>(null);
+  const presenting = presented !== null && presented.phase !== "idle" ? presented.board : null;
+  // Held down in interactive mode, C shows the pins and places comments.
+  const [commentHold, setCommentHold] = useState(false);
+  // What's selected, for which artboard P opens.
+  const [selection, setSelection] = useState<ReadonlyArray<string>>([]);
+  // The artboard last used with the Interact tool.
+  const lastUsedRef = useRef<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [updated, setUpdated] = useState<{ board: string; text: string } | null>(null);
+  // The tool in effect: interactive mode's own, or comments while C is held.
+  const tool: Mode = commentHold ? "comment" : presenting ? "interact" : mode;
+  // Read by listeners set up once, which outlive this render.
+  const live = useRef({ mode, tool, presenting, commentHold });
+  live.current = { mode, tool, presenting, commentHold };
+  const actions = useRef<{
+    enter: () => void;
+    enterOn: (boardId: string) => void;
+    /** Handles a key, from the app or forwarded from a page. Returns whether it was used. */
+    key: (key: FrameKey, typing: boolean) => boolean;
+  }>({ enter: () => {}, enterOn: () => {}, key: () => false });
 
   // Whether a draft or thread is open, for the window key handler.
   const popupRef = useRef(false);
@@ -193,8 +258,54 @@ export function DesignCanvas({ id }: { id: string }) {
     const renderer = new Renderer(frames, replica, {
       live: true,
       toPage: (x, y) => camera.toPage(x, y),
-      onPreview: setPreviewId,
-      onWheel: (event) => camera.wheel(event),
+      onPreview: (boardId) => actions.current.enterOn(boardId),
+      // A page's own wheel never moves a locked camera.
+      onWheel: (event) => !camera.locked && camera.wheel(event),
+      storage: pageStorage(id),
+      onGoto: (from, target) => {
+        const presenter = presenterRef.current;
+        if (presenter && live.current.presenting === from) {
+          if (!presenter.goto(target)) setNotice("That link goes to an artboard that isn’t there.");
+          return;
+        }
+        // With the Interact tool, a link flies the camera to its artboard.
+        const bounds = renderer.artboardBounds().get(target);
+        if (!bounds) setNotice("That link goes to an artboard that isn’t on this page.");
+        else {
+          const v = camera.view;
+          void camera.animateTo(
+            {
+              ...v,
+              x: v.x - (bounds.x + bounds.width / 2) * v.zoom + viewport.clientWidth / 2,
+              y: v.y - (bounds.y + bounds.height / 2) * v.zoom + viewport.clientHeight / 2,
+            },
+            350,
+          );
+        }
+      },
+      onFrameKey: (_boardId, key) => {
+        actions.current.key(key, false);
+      },
+      onFramePan: () => {
+        if (live.current.presenting) void presenterRef.current?.exit();
+      },
+      onFrameBlur: () => {
+        setCommentHold(false);
+        camera.space = false;
+        renderer.setPanning(false);
+      },
+      onUsed: (boardId) => {
+        if (lastUsedRef.current === boardId) return;
+        lastUsedRef.current = boardId;
+        // P and the play buttons may open a different artboard now.
+        setTick((t) => t + 1);
+      },
+      onUpdated: (boardId, actor, held) => {
+        if (boardId !== live.current.presenting) return;
+        const by = actor ? `Updated by ${actor}` : "Updated";
+        setUpdated({ board: boardId, text: held ? `${by}. Let go to see it` : by });
+      },
+      onNetwork: () => setTick((t) => t + 1),
       // An auto-height artboard with a script is measured inside its iframe,
       // so its real height arrives after the first frame. Frame it again,
       // unless the person has already panned or zoomed.
@@ -223,6 +334,36 @@ export function DesignCanvas({ id }: { id: string }) {
     editorRef.current = editor;
     rendererRef.current = renderer;
     cameraRef.current = camera;
+    const unwatchSelection = editor.subscribe(() => setSelection(editor.state.selection));
+    const presenter = new Presenter({
+      camera,
+      renderer,
+      freeRect: () => freeRect(viewport),
+      pageBoards: () => {
+        const page = renderer.shownPage();
+        return replica
+          .artboards()
+          .filter((board) => replica.pageOf(board) === page)
+          .sort((a, b) => (a.y ?? 0) - (b.y ?? 0) || (a.x ?? 0) - (b.x ?? 0))
+          .map((board) => board.id);
+      },
+      reveal: (boardId) => {
+        const board = replica.get(boardId);
+        if (!board || board.parent !== null) return false;
+        const pageId = replica.pageOf(board);
+        if (pageId !== renderer.shownPage()) {
+          pickPage(pageId);
+          renderer.setPage(pageId);
+        }
+        return true;
+      },
+    });
+    presenterRef.current = presenter;
+    const unwatchPresenter = presenter.subscribe(() => {
+      setPresented(presenter.state);
+      // While it runs, the view isn't the person's: don't save it or frame over it.
+      if (presenter.state.phase !== "idle") framedRef.current = RESTORED;
+    });
     // Hide the artboards outside the view.
     camera.subscribe(() => renderer.setViewport(camera.visibleWorld()));
     const showZoom = (view: View) => {
@@ -249,24 +390,20 @@ export function DesignCanvas({ id }: { id: string }) {
       saveTimer = setTimeout(savePlaceNow, SAVE_PLACE_MS);
     };
     camera.subscribe((view) => {
+      if (presenter.state.phase !== "idle") return;
       if (viewedPageRef.current) viewsRef.current[viewedPageRef.current] = view;
       rememberPlace.current();
     });
     // A reload can come before the timer fires.
     window.addEventListener("pagehide", savePlaceNow);
-    const resize = new ResizeObserver(() => renderer.setViewport(camera.visibleWorld()));
+    const resize = new ResizeObserver(() => {
+      renderer.setViewport(camera.visibleWorld());
+      presenter.refit();
+    });
     resize.observe(viewport);
-    let focusTimer: ReturnType<typeof setTimeout> | undefined;
-    const refocus = () => {
-      clearTimeout(focusTimer);
-      focusTimer = setTimeout(() => {
-        const next = mostVisible(renderer.artboardBounds(), camera.visibleWorld(0));
-        renderer.setFocused(next);
-        setFocused(next);
-      }, FOCUS_DELAY_MS);
-    };
+    // The play buttons follow what P would open, which changes with the selection.
+    const refocus = () => setTick((t) => t + 1);
     refocusRef.current = refocus;
-    camera.subscribe(refocus);
     // A new renderer starts on the saved page, or the first.
     renderer.setPage(saved?.page ?? null);
     setPickedPage(saved?.page ?? null);
@@ -305,33 +442,94 @@ export function DesignCanvas({ id }: { id: string }) {
         if (!controller.signal.aborted && Exit.isFailure(exit)) setMissing(true);
       });
 
-    const onKey = (e: KeyboardEvent) => {
-      // Preview mode handles its own keys.
-      if (previewRef.current) return;
-      if (isTyping(e.target) || e.metaKey || e.ctrlKey || e.altKey) {
-        if (e.key === "Escape") {
+    // Space hands every press to the camera, over pages too.
+    const setSpace = (held: boolean) => {
+      camera.space = held;
+      renderer.setPanning(held);
+    };
+    /**
+     * Keys pressed in the app or forwarded from inside a page. Returns
+     * whether one was used. In interactive mode Escape leaves, the arrows
+     * step, ⌘[ goes back, P leaves, and holding C comments.
+     */
+    actions.current.key = ({ key, phase, meta, repeat }, typing) => {
+      const { presenting: shown } = live.current;
+      if (key === " ") {
+        if (!typing) setSpace(phase === "down");
+        return false;
+      }
+      if (phase === "up") {
+        if (key === "c" || key === "C") setCommentHold(false);
+        return false;
+      }
+      if (shown) {
+        if (key === "Escape") {
+          // Close a comment first, then leave.
+          if (popupRef.current) {
+            setDraft(null);
+            setOpenId(null);
+          } else void presenter.exit();
+        } else if (typing) return false;
+        else if (meta && key === "[") presenter.back();
+        else if (meta) return false;
+        else if (key === "ArrowLeft") presenter.step(-1);
+        else if (key === "ArrowRight") presenter.step(1);
+        else if (key === "c" || key === "C") {
+          if (!repeat) setCommentHold(true);
+        } else if (key === "p" || key === "P") void presenter.exit();
+        else return false;
+        return true;
+      }
+      if (typing || meta) {
+        if (key === "Escape") {
           setDraft(null);
           setOpenId(null);
         }
-        return;
+        return false;
       }
-      if (e.key === "v" || e.key === "V") setMode("pointer");
-      else if (e.key === "c" || e.key === "C") setMode("comment");
-      else if (e.key === "Escape") {
-        // Close the draft or thread first, then leave comment mode.
+      if (key === "v" || key === "V") setMode("pointer");
+      else if (key === "i" || key === "I") setMode("interact");
+      else if (key === "c" || key === "C") setMode("comment");
+      else if (key === "p" || key === "P") actions.current.enter();
+      else if (key === "Escape") {
+        // Close the draft or thread first, then go back to the pointer.
         if (!popupRef.current) setMode("pointer");
         setDraft(null);
         setOpenId(null);
-      } else if (e.key === "!" || (e.shiftKey && e.code === "Digit1"))
+      } else return false;
+      return true;
+    };
+    const onKey = (e: KeyboardEvent) => {
+      const key: FrameKey = {
+        key: e.key,
+        phase: "down",
+        meta: e.metaKey || e.ctrlKey || e.altKey,
+        repeat: e.repeat,
+      };
+      if (e.key === " " && !isTyping(e)) e.preventDefault();
+      if (actions.current.key(key, isTyping(e))) {
+        e.preventDefault();
+        return;
+      }
+      if (live.current.presenting || isTyping(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === "!" || (e.shiftKey && e.code === "Digit1"))
         camera.fitTo(union(renderer.artboardBounds().values()));
-      else if (e.key === "0" && !e.metaKey && !e.ctrlKey) camera.set({ ...camera.view, zoom: 1 });
+      else if (e.key === "0") camera.set({ ...camera.view, zoom: 1 });
       else if (e.key === "=" || e.key === "+") camera.zoomBy(1.25);
       else if (e.key === "-") camera.zoomBy(0.8);
       else return;
       e.preventDefault();
     };
+    const onKeyUp = (e: KeyboardEvent) => {
+      actions.current.key({ key: e.key, phase: "up", meta: false, repeat: false }, isTyping(e));
+    };
+    const onBlur = () => {
+      setSpace(false);
+      setCommentHold(false);
+    };
     window.addEventListener("keydown", onKey);
-    window.addEventListener("resize", refocus);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
 
     // Keeps "2 minutes ago" labels fresh.
     const ticker = setInterval(() => setTick((t) => t + 1), 15_000);
@@ -351,9 +549,12 @@ export function DesignCanvas({ id }: { id: string }) {
       // The document lives in WebAssembly memory, which isn't garbage collected.
       replica.free();
       window.removeEventListener("keydown", onKey);
-      window.removeEventListener("resize", refocus);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+      unwatchSelection();
+      unwatchPresenter();
+      presenterRef.current = null;
       clearInterval(ticker);
-      clearTimeout(focusTimer);
       cancelAnimationFrame(hoverFrame.current);
       cancelAnimationFrame(partFrame.current);
       frames.replaceChildren();
@@ -361,15 +562,39 @@ export function DesignCanvas({ id }: { id: string }) {
   }, [id, model]);
 
   // In comment mode the left button places comments instead of panning.
+  // With the Interact tool a press on a page is the page's, and a wheel over
+  // something that scrolls in it scrolls it.
   useEffect(() => {
-    const commenting = mode === "comment";
-    if (cameraRef.current) cameraRef.current.dragToPan = !commenting;
-    rendererRef.current?.setCommenting(commenting);
-    if (!commenting) {
+    const camera = cameraRef.current;
+    const renderer = rendererRef.current;
+    const commenting = tool === "comment";
+    if (camera && renderer) {
+      camera.dragToPan = !commenting;
+      camera.mayPan = (e) => tool !== "interact" || renderer.boardOf(e) === null;
+      camera.routeWheel = (e) => {
+        if (tool === "interact" && renderer.scrollsPage(e)) return "native";
+        // Interactive mode's camera is locked, so this does nothing there.
+        return "camera";
+      };
+    }
+    renderer?.setTool(tool);
+    // Holding C in interactive mode keeps a comment being written when it's let go.
+    if (!commenting && !presenting) {
       setDraft(null);
       setHover(null);
     }
-  }, [mode]);
+  }, [tool, presenting]);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(null), NOTICE_MS);
+    return () => clearTimeout(timer);
+  }, [notice]);
+  useEffect(() => {
+    if (!updated) return;
+    const timer = setTimeout(() => setUpdated(null), UPDATED_MS);
+    return () => clearTimeout(timer);
+  }, [updated]);
 
   useEffect(() => {
     if (flash.length === 0) return;
@@ -386,7 +611,7 @@ export function DesignCanvas({ id }: { id: string }) {
   // Read by the renderer's onLayout callback, which outlives this render.
   refreshHover.current = () => {
     const pointer = pointerRef.current;
-    if (mode === "comment" && pointer && (!draft || pointer.shift)) hoverAt(pointer.x, pointer.y);
+    if (tool === "comment" && pointer && (!draft || pointer.shift)) hoverAt(pointer.x, pointer.y);
   };
 
   // Names the component part under the pointer: people can't tell from the
@@ -403,8 +628,8 @@ export function DesignCanvas({ id }: { id: string }) {
     cancelAnimationFrame(partFrame.current);
     // Not while dragging to pan.
     if (pressRef.current) setPart(null);
-    else partFrame.current = requestAnimationFrame(() => partAt(x, y));
-    if (mode !== "comment") return;
+    else if (!presenting) partFrame.current = requestAnimationFrame(() => partAt(x, y));
+    if (tool !== "comment") return;
     const { clientX, clientY, shiftKey } = e;
     pointerRef.current = { x: clientX, y: clientY, shift: shiftKey };
     // With a draft open, outline only what a shift-click would add.
@@ -421,9 +646,16 @@ export function DesignCanvas({ id }: { id: string }) {
     pressRef.current = null;
     const moved = press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > CLICK_SLOP;
     if (moved || (e.target instanceof Element && e.target.closest("[data-camera-ignore]"))) return;
+    // A click on the canvas around the page leaves interactive mode.
+    if (presenting && tool !== "comment" && !draft && !openId) {
+      if (rendererRef.current?.boardOf(e.nativeEvent) !== presenting) {
+        void presenterRef.current?.exit();
+      }
+      return;
+    }
     // Shift-click adds an element in the draft's artboard, or takes it out.
     // Only on a sure answer: a stale one could take out the wrong element.
-    if (mode === "comment" && draft?.nodeId && e.shiftKey) {
+    if (tool === "comment" && draft?.nodeId && e.shiftKey) {
       const hit = rendererRef.current?.hitTest(e.clientX, e.clientY, true) ?? null;
       if (hit?.artboardId === draft.artboardId) setDraft(toggleInDraft(draft, hit.nodeId));
       return;
@@ -436,7 +668,7 @@ export function DesignCanvas({ id }: { id: string }) {
     }
     const camera = cameraRef.current;
     const replica = sessionRef.current?.replica;
-    if (mode !== "comment" || !camera || !replica) return;
+    if (tool !== "comment" || !camera || !replica) return;
     const point = camera.toWorld(e.clientX, e.clientY);
     const hit = rendererRef.current?.hitTest(e.clientX, e.clientY) ?? null;
     const board = hit ? replica.get(hit.artboardId) : undefined;
@@ -603,7 +835,7 @@ export function DesignCanvas({ id }: { id: string }) {
   const openComment = openId ? comments.get(openId) : undefined;
   const targets = new Set([
     ...(draft ? selectionOf(draft) : openComment ? selectionOf(openComment) : []),
-    ...(mode === "comment" && !openComment && hover ? [hover.nodeId] : []),
+    ...(tool === "comment" && !openComment && hover ? [hover.nodeId] : []),
   ]);
   const canvasRect = (nodeId: string) => {
     const rect = rendererRef.current?.nodeRect(nodeId);
@@ -624,27 +856,38 @@ export function DesignCanvas({ id }: { id: string }) {
 
   const openCount = [...comments.values()].filter((c) => !c.resolved).length;
 
-  // Preview mode steps through the shown page's artboards in reading order.
+  // What P and the play buttons open: the selected artboard (several
+  // selected: the first, stepping through them all), or the one last used
+  // with the Interact tool.
   const replica = sessionRef.current?.replica;
-  const pageBoards =
-    replica && page
-      ? replica
-          .artboards()
-          .filter((board) => replica.pageOf(board) === page.id)
-          .sort((a, b) => (a.y ?? 0) - (b.y ?? 0) || (a.x ?? 0) - (b.x ?? 0))
-          .map((board) => board.id)
-      : [];
-  // An artboard deleted or moved to another page while previewed closes the preview.
-  const previewing = previewId !== null && pageBoards.includes(previewId) ? previewId : null;
-  previewRef.current = previewing !== null;
+  const selectedBoards = replica ? boardsOf(replica, selection) : [];
+  const targetNow = () => {
+    const used = lastUsedRef.current;
+    const board = used ? replica?.get(used) : undefined;
+    const usedHere = board && replica?.pageOf(board) === page?.id ? used : null;
+    return selectedBoards[0] ?? usedHere;
+  };
+  const target = targetNow();
+  actions.current.enter = () => {
+    // Read now: a page used a moment ago may not have re-rendered this yet.
+    const board = targetNow();
+    if (board) presenterRef.current?.enter(board, selectedBoards);
+  };
+  actions.current.enterOn = (boardId) => presenterRef.current?.enter(boardId, selectedBoards);
   useEffect(() => {
-    if (previewId !== null && previewing === null) setPreviewId(null);
-  }, [previewId, previewing]);
-  // People edit the canvas only in pointer mode, and not behind the preview,
-  // whose arrow keys and Escape would move or deselect what's selected.
+    rendererRef.current?.setFocused(presenting ? null : target);
+  }, [target, presenting]);
+  // An artboard deleted while it's shown leaves interactive mode.
   useEffect(() => {
-    editorRef.current?.setEnabled(mode !== "comment" && previewing === null);
-  }, [mode, previewing]);
+    if (presenting && !sessionRef.current?.replica.get(presenting)) {
+      void presenterRef.current?.exit();
+    }
+  }, [presenting, session.version]);
+  // People edit the canvas only with the pointer, and not in interactive
+  // mode, whose arrow keys and Escape would move or deselect what's selected.
+  useEffect(() => {
+    editorRef.current?.setEnabled(mode === "pointer" && presenting === null);
+  }, [mode, presenting]);
 
   const fitAll = () => {
     const renderer = rendererRef.current;
@@ -694,11 +937,15 @@ export function DesignCanvas({ id }: { id: string }) {
           cancelAnimationFrame(partFrame.current);
         }}
         onClick={onCanvasClick}
-        {...stylex.props(styles.viewport, mode === "comment" && styles.commenting)}
+        {...stylex.props(
+          styles.viewport,
+          tool === "comment" && styles.commenting,
+          tool === "interact" && styles.interacting,
+        )}
       >
         <div ref={worldRef} {...stylex.props(styles.world)}>
           <div ref={framesRef} />
-          {editorRef.current && rendererRef.current && cameraRef.current && (
+          {!presenting && editorRef.current && rendererRef.current && cameraRef.current && (
             <SelectionLayer
               editor={editorRef.current}
               renderer={rendererRef.current}
@@ -706,20 +953,22 @@ export function DesignCanvas({ id }: { id: string }) {
               version={session.version}
             />
           )}
-          {outlines.map(
-            ({ key, rect, flash }) =>
-              rect && (
-                <div
-                  key={key}
-                  data-outline={flash ? "flash" : "target"}
-                  {...stylex.props(
-                    styles.outline(rect.x, rect.y, rect.width, rect.height),
-                    flash && styles.flash,
-                  )}
-                />
-              ),
-          )}
+          {(!presenting || tool === "comment") &&
+            outlines.map(
+              ({ key, rect, flash }) =>
+                rect && (
+                  <div
+                    key={key}
+                    data-outline={flash ? "flash" : "target"}
+                    {...stylex.props(
+                      styles.outline(rect.x, rect.y, rect.width, rect.height),
+                      flash && styles.flash,
+                    )}
+                  />
+                ),
+            )}
           {part &&
+            !presenting &&
             (() => {
               const rect = canvasRect(part.id);
               return (
@@ -736,7 +985,7 @@ export function DesignCanvas({ id }: { id: string }) {
                 )
               );
             })()}
-          {sessionRef.current && page && (
+          {sessionRef.current && page && (!presenting || commentHold || draft || openId) && (
             <CommentLayer
               replica={sessionRef.current.replica}
               page={page.id}
@@ -762,7 +1011,10 @@ export function DesignCanvas({ id }: { id: string }) {
         </div>
       </div>
 
-      <header {...stylex.props(styles.bar, styles.top)}>
+      <header
+        data-canvas-chrome
+        {...stylex.props(styles.bar, styles.top, presenting !== null && styles.gone)}
+      >
         <Link href="/" {...stylex.props(styles.link)}>
           ← Designs
         </Link>
@@ -773,13 +1025,13 @@ export function DesignCanvas({ id }: { id: string }) {
         <span {...stylex.props(styles.spacer)} />
         <button
           type="button"
-          disabled={!focused}
-          onClick={() => setPreviewId(focused)}
+          disabled={!target}
+          onClick={() => actions.current.enter()}
           {...stylex.props(styles.tool, styles.play)}
-          title="Preview the artboard in view"
+          title={target ? "Interactive mode (P): use the page, zoomed in" : "Select an artboard"}
         >
           <Icon name="play" size={10} />
-          Preview
+          Interactive
         </button>
         <button
           type="button"
@@ -844,7 +1096,7 @@ export function DesignCanvas({ id }: { id: string }) {
         </div>
       )}
 
-      {activity.length > 0 && (
+      {activity.length > 0 && !presenting && (
         <ol aria-label="Recent changes" {...stylex.props(styles.bar, styles.activity)}>
           {activity.map((a) => (
             <li key={a.seq} {...stylex.props(styles.activityItem)}>
@@ -895,18 +1147,22 @@ export function DesignCanvas({ id }: { id: string }) {
         />
       )}
 
-      <ToolPill mode={mode} onMode={setMode} />
+      {!presenting && <ToolPill mode={mode} onMode={setMode} />}
       {editorRef.current && <EditorNotice editor={editorRef.current} />}
-      {editorRef.current && rendererRef.current && sessionRef.current && mode === "pointer" && (
-        <Inspector
-          editor={editorRef.current}
-          renderer={rendererRef.current}
-          replica={sessionRef.current.replica}
-          version={session.version}
-        />
-      )}
+      {editorRef.current &&
+        rendererRef.current &&
+        sessionRef.current &&
+        mode === "pointer" &&
+        !presenting && (
+          <Inspector
+            editor={editorRef.current}
+            renderer={rendererRef.current}
+            replica={sessionRef.current.replica}
+            version={session.version}
+          />
+        )}
 
-      <div {...stylex.props(styles.bar, styles.zoom)}>
+      <div {...stylex.props(styles.bar, styles.zoom, presenting !== null && styles.gone)}>
         <button
           type="button"
           onClick={() => cameraRef.current?.zoomBy(0.8)}
@@ -940,16 +1196,28 @@ export function DesignCanvas({ id }: { id: string }) {
         </button>
       </div>
 
-      {previewing && replica && (
-        <Preview
-          replica={replica}
-          boards={pageBoards}
-          current={previewing}
-          version={session.version}
-          onSelect={setPreviewId}
-          onClose={() => setPreviewId(null)}
+      {presented && presenting && replica && (
+        <InteractivePill
+          name={replica.get(presenting)?.name ?? "Artboard"}
+          index={presented.boards.indexOf(presenting)}
+          total={presented.boards.length}
+          canGoBack={presented.history.length > 0}
+          held={rendererRef.current?.isHeld(presenting) ?? false}
+          note={notice ?? (updated?.board === presenting ? updated.text : null)}
+          hosts={rendererRef.current?.hostsOf(presenting) ?? []}
+          presence={presence}
+          onStep={(by) => presenterRef.current?.step(by)}
+          onBack={() => presenterRef.current?.back()}
+          onReload={() => rendererRef.current?.reload(presenting)}
+          onHold={() => {
+            const renderer = rendererRef.current;
+            renderer?.hold(presenting, !renderer.isHeld(presenting));
+            setTick((t) => t + 1);
+          }}
+          onExit={() => void presenterRef.current?.exit()}
         />
       )}
+      {notice && !presenting && <p {...stylex.props(styles.bar, styles.notice)}>{notice}</p>}
     </main>
   );
 }
@@ -974,6 +1242,8 @@ const styles = stylex.create({
   },
   // The draft pin, with its tail tip as the hotspot.
   commenting: { cursor: "var(--cursor-comment, crosshair)" },
+  // Pages show their own cursors; the canvas around them shows the arrow.
+  interacting: { cursor: "default" },
   world: {
     position: "absolute",
     left: 0,
@@ -1118,6 +1388,13 @@ const styles = stylex.create({
     marginLeft: 6,
     color: colors.muted,
     fontVariantNumeric: "tabular-nums",
+  },
+  gone: { display: "none" },
+  notice: {
+    left: "50%",
+    bottom: 64,
+    transform: "translateX(-50%)",
+    margin: 0,
   },
   percent: {
     minWidth: 48,

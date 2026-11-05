@@ -98,6 +98,7 @@ export function TokensPanel({
 
   return (
     <section
+      data-canvas-chrome
       data-camera-ignore
       aria-label="Tokens"
       {...stylex.props(styles.panel)}

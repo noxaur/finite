@@ -1,3 +1,6 @@
+// The originals of methods this replaces are kept unbound, to call on the page's own objects.
+// The file is one function expression, which hosts call.
+// oxlint-disable typescript/unbound-method, eslint/no-unused-expressions
 // Runs first in every artboard that runs scripts, before the artboard's own
 // code, in the viewer's sandboxed iframes and in screenshots. Hosts call it
 // with a config: `(BOOTSTRAP)({ nonce, storage })`.
@@ -66,19 +69,19 @@
         if (used - before + k.length + v.length > QUOTA) throw quotaError();
         used += k.length + v.length - before;
         map.set(k, v);
-        persist && persist({ set: [[k, v]] });
+        persist?.({ set: [[k, v]] });
       },
       removeItem(k) {
         k = String(k);
         if (!map.has(k)) return;
         used -= k.length + map.get(k).length;
         map.delete(k);
-        persist && persist({ set: [[k, null]] });
+        persist?.({ set: [[k, null]] });
       },
       clear() {
         map.clear();
         used = 0;
-        persist && persist({ clear: true });
+        persist?.({ clear: true });
       },
     };
     const own = (p) => typeof p === "string" && !(p in api) && map.has(p);
@@ -177,15 +180,15 @@
       constructor(...args) {
         super(...args);
         contexts.set(this, true);
-        if (!state.audio) suspend.call(this);
+        if (!state.audio) void suspend.call(this);
       }
     };
     win.AudioContext = Gated;
     if (win.webkitAudioContext) win.webkitAudioContext = Gated;
     var setAudio = (on) => {
       for (const [ctx, running] of contexts) {
-        if (on && running) resume.call(ctx);
-        else if (!on) suspend.call(ctx);
+        if (on && running) void resume.call(ctx);
+        else if (!on) void suspend.call(ctx);
       }
     };
   }

@@ -17,6 +17,38 @@ const HOST_CSS = ":host { all: initial; display: block; cursor: inherit; }";
 /** In comment mode, the comment cursor wins over the design's own cursors. */
 const COMMENTING_CSS = "* { cursor: inherit !important; }";
 
+/** What the pointer does on the canvas: select and edit, use pages, or place comments. */
+export type Tool = "pointer" | "interact" | "comment";
+
+/** A key pressed inside a sandboxed artboard that the canvas acts on. */
+export interface FrameKey {
+  readonly key: string;
+  readonly phase: "down" | "up";
+  readonly meta: boolean;
+  readonly repeat: boolean;
+}
+
+/** A change to the design's page storage: keys to set (`null` removes one), or clear it all. */
+export interface StorageChange {
+  readonly set?: ReadonlyArray<readonly [string, string | null]>;
+  readonly clear?: boolean;
+}
+
+/** Where pages' `localStorage` lives: one map per design, shared by its artboards. */
+export interface PageStorage {
+  read(): Record<string, string>;
+  /** Applies a change. Returns false if it doesn't fit. */
+  write(change: StorageChange): boolean;
+}
+
+/** The link that sends a page to another artboard: `#finite-artboard=<id>`. */
+export const ARTBOARD_LINK = "#finite-artboard=";
+
+/** How many pages people used with the Interact tool keep running while out of view. */
+const KEEP_USED = 4;
+/** How long "Updated by …" stays on a label. */
+const UPDATED_MS = 1800;
+
 /**
  * Tags never created in the app's own document. Scripts only run inside a
  * sandboxed iframe, and the server strips the rest too.
@@ -63,6 +95,32 @@ interface Frame {
   readonly tokenStyle: HTMLStyleElement | null;
   /** Set for artboards with scripts, rendered in a sandboxed iframe. */
   readonly iframe: HTMLIFrameElement | null;
+  /** Shows the hosts the page reached, in `label`. */
+  readonly network: HTMLElement;
+  /** Holds off reloads, in `label`, for pages people use. */
+  readonly pin: HTMLButtonElement;
+  /** "Updated by …", in `label`. */
+  readonly note: HTMLElement;
+  /** Identifies the iframe's current document, so only its bootstrap gets the port. */
+  nonce: string;
+  /** The private channel to the iframe's bootstrap, once it said hello. */
+  port: MessagePort | null;
+  /** Load events for the current document. A second one means the page navigated away. */
+  loads: number;
+  /** Hosts the page reached, as its bootstrap saw them. */
+  readonly hosts: Set<string>;
+  /** Reloads wait while this is set. */
+  held: boolean;
+  /** A change arrived while held: what to do on release. */
+  pending?: "reload" | "remount";
+  noteTimer?: ReturnType<typeof setTimeout>;
+  /** When the page last navigated itself away. */
+  navigatedAt?: number;
+  /**
+   * Set while interactive mode shows the artboard through a window this
+   * many CSS pixels tall, scrolling inside it, with its size before that.
+   */
+  clip?: { readonly height: number; readonly full: { width: number; height: number } };
   /**
    * Set while an auto-sized iframe hasn't reported its size: until then it
    * has a placeholder size, which a restored view far down a tall artboard
@@ -156,6 +214,22 @@ export interface RendererOptions {
   readonly onResize?: () => void;
   /** Called when the play button next to the focused artboard's name is clicked. */
   readonly onPreview?: (artboardId: string) => void;
+  /** Backs pages' `localStorage`. Without it, storage lasts as long as the page. */
+  readonly storage?: PageStorage;
+  /** A person clicked a link to another artboard (`#finite-artboard=<id>`) in `from`. */
+  readonly onGoto?: (from: string, target: string) => void;
+  /** A key the canvas acts on was pressed inside a sandboxed artboard. */
+  readonly onFrameKey?: (artboardId: string, key: FrameKey) => void;
+  /** The middle button was pressed inside a sandboxed artboard. */
+  readonly onFramePan?: (artboardId: string) => void;
+  /** A sandboxed artboard lost focus, so keys held in it were let go. */
+  readonly onFrameBlur?: () => void;
+  /** A person pressed or typed in an artboard with the Interact tool. */
+  readonly onUsed?: (artboardId: string) => void;
+  /** An artboard that people use changed, and reloaded or is waiting to (`held`). */
+  readonly onUpdated?: (artboardId: string, actor: string | null, held: boolean) => void;
+  /** A page reached a new host, or its hosts were forgotten on reload. */
+  readonly onNetwork?: (artboardId: string) => void;
 }
 
 /**
@@ -182,7 +256,18 @@ export class Renderer {
   /** The virtual ids drawn inside each instance, to forget when it's drawn again. */
   private readonly virtuals = new Map<string, string[]>();
   private working: ReadonlyMap<string, string> = new Map();
-  private commenting = false;
+  private tool: Tool = "pointer";
+  /** The artboard shown in interactive mode. */
+  private presenting: string | null = null;
+  /** While Space is held, presses go to the camera, even over pages. */
+  private panning = false;
+  /** Pages used with the Interact tool, most recent last. */
+  private readonly used = new Map<string, number>();
+  /** Who made the change being applied, for "Updated by …". */
+  private actor: string | null = null;
+  /** The scroll container the running wheel gesture belongs to, in a shadow-root artboard. */
+  private wheelOwner: Element | null = null;
+  private lastWheel = -Infinity;
   /** The element being typed into (`editText`), and what ends that, keeping the text. */
   private editing: HTMLElement | null = null;
   private finishText: (() => void) | null = null;
@@ -230,24 +315,27 @@ export class Renderer {
     private readonly options: RendererOptions = {},
   ) {
     const signal = this.abort.signal;
-    // Designs are view-only: links and forms inside them do nothing.
-    for (const type of ["click", "auxclick", "submit"]) {
+    // Links and forms never navigate the app. A page people use (the
+    // Interact tool, interactive mode) keeps its other clicks, so checkboxes
+    // and the like work; otherwise designs are view-only.
+    world.addEventListener("click", (e) => this.onClick(e), { capture: true, signal });
+    for (const type of ["auxclick", "submit"]) {
       world.addEventListener(type, (e) => e.preventDefault(), { capture: true, signal });
     }
-    if (options.live) window.addEventListener("message", (e) => this.onMessage(e), { signal });
+    if (options.live) window.addEventListener("message", (e) => this.onHello(e), { signal });
   }
 
   dispose() {
     this.abort.abort();
     this.culler.dispose();
     this.resizes?.disconnect();
-    for (const frame of this.frames.values()) clearTimers(frame);
+    for (const frame of this.frames.values()) closeFrame(frame);
   }
 
   /** Rebuilds everything from the replica. */
   reset() {
     for (const frame of this.frames.values()) {
-      clearTimers(frame);
+      closeFrame(frame);
       frame.root.remove();
     }
     this.frames.clear();
@@ -301,18 +389,49 @@ export class Renderer {
       clearTimeout(frame.reload);
       delete frame.reload;
       // Keep the document for a while: a hidden iframe isn't rendered, and
-      // panning back to it shouldn't start its scripts over.
+      // panning back to it shouldn't start its scripts over. A page people
+      // used keeps running until newer ones push it out.
       frame.unload = setTimeout(() => {
-        if (this.frames.get(id) !== frame || !this.culler.isCulled(id)) return;
-        iframe.srcdoc = "";
+        if (this.frames.get(id) !== frame || !this.culler.isCulled(id) || this.keeps(id)) return;
+        this.load(id, frame, false);
         frame.stale = true;
-        forgetLayout(frame);
       }, UNLOAD_DELAY_MS);
-    } else if (frame.stale) {
+    } else if (frame.stale && !frame.held) {
       frame.stale = false;
-      iframe.srcdoc = artboardDocument(this.replica, id);
-      forgetLayout(frame);
+      this.load(id, frame);
     }
+  }
+
+  /** Whether a hidden page keeps running: it's in interactive mode, or among the latest used. */
+  private keeps(id: string): boolean {
+    if (id === this.presenting) return true;
+    const recent = [...this.used.keys()].slice(-KEEP_USED);
+    return recent.includes(id);
+  }
+
+  /**
+   * Loads the artboard's latest document into its iframe (`fresh` false:
+   * an empty one, to stop its scripts). Every document gets a new nonce, so
+   * only its own bootstrap gets the port.
+   */
+  private load(id: string, frame: Frame, fresh = true) {
+    const iframe = frame.iframe;
+    if (!iframe) return;
+    frame.port?.close();
+    frame.port = null;
+    frame.loads = 0;
+    frame.nonce = newNonce();
+    if (frame.hosts.size > 0) {
+      frame.hosts.clear();
+      this.showNetwork(id, frame);
+    }
+    iframe.srcdoc = fresh
+      ? artboardDocument(this.replica, id, {
+          nonce: frame.nonce,
+          storage: this.options.storage?.read() ?? {},
+        })
+      : "";
+    forgetLayout(frame);
   }
 
   /** Shows only the artboards on `page` (`null`: the first page). */
@@ -387,9 +506,88 @@ export class Renderer {
       const node = this.replica.get(id);
       if (!frame || !node) continue;
       if (!layoutOnly) this.culler.touch(id);
-      if ((frame.iframe !== null) !== this.isLive(id)) this.remount(node);
-      else if (frame.iframe && !layoutOnly) this.scheduleReload(id, frame);
+      if ((frame.iframe !== null) !== this.isLive(id)) this.refresh(id, frame, "remount");
+      else if (frame.iframe && !layoutOnly) this.refresh(id, frame, "reload");
+      else if (!layoutOnly) this.noteUpdate(id, frame, false);
     }
+  }
+
+  /** Who makes the changes applied next, until the next call. */
+  setActor(actor: string | null) {
+    this.actor = actor;
+  }
+
+  /**
+   * Replaces an artboard's document after a change: reloads its iframe, or
+   * builds it again when it gained or lost its scripts. A held page waits,
+   * and does the latest of these once it's let go.
+   */
+  private refresh(id: string, frame: Frame, kind: "reload" | "remount") {
+    if (frame.held) {
+      frame.pending = kind === "remount" || frame.pending === "remount" ? "remount" : "reload";
+      clearTimeout(frame.reload);
+      delete frame.reload;
+      this.noteUpdate(id, frame, true);
+      return;
+    }
+    this.noteUpdate(id, frame, false);
+    const node = this.replica.get(id);
+    if (kind === "remount" && node) this.remount(node);
+    else this.scheduleReload(id, frame);
+  }
+
+  /** Shows "Updated by …" on a page people use, and tells the canvas. */
+  private noteUpdate(id: string, frame: Frame, held: boolean) {
+    if (id !== this.presenting && !this.used.has(id)) return;
+    const actor = this.actor;
+    frame.note.textContent = actor ? `Updated by ${actor}` : "Updated";
+    frame.note.hidden = false;
+    clearTimeout(frame.noteTimer);
+    frame.noteTimer = setTimeout(() => {
+      // A held page keeps saying it's out of date.
+      if (!frame.held || !frame.pending) frame.note.hidden = true;
+    }, UPDATED_MS);
+    this.options.onUpdated?.(id, actor, held);
+  }
+
+  /**
+   * Holds off reloads for artboard `id`, so changes don't reset what a
+   * person is doing in it. Letting go loads the latest version once.
+   */
+  hold(id: string, held: boolean) {
+    const frame = this.frames.get(id);
+    if (!frame || frame.held === held) return;
+    frame.held = held;
+    frame.pin.ariaPressed = String(held);
+    if (held) return;
+    const pending = frame.pending;
+    delete frame.pending;
+    frame.note.hidden = true;
+    const node = this.replica.get(id);
+    if (pending === "remount" && node) this.remount(node);
+    else if ((pending || frame.stale) && !this.culler.isCulled(id)) {
+      frame.stale = false;
+      this.load(id, frame);
+    }
+  }
+
+  isHeld(id: string): boolean {
+    return this.frames.get(id)?.held ?? false;
+  }
+
+  /** Loads artboard `id`'s page again from the start. */
+  reload(id: string) {
+    const frame = this.frames.get(id);
+    if (!frame?.iframe) return;
+    clearTimeout(frame.reload);
+    delete frame.reload;
+    delete frame.pending;
+    this.load(id, frame);
+  }
+
+  /** The hosts artboard `id`'s page reached, as far as its bootstrap could see. */
+  hostsOf(id: string): ReadonlyArray<string> {
+    return [...(this.frames.get(id)?.hosts ?? [])];
   }
 
   /**
@@ -421,12 +619,45 @@ export class Renderer {
       this.culler.touch(id);
       // A hidden artboard is built, or loaded, again when it's shown: the
       // new content is read then, so a hidden iframe isn't reloaded now.
-      if (this.culler.isCulled(id)) {
+      if (this.culler.isCulled(id) && !frame.held) {
         if (frame.iframe) frame.stale = true;
         continue;
       }
-      if ((frame.iframe !== null) !== this.isLive(id)) this.remount(node);
-      else if (frame.iframe) this.scheduleReload(id, frame);
+      if ((frame.iframe !== null) !== this.isLive(id)) this.refresh(id, frame, "remount");
+      else if (frame.iframe) this.refresh(id, frame, "reload");
+    }
+  }
+
+  /**
+   * Shows artboard `id` through a window `height` CSS pixels tall that
+   * scrolls, like a browser window over a long page (`null`: as it is).
+   * For interactive mode. The artboard keeps its size on the canvas.
+   */
+  setWindow(id: string, height: number | null) {
+    const frame = this.frames.get(id);
+    if (!frame) return;
+    if (height === null) {
+      const clip = frame.clip;
+      if (!clip) return;
+      delete frame.clip;
+      if (frame.iframe) frame.iframe.style.height = `${clip.full.height}px`;
+      else {
+        frame.content.style.height = "";
+        frame.content.style.overflowY = "";
+        frame.content.scrollTop = 0;
+      }
+      this.culler.touch(id);
+      return;
+    }
+    const full = frame.clip?.full ?? {
+      width: frame.root.offsetWidth,
+      height: frame.iframe ? frame.iframe.offsetHeight : frame.root.offsetHeight,
+    };
+    frame.clip = { height, full };
+    if (frame.iframe) frame.iframe.style.height = `${height}px`;
+    else {
+      frame.content.style.height = `${height}px`;
+      frame.content.style.overflowY = "auto";
     }
   }
 
@@ -436,10 +667,12 @@ export class Renderer {
     for (const [id, frame] of this.frames) {
       const node = this.replica.get(id);
       // A hidden artboard has no layout, so it reports the size it had when last shown.
-      const size = (this.culler.isCulled(id) && this.culler.size(id)) || {
-        width: frame.root.offsetWidth,
-        height: frame.root.offsetHeight,
-      };
+      const size =
+        frame.clip?.full ??
+        ((this.culler.isCulled(id) && this.culler.size(id)) || {
+          width: frame.root.offsetWidth,
+          height: frame.root.offsetHeight,
+        });
       out.set(id, { x: node?.x ?? 0, y: node?.y ?? 0, ...size });
     }
     return out;
@@ -487,7 +720,7 @@ export class Renderer {
     const y = Math.round((clientY - top) / scale);
     if (frame.asked?.x !== x || frame.asked?.y !== y) {
       frame.asked = { x, y };
-      iframe.contentWindow?.postMessage({ finite: { type: "hit", x, y } }, "*");
+      frame.port?.postMessage({ type: "hit", x, y });
     }
     if (frame.hit?.x === x && frame.hit.y === y) return frame.hit.id;
     return exact ? null : (frame.hit?.id ?? null);
@@ -520,7 +753,7 @@ export class Renderer {
       const known = frame.rects.get(id);
       if ((!known || performance.now() - known.at > RECT_TTL_MS) && !frame.pendingRects.has(id)) {
         frame.pendingRects.add(id);
-        frame.iframe.contentWindow?.postMessage({ finite: { type: "rect", id } }, "*");
+        frame.port?.postMessage({ type: "rect", id });
       }
       if (known) {
         const { left, top, scale } = iframeBox(frame.iframe);
@@ -645,15 +878,141 @@ export class Renderer {
     return null;
   }
 
-  /** In comment mode, clicks over sandboxed artboards go to the canvas instead of the artboard. */
-  setCommenting(commenting: boolean) {
-    this.commenting = commenting;
-    for (const frame of this.frames.values()) this.showCommenting(frame);
+  /**
+   * Sets what the pointer does. Pages take input only with the Interact
+   * tool, or in interactive mode; otherwise presses over sandboxed
+   * artboards go to the canvas, to select or comment.
+   */
+  setTool(tool: Tool) {
+    this.tool = tool;
+    this.wheelOwner = null;
+    this.showInputs();
   }
 
-  private showCommenting(frame: Frame) {
-    if (frame.iframe) frame.iframe.style.pointerEvents = this.commenting ? "none" : "";
-    if (frame.commentStyle) frame.commentStyle.textContent = this.commenting ? COMMENTING_CSS : "";
+  /**
+   * Shows artboard `id` in interactive mode (`null`: back to the canvas).
+   * Only that page takes input, it owns the wheel, and its audio plays.
+   */
+  setPresenting(id: string | null) {
+    this.presenting = id;
+    this.wheelOwner = null;
+    if (id) this.use(id);
+    this.showInputs();
+  }
+
+  /** While Space is held, presses over pages go to the camera, to pan. */
+  setPanning(panning: boolean) {
+    if (this.panning === panning) return;
+    this.panning = panning;
+    this.showInputs();
+  }
+
+  private showInputs() {
+    for (const [id, frame] of this.frames) this.showInput(id, frame);
+  }
+
+  /** Whether artboard `id` takes clicks, typing and the wheel right now. */
+  takesInput(id: string): boolean {
+    if (this.tool === "comment" || this.panning) return false;
+    return this.presenting === null ? this.tool === "interact" : id === this.presenting;
+  }
+
+  private showInput(id: string, frame: Frame) {
+    if (frame.iframe) frame.iframe.style.pointerEvents = this.takesInput(id) ? "" : "none";
+    if (frame.commentStyle) {
+      frame.commentStyle.textContent = this.tool === "comment" ? COMMENTING_CSS : "";
+    }
+    frame.pin.hidden = !this.used.has(id) && id !== this.presenting;
+    this.sendState(id, frame);
+  }
+
+  private sendState(id: string, frame: Frame) {
+    frame.port?.postMessage({
+      type: "state",
+      interact: this.tool === "interact" && this.presenting === null,
+      presenting: id === this.presenting,
+      audio: id === this.presenting,
+    });
+  }
+
+  /** Marks artboard `id` as just used, so it keeps running while out of view. */
+  private use(id: string) {
+    const first = !this.used.has(id);
+    this.used.delete(id);
+    this.used.set(id, Date.now());
+    // The pin stays on labels of pages used a while ago, so keep a few more.
+    for (const old of [...this.used.keys()].slice(0, -KEEP_USED * 8)) this.used.delete(old);
+    const frame = this.frames.get(id);
+    if (first && frame) frame.pin.hidden = false;
+    this.options.onUsed?.(id);
+  }
+
+  /**
+   * Whether a wheel event should scroll the page under it instead of
+   * moving the camera. A gesture belongs to the scroll container it starts
+   * over, in a page that takes input, whether or not that container can
+   * move that way yet, through its momentum and its own edges.
+   */
+  scrollsPage(e: WheelEvent): boolean {
+    if (e.ctrlKey || e.metaKey) return false;
+    if (e.timeStamp - this.lastWheel > GESTURE_GAP_MS) this.wheelOwner = this.scrollOwner(e);
+    this.lastWheel = e.timeStamp;
+    return this.wheelOwner !== null;
+  }
+
+  private scrollOwner(e: WheelEvent): Element | null {
+    const id = this.boardOf(e);
+    const frame = id && this.frames.get(id);
+    if (!id || !frame || frame.iframe || !this.takesInput(id)) return null;
+    for (const target of e.composedPath()) {
+      if (target === frame.root) break;
+      // The path passes through the shadow root, which isn't an element.
+      if (target instanceof Element && scrolls(target, e.deltaX, e.deltaY)) return target;
+    }
+    return null;
+  }
+
+  /** The artboard an event happened in, by its path. */
+  boardOf(e: Event): string | null {
+    for (const target of e.composedPath()) {
+      if (target instanceof HTMLElement && target.dataset.artboard) return target.dataset.artboard;
+    }
+    return null;
+  }
+
+  /**
+   * Clicks in shadow-root artboards. Only a page that takes input keeps its
+   * clicks. Links never navigate the app: one to another artboard asks the
+   * canvas to go there, an external one opens a new tab, and one to a part
+   * of the page scrolls to it.
+   */
+  private onClick(e: MouseEvent) {
+    const id = this.boardOf(e);
+    if (!id || this.frames.get(id)?.label.contains(e.target as globalThis.Node)) {
+      e.preventDefault();
+      return;
+    }
+    if (!this.takesInput(id)) {
+      e.preventDefault();
+      return;
+    }
+    this.use(id);
+    const link = e
+      .composedPath()
+      .find((t): t is HTMLAnchorElement | HTMLAreaElement =>
+        t instanceof Element ? t.matches("a[href], area[href]") : false,
+      );
+    if (!link) return;
+    e.preventDefault();
+    const href = link.getAttribute("href") ?? "";
+    if (href.startsWith(ARTBOARD_LINK)) {
+      this.options.onGoto?.(id, decodeURIComponent(href.slice(ARTBOARD_LINK.length)));
+    } else if (href.startsWith("#")) {
+      const root = link.getRootNode();
+      const target =
+        root instanceof ShadowRoot ? root.getElementById(decodeURIComponent(href.slice(1))) : null;
+      target?.scrollIntoView({ block: "start" });
+    } else openExternal(link.href);
   }
 
   /** Marks artboards that agents are working on, keyed by artboard id. */
@@ -735,7 +1094,7 @@ export class Renderer {
       this.frames.set(node.id, frame);
       this.world.append(frame.root);
       this.showWorking(frame, this.working.get(node.id));
-      this.showCommenting(frame);
+      this.showInput(node.id, frame);
       if (frame.shadow) this.build(node, frame.shadow, false);
       this.culler.add(node.id, node.x ?? 0, node.y ?? 0);
       this.resizes?.observe(frame.root);
@@ -829,7 +1188,7 @@ export class Renderer {
   private unmount(id: string) {
     const frame = this.frames.get(id);
     if (frame) {
-      clearTimers(frame);
+      closeFrame(frame);
       frame.root.remove();
       this.frames.delete(id);
       this.culler.remove(id);
@@ -891,7 +1250,25 @@ export class Renderer {
     play.addEventListener("click", () => this.options.onPreview?.(node.id), {
       signal: this.abort.signal,
     });
-    label.append(name, play);
+    const network = document.createElement("span");
+    network.className = stylex.props(styles.network).className ?? "";
+    network.innerHTML = iconMarkup("wifi", 10, `net-${node.id}`);
+    network.hidden = true;
+    const pin = document.createElement("button");
+    pin.type = "button";
+    pin.className = stylex.props(styles.pin).className ?? "";
+    pin.textContent = "Hold";
+    pin.title = "Hold off reloads, so changes don't reset this page";
+    pin.ariaPressed = "false";
+    pin.hidden = true;
+    pin.dataset.cameraIgnore = "";
+    pin.addEventListener("click", () => this.hold(node.id, !this.isHeld(node.id)), {
+      signal: this.abort.signal,
+    });
+    const note = document.createElement("span");
+    note.className = stylex.props(styles.note).className ?? "";
+    note.hidden = true;
+    label.append(name, play, network, note, pin);
 
     const badge = document.createElement("div");
     badge.className = stylex.props(styles.badge).className ?? "";
@@ -901,31 +1278,51 @@ export class Renderer {
     content.className = stylex.props(styles.content).className ?? "";
     root.append(label, badge, content);
 
+    const parts = {
+      root,
+      label,
+      name,
+      play,
+      badge,
+      content,
+      network,
+      pin,
+      note,
+      nonce: "",
+      port: null,
+      loads: 0,
+      hosts: new Set<string>(),
+      held: false,
+      rects: new Map(),
+      pendingRects: new Set<string>(),
+    };
+
     if (live) {
       const iframe = document.createElement("iframe");
-      iframe.sandbox.add("allow-scripts");
+      // No allow-same-origin, allow-modals, allow-popups, allow-top-navigation
+      // or allow-pointer-lock: an opaque origin that can't take over the app.
+      // Forms run their submit handlers; the content policy's form-action
+      // keeps them from sending anything.
+      iframe.sandbox.add("allow-scripts", "allow-forms");
+      iframe.allow =
+        "autoplay 'none'; fullscreen 'none'; camera 'none'; microphone 'none'; geolocation 'none'; display-capture 'none'";
       iframe.title = labelOf(node);
       iframe.className = stylex.props(styles.iframe).className ?? "";
       const size = pixelSize(node);
       iframe.style.width = `${size.width ?? 1440}px`;
       iframe.style.height = `${size.height ?? 900}px`;
-      iframe.srcdoc = artboardDocument(this.replica, node.id);
+      iframe.addEventListener("load", () => this.onLoad(node.id), { signal: this.abort.signal });
       content.append(iframe);
-      return {
-        root,
-        label,
-        name,
-        play,
-        badge,
-        content,
+      const frame: Frame = {
+        ...parts,
         shadow: null,
         commentStyle: null,
         tokenStyle: null,
         iframe,
         awaitingSize: size.width === null || size.height === null,
-        rects: new Map(),
-        pendingRects: new Set(),
       };
+      this.load(node.id, frame);
+      return frame;
     }
 
     const host = document.createElement("div");
@@ -947,26 +1344,13 @@ export class Renderer {
     const commentStyle = document.createElement("style");
     shadow.append(base, tokenStyle, commentStyle);
     content.append(host);
-    return {
-      root,
-      label,
-      name,
-      play,
-      badge,
-      content,
-      shadow,
-      commentStyle,
-      tokenStyle,
-      iframe: null,
-      rects: new Map(),
-      pendingRects: new Set(),
-    };
+    return { ...parts, shadow, commentStyle, tokenStyle, iframe: null };
   }
 
   /** Gives artboard `id` its tokens as they are now, in its mode. */
   private restyleTokens(id: string, frame: Frame) {
     if (frame.tokenStyle) frame.tokenStyle.textContent = this.replica.tokenStyle(id, true);
-    else this.scheduleReload(id, frame);
+    else this.refresh(id, frame, "reload");
   }
 
   private scheduleReload(id: string, frame: Frame) {
@@ -980,21 +1364,81 @@ export class Renderer {
     frame.reload = setTimeout(() => {
       delete frame.reload;
       if (this.frames.get(id) === frame && frame.iframe && !this.culler.isCulled(id)) {
-        frame.iframe.srcdoc = artboardDocument(this.replica, id);
-        forgetLayout(frame);
+        this.load(id, frame);
       }
     }, RELOAD_DELAY_MS);
   }
 
-  /** Handles messages from the runtime in sandboxed artboards (see `./html`). */
-  private onMessage(event: MessageEvent) {
-    let found: [string, Frame] | undefined;
-    for (const entry of this.frames) {
-      if (entry[1].iframe && entry[1].iframe.contentWindow === event.source) found = entry;
+  /** A page changed its storage: keep it, and tell the design's other pages. */
+  private onStorage(boardId: string, m: Record<string, unknown>) {
+    const set: Array<readonly [string, string | null]> = [];
+    if (Array.isArray(m.set)) {
+      for (const entry of m.set as unknown[]) {
+        if (!Array.isArray(entry) || typeof entry[0] !== "string") return;
+        const value: unknown = entry[1];
+        if (value !== null && typeof value !== "string") return;
+        set.push([entry[0], value]);
+      }
     }
-    const message: unknown = (event.data as { finite?: unknown } | null)?.finite;
-    if (!found || typeof message !== "object" || message === null) return;
-    const [boardId, frame] = found;
+    const change: StorageChange = { set, clear: m.clear === true };
+    if (this.options.storage && !this.options.storage.write(change)) return;
+    for (const [id, frame] of this.frames) {
+      if (id !== boardId) frame.port?.postMessage({ type: "storage", ...change });
+    }
+  }
+
+  private showNetwork(id: string, frame: Frame) {
+    const hosts = [...frame.hosts];
+    frame.network.hidden = hosts.length === 0;
+    frame.network.title = hosts.length > 0 ? `Uses the network: ${hosts.join(", ")}` : "";
+    this.options.onNetwork?.(id);
+  }
+
+  /**
+   * A sandboxed artboard's bootstrap said hello: hand it the private port.
+   * The page's own scripts can post here too, so only the first hello with
+   * the current document's nonce gets one, and the bootstrap's comes first.
+   */
+  private onHello(event: MessageEvent) {
+    const m = (event.data as { finite?: { type?: unknown; nonce?: unknown } } | null)?.finite;
+    if (m?.type !== "hello") return;
+    for (const [id, frame] of this.frames) {
+      const iframe = frame.iframe;
+      if (!iframe || iframe.contentWindow !== event.source) continue;
+      if (frame.port || m.nonce !== frame.nonce) return;
+      const channel = new MessageChannel();
+      frame.port = channel.port1;
+      channel.port1.onmessage = (e) => {
+        if (this.frames.get(id) === frame && frame.port === channel.port1)
+          this.onMessage(id, frame, e.data);
+      };
+      iframe.contentWindow?.postMessage({ finite: { type: "init", nonce: frame.nonce } }, "*", [
+        channel.port2,
+      ]);
+      this.sendState(id, frame);
+      return;
+    }
+  }
+
+  /**
+   * The iframe finished loading a document. A second load for the same
+   * document means the page navigated itself somewhere else: load it again.
+   */
+  private onLoad(id: string) {
+    const frame = this.frames.get(id);
+    if (!frame?.iframe) return;
+    frame.loads += 1;
+    if (frame.loads < 2 || frame.iframe.srcdoc === "") return;
+    // A page that keeps navigating away stays empty until it changes.
+    const again = frame.navigatedAt !== undefined && performance.now() - frame.navigatedAt < 2000;
+    frame.navigatedAt = performance.now();
+    this.load(id, frame, !again);
+    if (again) frame.stale = true;
+  }
+
+  /** Handles messages from the bootstrap in sandboxed artboards, over the private port. */
+  private onMessage(boardId: string, frame: Frame, message: unknown) {
+    if (typeof message !== "object" || message === null) return;
     const iframe = frame.iframe!;
     const m = message as Record<string, unknown>;
     const num = (key: string) =>
@@ -1043,12 +1487,43 @@ export class Renderer {
       if (num("width") === 0 && num("height") === 0) return;
       const fit = (n: number) => `${Math.min(MAX_SIDE, Math.max(1, n))}px`;
       const [width, height] = [fit(num("width")), fit(num("height"))];
-      const changed = iframe.style.width !== width || iframe.style.height !== height;
       frame.awaitingSize = false;
+      // In interactive mode's window, the page's size changes what's behind it.
+      if (frame.clip) {
+        frame.clip = { ...frame.clip, full: { width: num("width"), height: num("height") } };
+        iframe.style.width = width;
+        return;
+      }
+      const changed = iframe.style.width !== width || iframe.style.height !== height;
       this.culler.touch(boardId);
       iframe.style.width = width;
       iframe.style.height = height;
       if (changed) this.options.onResize?.();
+    } else if (m.type === "storage") {
+      this.onStorage(boardId, m);
+    } else if (m.type === "network" && typeof m.host === "string" && m.host.length <= 253) {
+      if (frame.hosts.size >= 50 || frame.hosts.has(m.host)) return;
+      frame.hosts.add(m.host);
+      this.showNetwork(boardId, frame);
+    } else if (m.type === "goto" && typeof m.target === "string") {
+      if (this.takesInput(boardId)) this.options.onGoto?.(boardId, m.target);
+    } else if (m.type === "open" && typeof m.url === "string") {
+      // The bootstrap sends this only for a person's click on a link.
+      if (this.takesInput(boardId)) openExternal(m.url);
+    } else if (m.type === "key" && typeof m.key === "string") {
+      this.options.onFrameKey?.(boardId, {
+        key: m.key,
+        phase: m.phase === "up" ? "up" : "down",
+        meta: m.meta === true,
+        repeat: m.repeat === true,
+      });
+    } else if (m.type === "pan") {
+      this.options.onFramePan?.(boardId);
+    } else if (m.type === "blur") {
+      this.options.onFrameBlur?.();
+    } else if (m.type === "used") {
+      // Sent on every press and key, so skip it while it's already the latest.
+      if (this.takesInput(boardId) && [...this.used.keys()].at(-1) !== boardId) this.use(boardId);
     } else if (m.type === "wheel" && this.options.onWheel) {
       // The iframe's content is unscaled; the canvas zoom scales its box.
       const rect = iframe.getBoundingClientRect();
@@ -1067,9 +1542,41 @@ export class Renderer {
   }
 }
 
-function clearTimers(frame: Frame) {
+/** Stops a frame's timers and closes its port. */
+function closeFrame(frame: Frame) {
   clearTimeout(frame.reload);
   clearTimeout(frame.unload);
+  clearTimeout(frame.noteTimer);
+  frame.port?.close();
+  frame.port = null;
+}
+
+/** A gesture's wheel events come closer together than this; a longer gap starts a new one. */
+const GESTURE_GAP_MS = 120;
+
+/** Whether `el` is a scroll container with room to scroll along the wheel's axis. */
+function scrolls(el: Element, dx: number, dy: number): boolean {
+  const style = getComputedStyle(el);
+  const y = /(auto|scroll)/.test(style.overflowY) && el.scrollHeight > el.clientHeight;
+  const x = /(auto|scroll)/.test(style.overflowX) && el.scrollWidth > el.clientWidth;
+  return (dy !== 0 && y) || (dx !== 0 && x);
+}
+
+function newNonce(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Opens an http(s) link from a page in a new tab, with no way back to the app. */
+function openExternal(url: string) {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return;
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return;
+  window.open(parsed.href, "_blank", "noopener,noreferrer");
 }
 
 /** A new or unloaded document: earlier answers about its layout no longer hold. */
@@ -1183,5 +1690,30 @@ const styles = stylex.create({
     display: "block",
     borderWidth: 0,
     colorScheme: "normal",
+  },
+  network: {
+    display: { default: "grid", ":is([hidden])": "none" },
+    placeItems: "center",
+    width: 16,
+    height: 16,
+    color: colors.muted,
+  },
+  note: {
+    display: { default: "inline", ":is([hidden])": "none" },
+    color: colors.text,
+  },
+  pin: {
+    display: { default: "inline-block", ":is([hidden])": "none" },
+    height: 16,
+    paddingInline: 5,
+    borderWidth: 1,
+    borderStyle: "solid",
+    borderColor: colors.border,
+    borderRadius: 4,
+    fontSize: 11,
+    lineHeight: 1,
+    backgroundColor: { default: "transparent", ":is([aria-pressed=true])": colors.accent },
+    color: { default: colors.muted, ":is([aria-pressed=true])": colors.onAccent },
+    cursor: "var(--cursor-pointer, pointer)",
   },
 });

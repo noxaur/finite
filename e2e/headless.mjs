@@ -74,6 +74,9 @@ Browser
                               Click an element's center, or a point. --shift
                               holds Shift, as for adding to a comment's elements.
   hover <css> | hover <x> <y> Move the mouse there.
+  wheel <x> <y> <dx> <dy> [--ctrl]
+                              Scroll the wheel at a point, in steps, like a
+                              trackpad gesture. --ctrl holds Control, to zoom.
   drag <css|x y> --by=<dx>,<dy> [--to <css>] [--steps 10] [--shift]
                               Press on an element's center (or a point), move
                               by dx,dy pixels or onto another element's center,
@@ -119,6 +122,7 @@ const { values: flags, positionals } = parseFlags({
     nth: { type: "string" },
     shift: { type: "boolean" },
     double: { type: "boolean" },
+    ctrl: { type: "boolean" },
     by: { type: "string" },
     to: { type: "string" },
     steps: { type: "string" },
@@ -601,6 +605,27 @@ async function daemon(dir, options) {
       await settle(page);
       const how = `${shift ? "Shift-" : ""}${double ? "double-clicked" : "clicked"}`;
       return `${how[0].toUpperCase()}${how.slice(1)} ${label} at ${Math.round(x)},${Math.round(y)}`;
+    },
+    async wheel({ args: [x, y, dx, dy], flags: { ctrl } }) {
+      const [px, py, sx, sy] = [x, y, dx, dy].map(Number);
+      if ([px, py, sx, sy].some((n) => !Number.isFinite(n))) {
+        throw new Error("usage: wheel <x> <y> <dx> <dy> [--ctrl]");
+      }
+      await page.move(px, py);
+      // Ten events 16 ms apart: one gesture, as a trackpad sends it.
+      for (let i = 0; i < 10; i++) {
+        await page.send("Input.dispatchMouseEvent", {
+          type: "mouseWheel",
+          x: px,
+          y: py,
+          deltaX: sx / 10,
+          deltaY: sy / 10,
+          modifiers: ctrl ? 2 : 0,
+        });
+        await new Promise((done) => setTimeout(done, 16));
+      }
+      await settle(page);
+      return `Scrolled ${sx},${sy} at ${px},${py}`;
     },
     async hover({ args: target, flags: { nth } }) {
       const { x, y, label } = await point(page, target, nth);

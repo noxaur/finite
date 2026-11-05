@@ -77,6 +77,23 @@ export function fit(
   };
 }
 
+/** What a wheel event does: move the camera, scroll the page under it natively, or nothing. */
+export type WheelRoute = "camera" | "native" | "ignore";
+
+/**
+ * Where the spring is, from 0 to 1, a fraction `t` of the way through. A
+ * slightly underdamped spring, so it settles with a hint of overshoot,
+ * scaled so it has all but settled at `t = 1`.
+ */
+export function spring(t: number): number {
+  if (t >= 1) return 1;
+  const damping = 0.82;
+  const omega = 9;
+  const damped = omega * Math.sqrt(1 - damping * damping);
+  const decay = Math.exp(-damping * omega * t);
+  return 1 - decay * (Math.cos(damped * t) + ((damping * omega) / damped) * Math.sin(damped * t));
+}
+
 /**
  * Pans and zooms a canvas. `world` holds the content in canvas coordinates
  * and gets a CSS transform. The wheel pans (pinch or Ctrl/⌘ + wheel zooms
@@ -87,6 +104,18 @@ export class Camera {
   view: View = { x: 0, y: 0, zoom: 1 };
   /** When false, only the middle button drags the canvas, so the left button can place comments. */
   dragToPan = true;
+  /** Decides each wheel event's route. Without it, every wheel moves the camera. */
+  routeWheel: ((e: WheelEvent) => WheelRoute) | null = null;
+  /** Whether a left press may pan, unless Space is held. Without it, any may. */
+  mayPan: ((e: PointerEvent) => boolean) | null = null;
+  /** Held down, Space lets the left button pan anywhere. */
+  space = false;
+  /**
+   * While set, nothing but `animateTo` and `set` moves the camera, and a
+   * press that would pan calls it instead.
+   */
+  locked: (() => void) | null = null;
+  private animation = 0;
   private readonly listeners = new Set<(view: View) => void>();
   private readonly abort = new AbortController();
   private settle: ReturnType<typeof setTimeout> | undefined;
@@ -99,8 +128,12 @@ export class Camera {
     viewport.addEventListener(
       "wheel",
       (e) => {
+        const route = this.routeWheel?.(e) ?? "camera";
+        // A page scrolling natively keeps the event; everything else is the canvas's.
+        if (route === "native") return;
         e.preventDefault();
-        this.wheel(e);
+        // A locked camera lets pages scroll, and nothing else.
+        if (route === "camera" && !this.locked) this.wheel(e);
       },
       { passive: false, signal },
     );
@@ -111,6 +144,7 @@ export class Camera {
   }
 
   dispose() {
+    cancelAnimationFrame(this.animation);
     this.abort.abort();
     this.listeners.clear();
     clearTimeout(this.settle);
@@ -122,8 +156,57 @@ export class Camera {
   }
 
   set(view: View) {
+    cancelAnimationFrame(this.animation);
+    this.animation = 0;
+    this.show(view);
+  }
+
+  private show(view: View) {
     this.view = { ...view, zoom: clampZoom(view.zoom) };
     this.apply();
+  }
+
+  /**
+   * Moves to `view` on a spring over `durationMs`, zooming evenly (in log
+   * space) while the canvas point at the viewport's center glides across.
+   * Resolves true once it lands, or false if something else moved the
+   * camera first. With reduced motion, or no duration, it jumps.
+   */
+  animateTo(view: View, durationMs: number): Promise<boolean> {
+    cancelAnimationFrame(this.animation);
+    this.animation = 0;
+    const reduced =
+      typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (durationMs <= 0 || reduced) {
+      this.show(view);
+      return Promise.resolve(true);
+    }
+    const width = this.viewport.clientWidth;
+    const height = this.viewport.clientHeight;
+    const center = (v: View) => ({ x: (width / 2 - v.x) / v.zoom, y: (height / 2 - v.y) / v.zoom });
+    const from = { ...center(this.view), zoom: this.view.zoom };
+    const to = { ...center(view), zoom: clampZoom(view.zoom) };
+    const start = performance.now();
+    return new Promise((resolve) => {
+      const step = (now: number) => {
+        // A newer animation, or `set`, took over.
+        if (this.animation !== id) return resolve(false);
+        const t = Math.min(1, (now - start) / durationMs);
+        const p = spring(t);
+        const zoom = Math.exp(Math.log(from.zoom) + (Math.log(to.zoom) - Math.log(from.zoom)) * p);
+        const cx = from.x + (to.x - from.x) * p;
+        const cy = from.y + (to.y - from.y) * p;
+        if (t >= 1) {
+          this.animation = 0;
+          this.show(view);
+          return resolve(true);
+        }
+        this.show({ zoom, x: width / 2 - cx * zoom, y: height / 2 - cy * zoom });
+        this.animation = id = requestAnimationFrame(step);
+      };
+      let id = requestAnimationFrame(step);
+      this.animation = id;
+    });
   }
 
   /** Zooms by `factor`, keeping the viewport point (`cx`, `cy`) fixed. Defaults to the center. */
@@ -200,9 +283,18 @@ export class Camera {
   }
 
   private onPointerDown(e: PointerEvent) {
-    if (e.button !== 1 && (e.button !== 0 || !this.dragToPan)) return;
+    const left = e.button === 0 && (this.space || (this.dragToPan && (this.mayPan?.(e) ?? true)));
+    if (e.button !== 1 && !left) return;
     // Controls on the canvas, like comment pins, opt out with `data-camera-ignore`.
     if (e.target instanceof Element && e.target.closest("[data-camera-ignore]")) return;
+    if (this.locked) {
+      // Only an attempt to pan counts: Space or the middle button.
+      if (e.button === 1 || this.space) {
+        e.preventDefault();
+        this.locked();
+      }
+      return;
+    }
     e.preventDefault();
     const start = { px: e.clientX, py: e.clientY, x: this.view.x, y: this.view.y };
     this.viewport.setPointerCapture(e.pointerId);
