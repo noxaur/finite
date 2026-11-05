@@ -939,7 +939,13 @@ export class Renderer {
     const active = document.activeElement;
     if (active instanceof HTMLIFrameElement) {
       for (const [id, frame] of this.frames) {
-        if (frame.iframe === active && !this.takesInput(id)) active.blur();
+        if (frame.iframe !== active || this.takesInput(id)) continue;
+        // blur() alone doesn't take the focus out of a cross-origin frame;
+        // focusing something in this document does.
+        active.blur();
+        this.world.tabIndex = -1;
+        this.world.style.outline = "none";
+        this.world.focus({ preventScroll: true });
       }
     }
   }

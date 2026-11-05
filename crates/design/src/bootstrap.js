@@ -421,11 +421,13 @@
     " ",
   ]);
   const forward = (e, phase) => {
-    if (!using()) return;
+    // Escape always goes, so a page that kept the focus after it stopped
+    // taking input can't trap the way out.
     if (e.key === "Escape") {
       if (phase === "down") send({ type: "key", phase, key: e.key });
       return;
     }
+    if (!using()) return;
     if (!FORWARDED.has(e.key) || e.altKey || e.ctrlKey) return;
     if (e.metaKey && e.key !== "[") return;
     if (editing(e.composedPath()[0])) return;
