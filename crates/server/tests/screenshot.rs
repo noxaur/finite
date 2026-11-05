@@ -5,7 +5,8 @@ use std::{collections::BTreeMap, time::Duration};
 
 use finite_design::{Document, Op, edit, html};
 use finite_server::screenshot::{
-    Format, Image, MAX_OUTPUT_SIDE, Options, Rect, Shot, capture, plan, plan_measurement, scene,
+    Format, Image, MAX_OUTPUT_SIDE, Options, Rect, Shot, capture, layout, plan, plan_measurement,
+    scene,
 };
 
 /// A PNG's width, height and RGBA pixels.
@@ -421,6 +422,118 @@ async fn scripted_artboards_run_before_the_capture() {
     let image = images[0].as_ref().unwrap();
     assert_eq!(image.settled, Some(Duration::from_secs(1)));
     assert_eq!(Png::of(image).rgb(50, 50), BLUE);
+}
+
+#[tokio::test]
+async fn scripted_artboards_run_sandboxed_with_a_working_local_storage() {
+    // An opaque origin has no localStorage; the bootstrap provides one. And
+    // the page can't reach the wrapper it's framed in. Blue means it held.
+    let (doc, names) = design(
+        r#"<div data-name="Board" style="width: 200px; height: 100px; display: flex"><div data-name="Storage" id="a" style="width: 100px; height: 100px; background: #f00"></div><div data-name="Sandbox" id="b" style="width: 100px; height: 100px; background: #f00"></div><script>
+try { localStorage.setItem('k', 'v'); if (localStorage.getItem('k') === 'v') document.getElementById('a').style.background = 'blue'; } catch (e) {}
+try { void top.document.title; } catch (e) { document.getElementById('b').style.background = 'blue'; }
+</script></div>"#,
+    );
+    let shots = vec![Shot::node(&names["Storage"]), Shot::node(&names["Sandbox"])];
+    let Some(images) = shoot(&doc, shots, Options::default()).await else {
+        return;
+    };
+    assert_eq!(
+        Png::of(images[0].as_ref().unwrap()).rgb(50, 50),
+        BLUE,
+        "localStorage"
+    );
+    assert_eq!(
+        Png::of(images[1].as_ref().unwrap()).rgb(50, 50),
+        BLUE,
+        "sandbox"
+    );
+}
+
+#[tokio::test]
+async fn a_script_cannot_change_what_measuring_reads() {
+    // The page replaces getBoundingClientRect. Measuring runs in its own
+    // world in the frame, so the boxes are still the real ones.
+    let (doc, names) = design(
+        r#"<div data-name="Board" style="width: 100px; height: 100px"><div data-name="Box" style="width: 40px; height: 30px; background: #f00"></div><script>Element.prototype.getBoundingClientRect = () => ({ x: 9, y: 9, left: 9, top: 9, right: 10, bottom: 10, width: 1, height: 1 });</script></div>"#,
+    );
+    let m = plan_measurement(&doc, &names["Board"], Options::default()).unwrap();
+    let boxes = match layout(m).await {
+        Ok(boxes) => boxes,
+        Err(error) if error.contains("no Chrome") => return,
+        Err(error) => panic!("{error}"),
+    };
+    let found = boxes.iter().find(|b| b.id == names["Box"]).unwrap();
+    assert_eq!(
+        (found.x, found.y, found.width, found.height),
+        (0.0, 0.0, 40.0, 30.0)
+    );
+}
+
+#[tokio::test]
+async fn a_scripted_artboard_measures_like_one_without_scripts() {
+    const BODY: &str = r#"<div data-name="Board" style="width: 400px; height: 300px; position: relative; margin: 20px"><div data-name="Red" style="position: absolute; left: 50px; top: 60px; width: 100px; height: 80px; background: #f00"></div><p data-name="P" style="margin: 0; padding-top: 150px; font: 20px/30px monospace">ab<b data-name="B">cd</b>ef</p>"#;
+    let (plain, plain_names) = design(&format!("{BODY}</div>"));
+    let (scripted, scripted_names) = design(&format!("{BODY}<script>void 0</script></div>"));
+    let measure = |doc: &Document, names: &BTreeMap<String, String>| {
+        plan_measurement(doc, &names["Board"], Options::default()).unwrap()
+    };
+    let (a, b) = match (
+        layout(measure(&plain, &plain_names)).await,
+        layout(measure(&scripted, &scripted_names)).await,
+    ) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(error), _) | (_, Err(error)) if error.contains("no Chrome") => return,
+        (Err(error), _) | (_, Err(error)) => panic!("{error}"),
+    };
+    // The ids line up: the script is the only node more.
+    assert_eq!(a, b);
+    let red = a.iter().find(|e| e.id == plain_names["Red"]).unwrap();
+    assert_eq!((red.x, red.y), (20.0 + 50.0, 20.0 + 60.0));
+
+    let ma = scene(measure(&plain, &plain_names)).await.unwrap();
+    let mb = scene(measure(&scripted, &scripted_names)).await.unwrap();
+    for name in ["Board", "Red", "P", "B"] {
+        let (x, y) = (
+            &ma.nodes[&plain_names[name]],
+            &mb.nodes[&scripted_names[name]],
+        );
+        assert_eq!(
+            (x.x, x.y, x.width, x.height),
+            (y.x, y.y, y.width, y.height),
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn scripted_artboards_reveal_overflow_and_clear_backgrounds() {
+    let (doc, names) = design(
+        r#"<div data-name="Board" style="width: 200px; height: 100px; background: #fff; overflow: hidden"><div style="width: 200px; height: 250px; background: #00f; flex-shrink: 0"></div><script>void 0</script></div>"#,
+    );
+    let board = &names["Board"];
+    let options = Options {
+        reveal_overflow: true,
+        ..Default::default()
+    };
+    let Some(images) = shoot(&doc, vec![Shot::node(board)], options).await else {
+        return;
+    };
+    let shown = images[0].as_ref().unwrap();
+    assert_eq!(shown.overflow.bottom, 150.0);
+    assert_eq!(shown.area, Rect::new(0.0, 0.0, 200.0, 250.0));
+    let png = Png::of(shown);
+    assert_eq!((png.width, png.height), (200, 250));
+    assert_eq!(png.rgb(100, 240), BLUE);
+
+    let options = Options {
+        transparent: true,
+        ..Default::default()
+    };
+    let images = shoot(&doc, vec![Shot::node(board)], options).await.unwrap();
+    let png = Png::of(images[0].as_ref().unwrap());
+    // The blue child stays; the artboard's own white background goes.
+    assert_eq!(png.rgb(100, 50), BLUE);
 }
 
 #[tokio::test]

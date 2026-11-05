@@ -22,7 +22,7 @@ use base64::Engine;
 use finite_design::{
     Document, NodeId, NodeKind,
     edit::pixel_size,
-    html::{self, BASE_CSS, BASE_LAYER, CSP, VIEWER_ID_ATTR},
+    html::{self, BASE_CSS, BASE_LAYER, BOOTSTRAP, CSP, VIEWER_ID_ATTR},
     tokens,
 };
 use finite_transfer::scene::{COMPUTED, Measure, Resolved, Scene};
@@ -32,6 +32,11 @@ use serde_json::{Value, json};
 use crate::hub::random_id;
 
 mod cdp;
+mod egress;
+#[cfg(test)]
+mod network_tests;
+
+use egress::Policy;
 
 /// Artboards without a pixel width or height are captured at this size.
 const FALLBACK_WIDTH: f64 = 1440.0;
@@ -297,6 +302,9 @@ struct Page {
     html: String,
     width: f64,
     height: f64,
+    /// The artboard runs scripts, so `html` is a wrapper holding it in a
+    /// sandboxed iframe, and the page is measured in that frame.
+    scripted: bool,
     shots: Vec<PlannedShot>,
 }
 
@@ -374,13 +382,14 @@ pub fn plan(doc: &Document, shots: Vec<Shot>, options: Options) -> Result<Plan, 
         match pages.iter_mut().find(|p| p.artboard == artboard) {
             Some(page) => page.shots.push(planned),
             None => {
-                let (html, width, height) =
+                let built =
                     page_html(doc, &artboard, &options).expect("the artboard is in the document");
                 pages.push(Page {
                     artboard,
-                    html,
-                    width,
-                    height,
+                    html: built.html,
+                    width: built.width,
+                    height: built.height,
+                    scripted: built.scripted,
                     shots: vec![planned],
                 });
             }
@@ -393,11 +402,34 @@ pub fn plan(doc: &Document, shots: Vec<Shot>, options: Options) -> Result<Plan, 
     })
 }
 
+/// A page to render, and the artboard's size in CSS pixels.
+struct Built {
+    html: String,
+    width: f64,
+    height: f64,
+    scripted: bool,
+}
+
+/// The sandbox the web viewer puts an artboard that runs scripts in. No
+/// `allow-same-origin`, so the page has an opaque origin and can't reach the
+/// wrapper around it; no popups, modals, top navigation or pointer lock.
+const SANDBOX: &str = "allow-scripts allow-forms";
+const FRAME_PERMISSIONS: &str = "autoplay 'none'; fullscreen 'none'";
+
 /// A standalone HTML page showing just the artboard, and its size in CSS
 /// pixels. Every element carries its node id in [`VIEWER_ID_ATTR`], so
 /// shots can find it. The web viewer renders artboards that run scripts
 /// from the same HTML.
-fn page_html(doc: &Document, artboard: &str, options: &Options) -> Option<(String, f64, f64)> {
+///
+/// An artboard with a `<script>` renders as the viewer does: the page above
+/// is the `srcdoc` of a sandboxed `<iframe>` in a bare wrapper, with the
+/// viewer's [`BOOTSTRAP`] running first. It then runs with the same limits,
+/// an opaque origin and a `localStorage` that lasts only for the capture.
+/// An artboard without one loads directly, since nothing in it runs and the
+/// sandbox would change nothing, and its measurements need no second frame.
+/// The frame sits at the wrapper's (0, 0) and fills it, so coordinates are
+/// the same either way.
+fn page_html(doc: &Document, artboard: &str, options: &Options) -> Option<Built> {
     let node = doc.get(artboard)?;
     // Compact, so no whitespace is added between elements: it renders like the viewer.
     let body = html::export_for_viewer(doc, artboard)?;
@@ -437,10 +469,40 @@ fn page_html(doc: &Document, artboard: &str, options: &Options) -> Option<(Strin
     } else {
         format!("<style>{tokens}</style>")
     };
+    let scripted = doc.subtree(artboard).iter().any(|n| {
+        n.tag()
+            .is_some_and(|tag| tag.eq_ignore_ascii_case("script"))
+    });
+    // The bootstrap's config goes in as JSON; `<` can't end the script.
+    let bootstrap = if scripted {
+        let config = json!({ "nonce": "screenshot", "storage": {} })
+            .to_string()
+            .replace('<', "\\u003c");
+        // A trailing `;` after the function would end the parentheses early.
+        let function = BOOTSTRAP.trim().trim_end_matches(';');
+        format!("<script>({function})({config})</script>")
+    } else {
+        String::new()
+    };
     let page = format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\"><style>@layer {BASE_LAYER} {{ {BASE_CSS} html, body {{ margin: 0; }} }}</style>{shared}</head><body>{body}<style>{overrides}</style></body></html>"
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\">{bootstrap}<style>@layer {BASE_LAYER} {{ {BASE_CSS} html, body {{ margin: 0; }} }}</style>{shared}</head><body>{body}<style>{overrides}</style></body></html>"
     );
-    Some((page, width, height))
+    let html = if scripted {
+        format!(
+            "<!doctype html><html><head><meta charset=\"utf-8\"><style>html, body {{ margin: 0; }} iframe {{ display: block; border: 0; width: {}px; height: {}px; }}</style></head><body><iframe sandbox=\"{SANDBOX}\" allow=\"{FRAME_PERMISSIONS}\" srcdoc=\"{}\"></iframe></body></html>",
+            width.ceil(),
+            height.ceil(),
+            html::escape(&page, true)
+        )
+    } else {
+        page
+    };
+    Some(Built {
+        html,
+        width,
+        height,
+        scripted,
+    })
 }
 
 /// A CSS selector for the element with node id `id`.
@@ -502,6 +564,10 @@ fn chrome() -> Option<PathBuf> {
 /// the order it was asked for. A shot fails when its node has no box on the
 /// page (`display: none`, or empty) or lies wholly outside the artboard.
 pub async fn capture(plan: Plan) -> Result<Vec<Result<Image, String>>, String> {
+    capture_with(plan, Policy::default()).await
+}
+
+async fn capture_with(plan: Plan, policy: Policy) -> Result<Vec<Result<Image, String>>, String> {
     let chrome = chrome().ok_or(
         "no Chrome, Chromium or Edge found for screenshots; set FINITE_CHROME to a browser binary",
     )?;
@@ -510,7 +576,7 @@ pub async fn capture(plan: Plan) -> Result<Vec<Result<Image, String>>, String> {
         .await
         .map_err(|_| "screenshots are shutting down")?;
     let dir = std::env::temp_dir().join(format!("finite-shot-{}", random_id(10)));
-    let (browser, mut tab) = cdp::Browser::launch(&chrome, dir.clone()).await?;
+    let (browser, mut tab) = cdp::Browser::launch(&chrome, dir.clone(), policy).await?;
     let results = capture_pages(&mut tab, &dir, plan).await;
     browser.close(tab).await;
     results
@@ -588,6 +654,7 @@ pub struct Measurement {
     html: String,
     width: f64,
     height: f64,
+    scripted: bool,
     settle: Duration,
     texts: Vec<TextRuns>,
 }
@@ -651,14 +718,14 @@ pub fn plan_measurement(
         .ok_or_else(|| format!("node {node:?} not found"))?
         .id
         .clone();
-    let (html, width, height) =
-        page_html(doc, &artboard, &options).expect("the artboard is in the document");
+    let built = page_html(doc, &artboard, &options).expect("the artboard is in the document");
     Ok(Measurement {
         texts: text_runs(doc, &artboard),
         artboard,
-        html,
-        width,
-        height,
+        html: built.html,
+        width: built.width,
+        height: built.height,
+        scripted: built.scripted,
         settle: options.settle,
     })
 }
@@ -668,6 +735,10 @@ pub fn plan_measurement(
 /// screenshot would, but takes no picture, so it's cheap to call after
 /// every edit.
 pub async fn layout(m: Measurement) -> Result<Vec<ElementBox>, String> {
+    layout_with(m, Policy::default()).await
+}
+
+async fn layout_with(m: Measurement, policy: Policy) -> Result<Vec<ElementBox>, String> {
     let chrome = chrome().ok_or(
         "no Chrome, Chromium or Edge found to lay out the page; set FINITE_CHROME to a browser binary",
     )?;
@@ -677,7 +748,7 @@ pub async fn layout(m: Measurement) -> Result<Vec<ElementBox>, String> {
         .map_err(|_| "layout is shutting down")?;
     let dir = std::env::temp_dir().join(format!("finite-layout-{}", random_id(10)));
     let run = async {
-        let (browser, mut tab) = cdp::Browser::launch(&chrome, dir.clone()).await?;
+        let (browser, mut tab) = cdp::Browser::launch(&chrome, dir.clone(), policy).await?;
         let result = measure_page(&mut tab, &dir, &m).await;
         browser.close(tab).await;
         result
@@ -725,12 +796,47 @@ async fn load(tab: &mut cdp::Tab, dir: &std::path::Path, m: &Measurement) -> Res
         }),
     )
     .await?;
+    open(tab, &path, m.scripted).await
+}
+
+/// Navigates to the page at `path` and waits for it to load. For a wrapper
+/// page (`scripted`), later evaluations then run in the artboard's frame.
+async fn open(tab: &mut cdp::Tab, path: &std::path::Path, scripted: bool) -> Result<(), String> {
     tab.clear_events();
+    tab.set_context(None);
     let url = format!("file://{}", path.display());
     tab.call("Page.navigate", json!({ "url": url })).await?;
+    // A slow image shouldn't stop the capture; it shows as not loaded.
     tab.wait_for("Page.loadEventFired", LOAD).await?;
+    if scripted {
+        enter_frame(tab).await?;
+    }
     tab.evaluate("document.fonts.ready.then(() => true)")
         .await?;
+    Ok(())
+}
+
+/// Points [`cdp::Tab::evaluate`] at the wrapper's iframe. It runs in an
+/// isolated world there: it sees the artboard's DOM, but not the page's
+/// own variables, so a script can't change what the measuring code calls.
+/// The world belongs to the frame's current document, so a page that
+/// navigates itself away ends it.
+async fn enter_frame(tab: &mut cdp::Tab) -> Result<(), String> {
+    let tree = tab.call("Page.getFrameTree", json!({})).await?;
+    let frame = tree["frameTree"]["childFrames"][0]["frame"]["id"]
+        .as_str()
+        .ok_or("the artboard's frame isn't in the page")?
+        .to_owned();
+    let world = tab
+        .call(
+            "Page.createIsolatedWorld",
+            json!({ "frameId": frame, "worldName": "finite-measure" }),
+        )
+        .await?;
+    let context = world["executionContextId"]
+        .as_i64()
+        .ok_or("the artboard's frame has no script context")?;
+    tab.set_context(Some(context));
     Ok(())
 }
 
@@ -749,7 +855,7 @@ pub async fn scene(m: Measurement) -> Result<Scene, String> {
         .await
         .map_err(|_| "measuring is shutting down")?;
     let dir = std::env::temp_dir().join(format!("finite-scene-{}", random_id(10)));
-    let (browser, mut tab) = cdp::Browser::launch(&chrome, dir.clone()).await?;
+    let (browser, mut tab) = cdp::Browser::launch(&chrome, dir.clone(), Policy::default()).await?;
     let result = scene_page(&mut tab, &dir, &m).await;
     browser.close(tab).await;
     result
@@ -906,13 +1012,7 @@ async fn render(
         )
         .await?;
     }
-    tab.clear_events();
-    let url = format!("file://{}", path.display());
-    tab.call("Page.navigate", json!({ "url": url })).await?;
-    // A slow image shouldn't stop the capture; it shows as not loaded.
-    tab.wait_for("Page.loadEventFired", LOAD).await?;
-    tab.evaluate("document.fonts.ready.then(() => true)")
-        .await?;
+    open(tab, path, page.scripted).await?;
 
     let ids: Vec<&str> = page.shots.iter().map(|s| s.element.as_str()).collect();
     let layout = measure(tab, &page.artboard, &ids).await?;
@@ -956,6 +1056,20 @@ async fn render(
             selector(&page.artboard)
         );
         set_style(tab, "finite-reveal-style", &css).await?;
+        if page.scripted {
+            // The artboard is in a frame, which clips what reaches past its
+            // own size; make the frame as big as what's revealed.
+            grow_frame(
+                tab,
+                Rect::new(
+                    board.x,
+                    board.y,
+                    board.width + overflow.right,
+                    board.height + overflow.bottom,
+                ),
+            )
+            .await?;
+        }
     }
     // What can be captured: the artboard, or with its overflow revealed,
     // everything its content reaches.
@@ -1178,6 +1292,30 @@ async fn shoot(
         boxes: (planned.element == page.artboard)
             .then(|| layout.nodes.iter().map(element_box).collect()),
     })
+}
+
+/// Resizes the wrapper's iframe to cover `area`, so content that overflows
+/// the artboard shows in the capture.
+async fn grow_frame(tab: &mut cdp::Tab, area: Rect) -> Result<(), String> {
+    let (width, height) = (
+        area.right().ceil().clamp(1.0, MAX_SIDE * 2.0),
+        area.bottom().ceil().clamp(1.0, MAX_SIDE * 2.0),
+    );
+    // The wrapper's own context, not the frame's.
+    let frame = tab.context();
+    tab.set_context(None);
+    let resized = tab
+        .evaluate(&format!(
+            r#"(() => {{
+  const frame = document.querySelector("iframe");
+  frame.style.width = "{width}px";
+  frame.style.height = "{height}px";
+  return new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done(true))));
+}})()"#
+        ))
+        .await;
+    tab.set_context(frame);
+    resized.map(|_| ())
 }
 
 /// The `<style>` element holding CSS for one shot only.

@@ -39,7 +39,7 @@ Agents can style with inline `style` attributes or with `<style>` blocks and cla
 
 An artboard that contains a `<script>` renders in a sandboxed iframe instead. The `sandbox="allow-scripts"` attribute gives the iframe an opaque origin, so its code can't reach the app or the app's API. A content security policy also blocks its network requests, while still letting it load remote images, fonts and stylesheets. The iframe reloads after each burst of edits, so a script's state resets when an agent changes the artboard. A small runtime inside the iframe forwards wheel events to the canvas, so you can still pan and zoom over it. The server strips inline `on*` handlers and `<script src>`, so scripts attach listeners with `addEventListener`.
 
-Thumbnails never run scripts. Screenshots run them under the same content policy, capturing the frame about 3 seconds after load.
+Thumbnails never run scripts. Screenshots run them in the same sandboxed iframe, with the same content policy, capturing the frame about 3 seconds after load. Chrome's traffic in a screenshot goes through a proxy in the server that refuses loopback, private and link-local addresses and any port but 80 and 443, so a script can't use `fetch` to reach the server's own network.
 
 ## Preview mode
 
