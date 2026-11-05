@@ -431,8 +431,15 @@ fn code_page(doc: &Document, id: &str, offset: usize, limit: usize) -> Option<St
     } else {
         String::new()
     };
+    // The marker right after the code keeps its trailing whitespace, which
+    // the result would otherwise trim, so the pieces join back exactly.
+    let end_mark = if shown_to < total {
+        format!("⟨piece ends; offset {shown_to} continues⟩")
+    } else {
+        "⟨code ends⟩".to_owned()
+    };
     Some(format!(
-        "{}'s code is {total} characters, more than a result holds, so this is a piece of it, not HTML to write back. Showing characters {offset} to {shown_to}.{next}\n{}",
+        "{}'s code is {total} characters, more than a result holds, so this is a piece of it, not HTML to write back. Showing characters {offset} to {shown_to}, up to the ⟨…⟩ mark.{next}\n{}{end_mark}",
         label(doc, id),
         &code[start..end]
     ))

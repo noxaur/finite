@@ -1338,7 +1338,8 @@ async fn read_html_hides_long_stylesheets_in_an_artboard() {
     let mut agent = Agent::connect_doc6(&app, "Big").await;
     let id = design(&mut agent, "Big").await;
     let css: String = (0..1500)
-        .map(|i| format!(".c{i} {{ color: red }}\n"))
+        // Trailing spaces and tabs, and text past ASCII, must survive paging.
+        .map(|i| format!(".c{i} {{ content: \"å\" }} \t\n"))
         .collect();
     let made = edit(
         &mut agent,
@@ -1378,7 +1379,8 @@ async fn read_html_pages_through_a_stylesheet_longer_than_a_result() {
     let mut agent = Agent::connect_doc6(&app, "Huge").await;
     let id = design(&mut agent, "Huge").await;
     let css: String = (0..2500)
-        .map(|i| format!(".c{i} {{ color: red }}\n"))
+        // Trailing spaces and tabs, and text past ASCII, must survive paging.
+        .map(|i| format!(".c{i} {{ content: \"å\" }} \t\n"))
         .collect();
     assert!(css.len() > 40_000, "{} characters", css.len());
     let made = edit(
@@ -1407,15 +1409,15 @@ async fn read_html_pages_through_a_stylesheet_longer_than_a_result() {
         assert!(!page.contains("Read one of its children"), "{page}");
         assert!(page.len() < 40_000, "{} characters", page.len());
         let (heading, code) = page.split_once('\n').expect("a heading line");
+        let (code, _) = code.rsplit_once('⟨').expect("the piece's end mark");
         read.push_str(code);
-        read.push('\n');
         match heading.split("offset: ").nth(1) {
             Some(next) => offset = next.trim_end_matches('.').parse().expect("an offset"),
             None => break,
         }
     }
-    // Each piece ends at a line break, which a result drops with its trailing space.
-    assert!(read.lines().eq(css.lines()));
+    // The pieces join back into exactly the stylesheet.
+    assert_eq!(read, css);
 }
 
 /// Stylesheets that change alike but hold different rules are not copies.
