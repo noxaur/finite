@@ -1382,6 +1382,291 @@ async fn components_are_made_used_and_detached_in_edits() {
     );
 }
 
+/// Classic tool names in a string an agent on this surface was shown.
+fn classic_tool(text: &str) -> Option<&'static str> {
+    [
+        "update_styles",
+        "write_html",
+        "set_attributes",
+        "replace_values",
+        "detach_instance",
+        "set_text_content",
+        "move_nodes",
+        "delete_nodes",
+        "get_html",
+        "get_screenshot",
+        "create_component",
+        "insert_instance",
+    ]
+    .into_iter()
+    .find(|name| text.contains(name))
+}
+
+/// A failed edit says what to do with a doc6 op, and never names a classic tool.
+#[tokio::test]
+async fn errors_tell_doc6_agents_which_op_to_use() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Errors").await;
+    let (id, board) = landing(&mut agent).await;
+
+    let style = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "attrs", "select": "h1", "set": { "style": null } }]),
+    )
+    .await;
+    assert!(
+        style.contains("style isn't an attribute") && style.contains("\"op\": \"css\""),
+        "{style}"
+    );
+    let styled = style
+        .split('#')
+        .nth(1)
+        .and_then(|rest| rest.split(|c: char| !c.is_ascii_alphanumeric()).next())
+        .expect("the node the style was refused on");
+    assert!(
+        style.contains(&format!("\"select\": \"#{styled}\"")),
+        "{style}"
+    );
+    assert_eq!(classic_tool(&style), None, "{style}");
+
+    let replaced = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "html", "select": format!("#{board}"), "mode": "replace", "html": "<div>x</div>" }]),
+    )
+    .await;
+    assert!(replaced.contains("mode \"inner\""), "{replaced}");
+    assert!(!replaced.contains("replace-children"), "{replaced}");
+    assert_eq!(classic_tool(&replaced), None, "{replaced}");
+
+    let nav = |title: &str| {
+        format!("<header data-name=\"Nav\"><h1 data-name=\"Title\">{title}</h1></header>")
+    };
+    let made = edit(
+        &mut agent,
+        &id,
+        json!([
+            { "op": "artboard", "name": "Home", "width": 400, "height": 300, "html": nav("Home") },
+            { "op": "artboard", "name": "Settings", "width": 400, "height": 300, "html": nav("Settings") },
+            { "op": "component", "select": "[data-name=Nav]", "name": "Top bar", "as": "bar" },
+        ]),
+    )
+    .await;
+    let bar = id_after(&made, "3. component:");
+    let instance = id_after(&made, "Replaced 1 copy");
+    let shown = html(&mut agent, &id, &format!("#{instance}")).await;
+    let marker = format!("data-id=\"{instance}/");
+    let at = shown.find(&marker).expect("a node inside the instance") + marker.len();
+    let title: String = shown[at..]
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
+    let part = format!("{instance}/{title}");
+
+    // inner html replaces the heading's children. The refusal names the
+    // heading, not the text node under it, and says how to set its text.
+    let inner = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "html", "select": format!("#{part}"), "mode": "inner", "html": "Inbox" }]),
+    )
+    .await;
+    assert!(
+        inner.contains(&format!("#{part} is inside instance #{instance}"))
+            && inner.contains("mode inner replaces its children")
+            && inner.contains("\"in\": \"text\"")
+            && inner.contains(&format!("\"select\": \"#{part}\""))
+            && inner.contains(&format!("\"select\": \"#{instance}\""))
+            && inner.contains("\"detach\": true"),
+        "{inner}"
+    );
+    assert!(
+        !inner.contains(&format!("{part}/")),
+        "names a child of the selection: {inner}"
+    );
+    let other_part = inner.split('#').skip(1).any(|tail| {
+        let id: String = tail
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '/' || *c == '_' || *c == '-')
+            .collect();
+        id.contains('/') && id != part
+    });
+    assert!(
+        !other_part,
+        "names a node other than the selection: {inner}"
+    );
+    assert_eq!(classic_tool(&inner), None, "{inner}");
+
+    let deep = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "component", "select": format!("#{part}"), "detach": true }]),
+    )
+    .await;
+    assert!(
+        deep.contains(&format!("\"select\": \"#{instance}\"")) && deep.contains("\"detach\": true"),
+        "{deep}"
+    );
+    assert_eq!(classic_tool(&deep), None, "{deep}");
+
+    let removed = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "remove", "select": format!("#{part}") }]),
+    )
+    .await;
+    assert!(
+        removed.contains(&format!("\"select\": \"#{instance}\""))
+            && removed.contains("\"detach\": true"),
+        "{removed}"
+    );
+    assert_eq!(classic_tool(&removed), None, "{removed}");
+
+    let nested = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "component", "select": format!("#{part}"), "name": "Title" }]),
+    )
+    .await;
+    assert!(
+        nested.contains(&format!("\"select\": \"#{instance}\""))
+            && nested.contains("\"detach\": true"),
+        "{nested}"
+    );
+    assert_eq!(classic_tool(&nested), None, "{nested}");
+
+    let plain = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "html", "select": format!("#{board}"), "html": "<div data-name=\"Plain\">x</div>" }]),
+    )
+    .await;
+    let plain_id = id_after(&plain, "div");
+    let not_component = refused(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "html",
+            "select": format!("#{board}"),
+            "html": format!("<div data-instance-of=\"{plain_id}\"></div>")
+        }]),
+    )
+    .await;
+    assert!(
+        not_component.contains("isn't a component")
+            && not_component.contains(&format!("\"select\": \"#{plain_id}\"")),
+        "{not_component}"
+    );
+    assert_eq!(classic_tool(&not_component), None, "{not_component}");
+
+    let extra = refused(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "html",
+            "select": format!("#{board}"),
+            "html": format!("<header data-instance-of=\"{bar}\"><p>Extra</p></header>")
+        }]),
+    )
+    .await;
+    assert!(extra.contains("read with as: \"html\""), "{extra}");
+    assert_eq!(classic_tool(&extra), None, "{extra}");
+
+    // The advice above is the edit that actually sets one instance's text.
+    let changed = edit(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "replace",
+            "select": format!("#{part}"),
+            "find": "Settings",
+            "replace": "Inbox",
+            "in": "text"
+        }]),
+    )
+    .await;
+    assert!(changed.contains("Replaced 1 use"), "{changed}");
+    let instance_html = html(&mut agent, &id, &format!("#{instance}")).await;
+    let component_html = html(&mut agent, &id, &format!("#{bar}")).await;
+    assert!(instance_html.contains(">Inbox<"), "{instance_html}");
+    assert!(
+        component_html.contains(">Home<") && !component_html.contains("Inbox"),
+        "{component_html}"
+    );
+
+    // A <script> inside an instance isn't visible text. inner names that
+    // node and says to replace in code, and following that changes only
+    // this instance.
+    let widget = "<div data-name=\"Widget\"><script>var marker = home</script></div>";
+    let coded = edit(
+        &mut agent,
+        &id,
+        json!([
+            { "op": "artboard", "name": "Code", "width": 400, "height": 200, "html": widget },
+            { "op": "artboard", "name": "Code copy", "width": 400, "height": 200, "html": widget },
+            { "op": "component", "select": "[data-name=Widget]", "name": "Widget" },
+        ]),
+    )
+    .await;
+    let widget_component = id_after(&coded, "3. component:");
+    let widget_instance = id_after(&coded, "Replaced 1 copy");
+    let widget_html = html(&mut agent, &id, &format!("#{widget_instance}")).await;
+    let script_at = widget_html
+        .find("<script")
+        .expect("a script in the instance");
+    let script_tag =
+        &widget_html[script_at..script_at + widget_html[script_at..].find('>').unwrap()];
+    let marker = "data-id=\"";
+    let at = script_tag.find(marker).expect("the script's data-id") + marker.len();
+    let script: String = script_tag[at..].chars().take_while(|c| *c != '"').collect();
+    let script_inner = refused(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "html",
+            "select": format!("#{script}"),
+            "mode": "inner",
+            "html": "var marker = inbox"
+        }]),
+    )
+    .await;
+    assert!(
+        script_inner.contains(&format!("#{script} is inside instance #{widget_instance}"))
+            && script_inner.contains("\"in\": \"code\"")
+            && script_inner.contains(&format!("\"select\": \"#{script}\""))
+            && !script_inner.contains("\"in\": \"text\""),
+        "{script_inner}"
+    );
+    assert_eq!(classic_tool(&script_inner), None, "{script_inner}");
+    let script_changed = edit(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "replace",
+            "select": format!("#{script}"),
+            "find": "home",
+            "replace": "inbox",
+            "in": "code"
+        }]),
+    )
+    .await;
+    assert!(
+        script_changed.contains("Replaced 1 use"),
+        "{script_changed}"
+    );
+    let instance_code = html(&mut agent, &id, &format!("#{widget_instance}")).await;
+    let component_code = html(&mut agent, &id, &format!("#{widget_component}")).await;
+    assert!(
+        instance_code.contains("var marker = inbox"),
+        "{instance_code}"
+    );
+    assert!(
+        component_code.contains("var marker = home") && !component_code.contains("inbox"),
+        "{component_code}"
+    );
+}
+
 /// Detach and read find instances by the `data-instance-of` marker read's
 /// HTML writes, including under an artboard.
 #[tokio::test]

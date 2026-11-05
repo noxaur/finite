@@ -1075,7 +1075,9 @@ pub fn update_attributes(
         for (name, value) in attrs {
             let lower = name.to_ascii_lowercase();
             if lower == "style" {
-                return err("use update_styles to change inline styles");
+                return err(format!(
+                    "#{id}: style isn't an attribute; use update_styles to change inline styles"
+                ));
             }
             if lower.starts_with("on") {
                 return err(format!(
@@ -1879,8 +1881,9 @@ pub fn create_component(
     replace: &[NodeId],
 ) -> Result<Vec<Op>> {
     if components::is_virtual(id) {
+        let instance = components::split(id).map_or(id, |(root, _)| root);
         return err(format!(
-            "#{id} is inside an instance; make a component from the component's own nodes, or detach_instance first"
+            "#{id} is inside an instance; make a component from the component's own nodes, or detach_instance #{instance} first"
         ));
     }
     let node = element(doc, id)?;
@@ -2591,6 +2594,14 @@ mod tests {
         assert!(set("x\" onload=\"alert(1)", "y").is_err());
         assert!(set("", "y").is_err());
         assert!(set("data-id", "n9").is_err());
+        let style = set("style", "color: red").unwrap_err();
+        assert!(
+            style
+                .0
+                .contains(&format!("#{board}: style isn't an attribute"))
+                && style.0.contains("update_styles"),
+            "{style}"
+        );
     }
 
     #[test]
