@@ -285,6 +285,17 @@ pub struct ElementBox {
     /// Where that text itself rendered, which can be much smaller than the
     /// element's box: a heading's text in a full-width block, say.
     pub text: Option<Rect>,
+    /// Whether an ancestor between the element and the artboard clips it
+    /// across and down: `overflow` other than visible (a scroller, an
+    /// `<svg>`'s viewport), or a `clip-path`. What it clips isn't cut off by
+    /// the artboard's edge.
+    pub clipped: (bool, bool),
+    /// The part of the page the scrollers and viewports around the element
+    /// show, which is all of it that people see. `None` when none clips it.
+    pub visible: Option<Rect>,
+    /// Whether the element is positioned out of the flow (`absolute` or
+    /// `fixed`), so a taller artboard wouldn't make room for it.
+    pub out_of_flow: bool,
 }
 
 /// A capture, decided from the document and ready to render.
@@ -633,9 +644,24 @@ struct Layout {
     nodes: Vec<RawBox>,
 }
 
-type RawBox = (String, f64, f64, f64, f64, f64, f64, bool, Option<[f64; 4]>);
+type RawBox = (
+    String,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    bool,
+    Option<[f64; 4]>,
+    (bool, bool),
+    bool,
+    Option<[f64; 4]>,
+);
 
-fn element_box((id, x, y, width, height, ox, oy, has_text, text): &RawBox) -> ElementBox {
+fn element_box(
+    (id, x, y, width, height, ox, oy, has_text, text, clipped, out_of_flow, visible): &RawBox,
+) -> ElementBox {
     ElementBox {
         id: id.clone(),
         x: *x,
@@ -645,6 +671,9 @@ fn element_box((id, x, y, width, height, ox, oy, has_text, text): &RawBox) -> El
         text_overflow: (*ox, *oy),
         has_text: *has_text,
         text: text.map(rect),
+        clipped: *clipped,
+        visible: visible.map(rect),
+        out_of_flow: *out_of_flow,
     }
 }
 
@@ -1128,6 +1157,50 @@ async fn measure(tab: &mut cdp::Tab, artboard: &str, ids: &[&str]) -> Result<Lay
     ];
   }};
   const board = find({board});
+  // The element whose box lays out `el`'s: its parent, or for a positioned
+  // element the nearest ancestor that positions it. Overflow clips only what
+  // it contains, so a skipped ancestor doesn't clip `el`.
+  const makesBlock = (s) => s.transform !== "none" || s.filter !== "none" || s.perspective !== "none" || /paint|layout|strict|content/.test(s.contain);
+  const containing = (el, position) => {{
+    if (position !== "absolute" && position !== "fixed") return el.parentElement;
+    for (let p = el.parentElement; p && p !== board; p = p.parentElement) {{
+      const s = getComputedStyle(p);
+      if (makesBlock(s) || (position === "absolute" && s.position !== "static")) return p;
+    }}
+    return position === "absolute" ? board : null;
+  }};
+  // Whether `el` clips what it contains, across and down, or an element
+  // containing it does. The artboard's own clipping is what is being checked.
+  const holds = new Map();
+  const clips = (el) => {{
+    if (!el || el === board || !board.contains(el)) return [false, false];
+    if (!holds.has(el)) {{
+      const s = getComputedStyle(el);
+      const [x, y] = clips(containing(el, s.position));
+      const path = s.clipPath !== "none";
+      holds.set(el, [path || x || s.overflowX !== "visible", path || y || s.overflowY !== "visible"]);
+    }}
+    return holds.get(el);
+  }};
+  // What the scrollers and viewports around `el` (and `el` itself, for what it
+  // contains) show of the page, as [left, top, right, bottom].
+  const windows = new Map();
+  const shown = (el) => {{
+    if (!el || el === board || !board.contains(el)) return null;
+    if (!windows.has(el)) {{
+      const s = getComputedStyle(el);
+      let out = shown(containing(el, s.position));
+      if (s.overflowX !== "visible" || s.overflowY !== "visible") {{
+        const [x, y, w, h] = box(el);
+        const px = (name) => parseFloat(s[name]) || 0;
+        const [l, t] = [x + px("borderLeftWidth"), y + px("borderTopWidth")];
+        const [r, b] = [x + w - px("borderRightWidth"), y + h - px("borderBottomWidth")];
+        out = out ? [Math.max(out[0], l), Math.max(out[1], t), Math.min(out[2], r), Math.min(out[3], b)] : [l, t, r, b];
+      }}
+      windows.set(el, out);
+    }}
+    return windows.get(el);
+  }};
   const elements = {{}};
   for (const id of {ids}) {{
     const el = find(id);
@@ -1139,7 +1212,8 @@ async fn measure(tab: &mut cdp::Tab, artboard: &str, ids: &[&str]) -> Result<Lay
     if (!w && !h) continue;
     let text = false;
     for (const c of el.childNodes) if (c.nodeType === 3 && c.textContent.trim()) text = true;
-    const inline = getComputedStyle(el).display === "inline";
+    const style = getComputedStyle(el);
+    const inline = style.display === "inline";
     const spill = text && !inline;
     // The union of the element's own text runs.
     let ink = null;
@@ -1157,9 +1231,15 @@ async fn measure(tab: &mut cdp::Tab, artboard: &str, ids: &[&str]) -> Result<Lay
     }}
     nodes.push([el.getAttribute("{VIEWER_ID_ATTR}"), x, y, w, h,
       spill ? el.scrollWidth - el.clientWidth : 0, spill ? el.scrollHeight - el.clientHeight : 0, text,
-      ink ? [ink[0], ink[1], ink[2] - ink[0], ink[3] - ink[1]] : null]);
+      ink ? [ink[0], ink[1], ink[2] - ink[0], ink[3] - ink[1]] : null,
+      style.clipPath !== "none" ? [true, true] : clips(containing(el, style.position)),
+      style.position === "absolute" || style.position === "fixed",
+      (() => {{
+        const w = shown(containing(el, style.position));
+        return w ? [w[0], w[1], Math.max(0, w[2] - w[0]), Math.max(0, w[3] - w[1])] : null;
+      }})()]);
   }}
-  nodes.unshift([{board}, ...box(board), 0, 0, false, null]);
+  nodes.unshift([{board}, ...box(board), 0, 0, false, null, [false, false], false, null]);
   return {{
     nodes,
     board: box(board),

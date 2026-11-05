@@ -41,6 +41,7 @@ use crate::{
 };
 
 mod format;
+mod layout;
 pub(crate) mod params;
 
 use format::{OUTPUT_LIMIT, comments_json, cut, node_json, outline};
@@ -1418,7 +1419,7 @@ impl FiniteMcp {
                     content.push(ContentBlock::text(format::shot(image)));
                     if let Some(boxes) = &image.boxes {
                         let notes = handle.read(|d| {
-                            format::layout_notes(d.view(), &image.artboard, boxes, self.surface)
+                            layout::layout_notes(d.view(), &image.artboard, boxes, self.surface)
                         });
                         if !notes.is_empty() {
                             content.push(ContentBlock::text(notes));

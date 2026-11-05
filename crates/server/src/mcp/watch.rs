@@ -10,6 +10,13 @@
 //! several edits at once, so a note from an earlier edit can arrive with a
 //! later one.
 //!
+//! An edit's note reports what that edit changed. Each check remembers what it
+//! found on the artboard, and the next one lists a finding only if it's new
+//! or about a node the edit touched (or one around it). It counts the rest in
+//! one line. Designs often carry a finding that is on purpose or not worth
+//! fixing, and repeating it on every edit taught agents to switch the check
+//! off, which hid the real regressions too.
+//!
 //! A note describes the design as of one edit, so anything that changes the
 //! design afterwards drops it: a newer `write_html` or `update_styles` on the
 //! artboard replaces it, any other edit clears every note on the design (see
@@ -22,14 +29,14 @@
 //! start one browser, not six.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
 
-use finite_design::Change;
+use finite_design::{Change, Document};
 
-use super::format::{layout_notes, overlap_note};
+use super::layout::Report;
 use crate::{hub::DesignHandle, screenshot};
 
 /// How long a doc6 edit waits at least: its check is on by default, and AX
@@ -57,9 +64,6 @@ const MEASURE_LIMIT: Duration = Duration::from_secs(8);
 /// doesn't start a browser for each. The note says when it left some out.
 const BOARDS_PER_EDIT: usize = 3;
 
-/// What `layout_notes` starts with when it found nothing to report.
-const CLEAN: &str = "Layout: nothing is cut off";
-
 /// The entry for what one edit left unchecked, which no artboard has an id like.
 const UNCHECKED: &str = "+unchecked";
 
@@ -75,6 +79,16 @@ struct Entry {
     /// after a newer edit can tell it's out of date.
     generation: u64,
     note: Option<String>,
+    /// What the check behind `note` found, as `Found::key`s. It becomes
+    /// `seen` once the note is taken, so a note that never reaches the agent
+    /// doesn't hide what it said from the next one.
+    found: Option<HashSet<String>>,
+    /// The nodes edited since the last check the agent heard about, which the
+    /// next check reports on. Edits sent together share one check.
+    touched: HashSet<String>,
+    /// What the last check the agent heard about found, as `Found::key`s.
+    /// `None` before the first, when everything counts as new.
+    seen: Option<HashSet<String>>,
 }
 
 /// A note taken from the watch, to put on a result, or back if that result is an error.
@@ -120,6 +134,13 @@ impl LayoutWatch {
         handle: &Arc<DesignHandle>,
         change: &Change,
     ) -> bool {
+        let touched: HashSet<String> = change
+            .ops
+            .iter()
+            .map(|op| op.id())
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .collect();
         let mut boards: Vec<String> = handle.read(|d| {
             let mut boards: Vec<String> = Vec::new();
             for op in &change.ops {
@@ -139,16 +160,20 @@ impl LayoutWatch {
                 design,
                 UNCHECKED,
                 generation,
-                Some(format!(
-                    "Layout: this edit touched {} artboards and only the first {BOARDS_PER_EDIT} were checked. {} checks the rest.",
-                    boards.len() + left_out,
-                    layout_tool(self.surface)
-                )),
+                Some(Measured {
+                    note: Some(format!(
+                        "Layout: this edit touched {} artboards and only the first {BOARDS_PER_EDIT} were checked. {} checks the rest.",
+                        boards.len() + left_out,
+                        layout_tool(self.surface)
+                    )),
+                    found: HashSet::new(),
+                }),
             );
         }
         let mut tasks = Vec::new();
         for board in boards {
             let generation = self.bump(design, &board);
+            self.touch(design, &board, &touched);
             let (watch, handle, design) = (Arc::clone(self), Arc::clone(handle), design.to_owned());
             tasks.push(tokio::spawn(async move {
                 // Let edits sent together all count before the first one measures.
@@ -159,9 +184,10 @@ impl LayoutWatch {
                 if !watch.is_current(&design, &board, generation) {
                     return false;
                 }
-                let measured = measure(&handle, &board, watch.surface).await;
-                let clean = matches!(measured, Some(None));
-                watch.finish(&design, &board, generation, measured.flatten());
+                let (touched, before) = watch.checked_so_far(&design, &board);
+                let measured = measure(&handle, &board, watch.surface, &touched, before).await;
+                let clean = matches!(&measured, Some(m) if m.note.is_none());
+                watch.finish(&design, &board, generation, measured);
                 clean
             }));
         }
@@ -188,7 +214,29 @@ impl LayoutWatch {
             .or_default();
         entry.generation += 1;
         entry.note = None;
+        entry.found = None;
         entry.generation
+    }
+
+    /// Adds `ids` to the nodes the next check of `board` reports on.
+    fn touch(&self, design: &str, board: &str, ids: &HashSet<String>) {
+        let mut all = self.boards.lock().expect("layout watch lock");
+        if let Some(entry) = all.get_mut(design).and_then(|d| d.get_mut(board)) {
+            entry.touched.extend(ids.iter().cloned());
+        }
+    }
+
+    /// The nodes edited since `board` was last checked, and what that check
+    /// found.
+    fn checked_so_far(
+        &self,
+        design: &str,
+        board: &str,
+    ) -> (HashSet<String>, Option<HashSet<String>>) {
+        let all = self.boards.lock().expect("layout watch lock");
+        all.get(design)
+            .and_then(|d| d.get(board))
+            .map_or_else(Default::default, |e| (e.touched.clone(), e.seen.clone()))
     }
 
     fn is_current(&self, design: &str, board: &str, generation: u64) -> bool {
@@ -198,12 +246,33 @@ impl LayoutWatch {
             .is_some_and(|e| e.generation == generation)
     }
 
-    fn finish(&self, design: &str, board: &str, generation: u64, note: Option<String>) {
+    /// Keeps what a check found for [`Self::take`], unless the artboard was
+    /// edited meanwhile. A check with nothing to say is heard about already.
+    fn finish(&self, design: &str, board: &str, generation: u64, measured: Option<Measured>) {
         let mut all = self.boards.lock().expect("layout watch lock");
         if let Some(entry) = all.get_mut(design).and_then(|d| d.get_mut(board))
             && entry.generation == generation
         {
-            entry.note = note;
+            match measured {
+                Some(Measured { note: None, found }) => {
+                    entry.seen = Some(found);
+                    entry.touched.clear();
+                    entry.note = None;
+                }
+                Some(Measured { note, found }) => {
+                    entry.note = note;
+                    entry.found = Some(found);
+                }
+                None => entry.note = None,
+            }
+        }
+    }
+
+    /// Counts what a note that is being taken said as heard.
+    fn heard(entry: &mut Entry) {
+        if let Some(found) = entry.found.take() {
+            entry.seen = Some(found);
+            entry.touched.clear();
         }
     }
 
@@ -216,10 +285,12 @@ impl LayoutWatch {
         let mut taken: Vec<Taken> = boards
             .iter_mut()
             .filter_map(|(board, e)| {
+                let note = e.note.take()?;
+                Self::heard(e);
                 Some(Taken {
                     board: board.clone(),
                     generation: e.generation,
-                    note: e.note.take()?,
+                    note,
                 })
             })
             .collect();
@@ -261,47 +332,121 @@ impl LayoutWatch {
         for entry in all.get_mut(design).into_iter().flat_map(|d| d.values_mut()) {
             entry.generation += 1;
             entry.note = None;
+            entry.found = None;
         }
     }
 }
 
-/// What the layout check says about `board`: `Some(None)` when it found
-/// nothing, and `None` when it couldn't measure it.
+/// What a layout check of one artboard came to.
+struct Measured {
+    /// What to tell the agent, or `None` when there is nothing to tell.
+    note: Option<String>,
+    /// Every finding, as `Found::key`s, whether the note lists it or not.
+    found: HashSet<String>,
+}
+
+/// The nodes an edit touched and everything above them, to tell whether a
+/// finding is about something the edit changed.
+struct Touched<'a> {
+    doc: &'a Document,
+    nodes: HashSet<&'a str>,
+    /// The touched nodes and their ancestors.
+    above: HashSet<String>,
+}
+
+impl<'a> Touched<'a> {
+    /// The nodes of `ids` that are in `doc`, other than `board`: editing the
+    /// artboard itself (its size, say) is judged by what is new afterwards.
+    fn new(doc: &'a Document, board: &str, ids: &'a HashSet<String>) -> Self {
+        let nodes: HashSet<&str> = ids
+            .iter()
+            .map(String::as_str)
+            .filter(|id| *id != board && doc.contains(id))
+            .collect();
+        let mut above = HashSet::new();
+        for id in &nodes {
+            let mut current = Some(*id);
+            while let Some(c) = current {
+                if !above.insert(c.to_owned()) {
+                    break;
+                }
+                current = doc.get(c).and_then(|n| n.parent.as_deref());
+            }
+        }
+        Self { doc, nodes, above }
+    }
+
+    /// Whether `id` is a touched node, holds one, or is inside one.
+    fn reaches(&self, id: &str) -> bool {
+        if self.above.contains(id) {
+            return true;
+        }
+        let mut current = Some(id);
+        while let Some(c) = current {
+            if self.nodes.contains(c) {
+                return true;
+            }
+            current = self.doc.get(c).and_then(|n| n.parent.as_deref());
+        }
+        false
+    }
+}
+
+/// What the layout check says about `board`. `touched` is what edits since
+/// the last check changed, and `before` what that check found: the note lists
+/// findings that are new or about touched nodes, and counts the rest. `None`
+/// when it couldn't measure the artboard.
 async fn measure(
     handle: &DesignHandle,
     board: &str,
     surface: super::Surface,
-) -> Option<Option<String>> {
+    touched: &HashSet<String>,
+    before: Option<HashSet<String>>,
+) -> Option<Measured> {
     let plan = handle
         .read(|d| screenshot::plan_measurement(d.view(), board, screenshot::Options::default()));
     let boxes = tokio::time::timeout(MEASURE_LIMIT, screenshot::layout(plan.ok()?))
         .await
         .ok()?
         .ok()?;
-    let notes = handle.read(|d| {
+    let (notes, hidden, found) = handle.read(|d| {
         let doc = d.view();
-        let mut notes = layout_notes(doc, board, &boxes, surface);
-        if notes.starts_with(CLEAN) {
-            notes.clear();
-        }
+        let mut report = Report::new(doc, board, &boxes, surface);
         // doc6 promises overlapping text too, as get_layout reports it.
         if surface.doc6()
-            && let Some(overlap) = overlap_note(doc, &boxes)
+            && let Some(board) = boxes.first()
         {
-            if !notes.is_empty() {
-                notes.push('\n');
-            }
-            notes.push_str(&overlap);
+            report = report.with_overlaps(doc, board, &boxes);
         }
-        notes
+        let touched = Touched::new(doc, board, touched);
+        let (notes, hidden) = report.text(doc, |f| {
+            before.as_ref().is_none_or(|b| !b.contains(&f.key()))
+                || f.nodes().iter().any(|n| touched.reaches(n))
+        });
+        (
+            notes,
+            hidden,
+            report.found.iter().map(|f| f.key()).collect::<HashSet<_>>(),
+        )
     });
-    if notes.is_empty() {
-        return Some(None);
-    }
-    Some(Some(format!(
-        "{notes}\n(From checking artboard #{board} after your last edit. {} shows more.)",
-        layout_tool(surface)
-    )))
+    let tool = layout_tool(surface);
+    let note = match (notes.is_empty(), hidden) {
+        (true, 0) => None,
+        (true, n) => Some(format!(
+            "Layout: {n} earlier note{} on artboard #{board} unchanged by this edit; {tool} shows {}.",
+            if n == 1 { "" } else { "s" },
+            if n == 1 { "it" } else { "them" },
+        )),
+        (false, 0) => Some(format!(
+            "{notes}\n(From checking artboard #{board} after your last edit. {tool} shows more.)"
+        )),
+        (false, n) => Some(format!(
+            "{notes}\n(From checking artboard #{board} after your last edit. {n} earlier note{} unchanged; {tool} shows {}.)",
+            if n == 1 { "" } else { "s" },
+            if n == 1 { "it" } else { "them" },
+        )),
+    };
+    Some(Measured { note, found })
 }
 
 /// The tool that shows the whole layout, as this surface names it.
@@ -317,9 +462,16 @@ fn layout_tool(surface: super::Surface) -> &'static str {
 mod tests {
     use super::*;
 
+    fn measured(note: &str, found: &[&str]) -> Option<Measured> {
+        Some(Measured {
+            note: Some(note.into()),
+            found: found.iter().map(|k| (*k).to_owned()).collect(),
+        })
+    }
+
     fn note(watch: &LayoutWatch, design: &str, board: &str, text: &str) {
         let g = watch.bump(design, board);
-        watch.finish(design, board, g, Some(text.into()));
+        watch.finish(design, board, g, measured(text, &["k"]));
     }
 
     #[test]
@@ -336,9 +488,9 @@ mod tests {
         let old = watch.bump("d", "a");
         let new = watch.bump("d", "a");
         assert!(!watch.is_current("d", "a", old));
-        watch.finish("d", "a", old, Some("stale".into()));
+        watch.finish("d", "a", old, measured("stale", &["k"]));
         assert!(watch.take("d").is_empty());
-        watch.finish("d", "a", new, Some("fresh".into()));
+        watch.finish("d", "a", new, measured("fresh", &["k"]));
         assert_eq!(Taken::text(&watch.take("d")), "fresh");
     }
 
@@ -349,7 +501,7 @@ mod tests {
         let running = watch.bump("d", "b");
         watch.invalidate("d");
         assert!(!watch.is_current("d", "b", running));
-        watch.finish("d", "b", running, Some("late".into()));
+        watch.finish("d", "b", running, measured("late", &["k"]));
         assert!(watch.take("d").is_empty());
     }
 
@@ -382,5 +534,24 @@ mod tests {
         watch.invalidate("d1");
         assert!(watch.take("d1").is_empty());
         assert_eq!(Taken::text(&watch.take("d2")), "note d2");
+    }
+
+    #[test]
+    fn what_a_note_found_counts_as_heard_once_the_note_is_taken() {
+        let watch = LayoutWatch::default();
+        let seen = |watch: &LayoutWatch| watch.checked_so_far("d", "a").1;
+        // Replaced before anyone took it, so the agent never heard it.
+        let g = watch.bump("d", "a");
+        watch.touch("d", "a", &HashSet::from(["n".to_owned()]));
+        watch.finish("d", "a", g, measured("lost", &["cut:x"]));
+        watch.bump("d", "a");
+        assert_eq!(seen(&watch), None);
+        assert!(watch.checked_so_far("d", "a").0.contains("n"));
+        // Taken, so it was.
+        let g = watch.bump("d", "a");
+        watch.finish("d", "a", g, measured("heard", &["cut:x"]));
+        watch.take("d");
+        assert_eq!(seen(&watch), Some(HashSet::from(["cut:x".to_owned()])));
+        assert!(watch.checked_so_far("d", "a").0.is_empty());
     }
 }
