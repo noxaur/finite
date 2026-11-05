@@ -88,8 +88,9 @@ pub fn find(doc: &Document, within: Option<&str>, query: &Query) -> Vec<Found> {
             if is_raw_text(node_tag) {
                 hits.extend(
                     css_lines(&own_text(doc, node))
-                        .filter(|line| matches(line))
-                        .map(|line| format!("css: {line}")),
+                        .into_iter()
+                        .filter(|(_, line)| matches(line))
+                        .map(|(_, line)| format!("css: {line}")),
                 );
             }
             if hits.is_empty() {
@@ -162,8 +163,6 @@ pub fn replace(
     {
         return Err(EditError(format!("node {id:?} not found")));
     }
-    let exact =
-        |value: &str| -> (String, usize) { (value.replace(from, to), value.matches(from).count()) };
     let swap = |value: &str| swap(value, from, to);
     let from_is_color = parse_color(from).is_some();
     // Matches the all-or-nothing rule applies to. Script code never counts as
@@ -212,11 +211,17 @@ pub fn replace(
                 if places.css && is_raw_text(tag) {
                     let script = !tag.eq_ignore_ascii_case("style");
                     let label = if script { "script" } else { "css" };
-                    let swap_code: &dyn Fn(&str) -> (String, usize) =
-                        if script { &exact } else { &swap };
+                    let uses_in = |text: &str| {
+                        if script {
+                            exact_uses(text, from, to)
+                        } else {
+                            uses(text, from, to)
+                        }
+                    };
                     for child in doc.children(Some(&node.id)) {
                         let Some(code) = &child.text else { continue };
-                        let (new, n) = swap_code(code);
+                        let found = uses_in(code);
+                        let (new, n) = (apply(code, &found), found.len());
                         if n > 0 && new != *code {
                             count += n;
                             *kinds
@@ -229,17 +234,24 @@ pub fn replace(
                             if script || !from_is_color {
                                 guarded += n;
                             }
-                            let mut lines: Vec<String> = css_lines(code)
-                                .filter(|line| swap_code(line).1 > 0)
-                                .flat_map(|line| {
-                                    let after = swap_code(&line).0;
-                                    change_lines(label, &line, &after, from, to)
-                                })
-                                .collect();
+                            let mut lines = Vec::new();
+                            for (path, line) in css_lines(code) {
+                                let found = uses_in(&line);
+                                if found.is_empty() {
+                                    continue;
+                                }
+                                // A script's braces aren't rules.
+                                let label = if script || path.is_empty() {
+                                    label.to_owned()
+                                } else {
+                                    format!("{label} {path}")
+                                };
+                                lines.extend(change_lines(&label, &line, &found));
+                            }
                             // A find that spans `;`, `{` or `}` isn't inside any
                             // one line, so show it with the code around it.
                             if lines.is_empty() {
-                                lines = snippets(code, from, to)
+                                lines = snippets(code, &uses_in(code))
                                     .map(|(before, after)| format!("{label}: {before} → {after}"))
                                     .collect();
                             }
@@ -341,11 +353,42 @@ pub fn replace(
 /// when `to` is `var(--brand)`, so it's matched in any notation and never
 /// as a prefix of `#3b82f6cc`'s text.
 fn swap(value: &str, from: &str, to: &str) -> (String, usize) {
+    let uses = uses(value, from, to);
+    (apply(value, &uses), uses.len())
+}
+
+/// One place [`replace`] changes text: the byte range in the text, and what
+/// replaces it.
+type Use = (std::ops::Range<usize>, String);
+
+/// Where [`swap`] replaces `from` with `to` in `value`.
+fn uses(value: &str, from: &str, to: &str) -> Vec<Use> {
     match (parse_color(from), parse_color(to)) {
-        (Some(f), Some(t)) => replace_color(value, f, t),
-        (Some(f), None) => replace_color_with(value, f, false, |_| to.to_owned()),
-        _ => (value.replace(from, to), value.matches(from).count()),
+        (Some(f), Some(t)) => color_uses(value, f, true, |alpha| format_color(t.0, alpha.or(t.1))),
+        (Some(f), None) => color_uses(value, f, false, |_| to.to_owned()),
+        _ => exact_uses(value, from, to),
     }
+}
+
+/// Where `from` is, as the exact text, to be replaced by `to`.
+fn exact_uses(value: &str, from: &str, to: &str) -> Vec<Use> {
+    value
+        .match_indices(from)
+        .map(|(at, _)| (at..at + from.len(), to.to_owned()))
+        .collect()
+}
+
+/// `value` with each of `uses`, which are in order, replaced.
+fn apply(value: &str, uses: &[Use]) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = 0;
+    for (range, with) in uses {
+        out.push_str(&value[rest..range.start]);
+        out.push_str(with);
+        rest = range.end;
+    }
+    out.push_str(&value[rest..]);
+    out
 }
 
 /// A token's name, with its mode's name when the design has more than one.
@@ -436,12 +479,37 @@ fn own_text(doc: &Document, node: &Node) -> String {
         .collect()
 }
 
-/// A stylesheet's declarations and selectors, one per item, trimmed.
-fn css_lines(css: &str) -> impl Iterator<Item = String> + '_ {
-    css.split(['{', '}', ';'])
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
+/// A stylesheet's declarations and selectors, one per item, trimmed, each
+/// with the rules around it (`@media (min-width: 600px) .card`), empty at the
+/// top level.
+fn css_lines(css: &str) -> Vec<(String, String)> {
+    let mut lines = Vec::new();
+    let mut open: Vec<String> = Vec::new();
+    let mut item = String::new();
+    for ch in css.chars().chain(std::iter::once(';')) {
+        if !matches!(ch, '{' | '}' | ';') {
+            item.push(ch);
+            continue;
+        }
+        let text = item.trim();
+        if !text.is_empty() {
+            let around: Vec<&str> = open
+                .iter()
+                .map(String::as_str)
+                .filter(|s| !s.is_empty())
+                .collect();
+            lines.push((around.join(" "), text.to_owned()));
+        }
+        match ch {
+            '{' => open.push(text.to_owned()),
+            '}' => {
+                open.pop();
+            }
+            _ => {}
+        }
+        item.clear();
+    }
+    lines
 }
 
 /// How many nodes, and how many different changes, a refusal names.
@@ -453,49 +521,44 @@ const REFUSAL_LINES: usize = 8;
 const LINE_SHOWN: usize = 90;
 
 /// One changed line of code as `label: before → after`, or when the line is
-/// long, one such line per match with the code around it. A color matched in
-/// another notation isn't found as `from`, so a long line like that shows its
-/// start.
-fn change_lines(label: &str, line: &str, after: &str, from: &str, to: &str) -> Vec<String> {
+/// long, one such line per use in `uses` with the code around it.
+fn change_lines(label: &str, line: &str, uses: &[Use]) -> Vec<String> {
     if line.chars().count() <= LINE_SHOWN {
-        return vec![format!("{label}: {line} → {after}")];
+        return vec![format!("{label}: {line} → {}", apply(line, uses))];
     }
-    let around: Vec<String> = snippets(line, from, to)
+    snippets(line, uses)
         .map(|(before, after)| format!("{label}: {before} → {after}"))
-        .collect();
-    if !around.is_empty() {
-        return around;
-    }
-    let start = |text: &str| text.chars().take(LINE_SHOWN).collect::<String>();
-    vec![format!("{label}: {}… → {}…", start(line), start(after))]
+        .collect()
 }
 
-/// Each match of `from` in `code` with up to 30 characters of code on either
-/// side, as `(before, after)` for replacing it with `to`. A side that was cut
-/// ends in `…`.
-fn snippets<'a>(
-    code: &'a str,
-    from: &'a str,
-    to: &'a str,
-) -> impl Iterator<Item = (String, String)> + 'a {
+/// Each of `uses` in `code` with up to 30 characters of code on either side,
+/// as `(before, after)`. A side that was cut ends in `…`.
+fn snippets<'a>(code: &'a str, uses: &'a [Use]) -> impl Iterator<Item = (String, String)> + 'a {
     const CONTEXT: usize = 30;
-    code.match_indices(from).map(move |(at, _)| {
-        let start = code[..at]
+    uses.iter().map(move |(range, with)| {
+        let start = code[..range.start]
             .char_indices()
             .rev()
             .nth(CONTEXT - 1)
             .map_or(0, |(i, _)| i);
-        let end = code[at + from.len()..]
+        let end = code[range.end..]
             .char_indices()
             .nth(CONTEXT)
-            .map_or(code.len(), |(i, _)| at + from.len() + i);
-        let head = format!("{}{}", if start > 0 { "…" } else { "" }, &code[start..at]);
+            .map_or(code.len(), |(i, _)| range.end + i);
+        let head = format!(
+            "{}{}",
+            if start > 0 { "…" } else { "" },
+            &code[start..range.start]
+        );
         let tail = format!(
             "{}{}",
-            &code[at + from.len()..end],
+            &code[range.end..end],
             if end < code.len() { "…" } else { "" }
         );
-        (format!("{head}{from}{tail}"), format!("{head}{to}{tail}"))
+        (
+            format!("{head}{}{tail}", &code[range.clone()]),
+            format!("{head}{with}{tail}"),
+        )
     })
 }
 
@@ -584,8 +647,19 @@ fn replace_color_with(
     tints: bool,
     render: impl Fn(Option<f64>) -> String,
 ) -> (String, usize) {
-    let mut out = String::with_capacity(value.len());
-    let mut count = 0;
+    let uses = color_uses(value, from, tints, render);
+    (apply(value, &uses), uses.len())
+}
+
+/// Each use of the color `from` in `value`, in any notation, with what
+/// `render` makes of it.
+fn color_uses(
+    value: &str,
+    from: Color,
+    tints: bool,
+    render: impl Fn(Option<f64>) -> String,
+) -> Vec<Use> {
+    let mut found = Vec::new();
     let mut i = 0;
     while i < value.len() {
         let starts_token = i == 0 || !value.as_bytes()[i - 1].is_ascii_alphanumeric();
@@ -596,16 +670,13 @@ fn replace_color_with(
             // or none, so replacing #3b82f6 also updates its tints.
             && ((tints && from.1.is_none()) || from.1 == alpha)
         {
-            out.push_str(&render(alpha));
-            count += 1;
+            found.push((i..i + len, render(alpha)));
             i += len;
             continue;
         }
-        let ch = value[i..].chars().next().expect("in bounds");
-        out.push(ch);
-        i += ch.len_utf8();
+        i += value[i..].chars().next().expect("in bounds").len_utf8();
     }
-    (out, count)
+    found
 }
 
 fn format_color([r, g, b]: [u8; 3], alpha: Option<f64>) -> String {
@@ -719,7 +790,7 @@ mod tests {
         // Two matches are refused, with the count and the lines.
         let err = run("300ms", "500ms", false).unwrap_err().0;
         assert!(
-            err.contains("matches 2 times") && err.contains("css: transition: opacity 300ms"),
+            err.contains("matches 2 times") && err.contains("css .a: transition: opacity 300ms"),
             "{err}"
         );
         // all, or a narrower find, goes through.

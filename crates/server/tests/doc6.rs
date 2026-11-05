@@ -1370,3 +1370,108 @@ async fn read_html_hides_long_stylesheets_in_an_artboard() {
         &alone[..200]
     );
 }
+
+/// A stylesheet longer than a result reads in pieces that add up to all of it.
+#[tokio::test]
+async fn read_html_pages_through_a_stylesheet_longer_than_a_result() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Huge").await;
+    let id = design(&mut agent, "Huge").await;
+    let css: String = (0..2500)
+        .map(|i| format!(".c{i} {{ color: red }}\n"))
+        .collect();
+    assert!(css.len() > 40_000, "{} characters", css.len());
+    let made = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Huge", "width": 300, "height": 100,
+                 "html": format!("<style>{css}</style><p>Hi</p>") }]),
+    )
+    .await;
+    let board = id_after(&made, "Created artboard");
+    let whole = html(&mut agent, &id, &format!("#{board}")).await;
+    let style = whole
+        .split("<style data-id=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("the long style's id");
+    let mut read = String::new();
+    let mut offset = 0;
+    for _ in 0..5 {
+        let page = agent
+            .ok(
+                "read",
+                json!({ "designId": id, "select": format!("#{style}"), "as": "html", "offset": offset }),
+            )
+            .await;
+        assert!(!page.contains("Read one of its children"), "{page}");
+        assert!(page.len() < 40_000, "{} characters", page.len());
+        let (heading, code) = page.split_once('\n').expect("a heading line");
+        read.push_str(code);
+        read.push('\n');
+        match heading.split("offset: ").nth(1) {
+            Some(next) => offset = next.trim_end_matches('.').parse().expect("an offset"),
+            None => break,
+        }
+    }
+    // Each piece ends at a line break, which a result drops with its trailing space.
+    assert!(read.lines().eq(css.lines()));
+}
+
+/// Stylesheets that change alike but hold different rules are not copies.
+#[tokio::test]
+async fn replace_preview_groups_only_identical_stylesheets_and_names_their_rules() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Rules").await;
+    let id = design(&mut agent, "Rules").await;
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Rules", "width": 300, "height": 100,
+                 "html": "<style>.safe { color: red }</style><style>.danger { color: red }</style>\
+                          <style>.same { color: red }</style><style>.same { color: red; margin: 0 }</style>" }]),
+    )
+    .await;
+    let preview = agent
+        .ok(
+            "edit",
+            json!({ "designId": id, "check": false, "dryRun": true,
+                    "ops": [{ "op": "replace", "find": "red", "replace": "blue", "all": true }] }),
+        )
+        .await;
+    assert!(!preview.contains("identical"), "{preview}");
+    for rule in ["css .safe:", "css .danger:", "css .same:"] {
+        assert!(preview.contains(rule), "{rule} in {preview}");
+    }
+}
+
+/// A color is found in any notation, so the preview shows the code around
+/// the notation that matched, not around the find.
+#[tokio::test]
+async fn replace_preview_shows_code_around_a_color_in_another_notation() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Gradient").await;
+    let id = design(&mut agent, "Gradient").await;
+    let stops = (0..8)
+        .map(|i| format!("rgba(0, 0, {i}, 0.5) {}%", i * 10))
+        .collect::<Vec<_>>()
+        .join(", ");
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Gradient", "width": 300, "height": 100,
+                 "html": format!("<style>.hero {{ background: linear-gradient(to right, {stops}, rgb(255 0 0)) }}</style>") }]),
+    )
+    .await;
+    let preview = agent
+        .ok(
+            "edit",
+            json!({ "designId": id, "check": false, "dryRun": true,
+                    "ops": [{ "op": "replace", "find": "#ff0000", "replace": "#0000ff" }] }),
+        )
+        .await;
+    assert!(
+        preview.contains("rgb(255 0 0))") && preview.contains("#0000ff)"),
+        "{preview}"
+    );
+}

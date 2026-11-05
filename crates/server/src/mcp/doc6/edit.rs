@@ -1283,10 +1283,30 @@ fn replace(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<String> 
             }
             _ => super::line(doc, id),
         };
-        // Copies of one stylesheet change the same way: say so once.
+        // Copies of one stylesheet change the same way: say so once. Only a
+        // style or script with the same code is a copy: other code can change
+        // alike in a different rule.
+        let code = |id: &str| -> String {
+            match doc.get(id).and_then(|n| n.tag()) {
+                Some(tag)
+                    if tag.eq_ignore_ascii_case("style") || tag.eq_ignore_ascii_case("script") =>
+                {
+                    doc.children(Some(id))
+                        .iter()
+                        .filter_map(|c| c.text.as_deref())
+                        .collect()
+                }
+                _ => String::new(),
+            }
+        };
         let mut groups: Vec<(String, Vec<&NodeId>, &Vec<String>)> = Vec::new();
         for r in &replaced {
-            let key = format!("{}\n{}", mask_ids(&named(&r.id)), r.changes.join("\n"));
+            let key = format!(
+                "{}\n{}\n{}",
+                mask_ids(&named(&r.id)),
+                code(&r.id),
+                r.changes.join("\n")
+            );
             match groups.iter_mut().find(|(k, ..)| *k == key) {
                 Some((_, ids, _)) => ids.push(&r.id),
                 None => groups.push((key, vec![&r.id], &r.changes)),
