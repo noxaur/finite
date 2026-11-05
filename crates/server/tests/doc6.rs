@@ -1183,6 +1183,83 @@ async fn detach_takes_an_artboard_and_frees_every_instance_inside_it() {
 }
 
 #[tokio::test]
+async fn detaching_a_screen_freezes_nested_components_and_spares_definitions() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Freezer").await;
+    let id = design(&mut agent, "Nested").await;
+    let made = edit(
+        &mut agent,
+        &id,
+        json!([
+            { "op": "artboard", "name": "Parts", "width": 400, "height": 300,
+              "html": "<span data-component=\"Logo\">Finite</span>" },
+            { "op": "artboard", "name": "Screen", "width": 400, "height": 300 },
+        ]),
+    )
+    .await;
+    let parts = id_after(&made, "Created artboard");
+    let screen = id_after(&agent.ok("read", json!({ "designId": id })).await, "Screen");
+    // Each part holds an instance of the one before it.
+    let mut inner = String::new();
+    for (name, tag) in [("Logo", "span"), ("Bar", "header"), ("Page", "main")] {
+        if name != "Logo" {
+            let source = format!(
+                "<{tag} data-component=\"{name}\"><div data-instance-of=\"{inner}\"></div></{tag}>"
+            );
+            edit(
+                &mut agent,
+                &id,
+                json!([{ "op": "html", "select": format!("#{parts}"), "html": source }]),
+            )
+            .await;
+        }
+        let found = html(&mut agent, &id, &format!("[data-name={name}]")).await;
+        inner = found
+            .split("data-id=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("the component's id")
+            .to_owned();
+    }
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "html", "select": format!("#{screen}"), "html": format!("<main data-instance-of=\"{inner}\"></main>") }]),
+    )
+    .await;
+
+    // Freezing the screen leaves one copy of each part, and the parts alone.
+    let before = html(&mut agent, &id, &format!("#{parts}")).await;
+    let detached = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "component", "select": &format!("#{screen}"), "detach": true }]),
+    )
+    .await;
+    assert!(detached.contains("Detached 3 instances"), "{detached}");
+    let frozen = html(&mut agent, &id, &format!("#{screen}")).await;
+    assert_eq!(frozen.matches("Finite").count(), 1, "{frozen}");
+    assert!(!frozen.contains("data-instance-of"), "{frozen}");
+
+    // The board that holds the definitions has no instance of its own to
+    // detach, and the Logo instance inside Bar stays one.
+    let none = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "component", "select": &format!("#{parts}"), "detach": true }]),
+    )
+    .await;
+    assert!(none.contains("matches no instance"), "{none}");
+    let after = html(&mut agent, &id, &format!("#{parts}")).await;
+    let from_name = |text: &str| text[text.find("data-name").unwrap()..].to_owned();
+    assert_eq!(from_name(&after), from_name(&before));
+
+    agent.ok("undo", json!({ "designId": id })).await;
+    let restored = html(&mut agent, &id, &format!("#{screen}")).await;
+    assert!(restored.contains("data-instance-of"), "{restored}");
+}
+
+#[tokio::test]
 async fn removing_a_screen_warns_about_comments_and_pin_moves_them() {
     let (app, hub) = doc6();
     let mut agent = Agent::connect_doc6(&app, "Rebuilder").await;

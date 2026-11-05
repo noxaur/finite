@@ -2105,52 +2105,68 @@ pub fn detach_instances(
 }
 
 /// The instances at or below `roots`, roots included. An instance inside
-/// another is skipped: it only exists while its outer instance shows it.
+/// another is skipped: it only exists while its outer instance shows it. So
+/// is one inside a component's definition: the component is shared, and
+/// rewriting its nodes would orphan the overrides of its instances
+/// elsewhere.
 pub fn instances_in(doc: &Document, roots: &[NodeId]) -> Vec<NodeId> {
     let mut seen = HashSet::new();
-    roots
-        .iter()
-        .flat_map(|root| doc.subtree(root))
-        .filter(|n| n.is_instance() && !components::is_virtual(&n.id))
-        .filter(|n| seen.insert(n.id.as_str()))
-        .map(|n| n.id.clone())
-        .collect()
+    let mut out = Vec::new();
+    for root in roots {
+        if components::component_of(doc, root).is_some() {
+            continue;
+        }
+        let mut stack: Vec<&Node> = doc.get(root).into_iter().collect();
+        while let Some(node) = stack.pop() {
+            if node.component {
+                continue;
+            }
+            if node.is_instance() && !components::is_virtual(&node.id) && seen.insert(&node.id) {
+                out.push(node.id.clone());
+            }
+            stack.extend(doc.children(Some(&node.id)).into_iter().rev());
+        }
+    }
+    out
 }
 
 /// Turns every instance at or below `roots` into plain elements, however
 /// deep they nest: detaching one leaves the instances it held, and those
 /// are detached in turn. Where [`detach_instances`] stops at the one
-/// instance, this makes a frozen copy of a screen.
+/// instance, this makes a frozen copy of a screen. `doc` is the real
+/// document, not the expanded view: an expanded instance still has its
+/// virtual children after it is detached, and the next round would copy
+/// them along with the real ones.
 pub fn detach_all(
     doc: &Document,
     roots: &[NodeId],
     new_id: &mut impl FnMut() -> NodeId,
 ) -> Result<Vec<Op>> {
-    // Each level of nesting is a round; a component can't hold itself.
-    const ROUNDS: usize = 32;
     let mut ops = Vec::new();
-    let mut scratch: Option<Document> = None;
-    for _ in 0..ROUNDS {
-        let current = scratch.as_ref().unwrap_or(doc);
+    let mut staged: Option<Document> = None;
+    loop {
+        let current = staged.as_ref().unwrap_or(doc);
         let instances = instances_in(current, roots);
         if instances.is_empty() {
             return Ok(ops);
         }
         let round = detach_instances(current, &instances, &mut *new_id)?;
+        if detached_count(&round) == 0 {
+            return err("instances couldn't be detached");
+        }
         let nested = round
             .iter()
             .any(|op| matches!(op, Op::Create { node } if node.is_instance()));
         if nested {
             let mut next = current.clone();
             next.apply_all(&round);
-            scratch = Some(next);
+            staged = Some(next);
         }
         ops.extend(round);
         if !nested {
             return Ok(ops);
         }
     }
-    err("instances nest too deeply to detach")
 }
 
 /// How many instances `ops` turn into plain elements.

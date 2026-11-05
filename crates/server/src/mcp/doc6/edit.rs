@@ -310,7 +310,7 @@ fn freeze(tx: &mut Transaction<'_>, roots: &[NodeId], detach: bool) -> Result<Op
     }
     let ops = {
         let t = &*tx;
-        edit::detach_all(t.view(), roots, &mut || fresh(t)).map_err(|e| e.to_string())?
+        edit::detach_all(t.doc(), roots, &mut || fresh(t)).map_err(|e| e.to_string())?
     };
     let n = edit::detached_count(&ops);
     stage(tx, ops)?;
@@ -1028,7 +1028,7 @@ fn component(
         if !containers.is_empty() {
             let ops = {
                 let t = &*tx;
-                edit::detach_all(t.view(), &containers, &mut || fresh(t))
+                edit::detach_all(t.doc(), &containers, &mut || fresh(t))
                     .map_err(|e| e.to_string())?
             };
             detached += edit::detached_count(&ops);
