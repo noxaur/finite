@@ -214,7 +214,23 @@ try {
     page.eval(
       `(() => { const r = (${js}).getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; })()`,
     );
-  const activity = `[...document.querySelectorAll('ol[aria-label="Recent changes"] li')].map((l) => l.textContent)[0] ?? ""`;
+  const tab = (name) =>
+    `[...document.querySelectorAll('[role="tab"]')].find((t) => t.textContent.startsWith("${name}"))`;
+  const clickOn = async (js) => {
+    await page.until(js);
+    const r = await rectOf(js);
+    await page.click(r.x + r.w / 2, r.y + r.h / 2);
+  };
+  // The newest line in the comment tool's Activity tab, which this opens and closes.
+  const activity = async () => {
+    await page.key("c", "KeyC", 67);
+    await clickOn(tab("Activity"));
+    const newest = `document.querySelector('ol[aria-label="Recent changes"] li')?.textContent ?? ""`;
+    await page.until(newest);
+    const text = await page.eval(newest);
+    await page.key("Escape", "Escape", 27);
+    return text;
+  };
 
   // Live edits and undo.
   await agent.call("update_styles", {
@@ -229,7 +245,7 @@ try {
       ),
     ),
   );
-  check("the activity list shows it", (await page.eval(activity)).includes("Update styles"));
+  check("the activity list shows it", (await activity()).includes("Update styles"));
   await agent.call("undo", { designId: design });
   check(
     "undo reverts it",
@@ -379,11 +395,11 @@ try {
   // The agent's presence chip moves the header's buttons, so wait for the edit first.
   await page.until(`getComputedStyle(${shadow}.querySelector("button")).color === "rgb(1, 2, 3)"`);
   const panel = `document.querySelector('section[aria-label="Tokens"]')`;
-  const tokensToggle = await rectOf(
-    `[...document.querySelectorAll("header button")].find((b) => b.textContent === "Tokens")`,
-  );
-  await page.click(tokensToggle.x + tokensToggle.w / 2, tokensToggle.y + tokensToggle.h / 2);
+  await clickOn(tab("Tokens"));
   await page.until(panel);
+  await clickOn(
+    `[...${panel}.querySelectorAll("button")].find((b) => b.textContent === "Create token")`,
+  );
   const field = (label) => `${panel}.querySelector('input[aria-label="${label}"]')`;
   const nameBox = await rectOf(field("New token name"));
   await page.click(nameBox.x + 10, nameBox.y + nameBox.h / 2);
@@ -403,10 +419,7 @@ try {
         ),
       ),
   );
-  check(
-    "the activity list shows the person's edit",
-    (await page.eval(activity)).includes("Set tokens"),
-  );
+  check("the activity list shows the person's edit", (await activity()).includes("Set tokens"));
   check(
     "the panel lists the token",
     Boolean(await page.until(`${field("--ok in Default")}?.value === "rgb(0, 128, 0)"`)),
@@ -418,6 +431,7 @@ try {
     modes: ["Light", "Dark"],
     tokens: { "--ok": { Dark: "rgb(0, 0, 255)" } },
   });
+  await clickOn(tab("Dark"));
   await page.until(`${field("--ok in Dark")}?.value === "rgb(0, 0, 255)"`);
   // The select of the artboard named "Page".
   const select = `[...${panel}.querySelectorAll("label")].find((l) => l.textContent.startsWith("Page")).querySelector("select")`;
@@ -428,8 +442,7 @@ try {
     "an artboard in the Dark mode takes its values",
     Boolean(await page.until(`${ctaStyle}.color === "rgb(0, 0, 255)"`)),
   );
-  const close = await rectOf(`${panel}.querySelector('button[type="button"]')`);
-  await page.click(close.x + close.w / 2, close.y + close.h / 2);
+  await clickOn(tab("Design"));
   await page.until(`!${panel}`);
   await fetch(`${base}/api/designs/${design}/tokens`, {
     method: "PUT",

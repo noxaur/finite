@@ -111,6 +111,7 @@ export class Api extends Context.Service<
     searchDesigns(query: string): Effect.Effect<ReadonlyArray<DesignSummary>, ApiError>;
     createDesign(name: string): Effect.Effect<DesignSummary, ApiError>;
     getDesign(id: string): Effect.Effect<Snapshot, ApiError>;
+    renameDesign(id: string, name: string): Effect.Effect<void, ApiError>;
     createComment(
       designId: string,
       comment: NewComment,
@@ -309,6 +310,13 @@ export class Api extends Context.Service<
 
       const design = (designId: string) => `/designs/${encodeURIComponent(designId)}`;
 
+      const renameDesign = Effect.fn("Api.renameDesign")(function* (id: string, name: string) {
+        const request = HttpClientRequest.patch(design(id)).pipe(
+          HttpClientRequest.bodyJsonUnsafe({ name }),
+        );
+        yield* client.execute(request).pipe(toApiError);
+      });
+
       const setTokens = Effect.fn("Api.setTokens")(function* (
         designId: string,
         author: CommentAuthor,
@@ -368,6 +376,7 @@ export class Api extends Context.Service<
         searchDesigns,
         createDesign,
         getDesign,
+        renameDesign,
         createComment,
         replyToComment,
         setCommentResolved,
