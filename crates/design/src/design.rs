@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     NodeId,
     comment::{
-        self, Anchor, Audience, Author, AuthorKind, ChangeLog, Comment, CommentError, Message,
-        Point,
+        self, Anchor, Audience, Author, AuthorKind, ChangeLog, ChangeRef, Comment, CommentError,
+        Message, Point,
     },
     document::{Applied, Document, Op, Page, Rejected},
     edit::{self, EditError},
@@ -531,6 +531,12 @@ impl Design {
         self.seq
     }
 
+    /// The artboards changed after change `seq`, or `None` when that isn't
+    /// known or a change (such as a token's) may have changed them all.
+    pub fn artboards_changed_since(&self, seq: u64) -> Option<BTreeSet<NodeId>> {
+        self.log.artboards_since(seq)
+    }
+
     pub fn history(&self, actor: &str) -> Option<&History> {
         self.histories.get(actor)
     }
@@ -936,28 +942,28 @@ impl Design {
     ) -> Result<&Comment, CommentError> {
         let body = comment::check_body(body)?;
         let room_to_open = self.check_room_to_open();
-        let comment = find(&mut self.comments, id)?;
-        if comment.messages.len() >= comment::MAX_MESSAGES {
+        let index = self
+            .comments
+            .iter()
+            .position(|c| c.id == id)
+            .ok_or_else(|| CommentError::NotFound(id.into()))?;
+        if self.comments[index].messages.len() >= comment::MAX_MESSAGES {
             return Err(CommentError::ThreadFull);
         }
-        let resolved = resolve.unwrap_or(comment.resolved && author.kind == AuthorKind::Agent);
-        if comment.resolved && !resolved {
+        let resolved =
+            resolve.unwrap_or(self.comments[index].resolved && author.kind == AuthorKind::Agent);
+        if self.comments[index].resolved && !resolved {
             room_to_open?;
         }
         let changes = match author.kind {
-            AuthorKind::Agent => {
-                comment.taken_by = Some(author.clone());
-                self.log.since(
-                    &author.id,
-                    comment.last_seq(),
-                    comment.artboard_id.as_deref(),
-                )
-            }
-            AuthorKind::User => {
-                comment.passed_by.clear();
-                Vec::new()
-            }
+            AuthorKind::Agent => changes_for_reply(&self.comments, &self.log, index, &author.id),
+            AuthorKind::User => Vec::new(),
         };
+        let comment = &mut self.comments[index];
+        match author.kind {
+            AuthorKind::Agent => comment.taken_by = Some(author.clone()),
+            AuthorKind::User => comment.passed_by.clear(),
+        }
         mark_resolved(comment, resolved, now);
         comment.messages.push(Message {
             author,
@@ -1118,6 +1124,30 @@ impl Design {
         self.comments.remove(index);
         Ok(())
     }
+}
+
+/// Edits `actor` made on this comment's artboard that a reply should link.
+///
+/// The window opens after the thread's latest message. An edit already
+/// linked to any message is skipped, and each edit (one change `seq`) is
+/// linked once.
+fn changes_for_reply(
+    comments: &[Comment],
+    log: &ChangeLog,
+    index: usize,
+    actor: &str,
+) -> Vec<ChangeRef> {
+    let comment = &comments[index];
+    let mut seen: HashSet<u64> = comments
+        .iter()
+        .flat_map(|c| &c.messages)
+        .flat_map(|m| &m.changes)
+        .map(|c| c.seq)
+        .collect();
+    log.since(actor, comment.last_seq(), comment.artboard_id.as_deref())
+        .into_iter()
+        .filter(|change| seen.insert(change.seq))
+        .collect()
 }
 
 /// Sets the resolved state, and when it went to resolved.
@@ -1514,6 +1544,110 @@ mod tests {
         assert!(!reopened.resolved);
         assert!(reopened.messages.last().unwrap().changes.is_empty());
         assert_eq!(d.snapshot().comments.len(), 1);
+    }
+
+    #[test]
+    fn a_reply_links_an_edit_once() {
+        let mut d = design();
+        d.commit(
+            "agent",
+            "boards",
+            &[create("a", None), create("b", None)],
+            1,
+        );
+        let first = pin(&mut d, "a");
+        let second = pin(&mut d, "a");
+        let on_b = pin(&mut d, "b");
+        let agent = author("agent", AuthorKind::Agent);
+        let labels = |d: &Design, id: &str| -> Vec<String> {
+            d.comments()
+                .iter()
+                .find(|c| c.id == id)
+                .unwrap()
+                .messages
+                .last()
+                .unwrap()
+                .changes
+                .iter()
+                .map(|c| c.label.clone())
+                .collect()
+        };
+
+        d.commit("agent", "one", &[color("a", "red")], 2);
+        d.commit("agent", "two", &[color("a", "blue")], 3);
+        d.reply(&first, agent.clone(), "First", Some(true), 4)
+            .unwrap();
+        assert_eq!(labels(&d, &first), ["one", "two"]);
+
+        // Another thread on the same artboard does not take those edits again.
+        d.commit("agent", "three", &[color("a", "green")], 5);
+        d.reply(&second, agent.clone(), "Second", Some(true), 6)
+            .unwrap();
+        assert_eq!(labels(&d, &second), ["three"]);
+
+        // The same thread's next reply only adds edits made since it.
+        d.commit("agent", "four", &[color("a", "black")], 7);
+        d.reply(&first, agent.clone(), "More", None, 8).unwrap();
+        assert_eq!(labels(&d, &first), ["four"]);
+
+        // One edit that touches two artboards is linked by the first reply.
+        d.commit(
+            "agent",
+            "both",
+            &[color("a", "white"), color("b", "white")],
+            9,
+        );
+        d.reply(&on_b, agent.clone(), "On B", None, 10).unwrap();
+        assert_eq!(labels(&d, &on_b), ["both"]);
+        d.reply(&second, agent.clone(), "Not again", None, 11)
+            .unwrap();
+        assert!(labels(&d, &second).is_empty());
+
+        // A later message in the thread moves the window, so the edit before
+        // it stays unlinked.
+        d.commit("agent", "before", &[color("a", "pink")], 12);
+        d.reply(
+            &second,
+            author("user:1", AuthorKind::User),
+            "Now do this",
+            None,
+            13,
+        )
+        .unwrap();
+        d.commit("agent", "after", &[color("a", "orange")], 14);
+        d.reply(&second, agent, "After", None, 15).unwrap();
+        assert_eq!(labels(&d, &second), ["after"]);
+    }
+
+    #[test]
+    fn an_older_thread_links_edits_a_later_reply_missed() {
+        let mut d = design();
+        d.commit("agent", "boards", &[create("a", None)], 1);
+        let older = pin(&mut d, "a");
+        d.commit("agent", "red", &[color("a", "red")], 2);
+        let newer = pin(&mut d, "a");
+        let agent = author("agent", AuthorKind::Agent);
+        let labels = |d: &Design, id: &str| -> Vec<String> {
+            d.comments()
+                .iter()
+                .find(|c| c.id == id)
+                .unwrap()
+                .messages
+                .last()
+                .unwrap()
+                .changes
+                .iter()
+                .map(|c| c.label.clone())
+                .collect()
+        };
+
+        // The newer thread starts after the edit, so its reply links nothing.
+        d.reply(&newer, agent.clone(), "Nothing new", None, 3)
+            .unwrap();
+        assert!(labels(&d, &newer).is_empty());
+        // The older thread's window still covers that edit, and nobody has linked it.
+        d.reply(&older, agent, "That was it", None, 4).unwrap();
+        assert_eq!(labels(&d, &older), ["red"]);
     }
 
     #[test]

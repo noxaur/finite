@@ -193,7 +193,7 @@ fn unreachable(base: &str, error: impl std::fmt::Display) -> McpError {
 /// Waits at most `UPSTREAM_TIMEOUT` for `work` on `base`. A server that's
 /// stuck, rather than down, accepts connections and never answers, and
 /// without a limit it held up `list_designs` for every agent. Only for quick
-/// steps: a tool call like `wait_for_comments` can rightly take minutes.
+/// steps: a comments wait can last 55 seconds.
 async fn in_time<T>(
     base: &str,
     work: impl Future<Output = Result<T, McpError>>,

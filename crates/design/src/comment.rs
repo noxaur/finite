@@ -5,8 +5,10 @@
 //!
 //! - A new comment must point at a real artboard, and its node must be inside it.
 //! - An agent's reply links the edits that agent made to the comment's
-//!   artboard since the thread's previous message (from [`ChangeLog`]). That's
-//!   how a viewer goes from a comment to the change that answered it.
+//!   artboard since the thread's previous message (from [`ChangeLog`]). An
+//!   edit already linked to an earlier message, on any thread, is not linked
+//!   again, and the same edit is linked once. That's how a viewer goes from
+//!   a comment to the change that answered it.
 //! - A user's reply reopens a resolved comment. An agent's reply keeps the
 //!   current state unless it asks to resolve or reopen.
 //! - A person can edit their own message while it's the thread's newest, so
@@ -422,6 +424,10 @@ struct Logged {
     actor: ActorId,
     change: ChangeRef,
     artboards: BTreeSet<NodeId>,
+    /// Whether the change set a token, a mode or the shared CSS, which can
+    /// change what every artboard shows.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    global: bool,
 }
 
 /// The most recent changes to a design, with the artboards each one touched,
@@ -481,6 +487,10 @@ impl ChangeLog {
                 node_ids: outermost,
             },
             artboards,
+            global: change
+                .ops
+                .iter()
+                .any(|op| matches!(op, Op::Css { .. } | Op::Token { .. } | Op::Mode { .. })),
         });
         if self.entries.len() > LOG_LIMIT {
             self.entries.pop_front();
@@ -496,13 +506,33 @@ impl ChangeLog {
             .map(|e| e.actor.as_str())
     }
 
-    /// `actor`'s changes after `seq`, oldest first. With `artboard`, only the
-    /// changes that touched it.
+    /// The artboards the changes after `seq` touched, or `None` when the log
+    /// no longer reaches back to `seq` or a change set a token, a mode or the
+    /// shared CSS (or touched no artboard), which can change every artboard.
+    pub(crate) fn artboards_since(&self, seq: u64) -> Option<BTreeSet<NodeId>> {
+        if self.entries.front().is_none_or(|e| e.change.seq > seq + 1) {
+            return None;
+        }
+        let mut out = BTreeSet::new();
+        for e in self.entries.iter().filter(|e| e.change.seq > seq) {
+            if e.global || e.artboards.is_empty() {
+                return None;
+            }
+            out.extend(e.artboards.iter().cloned());
+        }
+        Some(out)
+    }
+
+    /// `actor`'s changes after `seq`, oldest first, one per edit. With
+    /// `artboard`, only the changes that touched it. A change recorded twice
+    /// (the same `seq`, one edit call) is returned once.
     pub(crate) fn since(&self, actor: &str, seq: u64, artboard: Option<&str>) -> Vec<ChangeRef> {
+        let mut seen = HashSet::new();
         self.entries
             .iter()
             .filter(|e| e.actor == actor && e.change.seq > seq)
             .filter(|e| artboard.is_none_or(|a| e.artboards.contains(a)))
+            .filter(|e| seen.insert(e.change.seq))
             .map(|e| e.change.clone())
             .collect()
     }
@@ -619,6 +649,30 @@ mod tests {
     }
 
     #[test]
+    fn a_token_change_counts_for_every_artboard() {
+        let doc = doc();
+        let mut log = ChangeLog::default();
+        log.record(&change(1, "agent:a", "child"), &doc, BTreeSet::new());
+        log.record(&change(2, "agent:a", "child"), &doc, BTreeSet::new());
+        assert_eq!(
+            log.artboards_since(1),
+            Some(BTreeSet::from(["board".to_owned()]))
+        );
+        // One change that sets a token and edits `board` can change `other` too.
+        let mut mixed = change(3, "agent:b", "child");
+        mixed.ops.push(Op::Token {
+            name: "--gap".into(),
+            mode_id: "light".into(),
+            value: Some("8px".into()),
+        });
+        log.record(&mixed, &doc, BTreeSet::new());
+        assert_eq!(log.artboards_since(2), None);
+        // A log that doesn't reach back far enough can't say.
+        assert_eq!(log.artboards_since(3), Some(BTreeSet::new()));
+        assert_eq!(ChangeLog::default().artboards_since(0), None);
+    }
+
+    #[test]
     fn anchors_must_exist_and_match() {
         let doc = doc();
         assert_eq!(
@@ -682,6 +736,10 @@ mod tests {
         assert_eq!(linked.iter().map(|c| c.seq).collect::<Vec<_>>(), [4]);
         assert_eq!(linked[0].node_ids, ["child"]);
         assert_eq!(log.since("a", 0, None).len(), 3);
+
+        // One edit recorded twice is still one link.
+        log.record(&change(4, "a", "child"), &doc, BTreeSet::new());
+        assert_eq!(log.since("a", 1, Some("board")).len(), 1);
 
         // A text edit links the element that holds the text.
         log.record(&change(5, "a", "text"), &doc, BTreeSet::new());
