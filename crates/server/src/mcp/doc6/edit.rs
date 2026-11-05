@@ -1487,12 +1487,15 @@ fn component(
     let (selector, ids) = selected(tx.view(), Kind::Component, f, refs)?;
     if detach {
         // An artboard or any other container: every instance inside it, at
-        // any depth. An instance itself: just that one.
+        // any depth. An instance itself: just that one. A part inside an
+        // instance goes with the instances, whose detach says which one to
+        // detach instead.
         let (instances, containers): (Vec<NodeId>, Vec<NodeId>) = {
             let doc = tx.view();
-            ids.iter()
-                .cloned()
-                .partition(|id| doc.get(id).is_some_and(|n| n.is_instance()))
+            ids.iter().cloned().partition(|id| {
+                finite_design::components::is_virtual(id)
+                    || doc.get(id).is_some_and(|n| n.is_instance())
+            })
         };
         let mut detached = 0;
         if !containers.is_empty() {
