@@ -990,6 +990,272 @@ async fn render_and_the_layout_check_after_an_edit() {
     assert!(!error, "{shot}");
 }
 
+/// `as: "computed"` asks the browser, so a token shows the value its
+/// artboard's mode gives it, on a plain artboard and on one that runs a
+/// script, and the outline shows a size token as the size.
+#[tokio::test]
+async fn computed_values_follow_the_artboards_mode() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Prober").await;
+    let id = design(&mut agent, "Modes").await;
+    let button = "<button class=\"btn\" style=\"background-color: var(--bg); width: 100%; height: var(--button-h); color: var(--fg)\">Go</button>";
+    let made = edit(
+        &mut agent,
+        &id,
+        json!([
+            { "op": "tokens", "set": {
+                "--bg": { "Light": "#fafcfb", "Dark": "#0b0f0d" },
+                "--fg": "#123456",
+                "--button-h": "44px" }, "modes": ["Light", "Dark"] },
+            { "op": "artboard", "name": "Light", "width": 300, "height": 200, "html": button },
+            { "op": "artboard", "name": "Dark", "width": 300, "height": 200, "mode": "Dark", "html": button },
+            { "op": "artboard", "name": "Scripted", "width": 300, "height": 200, "mode": "Dark",
+              "html": format!("{button}<script>document.title = 'ran'</script>") },
+        ]),
+    )
+    .await;
+    let outline = agent
+        .ok(
+            "read",
+            json!({ "designId": id, "select": ":root", "depth": 3 }),
+        )
+        .await;
+    assert!(
+        !made.is_empty() && !outline.contains("var(--button-h)"),
+        "{outline}"
+    );
+    assert!(outline.contains("[100% × 44px]"), "{outline}");
+    // Like render, it takes at most ten matches.
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Spare", "width": 100, "html": "<p>One</p><p>Two</p><p>Three</p><p>Four</p>" }]),
+    )
+    .await;
+    let (many, error) = agent
+        .call(
+            "read",
+            json!({ "designId": id, "select": "*", "as": "computed" }),
+        )
+        .await;
+    assert!(error && many.contains("takes at most 10"), "{many}");
+    let (probe, _) = agent
+        .call("render", json!({ "designId": id, "output": "layout" }))
+        .await;
+    if probe.contains("no Chrome") {
+        assert!(
+            std::env::var_os("FINITE_REQUIRE_BROWSER").is_none(),
+            "FINITE_REQUIRE_BROWSER is set but there is no browser: {probe}"
+        );
+        eprintln!("SKIPPED, NOTHING WAS TESTED: no Chrome, Chromium or Edge found");
+        return;
+    }
+    let read = agent
+        .ok(
+            "read",
+            json!({ "designId": id, "select": ".btn", "as": "computed",
+                    "properties": ["backgroundColor", "--bg", "--fg", "height", "--missing"] }),
+        )
+        .await;
+    let sections: Vec<&str> = read.split("<!-- ").skip(1).collect();
+    assert_eq!(sections.len(), 3, "{read}");
+    let value = |section: &str, name: &str| -> String {
+        section
+            .lines()
+            .find_map(|l| l.trim().strip_prefix(&format!("{name}: ")))
+            .unwrap_or_else(|| panic!("{name} in {section}"))
+            .to_owned()
+    };
+    let light = sections.iter().find(|s| s.contains("\"Light\"")).unwrap();
+    assert_eq!(value(light, "background-color"), "rgb(250, 252, 251)");
+    assert_eq!(value(light, "--bg"), "#fafcfb");
+    assert!(light.contains("(mode \"Light\")"), "{light}");
+    // Both renderers: a plain artboard and one that runs a script.
+    for name in ["Dark", "Scripted"] {
+        let dark = sections
+            .iter()
+            .find(|s| s.contains(&format!("\"{name}\"")))
+            .unwrap();
+        assert_eq!(value(dark, "background-color"), "rgb(11, 15, 13)", "{dark}");
+        assert_eq!(value(dark, "--bg"), "#0b0f0d");
+        assert_eq!(value(dark, "--fg"), "#123456");
+        assert_eq!(value(dark, "height"), "44px");
+        assert_eq!(value(dark, "--missing"), "(not set)");
+        assert!(dark.contains("(mode \"Dark\")"), "{dark}");
+    }
+    // The default set, and a bad name.
+    let short = agent
+        .ok(
+            "read",
+            json!({ "designId": id, "select": "[data-name=Dark] .btn", "as": "computed" }),
+        )
+        .await;
+    for name in [
+        "color",
+        "font",
+        "padding",
+        "gap",
+        "border-radius",
+        "display",
+    ] {
+        assert!(short.contains(&format!("  {name}: ")), "{name}: {short}");
+    }
+    let (bad, error) = agent
+        .call(
+            "read",
+            json!({ "designId": id, "select": ".btn", "as": "computed", "properties": ["a;b"] }),
+        )
+        .await;
+    assert!(error && bad.contains("isn't a CSS property"), "{bad}");
+}
+
+/// The browser measures the artboard as it was when the read began. If the
+/// design changes meanwhile, the result keeps the labels and mode of that
+/// snapshot and says to read again, instead of pairing a new mode with old
+/// values or showing a deleted element's values as current.
+#[tokio::test]
+async fn computed_values_say_when_the_design_changed_meanwhile() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Prober").await;
+    let mut editor = Agent::connect_doc6(&app, "Editor").await;
+    let id = design(&mut agent, "Race").await;
+    // The animation makes the browser wait out the settle delay, so there is time to edit.
+    let board = "<style>@keyframes fade { to { opacity: .5 } } .fade { animation: fade 10s infinite }</style><div class=\"fade\">…</div><button class=\"btn\" style=\"background-color: var(--bg)\">Go</button>";
+    edit(
+        &mut agent,
+        &id,
+        json!([
+            { "op": "tokens", "set": { "--bg": { "Light": "#fafcfb", "Dark": "#0b0f0d" } }, "modes": ["Light", "Dark"] },
+            { "op": "artboard", "name": "Flip", "width": 300, "height": 200, "mode": "Dark", "html": board },
+            { "op": "artboard", "name": "Gone", "width": 300, "height": 200, "mode": "Dark", "html": board },
+        ]),
+    )
+    .await;
+    let (probe, _) = agent
+        .call("render", json!({ "designId": id, "output": "layout" }))
+        .await;
+    if probe.contains("no Chrome") {
+        assert!(
+            std::env::var_os("FINITE_REQUIRE_BROWSER").is_none(),
+            "FINITE_REQUIRE_BROWSER is set but there is no browser: {probe}"
+        );
+        eprintln!("SKIPPED, NOTHING WAS TESTED: no Chrome, Chromium or Edge found");
+        return;
+    }
+    let read = json!({ "designId": id, "select": ".btn", "as": "computed", "properties": ["background-color"] });
+    // A mode switch while the browser measures.
+    let (read_now, _) = tokio::join!(agent.ok("read", read.clone()), async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        edit(
+            &mut editor,
+            &id,
+            json!([{ "op": "move", "select": "[data-name=Flip]", "mode": "Light" }]),
+        )
+        .await
+    });
+    let flip = read_now
+        .split("<!-- ")
+        .find(|s| s.contains("\"Flip\""))
+        .unwrap_or_else(|| panic!("{read_now}"));
+    assert!(flip.contains("rgb(11, 15, 13)"), "{read_now}");
+    assert!(
+        flip.contains("(mode \"Dark\")") && !flip.contains("(mode \"Light\")"),
+        "the Dark values must not be labeled Light: {read_now}"
+    );
+    assert!(read_now.contains("Read again"), "{read_now}");
+    // An element deleted while the browser measures.
+    let (read_now, _) = tokio::join!(agent.ok("read", read), async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        edit(
+            &mut editor,
+            &id,
+            json!([{ "op": "remove", "select": "[data-name=Gone] .btn" }]),
+        )
+        .await
+    });
+    assert!(read_now.contains("Read again"), "{read_now}");
+}
+
+/// The outline shows a token's value for `var()` only where nothing nearer
+/// sets that custom property: an ancestor or the element itself in a style
+/// attribute, or a `<style>` block, which the outline doesn't evaluate.
+#[tokio::test]
+async fn the_outline_keeps_var_where_the_cascade_sets_it() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Sizer").await;
+    let id = design(&mut agent, "Cascade").await;
+    edit(
+        &mut agent,
+        &id,
+        json!([
+            { "op": "tokens", "set": { "--button-h": "44px" } },
+            { "op": "artboard", "name": "Sizes", "width": 300, "height": 300, "html": concat!(
+                "<button data-name=\"Own\" style=\"--button-h:60px;width:100px;height:var(--button-h)\">Own</button>",
+                "<button data-name=\"Fallback\" style=\"--local:60px;width:100px;height:var(--local,8px)\">Fallback</button>",
+                "<div style=\"--button-h:70px\"><button data-name=\"Inherited\" style=\"width:100px;height:var(--button-h)\">Inherited</button></div>",
+                "<button data-name=\"Token\" style=\"width:100px;height:var(--button-h)\">Token</button>",
+            ) },
+        ]),
+    )
+    .await;
+    let outline = agent
+        .ok(
+            "read",
+            json!({ "designId": id, "select": ":root", "depth": 3 }),
+        )
+        .await;
+    let line = |name: &str| {
+        outline
+            .lines()
+            .find(|l| l.contains(&format!("\"{name}\"")))
+            .unwrap_or_else(|| panic!("{name} in {outline}"))
+            .to_owned()
+    };
+    assert!(
+        line("Own").contains("[100px × var(--button-h)]"),
+        "{outline}"
+    );
+    assert!(
+        line("Fallback").contains("[100px × var(--local,8px)]"),
+        "{outline}"
+    );
+    assert!(
+        line("Inherited").contains("[100px × var(--button-h)]"),
+        "{outline}"
+    );
+    assert!(line("Token").contains("[100px × 44px]"), "{outline}");
+    // A stylesheet might set it anywhere, so it stays as written too.
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Sheet", "width": 300, "height": 100, "html":
+            "<style>.big { --button-h: 90px }</style><button class=\"big\" data-name=\"Classed\" style=\"width:100px;height:var(--button-h)\">Big</button>" }]),
+    )
+    .await;
+    let outline = agent
+        .ok(
+            "read",
+            json!({ "designId": id, "select": "[data-name=Sheet]", "depth": 3 }),
+        )
+        .await;
+    assert!(outline.contains("[100px × var(--button-h)]"), "{outline}");
+    // A longer name that ends the same way doesn't set it.
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Suffix", "width": 300, "height": 100, "html":
+            "<style>.x { --big--button-h: 90px }</style><button data-name=\"Plain\" style=\"width:100px;height:var(--button-h)\">Plain</button>" }]),
+    )
+    .await;
+    let outline = agent
+        .ok(
+            "read",
+            json!({ "designId": id, "select": "[data-name=Suffix]", "depth": 3 }),
+        )
+        .await;
+    assert!(outline.contains("[100px × 44px]"), "{outline}");
+}
+
 /// A component op makes one top bar the component and its copies on the
 /// other screens instances, in the same edit that built the screens, and an
 /// edit to the component reaches every instance.

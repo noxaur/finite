@@ -3,7 +3,7 @@ Finite is a design canvas for agents. A design holds artboards: fixed-size frame
 There are six tools. Each one's description has its full grammar and examples, so load them all at once.
 
 - designs: find a design (query), create one (create: "Name"), rename one, or delete one for good (delete).
-- read: look at a design. With no select, an overview (pages, artboards, open comments, who is working) and every artboard's outline with ids. select is a CSS selector, where #k3x9a2bq is a node's id; as: "outline", "html", "css" or "jsx". contains: "#3b82f6" searches styles, visible text, attributes, <style> and <script> code, and tokens. export: "figma" (or html, finite, repo, jsx) returns a file's text to save.
+- read: look at a design. With no select, an overview (pages, artboards, open comments, who is working) and every artboard's outline with ids. select is a CSS selector, where #k3x9a2bq is a node's id; as: "outline", "html", "css", "jsx" or "computed". contains: "#3b82f6" searches styles, visible text, attributes, <style> and <script> code, and tokens. export: "figma" (or html, finite, repo, jsx) returns a file's text to save.
 - edit: every change. Its ops run in order as one transaction: all or nothing, one undo step. Ops: artboard, html, css, attrs, move, remove, replace, tokens, page, import, component. Each result ends with a layout check. status: "…" shows people what you're doing; dryRun: true previews.
 - render: an image of what select matches (every artboard by default), or output: "layout" for each element's box as text.
 - comments: open comments; wait: 60 blocks until one is waiting for you; reply: [{commentId, message, resolve: true}].
