@@ -537,7 +537,7 @@ async fn an_edit_is_one_undo_step_and_one_broadcast() {
         .await;
     assert_eq!(
         undone,
-        "Undid your last 2 edits (Replace #3b82f6 → #f97316, css on .card, Restyling the cards)."
+        "Undid your last 2 edits (Replace #3b82f6 → #f97316, CSS on .card, Restyling the cards)."
     );
 }
 
@@ -1180,5 +1180,94 @@ async fn each_comment_goes_to_one_agent() {
         bo.ok("comments", wait.clone())
             .await
             .contains("Make it pink")
+    );
+}
+
+#[tokio::test]
+async fn a_reply_links_each_edit_once() {
+    let (app, hub) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Linker").await;
+    let (id, board) = landing(&mut agent).await;
+    let handle = hub.open(&id).await.unwrap();
+    let person = Author {
+        id: "user:cy".into(),
+        name: "Cy".into(),
+        kind: AuthorKind::User,
+    };
+    let anchor = Anchor {
+        artboard_id: Some(board),
+        node_id: None,
+        extra_node_ids: Vec::new(),
+        x: 0.0,
+        y: 0.0,
+    };
+    let one = handle
+        .add_comment(person.clone(), anchor.clone(), Audience::Agents, "First")
+        .unwrap();
+    let two = handle
+        .add_comment(person, anchor, Audience::Agents, "Second")
+        .unwrap();
+
+    edit(
+        &mut agent,
+        &id,
+        json!([
+            { "op": "attrs", "select": ["h1", ".card"], "set": { "title": "Hi" } },
+            { "op": "html", "select": "h1", "html": "<em>!</em>", "mode": "append" },
+            { "op": "html", "select": "h1", "html": "<em>?</em>", "mode": "append" },
+        ]),
+    )
+    .await;
+    let replied = agent
+        .ok(
+            "comments",
+            json!({ "designId": id, "reply": [
+                { "commentId": one.id, "message": "Titled them", "resolve": true },
+                { "commentId": two.id, "message": "Same edits", "resolve": true },
+            ] }),
+        )
+        .await;
+    let lines: Vec<&str> = replied.lines().collect();
+    assert_eq!(lines.len(), 2, "{replied}");
+    assert!(
+        lines[0].contains("links your 1 change")
+            && lines[0].contains("Attrs on h1, .card, HTML on h1")
+            && !lines[0].contains('['),
+        "{replied}"
+    );
+    assert!(
+        lines[1].contains("links none of your changes"),
+        "the second reply listed edits the first one already linked: {replied}"
+    );
+
+    edit(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "replace",
+            "find": "#3b82f6",
+            "replace": "#f97316\n.ins svg { stroke-width: 2 }",
+        }]),
+    )
+    .await;
+    let again = agent
+        .ok(
+            "comments",
+            json!({ "designId": id, "reply": [
+                { "commentId": two.id, "message": "Recolored it", "resolve": true },
+            ] }),
+        )
+        .await;
+    assert!(
+        again.contains("links your 1 change") && again.contains("Replace #3b82f6 → #f97316"),
+        "{again}"
+    );
+    assert!(
+        !again.contains('\n') && !again.contains("Attrs on"),
+        "{again}"
+    );
+    assert!(
+        again.chars().count() < 400,
+        "the label should be a short line, got {again}"
     );
 }

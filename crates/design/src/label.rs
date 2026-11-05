@@ -9,6 +9,9 @@ pub const LAYER_NAME: usize = 120;
 pub const DESIGN_NAME: usize = 120;
 /// The longest "working on" status, in characters.
 pub const STATUS: usize = 120;
+/// The longest label Finite writes for an edit that has no status, in
+/// characters. It's one line, shown on undo and on a comment's changes.
+pub const SUMMARY: usize = 60;
 
 /// `text` without surrounding whitespace, cut to `max` characters.
 pub fn clip(text: &str, max: usize) -> String {
