@@ -153,7 +153,10 @@ export function parseDeclarations(
   for (const line of splitDeclarations(text)) {
     const colon = line.indexOf(":");
     if (colon === -1) continue;
-    const name = line.slice(0, colon).trim();
+    const name = line
+      .slice(0, colon)
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .trim();
     // Custom properties are case-sensitive; the rest aren't.
     const prop = name.startsWith("--") ? name : name.toLowerCase();
     const value = line.slice(colon + 1).trim();

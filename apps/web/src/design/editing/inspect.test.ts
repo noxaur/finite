@@ -97,6 +97,12 @@ describe("declarations", () => {
     });
   });
 
+  it("reads a declaration after a comment", () => {
+    expect(
+      parseDeclarations("color: red; /* spacing */ gap: 8px;", { color: "red", gap: "4px" }),
+    ).toEqual({ gap: "8px" });
+  });
+
   it("keeps comments and braces in a value whole", () => {
     const before = {
       color: "red /* ; blue */",
