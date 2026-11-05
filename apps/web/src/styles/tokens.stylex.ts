@@ -44,6 +44,8 @@ export const colors = stylex.defineVars({
   /** Lines drawn over artboard content, on a `halo`, so they read on any artboard in either theme. */
   ink: "#1a1a18",
   halo: gray[0],
+  /** The outline on the selection and the node under the pointer, and the selection's corner marks. */
+  hover: "#3478ba",
   ok: { default: "#15803d", [DARK]: "#4ade80" },
   danger: { default: "#b8341f", [DARK]: "#f0806c" },
   /** Components and their instances on the canvas. */
