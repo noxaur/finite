@@ -310,10 +310,11 @@ async fn an_agent_waits_for_the_next_comment() {
     );
 }
 
-/// Same cap as doc6: 120 and 300 used to die in the client. The long waits
-/// run together, so the check costs one 55 second pause. Omitting
-/// timeoutSeconds uses that same default.
-#[tokio::test]
+/// Same cap as doc6: 120 and 300 used to die in the client. Omitting
+/// timeoutSeconds uses that same default. The clock is paused, and the test
+/// jumps those 55 seconds in one step: SSE keep-alives sit at 15 seconds and
+/// reset from the wall clock, so auto-advance would crawl.
+#[tokio::test(start_paused = true)]
 async fn a_long_wait_for_comments_is_clamped_to_55_seconds() {
     let app = test_app();
     let mut agent = Agent::connect(&app, "Claude").await;
@@ -350,17 +351,28 @@ async fn a_long_wait_for_comments_is_clamped_to_55_seconds() {
         let app = app.clone();
         waits.push(tokio::spawn(async move {
             let mut agent = Agent::connect(&app, name).await;
-            let started = std::time::Instant::now();
+            let started = tokio::time::Instant::now();
             let text = agent.ok("wait_for_comments", args).await;
             (name, text, started.elapsed())
         }));
     }
+    // Yielding does not advance the clock, so each call stays parked on the cap.
+    for _ in 0..1_000 {
+        tokio::task::yield_now().await;
+    }
+    for wait in &waits {
+        assert!(
+            !wait.is_finished(),
+            "a capped wait returned before the clock reached 55 seconds"
+        );
+    }
+    tokio::time::advance(std::time::Duration::from_secs(55)).await;
     let capped = format!("No comments arrived in 55 seconds. {again}");
     for wait in waits {
         let (name, text, elapsed) = wait.await.unwrap();
         assert_eq!(text, capped, "{name}");
         assert!(
-            elapsed >= std::time::Duration::from_secs(50)
+            elapsed >= std::time::Duration::from_secs(55)
                 && elapsed < std::time::Duration::from_secs(70),
             "{name} took {elapsed:?}"
         );
