@@ -462,3 +462,151 @@ fn virtual_ids_name_nodes_inside_instances() {
     assert_eq!(found, vec![title]);
     let _ = &mut design;
 }
+
+/// `[data-instance-of]` and `[data-component]` match the attributes
+/// `get_html` writes, which live on the node rather than in its attrs.
+#[test]
+fn component_markers_match_what_html_writes() {
+    let d = design(&[(
+        "board",
+        None,
+        r#"<header data-component="Top bar"><h1 data-name="Title">Home</h1></header><header data-component="Top bar"><h1 data-name="Title">Settings</h1></header><p data-name="Loose">Hi</p>"#,
+    )]);
+    let view = d.view();
+    let component = view
+        .nodes()
+        .find(|n| n.component)
+        .expect("a component")
+        .id
+        .clone();
+    let instance = view
+        .nodes()
+        .find(|n| n.is_instance())
+        .expect("an instance")
+        .id
+        .clone();
+    let html = finite_design::html::export(view, "board", true).unwrap();
+    assert!(html.contains("data-component=\"Top bar\""), "{html}");
+    assert!(
+        html.contains(&format!("data-instance-of=\"{component}\"")),
+        "{html}"
+    );
+
+    let ids = |selector: &str| {
+        let list = select::parse(selector).unwrap_or_else(|e| panic!("{selector}: {e}"));
+        select::matches(view, &list, Scope::Design)
+    };
+    assert_eq!(ids("[data-component]"), vec![component.clone()]);
+    assert_eq!(ids("[data-component='Top bar']"), vec![component.clone()]);
+    assert_eq!(ids("[DATA-COMPONENT='Top bar']"), vec![component.clone()]);
+    assert_eq!(ids("[data-component^=Top]"), vec![component.clone()]);
+    assert!(ids("[data-component=Bar]").is_empty());
+    assert!(ids("[data-component='top bar']").is_empty());
+
+    assert_eq!(ids("[data-instance-of]"), vec![instance.clone()]);
+    assert_eq!(ids("[DATA-INSTANCE-OF]"), vec![instance.clone()]);
+    assert_eq!(
+        ids(&format!("[data-instance-of='{component}']")),
+        vec![instance.clone()]
+    );
+    let prefix = &component[..component.len().min(2)];
+    assert_eq!(
+        ids(&format!("[data-instance-of^='{prefix}']")),
+        vec![instance.clone()]
+    );
+    assert_eq!(ids("#board [data-instance-of]"), vec![instance.clone()]);
+    assert!(ids("[data-instance-of=nope]").is_empty());
+
+    let marked = ids("[data-instance-of], [data-component]");
+    assert!(
+        view.nodes()
+            .filter(|n| n.id.contains('/'))
+            .all(|n| !marked.contains(&n.id)),
+        "a node inside an instance is not an instance or a component"
+    );
+    assert!(
+        !marked
+            .iter()
+            .any(|id| view.get(id).unwrap().name.as_deref() == Some("Loose"))
+    );
+    let list = select::parse("[data-instance-of], [data-component]").unwrap();
+    assert_eq!(
+        select::matches(d.doc(), &list, Scope::Design),
+        select::matches(view, &list, Scope::Design)
+    );
+}
+
+/// A layer name wins over the name in `data-component`, because that's what
+/// the HTML writer emits.
+#[test]
+fn data_component_matches_the_written_name() {
+    let d = design(&[(
+        "board",
+        None,
+        r#"<header data-name="Nav" data-component="Bar"><span data-name="Label">Home</span></header>"#,
+    )]);
+    let view = d.view();
+    let html = finite_design::html::export(view, "board", true).unwrap();
+    assert!(html.contains("data-component=\"Nav\""), "{html}");
+    assert!(!html.contains("data-component=\"Bar\""), "{html}");
+    let component = select::parse("[data-component='Nav']").unwrap();
+    let found = select::matches(view, &component, Scope::Design);
+    assert_eq!(found.len(), 1);
+    assert!(view.get(&found[0]).unwrap().component);
+    let original = select::parse("[data-component=Bar]").unwrap();
+    assert!(select::matches(view, &original, Scope::Design).is_empty());
+}
+
+#[test]
+fn a_nameless_component_matches_its_tag() {
+    let mut d = design(&[("board", None, "<section></section>")]);
+    let id = d
+        .doc()
+        .nodes()
+        .find(|n| n.tag() == Some("section"))
+        .unwrap()
+        .id
+        .clone();
+    let ops = edit::create_component(d.doc(), &id, None, &[]).unwrap();
+    d.commit("agent", "Component", &ops, 0).unwrap();
+    assert_eq!(pick(&d, "[data-component]"), ["section"]);
+    assert_eq!(pick(&d, "[data-component=section]"), ["section"]);
+    assert_eq!(pick(&d, "[data-component^=sec]"), ["section"]);
+    assert!(pick(&d, "[data-component=Section]").is_empty());
+    let html = finite_design::html::export(d.doc(), &id, true).unwrap();
+    assert!(html.contains("data-component=\"section\""), "{html}");
+}
+
+/// The selector value is the attribute value. The HTML source escapes `&`,
+/// and a selector for that escaped text matches nothing.
+#[test]
+fn data_component_matches_the_name_not_its_html_escape() {
+    let mut d = design(&[("board", None, "<div></div><div></div>")]);
+    let divs: Vec<String> = d
+        .doc()
+        .children(Some("board"))
+        .into_iter()
+        .filter(|n| n.tag() == Some("div"))
+        .map(|n| n.id.clone())
+        .collect();
+    let ops = edit::create_component(
+        d.doc(),
+        &divs[0],
+        Some("A & B"),
+        std::slice::from_ref(&divs[1]),
+    )
+    .unwrap();
+    d.commit("agent", "Component", &ops, 0).unwrap();
+    assert_eq!(pick(&d, "[data-component='A & B']"), ["A & B"]);
+    assert!(pick(&d, "[data-component='A &amp; B']").is_empty());
+    assert_eq!(
+        pick(&d, &format!("[data-instance-of=\"{}\"]", divs[0])),
+        ["div"]
+    );
+    let html = finite_design::html::export(d.view(), "board", true).unwrap();
+    assert!(html.contains("data-component=\"A &amp; B\""), "{html}");
+    assert!(
+        html.contains(&format!("data-instance-of=\"{}\"", divs[0])),
+        "{html}"
+    );
+}

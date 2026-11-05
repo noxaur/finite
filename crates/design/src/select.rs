@@ -14,8 +14,10 @@
 //!   reaches across from one artboard to another.
 //! - `#id` matches a node's id, then its `id` attribute. Ids may start with a
 //!   digit, which CSS doesn't allow, so `#4kx92mab` is escaped before parsing.
-//! - `[data-id]`, `[data-name]` and `[style]` read the node's id, layer name
-//!   and inline styles, as `get_html` writes them.
+//! - `[data-id]`, `[data-name]`, `[data-instance-of]`, `[data-component]` and
+//!   `[style]` read the node's id, layer name, the component an instance
+//!   shows, a component root's name and its inline styles, as `get_html`
+//!   writes them.
 //! - Text nodes are never matched. [`Matcher::text_nodes`] resolves a bare
 //!   `#id` list that names them.
 //! - `:contains("text")` matches an element whose visible text, including its
@@ -44,7 +46,7 @@ use selectors::{
 
 use crate::{
     Document, Node, NodeId, NodeKind,
-    html::{ID_ATTR, NAME_ATTR, style_string},
+    html::{COMPONENT_ATTR, ID_ATTR, INSTANCE_ATTR, NAME_ATTR, style_string},
 };
 
 /// A parsed selector list, like `.card, nav > a`.
@@ -746,25 +748,49 @@ impl<'a> Matcher<'a> {
         &self.entries[i as usize]
     }
 
-    /// An attribute as `get_html` writes it.
+    /// An attribute as `get_html` writes it. `data-instance-of` and
+    /// `data-component` are node fields, not entries in `attrs`. The values
+    /// are the component id and the component root's display name: what the
+    /// writer puts in the attribute, before it escapes the HTML source.
     fn attr(&self, i: u32, name: &str) -> Option<Cow<'a, str>> {
         let node = self.entry(i).node;
         match name {
             ID_ATTR => Some(Cow::Borrowed(&node.id)),
             NAME_ATTR => node.name.as_deref().map(Cow::Borrowed),
+            INSTANCE_ATTR => node
+                .instance_of
+                .as_deref()
+                .map(Cow::Borrowed)
+                .or_else(|| stored_attr(node, name)),
+            COMPONENT_ATTR if node.component => Some(written_component_name(node)),
             "style" if !node.styles.is_empty() => Some(Cow::Owned(style_string(&node.styles))),
-            _ => node
-                .attrs
-                .get(name)
-                .or_else(|| {
-                    // Selectors lowercase names in HTML, but SVG keeps `viewBox`.
-                    node.attrs
-                        .iter()
-                        .find(|(k, _)| k.eq_ignore_ascii_case(name))
-                        .map(|(_, v)| v)
-                })
-                .map(|v| Cow::Borrowed(v.as_str())),
+            _ => stored_attr(node, name),
         }
+    }
+}
+
+/// An attribute stored on the node, including SVG names like `viewBox`
+/// when the selector's name has been lowercased.
+fn stored_attr<'a>(node: &'a Node, name: &str) -> Option<Cow<'a, str>> {
+    node.attrs
+        .get(name)
+        .or_else(|| {
+            node.attrs
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v)
+        })
+        .map(|v| Cow::Borrowed(v.as_str()))
+}
+
+/// `data-component`'s value, the same string [`Node::display_name`] returns
+/// for an element: the layer name, or else the tag. Borrows either, so a
+/// component match does not allocate. A text node, which a component root
+/// isn't, is the only case that allocates.
+fn written_component_name(node: &Node) -> Cow<'_, str> {
+    match node.name.as_deref().or_else(|| node.tag()) {
+        Some(name) => Cow::Borrowed(name),
+        None => Cow::Owned(node.display_name()),
     }
 }
 
