@@ -429,29 +429,39 @@ fn css_lines(css: &str) -> impl Iterator<Item = String> + '_ {
 }
 
 /// Each case-insensitive match of `needle` (already lowercase) in `code`, with
-/// up to 30 characters of code on either side.
+/// up to 30 characters of the original code on either side.
 fn code_matches<'a>(code: &'a str, needle: &'a str) -> impl Iterator<Item = String> + 'a {
-    let lower = code.to_lowercase();
-    // Lowercasing can move byte offsets outside ASCII; show the lowercase
-    // code then, so the offsets stay valid.
-    let shown = if code.is_ascii() {
-        code.to_owned()
-    } else {
-        lower.clone()
-    };
+    if needle.is_empty() {
+        return Vec::new().into_iter();
+    }
+    // Lowercase `code`, remembering where each lowercase byte came from, since
+    // lowercasing can change lengths outside ASCII.
+    let mut lower = String::with_capacity(code.len());
+    let mut origin = Vec::with_capacity(code.len() + 1);
+    for (i, c) in code.char_indices() {
+        for l in c.to_lowercase() {
+            origin.extend(std::iter::repeat_n(i, l.len_utf8()));
+            lower.push(l);
+        }
+    }
     let snippets: Vec<String> = lower
         .match_indices(needle)
         .map(|(at, _)| {
-            let start = shown[..at]
+            // The match runs from the char its first byte came from through
+            // the char its last byte came from.
+            let from = origin[at];
+            let last = origin[at + needle.len() - 1];
+            let to = last + code[last..].chars().next().map_or(0, char::len_utf8);
+            let start = code[..from]
                 .char_indices()
                 .rev()
                 .nth(29)
                 .map_or(0, |(i, _)| i);
-            let end = shown[at + needle.len()..]
+            let end = code[to..]
                 .char_indices()
                 .nth(30)
-                .map_or(shown.len(), |(i, _)| at + needle.len() + i);
-            shown[start..end].to_owned()
+                .map_or(code.len(), |(i, _)| to + i);
+            code[start..end].to_owned()
         })
         .collect();
     snippets.into_iter()
@@ -953,6 +963,16 @@ mod tests {
         // In a script `#abc` is code; in CSS it isn't the color #abcdef.
         assert_eq!(tags("#abc"), ["script"]);
         assert_eq!(tags("#ABCDEF"), ["style"]);
+    }
+
+    #[test]
+    fn code_snippets_keep_the_original_case_next_to_non_ascii_text() {
+        let snippets: Vec<_> =
+            code_matches(r#"let x="Å"; RenderCard() İx"#, "rendercard").collect();
+        assert_eq!(snippets, [r#"let x="Å"; RenderCard() İx"#]);
+        // `İ` lowercases to two chars; a match on them maps back to `İ`.
+        let snippets: Vec<_> = code_matches("aİb", "i\u{307}").collect();
+        assert_eq!(snippets, ["aİb"]);
     }
 
     #[test]
