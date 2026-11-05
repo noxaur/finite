@@ -1050,6 +1050,85 @@ async fn components_are_made_used_and_detached_in_edits() {
     );
 }
 
+/// Detach and read find instances by the `data-instance-of` marker read's
+/// HTML writes, including under an artboard.
+#[tokio::test]
+async fn detach_finds_instances_by_data_instance_of() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Builder").await;
+    let id = design(&mut agent, "App").await;
+    let made = edit(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "artboard",
+            "name": "Home",
+            "width": 400,
+            "height": 300,
+            "html": "<header data-component=\"Top bar\"><h1>Home</h1></header><header data-component=\"Top bar\"><h1>Settings</h1></header>"
+        }]),
+    )
+    .await;
+    let board = id_after(&made, "Created artboard");
+    let shown = html(&mut agent, &id, &format!("#{board}")).await;
+    let marker = "data-instance-of=\"";
+    let at = shown
+        .find(marker)
+        .unwrap_or_else(|| panic!("an instance in {shown}"))
+        + marker.len();
+    let component: String = shown[at..].chars().take_while(|c| *c != '"').collect();
+    assert!(!component.is_empty(), "{shown}");
+
+    let by_value = html(
+        &mut agent,
+        &id,
+        &format!("[data-instance-of=\"{component}\"]"),
+    )
+    .await;
+    assert!(
+        by_value.contains(&format!("data-instance-of=\"{component}\""))
+            && !by_value.contains("data-component"),
+        "{by_value}"
+    );
+    let root = html(&mut agent, &id, "[data-component=\"Top bar\"]").await;
+    assert!(
+        root.contains("data-component=\"Top bar\"") && !root.contains("data-instance-of"),
+        "{root}"
+    );
+
+    let detached = edit(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "component",
+            "select": format!("#{board} [data-instance-of]"),
+            "detach": true
+        }]),
+    )
+    .await;
+    assert!(detached.contains("Detached 1 instance"), "{detached}");
+    let plain = html(&mut agent, &id, &format!("#{board}")).await;
+    assert!(
+        !plain.contains("data-instance-of") && plain.contains("Settings"),
+        "{plain}"
+    );
+
+    agent.ok("undo", json!({ "designId": id })).await;
+    let back = html(&mut agent, &id, &format!("#{board}")).await;
+    assert!(back.contains("data-instance-of"), "{back}");
+    let again = edit(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "component",
+            "select": format!("[data-instance-of=\"{component}\"]"),
+            "detach": true
+        }]),
+    )
+    .await;
+    assert!(again.contains("Detached 1 instance"), "{again}");
+}
+
 #[tokio::test]
 async fn each_comment_goes_to_one_agent() {
     let (app, hub) = doc6();
