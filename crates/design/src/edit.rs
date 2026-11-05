@@ -3,7 +3,7 @@
 //! [`crate::Design::commit`] so they land on the right actor's history.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt,
 };
 
@@ -2105,6 +2105,109 @@ pub fn detach_instances(
         ops.extend(components::detach(doc, id, new_id)?);
     }
     Ok(ops)
+}
+
+/// The instances at or below `roots`, roots included. An instance inside
+/// another is skipped: it only exists while its outer instance shows it. So
+/// is one inside a component's definition: the component is shared, and
+/// rewriting its nodes would orphan the overrides of its instances
+/// elsewhere. With `copies`, the roots are fresh copies, which nothing
+/// follows yet, so a root that sits inside a definition still counts.
+pub fn instances_in(doc: &Document, roots: &[NodeId], copies: bool) -> Vec<NodeId> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for root in roots {
+        if !copies && components::component_of(doc, root).is_some() {
+            continue;
+        }
+        let mut stack: Vec<&Node> = doc.get(root).into_iter().collect();
+        while let Some(node) = stack.pop() {
+            if node.component {
+                continue;
+            }
+            if node.is_instance() && !components::is_virtual(&node.id) && seen.insert(&node.id) {
+                out.push(node.id.clone());
+            }
+            stack.extend(doc.children(Some(&node.id)).into_iter().rev());
+        }
+    }
+    out
+}
+
+/// Turns every instance at or below `roots` into plain elements, however
+/// deep they nest: detaching one leaves the instances it held, and those
+/// are detached in turn. Where [`detach_instances`] stops at the one
+/// instance, this makes a frozen copy of a screen. `doc` is the real
+/// document, not the expanded view: an expanded instance still has its
+/// virtual children after it is detached, and the next round would copy
+/// them along with the real ones.
+pub fn detach_all(
+    doc: &Document,
+    roots: &[NodeId],
+    copies: bool,
+    new_id: &mut impl FnMut() -> NodeId,
+) -> Result<Vec<Op>> {
+    let mut ops = Vec::new();
+    let mut staged: Option<Document> = None;
+    loop {
+        let current = staged.as_ref().unwrap_or(doc);
+        let instances = instances_in(current, roots, copies);
+        if instances.is_empty() {
+            return Ok(ops);
+        }
+        let round = detach_instances(current, &instances, &mut *new_id)?;
+        if detached_count(&round) == 0 {
+            return err("instances couldn't be detached");
+        }
+        let nested = round
+            .iter()
+            .any(|op| matches!(op, Op::Create { node } if node.is_instance()));
+        if nested {
+            let mut next = current.clone();
+            next.apply_all(&round);
+            staged = Some(next);
+        }
+        ops.extend(round);
+        if !nested {
+            return Ok(ops);
+        }
+    }
+}
+
+/// How many instances `ops` turn into plain elements.
+pub fn detached_count(ops: &[Op]) -> usize {
+    ops.iter()
+        .filter(|op| {
+            matches!(
+                op,
+                Op::Set {
+                    key: PropKey::InstanceOf,
+                    value: None,
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+/// [`duplicate`], then [`detach_all`] on the copies, so they keep what the
+/// components show but no longer follow them.
+pub fn duplicate_detached(
+    doc: &Document,
+    ids: &[NodeId],
+    new_id: &mut impl FnMut() -> NodeId,
+) -> Result<(Vec<Op>, Vec<NodeId>)> {
+    let (mut ops, roots) = duplicate(doc, ids, &mut *new_id)?;
+    let follows = ids
+        .iter()
+        .flat_map(|id| doc.subtree(id))
+        .any(|n| n.is_instance() || n.component);
+    if follows {
+        let mut copied = doc.clone();
+        copied.apply_all(&ops);
+        ops.extend(detach_all(&copied, &roots, true, new_id)?);
+    }
+    Ok((ops, roots))
 }
 
 /// Refuses an edit that would leave the design with more than [`MAX_NODES`].

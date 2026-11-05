@@ -2181,6 +2181,333 @@ async fn components_are_made_used_and_detached_in_edits() {
     );
 }
 
+/// A design whose "Top bar" component is on two artboards, "Home" and "Settings".
+async fn two_screens(agent: &mut Agent) -> (String, String, String) {
+    let id = design(agent, "App").await;
+    let nav = |title: &str| {
+        format!("<header data-name=\"Nav\"><h1 data-name=\"Title\">{title}</h1></header>")
+    };
+    let made = edit(
+        agent,
+        &id,
+        json!([
+            { "op": "artboard", "name": "Home", "width": 400, "height": 300, "html": nav("Home") },
+            { "op": "artboard", "name": "Settings", "width": 400, "height": 300, "html": nav("Settings") },
+            { "op": "component", "select": "[data-name=Nav]", "name": "Top bar", "as": "bar" },
+        ]),
+    )
+    .await;
+    let home = id_after(&made, "Created artboard");
+    let bar = id_after(&made, "3. component: header");
+    (id, home, bar)
+}
+
+#[tokio::test]
+async fn a_copy_can_be_frozen_so_component_edits_leave_it_alone() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Snapshot").await;
+    let (id, home, bar) = two_screens(&mut agent).await;
+
+    // A plain copy still follows the component, and says so.
+    let live = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "from": format!("#{home}"), "name": "Live copy" }]),
+    )
+    .await;
+    assert!(
+        live.contains(
+            "1 instance still follows its component; pass detach: true for a frozen copy"
+        ),
+        "{live}"
+    );
+    let live_board = id_after(&live, " as #");
+
+    let frozen = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "from": format!("#{home}"), "name": "Before", "detach": true }]),
+    )
+    .await;
+    assert!(
+        frozen.contains("Detached 1 instance in the copy") && !frozen.contains("still follow"),
+        "{frozen}"
+    );
+    let frozen_board = id_after(&frozen, " as #");
+
+    // The move op's copy takes the flag too, and only with copy.
+    let moved = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "move", "select": format!("#{home}"), "copy": true, "detach": true, "x": 3000, "y": 0 }]),
+    )
+    .await;
+    assert!(moved.contains("Detached 1 instance in the copy"), "{moved}");
+    let kept = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "move", "select": format!("#{home}"), "detach": true, "x": 3000, "y": 0 }]),
+    )
+    .await;
+    assert!(kept.contains("needs copy: true"), "{kept}");
+
+    // Edit the component: the live copy follows, the frozen one doesn't.
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "css", "select": format!("#{bar}"), "css": "background: #f97316" }]),
+    )
+    .await;
+    assert!(
+        html(&mut agent, &id, &format!("#{live_board}"))
+            .await
+            .contains("#f97316")
+    );
+    let snapshot = html(&mut agent, &id, &format!("#{frozen_board}")).await;
+    assert!(
+        !snapshot.contains("#f97316")
+            && !snapshot.contains("data-instance-of")
+            && snapshot.contains("Home"),
+        "{snapshot}"
+    );
+
+    // Undo reverses the css edit, the move's copy, then the frozen copy with
+    // its detaching in one step.
+    agent
+        .ok("undo", json!({ "designId": id, "steps": 3 }))
+        .await;
+    let overview = agent.ok("read", json!({ "designId": id })).await;
+    assert!(!overview.contains("Before"), "{overview}");
+    assert!(overview.contains("Live copy"), "{overview}");
+}
+
+#[tokio::test]
+async fn detach_takes_an_artboard_and_frees_every_instance_inside_it() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Detacher").await;
+    let (id, home, _) = two_screens(&mut agent).await;
+    let settings = id_after(
+        &agent.ok("read", json!({ "designId": id })).await,
+        "Settings",
+    );
+    let detached = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "component", "select": ":root", "detach": true }]),
+    )
+    .await;
+    assert!(detached.contains("Detached 1 instance"), "{detached}");
+    for board in [&home, &settings] {
+        assert!(
+            !html(&mut agent, &id, &format!("#{board}"))
+                .await
+                .contains("data-instance-of"),
+        );
+    }
+    let none = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "component", "select": &format!("#{home}"), "detach": true }]),
+    )
+    .await;
+    assert!(none.contains("matches no instance"), "{none}");
+}
+
+#[tokio::test]
+async fn detaching_a_screen_freezes_nested_components_and_spares_definitions() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Freezer").await;
+    let id = design(&mut agent, "Nested").await;
+    let made = edit(
+        &mut agent,
+        &id,
+        json!([
+            { "op": "artboard", "name": "Parts", "width": 400, "height": 300,
+              "html": "<span data-component=\"Logo\">Finite</span>" },
+            { "op": "artboard", "name": "Screen", "width": 400, "height": 300 },
+        ]),
+    )
+    .await;
+    let parts = id_after(&made, "Created artboard");
+    let screen = id_after(&agent.ok("read", json!({ "designId": id })).await, "Screen");
+    // Each part holds an instance of the one before it.
+    let mut inner = String::new();
+    for (name, tag) in [("Logo", "span"), ("Bar", "header"), ("Page", "main")] {
+        if name != "Logo" {
+            let source = format!(
+                "<{tag} data-component=\"{name}\"><div data-instance-of=\"{inner}\"></div></{tag}>"
+            );
+            edit(
+                &mut agent,
+                &id,
+                json!([{ "op": "html", "select": format!("#{parts}"), "html": source }]),
+            )
+            .await;
+        }
+        let found = html(&mut agent, &id, &format!("[data-name={name}]")).await;
+        inner = found
+            .split("data-id=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("the component's id")
+            .to_owned();
+    }
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "html", "select": format!("#{screen}"), "html": format!("<main data-instance-of=\"{inner}\"></main>") }]),
+    )
+    .await;
+
+    // Freezing the screen leaves one copy of each part, and the parts alone.
+    let before = html(&mut agent, &id, &format!("#{parts}")).await;
+    let detached = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "component", "select": &format!("#{screen}"), "detach": true }]),
+    )
+    .await;
+    assert!(detached.contains("Detached 3 instances"), "{detached}");
+    let frozen = html(&mut agent, &id, &format!("#{screen}")).await;
+    assert_eq!(frozen.matches("Finite").count(), 1, "{frozen}");
+    assert!(!frozen.contains("data-instance-of"), "{frozen}");
+
+    // The board that holds the definitions has no instance of its own to
+    // detach, and the Logo instance inside Bar stays one.
+    let none = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "component", "select": &format!("#{parts}"), "detach": true }]),
+    )
+    .await;
+    assert!(none.contains("matches no instance"), "{none}");
+    let after = html(&mut agent, &id, &format!("#{parts}")).await;
+    let from_name = |text: &str| text[text.find("data-name").unwrap()..].to_owned();
+    assert_eq!(from_name(&after), from_name(&before));
+
+    agent.ok("undo", json!({ "designId": id })).await;
+    let restored = html(&mut agent, &id, &format!("#{screen}")).await;
+    assert!(restored.contains("data-instance-of"), "{restored}");
+}
+
+#[tokio::test]
+async fn removing_a_screen_warns_about_comments_and_pin_moves_them() {
+    let (app, hub) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Rebuilder").await;
+    let (id, board) = landing(&mut agent).await;
+    let handle = hub.open(&id).await.unwrap();
+    let title = handle.read(|d| {
+        d.view()
+            .subtree(&board)
+            .iter()
+            .find(|n| n.tag() == Some("h1"))
+            .unwrap()
+            .id
+            .clone()
+    });
+    let person = || Author {
+        id: "user:ada".into(),
+        name: "Ada".into(),
+        kind: AuthorKind::User,
+    };
+    let comment = |node: &str| {
+        handle
+            .add_comment(
+                person(),
+                Anchor {
+                    artboard_id: Some(board.clone()),
+                    node_id: Some(node.into()),
+                    extra_node_ids: Vec::new(),
+                    x: 10.0,
+                    y: 10.0,
+                },
+                Audience::Agents,
+                "Make it orange",
+            )
+            .unwrap()
+            .id
+    };
+    let (on_title, on_board) = (comment(&title), comment(&board));
+
+    // Removing the title only costs the first comment its element.
+    let dry = agent
+        .ok(
+            "edit",
+            json!({ "designId": id, "dryRun": true, "op": "remove", "select": format!("#{title}") }),
+        )
+        .await;
+    assert!(
+        dry.contains("1 open comment is pinned to elements inside")
+            && dry.contains(&on_title)
+            && dry.contains("node: null"),
+        "{dry}"
+    );
+
+    // Removing the artboard orphans both.
+    let removed = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "remove", "select": format!("#{board}") }]),
+    )
+    .await;
+    assert!(
+        removed.contains("2 open comments are pinned inside")
+            && removed.contains("artboardDeleted: true")
+            && removed.contains("pin: [")
+            && removed.contains(&on_title)
+            && removed.contains(&on_board),
+        "{removed}"
+    );
+    let listed = agent.ok("comments", json!({ "designId": id })).await;
+    assert!(listed.contains("\"artboardDeleted\": true"), "{listed}");
+
+    // The screen is rebuilt and the comments are pinned to it.
+    let rebuilt = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Home", "width": 600, "height": 400,
+                 "html": "<h1 data-name=\"Title\">Hello</h1>" }]),
+    )
+    .await;
+    let new_board = id_after(&rebuilt, "Created artboard");
+    let pinned = agent
+        .ok(
+            "comments",
+            json!({ "designId": id, "pin": [
+                { "commentId": on_title, "select": "h1" },
+                { "commentId": on_board, "select": format!("#{new_board}") }] }),
+        )
+        .await;
+    assert!(
+        pinned.contains(&format!("Pinned {on_title}, {on_board}")),
+        "{pinned}"
+    );
+    let listed = agent.ok("comments", json!({ "designId": id })).await;
+    assert!(
+        listed.contains("\"artboardDeleted\": false")
+            && !listed.contains("\"artboardDeleted\": true")
+            && listed.contains(&format!("\"artboardId\": \"{new_board}\"")),
+        "{listed}"
+    );
+    // The viewer is told: the comment it holds has the new artboard.
+    let pinned = handle.comments();
+    assert!(
+        pinned
+            .iter()
+            .all(|c| c.artboard_id.as_deref() == Some(new_board.as_str()))
+    );
+    assert!(pinned.iter().all(|c| c.detached_at.is_none()));
+
+    // A selector that matches several elements, or none, changes nothing.
+    let (many, error) = agent
+        .call(
+            "comments",
+            json!({ "designId": id, "pin": [{ "commentId": on_title, "select": "*" }] }),
+        )
+        .await;
+    assert!(error && many.contains("pin takes one"), "{many}");
+}
+
 /// Classic tool names in a string an agent on this surface was shown.
 fn classic_tool(text: &str) -> Option<&'static str> {
     [

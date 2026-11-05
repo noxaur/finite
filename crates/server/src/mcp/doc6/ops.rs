@@ -237,7 +237,7 @@ fn kind_of(fields: &Fields) -> Result<Kind, String> {
     let has = |k: &str| fields.get(k).is_some_and(|v| !v.is_null());
     Ok(if (has("width") || has("from")) && has("name") {
         Kind::Artboard
-    } else if has("detach") {
+    } else if has("detach") && !has("copy") {
         Kind::Component
     } else if has("content") || has("contentBase64") {
         Kind::Import

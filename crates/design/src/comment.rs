@@ -538,6 +538,33 @@ impl ChangeLog {
     }
 }
 
+/// The open comments pinned to a node at or below `roots`: on a root that's
+/// an artboard, or on an element inside one. Deleting the roots orphans
+/// them. A comment on a deleted artboard shows as `artboardDeleted`, and one
+/// on a deleted element keeps its place on the artboard but loses its node.
+pub fn pinned_inside<'a>(
+    doc: &Document,
+    comments: &'a [Comment],
+    roots: &[NodeId],
+) -> Vec<&'a Comment> {
+    let gone: HashSet<&str> = roots
+        .iter()
+        .flat_map(|root| doc.subtree(root))
+        .map(|n| n.id.as_str())
+        .collect();
+    comments
+        .iter()
+        .filter(|c| !c.resolved)
+        .filter(|c| {
+            c.artboard_id
+                .iter()
+                .chain(&c.node_id)
+                .chain(&c.extra_node_ids)
+                .any(|id| gone.contains(id.as_str()))
+        })
+        .collect()
+}
+
 /// The artboards that contain the nodes `ops` target, as of `doc`. An
 /// edit to a component counts for the artboards its instances are on too,
 /// since it changes what they show.

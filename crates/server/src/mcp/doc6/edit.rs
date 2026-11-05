@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use finite_design::{
-    Document, NodeId, Op, Transaction, css,
+    Document, NodeId, Op, Transaction, comment, css,
     edit::{self, NewArtboard, WriteMode},
     search::{self, Places},
     select,
@@ -22,8 +22,8 @@ use super::{
 use crate::{
     hub::random_id,
     mcp::{
-        TokenValue, component_tools::classes_styled_outside, cut, kept_nodes_note, kept_note,
-        left_out, outline, token_ops, transfer,
+        TokenValue, component_tools::classes_styled_outside, cut, following_note, kept_nodes_note,
+        kept_note, left_out, outline, token_ops, transfer,
     },
 };
 
@@ -420,6 +420,28 @@ fn artboard(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String
     Ok((text, Some(id)))
 }
 
+/// What a copy does about the instances in it. With `detach`, they become
+/// plain elements, so later component edits don't change the copy; without,
+/// the result says how many still follow their components.
+fn freeze(tx: &mut Transaction<'_>, roots: &[NodeId], detach: bool) -> Result<Option<String>> {
+    if !detach {
+        let n = edit::instances_in(tx.view(), roots, true).len();
+        return Ok((n > 0).then(|| following_note(n)));
+    }
+    let ops = {
+        let t = &*tx;
+        edit::detach_all(t.doc(), roots, true, &mut || fresh(t)).map_err(|e| e.to_string())?
+    };
+    let n = edit::detached_count(&ops);
+    stage(tx, ops)?;
+    Ok((n > 0).then(|| {
+        format!(
+            "Detached {n} instance{} in the copy; it no longer follows any component.",
+            plural(n)
+        )
+    }))
+}
+
 /// An artboard op with `from`: a copy of that artboard, renamed, resized,
 /// moved and filled as the op says.
 fn copy_artboard(
@@ -452,6 +474,7 @@ fn copy_artboard(
     };
     stage(tx, ops)?;
     let id = roots.first().cloned().ok_or("the copy made nothing")?;
+    let frozen = freeze(tx, &roots, flag(f, "detach"))?;
     if let Some(name) = text(f, "name") {
         let ops = edit::rename(tx.view(), &id, Some(&name)).map_err(|e| e.to_string())?;
         stage(tx, ops)?;
@@ -509,6 +532,10 @@ fn copy_artboard(
         label(doc, &src),
         outline(doc, &id, 2)
     );
+    if let Some(frozen) = frozen {
+        text.push('\n');
+        text.push_str(&frozen);
+    }
     text.push_str(&left_out(&dropped));
     Ok((text, Some(id)))
 }
@@ -1248,19 +1275,28 @@ fn move_op(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<(String,
     };
     // Copy first, so mode, page and x and y place the copies, not the originals.
     let duplicate = text(f, "op").is_some_and(|o| o.eq_ignore_ascii_case("duplicate"));
-    if flag(f, "copy") || flag(f, "duplicate") || duplicate {
+    let copying = flag(f, "copy") || flag(f, "duplicate") || duplicate;
+    if flag(f, "detach") && !copying {
+        return Err(
+            "detach on a move needs copy: true, to detach the copies. To detach instances where they are, use {\"op\": \"component\", \"select\": \"…\", \"detach\": true}"
+                .into(),
+        );
+    }
+    if copying {
         let (ops, roots) = {
             let t = &*tx;
             edit::duplicate(t.view(), &ids, &mut || fresh(t)).map_err(|e| e.to_string())?
         };
         stage(tx, ops)?;
         made = roots.first().cloned();
+        let frozen = freeze(tx, &roots, flag(f, "detach"))?;
         parts.push(format!(
             "Copied {} node{}:\n{}",
             roots.len(),
             plural(roots.len()),
             outlines(tx.view(), &roots, 2).trim_end()
         ));
+        parts.extend(frozen);
         ids = roots;
     }
     if f.contains_key("mode") && to.is_none() {
@@ -1450,25 +1486,57 @@ fn component(
         || text(f, "op").is_some_and(|op| op.to_ascii_lowercase().starts_with("detach"));
     let (selector, ids) = selected(tx.view(), Kind::Component, f, refs)?;
     if detach {
-        let ops = {
-            let t = &*tx;
-            edit::detach_instances(t.view(), &ids, &mut || fresh(t)).map_err(|e| e.to_string())?
+        // An artboard or any other container: every instance inside it, at
+        // any depth. An instance itself: just that one. A part inside an
+        // instance goes with the instances, whose detach says which one to
+        // detach instead.
+        let (instances, containers): (Vec<NodeId>, Vec<NodeId>) = {
+            let doc = tx.view();
+            ids.iter().cloned().partition(|id| {
+                finite_design::components::is_virtual(id)
+                    || doc.get(id).is_some_and(|n| n.is_instance())
+            })
         };
-        if ops.is_empty() {
+        let mut detached = 0;
+        if !containers.is_empty() {
+            let ops = {
+                let t = &*tx;
+                edit::detach_all(t.doc(), &containers, false, &mut || fresh(t))
+                    .map_err(|e| e.to_string())?
+            };
+            detached += edit::detached_count(&ops);
+            stage(tx, ops)?;
+        }
+        // One inside a container is plain by now.
+        let rest: Vec<NodeId> = instances
+            .into_iter()
+            .filter(|id| {
+                finite_design::components::is_virtual(id)
+                    || tx.doc().get(id).is_some_and(|n| n.is_instance())
+            })
+            .collect();
+        if !rest.is_empty() {
+            let ops = {
+                let t = &*tx;
+                edit::detach_instances(t.view(), &rest, &mut || fresh(t))
+                    .map_err(|e| e.to_string())?
+            };
+            detached += edit::detached_count(&ops);
+            stage(tx, ops)?;
+        }
+        if detached == 0 {
             return Err(format!(
                 "{selector:?} matches no instance: {}. An instance is an element with data-instance-of in read's html",
                 describe(tx.view(), &ids)
             ));
         }
-        stage(tx, ops)?;
         let doc = tx.view();
-        let detached: Vec<NodeId> = ids.into_iter().filter(|id| doc.get(id).is_some()).collect();
+        let shown: Vec<NodeId> = ids.into_iter().filter(|id| doc.get(id).is_some()).collect();
         return Ok((
             format!(
-                "Detached {} instance{}; they no longer follow a component:\n{}",
-                detached.len(),
-                plural(detached.len()),
-                outlines(doc, &detached, 2)
+                "Detached {detached} instance{}; they no longer follow a component:\n{}",
+                plural(detached),
+                outlines(doc, &shown, 2)
             ),
             None,
         ));
@@ -1540,11 +1608,60 @@ fn remove(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<String> {
     let inside: usize = ops.iter().map(|op| doc.subtree(op.id()).len()).sum();
     let count = ops.len();
     let shown = describe(doc, &ids);
+    let warning = orphaned_comments(tx, &ids);
     stage(tx, ops)?;
-    Ok(format!(
+    let mut text = format!(
         "Deleted {count} node{} ({shown}), {inside} in all with everything inside them.",
         plural(count)
-    ))
+    );
+    if let Some(warning) = warning {
+        text.push('\n');
+        text.push_str(&warning);
+    }
+    Ok(text)
+}
+
+/// A warning for the open comments that deleting `roots` leaves pinned to
+/// nothing: the ones on a deleted artboard show as `artboardDeleted`, and
+/// the ones on a deleted element keep their place on the artboard but lose
+/// the element (`node: null`).
+fn orphaned_comments(tx: &Transaction<'_>, roots: &[NodeId]) -> Option<String> {
+    const SHOWN: usize = 6;
+    let pinned = comment::pinned_inside(tx.view(), tx.comments(), roots);
+    let (boards, elements): (Vec<_>, Vec<_>) = pinned.into_iter().partition(|c| {
+        c.artboard_id
+            .as_ref()
+            .is_some_and(|board| roots.contains(board))
+    });
+    let ids = |list: &[&comment::Comment]| {
+        let mut shown: Vec<&str> = list.iter().take(SHOWN).map(|c| c.id.as_str()).collect();
+        let more = list.len().saturating_sub(SHOWN);
+        if more > 0 {
+            shown.push("…");
+        }
+        shown.join(", ")
+    };
+    let open = |n: usize| format!("{n} open comment{}", plural(n));
+    let mut notes = Vec::new();
+    if !boards.is_empty() {
+        notes.push(format!(
+            "{} {} pinned inside: {}; they'll show as on a deleted artboard (artboardDeleted: true). To keep them with a rebuilt screen, call comments with pin: [{{\"commentId\": \"{}\", \"select\": \"#newNode\"}}] once it exists.",
+            open(boards.len()),
+            if boards.len() == 1 { "is" } else { "are" },
+            ids(&boards),
+            boards[0].id
+        ));
+    }
+    if !elements.is_empty() {
+        notes.push(format!(
+            "{} {} pinned to elements inside: {}; they keep their place on the artboard but lose the element (node: null). comments with pin: [{{\"commentId\": \"{}\", \"select\": \"#newNode\"}}] points one at a replacement.",
+            open(elements.len()),
+            if elements.len() == 1 { "is" } else { "are" },
+            ids(&elements),
+            elements[0].id
+        ));
+    }
+    (!notes.is_empty()).then(|| notes.join("\n"))
 }
 
 /// Where a replace op looks: `in`, one place or a list of them, or by
@@ -1819,16 +1936,20 @@ fn page(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<(String, Op
     if let Some(gone) = text(f, "remove").or_else(|| text(f, "delete")) {
         let doc = tx.view();
         let id = page_id(doc, &gone, refs)?;
-        let boards = doc.artboards_on(&id).len();
+        let boards: Vec<NodeId> = doc.artboards_on(&id).iter().map(|b| b.id.clone()).collect();
         let ops = edit::delete_page(doc, &id).map_err(|e| e.to_string())?;
+        let warning = orphaned_comments(tx, &boards);
         stage(tx, ops)?;
-        return Ok((
-            format!(
-                "Deleted page {gone:?} and its {boards} artboard{}.",
-                plural(boards)
-            ),
-            None,
-        ));
+        let mut text = format!(
+            "Deleted page {gone:?} and its {} artboard{}.",
+            boards.len(),
+            plural(boards.len())
+        );
+        if let Some(warning) = warning {
+            text.push('\n');
+            text.push_str(&warning);
+        }
+        return Ok((text, None));
     }
     Err(format!(
         "\"page\" takes create, rename (with name) or remove, like {}, {{\"op\": \"page\", \"rename\": \"Drafts\", \"name\": \"Archive\"}} or {{\"op\": \"page\", \"remove\": \"Drafts\"}}",
