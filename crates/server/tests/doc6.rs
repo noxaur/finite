@@ -176,6 +176,72 @@ async fn replace_in_text_leaves_attributes_alone() {
     assert!(wrong.contains("isn't a place to replace in"), "{wrong}");
 }
 
+/// in: "text" changes what people read and leaves <script> and <style> alone,
+/// including an SVG <style>. in: "code" is what reaches that code.
+#[tokio::test]
+async fn replace_in_text_skips_script_and_style() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Replacer").await;
+    let id = design(&mut agent, "Rates").await;
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Page", "width": 600,
+                 "html": "<p>Timepris</p><script>h('Timepris'); h('Timepris')</script><svg><style>.z { content: \"Timepris\" }</style></svg>" }]),
+    )
+    .await;
+    let found = agent
+        .ok("read", json!({ "designId": id, "contains": "Timepris" }))
+        .await;
+    let text = found.split("In text:").nth(1).unwrap_or("");
+    assert!(
+        text.starts_with(" 1 element") && !text.contains("script") && !text.contains("style"),
+        "{found}"
+    );
+    assert!(
+        found.contains("In styles") && found.contains("script"),
+        "{found}"
+    );
+    let done = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "replace", "find": "Timepris", "replace": "Timepris arbeid", "in": "text" }]),
+    )
+    .await;
+    assert!(done.contains("Replaced 1 use"), "{done}");
+    let page = html(&mut agent, &id, ":root").await;
+    assert!(
+        page.contains("Timepris arbeid")
+            && page.contains("h('Timepris')")
+            && page.contains("content: \"Timepris\""),
+        "{page}"
+    );
+    let refused_code = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "replace", "find": "Timepris", "replace": "Rate", "in": "code" }]),
+    )
+    .await;
+    assert!(
+        refused_code.contains("matches") && refused_code.contains("nothing changed"),
+        "{refused_code}"
+    );
+    let code = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "replace", "find": "Timepris", "replace": "Rate", "in": "code", "all": true }]),
+    )
+    .await;
+    assert!(code.contains("Replaced"), "{code}");
+    let page = html(&mut agent, &id, ":root").await;
+    assert!(
+        page.contains("h('Rate')")
+            && page.contains("content: \"Rate\"")
+            && page.contains("Timepris arbeid"),
+        "{page}"
+    );
+}
+
 /// Deleting can't be undone, so the start of an id, which every other
 /// tool accepts, isn't enough.
 /// A copy is what x, y, page and mode place, not its original.

@@ -12,14 +12,17 @@ use crate::{
 /// What to look for. Every filter that's set must match.
 #[derive(Clone, Debug, Default)]
 pub struct Query {
-    /// Text the element contains, ignoring case.
+    /// Visible text the element contains, ignoring case. Text inside
+    /// `<script>` and `<style>` (including an SVG `<style>`) is code, so it
+    /// doesn't match; a style search still finds it.
     pub text: Option<String>,
     /// Part of the layer name, ignoring case.
     pub name: Option<String>,
     /// The tag, like `button`.
     pub tag: Option<String>,
     /// Part of a style declaration, like `#3b82f6`, `border-radius` or
-    /// `display: grid`, ignoring case. Also matches the CSS in `<style>` blocks.
+    /// `display: grid`, ignoring case. Also matches the code in `<style>` and
+    /// `<script>` blocks, including an SVG `<style>`.
     pub style: Option<String>,
     /// Part of an attribute, like `href` or `src="https://`, ignoring case.
     pub attribute: Option<String>,
@@ -33,7 +36,8 @@ pub struct Found {
 }
 
 /// The nodes under `within` (or in every artboard) that match `query`, in
-/// document order. Text matches name the element holding the text.
+/// document order. A text match names the element holding the text. Text
+/// inside `<script>` and `<style>` doesn't match.
 pub fn find(doc: &Document, within: Option<&str>, query: &Query) -> Vec<Found> {
     let lower = |s: &Option<String>| s.as_ref().map(|s| s.to_lowercase());
     let (text, name, tag, style, attribute) = (
@@ -65,6 +69,10 @@ pub fn find(doc: &Document, within: Option<&str>, query: &Query) -> Vec<Found> {
             continue;
         }
         if let Some(text) = &text {
+            // Script and style bodies are code, reached by a style search.
+            if in_raw_text(doc, node) {
+                continue;
+            }
             let own = own_text(doc, node);
             if !own.to_lowercase().contains(text) {
                 continue;
@@ -120,8 +128,9 @@ pub fn find(doc: &Document, within: Option<&str>, query: &Query) -> Vec<Found> {
 pub struct Places {
     pub styles: bool,
     pub attributes: bool,
-    /// The code in `<style>` and `<script>` blocks.
+    /// The code in `<style>` and `<script>` blocks, including an SVG `<style>`.
     pub css: bool,
+    /// Visible text. Not the text inside `<script>` or `<style>`.
     pub text: bool,
 }
 
@@ -139,11 +148,12 @@ pub struct Replaced {
 /// notation (`#3B82F6`, `rgb(59 130 246)`) and, when `to` is a color too, also
 /// its tints (`#3b82f6cc`, `rgba(59, 130, 246, 0.2)`), keeping each use's
 /// transparency; when `to` is text, tints are left alone. Otherwise it matches
-/// the exact text, and always does in a `<script>`, where `rgb(59 130 246)` is code. A
-/// match in a `<script>`, or in a `<style>` when `from` isn't a color, is
-/// refused when there's more than one match, unless `all` is set: `300ms` in
-/// one rule is rarely meant to change in every rule. Returns the ops and what
-/// they change.
+/// the exact text, and always does in a `<script>`, where `rgb(59 130 246)` is code.
+/// Text inside `<script>` and `<style>` (including an SVG `<style>`) is that code:
+/// `places.text` skips it, and `places.css` is what reaches it. A match in a
+/// `<script>`, or in a `<style>` when `from` isn't a color, is refused when
+/// there's more than one match, unless `all` is set: `300ms` in one rule is
+/// rarely meant to change in every rule. Returns the ops and what they change.
 pub fn replace(
     doc: &Document,
     within: Option<&str>,
@@ -238,13 +248,8 @@ pub fn replace(
                 }
             }
             NodeKind::Text if places.text => {
-                let in_code = node
-                    .parent
-                    .as_deref()
-                    .and_then(|p| doc.get(p))
-                    .is_some_and(|p| p.tag().is_some_and(is_raw_text));
                 if let Some(text) = &node.text
-                    && !in_code
+                    && !in_raw_text(doc, node)
                 {
                     let (new, n) = swap(text);
                     if n > 0 && new != *text {
@@ -376,6 +381,20 @@ fn scope<'a>(doc: &'a Document, within: Option<&str>) -> Vec<&'a Node> {
 
 fn is_raw_text(tag: &str) -> bool {
     tag.eq_ignore_ascii_case("style") || tag.eq_ignore_ascii_case("script")
+}
+
+/// Whether `node` is a `<script>` or `<style>`, or sits inside one. An SVG
+/// `<style>` is a `<style>` too. Visible text stops at these elements; their
+/// bodies are code.
+fn in_raw_text(doc: &Document, node: &Node) -> bool {
+    let mut current = Some(node);
+    while let Some(at) = current {
+        if at.tag().is_some_and(is_raw_text) {
+            return true;
+        }
+        current = at.parent.as_deref().and_then(|id| doc.get(id));
+    }
+    false
 }
 
 /// The text directly inside an element (not in its descendants' elements).
@@ -772,6 +791,98 @@ mod tests {
         )
         .unwrap();
         assert!(!report[0].changes.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn text_scope_skips_script_and_style_code_scope_finds_them() {
+        let (doc, board) = design(
+            r##"<p>See Timepris</p>
+<script>h('Timepris'); h('Timepris')</script>
+<style>.a { content: "Timepris" } .b { content: "Timepris" }</style>
+<svg><style>.z { content: "Timepris" }</style></svg>"##,
+        );
+        let text_only = Places {
+            styles: false,
+            attributes: false,
+            css: false,
+            text: true,
+        };
+        let (ops, report) = replace(
+            &doc,
+            Some(&board),
+            "Timepris",
+            "Timepris arbeid",
+            text_only,
+            false,
+        )
+        .unwrap();
+        let mut changed = doc.clone();
+        changed.apply_all(&ops);
+        let html = html::export(&changed, &board, false).unwrap();
+        assert!(
+            html.contains("See Timepris arbeid") && html.contains("h('Timepris')"),
+            "text scope rewrote code:\n{html}\n{report:?}"
+        );
+        assert!(
+            html.contains(r#"content: "Timepris""#),
+            "text scope rewrote style:\n{html}\n{report:?}"
+        );
+        assert_eq!(
+            report.iter().map(|r| r.count).sum::<usize>(),
+            1,
+            "{report:?}"
+        );
+
+        let code_only = Places {
+            styles: false,
+            attributes: false,
+            css: true,
+            text: false,
+        };
+        let (ops, report) =
+            replace(&doc, Some(&board), "Timepris", "Rate", code_only, true).unwrap();
+        let mut changed = doc.clone();
+        changed.apply_all(&ops);
+        let html = html::export(&changed, &board, false).unwrap();
+        assert!(
+            html.contains("h('Rate')")
+                && html.contains(r#"content: "Rate""#)
+                && html.contains("See Timepris"),
+            "code scope missed script or style:\n{html}\n{report:?}"
+        );
+        // The two style rules plus the svg style plus two script calls.
+        assert!(
+            report.iter().map(|r| r.count).sum::<usize>() >= 5,
+            "{report:?}\n{html}"
+        );
+
+        let hits = find(
+            &doc,
+            Some(&board),
+            &Query {
+                text: Some("Timepris".into()),
+                ..Default::default()
+            },
+        );
+        let tags: Vec<_> = hits
+            .iter()
+            .filter_map(|h| doc.get(&h.id).and_then(|n| n.tag()))
+            .collect();
+        assert_eq!(tags, ["p"], "text search hit code: {tags:?} {hits:?}");
+        // A style search is what still reaches the script and both styles.
+        let code = find(
+            &doc,
+            Some(&board),
+            &Query {
+                style: Some("Timepris".into()),
+                ..Default::default()
+            },
+        );
+        let code_tags: Vec<_> = code
+            .iter()
+            .filter_map(|h| doc.get(&h.id).and_then(|n| n.tag()))
+            .collect();
+        assert_eq!(code_tags, ["script", "style", "style"], "{code:?}");
     }
 
     #[test]
