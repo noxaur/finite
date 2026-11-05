@@ -7,10 +7,11 @@ use finite_design::{
     comment::{Audience, Comment},
 };
 
-/// The most text one tool result returns, about 15,000 tokens. Claude Code
-/// cuts MCP results at 25,000 tokens by default, wherever that falls, and a
-/// long result crowds out the rest of the agent's context anyway.
-pub(super) const OUTPUT_LIMIT: usize = 60_000;
+/// The most text one tool result returns, about 10,000 tokens. Claude Code
+/// cuts MCP results at 25,000 tokens by default, wherever that falls, and
+/// other clients cap lower: a 56,000-character read went over one's limit
+/// twice. A long result crowds out the rest of the agent's context anyway.
+pub(super) const OUTPUT_LIMIT: usize = 40_000;
 
 /// Cuts `text` to [`OUTPUT_LIMIT`] at the end of a line, and says how to see
 /// the rest with `hint`.
@@ -29,6 +30,20 @@ pub(super) fn cut(text: String, hint: &str) -> String {
         "{}… cut off after {shown} of {total} lines. {hint}\n",
         &text[..end]
     )
+}
+
+/// The first `shown` of `ids` like `#a, #b, #c, … +8`, for lines that name
+/// many nodes at once.
+pub(super) fn some_ids<S: AsRef<str>>(ids: &[S], shown: usize) -> String {
+    let mut text: Vec<String> = ids
+        .iter()
+        .take(shown)
+        .map(|id| format!("#{}", id.as_ref()))
+        .collect();
+    if ids.len() > shown {
+        text.push(format!("… +{}", ids.len() - shown));
+    }
+    text.join(", ")
 }
 
 /// One line per node, indented by depth: `tag "Name" #id [width×height] "text"`.
@@ -300,10 +315,14 @@ pub(super) fn shot(image: &crate::screenshot::Image) -> String {
     let px = |v: f64| format!("{}", (v * 10.0).round() / 10.0);
     let a = &image.area;
     let b = &image.bounds;
-    let mut out = format!(
-        "#{} in artboard #{}: shows {}×{} at ({}, {}); the node's box is {}×{} at ({}, {}). {}×{} pixels.",
-        image.node,
-        image.artboard,
+    let mut out = if image.node == image.artboard {
+        format!("Artboard #{}", image.artboard)
+    } else {
+        format!("#{} in artboard #{}", image.node, image.artboard)
+    };
+    let _ = write!(
+        out,
+        ": shows {}×{} at ({}, {}); the node's box is {}×{} at ({}, {}). {}×{} pixels.",
         px(a.width),
         px(a.height),
         px(a.x),
@@ -343,14 +362,34 @@ pub(super) fn shot(image: &crate::screenshot::Image) -> String {
             ", and is cut off there; pass revealOverflow to see it."
         });
     }
-    if let Some(settled) = image.settled {
-        let _ = write!(
-            out,
-            " It has scripts or animations, captured {:.1}s after load.",
-            settled.as_secs_f64()
-        );
-    }
     out
+}
+
+/// Which of `images` have scripts or animations, and how long they ran
+/// before capture. Every image waits the same, so a call says it once.
+pub(super) fn settled_note<'a>(
+    images: impl Iterator<Item = &'a crate::screenshot::Image>,
+) -> Option<String> {
+    let mut settled = None;
+    let mut nodes = Vec::new();
+    for image in images {
+        if let Some(wait) = image.settled {
+            settled = Some(wait);
+            nodes.push(image.node.as_str());
+        }
+    }
+    let wait = settled?;
+    Some(format!(
+        "{} {} scripts or animations, so {} captured {:.1}s after load.",
+        some_ids(&nodes, 3),
+        if nodes.len() == 1 { "has" } else { "have" },
+        if nodes.len() == 1 {
+            "it was"
+        } else {
+            "they were"
+        },
+        wait.as_secs_f64()
+    ))
 }
 
 /// How many elements a layout note names before it says how many more.
@@ -669,3 +708,61 @@ fn rendered_into(
 
 /// Elements whose content is code, not text.
 const RAW_TEXT: &[&str] = &["style", "script"];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::screenshot::{Image, Overflow, Rect};
+    use std::time::Duration;
+
+    fn image(node: &str, artboard: &str, settled: Option<u64>) -> Image {
+        let rect = Rect::new(0.0, 0.0, 100.0, 50.0);
+        Image {
+            data: Vec::new(),
+            mime: "image/png",
+            node: node.into(),
+            artboard: artboard.into(),
+            element: node.into(),
+            area: rect,
+            bounds: rect,
+            pixel_width: 100,
+            pixel_height: 50,
+            scale: 1.0,
+            requested_scale: 1.0,
+            cut_off: false,
+            overflow: Overflow::default(),
+            overflow_shown: false,
+            settled: settled.map(Duration::from_secs),
+            boxes: None,
+        }
+    }
+
+    #[test]
+    fn a_shot_of_the_artboard_does_not_name_it_twice() {
+        assert!(shot(&image("ab", "ab", None)).starts_with("Artboard #ab: shows"));
+        assert!(shot(&image("n1", "ab", None)).starts_with("#n1 in artboard #ab: shows"));
+        assert!(!shot(&image("ab", "ab", Some(3))).contains("scripts"));
+    }
+
+    #[test]
+    fn the_wait_for_scripts_is_said_once_per_call() {
+        let images = [
+            image("a", "a", Some(3)),
+            image("b", "b", None),
+            image("c", "c", Some(3)),
+        ];
+        assert_eq!(
+            settled_note(images.iter()).unwrap(),
+            "#a, #c have scripts or animations, so they were captured 3.0s after load."
+        );
+        assert_eq!(settled_note(images[1..2].iter()), None);
+    }
+
+    #[test]
+    fn some_ids_names_the_first_few_and_counts_the_rest() {
+        let ids: Vec<String> = (1..=11).map(|i| format!("n{i}")).collect();
+        assert_eq!(some_ids(&ids, 3), "#n1, #n2, #n3, … +8");
+        assert_eq!(some_ids(&ids[..2], 3), "#n1, #n2");
+        assert_eq!(some_ids::<&str>(&[], 3), "");
+    }
+}

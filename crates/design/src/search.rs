@@ -3,6 +3,8 @@
 //! artboard's HTML and picked out each use of a color by eye, and nothing
 //! told them whether they had found them all.
 
+use std::collections::BTreeMap;
+
 use crate::{
     Document, Node, NodeId, NodeKind, Op, PropKey,
     edit::{EditError, normalize_style_name},
@@ -168,6 +170,8 @@ pub fn replace(
     // color: `rgb(59 130 246)` or `'#abc'` there is code, so it's matched as
     // exact text.
     let mut guarded = 0;
+    // How many matches landed in each kind of place, for the refusal.
+    let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
     let mut report = Vec::new();
     let mut ops = Vec::new();
     for node in scope(doc, within) {
@@ -180,6 +184,7 @@ pub fn replace(
                         let (new, n) = swap(value);
                         if n > 0 && new != *value {
                             count += n;
+                            *kinds.entry("inline styles").or_default() += n;
                             changes.push(format!("{key}: {value} → {new}"));
                             ops.push(Op::Set {
                                 id: node.id.clone(),
@@ -194,6 +199,7 @@ pub fn replace(
                         let (new, n) = swap(value);
                         if n > 0 && new != *value && html::is_safe_attr(key, &new) {
                             count += n;
+                            *kinds.entry("attributes").or_default() += n;
                             changes.push(format!("{key}=\"{value}\" → \"{new}\""));
                             ops.push(Op::Set {
                                 id: node.id.clone(),
@@ -213,12 +219,22 @@ pub fn replace(
                         let (new, n) = swap_code(code);
                         if n > 0 && new != *code {
                             count += n;
+                            *kinds
+                                .entry(if script {
+                                    "<script> code"
+                                } else {
+                                    "<style> code"
+                                })
+                                .or_default() += n;
                             if script || !from_is_color {
                                 guarded += n;
                             }
                             let mut lines: Vec<String> = css_lines(code)
                                 .filter(|line| swap_code(line).1 > 0)
-                                .map(|line| format!("{label}: {line} → {}", swap_code(&line).0))
+                                .flat_map(|line| {
+                                    let after = swap_code(&line).0;
+                                    change_lines(label, &line, &after, from, to)
+                                })
                                 .collect();
                             // A find that spans `;`, `{` or `}` isn't inside any
                             // one line, so show it with the code around it.
@@ -249,6 +265,7 @@ pub fn replace(
                     let (new, n) = swap(text);
                     if n > 0 && new != *text {
                         count += n;
+                        *kinds.entry("text").or_default() += n;
                         changes.push(format!("text: {text:?} → {new:?}"));
                         ops.push(Op::Set {
                             id: node.id.clone(),
@@ -271,15 +288,48 @@ pub fn replace(
     }
     let total: usize = report.iter().map(|r| r.count).sum();
     if guarded > 0 && total > 1 && !all {
-        let lines: Vec<&str> = report
+        let kinds: Vec<String> = kinds.iter().map(|(k, n)| format!("{k} ×{n}")).collect();
+        let nodes: Vec<String> = report
             .iter()
-            .flat_map(|r| r.changes.iter().map(String::as_str))
+            .take(REFUSAL_NODES)
+            .map(|r| {
+                let tag = doc.get(&r.id).and_then(|n| n.tag()).unwrap_or("node");
+                format!("{tag} #{}", r.id)
+            })
             .collect();
+        let more = report.len().saturating_sub(REFUSAL_NODES);
+        // Copies of one stylesheet make the same change many times over.
+        let mut lines: Vec<(&str, usize)> = Vec::new();
+        for line in report.iter().flat_map(|r| r.changes.iter()) {
+            match lines.iter_mut().find(|(seen, _)| *seen == line.as_str()) {
+                Some((_, times)) => *times += 1,
+                None => lines.push((line, 1)),
+            }
+        }
+        let hidden = lines.len().saturating_sub(REFUSAL_LINES);
+        let mut shown: Vec<String> = lines
+            .iter()
+            .take(REFUSAL_LINES)
+            .map(|(line, times)| match times {
+                1 => (*line).to_owned(),
+                _ => format!("{line} (×{times})"),
+            })
+            .collect();
+        if hidden > 0 {
+            shown.push(format!("… and {hidden} more different changes"));
+        }
         return Err(EditError(format!(
-            "{from:?} matches {total} times, and not only in colors, so nothing changed. \
+            "{from:?} matches {total} times, in {} (on {}{}), and not only in colors, so nothing changed. \
              Narrow it with within or a longer find, or pass all: true to replace every one. \
              It would change:\n  {}",
-            lines.join("\n  ")
+            kinds.join(", "),
+            nodes.join(", "),
+            if more > 0 {
+                format!(", … +{more}")
+            } else {
+                String::new()
+            },
+            shown.join("\n  ")
         )));
     }
     Ok((ops, report))
@@ -394,8 +444,35 @@ fn css_lines(css: &str) -> impl Iterator<Item = String> + '_ {
         .map(str::to_owned)
 }
 
+/// How many nodes, and how many different changes, a refusal names.
+const REFUSAL_NODES: usize = 3;
+const REFUSAL_LINES: usize = 8;
+
+/// How long a changed line of code can be before a preview shows just the
+/// code around each match instead.
+const LINE_SHOWN: usize = 90;
+
+/// One changed line of code as `label: before → after`, or when the line is
+/// long, one such line per match with the code around it. A color matched in
+/// another notation isn't found as `from`, so a long line like that shows its
+/// start.
+fn change_lines(label: &str, line: &str, after: &str, from: &str, to: &str) -> Vec<String> {
+    if line.chars().count() <= LINE_SHOWN {
+        return vec![format!("{label}: {line} → {after}")];
+    }
+    let around: Vec<String> = snippets(line, from, to)
+        .map(|(before, after)| format!("{label}: {before} → {after}"))
+        .collect();
+    if !around.is_empty() {
+        return around;
+    }
+    let start = |text: &str| text.chars().take(LINE_SHOWN).collect::<String>();
+    vec![format!("{label}: {}… → {}…", start(line), start(after))]
+}
+
 /// Each match of `from` in `code` with up to 30 characters of code on either
-/// side, as `(before, after)` for replacing it with `to`.
+/// side, as `(before, after)` for replacing it with `to`. A side that was cut
+/// ends in `…`.
 fn snippets<'a>(
     code: &'a str,
     from: &'a str,
@@ -412,7 +489,12 @@ fn snippets<'a>(
             .char_indices()
             .nth(CONTEXT)
             .map_or(code.len(), |(i, _)| at + from.len() + i);
-        let (head, tail) = (&code[start..at], &code[at + from.len()..end]);
+        let head = format!("{}{}", if start > 0 { "…" } else { "" }, &code[start..at]);
+        let tail = format!(
+            "{}{}",
+            &code[at + from.len()..end],
+            if end < code.len() { "…" } else { "" }
+        );
         (format!("{head}{from}{tail}"), format!("{head}{to}{tail}"))
     })
 }
@@ -649,6 +731,58 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn replace_shows_the_code_around_a_match_in_a_long_line() {
+        let font = "@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400&family=Roboto+Mono:wght@500&display=swap')";
+        let (doc, board) = design(&format!("<style>{font};\n.a {{ color: red }}</style>"));
+        let places = Places {
+            styles: false,
+            attributes: false,
+            css: true,
+            text: false,
+        };
+        let (_, report) =
+            replace(&doc, Some(&board), "Roboto+Mono", "Fira+Code", places, true).unwrap();
+        let [change] = report[0].changes.as_slice() else {
+            panic!("{report:?}")
+        };
+        assert!(
+            change.starts_with("css: …")
+                && change.contains("Roboto+Mono")
+                && change.contains("Fira+Code"),
+            "{change}"
+        );
+        assert!(!change.contains("@import"), "{change}");
+    }
+
+    #[test]
+    fn a_refusal_names_the_places_and_groups_identical_changes() {
+        let sheet = "<style>.a { transition: opacity 300ms }</style>";
+        let (doc, board) = design(&sheet.repeat(4));
+        let places = Places {
+            styles: true,
+            attributes: true,
+            css: true,
+            text: false,
+        };
+        let err = replace(&doc, Some(&board), "300ms", "500ms", places, false)
+            .unwrap_err()
+            .0;
+        assert!(
+            err.contains("matches 4 times, in <style> code ×4")
+                && err.contains("on style #")
+                && err.contains(", … +1)"),
+            "{err}"
+        );
+        // Four equal lines are one line with a count.
+        assert_eq!(
+            err.matches("transition: opacity 300ms →").count(),
+            1,
+            "{err}"
+        );
+        assert!(err.contains("(×4)"), "{err}");
     }
 
     #[test]

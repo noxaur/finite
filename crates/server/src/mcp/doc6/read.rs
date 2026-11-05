@@ -288,6 +288,11 @@ fn html_view(design: &Design, ids: &[NodeId], depth: Option<usize>) -> String {
     text
 }
 
+/// The longest `<style>` or `<script>` code read shows inside an element's
+/// HTML. A page's stylesheet can be most of an artboard's HTML, and reading
+/// the element on its own shows all of it.
+const CODE_SHOWN: usize = 2_000;
+
 /// One node's HTML, as an html op takes it back, cut to fit `limit`.
 fn html_of(design: &Design, id: &str, depth: Option<usize>, limit: usize) -> String {
     let doc = design.view();
@@ -295,6 +300,10 @@ fn html_of(design: &Design, id: &str, depth: Option<usize>, limit: usize) -> Str
         ids: true,
         styles: true,
         depth,
+        max_code_len: (!doc.get(id).and_then(|n| n.tag()).is_some_and(|tag| {
+            tag.eq_ignore_ascii_case("style") || tag.eq_ignore_ascii_case("script")
+        }))
+        .then_some(CODE_SHOWN),
         read_at: Some(design.seq()),
         ..Default::default()
     };
@@ -345,6 +354,18 @@ fn html_of(design: &Design, id: &str, depth: Option<usize>, limit: usize) -> Str
             } else {
                 "s were"
             },
+        ));
+    }
+    if export.hidden_code > 0 {
+        out.push_str(&format!(
+            "\n{} <style> or <script> {} replaced by a comment saying how to read {}. Don't write this HTML back as it is.",
+            export.hidden_code,
+            if export.hidden_code == 1 {
+                "body was"
+            } else {
+                "bodies were"
+            },
+            if export.hidden_code == 1 { "it" } else { "them" },
         ));
     }
     if let Some(note) = html_component_note(design, id, &out) {
