@@ -2108,12 +2108,13 @@ pub fn detach_instances(
 /// another is skipped: it only exists while its outer instance shows it. So
 /// is one inside a component's definition: the component is shared, and
 /// rewriting its nodes would orphan the overrides of its instances
-/// elsewhere.
-pub fn instances_in(doc: &Document, roots: &[NodeId]) -> Vec<NodeId> {
+/// elsewhere. With `copies`, the roots are fresh copies, which nothing
+/// follows yet, so a root that sits inside a definition still counts.
+pub fn instances_in(doc: &Document, roots: &[NodeId], copies: bool) -> Vec<NodeId> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for root in roots {
-        if components::component_of(doc, root).is_some() {
+        if !copies && components::component_of(doc, root).is_some() {
             continue;
         }
         let mut stack: Vec<&Node> = doc.get(root).into_iter().collect();
@@ -2140,13 +2141,14 @@ pub fn instances_in(doc: &Document, roots: &[NodeId]) -> Vec<NodeId> {
 pub fn detach_all(
     doc: &Document,
     roots: &[NodeId],
+    copies: bool,
     new_id: &mut impl FnMut() -> NodeId,
 ) -> Result<Vec<Op>> {
     let mut ops = Vec::new();
     let mut staged: Option<Document> = None;
     loop {
         let current = staged.as_ref().unwrap_or(doc);
-        let instances = instances_in(current, roots);
+        let instances = instances_in(current, roots, copies);
         if instances.is_empty() {
             return Ok(ops);
         }
@@ -2200,7 +2202,7 @@ pub fn duplicate_detached(
     if follows {
         let mut copied = doc.clone();
         copied.apply_all(&ops);
-        ops.extend(detach_all(&copied, &roots, new_id)?);
+        ops.extend(detach_all(&copied, &roots, true, new_id)?);
     }
     Ok((ops, roots))
 }

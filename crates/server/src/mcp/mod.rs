@@ -1893,7 +1893,7 @@ impl FiniteMcp {
                     for root in &roots {
                         text.push_str(&outline(d.view(), root, 3));
                     }
-                    let following = edit::instances_in(d.view(), &roots).len();
+                    let following = edit::instances_in(d.view(), &roots, true).len();
                     if following > 0 {
                         text.push_str(&following_note(following));
                         text.push('\n');

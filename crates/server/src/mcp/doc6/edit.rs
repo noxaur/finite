@@ -305,12 +305,12 @@ fn artboard(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String
 /// the result says how many still follow their components.
 fn freeze(tx: &mut Transaction<'_>, roots: &[NodeId], detach: bool) -> Result<Option<String>> {
     if !detach {
-        let n = edit::instances_in(tx.view(), roots).len();
+        let n = edit::instances_in(tx.view(), roots, true).len();
         return Ok((n > 0).then(|| following_note(n)));
     }
     let ops = {
         let t = &*tx;
-        edit::detach_all(t.doc(), roots, &mut || fresh(t)).map_err(|e| e.to_string())?
+        edit::detach_all(t.doc(), roots, true, &mut || fresh(t)).map_err(|e| e.to_string())?
     };
     let n = edit::detached_count(&ops);
     stage(tx, ops)?;
@@ -1028,7 +1028,7 @@ fn component(
         if !containers.is_empty() {
             let ops = {
                 let t = &*tx;
-                edit::detach_all(t.doc(), &containers, &mut || fresh(t))
+                edit::detach_all(t.doc(), &containers, false, &mut || fresh(t))
                     .map_err(|e| e.to_string())?
             };
             detached += edit::detached_count(&ops);

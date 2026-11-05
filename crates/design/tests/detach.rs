@@ -102,14 +102,14 @@ fn a_copy_follows_its_components_unless_detached() {
     let (ops, roots) = edit::duplicate(d.view(), &["a".into()], &mut next).unwrap();
     commit(&mut d, "Copy", &ops);
     assert_eq!(
-        edit::instances_in(d.view(), &roots).len(),
+        edit::instances_in(d.view(), &roots, false).len(),
         1,
         "the copy holds an instance of Bar"
     );
 
     let (ops, frozen) = edit::duplicate_detached(d.view(), &["a".into()], &mut next).unwrap();
     commit(&mut d, "Frozen copy", &ops);
-    assert!(edit::instances_in(d.view(), &frozen).is_empty());
+    assert!(edit::instances_in(d.view(), &frozen, false).is_empty());
     assert!(
         copy_text(d.view(), &frozen[0]).contains("Finite")
             && copy_text(d.view(), &frozen[0]).contains("Home"),
@@ -134,7 +134,7 @@ fn detach_all_reaches_instances_nested_in_instances() {
     let mut next = ids();
     let (d, logo, bar) = design(&mut next);
     // On artboard a, Bar is an instance and so is the Logo it shows.
-    let ops = edit::detach_all(d.doc(), &["a".into()], &mut next).unwrap();
+    let ops = edit::detach_all(d.doc(), &["a".into()], false, &mut next).unwrap();
     assert_eq!(
         edit::detached_count(&ops),
         2,
@@ -143,7 +143,7 @@ fn detach_all_reaches_instances_nested_in_instances() {
     let mut doc = d.doc().clone();
     doc.apply_all(&ops);
     let view = finite_design::components::expand(&doc);
-    assert!(edit::instances_in(&view, &["a".into()]).is_empty());
+    assert!(edit::instances_in(&view, &["a".into()], false).is_empty());
     assert!(
         [&logo, &bar]
             .iter()
@@ -168,7 +168,7 @@ fn a_frozen_copy_is_one_undo_step() {
     );
     assert_eq!(copy_text(d.view(), "a"), before);
     d.redo("agent", 0).unwrap();
-    assert!(edit::instances_in(d.view(), &roots).is_empty());
+    assert!(edit::instances_in(d.view(), &roots, false).is_empty());
 }
 
 #[test]
@@ -194,7 +194,8 @@ fn freeze(design: &mut Design, roots: &[NodeId], new_id: &mut impl FnMut() -> No
             "Detach",
             0,
             |tx| -> Result<usize, edit::EditError> {
-                let ops = edit::detach_all(tx.doc(), roots, &mut || tx.new_id(&mut *new_id))?;
+                let ops =
+                    edit::detach_all(tx.doc(), roots, false, &mut || tx.new_id(&mut *new_id))?;
                 let detached = edit::detached_count(&ops);
                 tx.edit(ops, new_id)?;
                 Ok(detached)
@@ -373,7 +374,7 @@ fn nested_components_freeze_to_one_copy_of_each_part() {
 
     let detached = freeze(&mut d, &["s".into()], &mut next);
     assert_eq!(detached, 3, "Page, Bar and Logo");
-    assert!(edit::instances_in(d.view(), &["s".into()]).is_empty());
+    assert!(edit::instances_in(d.view(), &["s".into()], false).is_empty());
     let after = copy_text(d.view(), &screen);
     assert_eq!(count(&after, "Finite"), 1, "{after}");
     assert_eq!(count(&after, "Home"), 1, "{after}");
@@ -429,6 +430,48 @@ fn chains_deeper_than_thirty_two_levels_freeze() {
 
     let detached = freeze(&mut d, &["s".into()], &mut next);
     assert_eq!(detached, LEVELS + 1);
-    assert!(edit::instances_in(d.view(), &["s".into()]).is_empty());
+    assert!(edit::instances_in(d.view(), &["s".into()], false).is_empty());
     assert_eq!(count(&copy_text(d.view(), &top), "Deep"), 1);
+}
+
+/// A copy made from inside a component's definition is fresh, so freezing it
+/// detaches it, though the original stays an instance in the shared component.
+#[test]
+fn a_copy_taken_from_inside_a_definition_freezes() {
+    let mut next = ids();
+    let mut d = Design::new(DesignMeta {
+        id: "d".into(),
+        name: "Detach".into(),
+        created_at: 0,
+        updated_at: 0,
+    });
+    artboard(&mut d, "s");
+    root_of(
+        &mut d,
+        "s",
+        r#"<span data-component="Logo">Finite</span>"#,
+        &mut next,
+    );
+    let logo = component(&d, "Logo");
+    root_of(
+        &mut d,
+        "s",
+        &format!(
+            r#"<header data-component="Bar"><span data-instance-of="{logo}"></span></header>"#
+        ),
+        &mut next,
+    );
+    let bar = component(&d, "Bar");
+    let used = d.doc().children(Some(&bar))[0].id.clone();
+    assert!(d.doc().get(&used).unwrap().is_instance());
+
+    let (ops, copies) =
+        edit::duplicate_detached(d.doc(), std::slice::from_ref(&used), &mut next).unwrap();
+    commit(&mut d, "Copy", &ops);
+    assert!(edit::instances_in(d.view(), &copies, true).is_empty());
+    assert!(!d.doc().get(&copies[0]).unwrap().is_instance());
+    assert!(
+        d.doc().get(&used).unwrap().is_instance(),
+        "the original still follows Logo"
+    );
 }
