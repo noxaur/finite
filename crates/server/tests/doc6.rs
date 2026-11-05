@@ -1953,6 +1953,300 @@ async fn each_comment_goes_to_one_agent() {
     );
 }
 
+/// Instances that changed the same way are one note, not a line each.
+#[tokio::test]
+async fn component_notes_name_many_instances_in_one_line() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Rows").await;
+    let id = design(&mut agent, "Rows").await;
+    let rows =
+        "<div data-component=\"Sum row\" class=\"row\"><span class=\"v\">0</span></div>".repeat(7);
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Sums", "width": 400, "height": 400, "html": rows }]),
+    )
+    .await;
+    // The span inside each instance, as instanceId/nodeId.
+    let outline = agent
+        .ok(
+            "read",
+            json!({ "designId": id, "select": ".v", "as": "outline" }),
+        )
+        .await;
+    let inside: Vec<&str> = outline
+        .split_whitespace()
+        .filter_map(|word| word.strip_prefix('#'))
+        .filter(|id| id.contains('/'))
+        .collect();
+    assert_eq!(inside.len(), 6, "{outline}");
+    let select = inside
+        .iter()
+        .map(|id| format!("#{id}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let result = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "css", "select": select, "css": "color: #22c55e" }]),
+    )
+    .await;
+    assert!(
+        result.contains("6 instances of \"Sum row\"")
+            && result.contains("got 1 override each (#")
+            && result.contains(", … +3)"),
+        "{result}"
+    );
+    assert!(!result.contains("Only instance"), "{result}");
+
+    // The component's own edit names its instances once, a few at a time.
+    let component = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "css", "select": ".row", "css": "padding: 4px" }]),
+    )
+    .await;
+    assert_eq!(
+        component.matches("This edited component").count(),
+        1,
+        "{component}"
+    );
+    assert!(
+        component.contains("so all 6 instances show it too (#") && component.contains(", … +3)"),
+        "{component}"
+    );
+}
+
+/// A replace preview shows the changed text once for identical copies, and
+/// its refusal says where the matches are.
+#[tokio::test]
+async fn replace_groups_identical_matches() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Copies").await;
+    let id = design(&mut agent, "Copies").await;
+    let sheet = "<style>@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');\n.card { border: 1px solid #ccc }</style><p>x</p>";
+    for name in ["A", "B", "C", "D", "E"] {
+        edit(
+            &mut agent,
+            &id,
+            json!([{ "op": "artboard", "name": name, "width": 200, "height": 100, "html": sheet }]),
+        )
+        .await;
+    }
+
+    let refusal = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "replace", "find": "1px", "replace": "2px" }]),
+    )
+    .await;
+    assert!(
+        refusal.contains("matches 5 times, in <style> code ×5 (on style #")
+            && refusal.contains(", … +2)"),
+        "{refusal}"
+    );
+    assert_eq!(
+        refusal.matches("border: 1px solid #ccc →").count(),
+        1,
+        "{refusal}"
+    );
+    assert!(refusal.contains("(×5)"), "{refusal}");
+
+    let preview = agent
+        .ok(
+            "edit",
+            json!({ "designId": id, "check": false, "dryRun": true,
+                    "ops": [{ "op": "replace", "find": "Mono", "replace": "Code", "all": true }] }),
+        )
+        .await;
+    assert!(
+        preview.contains("5 identical <style> copies: #") && preview.contains(", … +2"),
+        "{preview}"
+    );
+    // The changed text, not the start of the stylesheet.
+    assert!(preview.contains("JetBrains+Code"), "{preview}");
+    assert!(
+        !preview.contains("style #") || !preview.contains("@import"),
+        "{preview}"
+    );
+    assert_eq!(preview.matches("JetBrains+Code").count(), 1, "{preview}");
+}
+
+/// An html op over many elements reports the same result once.
+#[tokio::test]
+async fn html_dry_run_collapses_equal_results() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Spans").await;
+    let id = design(&mut agent, "Spans").await;
+    let spans = "<span>a</span>".repeat(6);
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Spans", "width": 300, "height": 100,
+                 "html": format!("<div data-name=\"Row\">{spans}</div>") }]),
+    )
+    .await;
+    let preview = agent
+        .ok(
+            "edit",
+            json!({ "designId": id, "check": false, "dryRun": true,
+                    "ops": [{ "op": "html", "select": "[data-name=Row] span", "mode": "before", "html": "<i>x</i>" }] }),
+        )
+        .await;
+    assert_eq!(preview.matches("Wrote 1 root node").count(), 1, "{preview}");
+    assert!(
+        preview.contains("before 6 elements (span #") && preview.contains(", … +3)"),
+        "{preview}"
+    );
+}
+
+/// A whole artboard's HTML hides long stylesheets, which read gives on request.
+#[tokio::test]
+async fn read_html_hides_long_stylesheets_in_an_artboard() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Big").await;
+    let id = design(&mut agent, "Big").await;
+    let css: String = (0..1500)
+        .map(|i| format!(".c{i} {{ color: red }}\n"))
+        .collect();
+    let made = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Big", "width": 300, "height": 100,
+                 "html": format!("<style>{css}</style><style>.small {{ color: blue }}</style><p>Hi</p>") }]),
+    )
+    .await;
+    let board = id_after(&made, "Created artboard");
+    let whole = html(&mut agent, &id, &format!("#{board}")).await;
+    assert!(whole.len() < 2_000, "{} characters: {whole}", whole.len());
+    assert!(
+        whole.contains("1500 lines")
+            && whole.contains("of CSS not shown")
+            && whole.contains(".small { color: blue }")
+            && whole.contains("1 <style> or <script> body was replaced"),
+        "{whole}"
+    );
+    let style = whole
+        .split("<style data-id=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("the long style's id");
+    // Selecting the element reads all of it.
+    let alone = html(&mut agent, &id, &format!("#{style}")).await;
+    assert!(
+        alone.contains(".c1499 { color: red }") && !alone.contains("not shown"),
+        "{}",
+        &alone[..200]
+    );
+}
+
+/// A stylesheet longer than a result reads in pieces that add up to all of it.
+#[tokio::test]
+async fn read_html_pages_through_a_stylesheet_longer_than_a_result() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Huge").await;
+    let id = design(&mut agent, "Huge").await;
+    let css: String = (0..2500)
+        // Trailing spaces and tabs, and text past ASCII, must survive paging.
+        .map(|i| format!(".c{i} {{ content: \"å\" }} \t\n"))
+        .collect();
+    assert!(css.len() > 40_000, "{} characters", css.len());
+    let made = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Huge", "width": 300, "height": 100,
+                 "html": format!("<style>{css}</style><p>Hi</p>") }]),
+    )
+    .await;
+    let board = id_after(&made, "Created artboard");
+    let whole = html(&mut agent, &id, &format!("#{board}")).await;
+    let style = whole
+        .split("<style data-id=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("the long style's id");
+    let mut read = String::new();
+    let mut offset = 0;
+    for _ in 0..5 {
+        let page = agent
+            .ok(
+                "read",
+                json!({ "designId": id, "select": format!("#{style}"), "as": "html", "offset": offset }),
+            )
+            .await;
+        assert!(!page.contains("Read one of its children"), "{page}");
+        assert!(page.len() < 40_000, "{} characters", page.len());
+        let (heading, code) = page.split_once('\n').expect("a heading line");
+        let (code, _) = code.rsplit_once('⟨').expect("the piece's end mark");
+        read.push_str(code);
+        match heading.split("offset: ").nth(1) {
+            Some(next) => offset = next.trim_end_matches('.').parse().expect("an offset"),
+            None => break,
+        }
+    }
+    // The pieces join back into exactly the stylesheet.
+    assert_eq!(read, css);
+}
+
+/// Stylesheets that change alike but hold different rules are not copies.
+#[tokio::test]
+async fn replace_preview_groups_only_identical_stylesheets_and_names_their_rules() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Rules").await;
+    let id = design(&mut agent, "Rules").await;
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Rules", "width": 300, "height": 100,
+                 "html": "<style>.safe { color: red }</style><style>.danger { color: red }</style>\
+                          <style>.same { color: red }</style><style>.same { color: red; margin: 0 }</style>" }]),
+    )
+    .await;
+    let preview = agent
+        .ok(
+            "edit",
+            json!({ "designId": id, "check": false, "dryRun": true,
+                    "ops": [{ "op": "replace", "find": "red", "replace": "blue", "all": true }] }),
+        )
+        .await;
+    assert!(!preview.contains("identical"), "{preview}");
+    for rule in ["css .safe:", "css .danger:", "css .same:"] {
+        assert!(preview.contains(rule), "{rule} in {preview}");
+    }
+}
+
+/// A color is found in any notation, so the preview shows the code around
+/// the notation that matched, not around the find.
+#[tokio::test]
+async fn replace_preview_shows_code_around_a_color_in_another_notation() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Gradient").await;
+    let id = design(&mut agent, "Gradient").await;
+    let stops = (0..8)
+        .map(|i| format!("rgba(0, 0, {i}, 0.5) {}%", i * 10))
+        .collect::<Vec<_>>()
+        .join(", ");
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Gradient", "width": 300, "height": 100,
+                 "html": format!("<style>.hero {{ background: linear-gradient(to right, {stops}, rgb(255 0 0)) }}</style>") }]),
+    )
+    .await;
+    let preview = agent
+        .ok(
+            "edit",
+            json!({ "designId": id, "check": false, "dryRun": true,
+                    "ops": [{ "op": "replace", "find": "#ff0000", "replace": "#0000ff" }] }),
+        )
+        .await;
+    assert!(
+        preview.contains("rgb(255 0 0))") && preview.contains("#0000ff)"),
+        "{preview}"
+    );
+}
+
 #[tokio::test]
 async fn a_reply_links_each_edit_once() {
     let (app, hub) = doc6();

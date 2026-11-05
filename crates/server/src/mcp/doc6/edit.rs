@@ -606,14 +606,79 @@ fn html_op(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String,
                  and elements others added since were removed.",
             );
         }
-        if many || place != Place::Append {
-            text = format!("{} {where_}: {text}", place.name());
-        }
-        parts.push(text.trim_end().to_owned());
+        parts.push((where_, text.trim_end().to_owned()));
     }
-    let mut text = parts.join("\n");
+    let mut text = if many || place != Place::Append {
+        collapse_repeats(place.name(), parts)
+    } else {
+        parts
+            .into_iter()
+            .map(|(_, text)| text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     text.push_str(&left_out(&parsed.dropped));
     Ok((text, first))
+}
+
+/// How many nodes a repeated result names before it counts the rest.
+const REPEATS_NAMED: usize = 3;
+
+/// `text` with every `#` followed by an 8-character id as `#_`, so results
+/// that differ only in the ids they made compare equal.
+fn mask_ids(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('#') {
+        out.push_str(&rest[..=at]);
+        rest = &rest[at + 1..];
+        let id = rest
+            .bytes()
+            .take_while(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+            .count();
+        if id == 8 {
+            out.push('_');
+            rest = &rest[id..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// What an html op did at each of its targets, one section per target. Targets
+/// that got the same result apart from the ids they made are one section: it
+/// says how many, names the first few, and shows the first one's result.
+fn collapse_repeats(place: &str, parts: Vec<(String, String)>) -> String {
+    let mut groups: Vec<(String, Vec<(String, String)>)> = Vec::new();
+    for (target, text) in parts {
+        let key = mask_ids(&text);
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, members)) => members.push((target, text)),
+            None => groups.push((key, vec![(target, text)])),
+        }
+    }
+    let sections: Vec<String> = groups
+        .into_iter()
+        .map(|(_, members)| match members.as_slice() {
+            [(target, text)] => format!("{place} {target}: {text}"),
+            [(_, first), ..] => {
+                let named: Vec<&str> = members
+                    .iter()
+                    .take(REPEATS_NAMED)
+                    .map(|(target, _)| target.as_str())
+                    .collect();
+                let more = members.len().saturating_sub(REPEATS_NAMED);
+                format!(
+                    "{place} {} elements ({}{}) all got the same, with new ids of their own; the first got: {first}",
+                    members.len(),
+                    named.join(", "),
+                    if more > 0 { format!(", … +{more}") } else { String::new() },
+                )
+            }
+            [] => String::new(),
+        })
+        .collect();
+    sections.join("\n")
 }
 
 /// `mode: "inner"` on a node an instance shows. Names that node, not the
@@ -1374,10 +1439,59 @@ fn replace(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<String> 
             replaced.len(),
             plural(replaced.len())
         ));
+        // A style or script's text is code, and its changes show the part
+        // that matched, not the start, so it's named without its text.
+        let named = |id: &str| match doc.get(id).and_then(|n| n.tag()) {
+            Some(tag)
+                if tag.eq_ignore_ascii_case("style") || tag.eq_ignore_ascii_case("script") =>
+            {
+                label(doc, id)
+            }
+            _ => super::line(doc, id),
+        };
+        // Copies of one stylesheet change the same way: say so once. Only a
+        // style or script with the same code is a copy: other code can change
+        // alike in a different rule.
+        let code = |id: &str| -> String {
+            match doc.get(id).and_then(|n| n.tag()) {
+                Some(tag)
+                    if tag.eq_ignore_ascii_case("style") || tag.eq_ignore_ascii_case("script") =>
+                {
+                    doc.children(Some(id))
+                        .iter()
+                        .filter_map(|c| c.text.as_deref())
+                        .collect()
+                }
+                _ => String::new(),
+            }
+        };
+        let mut groups: Vec<(String, Vec<&NodeId>, &Vec<String>)> = Vec::new();
         for r in &replaced {
+            let key = format!(
+                "{}\n{}\n{}",
+                mask_ids(&named(&r.id)),
+                code(&r.id),
+                r.changes.join("\n")
+            );
+            match groups.iter_mut().find(|(k, ..)| *k == key) {
+                Some((_, ids, _)) => ids.push(&r.id),
+                None => groups.push((key, vec![&r.id], &r.changes)),
+            }
+        }
+        for (_, ids, changes) in groups {
             text.push_str("  ");
-            text.push_str(&super::line(doc, &r.id));
-            for change in &r.changes {
+            match ids.as_slice() {
+                [only] => text.push_str(&named(only)),
+                _ => {
+                    let tag = doc.get(ids[0]).and_then(|n| n.tag()).unwrap_or("node");
+                    text.push_str(&format!(
+                        "{} identical <{tag}> copies: {}",
+                        ids.len(),
+                        crate::mcp::format::some_ids(&ids, REPEATS_NAMED)
+                    ));
+                }
+            }
+            for change in changes {
                 text.push_str(&format!("\n      {change}"));
             }
             text.push('\n');
@@ -1519,7 +1633,45 @@ fn import(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String, 
 
 #[cfg(test)]
 mod tests {
-    use super::for_doc6;
+    use super::*;
+
+    #[test]
+    fn ids_are_masked_only_when_they_are_eight_characters() {
+        assert_eq!(
+            mask_ids("i #jd1ikl6e \"x\" in #ab12 and #4f06485a/x9"),
+            "i #_ \"x\" in #ab12 and #_/x9"
+        );
+    }
+
+    #[test]
+    fn targets_with_the_same_result_are_one_section() {
+        let part = |id: &str, new: &str| {
+            (
+                format!("span #{id}"),
+                format!("Wrote 1 root node:\ni #{new} \"x\""),
+            )
+        };
+        let text = collapse_repeats(
+            "before",
+            vec![
+                part("aaaaaaa1", "nnnnnnn1"),
+                part("aaaaaaa2", "nnnnnnn2"),
+                part("aaaaaaa3", "nnnnnnn3"),
+                part("aaaaaaa4", "nnnnnnn4"),
+                (
+                    "div #bbbbbbb1".into(),
+                    "Wrote 1 root node:\nb #nnnnnnn5".into(),
+                ),
+            ],
+        );
+        assert_eq!(
+            text,
+            "before 4 elements (span #aaaaaaa1, span #aaaaaaa2, span #aaaaaaa3, … +1) \
+             all got the same, with new ids of their own; the first got: \
+             Wrote 1 root node:\ni #nnnnnnn1 \"x\"\n\
+             before div #bbbbbbb1: Wrote 1 root node:\nb #nnnnnnn5"
+        );
+    }
 
     #[test]
     fn doc6_errors_name_doc6_ops() {

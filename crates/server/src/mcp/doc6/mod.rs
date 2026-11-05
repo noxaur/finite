@@ -106,6 +106,9 @@ pub struct ReadParams {
     /// How many levels below each match (or each artboard) to show.
     #[serde(default)]
     depth: Option<usize>,
+    /// With as: "html" on a <style> or <script> longer than a result: the character to start at. Each page says where the next one starts.
+    #[serde(default)]
+    offset: usize,
 }
 
 #[derive(Deserialize, JsonSchema)]

@@ -91,7 +91,7 @@ pub(super) async fn read(
                 overview(d, listening, &presence, actor, page.as_deref(), p.depth)
             }))
         }
-        (Some("html"), Some(ids)) => ok(handle.read(|d| html_view(d, &ids, p.depth))),
+        (Some("html"), Some(ids)) => ok(handle.read(|d| html_view(d, &ids, p.depth, p.offset))),
         (Some("outline") | None, Some(ids)) => {
             ok(handle.read(|d| outline_view(d.view(), &ids, p.depth)))
         }
@@ -483,14 +483,14 @@ fn outline_view(doc: &Document, ids: &[NodeId], depth: Option<usize>) -> String 
     )
 }
 
-fn html_view(design: &Design, ids: &[NodeId], depth: Option<usize>) -> String {
+fn html_view(design: &Design, ids: &[NodeId], depth: Option<usize>, offset: usize) -> String {
     let doc = design.view();
     let shown = ids.len().min(SHOWN);
     let limit = OUTPUT_LIMIT / shown.max(1);
     let mut parts = Vec::new();
     for (i, id) in ids.iter().take(SHOWN).enumerate() {
         let mut text = heading(doc, ids, i);
-        text.push_str(&html_of(design, id, depth, limit));
+        text.push_str(&html_of(design, id, depth, offset, limit));
         parts.push(text.trim_end().to_owned());
     }
     let mut text = parts.join("\n\n");
@@ -498,13 +498,25 @@ fn html_view(design: &Design, ids: &[NodeId], depth: Option<usize>) -> String {
     text
 }
 
+/// The longest `<style>` or `<script>` code read shows inside an element's
+/// HTML. A page's stylesheet can be most of an artboard's HTML, and reading
+/// the element on its own shows all of it.
+const CODE_SHOWN: usize = 2_000;
+
 /// One node's HTML, as an html op takes it back, cut to fit `limit`.
-fn html_of(design: &Design, id: &str, depth: Option<usize>, limit: usize) -> String {
+fn html_of(design: &Design, id: &str, depth: Option<usize>, offset: usize, limit: usize) -> String {
     let doc = design.view();
+    if let Some(page) = code_page(doc, id, offset, limit) {
+        return page;
+    }
     let options = html::ExportOptions {
         ids: true,
         styles: true,
         depth,
+        max_code_len: (!doc.get(id).and_then(|n| n.tag()).is_some_and(|tag| {
+            tag.eq_ignore_ascii_case("style") || tag.eq_ignore_ascii_case("script")
+        }))
+        .then_some(CODE_SHOWN),
         read_at: Some(design.seq()),
         ..Default::default()
     };
@@ -557,6 +569,18 @@ fn html_of(design: &Design, id: &str, depth: Option<usize>, limit: usize) -> Str
             },
         ));
     }
+    if export.hidden_code > 0 {
+        out.push_str(&format!(
+            "\n{} <style> or <script> {} replaced by a comment saying how to read {}. Don't write this HTML back as it is.",
+            export.hidden_code,
+            if export.hidden_code == 1 {
+                "body was"
+            } else {
+                "bodies were"
+            },
+            if export.hidden_code == 1 { "it" } else { "them" },
+        ));
+    }
     if let Some(note) = html_component_note(design, id, &out) {
         out.push('\n');
         out.push_str(&note);
@@ -570,6 +594,65 @@ fn html_of(design: &Design, id: &str, depth: Option<usize>, limit: usize) -> Str
         ));
     }
     out
+}
+
+/// A `<style>` or `<script>` whose code is more than a result holds (or any
+/// of it from `offset` on), as the characters that fit and the offset of the
+/// rest. `None` when the element isn't one, or all its code fits.
+fn code_page(doc: &Document, id: &str, offset: usize, limit: usize) -> Option<String> {
+    /// Room for the heading line and the element's tag.
+    const HEADING: usize = 300;
+    let node = doc.get(id)?;
+    let tag = node.tag()?;
+    if !(tag.eq_ignore_ascii_case("style") || tag.eq_ignore_ascii_case("script")) {
+        return None;
+    }
+    let code: String = doc
+        .children(Some(id))
+        .iter()
+        .filter_map(|c| c.text.as_deref())
+        .collect();
+    let total = code.chars().count();
+    if offset == 0 && code.len() + HEADING <= limit {
+        return None;
+    }
+    if offset >= total {
+        return Some(format!(
+            "{} has {total} characters of code; offset {offset} is past the end.",
+            label(doc, id)
+        ));
+    }
+    let start = code
+        .char_indices()
+        .nth(offset)
+        .map_or(code.len(), |(i, _)| i);
+    let mut end = code.len().min(start + limit.saturating_sub(HEADING));
+    while !code.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end < code.len()
+        && let Some(line) = code[start..end].rfind('\n').filter(|&i| i > 0)
+    {
+        end = start + line + 1;
+    }
+    let shown_to = offset + code[start..end].chars().count();
+    let next = if shown_to < total {
+        format!(" Read the rest with offset: {shown_to}.")
+    } else {
+        String::new()
+    };
+    // The marker right after the code keeps its trailing whitespace, which
+    // the result would otherwise trim, so the pieces join back exactly.
+    let end_mark = if shown_to < total {
+        format!("⟨piece ends; offset {shown_to} continues⟩")
+    } else {
+        "⟨code ends⟩".to_owned()
+    };
+    Some(format!(
+        "{}'s code is {total} characters, more than a result holds, so this is a piece of it, not HTML to write back. Showing characters {offset} to {shown_to}, up to the ⟨…⟩ mark.{next}\n{}{end_mark}",
+        label(doc, id),
+        &code[start..end]
+    ))
 }
 
 /// The `<style>` elements in `board`, with their CSS.

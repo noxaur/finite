@@ -271,6 +271,9 @@ fn describe(change: Option<&Change>) -> &'static str {
 /// How many changed nodes an edit's result names before it just counts them.
 const CHANGED_NAMED: usize = 12;
 
+/// How many instances a component note names before it counts the rest.
+const OVERRIDDEN_NAMED: usize = 3;
+
 /// What an edit changed: how many values on which nodes, with each node's
 /// outline line, so an agent can check its ids hit what it meant without
 /// reading the tree again. `requested` is how many nodes the call named.
@@ -502,27 +505,60 @@ fn component_note(handle: &DesignHandle, change: &Change) -> Option<String> {
         let mut notes = Vec::new();
         // Detaching clears an instance's overrides; that's not news.
         overridden.retain(|id, _| !detached.contains(id));
+        // Instances that changed the same way share a line, so eleven rows
+        // given one override each are one note.
+        let mut grouped: BTreeMap<(String, usize, usize), Vec<&str>> = BTreeMap::new();
         for (instance, (set, cleared)) in overridden {
             let component = doc
                 .get(instance)
                 .and_then(|n| n.instance_of.as_deref())
                 .map(name)
                 .unwrap_or_default();
-            let mut text = format!("Only instance #{instance} of {component} changed");
-            if set > 0 {
-                text.push_str(&format!(
-                    ": {set} value{} became its overrides",
-                    if set == 1 { "" } else { "s" }
-                ));
-            }
-            if cleared > 0 {
-                text.push_str(&format!(
-                    "{}{cleared} value{} follow{} the component again",
-                    if set > 0 { ", and " } else { ": " },
-                    if cleared == 1 { "" } else { "s" },
-                    if cleared == 1 { "s" } else { "" },
-                ));
-            }
+            grouped
+                .entry((component, set, cleared))
+                .or_default()
+                .push(instance);
+        }
+        for ((component, set, cleared), instances) in grouped {
+            let plural = |n: usize| if n == 1 { "" } else { "s" };
+            let mut text = match instances.as_slice() {
+                [only] => {
+                    let mut text = format!("Only instance #{only} of {component} changed");
+                    if set > 0 {
+                        text.push_str(&format!(
+                            ": {set} value{} became its overrides",
+                            plural(set)
+                        ));
+                    }
+                    if cleared > 0 {
+                        text.push_str(&format!(
+                            "{}{cleared} value{} follow{} the component again",
+                            if set > 0 { ", and " } else { ": " },
+                            plural(cleared),
+                            if cleared == 1 { "s" } else { "" },
+                        ));
+                    }
+                    text
+                }
+                _ => {
+                    let mut did = Vec::new();
+                    if set > 0 {
+                        did.push(format!("got {set} override{}", plural(set)));
+                    }
+                    if cleared > 0 {
+                        did.push(format!(
+                            "have {cleared} value{} following the component again",
+                            plural(cleared)
+                        ));
+                    }
+                    format!(
+                        "{} instances of {component} {} each ({})",
+                        instances.len(),
+                        did.join(" and "),
+                        format::some_ids(&instances, OVERRIDDEN_NAMED)
+                    )
+                }
+            };
             text.push_str(". To change every instance, edit the component instead.");
             notes.push(text);
         }
@@ -540,7 +576,6 @@ fn component_note(handle: &DesignHandle, change: &Change) -> Option<String> {
         for (component, _) in edited {
             let instances: Vec<String> = components::affected(doc, &component)
                 .into_iter()
-                .map(|i| format!("#{i}"))
                 .collect();
             if instances.is_empty() {
                 notes.push(format!(
@@ -568,24 +603,22 @@ fn component_note(handle: &DesignHandle, change: &Change) -> Option<String> {
                 })
                 .take(4)
                 .collect();
-            let direct: Vec<&str> = doc.instances_of(&component).take(CHANGED_NAMED).collect();
+            let direct: Vec<&str> = doc.instances_of(&component).collect();
             for node in &added {
-                let ids: Vec<String> = direct.iter().map(|i| format!("#{i}/{}", node.id)).collect();
+                let ids: Vec<String> = direct.iter().map(|i| format!("{i}/{}", node.id)).collect();
                 let line = outline(doc, &node.id, 0);
                 notes.push(format!(
                     "New in the component: {}. In its instances it's {}: set those to give each instance its own value.",
                     line.lines().next().unwrap_or("").trim(),
-                    ids.join(", ")
+                    format::some_ids(&ids, OVERRIDDEN_NAMED)
                 ));
             }
-            let shown: Vec<&str> = instances.iter().take(CHANGED_NAMED).map(String::as_str).collect();
             notes.push(format!(
-                "This edited component {}, so all {} instance{} show it too ({}{}), except where they override a value.",
+                "This edited component {}, so all {} instance{} show it too ({}), except where they override a value.",
                 name(&component),
                 instances.len(),
                 if instances.len() == 1 { "" } else { "s" },
-                shown.join(", "),
-                if instances.len() > shown.len() { ", …" } else { "" }
+                format::some_ids(&instances, OVERRIDDEN_NAMED)
             ));
         }
         if !detached.is_empty() {
@@ -1433,6 +1466,9 @@ impl FiniteMcp {
         }
         if failed == images.len() {
             return Ok(CallToolResult::error(content));
+        }
+        if let Some(note) = format::settled_note(images.iter().filter_map(|i| i.as_ref().ok())) {
+            content.push(ContentBlock::text(note));
         }
         Ok(CallToolResult::success(content))
     }
