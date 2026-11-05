@@ -780,8 +780,13 @@ const styles = stylex.create({
   body: { margin: 0, whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.4 },
   changes: { display: "flex", flexWrap: "wrap", gap: 4, marginTop: 2 },
   change: {
+    maxWidth: "100%",
+    minWidth: 0,
     paddingInline: 6,
     paddingBlock: 1,
+    overflowWrap: "anywhere",
+    textAlign: "start",
+    whiteSpace: "normal",
     borderWidth: 1,
     borderStyle: "solid",
     borderColor: colors.border,

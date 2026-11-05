@@ -556,7 +556,7 @@ pub struct FindParams {
     /// Search only inside this node, such as an artboard. Omit to search every artboard.
     #[serde(default)]
     pub(super) within: Option<String>,
-    /// Text the element contains, ignoring case.
+    /// Visible text the element contains, ignoring case. Not text inside <script> or <style>, including an SVG <style>.
     #[serde(default)]
     pub(super) text: Option<String>,
     /// Part of the layer name, ignoring case.
@@ -584,7 +584,7 @@ pub struct ReplaceParams {
     /// Replace only inside this node, such as an artboard. Omit for every artboard.
     #[serde(default)]
     pub(super) within: Option<String>,
-    /// Also replace it in text content, like a product name. Defaults to false: styles, attributes and the code in <style> and <script> only.
+    /// Also replace it in visible text, like a product name. Not text inside <script> or <style> (including an SVG <style>), which is always searched as code. Defaults to false: styles, attributes and that code only.
     #[serde(default)]
     pub(super) include_text: bool,
     /// Replace every match even when a non-color value matches more than once inside a <style> or <script>. Without it, that case is refused with the match count and the lines, so you can narrow it with within or a longer find. dryRun never refuses.
