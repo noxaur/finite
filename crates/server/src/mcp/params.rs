@@ -540,11 +540,34 @@ pub struct WorkingParams {
     pub(super) status: Option<String>,
 }
 
+/// Longest a comments wait may block, in seconds.
+///
+/// MCP clients commonly time out a tool call well under two minutes. A wait
+/// of 120 seconds or more comes back as the client's own timeout, so the
+/// agent never sees this server's answer. 55 still returns it. The default
+/// wait is this same cap.
+pub(crate) const MAX_COMMENT_WAIT_SECS: u64 = 55;
+
+/// How many seconds to block for a comment. `None` is the default, which is
+/// the maximum. A request above the maximum still waits the maximum, and a
+/// request below 1 waits 1.
+pub(crate) fn comment_wait_secs(requested: Option<u64>) -> u64 {
+    requested
+        .unwrap_or(MAX_COMMENT_WAIT_SECS)
+        .clamp(1, MAX_COMMENT_WAIT_SECS)
+}
+
+/// What a comments wait says when nothing arrives. `seconds` is how long the
+/// call actually blocked, after the cap above.
+pub(crate) fn no_comments_arrived(seconds: u64) -> String {
+    format!("No comments arrived in {seconds} seconds. Call again to keep listening.")
+}
+
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WaitParams {
     pub(super) design_id: String,
-    /// How long to wait, in seconds. Defaults to 60; at most 300.
+    /// How long to wait, in seconds. Defaults to 55, which is also the most; a longer value waits 55.
     #[serde(default)]
     pub(super) timeout_seconds: Option<u64>,
 }
