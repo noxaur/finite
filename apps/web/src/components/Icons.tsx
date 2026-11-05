@@ -9,7 +9,7 @@ import { type ReactElement, useId } from "react";
  * `display: none` never takes another copy's filter with it.
  */
 
-export type IconName = "play" | "previous" | "next" | "close";
+export type IconName = "play" | "previous" | "next" | "close" | "wifi";
 
 interface Shape {
   readonly d: string;
@@ -31,6 +31,12 @@ const SHAPES: Record<IconName, Shape> = {
     d: "M6.2 6.5c3.9 3.6 7.7 7.4 11.6 11.2M17.7 5.9c-3.8 3.9-7.6 8-11.4 12.2",
     filled: false,
     seed: 11,
+  },
+  // Two arcs fanning up from a dot; the dot is a near-zero stroke the round cap fills.
+  wifi: {
+    d: "M12 19.6l.2.3M7.9 15.4c2.4-2.3 5.6-2.4 8.2.1M3.6 10.8c5.1-5 11.7-5.2 16.9-.1",
+    filled: false,
+    seed: 14,
   },
 };
 

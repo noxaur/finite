@@ -15,7 +15,7 @@ import { colors, radii, space } from "@/styles/tokens.stylex";
 /** How far right of its pin a popover starts, in pixels. */
 const POPOVER_GAP = 36;
 
-export type Mode = "pointer" | "comment";
+export type Mode = "pointer" | "interact" | "comment";
 
 /** A comment being written: where its pin goes, before it's posted. */
 export interface Draft {
@@ -96,6 +96,26 @@ export function ToolPill({ mode, onMode }: { mode: Mode; onMode: (mode: Mode) =>
             fill="currentColor"
             stroke="currentColor"
             strokeWidth="1.8"
+            strokeLinejoin="round"
+            filter="url(#tool-wob)"
+          />
+        </svg>
+      </button>
+      <button
+        type="button"
+        aria-pressed={mode === "interact"}
+        title="Interact (I): click, type and scroll in pages"
+        onClick={() => onMode("interact")}
+        {...stylex.props(styles.pillButton, mode === "interact" && styles.pillActive)}
+      >
+        {/* An outlined pointer with a click's rays: the pointer, using the page. */}
+        <svg width="20" height="20" viewBox="0 0 24 24" overflow="visible" aria-hidden="true">
+          <path
+            d="M8.6 7.6c3 1.9 5.9 3.9 8.9 5.9-1.5.4-2.9.7-4.3 1.1-.7 1.4-1.4 2.8-2.2 4.2-.8-3.7-1.6-7.4-2.4-11.2z M6.2 3.4l.9 2 M3.4 6.9l2.1.5 M10.2 2.7l-.3 2.1"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.9"
+            strokeLinecap="round"
             strokeLinejoin="round"
             filter="url(#tool-wob)"
           />

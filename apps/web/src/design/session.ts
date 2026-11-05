@@ -36,6 +36,8 @@ export interface DesignView {
   flush(): void;
   /** Badges the artboards agents are working on, keyed by artboard id. */
   setWorking(working: ReadonlyMap<string, string>): void;
+  /** Who makes the changes applied next (`null`: this browser), for "Updated by …". */
+  setActor?(actor: string | null): void;
 }
 
 export interface SessionState {
@@ -335,8 +337,10 @@ export class DesignSession {
     if (change.seq <= this.replica.seq) return [];
     const mine = mutation?.client === this.client ? mutation.mid : null;
     // One call into WebAssembly for the whole change; the view patches op by op.
+    this.view.setActor?.(mine === null ? actor : null);
     const outcome = this.replica.receive(change.ops, mine, (applied) => this.view.apply(applied));
     this.view.flush();
+    this.view.setActor?.(null);
     this.replica.seq = change.seq;
     if (mine !== null) this.answer(mine, { kind: "landed" });
     // A dropped mutation still gets the server's own answer, which decides.
