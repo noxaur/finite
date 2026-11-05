@@ -36,25 +36,6 @@ export function union(bounds: Iterable<Bounds>): Bounds | null {
   return minX === Infinity ? null : { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
-/**
- * The artboard that covers the most of `visible`, or `null` when none is in
- * it. Ties go to the first.
- */
-export function mostVisible(bounds: ReadonlyMap<string, Bounds>, visible: Bounds): string | null {
-  let best: string | null = null;
-  let bestArea = 0;
-  for (const [id, b] of bounds) {
-    const width = Math.min(b.x + b.width, visible.x + visible.width) - Math.max(b.x, visible.x);
-    const height = Math.min(b.y + b.height, visible.y + visible.height) - Math.max(b.y, visible.y);
-    const area = width > 0 && height > 0 ? width * height : 0;
-    if (area > bestArea) {
-      best = id;
-      bestArea = area;
-    }
-  }
-  return best;
-}
-
 /** The view that centers `bounds` in a `width` × `height` viewport with `padding` around it. */
 export function fit(
   bounds: Bounds,
@@ -116,6 +97,8 @@ export class Camera {
    */
   locked: (() => void) | null = null;
   private animation = 0;
+  /** Settles the running animation's promise with false, once something else moves the camera. */
+  private cancelled: (() => void) | null = null;
   private readonly listeners = new Set<(view: View) => void>();
   private readonly abort = new AbortController();
   private settle: ReturnType<typeof setTimeout> | undefined;
@@ -144,7 +127,7 @@ export class Camera {
   }
 
   dispose() {
-    cancelAnimationFrame(this.animation);
+    this.stop();
     this.abort.abort();
     this.listeners.clear();
     clearTimeout(this.settle);
@@ -156,9 +139,17 @@ export class Camera {
   }
 
   set(view: View) {
+    this.stop();
+    this.show(view);
+  }
+
+  /** Stops the running animation, if any, and settles its promise with false. */
+  private stop() {
     cancelAnimationFrame(this.animation);
     this.animation = 0;
-    this.show(view);
+    const cancelled = this.cancelled;
+    this.cancelled = null;
+    cancelled?.();
   }
 
   private show(view: View) {
@@ -173,8 +164,7 @@ export class Camera {
    * camera first. With reduced motion, or no duration, it jumps.
    */
   animateTo(view: View, durationMs: number): Promise<boolean> {
-    cancelAnimationFrame(this.animation);
-    this.animation = 0;
+    this.stop();
     const reduced =
       typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
     if (durationMs <= 0 || reduced) {
@@ -188,6 +178,7 @@ export class Camera {
     const to = { ...center(view), zoom: clampZoom(view.zoom) };
     const start = performance.now();
     return new Promise((resolve) => {
+      this.cancelled = () => resolve(false);
       const step = (now: number) => {
         // A newer animation, or `set`, took over.
         if (this.animation !== id) return resolve(false);
@@ -198,6 +189,7 @@ export class Camera {
         const cy = from.y + (to.y - from.y) * p;
         if (t >= 1) {
           this.animation = 0;
+          this.cancelled = null;
           this.show(view);
           return resolve(true);
         }

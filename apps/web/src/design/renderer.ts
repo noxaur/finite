@@ -388,18 +388,26 @@ export class Renderer {
       if (frame.reload !== undefined) frame.stale = true;
       clearTimeout(frame.reload);
       delete frame.reload;
-      // Keep the document for a while: a hidden iframe isn't rendered, and
-      // panning back to it shouldn't start its scripts over. A page people
-      // used keeps running until newer ones push it out.
-      frame.unload = setTimeout(() => {
-        if (this.frames.get(id) !== frame || !this.culler.isCulled(id) || this.keeps(id)) return;
-        this.load(id, frame, false);
-        frame.stale = true;
-      }, UNLOAD_DELAY_MS);
+      this.scheduleUnload(id, frame);
     } else if (frame.stale && !frame.held) {
       frame.stale = false;
       this.load(id, frame);
     }
+  }
+
+  /**
+   * Unloads a hidden iframe once it has stayed hidden for a while: a hidden
+   * iframe isn't rendered, and panning back to it shouldn't start its
+   * scripts over. A page people used keeps running until newer ones push it
+   * out, which schedules this again.
+   */
+  private scheduleUnload(id: string, frame: Frame) {
+    clearTimeout(frame.unload);
+    frame.unload = setTimeout(() => {
+      if (this.frames.get(id) !== frame || !this.culler.isCulled(id) || this.keeps(id)) return;
+      this.load(id, frame, false);
+      frame.stale = true;
+    }, UNLOAD_DELAY_MS);
   }
 
   /** Whether a hidden page keeps running: it's in interactive mode, or among the latest used. */
@@ -559,7 +567,15 @@ export class Renderer {
     if (!frame || frame.held === held) return;
     frame.held = held;
     frame.pin.ariaPressed = String(held);
-    if (held) return;
+    if (held) {
+      // A reload already on its way waits too.
+      if (frame.reload !== undefined) {
+        clearTimeout(frame.reload);
+        delete frame.reload;
+        frame.pending ??= "reload";
+      }
+      return;
+    }
     const pending = frame.pending;
     delete frame.pending;
     frame.note.hidden = true;
@@ -950,6 +966,12 @@ export class Renderer {
     this.used.set(id, Date.now());
     // The pin stays on labels of pages used a while ago, so keep a few more.
     for (const old of [...this.used.keys()].slice(0, -KEEP_USED * 8)) this.used.delete(old);
+    // The page this pushed out of the latest stops once it's been hidden a while.
+    const dropped = [...this.used.keys()].at(-KEEP_USED - 1);
+    const out = dropped === undefined ? undefined : this.frames.get(dropped);
+    if (dropped && out?.iframe && this.culler.isCulled(dropped) && out.iframe.srcdoc !== "") {
+      this.scheduleUnload(dropped, out);
+    }
     const frame = this.frames.get(id);
     if (first && frame) frame.pin.hidden = false;
     this.options.onUsed?.(id);
@@ -1371,9 +1393,9 @@ export class Renderer {
     }
     frame.reload = setTimeout(() => {
       delete frame.reload;
-      if (this.frames.get(id) === frame && frame.iframe && !this.culler.isCulled(id)) {
-        this.load(id, frame);
-      }
+      if (this.frames.get(id) !== frame || !frame.iframe) return;
+      if (frame.held) frame.pending ??= "reload";
+      else if (!this.culler.isCulled(id)) this.load(id, frame);
     }, RELOAD_DELAY_MS);
   }
 

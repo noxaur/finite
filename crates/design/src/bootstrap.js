@@ -18,9 +18,21 @@
 (config) => {
   const win = window;
   const doc = document;
+  // The page's scripts run after this and can replace any prototype method
+  // or getter, including the ones a MessagePort is used through, to catch
+  // the port as `this`. So the channel only ever goes through the originals,
+  // taken now, and called with the original `Reflect.apply`, not `.call`.
+  const apply = Reflect.apply;
+  const getter = (proto, name) => Object.getOwnPropertyDescriptor(proto, name).get;
+  const eventData = getter(MessageEvent.prototype, "data");
+  const eventPorts = getter(MessageEvent.prototype, "ports");
+  const eventSource = getter(MessageEvent.prototype, "source");
+  const stopEvent = Event.prototype.stopImmediatePropagation;
+  const portPost = MessagePort.prototype.postMessage;
+  const portOnMessage = Object.getOwnPropertyDescriptor(MessagePort.prototype, "onmessage").set;
   let port = null;
   const queue = [];
-  const send = (message) => (port ? port.postMessage(message) : queue.push(message));
+  const send = (message) => (port ? apply(portPost, port, [message]) : queue.push(message));
   // What the viewer allows right now. `interact`: the page takes input on the
   // canvas. `presenting`: interactive mode, where the page owns the wheel.
   const state = { interact: false, presenting: false, audio: false };
@@ -30,13 +42,15 @@
   win.addEventListener(
     "message",
     (e) => {
-      const m = e.source === parent && e.data && e.data.finite;
+      const data = apply(eventData, e, []);
+      const m = apply(eventSource, e, []) === parent && data && data.finite;
       if (!m || m.type !== "init") return;
-      e.stopImmediatePropagation();
-      if (port || !e.ports[0] || m.nonce !== config.nonce) return;
-      port = e.ports[0];
-      port.onmessage = (ev) => receive(ev.data);
-      for (const message of queue.splice(0)) port.postMessage(message);
+      apply(stopEvent, e, []);
+      const given = apply(eventPorts, e, [])[0];
+      if (port || !given || m.nonce !== config.nonce) return;
+      port = given;
+      apply(portOnMessage, port, [(ev) => receive(apply(eventData, ev, []))]);
+      while (queue.length > 0) apply(portPost, port, [queue.shift()]);
     },
     true,
   );
