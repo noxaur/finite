@@ -550,14 +550,10 @@ fn html_op(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String,
     })?;
     let parsed = step.html.ok_or("\"html\" needs html")?;
     let (selector, ids) = selected(tx.view(), Kind::Html, f, refs)?;
-    let rewrite = matches!(place, Place::Inner | Place::Replace);
-    if rewrite && ids.len() > 1 {
-        return Err(format!(
-            "{selector:?} matches {} elements; mode {} takes one: {}",
-            ids.len(),
-            place.name(),
-            describe(tx.view(), &ids)
-        ));
+    // Replacing an outer match deletes the match inside it. Append,
+    // prepend, before and after leave both in place, so they can nest.
+    if matches!(place, Place::Inner | Place::Replace) {
+        refuse_nesting(tx.view(), &selector, &ids, "replace")?;
     }
     const MOST: usize = 100;
     if ids.len() > MOST {
@@ -605,6 +601,7 @@ fn html_op(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String,
             };
             (merged, roots, mode)
         };
+        // The label before the write: a replace deletes this node.
         let where_ = label(tx.view(), id);
         if let Err(error) = stage(tx, merged.ops) {
             // Replacing the children deletes them. Inside an instance those
@@ -776,14 +773,19 @@ fn css_op(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<String> {
         };
         format!("{} {{ {css} }}", selector_text(select, refs)?)
     };
+    let to = text(f, "to")
+        .unwrap_or_else(|| "inline".into())
+        .to_ascii_lowercase();
+    // A stylesheet rule can't name a part inside an instance. select plus
+    // declarations (the default) becomes an override, so that form stays.
+    if rules_given || matches!(to.trim(), "style" | "sheet" | "stylesheet") {
+        refuse_instance_paths(tx.view(), &css)?;
+    }
     // With rules, select limits them to inside its matches.
     let scope = match (&select, rules_given) {
         (Some(select), true) => Some(targets(tx.view(), select, refs, "select")?),
         _ => None,
     };
-    let to = text(f, "to")
-        .unwrap_or_else(|| "inline".into())
-        .to_ascii_lowercase();
     match to.trim() {
         "inline" | "" => inline(tx, &css, scope.as_ref()),
         "style" | "sheet" | "stylesheet" => {
@@ -802,6 +804,236 @@ fn css_op(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<String> {
             "to {other:?} isn't one of inline (default) or style"
         )),
     }
+}
+
+fn ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
+}
+
+/// `url(` at `i`, and not the tail of a longer name such as `noturl(`.
+fn at_url(bytes: &[u8], i: usize) -> bool {
+    if i > 0 && ident_byte(bytes[i - 1]) {
+        return false;
+    }
+    let Some(head) = bytes.get(i..i + 4) else {
+        return false;
+    };
+    head[3] == b'('
+        && head[0].eq_ignore_ascii_case(&b'u')
+        && head[1].eq_ignore_ascii_case(&b'r')
+        && head[2].eq_ignore_ascii_case(&b'l')
+}
+
+/// The index just past the `url(...)` that starts at `start`.
+fn skip_url(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 4;
+    while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
+        i += 1;
+    }
+    if matches!(bytes.get(i), Some(b'"' | b'\'')) {
+        let quote = bytes[i];
+        i += 1;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' {
+                i += 2;
+                continue;
+            }
+            if bytes[i] == quote {
+                i += 1;
+                break;
+            }
+            i += 1;
+        }
+        while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
+            i += 1;
+        }
+        if bytes.get(i) == Some(&b')') {
+            i += 1;
+        }
+        return i;
+    }
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b')' {
+            return i + 1;
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+/// The end of the attribute selector that opens at `i` (a `[`), past any
+/// quoted value and escape inside it.
+fn skip_attribute(bytes: &[u8], mut i: usize) -> usize {
+    let mut quote = None;
+    i += 1;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' {
+            i += 2;
+            continue;
+        }
+        match quote {
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None if b == b'"' || b == b'\'' => quote = Some(b),
+            None if b == b']' => return i + 1,
+            None => {}
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+/// The character a CSS escape starting at `i` (a `\\`) stands for, and where
+/// the escape ends: up to six hex digits and one whitespace, or one char.
+fn css_escape(source: &str, i: usize) -> (char, usize) {
+    let rest = &source[i + 1..];
+    let hex: String = rest
+        .chars()
+        .take_while(char::is_ascii_hexdigit)
+        .take(6)
+        .collect();
+    if hex.is_empty() {
+        return match rest.chars().next() {
+            Some(c) => (c, i + 1 + c.len_utf8()),
+            None => ('\\', i + 1),
+        };
+    }
+    let mut end = i + 1 + hex.len();
+    if source[end..].starts_with(|c: char| c.is_ascii_whitespace()) {
+        end += 1;
+    }
+    let ch = u32::from_str_radix(&hex, 16)
+        .ok()
+        .and_then(char::from_u32)
+        .unwrap_or('\u{fffd}');
+    (ch, end)
+}
+
+/// Ids named by `#` tokens in `source`, outside strings, comments and
+/// `url(...)`. `\/` reads as `/`, so `#inst/part` and `#inst\/part` are one id.
+fn hash_ids(source: &str) -> Vec<String> {
+    let bytes = source.as_bytes();
+    let mut out = Vec::new();
+    let mut quote = None;
+    let mut comment = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if comment {
+            if b == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                comment = false;
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(q) = quote {
+            if b == b'\\' {
+                i += 2;
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        // `url(https://cdn.example/*)` is a url token, not a comment. A
+        // `/*` inside it must not swallow the rest of the sheet, and a `#`
+        // in a url is a fragment, not a selector.
+        if at_url(bytes, i) {
+            i = skip_url(bytes, i);
+            continue;
+        }
+        if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            comment = true;
+            i += 2;
+            continue;
+        }
+        if b == b'"' || b == b'\'' {
+            quote = Some(b);
+            i += 1;
+            continue;
+        }
+        // `[href=\#a\/b]` matches an attribute's value, not an id.
+        if b == b'[' {
+            i = skip_attribute(bytes, i);
+            continue;
+        }
+        if b != b'#' {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let mut id = String::new();
+        while i < bytes.len() {
+            let c = bytes[i];
+            if c == b'\\' {
+                // `\/`, `\2f ` and `\00002F` all read as `/`.
+                let (ch, next) = css_escape(source, i);
+                id.push(ch);
+                i = next;
+                continue;
+            }
+            if ident_byte(c) {
+                id.push(c as char);
+                i += 1;
+                continue;
+            }
+            // A slash continues the id only when another id character follows,
+            // so `16px/1.5` and a trailing `/` stay out of it.
+            if c == b'/' && bytes.get(i + 1).is_some_and(|n| ident_byte(*n)) {
+                id.push('/');
+                i += 1;
+                continue;
+            }
+            break;
+        }
+        if !id.is_empty() {
+            out.push(id);
+        }
+    }
+    out
+}
+
+/// Refuses a stylesheet whose selector names a node inside an instance.
+/// `#inst/part` and `#inst\/part` are the same id, and a rule written
+/// either way never reaches the rendered part. Style it with `select`,
+/// which becomes an override, or edit the component. A `/` in a value, a
+/// `url(...)`, a string or a comment is not that selector, so it stays.
+fn refuse_instance_paths(doc: &Document, css: &str) -> Result<()> {
+    let rules = css::patch_rules(css).map_err(|e| e.to_string())?;
+    for rule in &rules {
+        for id in hash_ids(&rule.selector) {
+            // A path starts at an instance. Any other id with a `/` is the
+            // author's own, like `#account\/settings`.
+            let in_instance = finite_design::components::split(&id)
+                .and_then(|(root, _)| doc.get(root))
+                .is_some_and(|root| root.instance_of.is_some());
+            if in_instance {
+                return Err(instance_path_message(doc, &id));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn instance_path_message(doc: &Document, path: &str) -> String {
+    let component = finite_design::components::instance_of(doc, path)
+        .and_then(|(_, component)| component.map(|node| node.id.clone()));
+    let component = match component {
+        Some(id) => format!(" #{id}"),
+        None => String::new(),
+    };
+    format!(
+        "the rule can't reach a part inside an instance; style it with {{\"op\":\"css\",\"select\":\"#{path}\",\"css\":\"…\"}} (becomes an override), or edit the component{component}"
+    )
 }
 
 /// A css op's rules as inline styles on the elements they match.
@@ -1215,7 +1447,8 @@ fn move_op(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<(String,
 }
 
 /// Errors when `ids` nest inside each other, naming the outer ones.
-fn refuse_nesting(doc: &Document, selector: &str, ids: &[NodeId]) -> Result<()> {
+/// `verb` is what the op would do to an outer match ("remove", "replace").
+fn refuse_nesting(doc: &Document, selector: &str, ids: &[NodeId], verb: &str) -> Result<()> {
     let set: HashSet<&str> = ids.iter().map(String::as_str).collect();
     let mut outer: Vec<NodeId> = Vec::new();
     let mut seen = HashSet::new();
@@ -1234,7 +1467,7 @@ fn refuse_nesting(doc: &Document, selector: &str, ids: &[NodeId]) -> Result<()> 
     // In document order, as the matches are.
     outer.sort_by_key(|o| ids.iter().position(|id| id == o));
     Err(format!(
-        "{selector:?} matches {} elements nested inside each other, so it would remove {} with everything in {}. Narrow select to the elements you mean, like \":has(> h2:contains(\\\"…\\\"))\" for the element holding a heading",
+        "{selector:?} matches {} elements nested inside each other, so it would {verb} {} with everything in {}. Narrow select to the elements you mean, like \":has(> h2:contains(\\\"…\\\"))\" for the element holding a heading",
         ids.len(),
         describe(doc, &outer),
         if outer.len() == 1 { "it" } else { "them" }
@@ -1367,7 +1600,7 @@ fn remove(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<String> {
     let (selector, ids) = selected(doc, Kind::Remove, f, refs)?;
     // A broad select, like a :has(...) that matched every ancestor of its
     // target, would delete far more than meant.
-    refuse_nesting(doc, &selector, &ids)?;
+    refuse_nesting(doc, &selector, &ids, "remove")?;
     let ops = edit::delete(doc, &ids).map_err(|e| e.to_string())?;
     let inside: usize = ops.iter().map(|op| doc.subtree(op.id()).len()).sum();
     let count = ops.len();
@@ -1752,6 +1985,63 @@ fn import(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use finite_design::{Document, Node, Op};
+
+    /// A component `comp0001` with part `part0001`, and instance `inst0001`.
+    fn instance() -> Document {
+        let mut doc = Document::default();
+        let mut component = Node::element("comp0001", "header");
+        component.component = true;
+        let part = Node {
+            parent: Some("comp0001".into()),
+            index: "a".into(),
+            ..Node::element("part0001", "h1")
+        };
+        let instance = Node {
+            instance_of: Some("comp0001".into()),
+            ..Node::element("inst0001", "header")
+        };
+        for node in [component, part, instance] {
+            assert!(doc.apply(&Op::Create { node }).is_some());
+        }
+        doc
+    }
+
+    #[test]
+    fn a_path_selector_is_refused_and_a_url_is_not_a_selector() {
+        let doc = instance();
+        let values = "h1 { font: 16px/1.5 sans-serif; background: url(https://cdn.example/*); color: #112233 }";
+        assert!(refuse_instance_paths(&doc, values).is_ok(), "{values}");
+
+        // A `/*` inside an unquoted url does not hide the path selector after it.
+        let raw = "h1 { background: url(https://cdn.example/*) } #inst0001/part0001 { color: red }";
+        let err = refuse_instance_paths(&doc, raw).unwrap_err();
+        let told = r##"{"op":"css","select":"#inst0001/part0001","css":"…"}"##;
+        assert!(
+            err.contains(told)
+                && err.contains("can't reach a part inside an instance")
+                && err.contains("or edit the component #comp0001"),
+            "{err}"
+        );
+        let escaped = r"#inst0001\/part0001 { color: blue }";
+        let err = refuse_instance_paths(&doc, escaped).unwrap_err();
+        assert!(err.contains(told) && err.contains("#comp0001"), "{err}");
+
+        // A slash in a value, a fragment, a quoted url and a comment stay.
+        let kept = r##"h1 { font: 16px/1.5 sans-serif; background: url( https://cdn.example/* ) } p { background: url(https://cdn.example/a#inst0001/part0001) } b { background: url("https://cdn.example/*") } /* #inst0001/part0001 */ h1 { content: "#inst0001/part0001" }"##;
+        assert!(refuse_instance_paths(&doc, kept).is_ok(), "{kept}");
+        // The same `#` inside a selector's string or comment is not the id.
+        assert!(
+            refuse_instance_paths(&doc, r##"a[href="#inst0001/part0001"] { color: red }"##).is_ok()
+        );
+        assert!(refuse_instance_paths(&doc, "h1 /* #inst0001/part0001 */ { color: red }").is_ok());
+        // An author's own id with a slash, outside any instance, is kept.
+        assert!(refuse_instance_paths(&doc, r"#account\/settings { color: red }").is_ok());
+        assert!(refuse_instance_paths(&doc, r"[href=\#inst0001\/part0001] { color: red }").is_ok());
+        // A hex escape for `/` names the same path, inside :is() too.
+        let hex = refuse_instance_paths(&doc, r":is(#inst0001\2f part0001) { color: red }");
+        assert!(hex.unwrap_err().contains(told));
+    }
 
     #[test]
     fn ids_are_masked_only_when_they_are_eight_characters() {

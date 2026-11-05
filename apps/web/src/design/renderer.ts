@@ -834,6 +834,20 @@ export class Renderer {
   }
 
   /**
+   * The browser's styles for an element drawn in a shadow-root artboard, or
+   * an artboard itself, for the inspector to show what classes and
+   * `<style>` blocks set. `null` where `measure` is: inside a sandboxed
+   * artboard, and on hidden artboards.
+   */
+  computedStyle(id: string): CSSStyleDeclaration | null {
+    const board = this.replica.artboardOf(id);
+    const frame = board && this.frames.get(board.id);
+    if (!frame || frame.iframe || this.culler.isCulled(board.id)) return null;
+    const el = this.elements.get(id);
+    return el instanceof Element && el.isConnected ? getComputedStyle(el) : null;
+  }
+
+  /**
    * Lets the person type into the text of element `id`, in place, as
    * plain text. Enter or leaving it calls `done` with the text, and
    * Escape with `null`. Either way the element's content is drawn from
