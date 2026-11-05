@@ -5,6 +5,13 @@ import { app, BrowserWindow, dialog, session, shell } from "electron";
 import { afterStop } from "./restarts.js";
 import { keepUpToDate, offerMoveToApplications } from "./updates.js";
 
+// Script artboards are sandboxed iframes. Chromium gives each one its own
+// process, and an out-of-process frame whose on-screen size changes gets a new
+// surface the page must wait for, so every zoom step stalled a frame per
+// visible artboard. In the page's process they zoom like any other layer. They
+// keep their opaque origin and sandbox, and lose only process isolation.
+app.commandLine.appendSwitch("disable-features", "IsolateSandboxedIframes");
+
 // `electron . --dev` loads the Next.js dev server; the Rust server runs separately via `vp run dev`.
 const isDev = process.argv.includes("--dev");
 const DEV_URL = "http://localhost:5310";
