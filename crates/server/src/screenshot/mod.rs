@@ -798,6 +798,86 @@ async fn scene_page(
     Ok(Scene { nodes })
 }
 
+/// The values `getComputedStyle` gives each element in `ids` for the
+/// properties `props`, in the order asked, with the artboard's mode applied.
+/// An element the page doesn't have comes back as `None`. It renders the
+/// page as [`layout`] does, so a value is what a screenshot shows, whichever
+/// way the artboard renders in the viewer.
+pub async fn computed(
+    m: Measurement,
+    ids: Vec<NodeId>,
+    props: Vec<String>,
+) -> Result<BTreeMap<NodeId, Option<Vec<(String, String)>>>, String> {
+    let chrome = chrome().ok_or(
+        "no Chrome, Chromium or Edge found to compute styles; set FINITE_CHROME to a browser binary",
+    )?;
+    let _turn = browsers()
+        .acquire()
+        .await
+        .map_err(|_| "computing styles is shutting down")?;
+    let dir = std::env::temp_dir().join(format!("finite-computed-{}", random_id(10)));
+    let run = async {
+        let (browser, mut tab) =
+            cdp::Browser::launch(&chrome, dir.clone(), Policy::default()).await?;
+        let result = computed_page(&mut tab, &dir, &m, &ids, &props).await;
+        browser.close(tab).await;
+        result
+    };
+    tokio::time::timeout(LAYOUT_LIMIT, run)
+        .await
+        .map_err(|_| "the browser took too long to compute styles".to_owned())?
+}
+
+async fn computed_page(
+    tab: &mut cdp::Tab,
+    dir: &std::path::Path,
+    m: &Measurement,
+    ids: &[NodeId],
+    props: &[String],
+) -> Result<BTreeMap<NodeId, Option<Vec<(String, String)>>>, String> {
+    load(tab, dir, m).await?;
+    let mut raw = read_computed(tab, ids, props).await?;
+    let settle = m.settle.min(MAX_SETTLE);
+    if raw.animated && !settle.is_zero() {
+        tokio::time::sleep(settle).await;
+        raw = read_computed(tab, ids, props).await?;
+    }
+    Ok(raw.values)
+}
+
+#[derive(serde::Deserialize)]
+struct RawComputed {
+    values: BTreeMap<NodeId, Option<Vec<(String, String)>>>,
+    animated: bool,
+}
+
+async fn read_computed(
+    tab: &mut cdp::Tab,
+    ids: &[NodeId],
+    props: &[String],
+) -> Result<RawComputed, String> {
+    let ids = serde_json::to_string(ids).expect("strings serialize");
+    let props = serde_json::to_string(props).expect("strings serialize");
+    let script = format!(
+        r#"(() => {{
+  const props = {props};
+  const values = {{}};
+  for (const id of {ids}) {{
+    const el = document.querySelector(`[{VIEWER_ID_ATTR}="${{CSS.escape(id)}}"]`);
+    if (!el) {{ values[id] = null; continue; }}
+    const computed = getComputedStyle(el);
+    values[id] = props.map((name) => [name, computed.getPropertyValue(name).trim()]);
+  }}
+  return {{
+    values,
+    animated: document.scripts.length > 0 || document.getAnimations().length > 0,
+  }};
+}})()"#
+    );
+    let value = tab.evaluate(&script).await?;
+    serde_json::from_value(value).map_err(|e| format!("couldn't read computed styles: {e}"))
+}
+
 /// Measures artboards for an export in headless Chrome, with [`scene`].
 /// Codecs run on the blocking pool, so it waits on the runtime it was
 /// made on from there. Calling it on a runtime thread panics.

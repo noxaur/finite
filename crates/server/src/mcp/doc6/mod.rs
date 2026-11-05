@@ -85,9 +85,12 @@ pub struct ReadParams {
     /// A CSS selector: #k3x9a2bq (a node id), .card, button, [data-name="Hero"] h1, :root (artboards), :contains("Sign in"). A list of selectors works too.
     #[serde(default)]
     select: Option<Select>,
-    /// What to show for select: "outline" (default), "html", "css" or "jsx".
+    /// What to show for select: "outline" (default), "html", "css", "jsx" or "computed".
     #[serde(default, rename = "as", alias = "view")]
     view: Option<String>,
+    /// With as: "computed", the CSS properties to read, like ["color", "background-color", "--bg"]. Default: color, background-color, font, width, height, padding, gap, border, border-radius, display.
+    #[serde(default)]
+    properties: Option<Vec<String>>,
     /// With as: "jsx", Tailwind classes.
     #[serde(default)]
     tailwind: bool,

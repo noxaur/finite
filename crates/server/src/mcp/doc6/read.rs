@@ -1,10 +1,10 @@
 //! The `read` tool's views of a design: the overview, and for what a
 //! selector matches, its outline, HTML, CSS or JSX, or a search inside it.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, fmt::Write, sync::Arc};
 
 use finite_design::{
-    Design, Document, NodeId, css, html,
+    Design, Document, NodeId, NodeKind, css, html,
     search::{self, Query},
     select,
 };
@@ -18,6 +18,7 @@ use crate::{
         FiniteMcp, ToolResult, cut, fail, format::OUTPUT_LIMIT, html_component_note, ok, outline,
         params::ExportParams, search::found_text, tokens::listed,
     },
+    screenshot,
 };
 
 /// How many matches a view shows before it asks to narrow select.
@@ -68,6 +69,14 @@ pub(super) async fn read(
         };
         return ok(handle.read(|d| jsx_view(d.view(), &ids, p.tailwind)));
     }
+    if view.as_deref() == Some("computed") {
+        let Some(ids) = ids else {
+            return fail(
+                "as: \"computed\" needs select, like {\"select\": \"#k3x9a2bq\", \"as\": \"computed\"}.",
+            );
+        };
+        return computed(handle, ids, p.properties).await;
+    }
     if let Some(needle) = p.contains.as_deref().filter(|c| !c.is_empty()) {
         return ok(handle.read(|d| contains(d.view(), needle, ids.as_deref(), page.as_deref())));
     }
@@ -87,9 +96,172 @@ pub(super) async fn read(
             ok(handle.read(|d| outline_view(d.view(), &ids, p.depth)))
         }
         (Some(other), _) => fail(format!(
-            "as {other:?} isn't one of outline (default), html, css or jsx."
+            "as {other:?} isn't one of outline (default), html, css, jsx or computed."
         )),
     }
+}
+
+/// What `as: "computed"` shows without `properties`.
+const COMPUTED: [&str; 10] = [
+    "color",
+    "background-color",
+    "font",
+    "width",
+    "height",
+    "padding",
+    "gap",
+    "border",
+    "border-radius",
+    "display",
+];
+
+/// The most properties one `as: "computed"` asks for.
+const MAX_PROPERTIES: usize = 40;
+
+/// `properties` as CSS names: `backgroundColor` becomes `background-color`,
+/// and `--bg` stays as it is, since custom properties are case-sensitive.
+fn property_names(given: Option<Vec<String>>) -> Result<Vec<String>, String> {
+    let Some(given) = given.filter(|g| !g.is_empty()) else {
+        return Ok(COMPUTED.map(str::to_owned).to_vec());
+    };
+    if given.len() > MAX_PROPERTIES {
+        return Err(format!(
+            "properties lists {} names; one read takes at most {MAX_PROPERTIES}.",
+            given.len()
+        ));
+    }
+    given
+        .iter()
+        .map(|name| {
+            let name = name.trim();
+            let custom = name.starts_with("--");
+            let mut css = String::with_capacity(name.len());
+            for c in name.chars() {
+                if c.is_ascii_uppercase() && !custom {
+                    css.push('-');
+                    css.push(c.to_ascii_lowercase());
+                } else {
+                    css.push(c);
+                }
+            }
+            let body = css.trim_start_matches('-');
+            let valid = !body.is_empty()
+                && css.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            if valid {
+                Ok(css)
+            } else {
+                Err(format!(
+                    "{name:?} isn't a CSS property. Use names like \"color\", \"background-color\" or \"--bg\"."
+                ))
+            }
+        })
+        .collect()
+}
+
+/// The values the browser computes for what select matches, in each
+/// artboard's mode: a token as `var(--bg)` resolves, `100%` as pixels.
+async fn computed(
+    handle: &Arc<DesignHandle>,
+    ids: Vec<NodeId>,
+    properties: Option<Vec<String>>,
+) -> ToolResult {
+    let defaulted = properties.as_ref().is_none_or(Vec::is_empty);
+    let props = match property_names(properties) {
+        Ok(props) => props,
+        Err(error) => return fail(error),
+    };
+    // A text node has its parent's values.
+    let planned = handle.read(|d| -> Result<Vec<(screenshot::Measurement, Vec<NodeId>)>, String> {
+        let doc = d.view();
+        if ids.len() > screenshot::MAX_SHOTS {
+            return Err(format!(
+                "select matches {} elements; as: \"computed\" takes at most {}. Narrow select: {}.",
+                ids.len(),
+                screenshot::MAX_SHOTS,
+                describe(doc, &ids)
+            ));
+        }
+        let mut boards: Vec<(NodeId, Vec<NodeId>)> = Vec::new();
+        for id in &ids {
+            let element = match doc.get(id) {
+                Some(n) if n.kind == NodeKind::Text => n.parent.clone().unwrap_or_else(|| id.clone()),
+                _ => id.clone(),
+            };
+            let board = doc
+                .artboard_of(&element)
+                .ok_or_else(|| format!("#{id} isn't in an artboard."))?
+                .id
+                .clone();
+            match boards.iter_mut().find(|(b, _)| *b == board) {
+                Some((_, list)) => list.push(element),
+                None => boards.push((board, vec![element])),
+            }
+        }
+        boards
+            .into_iter()
+            .map(|(board, list)| {
+                screenshot::plan_measurement(doc, &board, screenshot::Options::default())
+                    .map(|m| (m, list))
+            })
+            .collect()
+    });
+    let planned = match planned {
+        Ok(planned) => planned,
+        Err(error) => return fail(error),
+    };
+    // One browser for each artboard, without the design's lock.
+    let results = futures::future::join_all(
+        planned
+            .into_iter()
+            .map(|(m, list)| screenshot::computed(m, list, props.clone())),
+    )
+    .await;
+    let mut values = HashMap::new();
+    for result in results {
+        match result {
+            Ok(found) => values.extend(found),
+            Err(error) => return fail(error),
+        }
+    }
+    ok(handle.read(|d| {
+        let doc = d.view();
+        let many = ids.len() > 1;
+        let mut text = String::new();
+        for (i, id) in ids.iter().enumerate() {
+            let element = match doc.get(id) {
+                Some(n) if n.kind == NodeKind::Text => n.parent.as_ref().unwrap_or(id),
+                _ => id,
+            };
+            let mode = doc
+                .artboard_of(element)
+                .filter(|_| doc.modes().len() > 1)
+                .map(|board| {
+                    let mode = doc.mode_of(board);
+                    let name = doc.mode_map().get(mode).map_or(mode, |m| m.name.as_str());
+                    format!(" (mode {name:?})")
+                })
+                .unwrap_or_default();
+            if many {
+                text.push_str(&heading(doc, &ids, i));
+            }
+            let _ = writeln!(text, "{}{mode}", label(doc, element));
+            match values.get(element) {
+                Some(Some(list)) => {
+                    for (name, value) in list {
+                        let shown = if value.is_empty() { "(not set)" } else { value };
+                        let _ = writeln!(text, "  {name}: {shown}");
+                    }
+                }
+                _ => text.push_str("  not on the page any more: the design changed meanwhile. Read again.\n"),
+            }
+        }
+        if defaulted {
+            text.push_str(
+                "\nPass properties for others, like [\"--bg\", \"font-size\", \"margin\"]. Values are what the browser computes with the artboard's mode applied.",
+            );
+        }
+        text
+    }))
 }
 
 /// The comment before each match when there are several, naming its artboard.

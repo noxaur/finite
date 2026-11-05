@@ -1,10 +1,11 @@
 //! How tools describe the document to agents: compact outlines and node JSON.
 
-use std::fmt::Write;
+use std::{borrow::Cow, fmt::Write};
 
 use finite_design::{
     Design, Document, NodeKind,
     comment::{Audience, Comment},
+    tokens,
 };
 
 /// The most text one tool result returns, about 15,000 tokens. Claude Code
@@ -75,6 +76,7 @@ fn outline_into(doc: &Document, id: &str, depth: usize, max_depth: usize, out: &
             }
             let size = |k: &str| node.styles.get(k).map(String::as_str);
             if let (Some(w), Some(h)) = (size("width"), size("height")) {
+                let (w, h) = (resolve_vars(doc, node, w), resolve_vars(doc, node, h));
                 let _ = write!(out, " [{w} × {h}]");
             }
             if let Some(display) = size("display") {
@@ -99,6 +101,59 @@ fn outline_into(doc: &Document, id: &str, depth: usize, max_depth: usize, out: &
             }
         }
     }
+}
+
+/// `value` with each `var(--token)` the design defines replaced by the
+/// token's value in the mode of `node`'s artboard, so an outline shows
+/// `44px` where the style says `var(--button-h)`. A `var()` naming no token
+/// takes its fallback, or stays as it is.
+fn resolve_vars<'a>(doc: &Document, node: &finite_design::Node, value: &'a str) -> Cow<'a, str> {
+    if !value.contains("var(") {
+        return Cow::Borrowed(value);
+    }
+    let mode = doc.artboard_of(&node.id).map(|board| doc.mode_of(board));
+    Cow::Owned(substitute(doc, mode.unwrap_or(doc.first_mode()), value, 0))
+}
+
+/// How deep a token's value may itself use `var()` before it stays as written.
+const VAR_DEPTH: usize = 4;
+
+fn substitute(doc: &Document, mode: &str, text: &str, depth: usize) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("var(") {
+        out.push_str(&rest[..start]);
+        let inner = &rest[start + 4..];
+        // The matching close paren, so a fallback like `calc(1px + 2px)` stays whole.
+        let mut open = 1;
+        let end = inner.find(|c| {
+            match c {
+                '(' => open += 1,
+                ')' => open -= 1,
+                _ => {}
+            }
+            open == 0
+        });
+        let Some(end) = end else { break };
+        let (name, fallback) = match inner[..end].split_once(',') {
+            Some((name, fallback)) => (name.trim(), Some(fallback.trim())),
+            None => (inner[..end].trim(), None),
+        };
+        let value = doc
+            .tokens()
+            .get(name)
+            .and_then(|values| tokens::value(doc, values, mode))
+            .or(fallback);
+        match value {
+            Some(value) if depth < VAR_DEPTH => {
+                out.push_str(&substitute(doc, mode, value, depth + 1))
+            }
+            _ => out.push_str(&rest[start..start + 4 + end + 1]),
+        }
+        rest = &inner[end + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// How much of a text node the outline shows. Layer names stop at 24
