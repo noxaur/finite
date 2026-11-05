@@ -617,6 +617,55 @@ fn skip_url(bytes: &[u8], start: usize) -> usize {
     bytes.len()
 }
 
+/// The end of the attribute selector that opens at `i` (a `[`), past any
+/// quoted value and escape inside it.
+fn skip_attribute(bytes: &[u8], mut i: usize) -> usize {
+    let mut quote = None;
+    i += 1;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' {
+            i += 2;
+            continue;
+        }
+        match quote {
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None if b == b'"' || b == b'\'' => quote = Some(b),
+            None if b == b']' => return i + 1,
+            None => {}
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+/// The character a CSS escape starting at `i` (a `\\`) stands for, and where
+/// the escape ends: up to six hex digits and one whitespace, or one char.
+fn css_escape(source: &str, i: usize) -> (char, usize) {
+    let rest = &source[i + 1..];
+    let hex: String = rest
+        .chars()
+        .take_while(char::is_ascii_hexdigit)
+        .take(6)
+        .collect();
+    if hex.is_empty() {
+        return match rest.chars().next() {
+            Some(c) => (c, i + 1 + c.len_utf8()),
+            None => ('\\', i + 1),
+        };
+    }
+    let mut end = i + 1 + hex.len();
+    if source[end..].starts_with(|c: char| c.is_ascii_whitespace()) {
+        end += 1;
+    }
+    let ch = u32::from_str_radix(&hex, 16)
+        .ok()
+        .and_then(char::from_u32)
+        .unwrap_or('\u{fffd}');
+    (ch, end)
+}
+
 /// Ids named by `#` tokens in `source`, outside strings, comments and
 /// `url(...)`. `\/` reads as `/`, so `#inst/part` and `#inst\/part` are one id.
 fn hash_ids(source: &str) -> Vec<String> {
@@ -664,6 +713,11 @@ fn hash_ids(source: &str) -> Vec<String> {
             i += 1;
             continue;
         }
+        // `[href=\#a\/b]` matches an attribute's value, not an id.
+        if b == b'[' {
+            i = skip_attribute(bytes, i);
+            continue;
+        }
         if b != b'#' {
             i += 1;
             continue;
@@ -672,9 +726,11 @@ fn hash_ids(source: &str) -> Vec<String> {
         let mut id = String::new();
         while i < bytes.len() {
             let c = bytes[i];
-            if c == b'\\' && bytes.get(i + 1) == Some(&b'/') {
-                id.push('/');
-                i += 2;
+            if c == b'\\' {
+                // `\/`, `\2f ` and `\00002F` all read as `/`.
+                let (ch, next) = css_escape(source, i);
+                id.push(ch);
+                i = next;
                 continue;
             }
             if ident_byte(c) {
@@ -707,7 +763,12 @@ fn refuse_instance_paths(doc: &Document, css: &str) -> Result<()> {
     let rules = css::patch_rules(css).map_err(|e| e.to_string())?;
     for rule in &rules {
         for id in hash_ids(&rule.selector) {
-            if id.contains('/') {
+            // A path starts at an instance. Any other id with a `/` is the
+            // author's own, like `#account\/settings`.
+            let in_instance = finite_design::components::split(&id)
+                .and_then(|(root, _)| doc.get(root))
+                .is_some_and(|root| root.instance_of.is_some());
+            if in_instance {
                 return Err(instance_path_message(doc, &id));
             }
         }
@@ -1586,7 +1647,6 @@ mod tests {
         assert!(err.contains(told) && err.contains("#comp0001"), "{err}");
 
         // A slash in a value, a fragment, a quoted url and a comment stay.
-        // A path that only looks like one, and isn't an instance, is still refused.
         let kept = r##"h1 { font: 16px/1.5 sans-serif; background: url( https://cdn.example/* ) } p { background: url(https://cdn.example/a#inst0001/part0001) } b { background: url("https://cdn.example/*") } /* #inst0001/part0001 */ h1 { content: "#inst0001/part0001" }"##;
         assert!(refuse_instance_paths(&doc, kept).is_ok(), "{kept}");
         // The same `#` inside a selector's string or comment is not the id.
@@ -1594,11 +1654,11 @@ mod tests {
             refuse_instance_paths(&doc, r##"a[href="#inst0001/part0001"] { color: red }"##).is_ok()
         );
         assert!(refuse_instance_paths(&doc, "h1 /* #inst0001/part0001 */ { color: red }").is_ok());
-        let missing = refuse_instance_paths(&doc, "#nope00/missing { color: red }").unwrap_err();
-        assert!(
-            missing.contains(r##"{"op":"css","select":"#nope00/missing","css":"…"}"##)
-                && !missing.contains("#comp0001"),
-            "{missing}"
-        );
+        // An author's own id with a slash, outside any instance, is kept.
+        assert!(refuse_instance_paths(&doc, r"#account\/settings { color: red }").is_ok());
+        assert!(refuse_instance_paths(&doc, r"[href=\#inst0001\/part0001] { color: red }").is_ok());
+        // A hex escape for `/` names the same path, inside :is() too.
+        let hex = refuse_instance_paths(&doc, r":is(#inst0001\2f part0001) { color: red }");
+        assert!(hex.unwrap_err().contains(told));
     }
 }
