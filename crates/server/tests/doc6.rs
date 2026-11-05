@@ -8,11 +8,7 @@ use std::{sync::Arc, time::Duration};
 use agent::{Agent, id_after};
 use axum::Router;
 use finite_design::comment::{Anchor, Audience, Author, AuthorKind};
-use finite_server::{
-    Hub, app,
-    screenshot::{self, scene},
-    store::MemoryStore,
-};
+use finite_server::{Hub, app, store::MemoryStore};
 use serde_json::{Value, json};
 
 /// A server, whose `/mcp` serves the doc6 tools by default.
@@ -808,7 +804,7 @@ fn tag_ids(html: &str, tag: &str) -> Vec<String> {
 
 #[tokio::test]
 async fn path_ids_and_instance_edits_take_either_slash() {
-    let (app, hub) = doc6();
+    let (app, _) = doc6();
     let mut agent = Agent::connect_doc6(&app, "Paths").await;
     let (id, _) = landing(&mut agent).await;
     // A slash in a value, and a color hash, are not path ids.
@@ -916,50 +912,71 @@ async fn path_ids_and_instance_edits_take_either_slash() {
 
     let path = &titles[0];
     let escaped = path.replace('/', r"\/");
+    let component = made[..made.find(" is a component").expect("the component")]
+        .rsplit(|c: char| !c.is_ascii_alphanumeric())
+        .next()
+        .expect("the component id")
+        .to_owned();
+    let suggestion = format!(r##"{{"op":"css","select":"#{path}","css":"…"}}"##);
+
+    // select styles the part, as an override. Both spellings name it.
     let by_select = edit(
         &mut agent,
         &id,
-        json!([{ "op": "css", "select": format!("#{escaped}"), "css": "color: #123456" }]),
+        json!([{ "op": "css", "select": format!("#{path}"), "css": "color: #123456" }]),
     )
     .await;
     assert!(
         by_select.contains("1 element") || by_select.contains("matched 1"),
         "{by_select}"
     );
-    let mixed = {
-        let (head, tail) = path.split_once('/').unwrap();
-        format!(r"#{head}\/{tail}")
-    };
-    let by_rule = edit(
+    let by_escaped = edit(
         &mut agent,
         &id,
-        json!([{ "op": "css", "css": format!("{mixed} {{ letter-spacing: 1px }}") }]),
-    )
-    .await;
-    assert!(!by_rule.contains("matches no element"), "{by_rule}");
-    let unescaped = edit(
-        &mut agent,
-        &id,
-        json!([{ "op": "css", "css": format!("#{path} {{ font-weight: 700 }}") }]),
+        json!([{ "op": "css", "select": format!("#{escaped}"), "css": "font-weight: 700" }]),
     )
     .await;
     assert!(
-        unescaped.contains("font-weight")
-            || unescaped.contains("1 element")
-            || unescaped.contains("matched"),
-        "{unescaped}"
+        by_escaped.contains("1 element") || by_escaped.contains("matched 1"),
+        "{by_escaped}"
     );
     let shown = html(&mut agent, &id, &format!("#{path}")).await;
     assert!(
-        shown.contains("#123456") && shown.contains("1px") && shown.contains("700"),
+        shown.contains("#123456") && shown.contains("700"),
+        "the select op sets the part's style: {shown}"
+    );
+    let via_escaped = html(&mut agent, &id, &format!("#{escaped}")).await;
+    assert!(via_escaped.contains("#123456"), "{via_escaped}");
+
+    // A stylesheet rule can't reach the part, in either spelling.
+    let raw = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "css", "css": format!("#{path} {{ letter-spacing: 1px }}") }]),
+    )
+    .await;
+    let escaped_rule = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "css", "css": format!(r"#{escaped} {{ outline-color: #abcdef }}") }]),
+    )
+    .await;
+    for error in [&raw, &escaped_rule] {
+        assert!(
+            error.contains("can't reach a part inside an instance")
+                && error.contains(&suggestion)
+                && error.contains(&format!("component #{component}"))
+                && error.contains("Nothing was changed."),
+            "{error}"
+        );
+    }
+    let shown = html(&mut agent, &id, &format!("#{path}")).await;
+    assert!(
+        shown.contains("#123456") && shown.contains("700") && !shown.contains("1px"),
         "{shown}"
     );
-    // The same node, read with the escaped spelling.
-    let via_escaped = html(&mut agent, &id, &format!("#{escaped}")).await;
-    assert!(via_escaped.contains("700"), "{via_escaped}");
 
-    // An unescaped path that isn't a node is refused, and the error shows
-    // the escaped spelling. The styles above stay.
+    // A path that isn't a node is the same refusal. The part's style stays.
     let bad = refused(
         &mut agent,
         &id,
@@ -967,36 +984,30 @@ async fn path_ids_and_instance_edits_take_either_slash() {
     )
     .await;
     assert!(
-        bad.contains(r"#nope00\/missing") && bad.contains("Nothing was changed."),
+        bad.contains(r##"{"op":"css","select":"#nope00/missing","css":"…"}"##)
+            && bad.contains("Nothing was changed."),
         "{bad}"
     );
     let shown = html(&mut agent, &id, &format!("#{path}")).await;
     assert!(
-        shown.contains("700") && !shown.contains("color: red"),
+        shown.contains("#123456") && !shown.contains("color: red"),
         "{shown}"
     );
 
-    // A rule stored in <style> keeps the escaped spelling.
-    let stored = edit(
+    // A `/*` inside an unquoted url() stays part of the url. A path selector
+    // after it is still seen, and refused, rather than stored.
+    let url_only = edit(
         &mut agent,
         &id,
         json!([{
             "op": "css",
             "to": "style",
-            "css": format!("#{path} {{ outline-color: #abcdef }}")
+            "css": "h1 { background-image: url(https://cdn.example/*) }"
         }]),
     )
     .await;
-    assert!(!stored.contains("isn't a node"), "{stored}");
-    let sheet = html(&mut agent, &id, "style").await;
-    assert!(
-        sheet.contains(&escaped) && sheet.contains("abcdef"),
-        "{sheet}"
-    );
-
-    // A `/*` inside an unquoted url() is part of the url. A later path is
-    // still escaped, so the rule stays valid CSS.
-    let after_url = edit(
+    assert!(!url_only.contains("can't reach"), "{url_only}");
+    let after_url = refused(
         &mut agent,
         &id,
         json!([{
@@ -1008,42 +1019,16 @@ async fn path_ids_and_instance_edits_take_either_slash() {
         }]),
     )
     .await;
-    assert!(!after_url.contains("isn't a node"), "{after_url}");
+    assert!(
+        after_url.contains(&suggestion) && after_url.contains("Nothing was changed."),
+        "{after_url}"
+    );
     let sheet = html(&mut agent, &id, "style").await;
     assert!(
         sheet.contains("url(https://cdn.example/*)")
-            && sheet.contains(&format!("{escaped} {{ background-color: rgb(255, 0, 0) }}")),
+            && !sheet.contains(&escaped)
+            && !sheet.contains("255, 0, 0"),
         "{sheet}"
-    );
-
-    // The stored `#inst\/part` rule matches the rendered part. Inline color
-    // doesn't cover background-color.
-    let measurement = {
-        let handle = hub.open(&id).await.unwrap();
-        handle
-            .read(|d| {
-                let doc = d.view();
-                let board = doc.artboard_of(path).expect("the part is on an artboard");
-                screenshot::plan_measurement(doc, &board.id, screenshot::Options::default())
-            })
-            .expect("the artboard can be measured")
-    };
-    let rendered = match scene(measurement).await {
-        Ok(rendered) => rendered,
-        Err(error) if error.contains("no Chrome") => {
-            eprintln!("skipped the render check: {error}");
-            return;
-        }
-        Err(error) => panic!("{error}"),
-    };
-    let part = rendered
-        .nodes
-        .get(path.as_str())
-        .unwrap_or_else(|| panic!("the part didn't render: {rendered:?}"));
-    assert_eq!(
-        part.style("background-color"),
-        "rgb(255, 0, 0)",
-        "path id {path}"
     );
 }
 

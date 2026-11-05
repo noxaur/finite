@@ -525,17 +525,19 @@ fn css_op(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<String> {
         };
         format!("{} {{ {css} }}", selector_text(select, refs)?)
     };
+    let to = text(f, "to")
+        .unwrap_or_else(|| "inline".into())
+        .to_ascii_lowercase();
+    // A stylesheet rule can't name a part inside an instance. select plus
+    // declarations (the default) becomes an override, so that form stays.
+    if rules_given || matches!(to.trim(), "style" | "sheet" | "stylesheet") {
+        refuse_instance_paths(tx.view(), &css)?;
+    }
     // With rules, select limits them to inside its matches.
     let scope = match (&select, rules_given) {
         (Some(select), true) => Some(targets(tx.view(), select, refs, "select")?),
         _ => None,
     };
-    // Unescaped `#inst/part` in a rule is only safe when that node exists.
-    // A `/` in a value, or a `#` that isn't a path, stays as written.
-    let css = prepare_css(tx.view(), &css)?;
-    let to = text(f, "to")
-        .unwrap_or_else(|| "inline".into())
-        .to_ascii_lowercase();
     match to.trim() {
         "inline" | "" => inline(tx, &css, scope.as_ref()),
         "style" | "sheet" | "stylesheet" => {
@@ -554,15 +556,6 @@ fn css_op(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<String> {
             "to {other:?} isn't one of inline (default) or style"
         )),
     }
-}
-
-/// A `#` token outside strings and comments. `id` reads `\/` as `/`.
-struct HashToken {
-    start: usize,
-    end: usize,
-    id: String,
-    /// A `/` written without a backslash, as in `#inst/part`.
-    raw_slash: bool,
 }
 
 fn ident_byte(b: u8) -> bool {
@@ -624,8 +617,9 @@ fn skip_url(bytes: &[u8], start: usize) -> usize {
     bytes.len()
 }
 
-/// `#` tokens in `source`, outside quotes and comments.
-fn hash_tokens(source: &str) -> Vec<HashToken> {
+/// Ids named by `#` tokens in `source`, outside strings, comments and
+/// `url(...)`. `\/` reads as `/`, so `#inst/part` and `#inst\/part` are one id.
+fn hash_ids(source: &str) -> Vec<String> {
     let bytes = source.as_bytes();
     let mut out = Vec::new();
     let mut quote = None;
@@ -674,10 +668,8 @@ fn hash_tokens(source: &str) -> Vec<HashToken> {
             i += 1;
             continue;
         }
-        let start = i;
         i += 1;
         let mut id = String::new();
-        let mut raw_slash = false;
         while i < bytes.len() {
             let c = bytes[i];
             if c == b'\\' && bytes.get(i + 1) == Some(&b'/') {
@@ -694,96 +686,45 @@ fn hash_tokens(source: &str) -> Vec<HashToken> {
             // so `16px/1.5` and a trailing `/` stay out of it.
             if c == b'/' && bytes.get(i + 1).is_some_and(|n| ident_byte(*n)) {
                 id.push('/');
-                raw_slash = true;
                 i += 1;
                 continue;
             }
             break;
         }
-        let end = i;
         if !id.is_empty() {
-            out.push(HashToken {
-                start,
-                end,
-                id,
-                raw_slash,
-            });
+            out.push(id);
         }
     }
     out
 }
 
-/// `#inst/part` as CSS writes it: `#inst\/part`.
-fn escaped_hash(id: &str) -> String {
-    let mut out = String::with_capacity(id.len() + 1);
-    out.push('#');
-    for c in id.chars() {
-        if c == '/' {
-            out.push_str(r"\/");
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// The escaped spelling, when `selector` names a node inside an instance.
-fn path_hint(selector: &str) -> String {
-    let mut shown = Vec::new();
-    for token in hash_tokens(selector) {
-        if !token.id.contains('/') {
-            continue;
-        }
-        let escaped = escaped_hash(&token.id);
-        if !shown.contains(&escaped) {
-            shown.push(escaped);
-        }
-    }
-    if shown.is_empty() {
-        String::new()
-    } else {
-        format!(
-            " Write a node inside an instance as {}.",
-            shown.join(" or ")
-        )
-    }
-}
-
-/// Rewrites unescaped `#inst/part` to `#inst\/part` when that node exists,
-/// so a `<style>` block holds CSS a browser can parse. An unescaped path
-/// that isn't a node is an error naming the escaped spelling. Slashes in
-/// values are not `#` tokens, so they stay.
-fn prepare_css(doc: &Document, css: &str) -> Result<String> {
+/// Refuses a stylesheet whose selector names a node inside an instance.
+/// `#inst/part` and `#inst\/part` are the same id, and a rule written
+/// either way never reaches the rendered part. Style it with `select`,
+/// which becomes an override, or edit the component. A `/` in a value, a
+/// `url(...)`, a string or a comment is not that selector, so it stays.
+fn refuse_instance_paths(doc: &Document, css: &str) -> Result<()> {
     let rules = css::patch_rules(css).map_err(|e| e.to_string())?;
     for rule in &rules {
-        for token in hash_tokens(&rule.selector) {
-            if token.raw_slash && !doc.contains(&token.id) {
-                let escaped = escaped_hash(&token.id);
-                return Err(format!(
-                    "#{} isn't a node. In css, write a node inside an instance as {escaped}.",
-                    token.id
-                ));
+        for id in hash_ids(&rule.selector) {
+            if id.contains('/') {
+                return Err(instance_path_message(doc, &id));
             }
         }
     }
-    let tokens = hash_tokens(css);
-    if !tokens
-        .iter()
-        .any(|token| token.raw_slash && doc.contains(&token.id))
-    {
-        return Ok(css.to_owned());
-    }
-    let mut out = String::with_capacity(css.len() + 8);
-    let mut copied = 0;
-    for token in tokens {
-        if token.raw_slash && doc.contains(&token.id) {
-            out.push_str(&css[copied..token.start]);
-            out.push_str(&escaped_hash(&token.id));
-            copied = token.end;
-        }
-    }
-    out.push_str(&css[copied..]);
-    Ok(out)
+    Ok(())
+}
+
+fn instance_path_message(doc: &Document, path: &str) -> String {
+    let component = finite_design::components::instance_of(doc, path)
+        .and_then(|(_, component)| component.map(|node| node.id.clone()));
+    let component = match component {
+        Some(id) => format!(" #{id}"),
+        None => String::new(),
+    };
+    format!(
+        "the rule can't reach a part inside an instance; style it with {{\"op\":\"css\",\"select\":\"#{path}\",\"css\":\"…\"}} (becomes an override), or edit the component{component}"
+    )
 }
 
 /// A css op's rules as inline styles on the elements they match.
@@ -805,23 +746,20 @@ fn inline(
     let mut lines = Vec::new();
     for rule in rules {
         let doc = tx.view();
-        let mut ids = matched(doc, &rule.selector, None)
-            .map_err(|e| format!("{e}{}", path_hint(&rule.selector)))?;
+        let mut ids = matched(doc, &rule.selector, None)?;
         if let Some((select, within)) = scope {
             ids.retain(|id| within.iter().any(|w| w == id || doc.is_ancestor(w, id)));
             if ids.is_empty() {
                 return Err(format!(
-                    "css rule {:?} matches no element inside select {select:?}{}",
-                    rule.selector,
-                    path_hint(&rule.selector)
+                    "css rule {:?} matches no element inside select {select:?}",
+                    rule.selector
                 ));
             }
         }
         if ids.is_empty() {
             return Err(format!(
-                "css rule {:?} matches no element. read with contains, or with no select, lists what's there{}",
-                rule.selector,
-                path_hint(&rule.selector)
+                "css rule {:?} matches no element. read with contains, or with no select, lists what's there",
+                rule.selector
             ));
         }
         let styles: BTreeMap<String, Option<String>> = rule.declarations.into_iter().collect();
@@ -874,10 +812,9 @@ fn style(tx: &mut Transaction<'_>, css: &str, within: Option<Vec<NodeId>>) -> Re
                 [one] => boards.push(one.id.clone()),
                 [] => return Err("the design has no artboards yet, so there's no <style> to put these in. Add one with an \"artboard\" op first".into()),
                 [first, ..] => {
-                    let hint: String = patch.iter().map(|rule| path_hint(&rule.selector)).collect();
                     return Err(format!(
-                        "no element matches these rules yet, so it's unclear which artboard's <style> block they belong in. Pass select with the artboard, like \"select\": \"#{}\"{}",
-                        first.id, hint
+                        "no element matches these rules yet, so it's unclear which artboard's <style> block they belong in. Pass select with the artboard, like \"select\": \"#{}\"",
+                        first.id
                     ));
                 }
             }
@@ -1606,38 +1543,62 @@ fn import(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String, 
 mod tests {
     use finite_design::{Document, Node, Op};
 
-    use super::prepare_css;
+    use super::refuse_instance_paths;
 
-    fn doc_with(id: &str) -> Document {
+    /// A component `comp0001` with part `part0001`, and instance `inst0001`.
+    fn instance() -> Document {
         let mut doc = Document::default();
-        assert!(
-            doc.apply(&Op::Create {
-                node: Node::element(id, "p"),
-            })
-            .is_some()
-        );
+        let mut component = Node::element("comp0001", "header");
+        component.component = true;
+        let part = Node {
+            parent: Some("comp0001".into()),
+            index: "a".into(),
+            ..Node::element("part0001", "h1")
+        };
+        let instance = Node {
+            instance_of: Some("comp0001".into()),
+            ..Node::element("inst0001", "header")
+        };
+        for node in [component, part, instance] {
+            assert!(doc.apply(&Op::Create { node }).is_some());
+        }
         doc
     }
 
     #[test]
-    fn a_url_does_not_swallow_the_rest_of_the_sheet() {
-        let doc = doc_with("inst0000/part0000");
-        let css = "h1 { background: url(https://cdn.example/*) } #inst0000/part0000 { color: red }";
-        let out = prepare_css(&doc, css).unwrap();
+    fn a_path_selector_is_refused_and_a_url_is_not_a_selector() {
+        let doc = instance();
+        let values = "h1 { font: 16px/1.5 sans-serif; background: url(https://cdn.example/*); color: #112233 }";
+        assert!(refuse_instance_paths(&doc, values).is_ok(), "{values}");
+
+        // A `/*` inside an unquoted url does not hide the path selector after it.
+        let raw = "h1 { background: url(https://cdn.example/*) } #inst0001/part0001 { color: red }";
+        let err = refuse_instance_paths(&doc, raw).unwrap_err();
+        let told = r##"{"op":"css","select":"#inst0001/part0001","css":"…"}"##;
         assert!(
-            out.contains("url(https://cdn.example/*)") && out.contains(r"#inst0000\/part0000"),
-            "{out}"
+            err.contains(told)
+                && err.contains("can't reach a part inside an instance")
+                && err.contains("or edit the component #comp0001"),
+            "{err}"
         );
-        // Spaces after `url(`, a fragment, and a quoted url stay put.
-        let css = r#"h1 { background: url( https://cdn.example/* ) } p { background: url(https://cdn.example/a#inst0000/part0000) } b { background: url("https://cdn.example/*") } /* #inst0000/part0000 */ #inst0000/part0000 { color: red }"#;
-        let out = prepare_css(&doc, css).unwrap();
-        assert!(out.contains("url( https://cdn.example/* )"), "{out}");
+        let escaped = r"#inst0001\/part0001 { color: blue }";
+        let err = refuse_instance_paths(&doc, escaped).unwrap_err();
+        assert!(err.contains(told) && err.contains("#comp0001"), "{err}");
+
+        // A slash in a value, a fragment, a quoted url and a comment stay.
+        // A path that only looks like one, and isn't an instance, is still refused.
+        let kept = r##"h1 { font: 16px/1.5 sans-serif; background: url( https://cdn.example/* ) } p { background: url(https://cdn.example/a#inst0001/part0001) } b { background: url("https://cdn.example/*") } /* #inst0001/part0001 */ h1 { content: "#inst0001/part0001" }"##;
+        assert!(refuse_instance_paths(&doc, kept).is_ok(), "{kept}");
+        // The same `#` inside a selector's string or comment is not the id.
         assert!(
-            out.contains("url(https://cdn.example/a#inst0000/part0000)"),
-            "{out}"
+            refuse_instance_paths(&doc, r##"a[href="#inst0001/part0001"] { color: red }"##).is_ok()
         );
-        assert!(out.contains(r#"url("https://cdn.example/*")"#), "{out}");
-        assert!(out.contains("/* #inst0000/part0000 */"), "{out}");
-        assert!(out.contains(r"#inst0000\/part0000 { color: red }"), "{out}");
+        assert!(refuse_instance_paths(&doc, "h1 /* #inst0001/part0001 */ { color: red }").is_ok());
+        let missing = refuse_instance_paths(&doc, "#nope00/missing { color: red }").unwrap_err();
+        assert!(
+            missing.contains(r##"{"op":"css","select":"#nope00/missing","css":"…"}"##)
+                && !missing.contains("#comp0001"),
+            "{missing}"
+        );
     }
 }
