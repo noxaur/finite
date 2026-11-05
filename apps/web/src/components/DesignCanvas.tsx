@@ -3,7 +3,7 @@
 import * as stylex from "@stylexjs/stylex";
 import { Cause, Exit } from "effect";
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Api, Refused } from "@/api/Api";
 import { Camera, union, type View } from "@/design/camera";
 import { Editor } from "@/design/editing/editor";
@@ -19,22 +19,22 @@ import { formatOf } from "@/lib/transfer";
 import { loadPlace, savePlace } from "@/lib/place";
 import { pageStorage } from "@/lib/pageStorage";
 import { localUser } from "@/lib/user";
-import { timeAgo } from "@/lib/time";
 import { runtime } from "@/runtime";
-import { colors, radii, space } from "@/styles/tokens.stylex";
+import { colors, fonts, radii, size, space } from "@/styles/tokens.stylex";
 import {
   CommentLayer,
   type Draft,
   type Mode,
   pinPosition,
   selectionOf,
-  ToolPill,
   toggleInDraft,
 } from "./Comments";
 import { CommentsPanel } from "./CommentsPanel";
 import { Icon } from "./Icons";
-import { PagesSidebar } from "./PagesSidebar";
 import { Inspector } from "./Inspector";
+import { LayersTree } from "./LayersTree";
+import { type LeftMode, LeftSidebar } from "./LeftSidebar";
+import { ToolRail } from "./ToolRail";
 import { EditorNotice, SelectionLayer } from "./SelectionLayer";
 import { type TokensActions, TokensPanel } from "./TokensPanel";
 import { InteractivePill } from "./InteractivePill";
@@ -207,11 +207,11 @@ export function DesignCanvas({ id }: { id: string }) {
     rememberPlace.current();
   };
   const page = pages.find((p) => p.id === pickedPage) ?? pages[0];
-  // The tokens, the comments list, the export menu and an import's result open in the
-  // same place, one at a time.
-  const [panel, setPanel] = useState<"tokens" | "comments" | "export" | "import" | null>(null);
-  const togglePanel = (name: "tokens" | "comments" | "export") =>
-    setPanel((open) => (open === name ? null : name));
+  // The export menu and an import's result open in the same place, one at a time.
+  const [panel, setPanel] = useState<"export" | "import" | null>(null);
+  // The left sidebar's pages and layers, or its tokens; and whether it's shown.
+  const [leftMode, setLeftMode] = useState<LeftMode>("design");
+  const [leftOpen, setLeftOpen] = useState(true);
   const [imported, setImported] = useState<ImportState | null>(null);
   // Interactive mode: the artboard zoomed onto, running as a page.
   const [presented, setPresented] = useState<PresenterState | null>(null);
@@ -339,6 +339,13 @@ export function DesignCanvas({ id }: { id: string }) {
       camera,
       renderer,
       freeRect: () => freeRect(viewport),
+      origin: () => {
+        const { left, top } = viewport.getBoundingClientRect();
+        return { x: left, y: top };
+      },
+      // React commits the chrome hiding before the next frame; the second one has its layout.
+      layout: () =>
+        new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))),
       pageBoards: () => {
         const page = renderer.shownPage();
         return replica
@@ -864,8 +871,6 @@ export function DesignCanvas({ id }: { id: string }) {
     ...flash.map((nodeId) => ({ key: `flash:${nodeId}`, rect: canvasRect(nodeId), flash: true })),
   ];
 
-  const openCount = [...comments.values()].filter((c) => !c.resolved).length;
-
   // What P and the play buttons open: the selected artboard (several
   // selected: the first, stepping through them all), or the one last used
   // with the Interact tool.
@@ -904,6 +909,32 @@ export function DesignCanvas({ id }: { id: string }) {
     if (renderer) cameraRef.current?.fitTo(union(renderer.artboardBounds().values()));
   };
 
+  const renameDesign = (name: string) => {
+    // The new name comes back over the socket, to every viewer.
+    void runtime.runPromiseExit(Api.use((api) => api.renameDesign(id, name)));
+  };
+
+  // From Layers: center the canvas on a layer.
+  const revealNode = (nodeId: string) => {
+    const rect = canvasRect(nodeId);
+    if (rect) cameraRef.current?.centerOn(rect.x + rect.width / 2, rect.y + rect.height / 2);
+  };
+
+  // Hiding or showing the chrome around the canvas moves its corner: pan by
+  // as much the other way, so the artboards stay where they are on screen.
+  const cornerRef = useRef<{ x: number; y: number } | null>(null);
+  useLayoutEffect(() => {
+    const box = viewportRef.current?.getBoundingClientRect();
+    const camera = cameraRef.current;
+    const was = cornerRef.current;
+    if (!box) return;
+    if (camera && was && (box.left !== was.x || box.top !== was.y)) {
+      const v = camera.view;
+      camera.set({ ...v, x: v.x - (box.left - was.x), y: v.y - (box.top - was.y) });
+    }
+    cornerRef.current = { x: box.left, y: box.top };
+  }, [leftOpen, presenting]);
+
   if (model instanceof Error) {
     return (
       <main {...stylex.props(styles.notFound)}>
@@ -927,108 +958,28 @@ export function DesignCanvas({ id }: { id: string }) {
   }
 
   return (
-    <main {...stylex.props(styles.page)}>
-      <div
-        ref={viewportRef}
-        onPointerDown={(e) => {
-          pressRef.current = { x: e.clientX, y: e.clientY };
-        }}
-        // Keeps the draft's text box focused through a shift-click.
-        onMouseDown={(e) => {
-          const onCanvas = !(
-            e.target instanceof Element && e.target.closest("[data-camera-ignore]")
-          );
-          if (draft && e.shiftKey && onCanvas) e.preventDefault();
-        }}
-        onPointerMove={onCanvasPointerMove}
-        onPointerLeave={() => {
-          setHover(null);
-          setPart(null);
-          cancelAnimationFrame(partFrame.current);
-        }}
-        onClick={onCanvasClick}
-        {...stylex.props(
-          styles.viewport,
-          tool === "comment" && styles.commenting,
-          tool === "interact" && styles.interacting,
-        )}
-      >
-        <div ref={worldRef} {...stylex.props(styles.world)}>
-          <div ref={framesRef} />
-          {!presenting && editorRef.current && rendererRef.current && cameraRef.current && (
-            <SelectionLayer
-              editor={editorRef.current}
-              renderer={rendererRef.current}
-              camera={cameraRef.current}
-              version={session.version}
-            />
-          )}
-          {(!presenting || tool === "comment") &&
-            outlines.map(
-              ({ key, rect, flash }) =>
-                rect && (
-                  <div
-                    key={key}
-                    data-outline={flash ? "flash" : "target"}
-                    {...stylex.props(
-                      styles.outline(rect.x, rect.y, rect.width, rect.height),
-                      flash && styles.flash,
-                    )}
-                  />
-                ),
-            )}
-          {part &&
-            !presenting &&
-            (() => {
-              const rect = canvasRect(part.id);
-              return (
-                rect && (
-                  <div
-                    data-outline="component"
-                    {...stylex.props(
-                      styles.outline(rect.x, rect.y, rect.width, rect.height),
-                      styles.part,
-                    )}
-                  >
-                    <span {...stylex.props(styles.partLabel)}>{part.label}</span>
-                  </div>
-                )
-              );
-            })()}
-          {sessionRef.current && page && (!presenting || commentHold || draft || openId) && (
-            <CommentLayer
-              replica={sessionRef.current.replica}
-              page={page.id}
-              comments={comments}
-              openId={openId}
-              draft={draft}
-              working={working}
-              agents={knownAgents(comments, presence, listening)}
-              onOpen={(commentId) => {
-                setDraft(null);
-                setOpenId(commentId);
-              }}
-              onPost={postComment}
-              onCancelDraft={() => setDraft(null)}
-              onReply={reply}
-              onResolve={resolve}
-              onAudience={setAudience}
-              onEdit={editMessage}
-              onDelete={deleteComment}
-              onShowChange={(nodeIds) => setFlash([...nodeIds])}
-            />
-          )}
-        </div>
-      </div>
-
-      <header
-        data-canvas-chrome
-        {...stylex.props(styles.bar, styles.top, presenting !== null && styles.gone)}
-      >
+    <main
+      {...stylex.props(
+        styles.page,
+        !leftOpen && styles.leftClosed,
+        presenting !== null && styles.presenting,
+      )}
+    >
+      <header {...stylex.props(styles.titleBar, presenting !== null && styles.gone)}>
+        <button
+          type="button"
+          aria-label={leftOpen ? "Hide the left sidebar" : "Show the left sidebar"}
+          aria-pressed={leftOpen}
+          title={leftOpen ? "Hide the left sidebar" : "Show the left sidebar"}
+          onClick={() => setLeftOpen(!leftOpen)}
+          {...stylex.props(styles.tool, styles.iconTool)}
+        >
+          <Icon name="sidebar" size={16} />
+        </button>
         <Link href="/" {...stylex.props(styles.link)}>
           ← Designs
         </Link>
-        <span {...stylex.props(styles.name)}>{meta?.name ?? "…"}</span>
+        {!leftOpen && <span {...stylex.props(styles.name)}>{meta?.name ?? "…"}</span>}
         <span {...stylex.props(styles.muted)} title="Pass this to agents as designId">
           <code {...stylex.props(styles.code)}>{id}</code>
         </span>
@@ -1043,24 +994,6 @@ export function DesignCanvas({ id }: { id: string }) {
           <Icon name="play" size={10} />
           Interactive
         </button>
-        <button
-          type="button"
-          aria-pressed={panel === "tokens"}
-          onClick={() => togglePanel("tokens")}
-          {...stylex.props(styles.tool)}
-          title="CSS variables every artboard uses, in each mode"
-        >
-          Tokens
-        </button>
-        <button
-          type="button"
-          aria-pressed={panel === "comments"}
-          onClick={() => togglePanel("comments")}
-          {...stylex.props(styles.tool)}
-          title="Every comment, open and resolved"
-        >
-          Comments{openCount > 0 && <span {...stylex.props(styles.count)}>{openCount}</span>}
-        </button>
         <ImportButton
           busy={imported?.status === "working"}
           onFile={(file) => void importFile(file)}
@@ -1068,7 +1001,7 @@ export function DesignCanvas({ id }: { id: string }) {
         <button
           type="button"
           aria-pressed={panel === "export"}
-          onClick={() => togglePanel("export")}
+          onClick={() => setPanel((open) => (open === "export" ? null : "export"))}
           {...stylex.props(styles.tool)}
           title="Download an artboard or the whole design"
         >
@@ -1085,149 +1018,238 @@ export function DesignCanvas({ id }: { id: string }) {
         />
       </header>
 
-      {pages.length > 0 && page && (
-        <PagesSidebar pages={pages} current={page.id} onSelect={showPage} />
+      {leftOpen && !presenting && (
+        <LeftSidebar
+          name={meta?.name ?? null}
+          onRename={renameDesign}
+          mode={leftMode}
+          onMode={setLeftMode}
+          pages={pages}
+          page={page?.id ?? null}
+          onPage={showPage}
+          presence={presence}
+          listening={listening}
+          layers={(query) =>
+            editorRef.current &&
+            replica &&
+            page && (
+              <LayersTree
+                replica={replica}
+                editor={editorRef.current}
+                page={page.id}
+                query={query}
+                onReveal={revealNode}
+                version={session.version}
+              />
+            )
+          }
+          tokens={
+            replica && (
+              <TokensPanel
+                table={session.tokens}
+                artboards={replica
+                  .artboards()
+                  .filter((board) => replica.pageOf(board) === page?.id)}
+                modeOf={(board) => replica.modeOf(board)}
+                actions={tokenActions}
+              />
+            )
+          }
+        />
       )}
 
-      {meta && session.artboardCount > 0 && page?.artboardCount === 0 && (
-        <div {...stylex.props(styles.empty)}>
-          <p {...stylex.props(styles.emptyTitle)}>No artboards on this page</p>
-          <p {...stylex.props(styles.muted)}>Ask an agent to add some, or pick another page.</p>
+      {!presenting && (
+        <ToolRail
+          mode={mode}
+          onMode={setMode}
+          zoomLabel={zoomLabelRef}
+          onZoom={(by) => cameraRef.current?.zoomBy(by)}
+          onActualSize={() => cameraRef.current?.set({ ...cameraRef.current.view, zoom: 1 })}
+          onFit={fitAll}
+        />
+      )}
+
+      <div {...stylex.props(styles.cell)}>
+        <div
+          ref={viewportRef}
+          onPointerDown={(e) => {
+            pressRef.current = { x: e.clientX, y: e.clientY };
+          }}
+          // Keeps the draft's text box focused through a shift-click.
+          onMouseDown={(e) => {
+            const onCanvas = !(
+              e.target instanceof Element && e.target.closest("[data-camera-ignore]")
+            );
+            if (draft && e.shiftKey && onCanvas) e.preventDefault();
+          }}
+          onPointerMove={onCanvasPointerMove}
+          onPointerLeave={() => {
+            setHover(null);
+            setPart(null);
+            cancelAnimationFrame(partFrame.current);
+          }}
+          onClick={onCanvasClick}
+          {...stylex.props(
+            styles.viewport,
+            tool === "comment" && styles.commenting,
+            tool === "interact" && styles.interacting,
+          )}
+        >
+          <div ref={worldRef} {...stylex.props(styles.world)}>
+            <div ref={framesRef} />
+            {!presenting && editorRef.current && rendererRef.current && cameraRef.current && (
+              <SelectionLayer
+                editor={editorRef.current}
+                renderer={rendererRef.current}
+                camera={cameraRef.current}
+                version={session.version}
+              />
+            )}
+            {(!presenting || tool === "comment") &&
+              outlines.map(
+                ({ key, rect, flash }) =>
+                  rect && (
+                    <div
+                      key={key}
+                      data-outline={flash ? "flash" : "target"}
+                      {...stylex.props(
+                        styles.outline(rect.x, rect.y, rect.width, rect.height),
+                        flash && styles.flash,
+                      )}
+                    />
+                  ),
+              )}
+            {part &&
+              !presenting &&
+              (() => {
+                const rect = canvasRect(part.id);
+                return (
+                  rect && (
+                    <div
+                      data-outline="component"
+                      {...stylex.props(
+                        styles.outline(rect.x, rect.y, rect.width, rect.height),
+                        styles.part,
+                      )}
+                    >
+                      <span {...stylex.props(styles.partLabel)}>{part.label}</span>
+                    </div>
+                  )
+                );
+              })()}
+            {sessionRef.current && page && (!presenting || commentHold || draft || openId) && (
+              <CommentLayer
+                replica={sessionRef.current.replica}
+                page={page.id}
+                comments={comments}
+                openId={openId}
+                draft={draft}
+                working={working}
+                agents={knownAgents(comments, presence, listening)}
+                onOpen={(commentId) => {
+                  setDraft(null);
+                  setOpenId(commentId);
+                }}
+                onPost={postComment}
+                onCancelDraft={() => setDraft(null)}
+                onReply={reply}
+                onResolve={resolve}
+                onAudience={setAudience}
+                onEdit={editMessage}
+                onDelete={deleteComment}
+                onShowChange={(nodeIds) => setFlash([...nodeIds])}
+              />
+            )}
+          </div>
         </div>
-      )}
 
-      {meta && session.artboardCount === 0 && (
-        <div {...stylex.props(styles.empty)}>
-          <p {...stylex.props(styles.emptyTitle)}>No artboards yet</p>
-          <p {...stylex.props(styles.muted)}>
-            Connect an agent to <code {...stylex.props(styles.code)}>{mcpUrl()}</code> and ask it to
-            design something in <code {...stylex.props(styles.code)}>{id}</code>.
-          </p>
-        </div>
-      )}
+        {meta && session.artboardCount > 0 && page?.artboardCount === 0 && (
+          <div {...stylex.props(styles.empty)}>
+            <p {...stylex.props(styles.emptyTitle)}>No artboards on this page</p>
+            <p {...stylex.props(styles.muted)}>Ask an agent to add some, or pick another page.</p>
+          </div>
+        )}
 
-      {activity.length > 0 && !presenting && (
-        <ol aria-label="Recent changes" {...stylex.props(styles.bar, styles.activity)}>
-          {activity.map((a) => (
-            <li key={a.seq} {...stylex.props(styles.activityItem)}>
-              <span {...stylex.props(styles.actor)}>{a.actor}</span> {a.label}{" "}
-              <span {...stylex.props(styles.muted)}>{timeAgo(a.at)}</span>
-            </li>
-          ))}
-        </ol>
-      )}
+        {meta && session.artboardCount === 0 && (
+          <div {...stylex.props(styles.empty)}>
+            <p {...stylex.props(styles.emptyTitle)}>No artboards yet</p>
+            <p {...stylex.props(styles.muted)}>
+              Connect an agent to <code {...stylex.props(styles.code)}>{mcpUrl()}</code> and ask it
+              to design something in <code {...stylex.props(styles.code)}>{id}</code>.
+            </p>
+          </div>
+        )}
 
-      {panel === "tokens" && sessionRef.current && (
-        <TokensPanel
-          table={session.tokens}
-          artboards={sessionRef.current.replica
-            .artboards()
-            .filter((board) => sessionRef.current?.replica.pageOf(board) === page?.id)}
-          modeOf={(board) => sessionRef.current?.replica.modeOf(board) ?? ""}
-          actions={tokenActions}
-          onClose={() => setPanel(null)}
-        />
-      )}
-      {panel === "comments" && sessionRef.current && (
-        <CommentsPanel
-          replica={sessionRef.current.replica}
-          comments={comments}
-          working={working}
-          openId={openId}
-          onSelect={showComment}
-          onClose={() => setPanel(null)}
-        />
-      )}
-
-      {panel === "export" && sessionRef.current && (
-        <ExportMenu
-          designId={id}
-          artboards={sessionRef.current.replica
-            .artboards()
-            .map((board) => ({ id: board.id, name: board.name ?? "Artboard" }))}
-          onClose={() => setPanel(null)}
-        />
-      )}
-      {panel === "import" && imported && (
-        <ImportResultCard
-          designId={id}
-          state={imported}
-          nameOf={(nodeId) => sessionRef.current?.replica.get(nodeId)?.name ?? undefined}
-          onClose={() => setPanel(null)}
-        />
-      )}
-
-      {!presenting && <ToolPill mode={mode} onMode={setMode} />}
-      {editorRef.current && <EditorNotice editor={editorRef.current} />}
-      {editorRef.current &&
-        rendererRef.current &&
-        sessionRef.current &&
-        mode === "pointer" &&
-        !presenting && (
-          <Inspector
-            editor={editorRef.current}
-            renderer={rendererRef.current}
-            replica={sessionRef.current.replica}
-            version={session.version}
+        {panel === "export" && replica && (
+          <ExportMenu
+            designId={id}
+            artboards={replica
+              .artboards()
+              .map((board) => ({ id: board.id, name: board.name ?? "Artboard" }))}
+            onClose={() => setPanel(null)}
+          />
+        )}
+        {panel === "import" && imported && (
+          <ImportResultCard
+            designId={id}
+            state={imported}
+            nameOf={(nodeId) => replica?.get(nodeId)?.name ?? undefined}
+            onClose={() => setPanel(null)}
           />
         )}
 
-      <div {...stylex.props(styles.bar, styles.zoom, presenting !== null && styles.gone)}>
-        <button
-          type="button"
-          onClick={() => cameraRef.current?.zoomBy(0.8)}
-          {...stylex.props(styles.tool)}
-          aria-label="Zoom out"
-        >
-          −
-        </button>
-        <button
-          type="button"
-          ref={zoomLabelRef}
-          onClick={() => cameraRef.current?.set({ ...cameraRef.current.view, zoom: 1 })}
-          {...stylex.props(styles.tool, styles.percent)}
-          title="Zoom to 100% (0)"
-        />
-        <button
-          type="button"
-          onClick={() => cameraRef.current?.zoomBy(1.25)}
-          {...stylex.props(styles.tool)}
-          aria-label="Zoom in"
-        >
-          +
-        </button>
-        <button
-          type="button"
-          onClick={fitAll}
-          {...stylex.props(styles.tool)}
-          title="Zoom to fit (Shift+1)"
-        >
-          Fit
-        </button>
+        {editorRef.current && <EditorNotice editor={editorRef.current} />}
+
+        {presented && presenting && replica && (
+          <InteractivePill
+            name={replica.get(presenting)?.name ?? "Artboard"}
+            index={presented.boards.indexOf(presenting)}
+            total={presented.boards.length}
+            canGoBack={presented.history.length > 0}
+            held={rendererRef.current?.isHeld(presenting) ?? false}
+            note={notice ?? (updated?.board === presenting ? updated.text : null)}
+            hosts={rendererRef.current?.hostsOf(presenting) ?? []}
+            presence={presence}
+            onStep={(by) => presenterRef.current?.step(by)}
+            onBack={() => presenterRef.current?.back()}
+            onReload={() => rendererRef.current?.reload(presenting)}
+            onHold={() => {
+              const renderer = rendererRef.current;
+              renderer?.hold(presenting, !renderer.isHeld(presenting));
+              setTick((t) => t + 1);
+            }}
+            onExit={() => void presenterRef.current?.exit()}
+          />
+        )}
+        {notice && !presenting && <p {...stylex.props(styles.bar, styles.notice)}>{notice}</p>}
       </div>
 
-      {presented && presenting && replica && (
-        <InteractivePill
-          name={replica.get(presenting)?.name ?? "Artboard"}
-          index={presented.boards.indexOf(presenting)}
-          total={presented.boards.length}
-          canGoBack={presented.history.length > 0}
-          held={rendererRef.current?.isHeld(presenting) ?? false}
-          note={notice ?? (updated?.board === presenting ? updated.text : null)}
-          hosts={rendererRef.current?.hostsOf(presenting) ?? []}
-          presence={presence}
-          onStep={(by) => presenterRef.current?.step(by)}
-          onBack={() => presenterRef.current?.back()}
-          onReload={() => rendererRef.current?.reload(presenting)}
-          onHold={() => {
-            const renderer = rendererRef.current;
-            renderer?.hold(presenting, !renderer.isHeld(presenting));
-            setTick((t) => t + 1);
-          }}
-          onExit={() => void presenterRef.current?.exit()}
-        />
+      {!presenting && (
+        <aside data-camera-ignore aria-label="Properties" {...stylex.props(styles.right)}>
+          {tool === "comment" && replica ? (
+            <CommentsPanel
+              replica={replica}
+              comments={comments}
+              working={working}
+              openId={openId}
+              activity={activity}
+              onSelect={showComment}
+            />
+          ) : (
+            editorRef.current &&
+            rendererRef.current &&
+            replica && (
+              <Inspector
+                editor={editorRef.current}
+                renderer={rendererRef.current}
+                replica={replica}
+                tokens={session.tokens}
+                version={session.version}
+              />
+            )
+          )}
+        </aside>
       )}
-      {notice && !presenting && <p {...stylex.props(styles.bar, styles.notice)}>{notice}</p>}
     </main>
   );
 }
@@ -1236,11 +1258,55 @@ const styles = stylex.create({
   page: {
     position: "fixed",
     inset: 0,
+    display: "grid",
+    gridTemplateColumns: `${size.left} ${size.rail} minmax(0, 1fr) ${size.right}`,
+    gridTemplateRows: `${size.bar} minmax(0, 1fr)`,
+    gridTemplateAreas: '"bar bar bar bar" "left rail canvas right"',
     overflow: "hidden",
     backgroundColor: colors.canvas,
     color: colors.text,
-    fontFamily: "ui-sans-serif, system-ui, sans-serif",
+    fontFamily: fonts.sans,
     fontSize: 13,
+  },
+  leftClosed: {
+    gridTemplateColumns: `${size.rail} minmax(0, 1fr) ${size.right}`,
+    gridTemplateAreas: '"bar bar bar" "rail canvas right"',
+  },
+  // Interactive mode gives the page the whole window.
+  presenting: {
+    gridTemplateColumns: "minmax(0, 1fr)",
+    gridTemplateRows: "minmax(0, 1fr)",
+    gridTemplateAreas: '"canvas"',
+  },
+  titleBar: {
+    gridArea: "bar",
+    display: "flex",
+    alignItems: "center",
+    gap: space.sm,
+    minWidth: 0,
+    paddingInline: space.sm,
+    backgroundColor: colors.bg,
+    borderBottomWidth: 1,
+    borderBottomStyle: "solid",
+    borderBottomColor: colors.border,
+  },
+  cell: {
+    gridArea: "canvas",
+    position: "relative",
+    minWidth: 0,
+    minHeight: 0,
+    overflow: "hidden",
+  },
+  right: {
+    gridArea: "right",
+    display: "flex",
+    flexDirection: "column",
+    minHeight: 0,
+    overflowY: "auto",
+    backgroundColor: colors.surface,
+    borderLeftWidth: 1,
+    borderLeftStyle: "solid",
+    borderLeftColor: colors.border,
   },
   viewport: {
     position: "absolute",
@@ -1308,11 +1374,6 @@ const styles = stylex.create({
     borderColor: colors.border,
     backgroundColor: colors.surface,
   },
-  top: {
-    top: space.sm,
-    left: space.sm,
-    right: space.sm,
-  },
   spacer: { flexGrow: 1 },
   link: {
     color: colors.muted,
@@ -1321,7 +1382,7 @@ const styles = stylex.create({
   name: { fontWeight: 500 },
   muted: { margin: 0, color: colors.muted },
   code: {
-    fontFamily: "ui-monospace, monospace",
+    fontFamily: fonts.mono,
     fontSize: 12,
     userSelect: "all",
   },
@@ -1355,38 +1416,24 @@ const styles = stylex.create({
     fontSize: 15,
     fontWeight: 500,
   },
-  activity: {
-    left: space.sm,
-    bottom: space.sm,
-    flexDirection: "column",
-    alignItems: "flex-start",
-    gap: 2,
-    margin: 0,
-    maxWidth: 360,
-    listStyle: "none",
-  },
-  activityItem: {
-    whiteSpace: "nowrap",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    maxWidth: "100%",
-  },
-  actor: { fontWeight: 500 },
-  zoom: {
-    right: space.sm,
-    bottom: space.sm,
-    gap: 2,
-  },
   tool: {
     minWidth: 28,
     height: 24,
     paddingInline: 6,
     borderWidth: 0,
-    borderRadius: 4,
-    backgroundColor: { default: "transparent", ":hover": colors.bg },
+    borderRadius: radii.sm,
+    backgroundColor: { default: "transparent", ":hover": colors.sunk },
     color: "inherit",
     font: "inherit",
     cursor: "var(--cursor-pointer, pointer)",
+  },
+  iconTool: {
+    display: "grid",
+    placeItems: "center",
+    width: size.xs,
+    minWidth: 0,
+    padding: 0,
+    color: colors.muted,
   },
   play: {
     display: "inline-flex",
@@ -1406,10 +1453,6 @@ const styles = stylex.create({
     transform: "translateX(-50%)",
     margin: 0,
   },
-  percent: {
-    minWidth: 48,
-    fontVariantNumeric: "tabular-nums",
-  },
   notFound: {
     minHeight: "100vh",
     display: "grid",
@@ -1418,6 +1461,6 @@ const styles = stylex.create({
     textAlign: "center",
     backgroundColor: colors.bg,
     color: colors.text,
-    fontFamily: "ui-sans-serif, system-ui, sans-serif",
+    fontFamily: fonts.sans,
   },
 });

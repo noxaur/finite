@@ -56,7 +56,7 @@ pub fn routes() -> Router<Arc<Hub>> {
     Router::new()
         .route("/designs", get(list_designs).post(create_design))
         .route("/designs/ws", get(lobby_socket))
-        .route("/designs/{id}", get(get_design))
+        .route("/designs/{id}", get(get_design).patch(rename_design))
         .route("/owner/{id}", get(owner_of))
         .route(
             "/designs/{id}/handoff",
@@ -224,6 +224,21 @@ async fn get_design(
         .await
         .map(Json)
         .ok_or_else(|| ApiError::NotFound(format!("design {id:?} not found")))
+}
+
+#[derive(Deserialize)]
+struct Rename {
+    name: String,
+}
+
+/// Renames a design. Viewers and the design list get the new name.
+async fn rename_design(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    Json(body): Json<Rename>,
+) -> Result<StatusCode, ApiError> {
+    open(&hub, &id).await?.rename(body.name);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Takes over a design another server is handing off, after the list of

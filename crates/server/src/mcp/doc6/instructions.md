@@ -3,10 +3,10 @@ Finite is a design canvas for agents. A design holds artboards: fixed-size frame
 There are six tools. Each one's description has its full grammar and examples, so load them all at once.
 
 - designs: find a design (query), create one (create: "Name"), rename one, or delete one for good (delete).
-- read: look at a design. With no select, an overview (pages, artboards, open comments, who is working) and every artboard's outline with ids. select is a CSS selector, where #k3x9a2bq is a node's id; as: "outline", "html", "css" or "jsx". contains: "#3b82f6" searches styles, text, attributes, <style> blocks and tokens. export: "figma" (or html, finite, repo, jsx) returns a file's text to save.
+- read: look at a design. With no select, an overview (pages, artboards, open comments, who is working) and every artboard's outline with ids. select is a CSS selector, where #k3x9a2bq is a node's id; as: "outline", "html", "css", "jsx" or "computed". contains: "#3b82f6" searches styles, visible text, attributes, <style> and <script> code, and tokens. export: "figma" (or html, finite, repo, jsx) returns a file's text to save.
 - edit: every change. Its ops run in order as one transaction: all or nothing, one undo step. Ops: artboard, html, css, attrs, move, remove, replace, tokens, page, import, component. Each result ends with a layout check. status: "…" shows people what you're doing; dryRun: true previews.
 - render: an image of what select matches (every artboard by default), or output: "layout" for each element's box as text.
-- comments: open comments; wait: 60 blocks until one is waiting for you; reply: [{commentId, message, resolve: true}].
+- comments: open comments; wait: 55 blocks until one is waiting for you (at most 55; call again to keep listening); reply: [{commentId, message, resolve: true}].
 - undo: reverses your own last edit calls; redo: true redoes.
 
 Every tool but designs takes a designId: the design's id or exact name. Other agents and people may edit the same design, so re-read before changing nodes you didn't create.
@@ -15,6 +15,6 @@ Workflow: designs, then read, then edit. A new screen is one artboard op holding
 
 HTML: inline styles or <style> blocks with classes. Prefer flexbox and gap. Name layers with data-name="Header". box-sizing is border-box. <img src="https://…"> and inline <svg> work. Artboards are white flex columns with overflow hidden, so children shrink unless they have flex-shrink: 0. A <style> or <script> only affects its own artboard. Scripts run sandboxed: inline or <script src="https://…">, fetch/WebSocket to https, localStorage, addEventListener (on* attributes are dropped). href="#finite-artboard=<id>" links to another artboard. render waits about 3 seconds after load.
 
-Comments are user requests pinned to an element. The server sends each one to a single agent: wait returns only yours, and in a list "for" says whose each one is. When read says comments are waiting for you: call comments, make the change, check it, then reply saying what you changed, with resolve: true. Your reply links your edits to that artboard since the thread's last message. If a comment is unclear, ask in a reply and leave it open. If it's a note between people, not a request, mark it with forPeople: [commentId]. If you can't take it, pass: [commentId].
+Comments are user requests pinned to an element. The server sends each one to a single agent: wait returns only yours, and in a list "for" says whose each one is. When read says comments are waiting for you: call comments, make the change, check it, then reply saying what you changed, with resolve: true. Your reply links your edits on that artboard since the thread's last message. If a comment is unclear, ask in a reply and leave it open. If it's a note between people, not a request, mark it with forPeople: [commentId]. If you can't take it, pass: [commentId].
 
 Long results end with a note saying how to get the rest. Errors say what to do instead.

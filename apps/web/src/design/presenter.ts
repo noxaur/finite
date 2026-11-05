@@ -62,6 +62,10 @@ export interface PresenterHost {
   readonly renderer: Renderer;
   /** The part of the viewport no app chrome covers, in viewport coordinates. */
   freeRect(): Bounds;
+  /** Where the viewport's corner is in the window. Hiding the chrome around it moves it. */
+  origin(): { readonly x: number; readonly y: number };
+  /** Resolves once the app has laid out a change of state, like the chrome hiding. */
+  layout(): Promise<void>;
   /** The shown page's artboards in reading order, for stepping without a playlist. */
   pageBoards(): ReadonlyArray<string>;
   /** Shows `id`'s page, if it's on another. False when there's no such artboard. */
@@ -87,6 +91,8 @@ export class Presenter {
   /** The view to go back to, and its page, saved once when it starts. */
   private returnView: View | null = null;
   private returnPage: string | null = null;
+  /** The viewport's corner when it started, since the view is relative to it. */
+  private returnOrigin = { x: 0, y: 0 };
   /** The selection it started with, if it was several artboards. */
   private playlist: ReadonlyArray<string> | null = null;
   private turn = 0;
@@ -108,6 +114,7 @@ export class Presenter {
     if (!this.host.reveal(board)) return;
     if (this.current.phase === "idle") {
       this.returnView = this.host.camera.view;
+      this.returnOrigin = this.host.origin();
       // The page it started on, before revealing the artboard switched it.
       this.returnPage = page;
       this.playlist = playlist && playlist.length > 1 ? playlist : null;
@@ -156,7 +163,17 @@ export class Presenter {
     // started on; if that page is gone, the view would frame nothing.
     const page = this.returnPage;
     const home = page === null || page === this.host.page() || this.host.showPage(page);
-    const back = home ? this.returnView : null;
+    // The viewport moves back when the chrome shows again, and the app pans
+    // to keep the canvas still, so land where that leaves the starting view.
+    const now = this.host.origin();
+    const back =
+      home && this.returnView
+        ? {
+            ...this.returnView,
+            x: this.returnView.x + this.returnOrigin.x - now.x,
+            y: this.returnView.y + this.returnOrigin.y - now.y,
+          }
+        : null;
     if (back) await this.host.camera.animateTo(back, ENTER_MS);
     if (turn !== this.turn) return;
     this.host.camera.locked = null;
@@ -191,12 +208,22 @@ export class Presenter {
     const turn = ++this.turn;
     const renderer = this.host.renderer;
     const before = this.current.board;
+    const starting = this.current.phase === "idle";
     renderer.setPresenting(null);
     if (before && before !== board) renderer.setWindow(before, null);
+    // Starting hides the chrome around the canvas, which resizes it: fit what it leaves.
+    if (starting) {
+      this.update({ phase: "entering", board, history, boards: this.boards() });
+      await this.host.layout();
+      if (turn !== this.turn) return;
+    }
     // The full size, before any window, decides the fit.
     renderer.setWindow(board, null);
     const at = this.presentation(board);
-    if (!at) return;
+    if (!at) {
+      if (starting) void this.exit();
+      return;
+    }
     renderer.setWindow(board, at.window);
     this.update({ phase: "entering", board, history, boards: this.boards() });
     const landed = await this.host.camera.animateTo(at.view, durationMs);
