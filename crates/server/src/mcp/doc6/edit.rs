@@ -76,24 +76,28 @@ fn for_doc6(error: &str) -> String {
     rewrite_detach(&rewrite_make_component(&error))
 }
 
-/// `use update_styles to change inline styles`, optionally after `#{id}:`.
-/// The css op selects that node when the error names one.
+/// The whole design error for a `style` attribute, `#{id}: style isn't an
+/// attribute; use update_styles to change inline styles`, or that sentence
+/// alone. A value an agent sent can quote the phrase inside a different
+/// error, and a substring rewrite would turn that value into css advice.
 fn rewrite_style(error: &str) -> String {
-    const PHRASE: &str = "use update_styles to change inline styles";
-    let Some(at) = error.find(PHRASE) else {
-        return error.to_owned();
+    const SHORT: &str = "use update_styles to change inline styles";
+    const FULL: &str = "style isn't an attribute; use update_styles to change inline styles";
+    let advice = |prefix: &str, id: &str| {
+        format!(
+            "{prefix}style isn't an attribute; change inline styles with a css op, like {{\"op\": \"css\", \"select\": \"#{id}\", \"css\": \"color: red\"}}"
+        )
     };
-    let id = node_id_before(&error[..at]).unwrap_or("id");
-    let advice = format!(
-        "style isn't an attribute; change inline styles with a css op, like {{\"op\": \"css\", \"select\": \"#{id}\", \"css\": \"color: red\"}}"
-    );
-    // The design error already says this, so the node id in front of it stays.
-    let start = error[..at].rfind("style isn't an attribute").unwrap_or(at);
-    let mut out = String::with_capacity(error.len() + advice.len());
-    out.push_str(&error[..start]);
-    out.push_str(&advice);
-    out.push_str(&error[at + PHRASE.len()..]);
-    out
+    if error == SHORT || error == FULL {
+        return advice("", "id");
+    }
+    if let Some(head) = error.strip_suffix(FULL)
+        && let Some(id) = node_id_before(head)
+        && head == format!("#{id}: ")
+    {
+        return advice(head, id);
+    }
+    error.to_owned()
 }
 
 /// The node id in the last `#{id}` before `end`, when one is there.
@@ -614,11 +618,20 @@ fn html_op(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String,
 
 /// `mode: "inner"` on a node an instance shows. Names that node, not the
 /// child the replace would have deleted, and says how to change it.
+/// Text replace skips `<style>` and `<script>` bodies, so those say code.
 fn inner_keeps_instance_children(doc: &Document, id: &str) -> String {
+    let code = doc
+        .get(id)
+        .and_then(|node| node.tag())
+        .is_some_and(|tag| tag.eq_ignore_ascii_case("style") || tag.eq_ignore_ascii_case("script"));
+    let place = if code { "code" } else { "text" };
+    let replace = format!(
+        "{{\"op\": \"replace\", \"select\": \"#{id}\", \"find\": \"…\", \"replace\": \"…\", \"in\": \"{place}\"}}"
+    );
     let Some((instance, component)) = finite_design::components::instance_of(doc, id) else {
         return format!(
             "#{id}: mode inner replaces its children, and that was refused. \
-             To change its text, use {{\"op\": \"replace\", \"select\": \"#{id}\", \"find\": \"…\", \"replace\": \"…\", \"in\": \"text\"}}. \
+             To change its {place}, use {replace}. \
              A css or attrs op changes its styles or attributes."
         );
     };
@@ -640,7 +653,7 @@ fn inner_keeps_instance_children(doc: &Document, id: &str) -> String {
     };
     format!(
         "{relation}{of}, so mode inner replaces its children, and those come from the component. \
-         To change only its text, use {{\"op\": \"replace\", \"select\": \"#{id}\", \"find\": \"…\", \"replace\": \"…\", \"in\": \"text\"}}. \
+         To change only its {place}, use {replace}. \
          A css or attrs op on it changes only its styles or attributes.{edit_component} with {{\"op\": \"component\", \"select\": \"#{}\", \"detach\": true}}.",
         instance.id
     )
@@ -1573,6 +1586,17 @@ mod tests {
             "{bare}"
         );
         assert!(!bare.contains("detach #"), "{bare}");
+
+        // The phrase is the value the agent set, inside a different error.
+        // Rewriting by substring turns that value into css advice.
+        let quoted = for_doc6(
+            "srcdoc=\"use update_styles to change inline styles\" isn't allowed: no srcdoc, and no javascript: or vbscript: URLs",
+        );
+        assert!(
+            quoted.contains("srcdoc=\"use update_styles to change inline styles\""),
+            "{quoted}"
+        );
+        assert!(!quoted.contains("\"op\": \"css\""), "{quoted}");
 
         let mode = for_doc6("can't replace an artboard; use mode \"replace-children\" instead");
         assert!(mode.contains("mode \"inner\""), "{mode}");

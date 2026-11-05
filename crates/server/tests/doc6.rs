@@ -1262,6 +1262,77 @@ async fn errors_tell_doc6_agents_which_op_to_use() {
         component_html.contains(">Home<") && !component_html.contains("Inbox"),
         "{component_html}"
     );
+
+    // A <script> inside an instance isn't visible text. inner names that
+    // node and says to replace in code, and following that changes only
+    // this instance.
+    let widget = "<div data-name=\"Widget\"><script>var marker = home</script></div>";
+    let coded = edit(
+        &mut agent,
+        &id,
+        json!([
+            { "op": "artboard", "name": "Code", "width": 400, "height": 200, "html": widget },
+            { "op": "artboard", "name": "Code copy", "width": 400, "height": 200, "html": widget },
+            { "op": "component", "select": "[data-name=Widget]", "name": "Widget" },
+        ]),
+    )
+    .await;
+    let widget_component = id_after(&coded, "3. component:");
+    let widget_instance = id_after(&coded, "Replaced 1 copy");
+    let widget_html = html(&mut agent, &id, &format!("#{widget_instance}")).await;
+    let script_at = widget_html
+        .find("<script")
+        .expect("a script in the instance");
+    let script_tag =
+        &widget_html[script_at..script_at + widget_html[script_at..].find('>').unwrap()];
+    let marker = "data-id=\"";
+    let at = script_tag.find(marker).expect("the script's data-id") + marker.len();
+    let script: String = script_tag[at..].chars().take_while(|c| *c != '"').collect();
+    let script_inner = refused(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "html",
+            "select": format!("#{script}"),
+            "mode": "inner",
+            "html": "var marker = inbox"
+        }]),
+    )
+    .await;
+    assert!(
+        script_inner.contains(&format!("#{script} is inside instance #{widget_instance}"))
+            && script_inner.contains("\"in\": \"code\"")
+            && script_inner.contains(&format!("\"select\": \"#{script}\""))
+            && !script_inner.contains("\"in\": \"text\""),
+        "{script_inner}"
+    );
+    assert_eq!(classic_tool(&script_inner), None, "{script_inner}");
+    let script_changed = edit(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "replace",
+            "select": format!("#{script}"),
+            "find": "home",
+            "replace": "inbox",
+            "in": "code"
+        }]),
+    )
+    .await;
+    assert!(
+        script_changed.contains("Replaced 1 use"),
+        "{script_changed}"
+    );
+    let instance_code = html(&mut agent, &id, &format!("#{widget_instance}")).await;
+    let component_code = html(&mut agent, &id, &format!("#{widget_component}")).await;
+    assert!(
+        instance_code.contains("var marker = inbox"),
+        "{instance_code}"
+    );
+    assert!(
+        component_code.contains("var marker = home") && !component_code.contains("inbox"),
+        "{component_code}"
+    );
 }
 
 #[tokio::test]
