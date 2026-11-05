@@ -923,6 +923,96 @@ try {
     ),
   );
 
+  // Interactive mode: P zooms onto the selected artboard on the canvas, its
+  // page takes clicks, a link flies to another artboard, and Escape goes
+  // back to the same view. With the pointer, the page's buttons don't press.
+  const play = (await agent.call("create_design", { name: "Interactive" })).match(
+    /designId "([a-z0-9]+)"/,
+  )[1];
+  const app = idAfter(
+    await agent.call("create_artboard", { designId: play, name: "App", width: 390, height: 600 }),
+    "artboard",
+  );
+  const next = idAfter(
+    await agent.call("create_artboard", {
+      designId: play,
+      name: "Next",
+      width: 390,
+      height: 600,
+      x: 500,
+    }),
+    "artboard",
+  );
+  await agent.call("write_html", {
+    designId: play,
+    targetId: app,
+    html: `<div style="padding:16px;display:flex;flex-direction:column;gap:16px"><button id="tap" style="height:120px">Tap</button><a href="#finite-artboard=${next}" style="display:block;height:80px">Next</a><script>let n=0;document.getElementById("tap").addEventListener("click",()=>parent.postMessage({taps:++n},"*"))</script></div>`,
+  });
+  await agent.call("write_html", { designId: play, targetId: next, html: `<p>Next page</p>` });
+  await page.goto(`${base}/design/?id=${play}`);
+  await page.until(`!!document.querySelector('[data-artboard="${app}"] iframe')`, 10_000);
+  await page.sleep(500);
+  await page.eval(
+    `window.taps = 0; addEventListener("message", (e) => { if (e.data?.taps) window.taps = e.data.taps; })`,
+  );
+  const boxOf = (sel) =>
+    page.eval(
+      `(() => { const r = document.querySelector(${JSON.stringify(sel)}).getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; })()`,
+    );
+  const canvasView = await zoom();
+  // Moves into the iframe first, as a person's pointer does: Chrome routes a
+  // press to a sandboxed frame once the pointer has moved over it.
+  const tapAt = async (x, y) => {
+    await page.move(x - 2, y - 2);
+    await page.move(x, y);
+    await page.sleep(100);
+    await page.click(x, y);
+  };
+  // The pointer selects the artboard; its button doesn't press.
+  let appBox = await boxOf(`[data-artboard="${app}"] iframe`);
+  await page.click(appBox.x + appBox.width / 2, appBox.y + 10);
+  await page.sleep(300);
+  check("with the pointer, a page's button doesn't press", (await page.eval("window.taps")) === 0);
+  await page.key("p", "KeyP");
+  const pill = `document.querySelector('[aria-label="Interactive mode"]')`;
+  check(
+    "P zooms onto the selected artboard in interactive mode",
+    Boolean(await page.until(`${pill}?.innerText.includes("App")`, 5000)) &&
+      Boolean(
+        await page.until(
+          `document.querySelector('[data-artboard="${app}"] iframe').style.pointerEvents === ""`,
+          5000,
+        ),
+      ),
+  );
+  appBox = await boxOf(`[data-artboard="${app}"] iframe`);
+  const scale = appBox.width / 390;
+  const tx = appBox.x + appBox.width / 2,
+    ty = appBox.y + (16 + 60) * scale;
+  await tapAt(tx, ty);
+  check("the page takes clicks", Boolean(await page.until("window.taps === 1", 5000)));
+  await tapAt(appBox.x + 40 * scale, appBox.y + (16 + 120 + 16 + 40) * scale);
+  check(
+    "a link to another artboard flies there, with Back",
+    Boolean(
+      await page.until(
+        `${pill}?.innerText.includes("Next") && ${pill}.innerText.includes("Back")`,
+        5000,
+      ),
+    ),
+  );
+  await page.key("Escape");
+  check(
+    "Escape goes back to the canvas, to the same view",
+    Boolean(await page.until(`!${pill}`, 5000)) &&
+      Boolean(
+        await page.until(
+          `getComputedStyle(document.querySelector("[data-artboard]").parentElement.parentElement).transform === ${JSON.stringify(canvasView)}`,
+          5000,
+        ),
+      ),
+  );
+
   check("no errors on the page", page.errors.length === 0, page.errors.join(" | "));
 } catch (error) {
   check("the run finished", false, error.stack ?? String(error));

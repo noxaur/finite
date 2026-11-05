@@ -42,6 +42,7 @@ export function CommentsPanel({
 
   return (
     <aside
+      data-canvas-chrome
       data-camera-ignore
       aria-label="Comments"
       {...stylex.props(styles.panel)}

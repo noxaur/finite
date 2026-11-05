@@ -67,6 +67,7 @@ export function ExportMenu({
 }) {
   return (
     <div
+      data-canvas-chrome
       data-camera-ignore
       role="menu"
       aria-label="Export"
@@ -161,6 +162,7 @@ export function ImportResultCard({
   const summary = state.status === "done" ? summarize(state.result, nameOf) : null;
   return (
     <aside
+      data-canvas-chrome
       data-camera-ignore
       aria-label="Import"
       {...stylex.props(styles.card, styles.result)}

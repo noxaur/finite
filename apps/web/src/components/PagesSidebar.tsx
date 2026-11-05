@@ -24,7 +24,7 @@ export function PagesSidebar({
   onSelect: (id: string) => void;
 }) {
   return (
-    <nav data-camera-ignore aria-label="Pages" {...stylex.props(styles.panel)}>
+    <nav data-camera-ignore data-canvas-chrome aria-label="Pages" {...stylex.props(styles.panel)}>
       <p {...stylex.props(styles.title)}>Pages</p>
       <ol {...stylex.props(styles.list)}>
         {pages.map((page) => (
