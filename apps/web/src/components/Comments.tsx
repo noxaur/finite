@@ -8,7 +8,6 @@ import { audienceLabel, audienceOf, routeLabel, type KnownAgent } from "@/lib/au
 import { COMMENT_LIMIT, NAME_LIMIT, SELECTION_LIMIT } from "@/lib/limits";
 import { isLocalUser, useLocalName } from "@/lib/user";
 import { timeAgo } from "@/lib/time";
-import { PIN_PATH } from "@/lib/cursors";
 import { PinFilters, PinIcon, type PinState } from "./PinIcon";
 import { colors, radii, space } from "@/styles/tokens.stylex";
 
@@ -68,82 +67,6 @@ export function pinState(comment: Comment, working: string | undefined): PinStat
 }
 
 /** The pointer and comment tools, in a pill at the bottom of the screen. */
-export function ToolPill({ mode, onMode }: { mode: Mode; onMode: (mode: Mode) => void }) {
-  return (
-    <div {...stylex.props(styles.pill)} role="toolbar" aria-label="Tools">
-      {/* The pill renders before any pins, so it carries its own wobble filter. */}
-      <svg width="0" height="0" style={{ position: "absolute" }} aria-hidden="true">
-        <filter id="tool-wob" x="-20%" y="-20%" width="140%" height="140%">
-          <feTurbulence type="fractalNoise" baseFrequency="0.045" numOctaves="1" seed="3" />
-          <feDisplacementMap
-            in="SourceGraphic"
-            scale="3"
-            xChannelSelector="R"
-            yChannelSelector="G"
-          />
-        </filter>
-      </svg>
-      <button
-        type="button"
-        aria-pressed={mode === "pointer"}
-        title="Pointer (V)"
-        onClick={() => onMode("pointer")}
-        {...stylex.props(styles.pillButton, mode === "pointer" && styles.pillActive)}
-      >
-        <svg width="20" height="20" viewBox="0 0 24 24" overflow="visible" aria-hidden="true">
-          <path
-            d="M6 3.5 18.5 12l-5.6 1.3-2.9 5.7z"
-            fill="currentColor"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinejoin="round"
-            filter="url(#tool-wob)"
-          />
-        </svg>
-      </button>
-      <button
-        type="button"
-        aria-pressed={mode === "interact"}
-        title="Interact (I): click, type and scroll in pages"
-        onClick={() => onMode("interact")}
-        {...stylex.props(styles.pillButton, mode === "interact" && styles.pillActive)}
-      >
-        {/* An outlined pointer with a click's rays: the pointer, using the page. */}
-        <svg width="20" height="20" viewBox="0 0 24 24" overflow="visible" aria-hidden="true">
-          <path
-            d="M8.6 7.6c3 1.9 5.9 3.9 8.9 5.9-1.5.4-2.9.7-4.3 1.1-.7 1.4-1.4 2.8-2.2 4.2-.8-3.7-1.6-7.4-2.4-11.2z M6.2 3.4l.9 2 M3.4 6.9l2.1.5 M10.2 2.7l-.3 2.1"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.9"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            filter="url(#tool-wob)"
-          />
-        </svg>
-      </button>
-      <button
-        type="button"
-        aria-pressed={mode === "comment"}
-        title="Comment (C)"
-        onClick={() => onMode("comment")}
-        {...stylex.props(styles.pillButton, mode === "comment" && styles.pillActive)}
-      >
-        {/* The pin's own outline, so the tool looks like what it places. */}
-        <svg width="22" height="20" viewBox="0 0 40 36" overflow="visible" aria-hidden="true">
-          <path
-            d={PIN_PATH}
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="3.2"
-            strokeLinejoin="round"
-            filter="url(#tool-wob)"
-          />
-        </svg>
-      </button>
-    </div>
-  );
-}
-
 interface LayerProps {
   readonly replica: Replica;
   /** The page shown. Pins on artboards on other pages are hidden. */
@@ -634,36 +557,6 @@ const pulse = stylex.keyframes({
 });
 
 const styles = stylex.create({
-  pill: {
-    position: "absolute",
-    left: "50%",
-    bottom: space.md,
-    transform: "translateX(-50%)",
-    display: "flex",
-    gap: 2,
-    padding: 4,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderStyle: "solid",
-    borderColor: colors.border,
-    backgroundColor: colors.surface,
-    boxShadow: "0 4px 16px rgba(0, 0, 0, 0.08)",
-  },
-  pillButton: {
-    display: "grid",
-    placeItems: "center",
-    width: 36,
-    height: 32,
-    borderWidth: 0,
-    borderRadius: 999,
-    backgroundColor: { default: "transparent", ":hover": colors.bg },
-    color: colors.text,
-    cursor: "var(--cursor-pointer, pointer)",
-  },
-  pillActive: {
-    backgroundColor: { default: colors.accent, ":hover": colors.accent },
-    color: colors.onAccent,
-  },
   layer: {
     position: "absolute",
     left: 0,

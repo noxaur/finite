@@ -17,7 +17,7 @@ describe("iconMarkup", () => {
 
   it("fills only the play triangle", () => {
     expect(iconMarkup("play")).toContain('fill="currentColor"');
-    for (const name of ["previous", "next", "close", "wifi"] as const) {
+    for (const name of ICON_NAMES.filter((n) => n !== "play")) {
       expect(iconMarkup(name)).not.toContain('fill="currentColor"');
     }
   });
