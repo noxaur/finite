@@ -66,10 +66,30 @@ pub const VOID_TAGS: &[&str] = &[
 /// use them; the viewer reads them through WebAssembly.
 pub const BASE_CSS: &str = "*, *::before, *::after { box-sizing: border-box; }";
 
-/// The content policy for artboards that run scripts: inline code, remote
-/// images, fonts and stylesheets, and no network access from scripts.
-/// Shared by screenshots and the viewer's sandboxed iframes.
-pub const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https:; img-src https: http: data: blob:; font-src https: data:; media-src https: data: blob:";
+/// The content policy for artboards that run scripts. Scripts are inline or
+/// load from `https:` (libraries from a CDN), and can call `https:` and `wss:`
+/// APIs. Forms never send anything (`form-action`), and a page can't nest
+/// other pages. Shared by screenshots and the viewer's sandboxed iframes,
+/// where the sandbox and [`BOOTSTRAP`] take away the rest: dialogs, popups,
+/// top navigation, pointer lock and fullscreen.
+pub const CSP: &str = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https:; connect-src https: wss:; style-src 'unsafe-inline' https:; img-src https: http: data: blob:; font-src https: data:; media-src https: data: blob:; worker-src blob:; form-action 'none'; frame-src 'none'; base-uri 'none'";
+
+/// Runs first in every artboard that runs scripts, before the artboard's own
+/// code: a function expression that hosts call with a config,
+/// `(BOOTSTRAP)({"nonce": "…", "storage": {…}})`. It holds the private channel
+/// to the viewer, the design's `localStorage`, and the limits on audio, focus
+/// and fullscreen. See the file for what it does.
+pub const BOOTSTRAP: &str = include_str!("bootstrap.js");
+
+/// Whether a `<script>`'s `src` may load: only from an `https:` URL.
+pub fn is_safe_script_src(value: &str) -> bool {
+    let value = value.trim();
+    value.len() > "https://".len()
+        && value
+            .get(..8)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+        && !value.chars().any(|c| c.is_whitespace() || c.is_control())
+}
 
 /// The cascade layer for the base styles every artboard renders with. It
 /// comes first, so tokens and an artboard's styles can override them, like
@@ -611,9 +631,13 @@ impl Walk {
                         INSTANCE_ATTR if !value.trim().is_empty() => {
                             fragment.instance_of = Some(value.trim().to_owned());
                         }
-                        // Scripts must be inline: the sandbox doesn't load anything that runs.
+                        "src" if is_script && is_safe_script_src(value) => {
+                            fragment
+                                .attrs
+                                .insert(name.to_owned(), value.trim().to_owned());
+                        }
                         "src" if is_script => {
-                            let reason = "scripts must be inline";
+                            let reason = "scripts load only from https:// URLs";
                             self.drop(Some(me), &path, "src on <script>".into(), reason);
                         }
                         _ if is_safe_attr(name, value) => {
@@ -1287,17 +1311,37 @@ mod tests {
     #[test]
     fn strips_handlers_and_frames() {
         let nodes = parse(
-            r#"<div onclick="x()" class="card"><iframe src="x"></iframe><a href="javascript:x()">a</a><img src="a.png"><script src="https://x/y.js">go()</script></div>"#,
+            r#"<div onclick="x()" class="card"><iframe src="x"></iframe><a href="javascript:x()">a</a><img src="a.png"><script src="http://x/y.js">go()</script><script src="https://cdn.x/y.js"></script></div>"#,
         );
         let div = &nodes[0];
         assert_eq!(div.attrs, BTreeMap::from([("class".into(), "card".into())]));
-        assert_eq!(div.children.len(), 3);
+        assert_eq!(div.children.len(), 4);
         assert!(div.children[0].attrs.is_empty());
         assert_eq!(div.children[1].attrs["src"], "a.png");
         assert!(
             div.children[2].attrs.is_empty(),
-            "external scripts are dropped"
+            "scripts from http: are dropped"
         );
+        assert_eq!(div.children[3].attrs["src"], "https://cdn.x/y.js");
+    }
+
+    #[test]
+    fn script_sources_must_be_https() {
+        assert!(is_safe_script_src(
+            "https://cdn.jsdelivr.net/npm/react@18.3.1"
+        ));
+        assert!(is_safe_script_src(" HTTPS://cdn.x/a.js "));
+        for bad in [
+            "http://x/a.js",
+            "//x/a.js",
+            "data:text/javascript,1",
+            "a.js",
+            "https://",
+            "https://x/ a.js",
+            "é漢字https://x",
+        ] {
+            assert!(!is_safe_script_src(bad), "{bad}");
+        }
     }
 
     #[test]

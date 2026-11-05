@@ -1111,12 +1111,23 @@ pub fn update_attributes(
             if lower == html::ID_ATTR {
                 return err("data-id is the node id and can't be changed");
             }
-            // The same rule write_html applies when it parses HTML.
+            // The same rules write_html applies when it parses HTML.
             if let Some(value) = value
                 && !html::is_safe_attr(name, value)
             {
                 return err(format!(
                     "{name}={value:?} isn't allowed: no srcdoc, and no javascript: or vbscript: URLs"
+                ));
+            }
+            if let Some(value) = value
+                && lower == "src"
+                && element(doc, id)?
+                    .tag()
+                    .is_some_and(|tag| tag.eq_ignore_ascii_case("script"))
+                && !html::is_safe_script_src(value)
+            {
+                return err(format!(
+                    "src={value:?} isn't allowed on a <script>: scripts load only from https:// URLs"
                 ));
             }
             ops.push(Op::Set {
