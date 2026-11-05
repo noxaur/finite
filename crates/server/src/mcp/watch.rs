@@ -36,7 +36,7 @@ use std::{
 
 use finite_design::{Change, Document};
 
-use super::layout::Report;
+use super::layout::{Found, Report, Texts};
 use crate::{hub::DesignHandle, screenshot};
 
 /// How long a doc6 edit waits at least: its check is on by default, and AX
@@ -67,6 +67,11 @@ const BOARDS_PER_EDIT: usize = 3;
 /// The entry for what one edit left unchecked, which no artboard has an id like.
 const UNCHECKED: &str = "+unchecked";
 
+/// Stands among an artboard's touched nodes when its `<style>` block changed,
+/// which restyles elements without editing them: all of its findings count
+/// as touched. No node has an id like it.
+const RESTYLED: &str = "+restyled";
+
 /// One measurement at a time, across every design.
 fn measuring() -> &'static tokio::sync::Semaphore {
     static SLOT: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
@@ -80,15 +85,16 @@ struct Entry {
     generation: u64,
     note: Option<String>,
     /// What the check behind `note` found, as `Found::key`s. It becomes
-    /// `seen` once the note is taken, so a note that never reaches the agent
-    /// doesn't hide what it said from the next one.
-    found: Option<HashSet<String>>,
+    /// `seen` once a response carries the note ([`LayoutWatch::deliver`]), so
+    /// a note that never reaches the agent doesn't hide what it said from the
+    /// next one.
+    found: Option<HashSet<u64>>,
     /// The nodes edited since the last check the agent heard about, which the
     /// next check reports on. Edits sent together share one check.
     touched: HashSet<String>,
     /// What the last check the agent heard about found, as `Found::key`s.
     /// `None` before the first, when everything counts as new.
-    seen: Option<HashSet<String>>,
+    seen: Option<HashSet<u64>>,
 }
 
 /// A note taken from the watch, to put on a result, or back if that result is an error.
@@ -141,16 +147,33 @@ impl LayoutWatch {
             .filter(|id| !id.is_empty())
             .map(str::to_owned)
             .collect();
-        let mut boards: Vec<String> = handle.read(|d| {
+        let (mut boards, restyled): (Vec<String>, HashSet<String>) = handle.read(|d| {
+            let doc = d.doc();
+            let in_sheet = |id: &str| {
+                let is_style = |n: &finite_design::Node| {
+                    n.tag().is_some_and(|t| t.eq_ignore_ascii_case("style"))
+                };
+                doc.get(id).is_some_and(|n| {
+                    is_style(n)
+                        || n.parent
+                            .as_deref()
+                            .and_then(|p| doc.get(p))
+                            .is_some_and(is_style)
+                })
+            };
             let mut boards: Vec<String> = Vec::new();
+            let mut restyled = HashSet::new();
             for op in &change.ops {
-                if let Some(board) = d.doc().artboard_of(op.id())
-                    && !boards.contains(&board.id)
-                {
-                    boards.push(board.id.clone());
+                if let Some(board) = doc.artboard_of(op.id()) {
+                    if !boards.contains(&board.id) {
+                        boards.push(board.id.clone());
+                    }
+                    if in_sheet(op.id()) {
+                        restyled.insert(board.id.clone());
+                    }
                 }
             }
-            boards
+            (boards, restyled)
         });
         let left_out = boards.len().saturating_sub(BOARDS_PER_EDIT);
         boards.truncate(BOARDS_PER_EDIT);
@@ -173,6 +196,10 @@ impl LayoutWatch {
         let mut tasks = Vec::new();
         for board in boards {
             let generation = self.bump(design, &board);
+            let mut touched = touched.clone();
+            if restyled.contains(&board) {
+                touched.insert(RESTYLED.to_owned());
+            }
             self.touch(design, &board, &touched);
             let (watch, handle, design) = (Arc::clone(self), Arc::clone(handle), design.to_owned());
             tasks.push(tokio::spawn(async move {
@@ -228,11 +255,7 @@ impl LayoutWatch {
 
     /// The nodes edited since `board` was last checked, and what that check
     /// found.
-    fn checked_so_far(
-        &self,
-        design: &str,
-        board: &str,
-    ) -> (HashSet<String>, Option<HashSet<String>>) {
+    fn checked_so_far(&self, design: &str, board: &str) -> (HashSet<String>, Option<HashSet<u64>>) {
         let all = self.boards.lock().expect("layout watch lock");
         all.get(design)
             .and_then(|d| d.get(board))
@@ -268,7 +291,7 @@ impl LayoutWatch {
         }
     }
 
-    /// Counts what a note that is being taken said as heard.
+    /// Counts what a note that reached the agent said as heard.
     fn heard(entry: &mut Entry) {
         if let Some(found) = entry.found.take() {
             entry.seen = Some(found);
@@ -276,7 +299,9 @@ impl LayoutWatch {
         }
     }
 
-    /// The notes waiting on `design`, which are then spent.
+    /// The notes waiting on `design`, which are then spent unless
+    /// [`Self::restore`]d. They aren't heard until a response carries them
+    /// ([`Self::deliver`]).
     pub(super) fn take(&self, design: &str) -> Vec<Taken> {
         let mut all = self.boards.lock().expect("layout watch lock");
         let Some(boards) = all.get_mut(design) else {
@@ -286,7 +311,6 @@ impl LayoutWatch {
             .iter_mut()
             .filter_map(|(board, e)| {
                 let note = e.note.take()?;
-                Self::heard(e);
                 Some(Taken {
                     board: board.clone(),
                     generation: e.generation,
@@ -302,13 +326,30 @@ impl LayoutWatch {
     }
 
     /// The `taken` notes whose artboard hasn't been edited since, which is
-    /// the ones still true of the design. A tool that ran after they were
-    /// taken may have fixed what they name.
-    pub(super) fn still_current(&self, design: &str, taken: Vec<Taken>) -> Vec<Taken> {
+    /// the ones still true of the design, and which the response carrying
+    /// them tells the agent. A tool that ran after they were taken may have
+    /// fixed what the rest name, so those are dropped and not counted as heard.
+    pub(super) fn deliver(&self, design: &str, taken: Vec<Taken>) -> Vec<Taken> {
+        let mut all = self.boards.lock().expect("layout watch lock");
         taken
             .into_iter()
-            .filter(|t| self.is_current(design, &t.board, t.generation))
+            .filter(|t| {
+                let Some(entry) = all.get_mut(design).and_then(|d| d.get_mut(&t.board)) else {
+                    return false;
+                };
+                if entry.generation != t.generation {
+                    return false;
+                }
+                Self::heard(entry);
+                true
+            })
             .collect()
+    }
+
+    /// The notes waiting on `design` for a result that is being built now
+    /// and carries them: taken, and heard.
+    pub(super) fn take_for_result(&self, design: &str) -> Vec<Taken> {
+        self.deliver(design, self.take(design))
     }
 
     /// Puts back notes whose result failed, unless the artboard has been
@@ -342,13 +383,15 @@ struct Measured {
     /// What to tell the agent, or `None` when there is nothing to tell.
     note: Option<String>,
     /// Every finding, as `Found::key`s, whether the note lists it or not.
-    found: HashSet<String>,
+    found: HashSet<u64>,
 }
 
 /// The nodes an edit touched and everything above them, to tell whether a
 /// finding is about something the edit changed.
 struct Touched<'a> {
     doc: &'a Document,
+    /// The artboard's `<style>` block changed, so anything in it may have.
+    restyled: bool,
     nodes: HashSet<&'a str>,
     /// The touched nodes and their ancestors.
     above: HashSet<String>,
@@ -373,12 +416,17 @@ impl<'a> Touched<'a> {
                 current = doc.get(c).and_then(|n| n.parent.as_deref());
             }
         }
-        Self { doc, nodes, above }
+        Self {
+            doc,
+            restyled: ids.contains(RESTYLED),
+            nodes,
+            above,
+        }
     }
 
     /// Whether `id` is a touched node, holds one, or is inside one.
     fn reaches(&self, id: &str) -> bool {
-        if self.above.contains(id) {
+        if self.restyled || self.above.contains(id) {
             return true;
         }
         let mut current = Some(id);
@@ -401,7 +449,7 @@ async fn measure(
     board: &str,
     surface: super::Surface,
     touched: &HashSet<String>,
-    before: Option<HashSet<String>>,
+    before: Option<HashSet<u64>>,
 ) -> Option<Measured> {
     let plan = handle
         .read(|d| screenshot::plan_measurement(d.view(), board, screenshot::Options::default()));
@@ -409,26 +457,39 @@ async fn measure(
         .await
         .ok()?
         .ok()?;
-    let (notes, hidden, found) = handle.read(|d| {
+    // Everything that reads the document is read here, in one go, so the
+    // pairs of overlapping text are compared and keyed without holding it.
+    let (report, texts, reaching) = handle.read(|d| {
         let doc = d.view();
-        let mut report = Report::new(doc, board, &boxes, surface);
-        // doc6 promises overlapping text too, as get_layout reports it.
-        if surface.doc6()
-            && let Some(board) = boxes.first()
-        {
-            report = report.with_overlaps(doc, board, &boxes);
-        }
         let touched = Touched::new(doc, board, touched);
-        let (notes, hidden) = report.text(doc, |f| {
-            before.as_ref().is_none_or(|b| !b.contains(&f.key()))
-                || f.nodes().iter().any(|n| touched.reaches(n))
-        });
         (
-            notes,
-            hidden,
-            report.found.iter().map(|f| f.key()).collect::<HashSet<_>>(),
+            Report::new(doc, board, &boxes, surface),
+            // doc6 promises overlapping text too, as get_layout reports it.
+            surface.doc6().then(|| Texts::new(doc, &boxes)),
+            boxes
+                .iter()
+                .map(|b| b.id.as_str())
+                .filter(|id| touched.reaches(id))
+                .collect::<HashSet<&str>>(),
         )
     });
+    let report = match (texts, boxes.first()) {
+        (Some(texts), Some(board)) => report.with_overlaps(board, &texts),
+        _ => report,
+    };
+    let keys: Vec<u64> = report.found.iter().map(Found::key).collect();
+    let kept: Vec<&Found> = report
+        .found
+        .iter()
+        .zip(&keys)
+        .filter(|(f, key)| {
+            before.as_ref().is_none_or(|b| !b.contains(key)) || f.any_node(|n| reaching.contains(n))
+        })
+        .map(|(f, _)| f)
+        .collect();
+    let hidden = report.found.len() - kept.len();
+    let notes = handle.read(|d| report.text(d.view(), &kept));
+    let found: HashSet<u64> = keys.into_iter().collect();
     let tool = layout_tool(surface);
     let note = match (notes.is_empty(), hidden) {
         (true, 0) => None,
@@ -462,16 +523,16 @@ fn layout_tool(surface: super::Surface) -> &'static str {
 mod tests {
     use super::*;
 
-    fn measured(note: &str, found: &[&str]) -> Option<Measured> {
+    fn measured(note: &str, found: &[u64]) -> Option<Measured> {
         Some(Measured {
             note: Some(note.into()),
-            found: found.iter().map(|k| (*k).to_owned()).collect(),
+            found: found.iter().copied().collect(),
         })
     }
 
     fn note(watch: &LayoutWatch, design: &str, board: &str, text: &str) {
         let g = watch.bump(design, board);
-        watch.finish(design, board, g, measured(text, &["k"]));
+        watch.finish(design, board, g, measured(text, &[1]));
     }
 
     #[test]
@@ -488,9 +549,9 @@ mod tests {
         let old = watch.bump("d", "a");
         let new = watch.bump("d", "a");
         assert!(!watch.is_current("d", "a", old));
-        watch.finish("d", "a", old, measured("stale", &["k"]));
+        watch.finish("d", "a", old, measured("stale", &[1]));
         assert!(watch.take("d").is_empty());
-        watch.finish("d", "a", new, measured("fresh", &["k"]));
+        watch.finish("d", "a", new, measured("fresh", &[1]));
         assert_eq!(Taken::text(&watch.take("d")), "fresh");
     }
 
@@ -501,7 +562,7 @@ mod tests {
         let running = watch.bump("d", "b");
         watch.invalidate("d");
         assert!(!watch.is_current("d", "b", running));
-        watch.finish("d", "b", running, measured("late", &["k"]));
+        watch.finish("d", "b", running, measured("late", &[1]));
         assert!(watch.take("d").is_empty());
     }
 
@@ -523,7 +584,7 @@ mod tests {
         note(&watch, "d", "b", "still true");
         let taken = watch.take("d");
         watch.bump("d", "a");
-        assert_eq!(Taken::text(&watch.still_current("d", taken)), "still true");
+        assert_eq!(Taken::text(&watch.deliver("d", taken)), "still true");
     }
 
     #[test]
@@ -543,15 +604,39 @@ mod tests {
         // Replaced before anyone took it, so the agent never heard it.
         let g = watch.bump("d", "a");
         watch.touch("d", "a", &HashSet::from(["n".to_owned()]));
-        watch.finish("d", "a", g, measured("lost", &["cut:x"]));
+        watch.finish("d", "a", g, measured("lost", &[10]));
         watch.bump("d", "a");
         assert_eq!(seen(&watch), None);
         assert!(watch.checked_so_far("d", "a").0.contains("n"));
         // Taken, so it was.
         let g = watch.bump("d", "a");
-        watch.finish("d", "a", g, measured("heard", &["cut:x"]));
-        watch.take("d");
-        assert_eq!(seen(&watch), Some(HashSet::from(["cut:x".to_owned()])));
+        watch.finish("d", "a", g, measured("heard", &[10]));
+        watch.deliver("d", watch.take("d"));
+        assert_eq!(seen(&watch), Some(HashSet::from([10])));
         assert!(watch.checked_so_far("d", "a").0.is_empty());
+    }
+
+    #[test]
+    fn a_note_the_response_drops_was_not_heard() {
+        let watch = LayoutWatch::default();
+        let g = watch.bump("d", "a");
+        watch.touch("d", "a", &HashSet::from(["n".to_owned()]));
+        watch.finish("d", "a", g, measured("dropped", &[10]));
+        // The next edit takes it, then bumps the artboard, so its response
+        // leaves the note out.
+        let taken = watch.take("d");
+        watch.bump("d", "a");
+        assert!(watch.deliver("d", taken).is_empty());
+        let (touched, seen) = watch.checked_so_far("d", "a");
+        assert_eq!(seen, None);
+        assert!(touched.contains("n"));
+        // A note a response does carry is heard, and only then.
+        let g = watch.bump("d", "a");
+        watch.finish("d", "a", g, measured("delivered", &[11]));
+        let taken = watch.take("d");
+        assert_eq!(Taken::text(&watch.deliver("d", taken)), "delivered");
+        let (touched, seen) = watch.checked_so_far("d", "a");
+        assert_eq!(seen, Some(HashSet::from([11])));
+        assert!(touched.is_empty());
     }
 }

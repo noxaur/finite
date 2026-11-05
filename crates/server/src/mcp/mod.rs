@@ -797,7 +797,7 @@ impl FiniteMcp {
                     }
                     if check && extra("layout") {
                         let _ = self.watch.after_edit(design_id, &handle, change).await;
-                        let notes = self.watch.take(design_id);
+                        let notes = self.watch.take_for_result(design_id);
                         if !notes.is_empty() {
                             text.push('\n');
                             text.push_str(&watch::Taken::text(&notes));
@@ -2182,7 +2182,7 @@ impl ServerHandler for FiniteMcp {
                 CallToolResponse::Complete(result) if result.is_error != Some(true) => {
                     // An edit that changed an artboard has made its note out
                     // of date, and the edit reports its own check.
-                    let notes = self.watch.still_current(design, notes);
+                    let notes = self.watch.deliver(design, notes);
                     if !notes.is_empty() {
                         result
                             .content

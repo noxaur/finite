@@ -1026,6 +1026,126 @@ async fn clipped_content_is_not_cut_off_by_the_artboard() {
     }
 }
 
+/// A `clip-path` clips to its own bounds: a box that reaches past the
+/// artboard under `inset(0)` is still cut off, and one the path crops short
+/// of the edge isn't. A script makes the artboard render in the viewer's
+/// iframe, and the check measures it the same way.
+#[tokio::test]
+async fn clip_path_clips_only_to_its_own_bounds() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Clipper").await;
+    for script in [false, true] {
+        let id = design(&mut agent, "Paths").await;
+        let script = if script { "<script>1 + 1</script>" } else { "" };
+        edit(
+            &mut agent,
+            &id,
+            json!([{ "op": "artboard", "name": "Mock", "width": 400, "height": 300,
+                     "html": format!(
+                        "{script}\
+                         <div data-name=\"Whole\" style=\"position: absolute; top: 0; left: 0; width: 100px; height: 600px; clip-path: inset(0)\">\
+                           <div data-name=\"Inside\" style=\"height: 700px\"></div>\
+                         </div>\
+                         <div data-name=\"Cropped\" style=\"position: absolute; top: 0; left: 120px; width: 100px; height: 600px; clip-path: inset(0 0 500px 0)\"></div>\
+                         <div data-name=\"Narrow\" style=\"position: absolute; top: 0; left: 240px; width: 100px; height: 100px; clip-path: polygon(0 0, 50% 0, 50% 100%, 0 100%)\"></div>\
+                         <div data-name=\"Wide\" style=\"position: absolute; top: 120px; left: 0; width: 600px; height: 20px; clip-path: inset(0 0 0 100px)\"></div>\
+                         <div data-name=\"Short\" style=\"position: absolute; top: 160px; left: 0; width: 600px; height: 20px; clip-path: inset(0 400px 0 0)\"></div>") }]),
+        )
+        .await;
+        let Some(cut) = layout_of(&mut agent, &id).await else {
+            return;
+        };
+        let sticking = cut.split("Sticking out:").nth(1).unwrap_or_default();
+        assert!(sticking.contains("\"Whole\""), "{cut}");
+        // Past the right edge too: what the path keeps still reaches it.
+        assert!(sticking.contains("\"Wide\""), "{cut}");
+        for cropped in ["Cropped", "Narrow", "Short", "Inside"] {
+            assert!(
+                !sticking.contains(cropped),
+                "{cropped} is cropped to the artboard: {sticking}"
+            );
+        }
+    }
+}
+
+/// Only what shows counts toward an overlap: what a wrapper clips on one
+/// axis only (`overflow-x: clip`) and what a `clip-path` crops away.
+#[tokio::test]
+async fn overlaps_count_only_what_shows() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Clipper").await;
+    for script in [false, true] {
+        let id = design(&mut agent, "Overlaps").await;
+        let script = if script { "<script>1 + 1</script>" } else { "" };
+        let text = |name: &str, style: &str| {
+            format!("<div data-name=\"{name}\" style=\"position: absolute; {style}\">{name}</div>")
+        };
+        let clip_x = "overflow-x: clip; overflow-y: visible; width: 100px; height: 30px";
+        let stage = [
+            // Clips across only: text below the wrapper still shows.
+            format!(
+                "<div style=\"position: absolute; left: 0; top: 0; {clip_x}\">{}</div>",
+                text("Alpha", "top: 60px; left: 0")
+            ),
+            text("Beta", "top: 60px; left: 0"),
+            // Text right of the wrapper is clipped.
+            format!(
+                "<div style=\"position: absolute; left: 0; top: 120px; {clip_x}\">{}</div>",
+                text("Gamma", "top: 0; left: 150px")
+            ),
+            text("Delta", "top: 120px; left: 150px"),
+            // A clip-path crops away the part where they would overlap.
+            format!(
+                "<div style=\"position: absolute; left: 0; top: 200px; width: 200px; height: 30px; clip-path: inset(0 0 0 100px)\">{}</div>",
+                text("Hidden", "top: 0; left: 0")
+            ),
+            text("Under", "top: 200px; left: 0"),
+            text(
+                "Own",
+                "top: 240px; left: 0; width: 200px; clip-path: inset(0 0 0 100px)",
+            ),
+            text("Beneath", "top: 240px; left: 0; width: 80px"),
+            // What the path keeps still overlaps.
+            text(
+                "Kept",
+                "top: 280px; left: 0; width: 200px; clip-path: inset(0 100px 0 0)",
+            ),
+            text("Over", "top: 280px; left: 50px; width: 100px"),
+        ]
+        .concat();
+        edit(
+            &mut agent,
+            &id,
+            json!([{ "op": "artboard", "name": "Mock", "width": 400, "height": 400,
+                     "html": format!("{script}{stage}") }]),
+        )
+        .await;
+        let Some(layout) = layout_of(&mut agent, &id).await else {
+            return;
+        };
+        let pairs = layout.split("overlap.").nth(1).unwrap_or_default();
+        let named = |a: &str, b: &str| pairs.contains(a) && pairs.contains(b);
+        assert!(pairs.contains("Alpha"), "{layout}");
+        assert!(pairs.contains("Beta"), "{layout}");
+        assert!(named("Kept", "Over"), "{layout}");
+        for hidden in ["Gamma", "Delta", "Hidden", "Under", "Own", "Beneath"] {
+            assert!(!pairs.contains(hidden), "{hidden} is hidden: {layout}");
+        }
+    }
+}
+
+/// An edit's result with its layout check. A slow check arrives with the next
+/// result, so ask until one has.
+async fn checked(agent: &mut Agent, id: &str, args: Value) -> String {
+    let mut text = agent.ok("edit", args).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !text.contains("Layout:") && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        text = agent.ok("comments", json!({ "designId": id })).await;
+    }
+    text
+}
+
 /// An edit's result lists what the edit changed: findings that are new, or
 /// about nodes it touched, and counts the rest in a line. Repeating the same
 /// finding on every edit taught agents to turn the check off.
@@ -1039,16 +1159,6 @@ async fn an_edit_reports_what_it_changed_and_counts_the_rest() {
         return;
     }
     let edit_checked = |ops: Value| json!({ "designId": id, "ops": ops });
-    // A slow check arrives with the next result, so ask until one has.
-    async fn checked(agent: &mut Agent, id: &str, args: Value) -> String {
-        let mut text = agent.ok("edit", args).await;
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        while !text.contains("Layout:") && std::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            text = agent.ok("comments", json!({ "designId": id })).await;
-        }
-        text
-    }
 
     // The first check has nothing to compare with, so it lists everything.
     let badge = "<div data-name=\"Badge\" style=\"position: absolute; top: 380px; height: 80px; width: 80px\">New</div>";
@@ -1094,6 +1204,41 @@ async fn an_edit_reports_what_it_changed_and_counts_the_rest() {
     .await;
     assert!(again.contains("\"Badge\""), "{again}");
     assert!(!again.contains("\"Tall\""), "{again}");
+}
+
+/// An edit to an artboard's `<style>` block restyles elements without
+/// touching them, so it lists the artboard's findings again: one it made
+/// worse isn't "unchanged by this edit".
+#[tokio::test]
+async fn a_stylesheet_edit_lists_the_findings_it_restyles() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Styler").await;
+    let (id, board) = landing(&mut agent).await;
+    // Warms the browser, so each check beats the edit's wait.
+    if layout_of(&mut agent, &id).await.is_none() {
+        return;
+    }
+    let badge = "<style>.badge { height: 80px }</style><div class=\"badge\" data-name=\"Badge\" style=\"position: absolute; top: 380px; width: 80px\">New</div>";
+    let first = checked(
+        &mut agent,
+        &id,
+        json!({ "designId": id, "ops": [{ "op": "html", "select": format!("#{board}"), "html": badge }] }),
+    )
+    .await;
+    assert!(first.contains("\"Badge\""), "{first}");
+
+    // The sheet makes it taller; the badge itself is not among the nodes edited.
+    let worse = checked(
+        &mut agent,
+        &id,
+        json!({ "designId": id, "ops": [{ "op": "css", "select": format!("#{board}"),
+                "css": ".badge { height: 200px }", "to": "style" }] }),
+    )
+    .await;
+    assert!(
+        worse.contains("Sticking out:") && worse.contains("\"Badge\""),
+        "{worse}"
+    );
 }
 
 /// A component op makes one top bar the component and its copies on the

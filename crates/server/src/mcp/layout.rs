@@ -6,7 +6,10 @@
 //! of them for `render` and a filtered few for an edit's result (see
 //! `watch.rs`).
 
-use std::fmt::Write;
+use std::{
+    fmt::Write,
+    hash::{DefaultHasher, Hash, Hasher},
+};
 
 use finite_design::Document;
 
@@ -20,66 +23,75 @@ const LAYOUT_NAMED: usize = 8;
 /// stays fast. It compares every pair, so this is at most about 2 million.
 const OVERLAP_CHECKED: usize = 2_000;
 
-/// One thing the layout check found.
-#[derive(Clone, Debug, PartialEq)]
-pub(super) enum Found {
+/// One thing the layout check found. It names elements by borrowing their
+/// ids from the measured boxes: an overlapping artboard can have millions of
+/// pairs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Found<'a> {
     /// An element reaching past the artboard's edge that nothing clips,
     /// with where its far corner is, from the artboard's top-left.
-    Cut { id: String, x: f64, y: f64 },
+    Cut { id: &'a str, x: f64, y: f64 },
     /// An element whose text runs past its box, across and down.
-    Spill { id: String, over: (f64, f64) },
+    Spill { id: &'a str, over: (f64, f64) },
     /// Two text elements overlapping by `w` × `h`.
     Overlap {
-        a: String,
-        b: String,
+        a: &'a str,
+        b: &'a str,
         w: f64,
         h: f64,
     },
 }
 
-impl Found {
+impl Found<'_> {
     /// Names this finding across checks, so a later check can tell it's the
-    /// same one: the same kind of problem on the same elements.
-    pub(super) fn key(&self) -> String {
-        match self {
-            Found::Cut { id, .. } => format!("cut:{id}"),
-            Found::Spill { id, .. } => format!("spill:{id}"),
-            Found::Overlap { a, b, .. } => format!("overlap:{a}:{b}"),
+    /// same one: the same kind of problem on the same elements. A 64-bit
+    /// hash, not the ids, since an artboard's findings are kept between checks.
+    pub(super) fn key(&self) -> u64 {
+        let mut hash = DefaultHasher::new();
+        match *self {
+            Found::Cut { id, .. } => (0u8, id).hash(&mut hash),
+            Found::Spill { id, .. } => (1u8, id).hash(&mut hash),
+            Found::Overlap { a, b, .. } => (2u8, a, b).hash(&mut hash),
         }
+        hash.finish()
     }
 
-    /// The elements it's about.
-    pub(super) fn nodes(&self) -> Vec<&str> {
-        match self {
-            Found::Cut { id, .. } | Found::Spill { id, .. } => vec![id],
-            Found::Overlap { a, b, .. } => vec![a, b],
+    /// Whether `test` holds for any element it's about.
+    pub(super) fn any_node(&self, test: impl Fn(&str) -> bool) -> bool {
+        match *self {
+            Found::Cut { id, .. } | Found::Spill { id, .. } => test(id),
+            Found::Overlap { a, b, .. } => test(a) || test(b),
         }
     }
 }
 
 /// What the layout check found in one artboard.
 #[derive(Debug, Default)]
-pub(super) struct Report {
+pub(super) struct Report<'a> {
     /// The note's opening about content cut off, up to the elements it names.
     cut_header: String,
-    pub(super) found: Vec<Found>,
+    pub(super) found: Vec<Found<'a>>,
     /// What to say when `found` has no cut-off content and no spilling text.
     clear: String,
 }
 
 /// What shows of `b`, as (left, top, right, bottom): its box inside the
-/// artboard and the scrollers around it.
+/// artboard and the scrollers and clip-paths around it, each clipping only
+/// the sides it clips.
 fn shown(b: &ElementBox, board: &ElementBox) -> (f64, f64, f64, f64) {
-    let (mut l, mut t) = (b.x.max(board.x), b.y.max(board.y));
-    let (mut r, mut d) = (
-        (b.x + b.width).min(board.x + board.width),
-        (b.y + b.height).min(board.y + board.height),
-    );
-    if let Some(v) = &b.visible {
-        (l, t) = (l.max(v.x), t.max(v.y));
-        (r, d) = (r.min(v.x + v.width), d.min(v.y + v.height));
-    }
-    (l, t, r, d)
+    let v = &b.visible;
+    (
+        v.left.unwrap_or(f64::MIN).max(b.x).max(board.x),
+        v.top.unwrap_or(f64::MIN).max(b.y).max(board.y),
+        v.right
+            .unwrap_or(f64::MAX)
+            .min(b.x + b.width)
+            .min(board.x + board.width),
+        v.bottom
+            .unwrap_or(f64::MAX)
+            .min(b.y + b.height)
+            .min(board.y + board.height),
+    )
 }
 
 /// An outline line for `id`, without its children.
@@ -92,7 +104,7 @@ fn line(doc: &Document, id: &str) -> String {
         .to_owned()
 }
 
-impl Report {
+impl<'a> Report<'a> {
     /// Content cut off at `artboard`'s edges, and text that runs past its
     /// own box. Agents only spotted these in the image before, and often
     /// didn't, so the note names the elements and says what to change.
@@ -104,7 +116,7 @@ impl Report {
     pub(super) fn new(
         doc: &Document,
         artboard: &str,
-        boxes: &[ElementBox],
+        boxes: &'a [ElementBox],
         surface: super::Surface,
     ) -> Self {
         use std::collections::{HashMap, HashSet};
@@ -191,7 +203,7 @@ impl Report {
             }
             report.cut_header = text;
             report.found.extend(outermost.iter().map(|b| Found::Cut {
-                id: b.id.clone(),
+                id: &b.id,
                 x: b.x + b.width - board.x,
                 y: b.y + b.height - board.y,
             }));
@@ -202,7 +214,7 @@ impl Report {
                 // Down, a few pixels is a tall glyph, like an emoji, in a tight line height.
                 .filter(|b| b.text_overflow.0 > 2.0 || b.text_overflow.1 > 8.0)
                 .map(|b| Found::Spill {
-                    id: b.id.clone(),
+                    id: &b.id,
                     over: b.text_overflow,
                 }),
         );
@@ -219,36 +231,22 @@ impl Report {
         report
     }
 
-    /// Adds the text elements in `boxes` that overlap each other, other
-    /// than an element and what's inside it. Only what shows counts: the part
-    /// of each inside the `board` and the scrollers around it, so a long list
-    /// in a scroller doesn't overlap what sits below it.
-    pub(super) fn with_overlaps(
-        mut self,
-        doc: &Document,
-        board: &ElementBox,
-        boxes: &[ElementBox],
-    ) -> Self {
-        let text: Vec<&ElementBox> = boxes
-            .iter()
-            .filter(|b| b.has_text && b.width > 0.0 && b.height > 0.0)
-            .take(OVERLAP_CHECKED)
-            .collect();
-        for (i, a) in text.iter().enumerate() {
-            for b in &text[i + 1..] {
-                let (a_box, b_box) = (shown(a, board), shown(b, board));
-                let (w, h) = (
-                    a_box.2.min(b_box.2) - a_box.0.max(b_box.0),
-                    a_box.3.min(b_box.3) - a_box.1.max(b_box.1),
-                );
-                if w > 2.0
-                    && h > 2.0
-                    && !doc.is_ancestor(&a.id, &b.id)
-                    && !doc.is_ancestor(&b.id, &a.id)
-                {
+    /// Adds the text elements in `texts` that overlap each other, other than
+    /// an element and what's inside it. Only what shows counts: the part of
+    /// each inside the `board` and the scrollers around it, so a long list in
+    /// a scroller doesn't overlap what sits below it.
+    ///
+    /// This compares every pair and reads no document, so it can run without
+    /// the lock `texts` was read under.
+    pub(super) fn with_overlaps(mut self, board: &ElementBox, texts: &Texts<'a>) -> Self {
+        let shown: Vec<_> = texts.boxes.iter().map(|b| shown(b, board)).collect();
+        for (i, a) in shown.iter().enumerate() {
+            for (j, b) in shown.iter().enumerate().skip(i + 1) {
+                let (w, h) = (a.2.min(b.2) - a.0.max(b.0), a.3.min(b.3) - a.1.max(b.1));
+                if w > 2.0 && h > 2.0 && !texts.nested(i, j) {
                     self.found.push(Found::Overlap {
-                        a: a.id.clone(),
-                        b: b.id.clone(),
+                        a: &texts.boxes[i].id,
+                        b: &texts.boxes[j].id,
                         w,
                         h,
                     });
@@ -258,11 +256,8 @@ impl Report {
         self
     }
 
-    /// The notes for the findings `keep` accepts, and how many it left out.
-    /// Empty when there is nothing to say.
-    pub(super) fn text(&self, doc: &Document, keep: impl Fn(&Found) -> bool) -> (String, usize) {
-        let kept: Vec<&Found> = self.found.iter().filter(|f| keep(f)).collect();
-        let hidden = self.found.len() - kept.len();
+    /// The notes for the `kept` findings. Empty when there is nothing to say.
+    pub(super) fn text(&self, doc: &Document, kept: &[&Found]) -> String {
         let more = |text: &mut String, shown: usize| {
             if shown > LAYOUT_NAMED {
                 let _ = write!(text, "\n  … and {} more", shown - LAYOUT_NAMED);
@@ -336,7 +331,49 @@ impl Report {
             more(&mut text, pairs.len());
             notes.push(text);
         }
-        (notes.join("\n"), hidden)
+        notes.join("\n")
+    }
+}
+
+/// The text elements the overlap check compares, and how they nest, which
+/// takes the document. Reading them is the only part of the overlap check
+/// that does, so the pairs can be compared without holding the design.
+pub(super) struct Texts<'a> {
+    boxes: Vec<&'a ElementBox>,
+    /// For each of `boxes`, which of them are above it in the document.
+    above: Vec<Vec<usize>>,
+}
+
+impl<'a> Texts<'a> {
+    pub(super) fn new(doc: &Document, boxes: &'a [ElementBox]) -> Self {
+        let boxes: Vec<&ElementBox> = boxes
+            .iter()
+            .filter(|b| b.has_text && b.width > 0.0 && b.height > 0.0)
+            .take(OVERLAP_CHECKED)
+            .collect();
+        let index: std::collections::HashMap<&str, usize> = boxes
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (b.id.as_str(), i))
+            .collect();
+        let above = boxes
+            .iter()
+            .map(|b| {
+                let mut above = Vec::new();
+                let mut current = doc.get(&b.id).and_then(|n| n.parent.as_deref());
+                while let Some(p) = current {
+                    above.extend(index.get(p));
+                    current = doc.get(p).and_then(|n| n.parent.as_deref());
+                }
+                above
+            })
+            .collect();
+        Self { boxes, above }
+    }
+
+    /// Whether one of the `i`th and `j`th is inside the other.
+    fn nested(&self, i: usize, j: usize) -> bool {
+        self.above[j].contains(&i) || self.above[i].contains(&j)
     }
 }
 
@@ -349,7 +386,8 @@ pub(super) fn layout_notes(
     surface: super::Surface,
 ) -> String {
     let report = Report::new(doc, artboard, boxes, surface);
-    let (notes, _) = report.text(doc, |_| true);
+    let kept: Vec<&Found> = report.found.iter().collect();
+    let notes = report.text(doc, &kept);
     if notes.is_empty() {
         report.clear
     } else {
@@ -364,7 +402,42 @@ pub(super) fn overlap_note(
     board: &ElementBox,
     boxes: &[ElementBox],
 ) -> Option<String> {
-    let report = Report::default().with_overlaps(doc, board, boxes);
-    let (notes, _) = report.text(doc, |_| true);
+    let report = Report::default().with_overlaps(board, &Texts::new(doc, boxes));
+    let kept: Vec<&Found> = report.found.iter().collect();
+    let notes = report.text(doc, &kept);
     (!notes.is_empty()).then_some(notes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::screenshot::Window;
+
+    fn text_box(id: String) -> ElementBox {
+        ElementBox {
+            id,
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 20.0,
+            text_overflow: (0.0, 0.0),
+            has_text: true,
+            text: None,
+            clipped: (false, false),
+            visible: Window::default(),
+            out_of_flow: false,
+        }
+    }
+
+    #[test]
+    fn every_pair_of_stacked_texts_has_its_own_key() {
+        let boxes: Vec<ElementBox> = (0..OVERLAP_CHECKED)
+            .map(|n| text_box(format!("t{n:08}")))
+            .collect();
+        let texts = Texts::new(&Document::default(), &boxes);
+        let report = Report::default().with_overlaps(&boxes[0], &texts);
+        let keys: std::collections::HashSet<u64> = report.found.iter().map(Found::key).collect();
+        let pairs = OVERLAP_CHECKED * (OVERLAP_CHECKED - 1) / 2;
+        assert_eq!((report.found.len(), keys.len()), (pairs, pairs));
+    }
 }

@@ -270,6 +270,16 @@ pub struct Image {
     pub boxes: Option<Vec<ElementBox>>,
 }
 
+/// The part of the page that shows, as the edges that clip: a side is `None`
+/// where nothing clips it, as with `overflow-x: clip` and `overflow-y: visible`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Window {
+    pub left: Option<f64>,
+    pub top: Option<f64>,
+    pub right: Option<f64>,
+    pub bottom: Option<f64>,
+}
+
 /// Where an element rendered, in CSS pixels from the page's top left corner.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ElementBox {
@@ -287,12 +297,14 @@ pub struct ElementBox {
     pub text: Option<Rect>,
     /// Whether an ancestor between the element and the artboard clips it
     /// across and down: `overflow` other than visible (a scroller, an
-    /// `<svg>`'s viewport), or a `clip-path`. What it clips isn't cut off by
+    /// `<svg>`'s viewport), or a `clip-path` that crops it to within the
+    /// artboard. What it clips isn't cut off by
     /// the artboard's edge.
     pub clipped: (bool, bool),
-    /// The part of the page the scrollers and viewports around the element
-    /// show, which is all of it that people see. `None` when none clips it.
-    pub visible: Option<Rect>,
+    /// The part of the page the scrollers, viewports and clip-paths around
+    /// the element (and its own clip-path) show, which is all of it that
+    /// people see.
+    pub visible: Window,
     /// Whether the element is positioned out of the flow (`absolute` or
     /// `fixed`), so a taller artboard wouldn't make room for it.
     pub out_of_flow: bool,
@@ -656,7 +668,7 @@ type RawBox = (
     Option<[f64; 4]>,
     (bool, bool),
     bool,
-    Option<[f64; 4]>,
+    Option<[Option<f64>; 4]>,
 );
 
 fn element_box(
@@ -672,7 +684,7 @@ fn element_box(
         has_text: *has_text,
         text: text.map(rect),
         clipped: *clipped,
-        visible: visible.map(rect),
+        visible: visible.map_or_else(Window::default, window),
         out_of_flow: *out_of_flow,
     }
 }
@@ -1013,6 +1025,15 @@ fn rect([x, y, width, height]: [f64; 4]) -> Rect {
     Rect::new(x, y, width, height)
 }
 
+fn window([left, top, right, bottom]: [Option<f64>; 4]) -> Window {
+    Window {
+        left,
+        top,
+        right,
+        bottom,
+    }
+}
+
 /// Loads one artboard's page and takes its shots.
 async fn render(
     tab: &mut cdp::Tab,
@@ -1169,6 +1190,56 @@ async fn measure(tab: &mut cdp::Tab, artboard: &str, ids: &[&str]) -> Result<Lay
     }}
     return position === "absolute" ? board : null;
   }};
+  // The bounds of what `el`'s clip-path keeps, as [left, top, right, bottom],
+  // or null for a shape that isn't read (a path(), a url(), another reference box).
+  const kept = new Map();
+  const pathBounds = (el, s) => {{
+    if (s.clipPath === "none") return null;
+    if (!kept.has(el)) {{
+      kept.set(el, (() => {{
+        const m = /^(inset|circle|ellipse|polygon)\((.*)\)$/.exec(s.clipPath);
+        if (!m) return null;
+        const [l, t, w, h] = box(el);
+        const len = (v, whole) => v.endsWith("%") ? parseFloat(v) / 100 * whole : parseFloat(v);
+        const word = {{ left: "0%", top: "0%", center: "50%", right: "100%", bottom: "100%" }};
+        const spot = (v) => {{
+          const p = v.trim().split(/\s+/);
+          return p.length === 2 ? [len(word[p[0]] ?? p[0], w), len(word[p[1]] ?? p[1], h)] : [NaN, NaN];
+        }};
+        // The distances from (cx, cy) to the sides, for closest-side and farthest-side.
+        const radius = (v, whole, near, far) => v === "farthest-side" ? Math.max(...far) : v === "closest-side" || v === "" ? Math.min(...near) : len(v, whole);
+        let out;
+        if (m[1] === "inset") {{
+          const [top, right = top, bottom = top, left = right] = m[2].split(/\s+round\s+/)[0].trim().split(/\s+/);
+          out = [l + len(left, w), t + len(top, h), l + w - len(right, w), t + h - len(bottom, h)];
+        }} else if (m[1] === "polygon") {{
+          const points = m[2].replace(/^\s*(evenodd|nonzero)\s*,/, "").split(",").map(spot);
+          out = [Math.min(...points.map((p) => p[0])) + l, Math.min(...points.map((p) => p[1])) + t,
+                 Math.max(...points.map((p) => p[0])) + l, Math.max(...points.map((p) => p[1])) + t];
+        }} else {{
+          const [shape, at = "50% 50%"] = m[2].split(/\s+at\s+/);
+          const [cx, cy] = spot(at).map((v, i) => v + (i ? t : l));
+          const dx = [cx - l, l + w - cx].map(Math.abs);
+          const dy = [cy - t, t + h - cy].map(Math.abs);
+          const [rx, ry] = m[1] === "circle"
+            ? Array(2).fill(radius(shape.trim(), Math.hypot(w, h) / Math.SQRT2, [...dx, ...dy], [...dx, ...dy]))
+            : [radius(shape.trim().split(/\s+/)[0], w, dx, dx), radius(shape.trim().split(/\s+/)[1] ?? "", h, dy, dy)];
+          out = [cx - rx, cy - ry, cx + rx, cy + ry];
+        }}
+        return out.some(Number.isNaN) ? null : out;
+      }})());
+    }}
+    return kept.get(el);
+  }};
+  // Whether `el`'s clip-path crops it, across and down, to within the
+  // artboard's far edges. A shape that isn't read is taken to crop it all.
+  const pathClips = (el, s) => {{
+    if (s.clipPath === "none") return [false, false];
+    const bounds = pathBounds(el, s);
+    if (!bounds) return [true, true];
+    const [x, y, w, h] = box(board);
+    return [bounds[2] <= x + w + 1, bounds[3] <= y + h + 1];
+  }};
   // Whether `el` clips what it contains, across and down, or an element
   // containing it does. The artboard's own clipping is what is being checked.
   const holds = new Map();
@@ -1177,27 +1248,31 @@ async fn measure(tab: &mut cdp::Tab, artboard: &str, ids: &[&str]) -> Result<Lay
     if (!holds.has(el)) {{
       const s = getComputedStyle(el);
       const [x, y] = clips(containing(el, s.position));
-      const path = s.clipPath !== "none";
-      holds.set(el, [path || x || s.overflowX !== "visible", path || y || s.overflowY !== "visible"]);
+      const path = pathClips(el, s);
+      holds.set(el, [path[0] || x || s.overflowX !== "visible", path[1] || y || s.overflowY !== "visible"]);
     }}
     return holds.get(el);
   }};
-  // What the scrollers and viewports around `el` (and `el` itself, for what it
-  // contains) show of the page, as [left, top, right, bottom].
+  // The tighter of two windows, as [left, top, right, bottom], where null
+  // leaves a side unclipped: a wrapper may clip across and not down.
+  const pick = (f, a, b) => a == null ? b : b == null ? a : f(a, b);
+  const narrow = (a, b) => !a ? b : !b ? a : [pick(Math.max, a[0], b[0]), pick(Math.max, a[1], b[1]), pick(Math.min, a[2], b[2]), pick(Math.min, a[3], b[3])];
+  // What the scrollers, viewports and clip-paths around `el` (and `el`
+  // itself, for what it contains) show of the page.
   const windows = new Map();
   const shown = (el) => {{
     if (!el || el === board || !board.contains(el)) return null;
     if (!windows.has(el)) {{
       const s = getComputedStyle(el);
       let out = shown(containing(el, s.position));
-      if (s.overflowX !== "visible" || s.overflowY !== "visible") {{
+      const [across, down] = [s.overflowX !== "visible", s.overflowY !== "visible"];
+      if (across || down) {{
         const [x, y, w, h] = box(el);
         const px = (name) => parseFloat(s[name]) || 0;
-        const [l, t] = [x + px("borderLeftWidth"), y + px("borderTopWidth")];
-        const [r, b] = [x + w - px("borderRightWidth"), y + h - px("borderBottomWidth")];
-        out = out ? [Math.max(out[0], l), Math.max(out[1], t), Math.min(out[2], r), Math.min(out[3], b)] : [l, t, r, b];
+        out = narrow(out, [across ? x + px("borderLeftWidth") : null, down ? y + px("borderTopWidth") : null,
+                           across ? x + w - px("borderRightWidth") : null, down ? y + h - px("borderBottomWidth") : null]);
       }}
-      windows.set(el, out);
+      windows.set(el, narrow(out, pathBounds(el, s)));
     }}
     return windows.get(el);
   }};
@@ -1232,12 +1307,13 @@ async fn measure(tab: &mut cdp::Tab, artboard: &str, ids: &[&str]) -> Result<Lay
     nodes.push([el.getAttribute("{VIEWER_ID_ATTR}"), x, y, w, h,
       spill ? el.scrollWidth - el.clientWidth : 0, spill ? el.scrollHeight - el.clientHeight : 0, text,
       ink ? [ink[0], ink[1], ink[2] - ink[0], ink[3] - ink[1]] : null,
-      style.clipPath !== "none" ? [true, true] : clips(containing(el, style.position)),
-      style.position === "absolute" || style.position === "fixed",
       (() => {{
-        const w = shown(containing(el, style.position));
-        return w ? [w[0], w[1], Math.max(0, w[2] - w[0]), Math.max(0, w[3] - w[1])] : null;
-      }})()]);
+        const [x, y] = clips(containing(el, style.position));
+        const path = pathClips(el, style);
+        return [path[0] || x, path[1] || y];
+      }})(),
+      style.position === "absolute" || style.position === "fixed",
+      narrow(shown(containing(el, style.position)), pathBounds(el, style))]);
   }}
   nodes.unshift([{board}, ...box(board), 0, 0, false, null, [false, false], false, null]);
   return {{
