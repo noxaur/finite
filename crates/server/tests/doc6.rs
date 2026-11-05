@@ -893,7 +893,18 @@ async fn a_comment_wait_over_55_seconds_is_clamped() {
             "a capped wait returned before the clock reached 55 seconds"
         );
     }
-    tokio::time::advance(Duration::from_secs(55)).await;
+    // One second short of the cap, every call is still waiting.
+    tokio::time::advance(Duration::from_secs(54)).await;
+    for _ in 0..1_000 {
+        tokio::task::yield_now().await;
+    }
+    for wait in &waits {
+        assert!(
+            !wait.is_finished(),
+            "a capped wait returned before 55 seconds"
+        );
+    }
+    tokio::time::advance(Duration::from_secs(1)).await;
     let capped = format!("No comments arrived in 55 seconds. {again}");
     for wait in waits {
         let (asked, text, elapsed) = wait.await.unwrap();
