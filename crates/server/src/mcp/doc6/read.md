@@ -8,7 +8,7 @@ Look at a design, as text.
   "jsx": each match as JSX to paste into a React codebase, with style objects, or Tailwind classes with tailwind: true.
 - export: "figma" returns the design (or select's artboard) as a file's text: "html", "finite" (a bundle that imports back exactly), "repo" (a tar of text files for git), "figma" (for the Finite Figma plugin) or "jsx", with what didn't convert exactly. Save the text to a file yourself.
 - as: "css" without select: the design's tokens and modes, and a list of every <style> block.
-- contains: "#3b82f6" searches instead: elements whose styles (inline or in <style> blocks), text, attributes or layer name contain it, plus matching tokens. A color matches in any notation. With select, it searches inside the matches. Use it instead of reading whole artboards, before and after a change.
+- contains: "#3b82f6" searches instead: elements whose styles (inline or in <style> blocks), visible text, attributes or layer name contain it, plus matching tokens. A color matches in any notation. Visible text skips <script> and <style>, including an SVG <style>; that code shows up with the styles, and replace reaches it with in: "code". With select, it searches inside the matches. Use it instead of reading whole artboards, before and after a change.
 
 designId takes the design's id or its exact name.
 

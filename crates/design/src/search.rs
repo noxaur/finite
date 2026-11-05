@@ -12,14 +12,17 @@ use crate::{
 /// What to look for. Every filter that's set must match.
 #[derive(Clone, Debug, Default)]
 pub struct Query {
-    /// Text the element contains, ignoring case.
+    /// Visible text the element contains, ignoring case. Text inside
+    /// `<script>` and `<style>` (including an SVG `<style>`) is code, so it
+    /// doesn't match; a style search still finds it.
     pub text: Option<String>,
     /// Part of the layer name, ignoring case.
     pub name: Option<String>,
     /// The tag, like `button`.
     pub tag: Option<String>,
     /// Part of a style declaration, like `#3b82f6`, `border-radius` or
-    /// `display: grid`, ignoring case. Also matches the CSS in `<style>` blocks.
+    /// `display: grid`, ignoring case. Also matches the code in `<style>` and
+    /// `<script>` blocks, including an SVG `<style>`.
     pub style: Option<String>,
     /// Part of an attribute, like `href` or `src="https://`, ignoring case.
     pub attribute: Option<String>,
@@ -33,7 +36,8 @@ pub struct Found {
 }
 
 /// The nodes under `within` (or in every artboard) that match `query`, in
-/// document order. Text matches name the element holding the text.
+/// document order. A text match names the element holding the text. Text
+/// inside `<script>` and `<style>` doesn't match.
 pub fn find(doc: &Document, within: Option<&str>, query: &Query) -> Vec<Found> {
     let lower = |s: &Option<String>| s.as_ref().map(|s| s.to_lowercase());
     let (text, name, tag, style, attribute) = (
@@ -65,6 +69,10 @@ pub fn find(doc: &Document, within: Option<&str>, query: &Query) -> Vec<Found> {
             continue;
         }
         if let Some(text) = &text {
+            // Script and style bodies are code, reached by a style search.
+            if in_raw_text(doc, node) {
+                continue;
+            }
             let own = own_text(doc, node);
             if !own.to_lowercase().contains(text) {
                 continue;
@@ -84,11 +92,26 @@ pub fn find(doc: &Document, within: Option<&str>, query: &Query) -> Vec<Found> {
                 .filter(|d| matches(d))
                 .collect();
             if is_raw_text(node_tag) {
-                hits.extend(
-                    css_lines(&own_text(doc, node))
-                        .filter(|line| matches(line))
-                        .map(|line| format!("css: {line}")),
-                );
+                let code = own_text(doc, node);
+                let script = node_tag.eq_ignore_ascii_case("script");
+                let before = hits.len();
+                // A script is code, not CSS: match it literally, as a code
+                // replace does, so `#abc` in `div#abc` is found.
+                if !script {
+                    hits.extend(
+                        css_lines(&code)
+                            .filter(|line| matches(line))
+                            .map(|line| format!("css: {line}")),
+                    );
+                }
+                // A match that spans `;`, `{` or `}` is in no single line. A
+                // color in CSS still needs a whole color, as in `replace`.
+                if hits.len() == before && (script || color.is_none()) {
+                    let label = if script { "script" } else { "css" };
+                    hits.extend(
+                        code_matches(&code, style).map(|snippet| format!("{label}: {snippet}")),
+                    );
+                }
             }
             if hits.is_empty() {
                 continue;
@@ -120,8 +143,9 @@ pub fn find(doc: &Document, within: Option<&str>, query: &Query) -> Vec<Found> {
 pub struct Places {
     pub styles: bool,
     pub attributes: bool,
-    /// The code in `<style>` and `<script>` blocks.
+    /// The code in `<style>` and `<script>` blocks, including an SVG `<style>`.
     pub css: bool,
+    /// Visible text. Not the text inside `<script>` or `<style>`.
     pub text: bool,
 }
 
@@ -139,11 +163,12 @@ pub struct Replaced {
 /// notation (`#3B82F6`, `rgb(59 130 246)`) and, when `to` is a color too, also
 /// its tints (`#3b82f6cc`, `rgba(59, 130, 246, 0.2)`), keeping each use's
 /// transparency; when `to` is text, tints are left alone. Otherwise it matches
-/// the exact text, and always does in a `<script>`, where `rgb(59 130 246)` is code. A
-/// match in a `<script>`, or in a `<style>` when `from` isn't a color, is
-/// refused when there's more than one match, unless `all` is set: `300ms` in
-/// one rule is rarely meant to change in every rule. Returns the ops and what
-/// they change.
+/// the exact text, and always does in a `<script>`, where `rgb(59 130 246)` is code.
+/// Text inside `<script>` and `<style>` (including an SVG `<style>`) is that code:
+/// `places.text` skips it, and `places.css` is what reaches it. A match in a
+/// `<script>`, or in a `<style>` when `from` isn't a color, is refused when
+/// there's more than one match, unless `all` is set: `300ms` in one rule is
+/// rarely meant to change in every rule. Returns the ops and what they change.
 pub fn replace(
     doc: &Document,
     within: Option<&str>,
@@ -238,13 +263,8 @@ pub fn replace(
                 }
             }
             NodeKind::Text if places.text => {
-                let in_code = node
-                    .parent
-                    .as_deref()
-                    .and_then(|p| doc.get(p))
-                    .is_some_and(|p| p.tag().is_some_and(is_raw_text));
                 if let Some(text) = &node.text
-                    && !in_code
+                    && !in_raw_text(doc, node)
                 {
                     let (new, n) = swap(text);
                     if n > 0 && new != *text {
@@ -378,6 +398,20 @@ fn is_raw_text(tag: &str) -> bool {
     tag.eq_ignore_ascii_case("style") || tag.eq_ignore_ascii_case("script")
 }
 
+/// Whether `node` is a `<script>` or `<style>`, or sits inside one. An SVG
+/// `<style>` is a `<style>` too. Visible text stops at these elements; their
+/// bodies are code.
+fn in_raw_text(doc: &Document, node: &Node) -> bool {
+    let mut current = Some(node);
+    while let Some(at) = current {
+        if at.tag().is_some_and(is_raw_text) {
+            return true;
+        }
+        current = at.parent.as_deref().and_then(|id| doc.get(id));
+    }
+    false
+}
+
 /// The text directly inside an element (not in its descendants' elements).
 fn own_text(doc: &Document, node: &Node) -> String {
     doc.children(Some(&node.id))
@@ -392,6 +426,48 @@ fn css_lines(css: &str) -> impl Iterator<Item = String> + '_ {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
+}
+
+/// Each case-insensitive match of `needle` (already lowercase) in `code`, with
+/// up to 30 characters of the original code on either side.
+fn code_matches<'a>(code: &'a str, needle: &'a str) -> impl Iterator<Item = String> + 'a {
+    if needle.is_empty() {
+        return Vec::new().into_iter();
+    }
+    // Lowercase `code` as the query was (so a final `ς` matches), and record
+    // where each lowercase byte came from, since lowercasing can change
+    // lengths outside ASCII. A context-dependent lowercase keeps each char's
+    // byte length, so the per-char lengths line up with `lower`.
+    let lower = code.to_lowercase();
+    let mut origin = Vec::with_capacity(lower.len());
+    for (i, c) in code.char_indices() {
+        let len: usize = c.to_lowercase().map(char::len_utf8).sum();
+        origin.extend(std::iter::repeat_n(i, len));
+    }
+    if origin.len() != lower.len() {
+        return Vec::new().into_iter();
+    }
+    let snippets: Vec<String> = lower
+        .match_indices(needle)
+        .map(|(at, _)| {
+            // The match runs from the char its first byte came from through
+            // the char its last byte came from.
+            let from = origin[at];
+            let last = origin[at + needle.len() - 1];
+            let to = last + code[last..].chars().next().map_or(0, char::len_utf8);
+            let start = code[..from]
+                .char_indices()
+                .rev()
+                .nth(29)
+                .map_or(0, |(i, _)| i);
+            let end = code[to..]
+                .char_indices()
+                .nth(30)
+                .map_or(code.len(), |(i, _)| to + i);
+            code[start..end].to_owned()
+        })
+        .collect();
+    snippets.into_iter()
 }
 
 /// Each match of `from` in `code` with up to 30 characters of code on either
@@ -772,6 +848,137 @@ mod tests {
         )
         .unwrap();
         assert!(!report[0].changes.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn text_scope_skips_script_and_style_code_scope_finds_them() {
+        let (doc, board) = design(
+            r##"<p>See Timepris</p>
+<script>h('Timepris'); h('Timepris')</script>
+<style>.a { content: "Timepris" } .b { content: "Timepris" }</style>
+<svg><style>.z { content: "Timepris" }</style></svg>"##,
+        );
+        let text_only = Places {
+            styles: false,
+            attributes: false,
+            css: false,
+            text: true,
+        };
+        let (ops, report) = replace(
+            &doc,
+            Some(&board),
+            "Timepris",
+            "Timepris arbeid",
+            text_only,
+            false,
+        )
+        .unwrap();
+        let mut changed = doc.clone();
+        changed.apply_all(&ops);
+        let html = html::export(&changed, &board, false).unwrap();
+        assert!(
+            html.contains("See Timepris arbeid") && html.contains("h('Timepris')"),
+            "text scope rewrote code:\n{html}\n{report:?}"
+        );
+        assert!(
+            html.contains(r#"content: "Timepris""#),
+            "text scope rewrote style:\n{html}\n{report:?}"
+        );
+        assert_eq!(
+            report.iter().map(|r| r.count).sum::<usize>(),
+            1,
+            "{report:?}"
+        );
+
+        let code_only = Places {
+            styles: false,
+            attributes: false,
+            css: true,
+            text: false,
+        };
+        let (ops, report) =
+            replace(&doc, Some(&board), "Timepris", "Rate", code_only, true).unwrap();
+        let mut changed = doc.clone();
+        changed.apply_all(&ops);
+        let html = html::export(&changed, &board, false).unwrap();
+        assert!(
+            html.contains("h('Rate')")
+                && html.contains(r#"content: "Rate""#)
+                && html.contains("See Timepris"),
+            "code scope missed script or style:\n{html}\n{report:?}"
+        );
+        // The two style rules plus the svg style plus two script calls.
+        assert!(
+            report.iter().map(|r| r.count).sum::<usize>() >= 5,
+            "{report:?}\n{html}"
+        );
+
+        let hits = find(
+            &doc,
+            Some(&board),
+            &Query {
+                text: Some("Timepris".into()),
+                ..Default::default()
+            },
+        );
+        let tags: Vec<_> = hits
+            .iter()
+            .filter_map(|h| doc.get(&h.id).and_then(|n| n.tag()))
+            .collect();
+        assert_eq!(tags, ["p"], "text search hit code: {tags:?} {hits:?}");
+        // A style search is what still reaches the script and both styles.
+        let code = find(
+            &doc,
+            Some(&board),
+            &Query {
+                style: Some("Timepris".into()),
+                ..Default::default()
+            },
+        );
+        let code_tags: Vec<_> = code
+            .iter()
+            .filter_map(|h| doc.get(&h.id).and_then(|n| n.tag()))
+            .collect();
+        assert_eq!(code_tags, ["script", "style", "style"], "{code:?}");
+    }
+
+    #[test]
+    fn style_search_finds_code_across_statements_and_color_shaped_selectors() {
+        let (doc, board) = design(
+            r##"<script>first(); second(); document.querySelector('div#abc')</script>
+<style>.a { color: #abcdef }</style>"##,
+        );
+        let tags = |style: &str| -> Vec<String> {
+            find(
+                &doc,
+                Some(&board),
+                &Query {
+                    style: Some(style.into()),
+                    ..Default::default()
+                },
+            )
+            .iter()
+            .filter_map(|h| doc.get(&h.id).and_then(|n| n.tag()).map(str::to_owned))
+            .collect()
+        };
+        assert_eq!(tags("first(); second()"), ["script"]);
+        assert_eq!(tags("div#abc"), ["script"]);
+        // In a script `#abc` is code; in CSS it isn't the color #abcdef.
+        assert_eq!(tags("#abc"), ["script"]);
+        assert_eq!(tags("#ABCDEF"), ["style"]);
+    }
+
+    #[test]
+    fn code_snippets_keep_the_original_case_next_to_non_ascii_text() {
+        let snippets: Vec<_> =
+            code_matches(r#"let x="Å"; RenderCard() İx"#, "rendercard").collect();
+        assert_eq!(snippets, [r#"let x="Å"; RenderCard() İx"#]);
+        // `İ` lowercases to two chars; a match on them maps back to `İ`.
+        let snippets: Vec<_> = code_matches("aİb", "i\u{307}").collect();
+        assert_eq!(snippets, ["aİb"]);
+        // A final sigma lowercases as `ς`, as the query does.
+        let snippets: Vec<_> = code_matches("const ΟΣ = 1;", &"ΟΣ".to_lowercase()).collect();
+        assert_eq!(snippets, ["const ΟΣ = 1;"]);
     }
 
     #[test]

@@ -824,7 +824,7 @@ fn replied(comment: &comment::Comment) -> String {
     let linked = match labels.len() {
         0 => "links none of your changes".to_owned(),
         n => format!(
-            "links your {n} change{} to this artboard since the thread's last message: {}",
+            "links your {n} change{} to this artboard: {}",
             if n == 1 { "" } else { "s" },
             labels.join(", ")
         ),
@@ -2052,7 +2052,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Reply to a comment, usually to say what you changed (with resolve: true) or to ask a question. The reply links the edits you made to the comment's artboard since the thread's last message."
+        description = "Reply to a comment, usually to say what you changed (with resolve: true) or to ask a question. The reply links the edits you made on the comment's artboard since the thread's last message. An edit an earlier reply already linked stays on that reply."
     )]
     async fn reply_to_comment(
         &self,
