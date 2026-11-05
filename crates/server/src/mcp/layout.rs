@@ -256,8 +256,10 @@ impl<'a> Report<'a> {
         self
     }
 
-    /// The notes for the `kept` findings. Empty when there is nothing to say.
-    pub(super) fn text(&self, doc: &Document, kept: &[&Found]) -> String {
+    /// The notes for the `named` findings. Empty when there is nothing to say.
+    /// This is the part that takes the document: it writes a line for each
+    /// finding in `named`, which is at most [`LAYOUT_NAMED`] of each kind.
+    pub(super) fn text(&self, doc: &Document, named: &Named) -> String {
         let more = |text: &mut String, shown: usize| {
             if shown > LAYOUT_NAMED {
                 let _ = write!(text, "\n  … and {} more", shown - LAYOUT_NAMED);
@@ -265,29 +267,21 @@ impl<'a> Report<'a> {
         };
         let mut notes = Vec::new();
 
-        let cut: Vec<&&Found> = kept
-            .iter()
-            .filter(|f| matches!(f, Found::Cut { .. }))
-            .collect();
-        if !cut.is_empty() {
+        if !named.cut.is_empty() {
             let mut text = format!("{} Sticking out:", self.cut_header);
-            for f in cut.iter().take(LAYOUT_NAMED) {
+            for f in &named.cut {
                 if let Found::Cut { id, x, y } = f {
                     let _ = write!(text, "\n  {} (ends at x {x:.0}, y {y:.0})", line(doc, id));
                 }
             }
-            more(&mut text, cut.len());
+            more(&mut text, named.cuts);
             notes.push(text);
         }
 
-        let spilling: Vec<&&Found> = kept
-            .iter()
-            .filter(|f| matches!(f, Found::Spill { .. }))
-            .collect();
-        if !spilling.is_empty() {
+        if !named.spilling.is_empty() {
             let mut text =
                 String::from("Layout: text runs past its box, so it may overlap or be clipped:");
-            for f in spilling.iter().take(LAYOUT_NAMED) {
+            for f in &named.spilling {
                 let Found::Spill { id, over } = f else {
                     continue;
                 };
@@ -304,21 +298,17 @@ impl<'a> Report<'a> {
                     }
                 }
             }
-            more(&mut text, spilling.len());
+            more(&mut text, named.spills);
             notes.push(text);
         }
 
-        let pairs: Vec<&&Found> = kept
-            .iter()
-            .filter(|f| matches!(f, Found::Overlap { .. }))
-            .collect();
-        if !pairs.is_empty() {
+        if !named.pairs.is_empty() {
             let mut text = format!(
                 "Layout: {} pair{} of text elements overlap. Check that's intended, like a badge over a card:",
-                pairs.len(),
-                if pairs.len() == 1 { "" } else { "s" }
+                named.overlaps,
+                if named.overlaps == 1 { "" } else { "s" }
             );
-            for f in pairs.iter().take(LAYOUT_NAMED) {
+            for f in &named.pairs {
                 if let Found::Overlap { a, b, w, h } = f {
                     let _ = write!(
                         text,
@@ -328,10 +318,47 @@ impl<'a> Report<'a> {
                     );
                 }
             }
-            more(&mut text, pairs.len());
+            more(&mut text, named.overlaps);
             notes.push(text);
         }
         notes.join("\n")
+    }
+}
+
+/// The findings a note names, and how many there are of each kind. Picking
+/// them reads no document, so it can run without the lock that
+/// [`Report::text`] needs to write their lines.
+#[derive(Debug, Default)]
+pub(super) struct Named<'r, 'a> {
+    cut: Vec<&'r Found<'a>>,
+    spilling: Vec<&'r Found<'a>>,
+    pairs: Vec<&'r Found<'a>>,
+    cuts: usize,
+    spills: usize,
+    overlaps: usize,
+}
+
+impl<'r, 'a> Named<'r, 'a> {
+    /// Sorts `kept` by kind and keeps the first [`LAYOUT_NAMED`] of each.
+    pub(super) fn new(kept: &[&'r Found<'a>]) -> Self {
+        let mut named = Self::default();
+        for &f in kept {
+            let (list, count) = match f {
+                Found::Cut { .. } => (&mut named.cut, &mut named.cuts),
+                Found::Spill { .. } => (&mut named.spilling, &mut named.spills),
+                Found::Overlap { .. } => (&mut named.pairs, &mut named.overlaps),
+            };
+            *count += 1;
+            if list.len() < LAYOUT_NAMED {
+                list.push(f);
+            }
+        }
+        named
+    }
+
+    /// Whether there is nothing to say.
+    pub(super) fn is_empty(&self) -> bool {
+        self.cuts + self.spills + self.overlaps == 0
     }
 }
 
@@ -387,7 +414,7 @@ pub(super) fn layout_notes(
 ) -> String {
     let report = Report::new(doc, artboard, boxes, surface);
     let kept: Vec<&Found> = report.found.iter().collect();
-    let notes = report.text(doc, &kept);
+    let notes = report.text(doc, &Named::new(&kept));
     if notes.is_empty() {
         report.clear
     } else {
@@ -404,7 +431,7 @@ pub(super) fn overlap_note(
 ) -> Option<String> {
     let report = Report::default().with_overlaps(board, &Texts::new(doc, boxes));
     let kept: Vec<&Found> = report.found.iter().collect();
-    let notes = report.text(doc, &kept);
+    let notes = report.text(doc, &Named::new(&kept));
     (!notes.is_empty()).then_some(notes)
 }
 
@@ -439,5 +466,20 @@ mod tests {
         let keys: std::collections::HashSet<u64> = report.found.iter().map(Found::key).collect();
         let pairs = OVERLAP_CHECKED * (OVERLAP_CHECKED - 1) / 2;
         assert_eq!((report.found.len(), keys.len()), (pairs, pairs));
+    }
+
+    #[test]
+    fn a_note_names_a_bounded_set_and_counts_the_rest() {
+        let ids: Vec<String> = (0..20).map(|n| format!("t{n}")).collect();
+        let found: Vec<Found> = ids
+            .iter()
+            .map(|id| Found::Cut { id, x: 0.0, y: 0.0 })
+            .collect();
+        let kept: Vec<&Found> = found.iter().collect();
+        let named = Named::new(&kept);
+        assert!(!named.is_empty() && Named::new(&[]).is_empty());
+        assert_eq!((named.cut.len(), named.cuts), (LAYOUT_NAMED, 20));
+        let text = Report::default().text(&Document::default(), &named);
+        assert!(text.ends_with("… and 12 more"), "{text}");
     }
 }

@@ -36,7 +36,7 @@ use std::{
 
 use finite_design::{Change, Document};
 
-use super::layout::{Found, Report, Texts};
+use super::layout::{Found, Named, Report, Texts};
 use crate::{hub::DesignHandle, screenshot};
 
 /// How long a doc6 edit waits at least: its check is on by default, and AX
@@ -459,7 +459,8 @@ async fn measure(
         .ok()?;
     // Everything that reads the document is read here, in one go, so the
     // pairs of overlapping text are compared and keyed without holding it.
-    let (report, texts, reaching) = handle.read(|d| {
+    // `seq` says which document that was, for the lines written below.
+    let (report, texts, reaching, seq) = handle.read(|d| {
         let doc = d.view();
         let touched = Touched::new(doc, board, touched);
         (
@@ -471,6 +472,7 @@ async fn measure(
                 .map(|b| b.id.as_str())
                 .filter(|id| touched.reaches(id))
                 .collect::<HashSet<&str>>(),
+            d.seq(),
         )
     });
     let report = match (texts, boxes.first()) {
@@ -488,7 +490,16 @@ async fn measure(
         .map(|(f, _)| f)
         .collect();
     let hidden = report.found.len() - kept.len();
-    let notes = handle.read(|d| report.text(d.view(), &kept));
+    // Only the lines of the findings named are written under the lock. A
+    // person's edit doesn't bump the watch's generation, so if the design
+    // moved on, the lines would name nodes that no longer match what was
+    // measured: drop the note, and the next check reports.
+    let named = Named::new(&kept);
+    let notes = if named.is_empty() {
+        String::new()
+    } else {
+        handle.read(|d| (d.seq() == seq).then(|| report.text(d.view(), &named)))?
+    };
     let found: HashSet<u64> = keys.into_iter().collect();
     let tool = layout_tool(surface);
     let note = match (notes.is_empty(), hidden) {

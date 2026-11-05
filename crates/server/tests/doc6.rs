@@ -1068,6 +1068,69 @@ async fn clip_path_clips_only_to_its_own_bounds() {
     }
 }
 
+/// A `clip-path` whose bounds can't be worked out exactly never hides
+/// content: a `calc()` inset, and a path on a transformed element or inside
+/// a transformed one, are taken to crop nothing, so the overflow is reported.
+#[tokio::test]
+async fn clip_path_bounds_that_cant_be_worked_out_hide_nothing() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Clipper").await;
+    for script in [false, true] {
+        let id = design(&mut agent, "Unread").await;
+        let script = if script { "<script>1 + 1</script>" } else { "" };
+        edit(
+            &mut agent,
+            &id,
+            json!([{ "op": "artboard", "name": "Mock", "width": 400, "height": 300,
+                     "html": format!(
+                        "{script}\
+                         <div data-name=\"Calc\" style=\"position: absolute; top: 0; left: 0; width: 100px; height: 600px; clip-path: inset(0 0 calc(10% + 5px) 0)\"></div>\
+                         <div data-name=\"Scaled\" style=\"position: absolute; top: 0; left: 120px; width: 100px; height: 1200px; transform: scale(0.5); transform-origin: 0 0; clip-path: inset(0 0 400px 0)\"></div>\
+                         <div data-name=\"Frame\" style=\"position: absolute; top: 0; left: 240px; width: 100px; height: 100px; transform: scale(0.5); transform-origin: 0 0\">\
+                           <div data-name=\"Inner\" style=\"position: absolute; top: 0; left: 0; width: 100px; height: 1200px; clip-path: inset(0 0 400px 0)\"></div>\
+                         </div>") }]),
+        )
+        .await;
+        let Some(cut) = layout_of(&mut agent, &id).await else {
+            return;
+        };
+        let sticking = cut.split("Sticking out:").nth(1).unwrap_or_default();
+        for reported in ["Calc", "Scaled", "Inner"] {
+            assert!(sticking.contains(reported), "{reported} is hidden: {cut}");
+        }
+    }
+}
+
+/// A `clip-path` crops everything inside it, including a descendant that is
+/// positioned against something outside it.
+#[tokio::test]
+async fn clip_path_crops_descendants_whatever_positions_them() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Clipper").await;
+    for script in [false, true] {
+        let id = design(&mut agent, "Escapees").await;
+        let script = if script { "<script>1 + 1</script>" } else { "" };
+        edit(
+            &mut agent,
+            &id,
+            json!([{ "op": "artboard", "name": "Mock", "width": 400, "height": 300,
+                     "html": format!(
+                        "{script}\
+                         <div data-name=\"Cropper\" style=\"height: 100px; flex-shrink: 0; clip-path: inset(0)\">\
+                           <div data-name=\"Escapee\" style=\"position: absolute; top: 0; left: 0; width: 100px; height: 700px\"></div>\
+                         </div>\
+                         <div data-name=\"Tall\" style=\"height: 900px; flex-shrink: 0\">Tall</div>") }]),
+        )
+        .await;
+        let Some(cut) = layout_of(&mut agent, &id).await else {
+            return;
+        };
+        let sticking = cut.split("Sticking out:").nth(1).unwrap_or_default();
+        assert!(sticking.contains("\"Tall\""), "{cut}");
+        assert!(!sticking.contains("Escapee"), "Escapee is cropped: {cut}");
+    }
+}
+
 /// Only what shows counts toward an overlap: what a wrapper clips on one
 /// axis only (`overflow-x: clip`) and what a `clip-path` crops away.
 #[tokio::test]
