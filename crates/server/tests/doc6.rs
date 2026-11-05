@@ -907,7 +907,79 @@ async fn comments_are_listed_awaited_and_answered() {
     let none = agent
         .ok("comments", json!({ "designId": id, "wait": 1 }))
         .await;
-    assert!(none.contains("No comments arrived"), "{none}");
+    assert!(
+        none.contains("No comments arrived in 1 seconds. Call again to keep listening."),
+        "{none}"
+    );
+}
+
+/// A wait past 55 seconds is what Claude Code drops with "The operation timed
+/// out". The server waits 55 and says to call again. The clock is paused, and
+/// the test jumps those 55 seconds in one step: SSE keep-alives sit at 15
+/// seconds and reset from the wall clock, so auto-advance would crawl.
+#[tokio::test(start_paused = true)]
+async fn a_comment_wait_over_55_seconds_is_clamped() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Helper").await;
+    let id = design(&mut agent, "Wait").await;
+    let again = "Call again to keep listening.";
+    let one = agent
+        .ok("comments", json!({ "designId": id, "wait": 1 }))
+        .await;
+    assert_eq!(one, format!("No comments arrived in 1 seconds. {again}"));
+    let zero = agent
+        .ok("comments", json!({ "designId": id, "wait": 0 }))
+        .await;
+    assert_eq!(zero, format!("No comments arrived in 1 seconds. {again}"));
+
+    let mut waits = Vec::new();
+    for (name, wait) in [
+        ("long", json!(300)),
+        ("mid", json!(120)),
+        ("flag", json!(true)),
+    ] {
+        let app = app.clone();
+        let id = id.clone();
+        waits.push(tokio::spawn(async move {
+            let mut agent = Agent::connect_doc6(&app, name).await;
+            let started = tokio::time::Instant::now();
+            let text = agent
+                .ok("comments", json!({ "designId": id, "wait": wait.clone() }))
+                .await;
+            (wait, text, started.elapsed())
+        }));
+    }
+    // Yielding does not advance the clock, so each call stays parked on the cap.
+    for _ in 0..1_000 {
+        tokio::task::yield_now().await;
+    }
+    for wait in &waits {
+        assert!(
+            !wait.is_finished(),
+            "a capped wait returned before the clock reached 55 seconds"
+        );
+    }
+    // One second short of the cap, every call is still waiting.
+    tokio::time::advance(Duration::from_secs(54)).await;
+    for _ in 0..1_000 {
+        tokio::task::yield_now().await;
+    }
+    for wait in &waits {
+        assert!(
+            !wait.is_finished(),
+            "a capped wait returned before 55 seconds"
+        );
+    }
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let capped = format!("No comments arrived in 55 seconds. {again}");
+    for wait in waits {
+        let (asked, text, elapsed) = wait.await.unwrap();
+        assert_eq!(text, capped, "wait {asked}");
+        assert!(
+            elapsed >= Duration::from_secs(55) && elapsed < Duration::from_secs(70),
+            "wait {asked} took {elapsed:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1773,7 +1845,9 @@ async fn each_comment_goes_to_one_agent() {
     };
     let wait = json!({ "designId": id, "wait": 1 });
 
-    let none = |reply: String| reply.contains("No comments arrived");
+    let none = |reply: String| {
+        reply.contains("No comments arrived in 1 seconds. Call again to keep listening.")
+    };
     // Both agents listen. Ada made the board, so its comments go to Ada.
     assert!(none(ada.ok("comments", wait.clone()).await));
     assert!(none(bo.ok("comments", wait.clone()).await));

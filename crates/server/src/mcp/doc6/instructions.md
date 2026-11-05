@@ -6,7 +6,7 @@ There are six tools. Each one's description has its full grammar and examples, s
 - read: look at a design. With no select, an overview (pages, artboards, open comments, who is working) and every artboard's outline with ids. select is a CSS selector, where #k3x9a2bq is a node's id; as: "outline", "html", "css", "jsx" or "computed". contains: "#3b82f6" searches styles, visible text, attributes, <style> and <script> code, and tokens. export: "figma" (or html, finite, repo, jsx) returns a file's text to save.
 - edit: every change. Its ops run in order as one transaction: all or nothing, one undo step. Ops: artboard, html, css, attrs, move, remove, replace, tokens, page, import, component. Each result ends with a layout check. status: "…" shows people what you're doing; dryRun: true previews.
 - render: an image of what select matches (every artboard by default), or output: "layout" for each element's box as text.
-- comments: open comments; wait: 60 blocks until one is waiting for you; reply: [{commentId, message, resolve: true}].
+- comments: open comments; wait: 55 blocks until one is waiting for you (at most 55; call again to keep listening); reply: [{commentId, message, resolve: true}].
 - undo: reverses your own last edit calls; redo: true redoes.
 
 Every tool but designs takes a designId: the design's id or exact name. Other agents and people may edit the same design, so re-read before changing nodes you didn't create.

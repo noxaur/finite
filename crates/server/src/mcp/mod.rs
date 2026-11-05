@@ -2009,7 +2009,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Wait for users to ask for something. Returns as soon as a comment or reply is waiting for you (open, a user's message last, not a note for people, and not another agent's), and takes it so other agents leave it to you, with those comments in the same form as get_comments. Returns right away if some already are, or with a message saying none arrived when timeoutSeconds (default 60, at most 300) runs out. Call it in a loop to keep taking feedback.",
+        description = "Wait for users to ask for something. Returns as soon as a comment or reply is waiting for you (open, a user's message last, not a note for people, and not another agent's), and takes it so other agents leave it to you, with those comments in the same form as get_comments. Returns right away if some already are, or with a message saying none arrived and to call again when timeoutSeconds runs out (default 55; a longer value waits 55, because clients time out the call sooner). Call it in a loop to keep taking feedback.",
         annotations(read_only_hint = true)
     )]
     async fn wait_for_comments(
@@ -2018,8 +2018,8 @@ impl FiniteMcp {
         ctx: RequestContext<RoleServer>,
     ) -> ToolResult {
         let actor = self.actor(&ctx);
-        let timeout = Duration::from_secs(p.timeout_seconds.unwrap_or(60).clamp(1, 300));
-        let deadline = tokio::time::Instant::now() + timeout;
+        let seconds = comment_wait_secs(p.timeout_seconds);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(seconds);
         loop {
             let handle = design!(self, &p.design_id);
             // Register before checking, so a comment that lands in between still wakes us.
@@ -2043,10 +2043,7 @@ impl FiniteMcp {
                 )));
             }
             if tokio::time::timeout_at(deadline, changed).await.is_err() {
-                return ok(format!(
-                    "No comments arrived in {} seconds.",
-                    timeout.as_secs()
-                ));
+                return ok(no_comments_arrived(seconds));
             }
         }
     }
@@ -2210,6 +2207,22 @@ mod tests {
     /// instructions and drops the rest without telling the agent. AX runs
     /// found the end of these cut off, so they stay under this.
     const INSTRUCTIONS_LIMIT: usize = 4_000;
+
+    #[test]
+    fn comment_waits_clamp_to_55_seconds() {
+        assert_eq!(comment_wait_secs(None), MAX_COMMENT_WAIT_SECS);
+        assert_eq!(comment_wait_secs(Some(0)), 1);
+        assert_eq!(comment_wait_secs(Some(1)), 1);
+        assert_eq!(comment_wait_secs(Some(55)), 55);
+        assert_eq!(comment_wait_secs(Some(60)), 55);
+        assert_eq!(comment_wait_secs(Some(120)), 55);
+        assert_eq!(comment_wait_secs(Some(240)), 55);
+        assert_eq!(comment_wait_secs(Some(300)), 55);
+        assert_eq!(
+            no_comments_arrived(55),
+            "No comments arrived in 55 seconds. Call again to keep listening."
+        );
+    }
 
     #[test]
     fn instructions_fit_what_clients_keep() {
