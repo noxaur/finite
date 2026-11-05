@@ -569,6 +569,61 @@ fn ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
 }
 
+/// `url(` at `i`, and not the tail of a longer name such as `noturl(`.
+fn at_url(bytes: &[u8], i: usize) -> bool {
+    if i > 0 && ident_byte(bytes[i - 1]) {
+        return false;
+    }
+    let Some(head) = bytes.get(i..i + 4) else {
+        return false;
+    };
+    head[3] == b'('
+        && head[0].eq_ignore_ascii_case(&b'u')
+        && head[1].eq_ignore_ascii_case(&b'r')
+        && head[2].eq_ignore_ascii_case(&b'l')
+}
+
+/// The index just past the `url(...)` that starts at `start`.
+fn skip_url(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 4;
+    while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
+        i += 1;
+    }
+    if matches!(bytes.get(i), Some(b'"' | b'\'')) {
+        let quote = bytes[i];
+        i += 1;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' {
+                i += 2;
+                continue;
+            }
+            if bytes[i] == quote {
+                i += 1;
+                break;
+            }
+            i += 1;
+        }
+        while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
+            i += 1;
+        }
+        if bytes.get(i) == Some(&b')') {
+            i += 1;
+        }
+        return i;
+    }
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b')' {
+            return i + 1;
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
 /// `#` tokens in `source`, outside quotes and comments.
 fn hash_tokens(source: &str) -> Vec<HashToken> {
     let bytes = source.as_bytes();
@@ -596,6 +651,13 @@ fn hash_tokens(source: &str) -> Vec<HashToken> {
                 quote = None;
             }
             i += 1;
+            continue;
+        }
+        // `url(https://cdn.example/*)` is a url token, not a comment. A
+        // `/*` inside it must not swallow the rest of the sheet, and a `#`
+        // in a url is a fragment, not a selector.
+        if at_url(bytes, i) {
+            i = skip_url(bytes, i);
             continue;
         }
         if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
@@ -1538,4 +1600,44 @@ fn import(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String, 
         result.import.id
     ));
     Ok((text, result.artboards.first().cloned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use finite_design::{Document, Node, Op};
+
+    use super::prepare_css;
+
+    fn doc_with(id: &str) -> Document {
+        let mut doc = Document::default();
+        assert!(
+            doc.apply(&Op::Create {
+                node: Node::element(id, "p"),
+            })
+            .is_some()
+        );
+        doc
+    }
+
+    #[test]
+    fn a_url_does_not_swallow_the_rest_of_the_sheet() {
+        let doc = doc_with("inst0000/part0000");
+        let css = "h1 { background: url(https://cdn.example/*) } #inst0000/part0000 { color: red }";
+        let out = prepare_css(&doc, css).unwrap();
+        assert!(
+            out.contains("url(https://cdn.example/*)") && out.contains(r"#inst0000\/part0000"),
+            "{out}"
+        );
+        // Spaces after `url(`, a fragment, and a quoted url stay put.
+        let css = r#"h1 { background: url( https://cdn.example/* ) } p { background: url(https://cdn.example/a#inst0000/part0000) } b { background: url("https://cdn.example/*") } /* #inst0000/part0000 */ #inst0000/part0000 { color: red }"#;
+        let out = prepare_css(&doc, css).unwrap();
+        assert!(out.contains("url( https://cdn.example/* )"), "{out}");
+        assert!(
+            out.contains("url(https://cdn.example/a#inst0000/part0000)"),
+            "{out}"
+        );
+        assert!(out.contains(r#"url("https://cdn.example/*")"#), "{out}");
+        assert!(out.contains("/* #inst0000/part0000 */"), "{out}");
+        assert!(out.contains(r"#inst0000\/part0000 { color: red }"), "{out}");
+    }
 }

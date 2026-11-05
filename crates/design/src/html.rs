@@ -1211,6 +1211,12 @@ fn write_compact(doc: &Document, node: &Node, ids: bool, out: &mut String) {
     let _ = write!(out, "<{tag}");
     if ids {
         let _ = write!(out, " {VIEWER_ID_ATTR}=\"{}\"", escape(&node.id, true));
+        // `#inst\/part` matches an element's id, the same way `#box` matches
+        // `id="box"`. A node inside an instance has no such attribute unless
+        // it already brought one, so the path becomes its id here.
+        if let Some(id) = rendered_id(node) {
+            let _ = write!(out, " id=\"{}\"", escape(id, true));
+        }
     }
     for (name, value) in &node.attrs {
         let _ = write!(out, " {name}=\"{}\"", escape(value, true));
@@ -1237,6 +1243,23 @@ fn write_compact(doc: &Document, node: &Node, ids: bool, out: &mut String) {
         }
     }
     let _ = write!(out, "</{tag}>");
+}
+
+/// The HTML `id` to write so a stylesheet's `#id` matches `node`, when
+/// `node` is inside an instance and doesn't already have an `id`. An `id`
+/// the node brought is what an ordinary `#id` rule matches, and it stays.
+fn rendered_id(node: &Node) -> Option<&str> {
+    if node.id.contains('/') && !has_html_id(node) {
+        Some(node.id.as_str())
+    } else {
+        None
+    }
+}
+
+fn has_html_id(node: &Node) -> bool {
+    node.attrs
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case("id"))
 }
 
 pub fn style_string(styles: &BTreeMap<String, String>) -> String {
@@ -1608,6 +1631,77 @@ mod tests {
         assert_eq!(
             layered_style(".icon\\:root {}"),
             "@layer finite-shared {\n.icon\\:root {}\n}"
+        );
+    }
+
+    #[test]
+    fn a_path_id_is_the_rendered_elements_id() {
+        let mut doc = crate::Document::default();
+        let mut board = crate::Node::element("a", "div");
+        board.styles.insert("width".into(), "200px".into());
+        let mut part = crate::Node {
+            parent: Some("c".into()),
+            index: "a".into(),
+            ..crate::Node::element("p", "h1")
+        };
+        part.attrs.insert("class".into(), "title".into());
+        let mut button = crate::Node {
+            parent: Some("c".into()),
+            index: "b".into(),
+            ..crate::Node::element("btn", "button")
+        };
+        button.attrs.insert("id".into(), "go".into());
+        let mut component = crate::Node {
+            parent: Some("a".into()),
+            index: "a".into(),
+            component: true,
+            ..crate::Node::element("c", "header")
+        };
+        component.styles.insert("color".into(), "black".into());
+        let instance = crate::Node {
+            parent: Some("a".into()),
+            index: "b".into(),
+            instance_of: Some("c".into()),
+            ..crate::Node::element("i", "header")
+        };
+        let sheet = crate::Node {
+            parent: Some("s".into()),
+            index: "a".into(),
+            ..crate::Node::text("st", r#"#i\/p { color: red } #i\/btn { color: blue }"#)
+        };
+        for node in [
+            board,
+            component,
+            part,
+            button,
+            instance,
+            crate::Node {
+                parent: Some("a".into()),
+                index: "c".into(),
+                ..crate::Node::element("s", "style")
+            },
+            sheet,
+        ] {
+            assert!(doc.apply(&crate::Op::Create { node }).is_some());
+        }
+        let view = crate::components::expand(&doc);
+        let html = export_for_viewer(&view, "a").unwrap();
+        assert!(
+            html.contains(r#"<h1 data-finite-id="i/p" id="i/p" class="title">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<button data-finite-id="i/btn" id="go">"#),
+            "an id the part already has stays: {html}"
+        );
+        assert!(
+            html.contains(r#"#i\/p { color: red }"#),
+            "the stored rule is already valid css: {html}"
+        );
+        let compact = export_compact(&view, "a").unwrap();
+        assert!(
+            !compact.contains(r#"id="i/p""#),
+            "reading html back doesn't gain the render id: {compact}"
         );
     }
 }

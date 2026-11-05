@@ -1230,6 +1230,9 @@ export class Renderer {
         el = svg ? document.createElementNS(SVG_NS, tag) : document.createElement(tag);
         for (const [name, value] of Object.entries(node.attrs)) setAttr(el, name, value);
         for (const [name, value] of Object.entries(node.styles)) setStyle(el, name, value);
+        // `#inst\/part` matches an element's id, as `#box` matches `id="box"`.
+        // The iframe and screenshot HTML do this in `html::rendered_id`.
+        paintPathId(el, node);
       }
       this.ids.set(el, node.id);
     }
@@ -1277,6 +1280,7 @@ export class Renderer {
       const value = node.attrs[name];
       if (value === undefined) el.removeAttribute(name);
       else setAttr(el, name, value);
+      if (name.toLowerCase() === "id") paintPathId(el, node);
     }
   }
 
@@ -1665,6 +1669,16 @@ function setStyle(el: Element, name: string, value: string) {
     important ? value.replace(/!\s*important\s*$/i, "").trim() : value,
     important ? "important" : "",
   );
+}
+
+/** A `#inst/part` rule matches this element the way `#box` matches `id="box"`. */
+function paintPathId(el: Element, node: Node) {
+  if (!node.id.includes("/") || hasHtmlId(node)) return;
+  el.setAttribute("id", node.id);
+}
+
+function hasHtmlId(node: Node): boolean {
+  return Object.keys(node.attrs).some((name) => name.toLowerCase() === "id");
 }
 
 /** Sets an attribute the server's own check (`html::is_safe_attr`) allows. */

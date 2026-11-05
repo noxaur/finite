@@ -8,7 +8,11 @@ use std::{sync::Arc, time::Duration};
 use agent::{Agent, id_after};
 use axum::Router;
 use finite_design::comment::{Anchor, Audience, Author, AuthorKind};
-use finite_server::{Hub, app, store::MemoryStore};
+use finite_server::{
+    Hub, app,
+    screenshot::{self, scene},
+    store::MemoryStore,
+};
 use serde_json::{Value, json};
 
 /// A server, whose `/mcp` serves the doc6 tools by default.
@@ -804,7 +808,7 @@ fn tag_ids(html: &str, tag: &str) -> Vec<String> {
 
 #[tokio::test]
 async fn path_ids_and_instance_edits_take_either_slash() {
-    let (app, _) = doc6();
+    let (app, hub) = doc6();
     let mut agent = Agent::connect_doc6(&app, "Paths").await;
     let (id, _) = landing(&mut agent).await;
     // A slash in a value, and a color hash, are not path ids.
@@ -988,6 +992,58 @@ async fn path_ids_and_instance_edits_take_either_slash() {
     assert!(
         sheet.contains(&escaped) && sheet.contains("abcdef"),
         "{sheet}"
+    );
+
+    // A `/*` inside an unquoted url() is part of the url. A later path is
+    // still escaped, so the rule stays valid CSS.
+    let after_url = edit(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "css",
+            "to": "style",
+            "css": format!(
+                "h1 {{ background-image: url(https://cdn.example/*) }} #{path} {{ background-color: rgb(255, 0, 0) }}"
+            )
+        }]),
+    )
+    .await;
+    assert!(!after_url.contains("isn't a node"), "{after_url}");
+    let sheet = html(&mut agent, &id, "style").await;
+    assert!(
+        sheet.contains("url(https://cdn.example/*)")
+            && sheet.contains(&format!("{escaped} {{ background-color: rgb(255, 0, 0) }}")),
+        "{sheet}"
+    );
+
+    // The stored `#inst\/part` rule matches the rendered part. Inline color
+    // doesn't cover background-color.
+    let measurement = {
+        let handle = hub.open(&id).await.unwrap();
+        handle
+            .read(|d| {
+                let doc = d.view();
+                let board = doc.artboard_of(path).expect("the part is on an artboard");
+                screenshot::plan_measurement(doc, &board.id, screenshot::Options::default())
+            })
+            .expect("the artboard can be measured")
+    };
+    let rendered = match scene(measurement).await {
+        Ok(rendered) => rendered,
+        Err(error) if error.contains("no Chrome") => {
+            eprintln!("skipped the render check: {error}");
+            return;
+        }
+        Err(error) => panic!("{error}"),
+    };
+    let part = rendered
+        .nodes
+        .get(path.as_str())
+        .unwrap_or_else(|| panic!("the part didn't render: {rendered:?}"));
+    assert_eq!(
+        part.style("background-color"),
+        "rgb(255, 0, 0)",
+        "path id {path}"
     );
 }
 

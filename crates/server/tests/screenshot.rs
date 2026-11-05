@@ -3,7 +3,7 @@
 
 use std::{collections::BTreeMap, time::Duration};
 
-use finite_design::{Document, Op, edit, html};
+use finite_design::{Document, Node, Op, components, edit, html};
 use finite_server::screenshot::{
     Format, Image, MAX_OUTPUT_SIDE, Options, Rect, Shot, capture, layout, plan, plan_measurement,
     scene,
@@ -703,4 +703,125 @@ async fn a_scene_has_every_box_and_its_computed_styles() {
         "{texts:?} {bold:?}"
     );
     assert_eq!(texts[1].style("font-size"), "20px");
+}
+
+/// An artboard whose `<style>` names a node inside an instance by its path,
+/// and a plain `id="box"`. `script` adds a `<script>`, so the page renders
+/// in the sandboxed iframe screenshots use for those artboards.
+fn path_sheet(script: bool) -> Document {
+    let mut board = Node::element("a", "div");
+    board.x = Some(0.0);
+    board.y = Some(0.0);
+    board.styles.insert("width".into(), "240px".into());
+    board.styles.insert("height".into(), "80px".into());
+    let part = Node {
+        parent: Some("c".into()),
+        index: "a".into(),
+        ..Node::element("p", "h1")
+    };
+    let text = Node {
+        parent: Some("p".into()),
+        index: "a".into(),
+        ..Node::text("pt", "Hi")
+    };
+    let component = Node {
+        parent: Some("a".into()),
+        index: "a".into(),
+        component: true,
+        ..Node::element("c", "header")
+    };
+    let instance = Node {
+        parent: Some("a".into()),
+        index: "b".into(),
+        instance_of: Some("c".into()),
+        ..Node::element("i", "header")
+    };
+    let mut box_node = Node {
+        parent: Some("a".into()),
+        index: "d".into(),
+        ..Node::element("boxnode", "p")
+    };
+    box_node.attrs.insert("id".into(), "box".into());
+    let box_text = Node {
+        parent: Some("boxnode".into()),
+        index: "a".into(),
+        ..Node::text("boxt", "Box")
+    };
+    let css = r#"#box { color: rgb(0, 0, 255) } #p { color: rgb(0, 128, 0) } #i\/p { color: rgb(255, 0, 0) }"#;
+    let mut nodes = vec![
+        board,
+        component,
+        part,
+        text,
+        instance,
+        Node {
+            parent: Some("a".into()),
+            index: "c".into(),
+            ..Node::element("s", "style")
+        },
+        Node {
+            parent: Some("s".into()),
+            index: "a".into(),
+            ..Node::text("st", css)
+        },
+        box_node,
+        box_text,
+    ];
+    if script {
+        nodes.push(Node {
+            parent: Some("a".into()),
+            index: "e".into(),
+            ..Node::element("sc", "script")
+        });
+        nodes.push(Node {
+            parent: Some("sc".into()),
+            index: "a".into(),
+            ..Node::text("sct", "void 0")
+        });
+    }
+    let mut doc = Document::default();
+    for node in nodes {
+        assert!(doc.apply(&Op::Create { node }).is_some());
+    }
+    doc
+}
+
+#[tokio::test]
+async fn a_stylesheet_path_id_colors_the_part() {
+    for script in [false, true] {
+        let doc = path_sheet(script);
+        let view = components::expand(&doc);
+        let html = html::export_for_viewer(&view, "a").unwrap();
+        assert!(
+            html.contains(r#"data-finite-id="i/p" id="i/p""#),
+            "script={script} {html}"
+        );
+        // A plain node id is not rewritten into an id attribute.
+        assert!(!html.contains(r#"data-finite-id="p" id="p""#), "{html}");
+        let m = plan_measurement(&view, "a", Options::default()).unwrap();
+        let scene = match scene(m).await {
+            Ok(scene) => scene,
+            Err(error) if error.contains("no Chrome") => {
+                eprintln!("skipped the render check: {error}");
+                return;
+            }
+            Err(error) => panic!("{error}"),
+        };
+        let color = |id: &str| scene.nodes[id].style("color");
+        assert_eq!(
+            color("boxnode"),
+            "rgb(0, 0, 255)",
+            "an ordinary id, script={script}"
+        );
+        assert_ne!(
+            color("p"),
+            "rgb(0, 128, 0)",
+            "a node id with no id attribute is not a stylesheet id, script={script}"
+        );
+        assert_eq!(
+            color("i/p"),
+            "rgb(255, 0, 0)",
+            "the path id, script={script}"
+        );
+    }
 }
