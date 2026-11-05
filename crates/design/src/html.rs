@@ -888,6 +888,11 @@ pub struct ExportOptions {
     /// this many characters are cut, ending in `…`, such as an image's
     /// inline data. `None` writes them whole.
     pub max_value_len: Option<usize>,
+    /// `<style>` and `<script>` code longer than this many characters is
+    /// replaced by a comment saying how long it is and how to read it. A
+    /// whole artboard's stylesheet can be most of its HTML. `None` writes
+    /// the code whole.
+    pub max_code_len: Option<usize>,
     /// Starts with the artboard's `<style>` elements that lie outside the
     /// subtree, since their rules may style it. Nothing is added when the
     /// root is an artboard, or its artboard has no `<style>`.
@@ -907,6 +912,7 @@ impl Default for ExportOptions {
             styles: true,
             depth: None,
             max_value_len: None,
+            max_code_len: None,
             stylesheets: false,
             indent: true,
             read_at: None,
@@ -923,6 +929,9 @@ pub struct Export {
     pub collapsed: usize,
     /// Values cut short by [`ExportOptions::max_value_len`].
     pub shortened: usize,
+    /// `<style>` and `<script>` code replaced by a comment, because of
+    /// [`ExportOptions::max_code_len`].
+    pub hidden_code: usize,
     /// `<style>` elements added from elsewhere in the artboard.
     pub stylesheets: usize,
 }
@@ -930,7 +939,7 @@ pub struct Export {
 impl Export {
     /// Whether the HTML holds the whole subtree, so it could be written back.
     pub fn is_complete(&self) -> bool {
-        self.collapsed == 0 && self.shortened == 0
+        self.collapsed == 0 && self.shortened == 0 && self.hidden_code == 0
     }
 }
 
@@ -943,6 +952,7 @@ pub fn export_with(doc: &Document, id: &str, options: &ExportOptions) -> Option<
         out: String::new(),
         collapsed: 0,
         shortened: 0,
+        hidden_code: 0,
         read_at: None,
     };
     let mut stylesheets = 0;
@@ -958,6 +968,7 @@ pub fn export_with(doc: &Document, id: &str, options: &ExportOptions) -> Option<
         html: writer.out,
         collapsed: writer.collapsed,
         shortened: writer.shortened,
+        hidden_code: writer.hidden_code,
         stylesheets,
     })
 }
@@ -1046,6 +1057,7 @@ struct Writer<'a> {
     out: String,
     collapsed: usize,
     shortened: usize,
+    hidden_code: usize,
     /// [`ExportOptions::read_at`], until the root is written.
     read_at: Option<u64>,
 }
@@ -1124,7 +1136,24 @@ impl Writer<'_> {
         let children = doc.children(Some(&node.id));
         if RAW_TEXT_TAGS.contains(&tag.to_ascii_lowercase().as_str()) {
             let code: String = children.iter().filter_map(|c| c.text.as_deref()).collect();
-            let code = self.clip(&code).into_owned();
+            let code = match self.options.max_code_len {
+                Some(max) if code.chars().count() > max => {
+                    self.hidden_code += 1;
+                    let lines = code.lines().count();
+                    format!(
+                        "/* {} lines, {} characters of {} not shown. Read them with select \"#{}\" and as: \"html\". */",
+                        lines,
+                        code.chars().count(),
+                        if tag.eq_ignore_ascii_case("style") {
+                            "CSS"
+                        } else {
+                            "script"
+                        },
+                        node.id
+                    )
+                }
+                _ => self.clip(&code).into_owned(),
+            };
             let _ = write!(self.out, ">{}</{tag}>", raw_text(&code, tag));
             self.newline();
             return;

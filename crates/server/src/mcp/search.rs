@@ -48,7 +48,7 @@ pub(super) fn found_text(doc: &Document, found: &[search::Found]) -> String {
 #[tool_router(router = search_router, vis = "pub(super)")]
 impl FiniteMcp {
     #[tool(
-        description = "Find elements by text, layer name, tag, CSS (inline styles and <style> blocks) or attribute, in one artboard or the whole design. Every filter you pass must match. Returns each match's outline line, grouped by artboard, with the declarations or attributes that matched. Use it before editing many nodes, and after, to check none were missed.",
+        description = "Find elements by visible text, layer name, tag, CSS (inline styles and <style> blocks) or attribute, in one artboard or the whole design. Text skips code inside <script> and <style>, including an SVG <style>; a style search still finds that code. Every filter you pass must match. Returns each match's outline line, grouped by artboard, with the declarations or attributes that matched. Use it before editing many nodes, and after, to check none were missed.",
         annotations(read_only_hint = true)
     )]
     async fn find_nodes(&self, Parameters(p): Parameters<FindParams>) -> ToolResult {
@@ -91,7 +91,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Find and replace text or a value, as one undo step: in inline styles, attributes (like SVG fill), <style> CSS and <script> code, and in visible text if includeText is set. Use it to change part of a <style> or <script> (a duration, a class name, a delay) without resending all of it. A color matches in any notation (#3B82F6, rgb(59 130 246), rgba(59,130,246,.2)) in styles, attributes and <style>; when it is replaced by another color, each use keeps its own alpha, and when it is replaced by text like var(--brand), tints with their own alpha are left alone. Other text, and anything inside a <script>, matches exactly; if that matches more than once inside a <style> or <script>, nothing changes until you narrow it with within or a longer find, or pass all: true. Preview with dryRun. Returns every change it made."
+        description = "Find and replace text or a value, as one undo step: in inline styles, attributes (like SVG fill), <style> CSS and <script> code, and in visible text if includeText is set. Visible text skips <script> and <style> bodies, including an SVG <style>; those are always searched as code. Use it to change part of a <style> or <script> (a duration, a class name, a delay) without resending all of it. A color matches in any notation (#3B82F6, rgb(59 130 246), rgba(59,130,246,.2)) in styles, attributes and <style>; when it is replaced by another color, each use keeps its own alpha, and when it is replaced by text like var(--brand), tints with their own alpha are left alone. Other text, and anything inside a <script>, matches exactly; if that matches more than once inside a <style> or <script>, nothing changes until you narrow it with within or a longer find, or pass all: true. Preview with dryRun. Returns every change it made."
     )]
     async fn replace_values(
         &self,
