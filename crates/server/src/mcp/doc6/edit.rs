@@ -38,7 +38,8 @@ pub(super) fn run(tx: &mut Transaction<'_>, steps: Vec<Step>) -> Result<Vec<Stri
     for (index, step) in steps.into_iter().enumerate() {
         let kind = step.kind;
         let name = text(&step.fields, "as").map(|a| a.trim().trim_start_matches('@').to_owned());
-        let (text, made) = apply(tx, step, &refs).map_err(|e| failed(index, Some(kind), &e))?;
+        let (text, made) =
+            apply(tx, step, &refs).map_err(|e| failed(index, Some(kind), &for_doc6(&e)))?;
         if let (Some(name), Some(id)) = (name.filter(|n| !n.is_empty()), made) {
             refs.insert(name, id);
         }
@@ -50,6 +51,121 @@ pub(super) fn run(tx: &mut Transaction<'_>, steps: Vec<Step>) -> Result<Vec<Stri
         ));
     }
     Ok(sections)
+}
+
+/// Design errors name the classic tools. This surface doesn't have them, so
+/// say which op to use instead. `run` applies it to every error an op returns.
+fn for_doc6(error: &str) -> String {
+    let error = rewrite_style(error)
+        .replace(
+            "need the data-id get_html gave them",
+            "need the data-id read with as: \"html\" gave them",
+        )
+        .replace(
+            "use the ids get_html shows for it",
+            "use the ids read with as: \"html\" shows for it",
+        )
+        .replace(
+            "replace it with insert_instance",
+            "write it as <div data-instance-of=\"…\"></div>",
+        )
+        .replace(
+            "use mode \"replace-children\" instead",
+            "use mode \"inner\" instead",
+        );
+    rewrite_detach(&rewrite_make_component(&error))
+}
+
+/// `use update_styles to change inline styles`, optionally after `#{id}:`.
+/// The css op selects that node when the error names one.
+fn rewrite_style(error: &str) -> String {
+    const PHRASE: &str = "use update_styles to change inline styles";
+    let Some(at) = error.find(PHRASE) else {
+        return error.to_owned();
+    };
+    let id = node_id_before(&error[..at]).unwrap_or("id");
+    let advice = format!(
+        "style isn't an attribute; change inline styles with a css op, like {{\"op\": \"css\", \"select\": \"#{id}\", \"css\": \"color: red\"}}"
+    );
+    // The design error already says this, so the node id in front of it stays.
+    let start = error[..at].rfind("style isn't an attribute").unwrap_or(at);
+    let mut out = String::with_capacity(error.len() + advice.len());
+    out.push_str(&error[..start]);
+    out.push_str(&advice);
+    out.push_str(&error[at + PHRASE.len()..]);
+    out
+}
+
+/// The node id in the last `#{id}` before `end`, when one is there.
+/// A virtual id keeps its `/`, since that is the node a css op has to select.
+fn node_id_before(text: &str) -> Option<&str> {
+    let hash = text.rfind('#')?;
+    let rest = &text[hash + 1..];
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/'))
+        .unwrap_or(rest.len());
+    let id = &rest[..end];
+    (!id.is_empty()).then_some(id)
+}
+
+/// `#{id} isn't a component; make it one with create_component` names the
+/// node, so the component op can select it.
+fn rewrite_make_component(error: &str) -> String {
+    const PHRASE: &str = "make it one with create_component";
+    let Some(at) = error.find(PHRASE) else {
+        return error.to_owned();
+    };
+    let id = error[..at].rfind('#').map(|hash| {
+        let rest = &error[hash + 1..at];
+        let end = rest
+            .find(|c: char| c.is_whitespace() || c == ';')
+            .unwrap_or(rest.len());
+        &rest[..end]
+    });
+    let advice = match id {
+        Some(id) if !id.is_empty() => {
+            format!("make it one with {{\"op\": \"component\", \"select\": \"#{id}\"}}")
+        }
+        _ => "make it one with a component op".to_owned(),
+    };
+    let mut out = String::with_capacity(error.len() + advice.len());
+    out.push_str(&error[..at]);
+    out.push_str(&advice);
+    out.push_str(&error[at + PHRASE.len()..]);
+    out
+}
+
+/// `detach_instance #id`, and a bare `detach #id`, become the component op
+/// that detaches that instance.
+fn rewrite_detach(error: &str) -> String {
+    let mut error = error.to_owned();
+    // The longer needle first, so `detach_instance #id` isn't read as `detach`.
+    for needle in ["detach_instance #", "detach #"] {
+        while let Some(start) = error.find(needle) {
+            let rest = &error[start + needle.len()..];
+            let id_len = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+                .unwrap_or(rest.len());
+            let id = &rest[..id_len];
+            if id.is_empty() {
+                break;
+            }
+            let op = format!("{{\"op\": \"component\", \"select\": \"#{id}\", \"detach\": true}}");
+            let mut after = &rest[id_len..];
+            if let Some(skipped) = after.strip_prefix(" first") {
+                after = skipped;
+            }
+            let mut out = String::with_capacity(error.len() + op.len());
+            out.push_str(&error[..start]);
+            out.push_str(&op);
+            out.push_str(after);
+            error = out;
+        }
+    }
+    error.replace(
+        "detach_instance",
+        "detach the instance with {\"op\": \"component\", \"select\": \"#instance\", \"detach\": true}",
+    )
 }
 
 /// An edit's result: `head`, then each op's section.
@@ -459,7 +575,16 @@ fn html_op(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String,
             (merged, roots, mode)
         };
         let where_ = label(tx.view(), id);
-        stage(tx, merged.ops)?;
+        if let Err(error) = stage(tx, merged.ops) {
+            // Replacing the children deletes them. Inside an instance those
+            // children belong to the component, and the refusal names the
+            // child that was about to go, often a text node the agent never
+            // selected.
+            if place == Place::Inner && error.contains("can't be deleted on its own") {
+                return Err(inner_keeps_instance_children(tx.view(), id));
+            }
+            return Err(error);
+        }
         first = first.or_else(|| roots.first().cloned());
         let doc = tx.view();
         let mut text = if mode == WriteMode::Replace && roots == [id.as_str()] {
@@ -485,6 +610,40 @@ fn html_op(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String,
     let mut text = parts.join("\n");
     text.push_str(&left_out(&parsed.dropped));
     Ok((text, first))
+}
+
+/// `mode: "inner"` on a node an instance shows. Names that node, not the
+/// child the replace would have deleted, and says how to change it.
+fn inner_keeps_instance_children(doc: &Document, id: &str) -> String {
+    let Some((instance, component)) = finite_design::components::instance_of(doc, id) else {
+        return format!(
+            "#{id}: mode inner replaces its children, and that was refused. \
+             To change its text, use {{\"op\": \"replace\", \"select\": \"#{id}\", \"find\": \"…\", \"replace\": \"…\", \"in\": \"text\"}}. \
+             A css or attrs op changes its styles or attributes."
+        );
+    };
+    let relation = if id == instance.id {
+        format!("#{id} is an instance")
+    } else {
+        format!("#{id} is inside instance #{}", instance.id)
+    };
+    let of = match component {
+        Some(c) => format!(" of component {:?} #{}", c.display_name(), c.id),
+        None => String::new(),
+    };
+    let edit_component = match component {
+        Some(c) => format!(
+            " Edit component #{} to change every instance, or detach this instance",
+            c.id
+        ),
+        None => " Detach this instance".to_owned(),
+    };
+    format!(
+        "{relation}{of}, so mode inner replaces its children, and those come from the component. \
+         To change only its text, use {{\"op\": \"replace\", \"select\": \"#{id}\", \"find\": \"…\", \"replace\": \"…\", \"in\": \"text\"}}. \
+         A css or attrs op on it changes only its styles or attributes.{edit_component} with {{\"op\": \"component\", \"select\": \"#{}\", \"detach\": true}}.",
+        instance.id
+    )
 }
 
 fn css_op(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<String> {
@@ -1020,14 +1179,8 @@ fn component(
         .cloned()
         .collect();
     let name = text(f, "name");
-    let ops = edit::create_component(doc, &id, name.as_deref(), &copies).map_err(|e| {
-        e.to_string()
-            .replace(
-                "replace it with insert_instance",
-                "write it as <div data-instance-of=\"…\"></div>",
-            )
-            .replace("detach_instance first", "detach it first")
-    })?;
+    let ops =
+        edit::create_component(doc, &id, name.as_deref(), &copies).map_err(|e| e.to_string())?;
     stage(tx, ops)?;
     let doc = tx.view();
     let mut text = format!(
@@ -1349,4 +1502,101 @@ fn import(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String, 
         result.import.id
     ));
     Ok((text, result.artboards.first().cloned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::for_doc6;
+
+    #[test]
+    fn doc6_errors_name_doc6_ops() {
+        let style = for_doc6("use update_styles to change inline styles");
+        assert!(style.contains("\"op\": \"css\""), "{style}");
+        assert!(style.contains("\"select\": \"#id\""), "{style}");
+        assert!(style.contains("style isn't an attribute"), "{style}");
+
+        let named =
+            for_doc6("#h1abc: style isn't an attribute; use update_styles to change inline styles");
+        assert!(named.contains("\"select\": \"#h1abc\""), "{named}");
+        assert!(named.starts_with("#h1abc:"), "{named}");
+
+        // The node inside an instance, not just the instance, is what the css op selects.
+        let inside = for_doc6(
+            "#k2n0d9xa/9qd2h0ce: style isn't an attribute; use update_styles to change inline styles",
+        );
+        assert!(
+            inside.contains("\"select\": \"#k2n0d9xa/9qd2h0ce\""),
+            "{inside}"
+        );
+        assert!(inside.starts_with("#k2n0d9xa/9qd2h0ce:"), "{inside}");
+
+        let detach = for_doc6(
+            "#i/new2 is inside instance #i of component \"Bar\", so it can't be deleted on its own. \
+             Edit the component #new1 to change every instance, or detach_instance #i first.",
+        );
+        assert!(
+            detach.contains("{\"op\": \"component\", \"select\": \"#i\", \"detach\": true}"),
+            "{detach}"
+        );
+        assert!(detach.ends_with('.'), "{detach}");
+
+        let made = for_doc6(
+            "#i/new2 is inside an instance; make a component from the component's own nodes, or detach_instance #i first",
+        );
+        assert!(
+            made.contains("{\"op\": \"component\", \"select\": \"#i\", \"detach\": true}"),
+            "{made}"
+        );
+
+        let component = for_doc6("#box isn't a component; make it one with create_component");
+        assert!(
+            component.contains("{\"op\": \"component\", \"select\": \"#box\"}"),
+            "{component}"
+        );
+
+        let html = for_doc6(
+            "elements inside it need the data-id get_html gave them. Add new content to the component",
+        );
+        assert!(html.contains("read with as: \"html\""), "{html}");
+
+        let copy = for_doc6("leave it out and replace it with insert_instance.");
+        assert!(
+            copy.contains("<div data-instance-of=\"…\"></div>"),
+            "{copy}"
+        );
+
+        let bare = for_doc6(
+            "#i/new2 is inside instance #i; detach #i, or the nested instance from the component it's in",
+        );
+        assert!(
+            bare.contains("{\"op\": \"component\", \"select\": \"#i\", \"detach\": true}"),
+            "{bare}"
+        );
+        assert!(!bare.contains("detach #"), "{bare}");
+
+        let mode = for_doc6("can't replace an artboard; use mode \"replace-children\" instead");
+        assert!(mode.contains("mode \"inner\""), "{mode}");
+        assert!(!mode.contains("replace-children"), "{mode}");
+
+        for error in [
+            &style, &named, &inside, &detach, &made, &component, &html, &copy, &bare, &mode,
+        ] {
+            for name in [
+                "update_styles",
+                "write_html",
+                "set_attributes",
+                "replace_values",
+                "detach_instance",
+                "set_text_content",
+                "move_nodes",
+                "delete_nodes",
+                "get_html",
+                "get_screenshot",
+                "create_component",
+                "insert_instance",
+            ] {
+                assert!(!error.contains(name), "{name} in {error}");
+            }
+        }
+    }
 }
