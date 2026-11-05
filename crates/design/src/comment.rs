@@ -424,6 +424,10 @@ struct Logged {
     actor: ActorId,
     change: ChangeRef,
     artboards: BTreeSet<NodeId>,
+    /// Whether the change set a token, a mode or the shared CSS, which can
+    /// change what every artboard shows.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    global: bool,
 }
 
 /// The most recent changes to a design, with the artboards each one touched,
@@ -483,6 +487,10 @@ impl ChangeLog {
                 node_ids: outermost,
             },
             artboards,
+            global: change
+                .ops
+                .iter()
+                .any(|op| matches!(op, Op::Css { .. } | Op::Token { .. } | Op::Mode { .. })),
         });
         if self.entries.len() > LOG_LIMIT {
             self.entries.pop_front();
@@ -499,15 +507,15 @@ impl ChangeLog {
     }
 
     /// The artboards the changes after `seq` touched, or `None` when the log
-    /// no longer reaches back to `seq` or a change touched no artboard (a
-    /// token or a mode, which can change what every artboard shows).
+    /// no longer reaches back to `seq` or a change set a token, a mode or the
+    /// shared CSS (or touched no artboard), which can change every artboard.
     pub(crate) fn artboards_since(&self, seq: u64) -> Option<BTreeSet<NodeId>> {
         if self.entries.front().is_none_or(|e| e.change.seq > seq + 1) {
             return None;
         }
         let mut out = BTreeSet::new();
         for e in self.entries.iter().filter(|e| e.change.seq > seq) {
-            if e.artboards.is_empty() {
+            if e.global || e.artboards.is_empty() {
                 return None;
             }
             out.extend(e.artboards.iter().cloned());
@@ -611,6 +619,30 @@ mod tests {
             extra_node_ids: nodes[1..].iter().map(|&id| id.into()).collect(),
             ..anchor(Some("board"), nodes.first().copied())
         }
+    }
+
+    #[test]
+    fn a_token_change_counts_for_every_artboard() {
+        let doc = doc();
+        let mut log = ChangeLog::default();
+        log.record(&change(1, "agent:a", "child"), &doc, BTreeSet::new());
+        log.record(&change(2, "agent:a", "child"), &doc, BTreeSet::new());
+        assert_eq!(
+            log.artboards_since(1),
+            Some(BTreeSet::from(["board".to_owned()]))
+        );
+        // One change that sets a token and edits `board` can change `other` too.
+        let mut mixed = change(3, "agent:b", "child");
+        mixed.ops.push(Op::Token {
+            name: "--gap".into(),
+            mode_id: "light".into(),
+            value: Some("8px".into()),
+        });
+        log.record(&mixed, &doc, BTreeSet::new());
+        assert_eq!(log.artboards_since(2), None);
+        // A log that doesn't reach back far enough can't say.
+        assert_eq!(log.artboards_since(3), Some(BTreeSet::new()));
+        assert_eq!(ChangeLog::default().artboards_since(0), None);
     }
 
     #[test]
