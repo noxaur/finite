@@ -5,8 +5,10 @@
 //!
 //! - A new comment must point at a real artboard, and its node must be inside it.
 //! - An agent's reply links the edits that agent made to the comment's
-//!   artboard since the thread's previous message (from [`ChangeLog`]). That's
-//!   how a viewer goes from a comment to the change that answered it.
+//!   artboard since the thread's previous message (from [`ChangeLog`]). An
+//!   edit already linked to an earlier message, on any thread, is not linked
+//!   again, and the same edit is linked once. That's how a viewer goes from
+//!   a comment to the change that answered it.
 //! - A user's reply reopens a resolved comment. An agent's reply keeps the
 //!   current state unless it asks to resolve or reopen.
 //! - A person can edit their own message while it's the thread's newest, so
@@ -513,13 +515,16 @@ impl ChangeLog {
         Some(out)
     }
 
-    /// `actor`'s changes after `seq`, oldest first. With `artboard`, only the
-    /// changes that touched it.
+    /// `actor`'s changes after `seq`, oldest first, one per edit. With
+    /// `artboard`, only the changes that touched it. A change recorded twice
+    /// (the same `seq`, one edit call) is returned once.
     pub(crate) fn since(&self, actor: &str, seq: u64, artboard: Option<&str>) -> Vec<ChangeRef> {
+        let mut seen = HashSet::new();
         self.entries
             .iter()
             .filter(|e| e.actor == actor && e.change.seq > seq)
             .filter(|e| artboard.is_none_or(|a| e.artboards.contains(a)))
+            .filter(|e| seen.insert(e.change.seq))
             .map(|e| e.change.clone())
             .collect()
     }
@@ -672,6 +677,10 @@ mod tests {
         assert_eq!(linked.iter().map(|c| c.seq).collect::<Vec<_>>(), [4]);
         assert_eq!(linked[0].node_ids, ["child"]);
         assert_eq!(log.since("a", 0, None).len(), 3);
+
+        // One edit recorded twice is still one link.
+        log.record(&change(4, "a", "child"), &doc, BTreeSet::new());
+        assert_eq!(log.since("a", 1, Some("board")).len(), 1);
 
         // A text edit links the element that holds the text.
         log.record(&change(5, "a", "text"), &doc, BTreeSet::new());

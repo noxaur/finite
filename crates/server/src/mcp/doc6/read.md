@@ -9,7 +9,7 @@ Look at a design, as text.
   "computed": the values the browser computes for each match (at most 10), with its artboard's mode applied: var(--bg) as the color it is in Dark, 100% as pixels. properties picks the CSS properties, tokens included (["color", "background-color", "--bg"]); the default is color, background-color, font, width, height, padding, gap, border, border-radius and display. It starts a browser, as render does. Use it instead of a probe node to ask what a token resolves to.
 - export: "figma" returns the design (or select's artboard) as a file's text: "html", "finite" (a bundle that imports back exactly), "repo" (a tar of text files for git), "figma" (for the Finite Figma plugin) or "jsx", with what didn't convert exactly. Save the text to a file yourself.
 - as: "css" without select: the design's tokens and modes, and a list of every <style> block.
-- contains: "#3b82f6" searches instead: elements whose styles (inline or in <style> blocks), text, attributes or layer name contain it, plus matching tokens. A color matches in any notation. With select, it searches inside the matches. Use it instead of reading whole artboards, before and after a change.
+- contains: "#3b82f6" searches instead: elements whose styles (inline or in <style> blocks), visible text, attributes or layer name contain it, plus matching tokens. A color matches in any notation. Visible text skips <script> and <style>, including an SVG <style>; that code shows up with the styles, and replace reaches it with in: "code". With select, it searches inside the matches. Use it instead of reading whole artboards, before and after a change.
 
 designId takes the design's id or its exact name.
 

@@ -176,6 +176,72 @@ async fn replace_in_text_leaves_attributes_alone() {
     assert!(wrong.contains("isn't a place to replace in"), "{wrong}");
 }
 
+/// in: "text" changes what people read and leaves <script> and <style> alone,
+/// including an SVG <style>. in: "code" is what reaches that code.
+#[tokio::test]
+async fn replace_in_text_skips_script_and_style() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Replacer").await;
+    let id = design(&mut agent, "Rates").await;
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Page", "width": 600,
+                 "html": "<p>Timepris</p><script>h('Timepris'); h('Timepris')</script><svg><style>.z { content: \"Timepris\" }</style></svg>" }]),
+    )
+    .await;
+    let found = agent
+        .ok("read", json!({ "designId": id, "contains": "Timepris" }))
+        .await;
+    let text = found.split("In text:").nth(1).unwrap_or("");
+    assert!(
+        text.starts_with(" 1 element") && !text.contains("script") && !text.contains("style"),
+        "{found}"
+    );
+    assert!(
+        found.contains("In styles") && found.contains("script"),
+        "{found}"
+    );
+    let done = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "replace", "find": "Timepris", "replace": "Timepris arbeid", "in": "text" }]),
+    )
+    .await;
+    assert!(done.contains("Replaced 1 use"), "{done}");
+    let page = html(&mut agent, &id, ":root").await;
+    assert!(
+        page.contains("Timepris arbeid")
+            && page.contains("h('Timepris')")
+            && page.contains("content: \"Timepris\""),
+        "{page}"
+    );
+    let refused_code = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "replace", "find": "Timepris", "replace": "Rate", "in": "code" }]),
+    )
+    .await;
+    assert!(
+        refused_code.contains("matches") && refused_code.contains("nothing changed"),
+        "{refused_code}"
+    );
+    let code = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "replace", "find": "Timepris", "replace": "Rate", "in": "code", "all": true }]),
+    )
+    .await;
+    assert!(code.contains("Replaced"), "{code}");
+    let page = html(&mut agent, &id, ":root").await;
+    assert!(
+        page.contains("h('Rate')")
+            && page.contains("content: \"Rate\"")
+            && page.contains("Timepris arbeid"),
+        "{page}"
+    );
+}
+
 /// Deleting can't be undone, so the start of an id, which every other
 /// tool accepts, isn't enough.
 /// A copy is what x, y, page and mode place, not its original.
@@ -537,7 +603,7 @@ async fn an_edit_is_one_undo_step_and_one_broadcast() {
         .await;
     assert_eq!(
         undone,
-        "Undid your last 2 edits (Replace #3b82f6 → #f97316, css on .card, Restyling the cards)."
+        "Undid your last 2 edits (Replace #3b82f6 → #f97316, CSS on .card, Restyling the cards)."
     );
 }
 
@@ -1316,6 +1382,85 @@ async fn components_are_made_used_and_detached_in_edits() {
     );
 }
 
+/// Detach and read find instances by the `data-instance-of` marker read's
+/// HTML writes, including under an artboard.
+#[tokio::test]
+async fn detach_finds_instances_by_data_instance_of() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Builder").await;
+    let id = design(&mut agent, "App").await;
+    let made = edit(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "artboard",
+            "name": "Home",
+            "width": 400,
+            "height": 300,
+            "html": "<header data-component=\"Top bar\"><h1>Home</h1></header><header data-component=\"Top bar\"><h1>Settings</h1></header>"
+        }]),
+    )
+    .await;
+    let board = id_after(&made, "Created artboard");
+    let shown = html(&mut agent, &id, &format!("#{board}")).await;
+    let marker = "data-instance-of=\"";
+    let at = shown
+        .find(marker)
+        .unwrap_or_else(|| panic!("an instance in {shown}"))
+        + marker.len();
+    let component: String = shown[at..].chars().take_while(|c| *c != '"').collect();
+    assert!(!component.is_empty(), "{shown}");
+
+    let by_value = html(
+        &mut agent,
+        &id,
+        &format!("[data-instance-of=\"{component}\"]"),
+    )
+    .await;
+    assert!(
+        by_value.contains(&format!("data-instance-of=\"{component}\""))
+            && !by_value.contains("data-component"),
+        "{by_value}"
+    );
+    let root = html(&mut agent, &id, "[data-component=\"Top bar\"]").await;
+    assert!(
+        root.contains("data-component=\"Top bar\"") && !root.contains("data-instance-of"),
+        "{root}"
+    );
+
+    let detached = edit(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "component",
+            "select": format!("#{board} [data-instance-of]"),
+            "detach": true
+        }]),
+    )
+    .await;
+    assert!(detached.contains("Detached 1 instance"), "{detached}");
+    let plain = html(&mut agent, &id, &format!("#{board}")).await;
+    assert!(
+        !plain.contains("data-instance-of") && plain.contains("Settings"),
+        "{plain}"
+    );
+
+    agent.ok("undo", json!({ "designId": id })).await;
+    let back = html(&mut agent, &id, &format!("#{board}")).await;
+    assert!(back.contains("data-instance-of"), "{back}");
+    let again = edit(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "component",
+            "select": format!("[data-instance-of=\"{component}\"]"),
+            "detach": true
+        }]),
+    )
+    .await;
+    assert!(again.contains("Detached 1 instance"), "{again}");
+}
+
 #[tokio::test]
 async fn each_comment_goes_to_one_agent() {
     let (app, hub) = doc6();
@@ -1446,5 +1591,94 @@ async fn each_comment_goes_to_one_agent() {
         bo.ok("comments", wait.clone())
             .await
             .contains("Make it pink")
+    );
+}
+
+#[tokio::test]
+async fn a_reply_links_each_edit_once() {
+    let (app, hub) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Linker").await;
+    let (id, board) = landing(&mut agent).await;
+    let handle = hub.open(&id).await.unwrap();
+    let person = Author {
+        id: "user:cy".into(),
+        name: "Cy".into(),
+        kind: AuthorKind::User,
+    };
+    let anchor = Anchor {
+        artboard_id: Some(board),
+        node_id: None,
+        extra_node_ids: Vec::new(),
+        x: 0.0,
+        y: 0.0,
+    };
+    let one = handle
+        .add_comment(person.clone(), anchor.clone(), Audience::Agents, "First")
+        .unwrap();
+    let two = handle
+        .add_comment(person, anchor, Audience::Agents, "Second")
+        .unwrap();
+
+    edit(
+        &mut agent,
+        &id,
+        json!([
+            { "op": "attrs", "select": ["h1", ".card"], "set": { "title": "Hi" } },
+            { "op": "html", "select": "h1", "html": "<em>!</em>", "mode": "append" },
+            { "op": "html", "select": "h1", "html": "<em>?</em>", "mode": "append" },
+        ]),
+    )
+    .await;
+    let replied = agent
+        .ok(
+            "comments",
+            json!({ "designId": id, "reply": [
+                { "commentId": one.id, "message": "Titled them", "resolve": true },
+                { "commentId": two.id, "message": "Same edits", "resolve": true },
+            ] }),
+        )
+        .await;
+    let lines: Vec<&str> = replied.lines().collect();
+    assert_eq!(lines.len(), 2, "{replied}");
+    assert!(
+        lines[0].contains("links your 1 change")
+            && lines[0].contains("Attrs on h1, .card, HTML on h1")
+            && !lines[0].contains('['),
+        "{replied}"
+    );
+    assert!(
+        lines[1].contains("links none of your changes"),
+        "the second reply listed edits the first one already linked: {replied}"
+    );
+
+    edit(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "replace",
+            "find": "#3b82f6",
+            "replace": "#f97316\n.ins svg { stroke-width: 2 }",
+        }]),
+    )
+    .await;
+    let again = agent
+        .ok(
+            "comments",
+            json!({ "designId": id, "reply": [
+                { "commentId": two.id, "message": "Recolored it", "resolve": true },
+            ] }),
+        )
+        .await;
+    assert!(
+        again.contains("links your 1 change") && again.contains("Replace #3b82f6 → #f97316"),
+        "{again}"
+    );
+    assert!(
+        !again.contains('\n') && !again.contains("Attrs on"),
+        "{again}"
+    );
+    assert!(
+        again.chars().count() < 400,
+        "the label should be a short line, got {again}"
     );
 }
