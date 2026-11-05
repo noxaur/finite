@@ -23,25 +23,46 @@ interface Row {
   readonly parent: boolean;
 }
 
-/** A node's children as drawn: an instance's come from its component. */
-function childrenOf(replica: Replica, node: Node): Node[] {
-  const kids =
-    node.instanceOf !== undefined || node.id.includes("/")
-      ? replica.expand(realId(node.id)).filter((n) => n.parent === node.id)
-      : replica.children(node.id);
+/**
+ * A node's children as drawn: an instance's come from its component.
+ * `expanded` holds each instance expanded once per render, by parent, since
+ * every row inside an instance asks for its own children.
+ */
+function childrenOf(
+  replica: Replica,
+  node: Node,
+  expanded: Map<string, Map<string, Node[]>>,
+): Node[] {
+  let kids: Node[];
+  if (node.instanceOf !== undefined || node.id.includes("/")) {
+    const root = realId(node.id);
+    let byParent = expanded.get(root);
+    if (!byParent) {
+      byParent = new Map();
+      for (const n of replica.expand(root)) {
+        if (n.parent === null) continue;
+        const siblings = byParent.get(n.parent);
+        if (siblings) siblings.push(n);
+        else byParent.set(n.parent, [n]);
+      }
+      expanded.set(root, byParent);
+    }
+    kids = byParent.get(node.id) ?? [];
+  } else kids = replica.children(node.id);
   return kids.filter((n) => (n.type === "text" ? n.text?.trim() : !HIDDEN.has(n.tag ?? "")));
 }
 
-/** An element holding only text reads as that text, and has no rows under it. */
-function onlyText(replica: Replica, node: Node): string | null {
-  const kids = childrenOf(replica, node);
-  return kids.length === 1 && kids[0]!.type === "text" ? (kids[0]!.text ?? "").trim() : null;
-}
-
 /** What a row shows for `node`, and whether it has rows under it. */
-function rowOf(replica: Replica, node: Node, depth: number): Row & { kids: Node[] } {
-  const text = node.type === "element" ? onlyText(replica, node) : null;
-  const kids = text === null && node.type === "element" ? childrenOf(replica, node) : [];
+function rowOf(
+  replica: Replica,
+  node: Node,
+  depth: number,
+  expanded: Map<string, Map<string, Node[]>>,
+): Row & { kids: Node[] } {
+  const all = node.type === "element" ? childrenOf(replica, node, expanded) : [];
+  // An element holding only text reads as that text, and has no rows under it.
+  const text = all.length === 1 && all[0]!.type === "text" ? (all[0]!.text ?? "").trim() : null;
+  const kids = text === null ? all : [];
   const label =
     node.name || (node.type === "text" ? node.text?.trim() : text) || node.tag || "Layer";
   const icon = text !== null && node.parent !== null && !node.component ? "text" : iconOf(node);
@@ -95,18 +116,19 @@ export function LayersTree({
 
   const boards = replica.artboards().filter((b) => replica.pageOf(b) === page);
   const rows: Row[] = [];
+  const expanded = new Map<string, Map<string, Node[]>>();
   const needle = query.trim().toLowerCase();
   if (needle) {
     const walk = (node: Node) => {
       if (rows.length >= MATCHES) return;
-      const row = rowOf(replica, node, 0);
+      const row = rowOf(replica, node, 0, expanded);
       if (row.label.toLowerCase().includes(needle)) rows.push({ ...row, parent: false });
       for (const kid of row.kids) walk(kid);
     };
     boards.forEach(walk);
   } else {
     const walk = (node: Node, depth: number) => {
-      const row = rowOf(replica, node, depth);
+      const row = rowOf(replica, node, depth, expanded);
       rows.push(row);
       if (open.has(node.id)) for (const kid of row.kids) walk(kid, depth + 1);
     };

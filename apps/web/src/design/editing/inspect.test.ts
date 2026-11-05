@@ -85,4 +85,15 @@ describe("declarations", () => {
       gap: null,
     });
   });
+
+  it("keeps semicolons inside quotes and url(), and custom properties' case", () => {
+    const before = {
+      "background-image": 'url("data:image/svg+xml;base64,PHN2Zy8+")',
+      "--Brand": "blue",
+      color: "red",
+    };
+    expect(parseDeclarations(`${declarations(before)}\nCOLOR: green`, before)).toEqual({
+      color: "green",
+    });
+  });
 });

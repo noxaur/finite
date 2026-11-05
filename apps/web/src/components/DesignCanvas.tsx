@@ -339,6 +339,13 @@ export function DesignCanvas({ id }: { id: string }) {
       camera,
       renderer,
       freeRect: () => freeRect(viewport),
+      origin: () => {
+        const { left, top } = viewport.getBoundingClientRect();
+        return { x: left, y: top };
+      },
+      // React commits the chrome hiding before the next frame; the second one has its layout.
+      layout: () =>
+        new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))),
       pageBoards: () => {
         const page = renderer.shownPage();
         return replica
@@ -913,17 +920,19 @@ export function DesignCanvas({ id }: { id: string }) {
     if (rect) cameraRef.current?.centerOn(rect.x + rect.width / 2, rect.y + rect.height / 2);
   };
 
-  // Hiding or showing the left sidebar moves the canvas's left edge: pan by
+  // Hiding or showing the chrome around the canvas moves its corner: pan by
   // as much the other way, so the artboards stay where they are on screen.
-  const edgeRef = useRef<{ open: boolean; left: number } | null>(null);
+  const cornerRef = useRef<{ x: number; y: number } | null>(null);
   useLayoutEffect(() => {
-    const left = viewportRef.current?.getBoundingClientRect().left ?? 0;
+    const box = viewportRef.current?.getBoundingClientRect();
     const camera = cameraRef.current;
-    const was = edgeRef.current;
-    if (camera && was && was.open !== leftOpen && left !== was.left) {
-      camera.set({ ...camera.view, x: camera.view.x - (left - was.left) });
+    const was = cornerRef.current;
+    if (!box) return;
+    if (camera && was && (box.left !== was.x || box.top !== was.y)) {
+      const v = camera.view;
+      camera.set({ ...v, x: v.x - (box.left - was.x), y: v.y - (box.top - was.y) });
     }
-    edgeRef.current = { open: leftOpen, left };
+    cornerRef.current = { x: box.left, y: box.top };
   }, [leftOpen, presenting]);
 
   if (model instanceof Error) {

@@ -97,8 +97,9 @@ export function layoutOf(display: string, direction: string): LayoutKind {
 /** The styles that make an element lay its children out as `kind`. */
 export function layoutStyles(kind: LayoutKind): Record<string, string | null> {
   switch (kind) {
+    // Explicit, so it wins over a class that makes it flex or grid.
     case "block":
-      return { display: null, "flex-direction": null };
+      return { display: "block", "flex-direction": null };
     case "column":
       return { display: "flex", "flex-direction": "column" };
     case "row":
@@ -149,12 +150,14 @@ export function parseDeclarations(
   before: Readonly<Record<string, string>>,
 ): Record<string, string | null> {
   const after: Record<string, string> = {};
-  for (const line of text.split(/;|\n/)) {
+  for (const line of splitDeclarations(text)) {
     const colon = line.indexOf(":");
     if (colon === -1) continue;
-    const prop = line.slice(0, colon).trim().toLowerCase();
+    const name = line.slice(0, colon).trim();
+    // Custom properties are case-sensitive; the rest aren't.
+    const prop = name.startsWith("--") ? name : name.toLowerCase();
     const value = line.slice(colon + 1).trim();
-    if (/^-{0,2}[a-z][\w-]*$/.test(prop) && value !== "") after[prop] = value;
+    if (/^(--[\w-]+|-?[a-z][\w-]*)$/i.test(prop) && value !== "") after[prop] = value;
   }
   const changes: Record<string, string | null> = {};
   for (const [prop, value] of Object.entries(after)) {
@@ -162,4 +165,27 @@ export function parseDeclarations(
   }
   for (const prop of Object.keys(before)) if (!(prop in after)) changes[prop] = null;
   return changes;
+}
+
+/** Splits at `;` and line breaks outside quotes and brackets, so `url("data:…;base64,…")` stays whole. */
+function splitDeclarations(text: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let quote: string | null = null;
+  let start = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (quote) {
+      if (c === "\\") i++;
+      else if (c === quote) quote = null;
+    } else if (c === '"' || c === "'") quote = c;
+    else if (c === "(" || c === "[") depth++;
+    else if ((c === ")" || c === "]") && depth > 0) depth--;
+    else if ((c === ";" || c === "\n") && depth === 0) {
+      parts.push(text.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(text.slice(start));
+  return parts;
 }
