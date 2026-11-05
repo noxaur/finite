@@ -276,8 +276,8 @@ export function DesignCanvas({ id }: { id: string }) {
           void camera.animateTo(
             {
               ...v,
-              x: v.x - (bounds.x + bounds.width / 2) * v.zoom + viewport.clientWidth / 2,
-              y: v.y - (bounds.y + bounds.height / 2) * v.zoom + viewport.clientHeight / 2,
+              x: viewport.clientWidth / 2 - (bounds.x + bounds.width / 2) * v.zoom,
+              y: viewport.clientHeight / 2 - (bounds.y + bounds.height / 2) * v.zoom,
             },
             350,
           );

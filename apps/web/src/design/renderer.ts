@@ -1116,8 +1116,12 @@ export class Renderer {
   }
 
   private remount(board: Node) {
+    // Interactive mode's window belongs to the artboard, not to the frame
+    // being replaced.
+    const clipped = this.frames.get(board.id)?.clip?.height ?? null;
     for (const id of this.replica.subtree(board.id)) this.unmount(id);
     this.mount(board);
+    if (clipped !== null) this.setWindow(board.id, clipped);
   }
 
   /** Builds `node` and its subtree, and inserts it in sibling order. */
