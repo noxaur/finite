@@ -907,7 +907,79 @@ async fn comments_are_listed_awaited_and_answered() {
     let none = agent
         .ok("comments", json!({ "designId": id, "wait": 1 }))
         .await;
-    assert!(none.contains("No comments arrived"), "{none}");
+    assert!(
+        none.contains("No comments arrived in 1 seconds. Call again to keep listening."),
+        "{none}"
+    );
+}
+
+/// A wait past 55 seconds is what Claude Code drops with "The operation timed
+/// out". The server waits 55 and says to call again. The clock is paused, and
+/// the test jumps those 55 seconds in one step: SSE keep-alives sit at 15
+/// seconds and reset from the wall clock, so auto-advance would crawl.
+#[tokio::test(start_paused = true)]
+async fn a_comment_wait_over_55_seconds_is_clamped() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Helper").await;
+    let id = design(&mut agent, "Wait").await;
+    let again = "Call again to keep listening.";
+    let one = agent
+        .ok("comments", json!({ "designId": id, "wait": 1 }))
+        .await;
+    assert_eq!(one, format!("No comments arrived in 1 seconds. {again}"));
+    let zero = agent
+        .ok("comments", json!({ "designId": id, "wait": 0 }))
+        .await;
+    assert_eq!(zero, format!("No comments arrived in 1 seconds. {again}"));
+
+    let mut waits = Vec::new();
+    for (name, wait) in [
+        ("long", json!(300)),
+        ("mid", json!(120)),
+        ("flag", json!(true)),
+    ] {
+        let app = app.clone();
+        let id = id.clone();
+        waits.push(tokio::spawn(async move {
+            let mut agent = Agent::connect_doc6(&app, name).await;
+            let started = tokio::time::Instant::now();
+            let text = agent
+                .ok("comments", json!({ "designId": id, "wait": wait.clone() }))
+                .await;
+            (wait, text, started.elapsed())
+        }));
+    }
+    // Yielding does not advance the clock, so each call stays parked on the cap.
+    for _ in 0..1_000 {
+        tokio::task::yield_now().await;
+    }
+    for wait in &waits {
+        assert!(
+            !wait.is_finished(),
+            "a capped wait returned before the clock reached 55 seconds"
+        );
+    }
+    // One second short of the cap, every call is still waiting.
+    tokio::time::advance(Duration::from_secs(54)).await;
+    for _ in 0..1_000 {
+        tokio::task::yield_now().await;
+    }
+    for wait in &waits {
+        assert!(
+            !wait.is_finished(),
+            "a capped wait returned before 55 seconds"
+        );
+    }
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let capped = format!("No comments arrived in 55 seconds. {again}");
+    for wait in waits {
+        let (asked, text, elapsed) = wait.await.unwrap();
+        assert_eq!(text, capped, "wait {asked}");
+        assert!(
+            elapsed >= Duration::from_secs(55) && elapsed < Duration::from_secs(70),
+            "wait {asked} took {elapsed:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -988,6 +1060,272 @@ async fn render_and_the_layout_check_after_an_edit() {
         .call("render", json!({ "designId": id, "select": "h1" }))
         .await;
     assert!(!error, "{shot}");
+}
+
+/// `as: "computed"` asks the browser, so a token shows the value its
+/// artboard's mode gives it, on a plain artboard and on one that runs a
+/// script, and the outline shows a size token as the size.
+#[tokio::test]
+async fn computed_values_follow_the_artboards_mode() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Prober").await;
+    let id = design(&mut agent, "Modes").await;
+    let button = "<button class=\"btn\" style=\"background-color: var(--bg); width: 100%; height: var(--button-h); color: var(--fg)\">Go</button>";
+    let made = edit(
+        &mut agent,
+        &id,
+        json!([
+            { "op": "tokens", "set": {
+                "--bg": { "Light": "#fafcfb", "Dark": "#0b0f0d" },
+                "--fg": "#123456",
+                "--button-h": "44px" }, "modes": ["Light", "Dark"] },
+            { "op": "artboard", "name": "Light", "width": 300, "height": 200, "html": button },
+            { "op": "artboard", "name": "Dark", "width": 300, "height": 200, "mode": "Dark", "html": button },
+            { "op": "artboard", "name": "Scripted", "width": 300, "height": 200, "mode": "Dark",
+              "html": format!("{button}<script>document.title = 'ran'</script>") },
+        ]),
+    )
+    .await;
+    let outline = agent
+        .ok(
+            "read",
+            json!({ "designId": id, "select": ":root", "depth": 3 }),
+        )
+        .await;
+    assert!(
+        !made.is_empty() && !outline.contains("var(--button-h)"),
+        "{outline}"
+    );
+    assert!(outline.contains("[100% × 44px]"), "{outline}");
+    // Like render, it takes at most ten matches.
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Spare", "width": 100, "html": "<p>One</p><p>Two</p><p>Three</p><p>Four</p>" }]),
+    )
+    .await;
+    let (many, error) = agent
+        .call(
+            "read",
+            json!({ "designId": id, "select": "*", "as": "computed" }),
+        )
+        .await;
+    assert!(error && many.contains("takes at most 10"), "{many}");
+    let (probe, _) = agent
+        .call("render", json!({ "designId": id, "output": "layout" }))
+        .await;
+    if probe.contains("no Chrome") {
+        assert!(
+            std::env::var_os("FINITE_REQUIRE_BROWSER").is_none(),
+            "FINITE_REQUIRE_BROWSER is set but there is no browser: {probe}"
+        );
+        eprintln!("SKIPPED, NOTHING WAS TESTED: no Chrome, Chromium or Edge found");
+        return;
+    }
+    let read = agent
+        .ok(
+            "read",
+            json!({ "designId": id, "select": ".btn", "as": "computed",
+                    "properties": ["backgroundColor", "--bg", "--fg", "height", "--missing"] }),
+        )
+        .await;
+    let sections: Vec<&str> = read.split("<!-- ").skip(1).collect();
+    assert_eq!(sections.len(), 3, "{read}");
+    let value = |section: &str, name: &str| -> String {
+        section
+            .lines()
+            .find_map(|l| l.trim().strip_prefix(&format!("{name}: ")))
+            .unwrap_or_else(|| panic!("{name} in {section}"))
+            .to_owned()
+    };
+    let light = sections.iter().find(|s| s.contains("\"Light\"")).unwrap();
+    assert_eq!(value(light, "background-color"), "rgb(250, 252, 251)");
+    assert_eq!(value(light, "--bg"), "#fafcfb");
+    assert!(light.contains("(mode \"Light\")"), "{light}");
+    // Both renderers: a plain artboard and one that runs a script.
+    for name in ["Dark", "Scripted"] {
+        let dark = sections
+            .iter()
+            .find(|s| s.contains(&format!("\"{name}\"")))
+            .unwrap();
+        assert_eq!(value(dark, "background-color"), "rgb(11, 15, 13)", "{dark}");
+        assert_eq!(value(dark, "--bg"), "#0b0f0d");
+        assert_eq!(value(dark, "--fg"), "#123456");
+        assert_eq!(value(dark, "height"), "44px");
+        assert_eq!(value(dark, "--missing"), "(not set)");
+        assert!(dark.contains("(mode \"Dark\")"), "{dark}");
+    }
+    // The default set, and a bad name.
+    let short = agent
+        .ok(
+            "read",
+            json!({ "designId": id, "select": "[data-name=Dark] .btn", "as": "computed" }),
+        )
+        .await;
+    for name in [
+        "color",
+        "font",
+        "padding",
+        "gap",
+        "border-radius",
+        "display",
+    ] {
+        assert!(short.contains(&format!("  {name}: ")), "{name}: {short}");
+    }
+    let (bad, error) = agent
+        .call(
+            "read",
+            json!({ "designId": id, "select": ".btn", "as": "computed", "properties": ["a;b"] }),
+        )
+        .await;
+    assert!(error && bad.contains("isn't a CSS property"), "{bad}");
+}
+
+/// The browser measures the artboard as it was when the read began. If the
+/// design changes meanwhile, the result keeps the labels and mode of that
+/// snapshot and says to read again, instead of pairing a new mode with old
+/// values or showing a deleted element's values as current.
+#[tokio::test]
+async fn computed_values_say_when_the_design_changed_meanwhile() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Prober").await;
+    let mut editor = Agent::connect_doc6(&app, "Editor").await;
+    let id = design(&mut agent, "Race").await;
+    // The animation makes the browser wait out the settle delay, so there is time to edit.
+    let board = "<style>@keyframes fade { to { opacity: .5 } } .fade { animation: fade 10s infinite }</style><div class=\"fade\">…</div><button class=\"btn\" style=\"background-color: var(--bg)\">Go</button>";
+    edit(
+        &mut agent,
+        &id,
+        json!([
+            { "op": "tokens", "set": { "--bg": { "Light": "#fafcfb", "Dark": "#0b0f0d" } }, "modes": ["Light", "Dark"] },
+            { "op": "artboard", "name": "Flip", "width": 300, "height": 200, "mode": "Dark", "html": board },
+            { "op": "artboard", "name": "Gone", "width": 300, "height": 200, "mode": "Dark", "html": board },
+        ]),
+    )
+    .await;
+    let (probe, _) = agent
+        .call("render", json!({ "designId": id, "output": "layout" }))
+        .await;
+    if probe.contains("no Chrome") {
+        assert!(
+            std::env::var_os("FINITE_REQUIRE_BROWSER").is_none(),
+            "FINITE_REQUIRE_BROWSER is set but there is no browser: {probe}"
+        );
+        eprintln!("SKIPPED, NOTHING WAS TESTED: no Chrome, Chromium or Edge found");
+        return;
+    }
+    let read = json!({ "designId": id, "select": ".btn", "as": "computed", "properties": ["background-color"] });
+    // A mode switch while the browser measures.
+    let (read_now, _) = tokio::join!(agent.ok("read", read.clone()), async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        edit(
+            &mut editor,
+            &id,
+            json!([{ "op": "move", "select": "[data-name=Flip]", "mode": "Light" }]),
+        )
+        .await
+    });
+    let flip = read_now
+        .split("<!-- ")
+        .find(|s| s.contains("\"Flip\""))
+        .unwrap_or_else(|| panic!("{read_now}"));
+    assert!(flip.contains("rgb(11, 15, 13)"), "{read_now}");
+    assert!(
+        flip.contains("(mode \"Dark\")") && !flip.contains("(mode \"Light\")"),
+        "the Dark values must not be labeled Light: {read_now}"
+    );
+    assert!(read_now.contains("Read again"), "{read_now}");
+    // An element deleted while the browser measures.
+    let (read_now, _) = tokio::join!(agent.ok("read", read), async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        edit(
+            &mut editor,
+            &id,
+            json!([{ "op": "remove", "select": "[data-name=Gone] .btn" }]),
+        )
+        .await
+    });
+    assert!(read_now.contains("Read again"), "{read_now}");
+}
+
+/// The outline shows a token's value for `var()` only where nothing nearer
+/// sets that custom property: an ancestor or the element itself in a style
+/// attribute, or a `<style>` block, which the outline doesn't evaluate.
+#[tokio::test]
+async fn the_outline_keeps_var_where_the_cascade_sets_it() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Sizer").await;
+    let id = design(&mut agent, "Cascade").await;
+    edit(
+        &mut agent,
+        &id,
+        json!([
+            { "op": "tokens", "set": { "--button-h": "44px" } },
+            { "op": "artboard", "name": "Sizes", "width": 300, "height": 300, "html": concat!(
+                "<button data-name=\"Own\" style=\"--button-h:60px;width:100px;height:var(--button-h)\">Own</button>",
+                "<button data-name=\"Fallback\" style=\"--local:60px;width:100px;height:var(--local,8px)\">Fallback</button>",
+                "<div style=\"--button-h:70px\"><button data-name=\"Inherited\" style=\"width:100px;height:var(--button-h)\">Inherited</button></div>",
+                "<button data-name=\"Token\" style=\"width:100px;height:var(--button-h)\">Token</button>",
+            ) },
+        ]),
+    )
+    .await;
+    let outline = agent
+        .ok(
+            "read",
+            json!({ "designId": id, "select": ":root", "depth": 3 }),
+        )
+        .await;
+    let line = |name: &str| {
+        outline
+            .lines()
+            .find(|l| l.contains(&format!("\"{name}\"")))
+            .unwrap_or_else(|| panic!("{name} in {outline}"))
+            .to_owned()
+    };
+    assert!(
+        line("Own").contains("[100px × var(--button-h)]"),
+        "{outline}"
+    );
+    assert!(
+        line("Fallback").contains("[100px × var(--local,8px)]"),
+        "{outline}"
+    );
+    assert!(
+        line("Inherited").contains("[100px × var(--button-h)]"),
+        "{outline}"
+    );
+    assert!(line("Token").contains("[100px × 44px]"), "{outline}");
+    // A stylesheet might set it anywhere, so it stays as written too.
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Sheet", "width": 300, "height": 100, "html":
+            "<style>.big { --button-h: 90px }</style><button class=\"big\" data-name=\"Classed\" style=\"width:100px;height:var(--button-h)\">Big</button>" }]),
+    )
+    .await;
+    let outline = agent
+        .ok(
+            "read",
+            json!({ "designId": id, "select": "[data-name=Sheet]", "depth": 3 }),
+        )
+        .await;
+    assert!(outline.contains("[100px × var(--button-h)]"), "{outline}");
+    // A longer name that ends the same way doesn't set it.
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Suffix", "width": 300, "height": 100, "html":
+            "<style>.x { --big--button-h: 90px }</style><button data-name=\"Plain\" style=\"width:100px;height:var(--button-h)\">Plain</button>" }]),
+    )
+    .await;
+    let outline = agent
+        .ok(
+            "read",
+            json!({ "designId": id, "select": "[data-name=Suffix]", "depth": 3 }),
+        )
+        .await;
+    assert!(outline.contains("[100px × 44px]"), "{outline}");
 }
 
 /// A component op makes one top bar the component and its copies on the
@@ -1116,6 +1454,291 @@ async fn components_are_made_used_and_detached_in_edits() {
     );
 }
 
+/// Classic tool names in a string an agent on this surface was shown.
+fn classic_tool(text: &str) -> Option<&'static str> {
+    [
+        "update_styles",
+        "write_html",
+        "set_attributes",
+        "replace_values",
+        "detach_instance",
+        "set_text_content",
+        "move_nodes",
+        "delete_nodes",
+        "get_html",
+        "get_screenshot",
+        "create_component",
+        "insert_instance",
+    ]
+    .into_iter()
+    .find(|name| text.contains(name))
+}
+
+/// A failed edit says what to do with a doc6 op, and never names a classic tool.
+#[tokio::test]
+async fn errors_tell_doc6_agents_which_op_to_use() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Errors").await;
+    let (id, board) = landing(&mut agent).await;
+
+    let style = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "attrs", "select": "h1", "set": { "style": null } }]),
+    )
+    .await;
+    assert!(
+        style.contains("style isn't an attribute") && style.contains("\"op\": \"css\""),
+        "{style}"
+    );
+    let styled = style
+        .split('#')
+        .nth(1)
+        .and_then(|rest| rest.split(|c: char| !c.is_ascii_alphanumeric()).next())
+        .expect("the node the style was refused on");
+    assert!(
+        style.contains(&format!("\"select\": \"#{styled}\"")),
+        "{style}"
+    );
+    assert_eq!(classic_tool(&style), None, "{style}");
+
+    let replaced = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "html", "select": format!("#{board}"), "mode": "replace", "html": "<div>x</div>" }]),
+    )
+    .await;
+    assert!(replaced.contains("mode \"inner\""), "{replaced}");
+    assert!(!replaced.contains("replace-children"), "{replaced}");
+    assert_eq!(classic_tool(&replaced), None, "{replaced}");
+
+    let nav = |title: &str| {
+        format!("<header data-name=\"Nav\"><h1 data-name=\"Title\">{title}</h1></header>")
+    };
+    let made = edit(
+        &mut agent,
+        &id,
+        json!([
+            { "op": "artboard", "name": "Home", "width": 400, "height": 300, "html": nav("Home") },
+            { "op": "artboard", "name": "Settings", "width": 400, "height": 300, "html": nav("Settings") },
+            { "op": "component", "select": "[data-name=Nav]", "name": "Top bar", "as": "bar" },
+        ]),
+    )
+    .await;
+    let bar = id_after(&made, "3. component:");
+    let instance = id_after(&made, "Replaced 1 copy");
+    let shown = html(&mut agent, &id, &format!("#{instance}")).await;
+    let marker = format!("data-id=\"{instance}/");
+    let at = shown.find(&marker).expect("a node inside the instance") + marker.len();
+    let title: String = shown[at..]
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
+    let part = format!("{instance}/{title}");
+
+    // inner html replaces the heading's children. The refusal names the
+    // heading, not the text node under it, and says how to set its text.
+    let inner = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "html", "select": format!("#{part}"), "mode": "inner", "html": "Inbox" }]),
+    )
+    .await;
+    assert!(
+        inner.contains(&format!("#{part} is inside instance #{instance}"))
+            && inner.contains("mode inner replaces its children")
+            && inner.contains("\"in\": \"text\"")
+            && inner.contains(&format!("\"select\": \"#{part}\""))
+            && inner.contains(&format!("\"select\": \"#{instance}\""))
+            && inner.contains("\"detach\": true"),
+        "{inner}"
+    );
+    assert!(
+        !inner.contains(&format!("{part}/")),
+        "names a child of the selection: {inner}"
+    );
+    let other_part = inner.split('#').skip(1).any(|tail| {
+        let id: String = tail
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '/' || *c == '_' || *c == '-')
+            .collect();
+        id.contains('/') && id != part
+    });
+    assert!(
+        !other_part,
+        "names a node other than the selection: {inner}"
+    );
+    assert_eq!(classic_tool(&inner), None, "{inner}");
+
+    let deep = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "component", "select": format!("#{part}"), "detach": true }]),
+    )
+    .await;
+    assert!(
+        deep.contains(&format!("\"select\": \"#{instance}\"")) && deep.contains("\"detach\": true"),
+        "{deep}"
+    );
+    assert_eq!(classic_tool(&deep), None, "{deep}");
+
+    let removed = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "remove", "select": format!("#{part}") }]),
+    )
+    .await;
+    assert!(
+        removed.contains(&format!("\"select\": \"#{instance}\""))
+            && removed.contains("\"detach\": true"),
+        "{removed}"
+    );
+    assert_eq!(classic_tool(&removed), None, "{removed}");
+
+    let nested = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "component", "select": format!("#{part}"), "name": "Title" }]),
+    )
+    .await;
+    assert!(
+        nested.contains(&format!("\"select\": \"#{instance}\""))
+            && nested.contains("\"detach\": true"),
+        "{nested}"
+    );
+    assert_eq!(classic_tool(&nested), None, "{nested}");
+
+    let plain = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "html", "select": format!("#{board}"), "html": "<div data-name=\"Plain\">x</div>" }]),
+    )
+    .await;
+    let plain_id = id_after(&plain, "div");
+    let not_component = refused(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "html",
+            "select": format!("#{board}"),
+            "html": format!("<div data-instance-of=\"{plain_id}\"></div>")
+        }]),
+    )
+    .await;
+    assert!(
+        not_component.contains("isn't a component")
+            && not_component.contains(&format!("\"select\": \"#{plain_id}\"")),
+        "{not_component}"
+    );
+    assert_eq!(classic_tool(&not_component), None, "{not_component}");
+
+    let extra = refused(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "html",
+            "select": format!("#{board}"),
+            "html": format!("<header data-instance-of=\"{bar}\"><p>Extra</p></header>")
+        }]),
+    )
+    .await;
+    assert!(extra.contains("read with as: \"html\""), "{extra}");
+    assert_eq!(classic_tool(&extra), None, "{extra}");
+
+    // The advice above is the edit that actually sets one instance's text.
+    let changed = edit(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "replace",
+            "select": format!("#{part}"),
+            "find": "Settings",
+            "replace": "Inbox",
+            "in": "text"
+        }]),
+    )
+    .await;
+    assert!(changed.contains("Replaced 1 use"), "{changed}");
+    let instance_html = html(&mut agent, &id, &format!("#{instance}")).await;
+    let component_html = html(&mut agent, &id, &format!("#{bar}")).await;
+    assert!(instance_html.contains(">Inbox<"), "{instance_html}");
+    assert!(
+        component_html.contains(">Home<") && !component_html.contains("Inbox"),
+        "{component_html}"
+    );
+
+    // A <script> inside an instance isn't visible text. inner names that
+    // node and says to replace in code, and following that changes only
+    // this instance.
+    let widget = "<div data-name=\"Widget\"><script>var marker = home</script></div>";
+    let coded = edit(
+        &mut agent,
+        &id,
+        json!([
+            { "op": "artboard", "name": "Code", "width": 400, "height": 200, "html": widget },
+            { "op": "artboard", "name": "Code copy", "width": 400, "height": 200, "html": widget },
+            { "op": "component", "select": "[data-name=Widget]", "name": "Widget" },
+        ]),
+    )
+    .await;
+    let widget_component = id_after(&coded, "3. component:");
+    let widget_instance = id_after(&coded, "Replaced 1 copy");
+    let widget_html = html(&mut agent, &id, &format!("#{widget_instance}")).await;
+    let script_at = widget_html
+        .find("<script")
+        .expect("a script in the instance");
+    let script_tag =
+        &widget_html[script_at..script_at + widget_html[script_at..].find('>').unwrap()];
+    let marker = "data-id=\"";
+    let at = script_tag.find(marker).expect("the script's data-id") + marker.len();
+    let script: String = script_tag[at..].chars().take_while(|c| *c != '"').collect();
+    let script_inner = refused(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "html",
+            "select": format!("#{script}"),
+            "mode": "inner",
+            "html": "var marker = inbox"
+        }]),
+    )
+    .await;
+    assert!(
+        script_inner.contains(&format!("#{script} is inside instance #{widget_instance}"))
+            && script_inner.contains("\"in\": \"code\"")
+            && script_inner.contains(&format!("\"select\": \"#{script}\""))
+            && !script_inner.contains("\"in\": \"text\""),
+        "{script_inner}"
+    );
+    assert_eq!(classic_tool(&script_inner), None, "{script_inner}");
+    let script_changed = edit(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "replace",
+            "select": format!("#{script}"),
+            "find": "home",
+            "replace": "inbox",
+            "in": "code"
+        }]),
+    )
+    .await;
+    assert!(
+        script_changed.contains("Replaced 1 use"),
+        "{script_changed}"
+    );
+    let instance_code = html(&mut agent, &id, &format!("#{widget_instance}")).await;
+    let component_code = html(&mut agent, &id, &format!("#{widget_component}")).await;
+    assert!(
+        instance_code.contains("var marker = inbox"),
+        "{instance_code}"
+    );
+    assert!(
+        component_code.contains("var marker = home") && !component_code.contains("inbox"),
+        "{component_code}"
+    );
+}
+
 /// Detach and read find instances by the `data-instance-of` marker read's
 /// HTML writes, including under an artboard.
 #[tokio::test]
@@ -1222,7 +1845,9 @@ async fn each_comment_goes_to_one_agent() {
     };
     let wait = json!({ "designId": id, "wait": 1 });
 
-    let none = |reply: String| reply.contains("No comments arrived");
+    let none = |reply: String| {
+        reply.contains("No comments arrived in 1 seconds. Call again to keep listening.")
+    };
     // Both agents listen. Ada made the board, so its comments go to Ada.
     assert!(none(ada.ok("comments", wait.clone()).await));
     assert!(none(bo.ok("comments", wait.clone()).await));
