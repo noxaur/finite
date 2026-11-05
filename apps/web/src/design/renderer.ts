@@ -334,7 +334,11 @@ export class Renderer {
 
   /** Rebuilds everything from the replica. */
   reset() {
-    for (const frame of this.frames.values()) {
+    // Interactive mode's window and Hold belong to the artboard, not to the
+    // frames being replaced.
+    const kept = new Map<string, { clip: number | null; held: boolean }>();
+    for (const [id, frame] of this.frames) {
+      kept.set(id, { clip: frame.clip?.height ?? null, held: frame.held });
       closeFrame(frame);
       frame.root.remove();
     }
@@ -352,6 +356,10 @@ export class Renderer {
     // Loading a snapshot marks nothing, but don't let a stale list linger.
     this.replica.takeDirty();
     for (const board of this.replica.artboards()) this.mount(board);
+    for (const [id, { clip, held }] of kept) {
+      if (clip !== null) this.setWindow(id, clip);
+      if (held) this.hold(id, true);
+    }
   }
 
   /**

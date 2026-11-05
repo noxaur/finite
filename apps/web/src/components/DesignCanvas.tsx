@@ -357,6 +357,13 @@ export function DesignCanvas({ id }: { id: string }) {
         }
         return true;
       },
+      page: () => renderer.shownPage(),
+      showPage: (pageId) => {
+        if (!replica.pages.some((p) => p.id === pageId)) return false;
+        pickPage(pageId);
+        renderer.setPage(pageId);
+        return true;
+      },
     });
     presenterRef.current = presenter;
     const unwatchPresenter = presenter.subscribe(() => {

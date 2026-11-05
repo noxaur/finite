@@ -66,6 +66,10 @@ export interface PresenterHost {
   pageBoards(): ReadonlyArray<string>;
   /** Shows `id`'s page, if it's on another. False when there's no such artboard. */
   reveal(id: string): boolean;
+  /** The page shown. */
+  page(): string;
+  /** Shows a page again. False when it's gone. */
+  showPage(id: string): boolean;
 }
 
 const idle: PresenterState = { phase: "idle", board: null, history: [], boards: [] };
@@ -80,8 +84,9 @@ const idle: PresenterState = { phase: "idle", board: null, history: [], boards: 
 export class Presenter {
   private current: PresenterState = idle;
   private readonly listeners = new Set<() => void>();
-  /** The view to go back to, saved once when it starts. */
+  /** The view to go back to, and its page, saved once when it starts. */
   private returnView: View | null = null;
+  private returnPage: string | null = null;
   /** The selection it started with, if it was several artboards. */
   private playlist: ReadonlyArray<string> | null = null;
   private turn = 0;
@@ -99,9 +104,12 @@ export class Presenter {
 
   /** Zooms onto `board`. With `playlist` (several selected artboards), ←/→ step only through those. */
   enter(board: string, playlist: ReadonlyArray<string> | null = null) {
+    const page = this.host.page();
     if (!this.host.reveal(board)) return;
     if (this.current.phase === "idle") {
       this.returnView = this.host.camera.view;
+      // The page it started on, before revealing the artboard switched it.
+      this.returnPage = page;
       this.playlist = playlist && playlist.length > 1 ? playlist : null;
     }
     this.host.camera.locked = () => this.exit();
@@ -144,11 +152,16 @@ export class Presenter {
     this.host.renderer.setPresenting(null);
     this.host.renderer.setWindow(board, null);
     this.update({ phase: "exiting" });
-    const back = this.returnView;
+    // A link may have gone to another page. The view belongs to the page it
+    // started on; if that page is gone, the view would frame nothing.
+    const page = this.returnPage;
+    const home = page === null || page === this.host.page() || this.host.showPage(page);
+    const back = home ? this.returnView : null;
     if (back) await this.host.camera.animateTo(back, ENTER_MS);
     if (turn !== this.turn) return;
     this.host.camera.locked = null;
     this.returnView = null;
+    this.returnPage = null;
     this.playlist = null;
     this.update(idle);
   }
