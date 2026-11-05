@@ -31,8 +31,18 @@
   const portPost = MessagePort.prototype.postMessage;
   const portOnMessage = Object.getOwnPropertyDescriptor(MessagePort.prototype, "onmessage").set;
   let port = null;
-  const queue = [];
-  const send = (message) => (port ? apply(portPost, port, [message]) : queue.push(message));
+  // Messages sent before the port arrives. A linked list of own properties,
+  // not an array: a page can replace Array.prototype.push or shift, and
+  // could swap in a message of its own as the queue drains.
+  let first = null;
+  let last = null;
+  const send = (message) => {
+    if (port) return apply(portPost, port, [message]);
+    const node = { message, next: null };
+    if (last) last.next = node;
+    else first = node;
+    last = node;
+  };
   // What the viewer allows right now. `interact`: the page takes input on the
   // canvas. `presenting`: interactive mode, where the page owns the wheel.
   const state = { interact: false, presenting: false, audio: false };
@@ -50,7 +60,8 @@
       if (port || !given || m.nonce !== config.nonce) return;
       port = given;
       apply(portOnMessage, port, [(ev) => receive(apply(eventData, ev, []))]);
-      while (queue.length > 0) apply(portPost, port, [queue.shift()]);
+      for (let node = first; node; node = node.next) apply(portPost, port, [node.message]);
+      first = last = null;
     },
     true,
   );

@@ -581,6 +581,7 @@ export class Renderer {
     frame.note.hidden = true;
     const node = this.replica.get(id);
     if (pending === "remount" && node) this.remount(node);
+    else if (pending && this.culler.isCulled(id)) frame.stale = true;
     else if ((pending || frame.stale) && !this.culler.isCulled(id)) {
       frame.stale = false;
       this.load(id, frame);
@@ -961,16 +962,19 @@ export class Renderer {
 
   /** Marks artboard `id` as just used, so it keeps running while out of view. */
   private use(id: string) {
+    const latest = new Set([...this.used.keys()].slice(-KEEP_USED));
     const first = !this.used.has(id);
     this.used.delete(id);
     this.used.set(id, Date.now());
     // The pin stays on labels of pages used a while ago, so keep a few more.
     for (const old of [...this.used.keys()].slice(0, -KEEP_USED * 8)) this.used.delete(old);
-    // The page this pushed out of the latest stops once it's been hidden a while.
-    const dropped = [...this.used.keys()].at(-KEEP_USED - 1);
-    const out = dropped === undefined ? undefined : this.frames.get(dropped);
-    if (dropped && out?.iframe && this.culler.isCulled(dropped) && out.iframe.srcdoc !== "") {
-      this.scheduleUnload(dropped, out);
+    // A page this pushed out of the latest stops once it's been hidden a while.
+    const now = new Set([...this.used.keys()].slice(-KEEP_USED));
+    for (const dropped of latest) {
+      const out = now.has(dropped) ? undefined : this.frames.get(dropped);
+      if (out?.iframe && this.culler.isCulled(dropped) && out.iframe.srcdoc !== "") {
+        this.scheduleUnload(dropped, out);
+      }
     }
     const frame = this.frames.get(id);
     if (first && frame) frame.pin.hidden = false;
