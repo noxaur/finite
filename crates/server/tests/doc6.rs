@@ -669,19 +669,325 @@ async fn remove_refuses_matches_nested_inside_each_other() {
 }
 
 #[tokio::test]
-async fn html_inner_and_replace_take_one_match() {
+async fn html_inner_and_replace_apply_to_every_match() {
     let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "One").await;
-    let (id, _) = landing(&mut agent).await;
-    let error = refused(
-        &mut agent,
+    let mut alice = Agent::connect_doc6(&app, "Alice").await;
+    let mut bob = Agent::connect_doc6(&app, "Bob").await;
+    let (id, _) = landing(&mut alice).await;
+    // A match inside another would be deleted by the outer replace.
+    let nested = refused(
+        &mut alice,
         &id,
-        json!([{ "op": "html", "select": ".card", "mode": "inner", "html": "x" }]),
+        json!([{ "op": "html", "select": ":has(p)", "mode": "inner", "html": "x" }]),
     )
     .await;
     assert!(
-        error.contains("matches 2 elements; mode inner takes one"),
-        "{error}"
+        nested.contains("nested inside each other") && nested.contains("Nothing was changed."),
+        "{nested}"
+    );
+    let cards = html(&mut alice, &id, ".card").await;
+    assert!(
+        cards.contains("First") && cards.contains("Second"),
+        "{cards}"
+    );
+
+    let mark = "MARKPATHDATA-should-not-be-echoed-in-the-result";
+    let written = edit(
+        &mut alice,
+        &id,
+        json!([{
+            "op": "html",
+            "select": ".card",
+            "mode": "inner",
+            "html": format!("<b data-name=\"Mark\"><i data-name=\"{mark}\">x</i></b>")
+        }]),
+    )
+    .await;
+    assert!(
+        written.contains("inner") && !written.contains(mark),
+        "many matches list ids, not each subtree: {written}"
+    );
+    assert_eq!(written.matches("inner ").count(), 2, "{written}");
+    let cards = html(&mut alice, &id, ".card").await;
+    assert!(cards.contains("Mark") && cards.contains(mark), "{cards}");
+    let bold_ids = tag_ids(&cards, "b");
+    assert_eq!(bold_ids.len(), 2, "{cards}");
+    assert_ne!(
+        bold_ids[0], bold_ids[1],
+        "each copy gets its own id: {cards}"
+    );
+
+    // outer is replace. One line per match, then undo restores both cards.
+    let replaced = edit(
+        &mut alice,
+        &id,
+        json!([{
+            "op": "html",
+            "select": ".card",
+            "mode": "outer",
+            "html": "<p data-name=\"Only\">Z</p>"
+        }]),
+    )
+    .await;
+    assert!(
+        replaced.contains("replace") && !replaced.contains("<p"),
+        "{replaced}"
+    );
+    let after = html(&mut alice, &id, "[data-name=Only]").await;
+    assert!(after.matches(">Z<").count() >= 2, "{after}");
+    alice.ok("undo", json!({ "designId": id })).await;
+    let cards = html(&mut alice, &id, ".card").await;
+    assert!(
+        cards.contains("Mark") && !cards.contains("Only"),
+        "undo puts the inner copies back: {cards}"
+    );
+    alice.ok("undo", json!({ "designId": id })).await;
+    let cards = html(&mut alice, &id, ".card").await;
+    assert!(
+        cards.contains("First") && cards.contains("Second") && !cards.contains("Mark"),
+        "{cards}"
+    );
+
+    // Bob's edit stays when Alice undoes a multi-match write.
+    let (alice_edit, bob_edit) = (
+        json!([{
+            "op": "html",
+            "select": ".card",
+            "mode": "prepend",
+            "html": "<span data-name=\"Tag\"><b data-name=\"Deep\">t</b></span>"
+        }]),
+        json!([{ "op": "css", "select": "h1", "css": "color: purple" }]),
+    );
+    let (ra, _) = tokio::join!(
+        alice.ok(
+            "edit",
+            json!({ "designId": id, "check": false, "ops": alice_edit }),
+        ),
+        bob.ok(
+            "edit",
+            json!({ "designId": id, "check": false, "ops": bob_edit }),
+        ),
+    );
+    assert!(
+        !ra.contains("Deep"),
+        "prepend on many matches stays one line each: {ra}"
+    );
+    assert!(ra.contains("prepend"), "{ra}");
+    alice.ok("undo", json!({ "designId": id })).await;
+    let home = html(&mut alice, &id, "h1").await;
+    assert!(
+        home.contains("purple") && !html(&mut alice, &id, ".card").await.contains("Deep"),
+        "{home}"
+    );
+}
+
+/// The `data-id` of each `<tag ` in `html`.
+fn tag_ids(html: &str, tag: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let open = format!("<{tag} ");
+    let mut rest = html;
+    while let Some(at) = rest.find(&open) {
+        rest = &rest[at..];
+        let end = rest.find('>').unwrap_or(rest.len());
+        let piece = &rest[..end];
+        if let Some(start) = piece.find("data-id=\"") {
+            let id: String = piece[start + 9..]
+                .chars()
+                .take_while(|c| *c != '"')
+                .collect();
+            found.push(id);
+        }
+        rest = &rest[end..];
+    }
+    found
+}
+
+#[tokio::test]
+async fn path_ids_and_instance_edits_take_either_slash() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Paths").await;
+    let (id, _) = landing(&mut agent).await;
+    // A slash in a value, and a color hash, are not path ids.
+    let styled = edit(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "css",
+            "css": "h1 { font: 16px/1.5 sans-serif; background-image: url(https://example.com/a.png); color: #112233 }"
+        }]),
+    )
+    .await;
+    assert!(styled.contains("h1 matched"), "{styled}");
+    let heading = html(&mut agent, &id, "h1").await;
+    assert!(
+        heading.contains("16px/1.5")
+            && heading.contains("example.com/a.png")
+            && heading.contains("#112233"),
+        "{heading}"
+    );
+
+    let nav = |title: &str| {
+        format!("<header data-name=\"Nav\"><h1 data-name=\"Title\">{title}</h1></header>")
+    };
+    let made = edit(
+        &mut agent,
+        &id,
+        json!([
+            { "op": "artboard", "name": "Settings", "width": 400, "height": 200, "html": nav("Settings") },
+            { "op": "artboard", "name": "Profile", "width": 400, "height": 200, "html": nav("Profile") },
+            { "op": "artboard", "name": "Account", "width": 400, "height": 200, "html": nav("Account") },
+            { "op": "component", "select": "[data-name=Nav]", "name": "Top bar" },
+        ]),
+    )
+    .await;
+    assert!(made.contains("Replaced 2 copies"), "{made}");
+    let mut instances = Vec::new();
+    for line in made.lines() {
+        let Some(rest) = line.trim().strip_prefix('#') else {
+            continue;
+        };
+        if let Some(id) = rest.split(':').next()
+            && id.len() == 8
+            && line.contains("override")
+        {
+            instances.push(id.to_owned());
+        }
+    }
+    assert_eq!(instances.len(), 2, "{made}");
+    let mut titles = Vec::new();
+    for instance in &instances {
+        let shown = html(&mut agent, &id, &format!("#{instance}")).await;
+        let marker = format!("data-id=\"{instance}/");
+        let at = shown.find(&marker).expect("a node inside the instance") + marker.len();
+        let part: String = shown[at..]
+            .chars()
+            .take_while(char::is_ascii_alphanumeric)
+            .collect();
+        titles.push(format!("{instance}/{part}"));
+    }
+
+    // Writing new elements inside an instance is refused for one match and
+    // for every match, and nothing is written. Styles on those nodes still
+    // go through, below, as overrides.
+    let select = titles
+        .iter()
+        .map(|title| format!("#{title}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let one = refused(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "html",
+            "select": format!("#{}", titles[0]),
+            "mode": "inner",
+            "html": "<b>nope</b>"
+        }]),
+    )
+    .await;
+    let both = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "html", "select": select, "mode": "inner", "html": "<b>nope</b>" }]),
+    )
+    .await;
+    assert!(
+        one.contains("Nothing was changed.") && both.contains("Nothing was changed."),
+        "{one}\n{both}"
+    );
+    let phrase = if one.contains("nothing can be added") {
+        "nothing can be added"
+    } else {
+        "can't be deleted"
+    };
+    assert!(
+        one.contains(phrase) && both.contains(phrase),
+        "{one}\n{both}"
+    );
+    let still = html(&mut agent, &id, &format!("#{}", titles[0])).await;
+    assert!(
+        (still.contains("Profile") || still.contains("Account")) && !still.contains("nope"),
+        "{still}"
+    );
+
+    let path = &titles[0];
+    let escaped = path.replace('/', r"\/");
+    let by_select = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "css", "select": format!("#{escaped}"), "css": "color: #123456" }]),
+    )
+    .await;
+    assert!(
+        by_select.contains("1 element") || by_select.contains("matched 1"),
+        "{by_select}"
+    );
+    let mixed = {
+        let (head, tail) = path.split_once('/').unwrap();
+        format!(r"#{head}\/{tail}")
+    };
+    let by_rule = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "css", "css": format!("{mixed} {{ letter-spacing: 1px }}") }]),
+    )
+    .await;
+    assert!(!by_rule.contains("matches no element"), "{by_rule}");
+    let unescaped = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "css", "css": format!("#{path} {{ font-weight: 700 }}") }]),
+    )
+    .await;
+    assert!(
+        unescaped.contains("font-weight")
+            || unescaped.contains("1 element")
+            || unescaped.contains("matched"),
+        "{unescaped}"
+    );
+    let shown = html(&mut agent, &id, &format!("#{path}")).await;
+    assert!(
+        shown.contains("#123456") && shown.contains("1px") && shown.contains("700"),
+        "{shown}"
+    );
+    // The same node, read with the escaped spelling.
+    let via_escaped = html(&mut agent, &id, &format!("#{escaped}")).await;
+    assert!(via_escaped.contains("700"), "{via_escaped}");
+
+    // An unescaped path that isn't a node is refused, and the error shows
+    // the escaped spelling. The styles above stay.
+    let bad = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "css", "css": "#nope00/missing { color: red }" }]),
+    )
+    .await;
+    assert!(
+        bad.contains(r"#nope00\/missing") && bad.contains("Nothing was changed."),
+        "{bad}"
+    );
+    let shown = html(&mut agent, &id, &format!("#{path}")).await;
+    assert!(
+        shown.contains("700") && !shown.contains("color: red"),
+        "{shown}"
+    );
+
+    // A rule stored in <style> keeps the escaped spelling.
+    let stored = edit(
+        &mut agent,
+        &id,
+        json!([{
+            "op": "css",
+            "to": "style",
+            "css": format!("#{path} {{ outline-color: #abcdef }}")
+        }]),
+    )
+    .await;
+    assert!(!stored.contains("isn't a node"), "{stored}");
+    let sheet = html(&mut agent, &id, "style").await;
+    assert!(
+        sheet.contains(&escaped) && sheet.contains("abcdef"),
+        "{sheet}"
     );
 }
 

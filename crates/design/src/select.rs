@@ -14,6 +14,8 @@
 //!   reaches across from one artboard to another.
 //! - `#id` matches a node's id, then its `id` attribute. Ids may start with a
 //!   digit, which CSS doesn't allow, so `#4kx92mab` is escaped before parsing.
+//!   A node inside an instance is `#instance/part/leaf`; `#instance\/part\/leaf`
+//!   is the same id.
 //! - `[data-id]`, `[data-name]` and `[style]` read the node's id, layer name
 //!   and inline styles, as `get_html` writes them.
 //! - Text nodes are never matched. [`Matcher::text_nodes`] resolves a bare
@@ -187,7 +189,9 @@ fn parse_list(
 /// Escapes the digit after a `#` outside strings: CSS reads `#4kx92mab` as a
 /// hash that isn't an id, since an identifier can't start with a digit, and
 /// node ids often do. It escapes the `/` in a virtual id too, so
-/// `#k2n0d9xa/9qd2h0ce` names a node inside an instance.
+/// `#k2n0d9xa/9qd2h0ce` names a node inside an instance. A slash already
+/// written `\/` stays inside that id, so the escaped spelling and a mix of
+/// the two name the same node.
 fn escape_ids(source: &str) -> Cow<'_, str> {
     let bytes = source.as_bytes();
     let mut out = String::new();
@@ -198,7 +202,10 @@ fn escape_ids(source: &str) -> Cow<'_, str> {
     while i < bytes.len() {
         let b = bytes[i];
         let ident = |b: &u8| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_';
-        if hash && !(ident(&b) || b == b'/') {
+        // `\/` is a slash an agent already escaped. It is still part of the
+        // path id, and a later raw `/` in that same id still needs escaping.
+        let escaped_slash = b == b'\\' && bytes.get(i + 1) == Some(&b'/');
+        if hash && !(ident(&b) || b == b'/' || escaped_slash) {
             hash = false;
         }
         match (quote, b) {

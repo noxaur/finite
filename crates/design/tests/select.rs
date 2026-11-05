@@ -459,6 +459,35 @@ fn virtual_ids_name_nodes_inside_instances() {
     assert!(title.contains('/'), "{title}");
     let list = select::parse(&format!("#{title}, #{title} > *")).unwrap();
     let found = Matcher::new(&view, Scope::Design).select(&list);
-    assert_eq!(found, vec![title]);
+    assert_eq!(found, vec![title.clone()]);
+    // The escaped spelling, and a selector that already escaped the slash.
+    let escaped = title.replace('/', r"\/");
+    let list = select::parse(&format!("#{escaped}")).unwrap();
+    assert_eq!(
+        Matcher::new(&view, Scope::Design).select(&list),
+        vec![title]
+    );
     let _ = &mut design;
+}
+
+/// `#a/b/c`, `#a\/b\/c` and a mix of the two are one id. A slash inside a
+/// string is not part of an id.
+#[test]
+fn virtual_id_spellings_are_the_same_id() {
+    let id = "k2n0d9xa/9qd2h0ce/f6bhzd5n";
+    let mixed = {
+        let (head, tail) = id.split_once('/').unwrap();
+        format!(r"{head}\/{tail}")
+    };
+    for form in [id.to_owned(), id.replace('/', r"\/"), mixed] {
+        let list = select::parse(&format!("#{form}")).unwrap_or_else(|e| panic!("{form}: {e}"));
+        assert_eq!(list.ids(), Some(&[id.to_owned()][..]), "{form}");
+    }
+    // A slash inside a string is not part of an id, and select still parses
+    // an unescaped path that names nothing.
+    let d = page();
+    assert_eq!(
+        pick(&d, r#"[href="https://example.com/docs"], #nope/missing"#),
+        ["Docs"]
+    );
 }

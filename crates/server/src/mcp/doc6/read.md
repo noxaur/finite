@@ -1,7 +1,7 @@
 Look at a design, as text.
 
 - No select: an overview (pages, artboards, open comments, who else is working, how many tokens), then an outline of every artboard: one line per element with its tag, layer name, #id, size and text. Start here. page: "Inbox" shows only that page's artboards, here and with select.
-- select (a CSS selector: #k3x9a2bq, .card, button, [data-name="Hero"] h1, :root for artboards, :contains("Sign in")) with as:
+- select (a CSS selector: #k3x9a2bq, .card, button, [data-name="Hero"] h1, :root for artboards, :contains("Sign in"); inside an instance, #instance/part/leaf or #instance\/part\/leaf) with as:
   "outline" (default): the outline under each match. depth sets how deep (default 4).
   "html": each match's HTML with inline styles; every element carries data-id, and the root data-read-at, so an html op with mode inner or replace can write it back. depth limits it.
   "css": the CSS that applies to each match: its inline style, then each matching rule from its artboard's <style> blocks, and which properties inline styles override.

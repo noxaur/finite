@@ -403,14 +403,10 @@ fn html_op(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String,
     })?;
     let parsed = step.html.ok_or("\"html\" needs html")?;
     let (selector, ids) = selected(tx.view(), Kind::Html, f, refs)?;
-    let rewrite = matches!(place, Place::Inner | Place::Replace);
-    if rewrite && ids.len() > 1 {
-        return Err(format!(
-            "{selector:?} matches {} elements; mode {} takes one: {}",
-            ids.len(),
-            place.name(),
-            describe(tx.view(), &ids)
-        ));
+    // Replacing an outer match deletes the match inside it. Append,
+    // prepend, before and after leave both in place, so they can nest.
+    if matches!(place, Place::Inner | Place::Replace) {
+        refuse_nesting(tx.view(), &selector, &ids, "replace")?;
     }
     const MOST: usize = 100;
     if ids.len() > MOST {
@@ -458,16 +454,36 @@ fn html_op(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String,
             };
             (merged, roots, mode)
         };
+        // The label before the write: a replace deletes this node.
         let where_ = label(tx.view(), id);
         stage(tx, merged.ops)?;
         first = first.or_else(|| roots.first().cloned());
         let doc = tx.view();
-        let mut text = if mode == WriteMode::Replace && roots == [id.as_str()] {
-            "Rewrote it in place: elements that kept their data-id kept their ids, comments and history.\n".to_owned()
+        // Several matches would each echo the whole subtree. One line names
+        // the copy's ids; a single match still shows the subtree.
+        let mut text = if many {
+            if mode == WriteMode::Replace && roots == [id.as_str()] {
+                format!("{} {where_}: rewrote it in place", place.name())
+            } else {
+                let shown = roots
+                    .iter()
+                    .map(|root| label(doc, root))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{} {where_}: {shown}", place.name())
+            }
         } else {
-            format!("Wrote {} root node{}:\n", roots.len(), plural(roots.len()))
+            let mut text = if mode == WriteMode::Replace && roots == [id.as_str()] {
+                "Rewrote it in place: elements that kept their data-id kept their ids, comments and history.\n".to_owned()
+            } else {
+                format!("Wrote {} root node{}:\n", roots.len(), plural(roots.len()))
+            };
+            text.push_str(&outlines(doc, &roots, 3));
+            if place != Place::Append {
+                text = format!("{} {where_}: {text}", place.name());
+            }
+            text
         };
-        text.push_str(&outlines(doc, &roots, 3));
         text.push_str(&kept_note(doc, &merged.kept));
         text.push_str(&kept_nodes_note(doc, &merged.kept_nodes));
         if !merged.reached {
@@ -476,9 +492,6 @@ fn html_op(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String,
                  so values in your HTML replaced any that others changed since you read it, \
                  and elements others added since were removed.",
             );
-        }
-        if many || place != Place::Append {
-            text = format!("{} {where_}: {text}", place.name());
         }
         parts.push(text.trim_end().to_owned());
     }
@@ -517,6 +530,9 @@ fn css_op(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<String> {
         (Some(select), true) => Some(targets(tx.view(), select, refs, "select")?),
         _ => None,
     };
+    // Unescaped `#inst/part` in a rule is only safe when that node exists.
+    // A `/` in a value, or a `#` that isn't a path, stays as written.
+    let css = prepare_css(tx.view(), &css)?;
     let to = text(f, "to")
         .unwrap_or_else(|| "inline".into())
         .to_ascii_lowercase();
@@ -540,6 +556,174 @@ fn css_op(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<String> {
     }
 }
 
+/// A `#` token outside strings and comments. `id` reads `\/` as `/`.
+struct HashToken {
+    start: usize,
+    end: usize,
+    id: String,
+    /// A `/` written without a backslash, as in `#inst/part`.
+    raw_slash: bool,
+}
+
+fn ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
+}
+
+/// `#` tokens in `source`, outside quotes and comments.
+fn hash_tokens(source: &str) -> Vec<HashToken> {
+    let bytes = source.as_bytes();
+    let mut out = Vec::new();
+    let mut quote = None;
+    let mut comment = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if comment {
+            if b == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                comment = false;
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(q) = quote {
+            if b == b'\\' {
+                i += 2;
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            comment = true;
+            i += 2;
+            continue;
+        }
+        if b == b'"' || b == b'\'' {
+            quote = Some(b);
+            i += 1;
+            continue;
+        }
+        if b != b'#' {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        i += 1;
+        let mut id = String::new();
+        let mut raw_slash = false;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if c == b'\\' && bytes.get(i + 1) == Some(&b'/') {
+                id.push('/');
+                i += 2;
+                continue;
+            }
+            if ident_byte(c) {
+                id.push(c as char);
+                i += 1;
+                continue;
+            }
+            // A slash continues the id only when another id character follows,
+            // so `16px/1.5` and a trailing `/` stay out of it.
+            if c == b'/' && bytes.get(i + 1).is_some_and(|n| ident_byte(*n)) {
+                id.push('/');
+                raw_slash = true;
+                i += 1;
+                continue;
+            }
+            break;
+        }
+        let end = i;
+        if !id.is_empty() {
+            out.push(HashToken {
+                start,
+                end,
+                id,
+                raw_slash,
+            });
+        }
+    }
+    out
+}
+
+/// `#inst/part` as CSS writes it: `#inst\/part`.
+fn escaped_hash(id: &str) -> String {
+    let mut out = String::with_capacity(id.len() + 1);
+    out.push('#');
+    for c in id.chars() {
+        if c == '/' {
+            out.push_str(r"\/");
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The escaped spelling, when `selector` names a node inside an instance.
+fn path_hint(selector: &str) -> String {
+    let mut shown = Vec::new();
+    for token in hash_tokens(selector) {
+        if !token.id.contains('/') {
+            continue;
+        }
+        let escaped = escaped_hash(&token.id);
+        if !shown.contains(&escaped) {
+            shown.push(escaped);
+        }
+    }
+    if shown.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " Write a node inside an instance as {}.",
+            shown.join(" or ")
+        )
+    }
+}
+
+/// Rewrites unescaped `#inst/part` to `#inst\/part` when that node exists,
+/// so a `<style>` block holds CSS a browser can parse. An unescaped path
+/// that isn't a node is an error naming the escaped spelling. Slashes in
+/// values are not `#` tokens, so they stay.
+fn prepare_css(doc: &Document, css: &str) -> Result<String> {
+    let rules = css::patch_rules(css).map_err(|e| e.to_string())?;
+    for rule in &rules {
+        for token in hash_tokens(&rule.selector) {
+            if token.raw_slash && !doc.contains(&token.id) {
+                let escaped = escaped_hash(&token.id);
+                return Err(format!(
+                    "#{} isn't a node. In css, write a node inside an instance as {escaped}.",
+                    token.id
+                ));
+            }
+        }
+    }
+    let tokens = hash_tokens(css);
+    if !tokens
+        .iter()
+        .any(|token| token.raw_slash && doc.contains(&token.id))
+    {
+        return Ok(css.to_owned());
+    }
+    let mut out = String::with_capacity(css.len() + 8);
+    let mut copied = 0;
+    for token in tokens {
+        if token.raw_slash && doc.contains(&token.id) {
+            out.push_str(&css[copied..token.start]);
+            out.push_str(&escaped_hash(&token.id));
+            copied = token.end;
+        }
+    }
+    out.push_str(&css[copied..]);
+    Ok(out)
+}
+
 /// A css op's rules as inline styles on the elements they match.
 fn inline(
     tx: &mut Transaction<'_>,
@@ -559,20 +743,23 @@ fn inline(
     let mut lines = Vec::new();
     for rule in rules {
         let doc = tx.view();
-        let mut ids = matched(doc, &rule.selector, None)?;
+        let mut ids = matched(doc, &rule.selector, None)
+            .map_err(|e| format!("{e}{}", path_hint(&rule.selector)))?;
         if let Some((select, within)) = scope {
             ids.retain(|id| within.iter().any(|w| w == id || doc.is_ancestor(w, id)));
             if ids.is_empty() {
                 return Err(format!(
-                    "css rule {:?} matches no element inside select {select:?}",
-                    rule.selector
+                    "css rule {:?} matches no element inside select {select:?}{}",
+                    rule.selector,
+                    path_hint(&rule.selector)
                 ));
             }
         }
         if ids.is_empty() {
             return Err(format!(
-                "css rule {:?} matches no element. read with contains, or with no select, lists what's there",
-                rule.selector
+                "css rule {:?} matches no element. read with contains, or with no select, lists what's there{}",
+                rule.selector,
+                path_hint(&rule.selector)
             ));
         }
         let styles: BTreeMap<String, Option<String>> = rule.declarations.into_iter().collect();
@@ -625,9 +812,10 @@ fn style(tx: &mut Transaction<'_>, css: &str, within: Option<Vec<NodeId>>) -> Re
                 [one] => boards.push(one.id.clone()),
                 [] => return Err("the design has no artboards yet, so there's no <style> to put these in. Add one with an \"artboard\" op first".into()),
                 [first, ..] => {
+                    let hint: String = patch.iter().map(|rule| path_hint(&rule.selector)).collect();
                     return Err(format!(
-                        "no element matches these rules yet, so it's unclear which artboard's <style> block they belong in. Pass select with the artboard, like \"select\": \"#{}\"",
-                        first.id
+                        "no element matches these rules yet, so it's unclear which artboard's <style> block they belong in. Pass select with the artboard, like \"select\": \"#{}\"{}",
+                        first.id, hint
                     ));
                 }
             }
@@ -942,7 +1130,8 @@ fn move_op(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<(String,
 }
 
 /// Errors when `ids` nest inside each other, naming the outer ones.
-fn refuse_nesting(doc: &Document, selector: &str, ids: &[NodeId]) -> Result<()> {
+/// `verb` is what the op would do to an outer match ("remove", "replace").
+fn refuse_nesting(doc: &Document, selector: &str, ids: &[NodeId], verb: &str) -> Result<()> {
     let set: HashSet<&str> = ids.iter().map(String::as_str).collect();
     let mut outer: Vec<NodeId> = Vec::new();
     let mut seen = HashSet::new();
@@ -961,7 +1150,7 @@ fn refuse_nesting(doc: &Document, selector: &str, ids: &[NodeId]) -> Result<()> 
     // In document order, as the matches are.
     outer.sort_by_key(|o| ids.iter().position(|id| id == o));
     Err(format!(
-        "{selector:?} matches {} elements nested inside each other, so it would remove {} with everything in {}. Narrow select to the elements you mean, like \":has(> h2:contains(\\\"…\\\"))\" for the element holding a heading",
+        "{selector:?} matches {} elements nested inside each other, so it would {verb} {} with everything in {}. Narrow select to the elements you mean, like \":has(> h2:contains(\\\"…\\\"))\" for the element holding a heading",
         ids.len(),
         describe(doc, &outer),
         if outer.len() == 1 { "it" } else { "them" }
@@ -1071,7 +1260,7 @@ fn remove(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<String> {
     let (selector, ids) = selected(doc, Kind::Remove, f, refs)?;
     // A broad select, like a :has(...) that matched every ancestor of its
     // target, would delete far more than meant.
-    refuse_nesting(doc, &selector, &ids)?;
+    refuse_nesting(doc, &selector, &ids, "remove")?;
     let ops = edit::delete(doc, &ids).map_err(|e| e.to_string())?;
     let inside: usize = ops.iter().map(|op| doc.subtree(op.id()).len()).sum();
     let count = ops.len();
