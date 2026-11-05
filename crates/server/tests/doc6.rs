@@ -976,7 +976,8 @@ async fn path_ids_and_instance_edits_take_either_slash() {
         "{shown}"
     );
 
-    // A path that isn't a node is the same refusal. The part's style stays.
+    // A path that doesn't start at an instance is an ordinary id, which
+    // matches nothing here. The part's style stays.
     let bad = refused(
         &mut agent,
         &id,
@@ -984,8 +985,7 @@ async fn path_ids_and_instance_edits_take_either_slash() {
     )
     .await;
     assert!(
-        bad.contains(r##"{"op":"css","select":"#nope00/missing","css":"…"}"##)
-            && bad.contains("Nothing was changed."),
+        bad.contains("matches no element") && bad.contains("Nothing was changed."),
         "{bad}"
     );
     let shown = html(&mut agent, &id, &format!("#{path}")).await;
