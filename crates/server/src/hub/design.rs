@@ -920,6 +920,11 @@ impl DesignHandle {
         self.update_comment(|design| design.edit_message(id, author_id, body, now_ms()))
     }
 
+    /// Pins a comment to another element. See [`Design::repin`].
+    pub fn repin(&self, id: &str, node: &str) -> Result<Comment, CommentError> {
+        self.update_comment(|design| design.repin(id, node))
+    }
+
     /// Changes who a comment is for. See [`Design::set_audience`].
     pub fn set_audience(&self, id: &str, audience: Audience) -> Result<Comment, CommentError> {
         self.update_comment(|design| design.set_audience(id, audience))

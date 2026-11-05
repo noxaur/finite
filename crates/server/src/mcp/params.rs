@@ -142,6 +142,17 @@ pub struct NodesParams {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+pub struct DuplicateParams {
+    pub(super) design_id: String,
+    #[serde(alias = "nodeId", deserialize_with = "lenient")]
+    pub(super) node_ids: Vec<String>,
+    /// Detach every instance in the copies, so they stop following their components.
+    #[serde(default)]
+    pub(super) detach: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ChildrenParams {
     pub(super) design_id: String,
     /// Parent node. Omit to list the artboards.

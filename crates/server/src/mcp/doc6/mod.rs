@@ -164,6 +164,14 @@ pub struct Reply {
     resolve: Option<bool>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Pin {
+    comment_id: String,
+    /// The element to pin it to: one match, an artboard or an element inside one.
+    select: Select,
+}
+
 /// Seconds to wait, or true for 60.
 #[derive(Deserialize, JsonSchema)]
 #[serde(untagged)]
@@ -197,6 +205,9 @@ pub struct CommentsDoc6Params {
     /// Only comments a person addressed to you.
     #[serde(default)]
     mentions: bool,
+    /// Pins comments to other elements, for a comment whose screen was removed and rebuilt: [{"commentId": "…", "select": "#k3x9a2bq"}].
+    #[serde(default)]
+    pin: Option<Vec<Pin>>,
     /// Comments to leave to others: they go to another agent and stop waking you until a person writes in them again.
     #[serde(default)]
     pass: Option<Vec<String>>,
@@ -797,7 +808,7 @@ impl FiniteMcp {
 
     #[tool(
         name = "comments",
-        description = "The comments people pinned to a design, and your replies to them. Each waiting comment goes to one agent: the one already on it, the one a person picked, or the one that last edited its artboard, while it's listening; otherwise the first to ask. Calling this takes the comments waiting for you, so other agents leave them to you.\n\n- {\"designId\": \"…\"}: open comments, oldest first: what was asked, the artboard, the element (its select and HTML), and the thread so far. includeResolved: true adds resolved ones; offset pages through a long list.\n- {\"designId\": \"…\", \"wait\": 60}: blocks until a comment or reply is waiting for you (open, a person's message last, and not another agent's), then returns those. Returns at once if some already are, or says none arrived after wait seconds (at most 300). Loop on it to keep taking feedback.\n- {\"designId\": \"…\", \"reply\": [{\"commentId\": \"…\", \"message\": \"Made it an underlined link.\", \"resolve\": true}]}: replies, one or several at once. Say what you changed, with resolve: true, or ask a question and leave it open. A reply links your edits to the comment's artboard since the thread's last message.\n\npass: [\"commentId\"] leaves comments to another agent: they stop waking you until a person writes in them again. forPeople: [\"commentId\"] marks notes between people (\"ask the client about blue\"), so no agent gets them. Both run before wait, so {\"pass\": [\"…\"], \"wait\": 60} works.\n\nEach comment's \"for\" says who it goes to when that's settled: \"you\", another agent (leave it), or \"people\" (don't act on it). passedBy lists agents that passed.\n\nOptional filters narrow both the list and wait: page (name or id), select (comments pinned to matching elements or inside them), mentions: true (only comments a person picked you for). Example: {\"designId\": \"…\", \"page\": \"Mobile\", \"wait\": 120}",
+        description = "The comments people pinned to a design, and your replies to them. Each waiting comment goes to one agent: the one already on it, the one a person picked, or the one that last edited its artboard, while it's listening; otherwise the first to ask. Calling this takes the comments waiting for you, so other agents leave them to you.\n\n- {\"designId\": \"…\"}: open comments, oldest first: what was asked, the artboard, the element (its select and HTML), and the thread so far. includeResolved: true adds resolved ones; offset pages through a long list.\n- {\"designId\": \"…\", \"wait\": 60}: blocks until a comment or reply is waiting for you (open, a person's message last, and not another agent's), then returns those. Returns at once if some already are, or says none arrived after wait seconds (at most 300). Loop on it to keep taking feedback.\n- {\"designId\": \"…\", \"reply\": [{\"commentId\": \"…\", \"message\": \"Made it an underlined link.\", \"resolve\": true}]}: replies, one or several at once. Say what you changed, with resolve: true, or ask a question and leave it open. A reply links your edits to the comment's artboard since the thread's last message.\n\npin: [{\"commentId\": \"…\", \"select\": \"#newNode\"}] moves a pin to another element, for a comment whose artboard or element was removed and rebuilt (the list shows \"artboardDeleted\": true); it keeps its offset in the artboard. Run before reply.\n\npass: [\"commentId\"] leaves comments to another agent: they stop waking you until a person writes in them again. forPeople: [\"commentId\"] marks notes between people (\"ask the client about blue\"), so no agent gets them. Both run before wait, so {\"pass\": [\"…\"], \"wait\": 60} works.\n\nEach comment's \"for\" says who it goes to when that's settled: \"you\", another agent (leave it), or \"people\" (don't act on it). passedBy lists agents that passed.\n\nOptional filters narrow both the list and wait: page (name or id), select (comments pinned to matching elements or inside them), mentions: true (only comments a person picked you for). Example: {\"designId\": \"…\", \"page\": \"Mobile\", \"wait\": 120}",
         annotations(read_only_hint = false)
     )]
     async fn doc6_comments(
@@ -812,6 +823,38 @@ impl FiniteMcp {
             name: actor.name.clone(),
             kind: finite_design::comment::AuthorKind::Agent,
         };
+        let mut pinned = Vec::new();
+        for pin in p.pin.iter().flatten() {
+            let done = match pinned.is_empty() {
+                true => String::new(),
+                false => format!(" Pinned {} before it.", pinned.join(", ")),
+            };
+            let selector = match selector_text(&pin.select.value(), &HashMap::new()) {
+                Ok(selector) => selector,
+                Err(error) => return fail(format!("{}: {error}.{done}", pin.comment_id)),
+            };
+            let found = match handle.read(|d| matched(d.view(), &selector, None)) {
+                Ok(found) => found,
+                Err(error) => return fail(format!("{}: {error}.{done}", pin.comment_id)),
+            };
+            let [target] = found.as_slice() else {
+                return fail(format!(
+                    "{}: {selector:?} matches {} elements; pin takes one, like \"#k3x9a2bq\".{done}",
+                    pin.comment_id,
+                    found.len()
+                ));
+            };
+            if let Err(error) = handle.repin(&pin.comment_id, target) {
+                return fail(format!("{}: {error}.{done}", pin.comment_id));
+            }
+            pinned.push(pin.comment_id.as_str());
+        }
+        let pinned = (!pinned.is_empty()).then(|| {
+            format!(
+                "Pinned {} to the element you selected, at the same offset in its artboard.",
+                pinned.join(", ")
+            )
+        });
         if let Some(replies) = p.reply {
             let many = replies.len() > 1;
             let mut out = Vec::new();
@@ -831,7 +874,7 @@ impl FiniteMcp {
                     }
                 }
             }
-            return ok(out.join("\n"));
+            return ok(joined([pinned, Some(out.join("\n"))]).unwrap_or_default());
         }
         let mut passed = Vec::new();
         for id in p.pass.iter().flatten() {
@@ -873,7 +916,7 @@ impl FiniteMcp {
                 if noted.len() == 1 { "it" } else { "them" }
             )
         });
-        let passed = joined([passed, noted]);
+        let passed = joined([pinned, joined([passed, noted])]);
         let selector = match p.select.as_ref() {
             Some(select) => match selector_text(&select.value(), &HashMap::new()) {
                 Ok(selector) => Some(selector),

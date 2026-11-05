@@ -268,6 +268,18 @@ fn describe(change: Option<&Change>) -> &'static str {
     }
 }
 
+/// Tells an agent that `n` instances in a copy still follow their components,
+/// and how to cut them loose.
+fn following_note(n: usize) -> String {
+    let (s, verb, its) = match n {
+        1 => ("", "s", "its"),
+        _ => ("s", "", "their"),
+    };
+    format!(
+        "{n} instance{s} still follow{verb} {its} component{s}; pass detach: true for a frozen copy."
+    )
+}
+
 /// How many changed nodes an edit's result names before it just counts them.
 const CHANGED_NAMED: usize = 12;
 
@@ -1858,18 +1870,21 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Duplicate nodes with their whole subtrees. Each copy is placed right after its original; copied artboards go into free canvas space. Returns each copy's outline with the new ids, so you can edit inside it, for example to make a mobile variant of a desktop artboard. To copy into another parent, duplicate, then move_nodes."
+        description = "Duplicate nodes with their whole subtrees. Each copy is placed right after its original; copied artboards go into free canvas space. Returns each copy's outline with the new ids, so you can edit inside it, for example to make a mobile variant of a desktop artboard. To copy into another parent, duplicate, then move_nodes. A copy of an instance is an instance, so it keeps following its component; detach: true makes every instance in the copies a plain element, for a snapshot that later component edits don't change."
     )]
     async fn duplicate_nodes(
         &self,
-        Parameters(p): Parameters<NodesParams>,
+        Parameters(p): Parameters<DuplicateParams>,
         ctx: RequestContext<RoleServer>,
     ) -> ToolResult {
         self.edit(
             &ctx,
             &p.design_id,
             "Duplicate",
-            |doc| edit::duplicate(doc, &p.node_ids, &mut id_in(doc)),
+            |doc| match p.detach {
+                true => edit::duplicate_detached(doc, &p.node_ids, &mut id_in(doc)),
+                false => edit::duplicate(doc, &p.node_ids, &mut id_in(doc)),
+            },
             |handle, roots, _| {
                 // Each copy's outline, so the ids inside it can be edited
                 // without reading the tree again.
@@ -1877,6 +1892,11 @@ impl FiniteMcp {
                     let mut text = format!("Created {} copies:\n", roots.len());
                     for root in &roots {
                         text.push_str(&outline(d.view(), root, 3));
+                    }
+                    let following = edit::instances_in(d.view(), &roots).len();
+                    if following > 0 {
+                        text.push_str(&following_note(following));
+                        text.push('\n');
                     }
                     cut(
                         text,

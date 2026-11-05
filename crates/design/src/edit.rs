@@ -3,7 +3,7 @@
 //! [`crate::Design::commit`] so they land on the right actor's history.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt,
 };
 
@@ -2102,6 +2102,91 @@ pub fn detach_instances(
         ops.extend(components::detach(doc, id, new_id)?);
     }
     Ok(ops)
+}
+
+/// The instances at or below `roots`, roots included. An instance inside
+/// another is skipped: it only exists while its outer instance shows it.
+pub fn instances_in(doc: &Document, roots: &[NodeId]) -> Vec<NodeId> {
+    let mut seen = HashSet::new();
+    roots
+        .iter()
+        .flat_map(|root| doc.subtree(root))
+        .filter(|n| n.is_instance() && !components::is_virtual(&n.id))
+        .filter(|n| seen.insert(n.id.as_str()))
+        .map(|n| n.id.clone())
+        .collect()
+}
+
+/// Turns every instance at or below `roots` into plain elements, however
+/// deep they nest: detaching one leaves the instances it held, and those
+/// are detached in turn. Where [`detach_instances`] stops at the one
+/// instance, this makes a frozen copy of a screen.
+pub fn detach_all(
+    doc: &Document,
+    roots: &[NodeId],
+    new_id: &mut impl FnMut() -> NodeId,
+) -> Result<Vec<Op>> {
+    // Each level of nesting is a round; a component can't hold itself.
+    const ROUNDS: usize = 32;
+    let mut ops = Vec::new();
+    let mut scratch: Option<Document> = None;
+    for _ in 0..ROUNDS {
+        let current = scratch.as_ref().unwrap_or(doc);
+        let instances = instances_in(current, roots);
+        if instances.is_empty() {
+            return Ok(ops);
+        }
+        let round = detach_instances(current, &instances, &mut *new_id)?;
+        let nested = round
+            .iter()
+            .any(|op| matches!(op, Op::Create { node } if node.is_instance()));
+        if nested {
+            let mut next = current.clone();
+            next.apply_all(&round);
+            scratch = Some(next);
+        }
+        ops.extend(round);
+        if !nested {
+            return Ok(ops);
+        }
+    }
+    err("instances nest too deeply to detach")
+}
+
+/// How many instances `ops` turn into plain elements.
+pub fn detached_count(ops: &[Op]) -> usize {
+    ops.iter()
+        .filter(|op| {
+            matches!(
+                op,
+                Op::Set {
+                    key: PropKey::InstanceOf,
+                    value: None,
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+/// [`duplicate`], then [`detach_all`] on the copies, so they keep what the
+/// components show but no longer follow them.
+pub fn duplicate_detached(
+    doc: &Document,
+    ids: &[NodeId],
+    new_id: &mut impl FnMut() -> NodeId,
+) -> Result<(Vec<Op>, Vec<NodeId>)> {
+    let (mut ops, roots) = duplicate(doc, ids, &mut *new_id)?;
+    let follows = ids
+        .iter()
+        .flat_map(|id| doc.subtree(id))
+        .any(|n| n.is_instance() || n.component);
+    if follows {
+        let mut copied = doc.clone();
+        copied.apply_all(&ops);
+        ops.extend(detach_all(&copied, &roots, new_id)?);
+    }
+    Ok((ops, roots))
 }
 
 /// Refuses an edit that would leave the design with more than [`MAX_NODES`].

@@ -285,6 +285,7 @@ pub struct Transaction<'a> {
     doc: &'a mut Document,
     actor: &'a str,
     sets: &'a SetLog,
+    comments: &'a [Comment],
     applied: Vec<Op>,
     /// Each applied op's inverse, in the order the ops applied.
     inverse: Vec<Vec<Op>>,
@@ -299,11 +300,17 @@ pub struct Transaction<'a> {
 }
 
 impl<'a> Transaction<'a> {
-    fn new(doc: &'a mut Document, actor: &'a str, sets: &'a SetLog) -> Self {
+    fn new(
+        doc: &'a mut Document,
+        actor: &'a str,
+        sets: &'a SetLog,
+        comments: &'a [Comment],
+    ) -> Self {
         Self {
             doc,
             actor,
             sets,
+            comments,
             applied: Vec::new(),
             inverse: Vec::new(),
             before: BTreeSet::new(),
@@ -311,6 +318,12 @@ impl<'a> Transaction<'a> {
             view: std::cell::OnceCell::new(),
             imports: Vec::new(),
         }
+    }
+
+    /// The design's comments as they were when the transaction began. Edits
+    /// never change them, so an op can warn about the ones it would orphan.
+    pub fn comments(&self) -> &[Comment] {
+        self.comments
     }
 
     /// The document with every op so far applied.
@@ -584,7 +597,7 @@ impl Design {
         now: u64,
         build: impl FnOnce(&mut Transaction<'_>) -> Result<T, E>,
     ) -> Result<(Option<Change>, T), E> {
-        let mut tx = Transaction::new(&mut self.doc, actor, &self.sets);
+        let mut tx = Transaction::new(&mut self.doc, actor, &self.sets, &self.comments);
         let output = match build(&mut tx) {
             Ok(output) => output,
             Err(error) => {
@@ -628,7 +641,7 @@ impl Design {
         actor: &str,
         build: impl FnOnce(&mut Transaction<'_>) -> Result<T, E>,
     ) -> Result<(Vec<Op>, T), E> {
-        let mut tx = Transaction::new(&mut self.doc, actor, &self.sets);
+        let mut tx = Transaction::new(&mut self.doc, actor, &self.sets, &self.comments);
         let result = build(&mut tx);
         let applied = std::mem::take(&mut tx.applied);
         if !applied.is_empty() {
@@ -995,6 +1008,39 @@ impl Design {
         if message.author.kind == AuthorKind::User {
             comment.passed_by.clear();
         }
+        comment.rev += 1;
+        Ok(comment)
+    }
+
+    /// Pins comment `id` to `node`, an artboard or an element inside one,
+    /// when the one it was pinned to is gone (a screen that was removed and
+    /// rebuilt). The pin keeps its offset from the artboard's top-left corner,
+    /// held inside the artboard, and the comment's other elements are dropped.
+    pub fn repin(&mut self, id: &str, node: &str) -> Result<&Comment, CommentError> {
+        let (board, origin, size) = {
+            let doc = self.view();
+            let board = doc
+                .artboard_of(node)
+                .ok_or_else(|| CommentError::NodeNotFound(node.into()))?;
+            (
+                board.id.clone(),
+                (board.x.unwrap_or(0.0), board.y.unwrap_or(0.0)),
+                crate::edit::pixel_size(board),
+            )
+        };
+        let comment = find(&mut self.comments, id)?;
+        if comment.artboard_id.is_none() {
+            // A canvas pin's x and y are canvas coordinates.
+            comment.x -= origin.0;
+            comment.y -= origin.1;
+        }
+        let inside = |at: f64, extent: Option<f64>| at.clamp(0.0, extent.unwrap_or(f64::MAX));
+        comment.x = inside(comment.x, size.0);
+        comment.y = inside(comment.y, size.1);
+        comment.node_id = (node != board).then(|| node.to_owned());
+        comment.artboard_id = Some(board);
+        comment.extra_node_ids.clear();
+        comment.detached_at = None;
         comment.rev += 1;
         Ok(comment)
     }
@@ -1840,5 +1886,51 @@ mod tests {
         let updated = d.take_comment_updates();
         assert_eq!(updated[0].id, id);
         assert_eq!(updated[0].detached_at, None, "back on its artboard");
+    }
+
+    #[test]
+    fn a_pin_can_move_to_a_rebuilt_artboard() {
+        let mut d = design();
+        let sized = |id: &str, x: f64, width: &str| {
+            let mut board = Node::element(id, "div");
+            board.index = "V".into();
+            board.x = Some(x);
+            board.y = Some(50.0);
+            board.styles.insert("width".into(), width.into());
+            board.styles.insert("height".into(), "200px".into());
+            Op::Create { node: board }
+        };
+        d.commit("agent", "board", &[sized("a", 100.0, "300px")], 1);
+        let id = pin(&mut d, "a");
+        let orphans = |d: &Design, root: &str| {
+            comment::pinned_inside(d.view(), d.comments(), &[root.into()]).len()
+        };
+        assert_eq!(orphans(&d, "a"), 1);
+
+        // The screen is removed and rebuilt narrow, elsewhere, with a new id.
+        d.commit("agent", "delete", &[Op::Delete { id: "a".into() }], 2);
+        d.commit(
+            "agent",
+            "rebuild",
+            &[sized("b", 900.0, "5px"), create("h", Some("b"))],
+            3,
+        );
+        d.take_comment_updates();
+        assert!(d.comments()[0].detached_at.is_some());
+
+        let pinned = d.repin(&id, "h").unwrap().clone();
+        assert_eq!(pinned.artboard_id.as_deref(), Some("b"));
+        assert_eq!(pinned.node_id.as_deref(), Some("h"));
+        assert_eq!(pinned.detached_at, None);
+        // The offset is kept, held inside the 5px-wide artboard.
+        assert_eq!((pinned.x, pinned.y), (5.0, 20.0));
+        assert_eq!(orphans(&d, "h"), 1);
+        assert_eq!(orphans(&d, "b"), 1, "removing its artboard orphans it too");
+
+        // Pointing it at the artboard itself leaves no element.
+        let pinned = d.repin(&id, "b").unwrap();
+        assert_eq!(pinned.node_id, None);
+        assert!(d.repin(&id, "nowhere").is_err());
+        assert!(d.repin("missing", "b").is_err());
     }
 }
