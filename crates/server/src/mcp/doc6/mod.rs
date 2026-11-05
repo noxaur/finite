@@ -715,7 +715,7 @@ impl FiniteMcp {
             }
             if p.check != Some(false) {
                 let clean = self.watch.after_edit(&p.design_id, &handle, change).await;
-                let notes = self.watch.take(&p.design_id);
+                let notes = self.watch.take_for_result(&p.design_id);
                 if !notes.is_empty() {
                     text.push('\n');
                     text.push_str(&super::watch::Taken::text(&notes));

@@ -8,6 +8,8 @@ use finite_design::{
     tokens,
 };
 
+use super::layout::{layout_notes, overlap_note};
+
 /// The most text one tool result returns, about 10,000 tokens. Claude Code
 /// cuts MCP results at 25,000 tokens by default, wherever that falls, and
 /// other clients cap lower: a 56,000-character read went over one's limit
@@ -432,25 +434,44 @@ pub(super) fn shot(image: &crate::screenshot::Image) -> String {
     let px = |v: f64| format!("{}", (v * 10.0).round() / 10.0);
     let a = &image.area;
     let b = &image.bounds;
+    // The shot is snapped out to whole pixels, so each of its edges is under
+    // one from the box's; that isn't worth a second set of numbers.
+    let same = (a.x - b.x).abs() < 1.0
+        && (a.y - b.y).abs() < 1.0
+        && ((a.x + a.width) - (b.x + b.width)).abs() < 1.0
+        && ((a.y + a.height) - (b.y + b.height)).abs() < 1.0;
     let mut out = if image.node == image.artboard {
         format!("Artboard #{}", image.artboard)
     } else {
         format!("#{} in artboard #{}", image.node, image.artboard)
     };
-    let _ = write!(
-        out,
-        ": shows {}×{} at ({}, {}); the node's box is {}×{} at ({}, {}). {}×{} pixels.",
-        px(a.width),
-        px(a.height),
-        px(a.x),
-        px(a.y),
-        px(b.width),
-        px(b.height),
-        px(b.x),
-        px(b.y),
-        image.pixel_width,
-        image.pixel_height,
-    );
+    if same {
+        let _ = write!(
+            out,
+            ": shows the node's box, {}×{} at ({}, {}). {}×{} pixels.",
+            px(b.width),
+            px(b.height),
+            px(b.x),
+            px(b.y),
+            image.pixel_width,
+            image.pixel_height,
+        );
+    } else {
+        let _ = write!(
+            out,
+            ": shows {}×{} at ({}, {}); the node's box is {}×{} at ({}, {}). {}×{} pixels.",
+            px(a.width),
+            px(a.height),
+            px(a.x),
+            px(a.y),
+            px(b.width),
+            px(b.height),
+            px(b.x),
+            px(b.y),
+            image.pixel_width,
+            image.pixel_height,
+        );
+    }
     if image.element != image.node {
         let _ = write!(out, " A text node: captured its parent #{}.", image.element);
     }
@@ -509,143 +530,6 @@ pub(super) fn settled_note<'a>(
     ))
 }
 
-/// How many elements a layout note names before it says how many more.
-const LAYOUT_NAMED: usize = 8;
-
-/// What a screenshot's measurements say about an artboard's layout: content
-/// cut off at its edges, and text that runs past its own box. Agents only
-/// spotted these in the image before, and often didn't, so the note names
-/// the elements and says what to change.
-pub(super) fn layout_notes(
-    doc: &Document,
-    artboard: &str,
-    boxes: &[crate::screenshot::ElementBox],
-    surface: super::Surface,
-) -> String {
-    use std::collections::{HashMap, HashSet};
-    let by_id: HashMap<&str, &crate::screenshot::ElementBox> =
-        boxes.iter().map(|b| (b.id.as_str(), b)).collect();
-    let Some(board) = by_id.get(artboard) else {
-        return String::new();
-    };
-    let line = |id: &str| {
-        outline(doc, id, 0)
-            .lines()
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_owned()
-    };
-    // Elements reaching past the artboard's bottom or right edge. Only the
-    // outermost is named: its children stick out because it does.
-    let (bottom, right) = (board.y + board.height, board.x + board.width);
-    let out: HashSet<&str> = boxes
-        .iter()
-        .filter(|b| {
-            b.id != artboard && (b.y + b.height > bottom + 1.0 || b.x + b.width > right + 1.0)
-        })
-        .map(|b| b.id.as_str())
-        .collect();
-    let mut notes = Vec::new();
-    if !out.is_empty() {
-        let content_bottom = boxes.iter().map(|b| b.y + b.height).fold(bottom, f64::max) - board.y;
-        let content_right = boxes.iter().map(|b| b.x + b.width).fold(right, f64::max) - board.x;
-        let outermost: Vec<&str> = boxes
-            .iter()
-            .map(|b| b.id.as_str())
-            .filter(|id| out.contains(id))
-            .filter(|id| {
-                doc.get(id)
-                    .and_then(|n| n.parent.as_deref())
-                    .is_none_or(|p| !out.contains(p))
-            })
-            .collect();
-        let mut text = String::from("Layout: content is cut off by the artboard's edge.");
-        if content_bottom > board.height + 1.0 {
-            let _ = write!(
-                text,
-                " It is {content_bottom:.0} px tall, but the artboard is {:.0} px. If it should all show, make the artboard taller with {}.",
-                board.height,
-                if surface.doc6() {
-                    format!(
-                        "{{\"op\": \"css\", \"css\": \"#{artboard} {{ height: {content_bottom:.0}px }}\"}}"
-                    )
-                } else {
-                    format!(
-                        "update_styles {{\"updates\": [{{\"nodeIds\": [\"{artboard}\"], \"styles\": {{\"height\": \"{content_bottom:.0}px\"}}}}]}}"
-                    )
-                }
-            );
-        }
-        if content_right > board.width + 1.0 {
-            let _ = write!(
-                text,
-                " It is {content_right:.0} px wide, but the artboard is {:.0} px.",
-                board.width
-            );
-        }
-        text.push_str(" Sticking out:");
-        for id in outermost.iter().take(LAYOUT_NAMED) {
-            let b = by_id[id];
-            let _ = write!(
-                text,
-                "\n  {} (ends at x {:.0}, y {:.0})",
-                line(id),
-                b.x + b.width - board.x,
-                b.y + b.height - board.y
-            );
-        }
-        if outermost.len() > LAYOUT_NAMED {
-            let _ = write!(text, "\n  … and {} more", outermost.len() - LAYOUT_NAMED);
-        }
-        notes.push(text);
-    }
-    let spilling: Vec<&crate::screenshot::ElementBox> = boxes
-        .iter()
-        // Down, a few pixels is a tall glyph, like an emoji, in a tight line height.
-        .filter(|b| b.text_overflow.0 > 2.0 || b.text_overflow.1 > 8.0)
-        .collect();
-    if !spilling.is_empty() {
-        let mut text =
-            String::from("Layout: text runs past its box, so it may overlap or be clipped:");
-        for b in spilling.iter().take(LAYOUT_NAMED) {
-            let _ = write!(text, "\n  {} ", line(&b.id));
-            match b.text_overflow {
-                (x, y) if x > 2.0 && y > 8.0 => {
-                    let _ = write!(text, "({x:.0} px too wide, {y:.0} px too tall)");
-                }
-                (x, _) if x > 2.0 => {
-                    let _ = write!(text, "({x:.0} px too wide)");
-                }
-                (_, y) => {
-                    let _ = write!(text, "({y:.0} px too tall)");
-                }
-            }
-        }
-        if spilling.len() > LAYOUT_NAMED {
-            let _ = write!(text, "\n  … and {} more", spilling.len() - LAYOUT_NAMED);
-        }
-        notes.push(text);
-    }
-    if notes.is_empty() {
-        let used = boxes
-            .iter()
-            .filter(|b| b.id != artboard)
-            .map(|b| b.y + b.height)
-            .fold(board.y, f64::max)
-            - board.y;
-        return format!(
-            "Layout: nothing is cut off, and no text overflows. The lowest element ends at y {used:.0}; the artboard is {:.0} px tall.",
-            board.height
-        );
-    }
-    notes.join("\n")
-}
-
-/// How many text elements the overlap check compares, so a huge artboard
-/// stays fast. It compares every pair, so this is at most about 2 million.
-const OVERLAP_CHECKED: usize = 2_000;
-
 /// The subtree at `root` as an outline with where each element rendered,
 /// relative to its artboard, then what the layout check found in it:
 /// content cut off by the artboard's edge, text overflowing its box, and
@@ -681,7 +565,7 @@ pub(super) fn rendered_outline(
     if !checked.starts_with("Layout: nothing is cut off") {
         notes.push(checked);
     }
-    notes.extend(overlap_note(doc, &in_scope));
+    notes.extend(overlap_note(doc, board, &in_scope));
     if notes.is_empty() {
         out.push_str("Layout: nothing is cut off, no text overflows its box, and no text overlaps other text.\n");
     } else {
@@ -689,58 +573,6 @@ pub(super) fn rendered_outline(
         out.push('\n');
     }
     out
-}
-
-/// The layout check's note on text elements in `boxes` that overlap
-/// each other, other than an element and what's inside it.
-pub(super) fn overlap_note(
-    doc: &Document,
-    boxes: &[crate::screenshot::ElementBox],
-) -> Option<String> {
-    let text: Vec<&crate::screenshot::ElementBox> = boxes
-        .iter()
-        .filter(|b| b.has_text && b.width > 0.0 && b.height > 0.0)
-        .take(OVERLAP_CHECKED)
-        .collect();
-    let mut pairs = Vec::new();
-    for (i, a) in text.iter().enumerate() {
-        for b in &text[i + 1..] {
-            let (w, h) = (
-                (a.x + a.width).min(b.x + b.width) - a.x.max(b.x),
-                (a.y + a.height).min(b.y + b.height) - a.y.max(b.y),
-            );
-            if w > 2.0
-                && h > 2.0
-                && !doc.is_ancestor(&a.id, &b.id)
-                && !doc.is_ancestor(&b.id, &a.id)
-            {
-                pairs.push((a.id.as_str(), b.id.as_str(), w, h));
-            }
-        }
-    }
-    if !pairs.is_empty() {
-        let line = |id: &str| {
-            outline(doc, id, 0)
-                .lines()
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_owned()
-        };
-        let mut text = format!(
-            "Layout: {} pair{} of text elements overlap. Check that's intended, like a badge over a card:",
-            pairs.len(),
-            if pairs.len() == 1 { "" } else { "s" }
-        );
-        for (a, b, w, h) in pairs.iter().take(LAYOUT_NAMED) {
-            let _ = write!(text, "\n  {} and {} ({w:.0} × {h:.0} px)", line(a), line(b));
-        }
-        if pairs.len() > LAYOUT_NAMED {
-            let _ = write!(text, "\n  … and {} more", pairs.len() - LAYOUT_NAMED);
-        }
-        return Some(text);
-    }
-    None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -852,6 +684,31 @@ mod tests {
             settled: settled.map(Duration::from_secs),
             boxes: None,
         }
+    }
+
+    #[test]
+    fn a_shot_snapped_to_whole_pixels_does_not_report_a_second_box() {
+        let shot_of = |area, bounds| {
+            shot(&Image {
+                area,
+                bounds,
+                ..image("n", "a", None)
+            })
+        };
+        let snapped = shot_of(
+            Rect::new(0.0, 0.0, 390.0, 338.0),
+            Rect::new(0.0, 0.4, 390.0, 337.0),
+        );
+        assert!(
+            snapped.contains("shows the node's box, 390×337"),
+            "{snapped}"
+        );
+        assert!(!snapped.contains("the node's box is"), "{snapped}");
+        let moved = shot_of(
+            Rect::new(0.0, 0.0, 390.0, 338.0),
+            Rect::new(0.0, 0.0, 390.0, 300.0),
+        );
+        assert!(moved.contains("the node's box is 390×300"), "{moved}");
     }
 
     #[test]

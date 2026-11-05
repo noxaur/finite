@@ -28,7 +28,7 @@ Adds a file as new artboards: an .html page, a .finite bundle, a .figma.json fro
 "as": "m" names what an op creates (an artboard, the first root of html, the first copy of a move, a page, an import's first artboard, a component); later ops in the same call use "@m" in select or page.
 
 status: a few words shown to people watching ("Making the mobile version"). It also labels the edit in undo and in comment replies.
-A layout check of the artboards the edit touched follows every result: content cut off by the artboard's edge, text overflowing its box or overlapping other text, with the css op that fixes an artboard's height. check: false skips it.
+A layout check of the artboards the edit touched follows every result: content cut off by the artboard's edge (not what a scroller, overflow: hidden or clip-path clips), text overflowing its box or overlapping other text, with the css op that fixes an artboard's height. It lists findings the edit caused or touched and counts the earlier ones; render with output: "layout" lists them all. check: false skips it.
 dryRun: true reports what the ops would change, and changes nothing. Use it before a broad replace or remove.
 
 Returns one numbered section per op: the nodes each changed or created, with their ids.
