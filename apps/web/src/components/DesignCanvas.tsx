@@ -577,13 +577,16 @@ export function DesignCanvas({ id }: { id: string }) {
         return "camera";
       };
     }
-    renderer?.setTool(tool);
+    // Pages stay inert while the camera flies in or out; the presenter
+    // wakes the one it lands on.
+    const flying = presenting !== null && presented?.phase !== "active";
+    renderer?.setTool(flying && tool !== "comment" ? "pointer" : tool);
     // Holding C in interactive mode keeps a comment being written when it's let go.
     if (!commenting && !presenting) {
       setDraft(null);
       setHover(null);
     }
-  }, [tool, presenting]);
+  }, [tool, presenting, presented?.phase]);
 
   useEffect(() => {
     if (!notice) return;

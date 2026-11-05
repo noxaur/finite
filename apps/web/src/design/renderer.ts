@@ -909,6 +909,14 @@ export class Renderer {
 
   private showInputs() {
     for (const [id, frame] of this.frames) this.showInput(id, frame);
+    // A page that stops taking input gives the keyboard back, or its frame
+    // would keep the keys the canvas needs, like Escape.
+    const active = document.activeElement;
+    if (active instanceof HTMLIFrameElement) {
+      for (const [id, frame] of this.frames) {
+        if (frame.iframe === active && !this.takesInput(id)) active.blur();
+      }
+    }
   }
 
   /** Whether artboard `id` takes clicks, typing and the wheel right now. */
