@@ -451,19 +451,28 @@ async fn measure(
     touched: &HashSet<String>,
     before: Option<HashSet<u64>>,
 ) -> Option<Measured> {
-    let plan = handle
-        .read(|d| screenshot::plan_measurement(d.view(), board, screenshot::Options::default()));
+    // `seq` says which document the browser measures. A later read that sees
+    // another one drops the note: a person's edit doesn't bump the watch's
+    // generation, and the boxes would describe a design that's gone.
+    let (plan, seq) = handle.read(|d| {
+        (
+            screenshot::plan_measurement(d.view(), board, screenshot::Options::default()),
+            d.seq(),
+        )
+    });
     let boxes = tokio::time::timeout(MEASURE_LIMIT, screenshot::layout(plan.ok()?))
         .await
         .ok()?
         .ok()?;
     // Everything that reads the document is read here, in one go, so the
     // pairs of overlapping text are compared and keyed without holding it.
-    // `seq` says which document that was, for the lines written below.
-    let (report, texts, reaching, seq) = handle.read(|d| {
+    let (report, texts, reaching) = handle.read(|d| {
+        if d.seq() != seq {
+            return None;
+        }
         let doc = d.view();
         let touched = Touched::new(doc, board, touched);
-        (
+        Some((
             Report::new(doc, board, &boxes, surface),
             // doc6 promises overlapping text too, as get_layout reports it.
             surface.doc6().then(|| Texts::new(doc, &boxes)),
@@ -472,9 +481,8 @@ async fn measure(
                 .map(|b| b.id.as_str())
                 .filter(|id| touched.reaches(id))
                 .collect::<HashSet<&str>>(),
-            d.seq(),
-        )
-    });
+        ))
+    })?;
     let report = match (texts, boxes.first()) {
         (Some(texts), Some(board)) => report.with_overlaps(board, &texts),
         _ => report,
@@ -490,10 +498,8 @@ async fn measure(
         .map(|(f, _)| f)
         .collect();
     let hidden = report.found.len() - kept.len();
-    // Only the lines of the findings named are written under the lock. A
-    // person's edit doesn't bump the watch's generation, so if the design
-    // moved on, the lines would name nodes that no longer match what was
-    // measured: drop the note, and the next check reports.
+    // Only the lines of the findings named are written under the lock, from
+    // the document that was measured.
     let named = Named::new(&kept);
     let notes = if named.is_empty() {
         String::new()
