@@ -434,15 +434,18 @@ fn code_matches<'a>(code: &'a str, needle: &'a str) -> impl Iterator<Item = Stri
     if needle.is_empty() {
         return Vec::new().into_iter();
     }
-    // Lowercase `code`, remembering where each lowercase byte came from, since
-    // lowercasing can change lengths outside ASCII.
-    let mut lower = String::with_capacity(code.len());
-    let mut origin = Vec::with_capacity(code.len() + 1);
+    // Lowercase `code` as the query was (so a final `ς` matches), and record
+    // where each lowercase byte came from, since lowercasing can change
+    // lengths outside ASCII. A context-dependent lowercase keeps each char's
+    // byte length, so the per-char lengths line up with `lower`.
+    let lower = code.to_lowercase();
+    let mut origin = Vec::with_capacity(lower.len());
     for (i, c) in code.char_indices() {
-        for l in c.to_lowercase() {
-            origin.extend(std::iter::repeat_n(i, l.len_utf8()));
-            lower.push(l);
-        }
+        let len: usize = c.to_lowercase().map(char::len_utf8).sum();
+        origin.extend(std::iter::repeat_n(i, len));
+    }
+    if origin.len() != lower.len() {
+        return Vec::new().into_iter();
     }
     let snippets: Vec<String> = lower
         .match_indices(needle)
@@ -973,6 +976,9 @@ mod tests {
         // `İ` lowercases to two chars; a match on them maps back to `İ`.
         let snippets: Vec<_> = code_matches("aİb", "i\u{307}").collect();
         assert_eq!(snippets, ["aİb"]);
+        // A final sigma lowercases as `ς`, as the query does.
+        let snippets: Vec<_> = code_matches("const ΟΣ = 1;", &"ΟΣ".to_lowercase()).collect();
+        assert_eq!(snippets, ["const ΟΣ = 1;"]);
     }
 
     #[test]
