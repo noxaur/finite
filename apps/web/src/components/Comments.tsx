@@ -521,7 +521,7 @@ function Thread({
                   <button
                     key={change.seq}
                     type="button"
-                    title={`${change.label}. Show what changed.`}
+                    title="Show what changed"
                     onClick={() => onShowChange(change.nodeIds)}
                     {...stylex.props(styles.change)}
                   >
