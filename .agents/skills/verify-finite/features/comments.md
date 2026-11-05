@@ -33,7 +33,7 @@ Preconditions:
 - The artboard has no `<script>`, because selectors can't reach a sandboxed one.
 - The design has no comments yet.
 
-- **Agent waits.** Run `$V bg $RUN 02-wait call wait_for_comments '{"designId":"<D>","timeoutSeconds":60}'`. It starts and returns at once, and the call blocks in the background.
+- **Agent waits.** Run `$V bg $RUN 02-wait call wait_for_comments '{"designId":"<D>","timeoutSeconds":55}'`. It starts and returns at once, and the call blocks in the background. 55 seconds is the most the server waits.
 - **Person pins.** Switch to the comment tool and click the button. Run `$V h $RUN key c`, then `$V h $RUN click '[data-artboard] >>> button'`, then `$V save $RUN 01-box snapshot --selector form`. The form shows textbox `Add a comment` [focused] and a disabled `Send`.
 - **Several elements.** Shift-click the heading. Run `$V h $RUN click '[data-artboard] >>> h1' --shift`, then `$V save $RUN 01b-count query '[data-selection-count]'`. It reads `2 elements · Shift-click to add or remove`.
 - **Name.** Run `$V h $RUN click 'button[title="Change your name"]'`, `$V h $RUN type "Verifier"` and `$V h $RUN key Enter`. The comment the agent gets below carries `author` `Verifier`, which proves the name was saved.
