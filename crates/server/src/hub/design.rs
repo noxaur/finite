@@ -222,10 +222,7 @@ impl DesignState {
         self.pending.is_empty()
             && !self.needs_snapshot
             && self.presence.is_empty()
-            && !self
-                .design
-                .actors()
-                .any(|a| finite_design::actor::is_session(a))
+            && !self.design.actors().any(finite_design::actor::is_session)
             && now.saturating_sub(self.last_used) >= UNLOAD_AFTER.as_millis() as u64
     }
 

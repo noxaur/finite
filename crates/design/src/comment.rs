@@ -84,7 +84,7 @@ pub enum Audience {
 }
 
 impl Audience {
-    pub fn is_agents(&self) -> bool {
+    pub(crate) fn is_agents(&self) -> bool {
         matches!(self, Self::Agents)
     }
 }
@@ -186,7 +186,7 @@ pub struct Point {
 
 impl Comment {
     /// The `seq` of the latest message, or 0 for an empty thread.
-    pub fn last_seq(&self) -> u64 {
+    pub(crate) fn last_seq(&self) -> u64 {
         self.messages.last().map_or(0, |m| m.seq)
     }
 

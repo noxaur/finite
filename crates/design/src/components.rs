@@ -200,7 +200,11 @@ fn uses(doc: &Document, component: &str, other: &str) -> bool {
 
 /// Refuses an instance of `component` under `parent` when the component
 /// would end up showing itself.
-pub fn check_cycle(doc: &Document, component: &str, parent: Option<&str>) -> Result<(), EditError> {
+pub(crate) fn check_cycle(
+    doc: &Document,
+    component: &str,
+    parent: Option<&str>,
+) -> Result<(), EditError> {
     let mut node = parent.and_then(|p| doc.get(real_id(p)));
     while let Some(n) = node {
         if n.component && uses(doc, component, &n.id) {
@@ -223,7 +227,7 @@ pub fn check_cycle(doc: &Document, component: &str, parent: Option<&str>) -> Res
 }
 
 /// The component `id`, or why it isn't one.
-pub fn check_component<'a>(doc: &'a Document, id: &str) -> Result<&'a Node, EditError> {
+pub(crate) fn check_component<'a>(doc: &'a Document, id: &str) -> Result<&'a Node, EditError> {
     match doc.get(id) {
         Some(node) if node.component => Ok(node),
         Some(node) if node.is_instance() => err(format!(
@@ -238,7 +242,7 @@ pub fn check_component<'a>(doc: &'a Document, id: &str) -> Result<&'a Node, Edit
 }
 
 /// How many nodes an instance of `component` adds to the expanded design.
-pub fn expanded_size(doc: &Document, component: &str) -> usize {
+pub(crate) fn expanded_size(doc: &Document, component: &str) -> usize {
     preview(doc, component).len()
 }
 

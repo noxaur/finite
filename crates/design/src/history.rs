@@ -12,13 +12,12 @@ pub struct Entry {
 /// One actor's undo and redo stacks for one design.
 ///
 /// Each actor (an agent session, or later a user's tab) owns its own history,
-/// so undo only ever reverses that actor's changes. While a batch is open
-/// (Liveblocks calls this pausing history), commits merge into one entry, so a
-/// drag or a multi-step tool call undoes in one step.
+/// so undo only ever reverses that actor's changes. A multi-step edit undoes
+/// in one step because it is one change (see [`Transaction`](crate::Transaction)).
 ///
 /// Histories are saved with full snapshots (see [`crate::Design::snapshot_to_save`]),
 /// so a named agent can still undo after a clean restart, and rebuilt from the
-/// journal after a crash (see [`crate::Design::replay`]). An open batch isn't saved.
+/// journal after a crash (see [`crate::Design::replay`]).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct History {
     #[serde(default)]
@@ -30,10 +29,6 @@ pub struct History {
     /// expires on time even after its design leaves memory and comes back.
     #[serde(default, rename = "lastUsed", skip_serializing_if = "is_zero")]
     last_used: u64,
-    #[serde(skip)]
-    batch_depth: usize,
-    #[serde(skip)]
-    batch_open: bool,
 }
 
 impl History {
@@ -49,16 +44,8 @@ impl History {
         self.last_used
     }
 
-    pub fn set_last_used(&mut self, at: u64) {
+    pub(crate) fn set_last_used(&mut self, at: u64) {
         self.last_used = at;
-    }
-
-    pub fn can_undo(&self) -> bool {
-        !self.undo.is_empty()
-    }
-
-    pub fn can_redo(&self) -> bool {
-        !self.redo.is_empty()
     }
 
     pub fn undo_labels(&self) -> impl Iterator<Item = &str> {
@@ -70,40 +57,19 @@ impl History {
     }
 
     /// Every op on both stacks.
-    pub fn ops(&self) -> impl Iterator<Item = &Op> {
+    pub(crate) fn ops(&self) -> impl Iterator<Item = &Op> {
         self.undo
             .iter()
             .chain(&self.redo)
             .flat_map(|entry| &entry.ops)
     }
 
-    pub fn begin_batch(&mut self) {
-        self.batch_depth += 1;
-    }
-
-    pub fn end_batch(&mut self) {
-        self.batch_depth = self.batch_depth.saturating_sub(1);
-        if self.batch_depth == 0 {
-            self.batch_open = false;
-        }
-    }
-
     /// Records a fresh change. Clears the redo stack, as in every editor.
-    pub fn record(&mut self, label: String, inverse: Vec<Op>) {
+    pub(crate) fn record(&mut self, label: String, inverse: Vec<Op>) {
         if inverse.is_empty() {
             return;
         }
         self.redo.clear();
-        if self.batch_open
-            && let Some(top) = self.undo.last_mut()
-        {
-            // The newest change must be reversed first.
-            let older = std::mem::take(&mut top.ops);
-            top.ops = inverse;
-            top.ops.extend(older);
-            trim(&mut self.undo);
-            return;
-        }
         push(
             &mut self.undo,
             Entry {
@@ -111,22 +77,21 @@ impl History {
                 ops: inverse,
             },
         );
-        self.batch_open = self.batch_depth > 0;
     }
 
-    pub fn pop_undo(&mut self) -> Option<Entry> {
+    pub(crate) fn pop_undo(&mut self) -> Option<Entry> {
         self.undo.pop()
     }
 
-    pub fn pop_redo(&mut self) -> Option<Entry> {
+    pub(crate) fn pop_redo(&mut self) -> Option<Entry> {
         self.redo.pop()
     }
 
-    pub fn push_undo(&mut self, entry: Entry) {
+    pub(crate) fn push_undo(&mut self, entry: Entry) {
         push(&mut self.undo, entry);
     }
 
-    pub fn push_redo(&mut self, entry: Entry) {
+    pub(crate) fn push_redo(&mut self, entry: Entry) {
         push(&mut self.redo, entry);
     }
 }

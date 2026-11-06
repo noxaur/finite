@@ -533,7 +533,7 @@ impl Design {
         }
     }
 
-    pub fn history_mut(&mut self, actor: &str) -> &mut History {
+    pub(crate) fn history_mut(&mut self, actor: &str) -> &mut History {
         self.histories.entry(actor.to_owned()).or_default()
     }
 
@@ -1434,21 +1434,6 @@ mod tests {
         d.undo("alice", 3).unwrap();
         d.commit("alice", "green", &[color("a", "green")], 4);
         assert!(d.redo("alice", 5).is_none());
-    }
-
-    #[test]
-    fn batch_undoes_in_one_step() {
-        let mut d = design();
-        d.commit("alice", "board", &[create("a", None)], 1);
-        d.history_mut("alice").begin_batch();
-        for c in ["red", "green", "blue"] {
-            d.commit("alice", "drag", &[color("a", c)], 2);
-        }
-        d.history_mut("alice").end_batch();
-        d.undo("alice", 3).unwrap();
-        assert_eq!(color_of(&d, "a"), None);
-        d.redo("alice", 4).unwrap();
-        assert_eq!(color_of(&d, "a").as_deref(), Some("blue"));
     }
 
     #[test]

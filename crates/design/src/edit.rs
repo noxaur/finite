@@ -68,7 +68,7 @@ fn page<'a>(doc: &'a Document, id: &str) -> Result<&'a Page> {
 }
 
 /// Space left between artboards placed automatically.
-pub const ARTBOARD_GAP: f64 = 120.0;
+pub(crate) const ARTBOARD_GAP: f64 = 120.0;
 
 /// Width and height of a node from its `width`/`height` styles, when they are plain pixels.
 pub fn pixel_size(node: &Node) -> (Option<f64>, Option<f64>) {
@@ -654,7 +654,7 @@ fn adds(doc: &Document, fragments: &[Fragment]) -> usize {
 /// Refuses an instance of something that isn't a component, one that would
 /// contain itself, and content the component doesn't have, since an
 /// instance can't hold content of its own.
-pub fn prepare_instances(
+pub(crate) fn prepare_instances(
     doc: &Document,
     fragments: &mut [Fragment],
     parent: Option<&str>,
@@ -965,7 +965,7 @@ fn differences(
 }
 
 /// Accepts `backgroundColor` as well as `background-color`, and keeps `--custom` properties as is.
-pub fn normalize_style_name(name: &str) -> String {
+pub(crate) fn normalize_style_name(name: &str) -> String {
     let name = name.trim();
     if name.starts_with("--") {
         return name.to_owned();
@@ -1289,7 +1289,7 @@ pub enum TokenChange {
 }
 
 /// A design's modes as `(id, name)`, in order.
-pub type ModeList = Vec<(String, String)>;
+pub(crate) type ModeList = Vec<(String, String)>;
 
 /// A design's modes as `(id, name)`, in order, for [`set_tokens`].
 pub fn mode_list(doc: &Document) -> ModeList {

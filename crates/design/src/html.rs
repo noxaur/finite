@@ -37,7 +37,7 @@ pub struct Fragment {
     pub source: Option<NodeId>,
     /// The component name it was written with ([`COMPONENT_ATTR`]): the
     /// first element with a name defines that component, and later ones are
-    /// instances of it (see [`crate::edit::prepare_instances`]).
+    /// instances of it (see `edit::prepare_instances`).
     pub component: Option<String>,
     /// The id to create it with, when it was decided before writing.
     pub id: Option<NodeId>,
@@ -169,10 +169,10 @@ pub const BASE_LAYER: &str = "finite-base";
 /// any layer beat layered ones whatever their specificity, so an artboard's
 /// own `<style>` blocks and inline styles still override them. The cascade
 /// reverses that for `!important`: a shared `!important` wins.
-pub const SHARED_LAYER: &str = "finite-shared";
+pub(crate) const SHARED_LAYER: &str = "finite-shared";
 
 /// Old shared CSS as the text of a `<style>` element, with `</style` broken
-/// up so it can't end the element early. Its rules go in [`SHARED_LAYER`],
+/// up so it can't end the element early. Its rules go in `SHARED_LAYER`,
 /// and so do its leading `@import`s, which can't go inside a layer block
 /// and take a `layer()` instead. The shared CSS rendered with `:root` as
 /// `:host` in shadow roots, and one `<style>` serves both, so `:root`
@@ -271,7 +271,7 @@ pub const INSTANCE_ATTR: &str = "data-instance-of";
 pub const COMPONENT_ATTR: &str = "data-component";
 /// The design's change counter when `read` returned the HTML, on its root.
 /// Written back, it's the base of a three-way merge (see [`Parsed::read_at`]).
-pub const READ_ATTR: &str = "data-read-at";
+pub(crate) const READ_ATTR: &str = "data-read-at";
 
 /// Parses an HTML fragment into detached subtrees.
 ///
@@ -304,7 +304,7 @@ pub struct Parsed {
     /// Where each kept fragment was in the source, numbered like
     /// [`Dropped::anchor`].
     pub paths: Vec<String>,
-    /// The oldest [`READ_ATTR`] on any element: when the author read what it
+    /// The oldest `READ_ATTR` on any element: when the author read what it
     /// rewrites, so a rewrite can keep what others changed since.
     pub read_at: Option<u64>,
 }
@@ -666,7 +666,7 @@ pub fn is_safe_attr(name: &str, value: &str) -> bool {
 
 /// Splits a `style` attribute into `(property, value)` pairs, respecting
 /// quotes and parentheses (`url(data:image/png;base64,...)` contains `;`).
-pub fn parse_style(style: &str) -> Vec<(String, String)> {
+pub(crate) fn parse_style(style: &str) -> Vec<(String, String)> {
     let mut declarations = Vec::new();
     let (mut depth, mut quote, mut start) = (0usize, None::<char>, 0);
     let mut push = |decl: &str| {
@@ -866,7 +866,7 @@ pub struct ExportOptions {
     /// Indents nested elements one per line. Without it, the HTML is written
     /// exactly as it renders, with no whitespace between elements.
     pub indent: bool,
-    /// Writes [`READ_ATTR`] with this value on the root.
+    /// Writes `READ_ATTR` with this value on the root.
     pub read_at: Option<u64>,
 }
 
@@ -1087,13 +1087,13 @@ impl Writer<'_> {
             let style = self.clip(&style_string(&node.styles)).into_owned();
             let _ = write!(self.out, " style=\"{}\"", escape(&style, true));
         }
-        if is_void(&tag) {
+        if is_void(tag) {
             self.out.push_str(" />");
             self.newline();
             return;
         }
         let children = doc.children(Some(&node.id));
-        if is_raw_text(&tag) {
+        if is_raw_text(tag) {
             let code: String = children.iter().filter_map(|c| c.text.as_deref()).collect();
             let code = match self.options.max_code_len {
                 Some(max) if code.chars().count() > max => {
@@ -1210,13 +1210,13 @@ fn write_compact(doc: &Document, node: &Node, ids: bool, out: &mut String) {
             escape(&style_string(&node.styles), true)
         );
     }
-    if is_void(&tag) {
+    if is_void(tag) {
         out.push_str(" />");
         return;
     }
     out.push('>');
     let children = doc.children(Some(&node.id));
-    if is_raw_text(&tag) {
+    if is_raw_text(tag) {
         let code: String = children.iter().filter_map(|c| c.text.as_deref()).collect();
         out.push_str(&raw_text(&code, tag));
     } else {
