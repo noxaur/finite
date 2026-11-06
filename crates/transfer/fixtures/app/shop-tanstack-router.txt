@@ -114,6 +114,7 @@ const route1 = createRoute({ getParentRoute: () => rootRoute, path: "/cart", com
 
 const router = createRouter({
   routeTree: rootRoute.addChildren([route0, route1]),
+  caseSensitive: true,
   scrollRestoration: true,
 });
 

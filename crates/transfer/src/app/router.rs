@@ -163,13 +163,14 @@ impl Router for TanStackRouter {
         router.push_str("\nconst rootRoute = createRootRoute();\n");
         for (i, page) in pages.iter().enumerate() {
             router.push_str(&format!(
-                "const route{i} = createRoute({{ getParentRoute: () => rootRoute, path: \"{}\", component: {} }});\n",
-                page.path, page.component
+                "const route{i} = createRoute({{ getParentRoute: () => rootRoute, path: {}, component: {} }});\n",
+                serde_json::to_string(&page.path).expect("strings serialize"),
+                page.component
             ));
         }
         let routes: Vec<String> = (0..pages.len()).map(|i| format!("route{i}")).collect();
         router.push_str(&format!(
-            "\nconst router = createRouter({{\n  routeTree: rootRoute.addChildren([{}]),\n  scrollRestoration: true,\n}});\n\ndeclare module \"@tanstack/react-router\" {{\n  interface Register {{\n    router: typeof router;\n  }}\n}}\n\nexport function App() {{\n  return <RouterProvider router={{router}} />;\n}}\n",
+            "\nconst router = createRouter({{\n  routeTree: rootRoute.addChildren([{}]),\n  caseSensitive: true,\n  scrollRestoration: true,\n}});\n\ndeclare module \"@tanstack/react-router\" {{\n  interface Register {{\n    router: typeof router;\n  }}\n}}\n\nexport function App() {{\n  return <RouterProvider router={{router}} />;\n}}\n",
             routes.join(", ")
         ));
         vec![

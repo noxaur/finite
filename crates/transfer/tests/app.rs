@@ -91,6 +91,15 @@ fn react_router() -> &'static dyn Router {
     RouterKind::ReactRouter.router()
 }
 
+/// How `kind`'s `router.tsx` writes the route at `path`, when `path` needs
+/// no escapes.
+fn route_at(kind: RouterKind, path: &str) -> String {
+    match kind {
+        RouterKind::ReactRouter => format!("path=\"{path}\""),
+        RouterKind::TanStackRouter => format!("path: \"{path}\""),
+    }
+}
+
 /// The files of an export, by path, as text.
 fn files(exported: &Exported) -> BTreeMap<String, String> {
     tar::read(&exported.bytes)
@@ -336,29 +345,31 @@ fn routes_make_distinct_component_names_and_paths() {
     for (id, route) in [("a", "/"), ("b", "/a-b"), ("c", "/a_b"), ("d", "/404")] {
         screen(&mut d, id, id, 800.0, Some(route), "<p>Hi</p>");
     }
-    let files = files(&export(&d, react_router()).unwrap());
-    let pages: Vec<&str> = files
-        .keys()
-        .filter(|p| p.starts_with("src/pages/"))
-        .map(String::as_str)
-        .collect();
-    assert_eq!(
-        pages,
-        [
-            "src/pages/Page404.tsx",
-            "src/pages/PageAB.tsx",
-            "src/pages/PageAB2.tsx",
-            "src/pages/PageIndex.tsx",
-        ]
-    );
-    // A route that is `/` already stays where it is, and nothing else moves there.
-    let router = &files["src/router.tsx"];
-    for path in ["/", "/a-b", "/a_b", "/404"] {
+    for kind in RouterKind::ALL {
+        let files = files(&export(&d, kind.router()).unwrap());
+        let pages: Vec<&str> = files
+            .keys()
+            .filter(|p| p.starts_with("src/pages/"))
+            .map(String::as_str)
+            .collect();
         assert_eq!(
-            router.matches(&format!("path=\"{path}\"")).count(),
-            1,
-            "{router}"
+            pages,
+            [
+                "src/pages/Page404.tsx",
+                "src/pages/PageAB.tsx",
+                "src/pages/PageAB2.tsx",
+                "src/pages/PageIndex.tsx",
+            ]
         );
+        // A route that is `/` already stays where it is, and nothing else moves there.
+        let router = &files["src/router.tsx"];
+        for path in ["/", "/a-b", "/a_b", "/404"] {
+            assert_eq!(
+                router.matches(&route_at(kind, path)).count(),
+                1,
+                "{kind:?}: {router}"
+            );
+        }
     }
 }
 
@@ -418,15 +429,28 @@ fn awkward() -> Design {
 
 #[test]
 fn routes_that_differ_by_case_stay_apart() {
-    let files = files(&export(&awkward(), react_router()).unwrap());
-    let router = &files["src/router.tsx"];
-    for path in ["/Cart", "/cart"] {
-        let route = router
-            .lines()
-            .find(|l| l.contains(&format!("\"{path}\"")))
-            .unwrap_or_else(|| panic!("{path} in {router}"));
-        // React Router matches case-insensitively unless told otherwise.
-        assert!(route.contains("caseSensitive"), "{route}");
+    for kind in RouterKind::ALL {
+        let files = files(&export(&awkward(), kind.router()).unwrap());
+        let router = &files["src/router.tsx"];
+        for path in ["/Cart", "/cart"] {
+            let routes: Vec<&str> = router
+                .lines()
+                .filter(|l| l.contains(&route_at(kind, path)))
+                .collect();
+            assert_eq!(routes.len(), 1, "{kind:?}: {path} in {router}");
+            match kind {
+                // React Router matches case-insensitively unless told otherwise.
+                RouterKind::ReactRouter => {
+                    assert!(routes[0].contains("caseSensitive"), "{}", routes[0])
+                }
+                // TanStack Router has one switch for the whole tree.
+                RouterKind::TanStackRouter => assert!(
+                    router.contains("createRouter({\n  routeTree: rootRoute.addChildren([")
+                        && router.contains("  caseSensitive: true,\n"),
+                    "{router}"
+                ),
+            }
+        }
     }
 }
 
@@ -437,28 +461,35 @@ fn a_path_is_written_as_a_string_literal() {
         component: "PageA".into(),
         module: "./pages/PageA".into(),
     }];
-    let router = react_router()
-        .files(&pages)
-        .into_iter()
-        .find(|f| f.path == "src/router.tsx")
-        .unwrap()
-        .text;
-    assert!(router.contains("path={\"/a\\\"b\\\\c&d\"}"), "{router}");
-    // Routes made from an id are paths a router can serve.
-    let router = &files(&export(&awkward(), react_router()).unwrap())["src/router.tsx"];
-    assert!(router.contains("path=\"/a-b\""), "{router}");
-    assert!(!router.contains("a\"b"), "{router}");
-    // A route a browser would rewrite falls back to the artboard's name, and says so.
-    assert!(router.contains("path=\"/dots\""), "{router}");
-    let exported = export(&awkward(), react_router()).unwrap();
-    assert!(
-        exported
-            .diagnostics
-            .iter()
-            .any(|d| d.what == "data-route=\"/a/../b\""),
-        "{:?}",
-        exported.diagnostics
-    );
+    for kind in RouterKind::ALL {
+        let router = kind
+            .router()
+            .files(&pages)
+            .into_iter()
+            .find(|f| f.path == "src/router.tsx")
+            .unwrap()
+            .text;
+        let literal = match kind {
+            RouterKind::ReactRouter => "path={\"/a\\\"b\\\\c&d\"}",
+            RouterKind::TanStackRouter => "path: \"/a\\\"b\\\\c&d\"",
+        };
+        assert!(router.contains(literal), "{kind:?}: {router}");
+        // Routes made from an id are paths a router can serve.
+        let exported = export(&awkward(), kind.router()).unwrap();
+        let router = &files(&exported)["src/router.tsx"];
+        assert!(router.contains(&route_at(kind, "/a-b")), "{router}");
+        assert!(!router.contains("a\"b"), "{router}");
+        // A route a browser would rewrite falls back to the artboard's name, and says so.
+        assert!(router.contains(&route_at(kind, "/dots")), "{router}");
+        assert!(
+            exported
+                .diagnostics
+                .iter()
+                .any(|d| d.what == "data-route=\"/a/../b\""),
+            "{:?}",
+            exported.diagnostics
+        );
+    }
 }
 
 /// The cart at 390 and 1440 wide, each with a `.title` of its own color. The
@@ -548,20 +579,22 @@ fn names_jsx_cant_write_are_left_out_and_reported() {
 
 #[test]
 fn files_differ_by_more_than_case() {
-    let files = files(&export(&awkward(), react_router()).unwrap());
-    let pages: Vec<&String> = files
-        .keys()
-        .filter(|p| p.starts_with("src/pages/"))
-        .collect();
-    let mut lower: Vec<String> = pages.iter().map(|p| p.to_ascii_lowercase()).collect();
-    lower.sort();
-    lower.dedup();
-    // A default macOS or Windows disk keeps one file for both.
-    assert_eq!(lower.len(), pages.len(), "{pages:?}");
-    assert_eq!(pages.len(), 9, "{pages:?}");
-    let router = &files["src/router.tsx"];
-    let imports: Vec<&str> = router.lines().filter(|l| l.contains("./pages/")).collect();
-    assert_eq!(imports.len(), pages.len(), "{router}");
+    for kind in RouterKind::ALL {
+        let files = files(&export(&awkward(), kind.router()).unwrap());
+        let pages: Vec<&String> = files
+            .keys()
+            .filter(|p| p.starts_with("src/pages/"))
+            .collect();
+        let mut lower: Vec<String> = pages.iter().map(|p| p.to_ascii_lowercase()).collect();
+        lower.sort();
+        lower.dedup();
+        // A default macOS or Windows disk keeps one file for both.
+        assert_eq!(lower.len(), pages.len(), "{pages:?}");
+        assert_eq!(pages.len(), 9, "{pages:?}");
+        let router = &files["src/router.tsx"];
+        let imports: Vec<&str> = router.lines().filter(|l| l.contains("./pages/")).collect();
+        assert_eq!(imports.len(), pages.len(), "{kind:?}: {router}");
+    }
 }
 
 #[test]
