@@ -92,7 +92,7 @@ Each route is a file in `src/pages/` that holds the route's screens (one per art
 @layer finite-base {
   *, *::before, *::after { box-sizing: border-box; } [hidden] { display: none !important; }
   html, body { margin: 0; }
-  .finite-screen > * { margin-inline: auto; }
+  .finite-page > * { margin-inline: auto; }
 }
 @layer finite-tokens { :root { --brand: #1a73e8; } }
 @layer finite-tokens { [data-finite-mode="1"] { --brand: #8ab4f8; } }
@@ -136,11 +136,13 @@ export default function PageHome() {
   return (
     <>
       <div className="finite-screen PageHome-0">
-        <div data-name="Home" style={{ backgroundColor: "#ffffff", display: "flex", flexDirection: "column", height: "600px", overflow: "hidden", position: "relative", width: "1440px" }}>
-          <Link to="/cart" data-name="Cart link">Cart</Link>
-          <a>Gone</a>
-          <img alt="Logo" src="/assets/5533e7ceb197fbfc4cfc1c88b88dc8e0cd5590c598c0bb74522da078e5a2ef53.png" />
-          <p style={{ color: "var(--brand)" }}>Welcome</p>
+        <div className="finite-page PageHome-0-page">
+          <div data-name="Home" style={{ backgroundColor: "#ffffff", display: "flex", flexDirection: "column", height: "600px", overflow: "hidden", position: "relative", width: "1440px" }}>
+            <Link to="/cart" data-name="Cart link">Cart</Link>
+            <a>Gone</a>
+            <img alt="Logo" src="/assets/5533e7ceb197fbfc4cfc1c88b88dc8e0cd5590c598c0bb74522da078e5a2ef53.png" />
+            <p style={{ color: "var(--brand)" }}>Welcome</p>
+          </div>
         </div>
       </div>
     </>
@@ -154,13 +156,17 @@ export default function PageCart() {
   return (
     <>
       <div className="finite-screen PageCart-0" data-finite-mode="1">
-        <div data-name="Cart mobile" data-route="/cart" style={{ backgroundColor: "#ffffff", display: "flex", flexDirection: "column", height: "600px", overflow: "hidden", position: "relative", width: "390px" }}>
-          <Link to="/">Back</Link>
+        <div className="finite-page PageCart-0-page">
+          <div data-name="Cart mobile" data-route="/cart" style={{ backgroundColor: "#ffffff", display: "flex", flexDirection: "column", height: "600px", overflow: "hidden", position: "relative", width: "390px" }}>
+            <Link to="/">Back</Link>
+          </div>
         </div>
       </div>
       <div className="finite-screen PageCart-1">
-        <div data-name="Cart" data-route="/cart" style={{ backgroundColor: "#ffffff", display: "flex", flexDirection: "column", height: "600px", overflow: "hidden", position: "relative", width: "1440px" }}>
-          <Link to="/">Back</Link>
+        <div className="finite-page PageCart-1-page">
+          <div data-name="Cart" data-route="/cart" style={{ backgroundColor: "#ffffff", display: "flex", flexDirection: "column", height: "600px", overflow: "hidden", position: "relative", width: "1440px" }}>
+            <Link to="/">Back</Link>
+          </div>
         </div>
       </div>
     </>

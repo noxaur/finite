@@ -308,21 +308,24 @@ fn write_page(doc: &Document, name: &str, screens: &[&Screen], links: &Links<'_>
             .filter(|mode| *mode != doc.first_mode())
             .and_then(|mode| modes.iter().position(|(id, _)| *id == mode));
         let mode = mode.map_or(String::new(), |n| format!(" data-finite-mode=\"{n}\""));
+        // Two elements, so the design's CSS can't undo the media queries: the
+        // outer one is only styled by `screens_css`, and the inner one is the
+        // page that the design's `html`, `body` and `:root` rules style.
+        let page = format!("{name}-{i}-page");
         text.push_str(&format!(
-            "      <div className=\"finite-screen {name}-{i}\"{mode}>\n"
+            "      <div className=\"finite-screen {name}-{i}\"{mode}>\n        <div className=\"finite-page {page}\">\n"
         ));
-        let class = format!("{name}-{i}");
         let options = jsx::Options {
-            scope: Some(&class),
+            scope: Some(&page),
             ..Default::default()
         };
-        if let Some(converted) = jsx::convert_with(doc, &screen.artboard, &options, Some(links), 4)
+        if let Some(converted) = jsx::convert_with(doc, &screen.artboard, &options, Some(links), 5)
         {
             text.push_str(&converted.jsx);
             text.push('\n');
             diagnostics.extend(converted.diagnostics);
         }
-        text.push_str("      </div>\n");
+        text.push_str("        </div>\n      </div>\n");
     }
     text.push_str("    </>\n  );\n}\n");
     Written {
@@ -332,7 +335,9 @@ fn write_page(doc: &Document, name: &str, screens: &[&Screen], links: &Links<'_>
     }
 }
 
-/// The rules that show the screen for the viewport's width. The first
+/// The rules that show the screen for the viewport's width. They are the only
+/// rules on a screen's outer element, so the design's own CSS can't show a
+/// screen they hide. The first
 /// screen shows below the second's width, and each other screen from its own
 /// width up to the next screen's.
 fn screens_css(name: &str, screens: &[&Screen]) -> String {
@@ -364,7 +369,7 @@ fn screens_css(name: &str, screens: &[&Screen]) -> String {
 /// screens that use it.
 fn global_css(doc: &Document, flow: &Flow) -> String {
     let mut css = format!(
-        "@layer {} {{\n  {}\n  html, body {{ margin: 0; }}\n  .finite-screen > * {{ margin-inline: auto; }}\n}}\n",
+        "@layer {} {{\n  {}\n  html, body {{ margin: 0; }}\n  .finite-page > * {{ margin-inline: auto; }}\n}}\n",
         html::BASE_LAYER,
         html::BASE_CSS
     );

@@ -441,7 +441,9 @@ fn a_path_is_written_as_a_string_literal() {
     );
 }
 
-/// The cart at 390 and 1440 wide, each with a `.title` of its own color.
+/// The cart at 390 and 1440 wide, each with a `.title` of its own color. The
+/// wide one also styles the page, with `display` that must not show it at 390,
+/// and a selector that holds a comment mark in a string.
 fn cart_with_styles() -> Design {
     let mut d = design();
     screen(
@@ -458,7 +460,7 @@ fn cart_with_styles() -> Design {
         "Cart",
         1440.0,
         Some("/cart"),
-        "<style>.title{color:blue} body{margin:4px}</style><p class=\"title\">Wide</p>",
+        "<style>.title{color:blue} body{margin:4px;display:flex !important} :root{--gap:4px} :is(body,.x) .title{font-weight:700} [data-x=\"/*\"]{color:green}</style><p class=\"title\" data-x=\"/*\">Wide</p>",
     );
     d
 }
@@ -469,13 +471,31 @@ fn a_screens_css_only_reaches_that_screen() {
     let cart = &files["src/pages/PageCart.tsx"];
     // Both screens are in the document at once, so each style is limited to its wrapper.
     assert!(
-        cart.contains("{`:where(.PageCart-0) .title{color:red}`}"),
+        cart.contains("{`:where(.PageCart-0-page) .title{color:red}`}"),
         "{cart}"
     );
     assert!(
-        cart.contains("{`:where(.PageCart-1) .title{color:blue} :where(.PageCart-1){margin:4px}`}"),
+        cart.contains(
+            "{`:where(.PageCart-1-page) .title{color:blue} :where(.PageCart-1-page){margin:4px;display:flex !important} .PageCart-1-page{--gap:4px} :is(:where(.PageCart-1-page),:where(.PageCart-1-page) .x) .title{font-weight:700} :where(.PageCart-1-page) [data-x=\"/*\"]{color:green}`}"
+        ),
         "{cart}"
     );
+}
+
+#[test]
+fn a_screens_css_cant_show_a_screen_that_is_hidden() {
+    let files = files(&export(&cart_with_styles(), react_router()).unwrap());
+    let cart = &files["src/pages/PageCart.tsx"];
+    // The wrapper that the media queries hide has no author rule on it: the
+    // design's `body` is the page inside it.
+    assert!(files["src/global.css"].contains(".PageCart-1 { display: none; }"));
+    assert!(
+        cart.contains(
+            "<div className=\"finite-screen PageCart-1\">\n        <div className=\"finite-page PageCart-1-page\">"
+        ),
+        "{cart}"
+    );
+    assert!(!cart.contains(":where(.PageCart-1)"), "{cart}");
 }
 
 #[test]
