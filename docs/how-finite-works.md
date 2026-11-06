@@ -112,7 +112,7 @@ An op that no longer makes sense is skipped. A `set` on a deleted node does noth
 
 ## A design: the document plus everyone's history
 
-`Design` in `crates/design/src/design.rs` wraps the document with three more things:
+`Design` in `crates/design/src/design/` wraps the document with three more things:
 
 - **`seq`**, a counter that goes up by one for every change. It's how browsers know they're up to date.
 - **One history per actor.** An actor is whoever made a change. Today that's an agent: its `X-Finite-Agent` header if it sends one, otherwise its MCP session id. A `History` (`history.rs`) is an undo stack and a redo stack of inverse ops.
@@ -149,7 +149,7 @@ Say Alice and Bob are both agents on one design:
 4. Bob undoes. `b` is deleted. Alice's red is gone with it, which is correct because the node is gone.
 5. Alice undoes. Her top entry, `set b.color = none`, targets a node that no longer exists, so it's skipped and dropped. Undo falls through to `delete a`.
 
-The test `undo_only_reverses_own_changes` in `design.rs` runs exactly this.
+The test `undo_only_reverses_own_changes` in `design/mod.rs` runs exactly this.
 
 A rewrite with an `html` op keeps the nodes its HTML names by `data-id`, so it doesn't break another agent's undo either. "Rewriting HTML in place" below covers it.
 
@@ -234,7 +234,7 @@ Every value kept from another agent is named in the result, like "kept border-ra
 
 Structure merges too. A child missing from the HTML is deleted only if it was under that parent at the mark. Say A reads a list with Free and Pro, B appends Enterprise, and A writes its copy back with Pro renamed. Enterprise isn't in A's HTML because it didn't exist when A read, so it stays where it is, and the result names it: "kept li #ltk7ccvx "Enterprise", which another agent added after you read it. Delete it if you meant to remove it." The same goes for an element another agent moved under that parent since the read ("moved here"). B can still undo its add. Elements A itself added or moved since follow A's HTML, and an element that was there at the read is deleted, even if someone moved it within the same parent since.
 
-The base comes from a **set log** (`SetLog` in `design.rs`): for each recent change, the old value of each property it set, and the parent before the change of each node it created, deleted or moved (none for a created node). Both come from the change's inverse. It holds the last 512 such changes, up to about 8 MB. It's kept in memory only, and loading a design or replaying its journal starts it empty. A mark older than what it holds can't be merged, so the result says the HTML replaced values others changed since the read, and that elements others added since were removed. Merging scans the log from the mark once, so it costs about as much as the changes since the read.
+The base comes from a **set log** (`SetLog` in `design/three_way.rs`): for each recent change, the old value of each property it set, and the parent before the change of each node it created, deleted or moved (none for a created node). Both come from the change's inverse. It holds the last 512 such changes, up to about 8 MB. It's kept in memory only, and loading a design or replaying its journal starts it empty. A mark older than what it holds can't be merged, so the result says the HTML replaced values others changed since the read, and that elements others added since were removed. Merging scans the log from the mark once, so it costs about as much as the changes since the read.
 
 ### Finding elements with CSS selectors
 
@@ -706,7 +706,7 @@ Comments live beside the document, not inside it, so undo never touches them. Th
 
 Each comment carries a **revision number**, `rev`. It starts at 0 and goes up by one with every change: a reply, a resolve, an edit, or a pin moving because its artboard went or came back. A browser can get the same comment twice. The server broadcasts it on the socket, and the REST call that changed it also returns it. The two can arrive in either order, and another change can land in between. Say you reply, and an agent answers at once. The agent's reply can reach your socket before the REST answer to your own reply. So `DesignSession.upsertComment` keeps whichever copy has the higher `rev`, and drops an older copy that arrives late.
 
-All the thread rules live in `crates/design`: `comment.rs` defines the types and checks, and `Design::add_comment`, `reply`, `set_resolved`, `edit_message` and `delete_comment` apply them. The hub only takes the lock, calls one of those, and broadcasts the updated comment. That means you can test a comment rule with a plain function call, like the tests at the bottom of `design.rs`.
+All the thread rules live in `crates/design`: `comment.rs` defines the types and checks, and `Design::add_comment`, `reply`, `set_resolved`, `edit_message` and `delete_comment` apply them. The hub only takes the lock, calls one of those, and broadcasts the updated comment. That means you can test a comment rule with a plain function call, like the tests in `design/comments.rs`.
 
 ## Saving and recovering
 
@@ -717,7 +717,7 @@ Everything above happens in memory. This section covers what reaches the disk, w
 Saving is a **write-ahead journal with compaction**, the same idea databases use. Each design has two files in `FINITE_DATA_DIR/designs/` (`crates/server/data` in dev):
 
 - `<id>.json` is the last full snapshot.
-- `<id>.log` is the journal: one JSON record per line for everything since that snapshot. A record is a change, the new state of a comment, a deleted comment's id, or the design's name and timestamps (`Record` in `crates/design/src/design.rs`).
+- `<id>.log` is the journal: one JSON record per line for everything since that snapshot. A record is a change, the new state of a comment, a deleted comment's id, or the design's name and timestamps (`Record` in `crates/design/src/design/`).
 
 After a burst of edits, the save task appends the new records to the log. That costs the same for a ten-node design as for a ten-thousand-node one. In the demo, one style change appended 305 bytes instead of rewriting the 11 KB snapshot. Every 1,000 records, or once the log's changes add up to 16 MB, the task writes a fresh snapshot instead and deletes the log. That step is **compaction**.
 
@@ -949,7 +949,7 @@ The guide explains each limit where it applies. This is the list in one place. M
 | Nodes in a design                      | 100,000                                                           | `MAX_NODES` in `document.rs`               | Every node is journaled, held in memory and sent to viewers      |
 | Pages in a design                      | 100                                                               | `MAX_PAGES` in `document.rs`               | Every page shows in the sidebar and in `read`'s overview         |
 | Nesting depth                          | 256 levels                                                        | `MAX_DEPTH` in `document.rs`               | Tree walks are recursive; deeper overflowed the stack            |
-| Nodes shown by instances               | 100,000, counted with the design's own                            | `room_for` in `edit/mod.rs`, `Expander`        | Instances nested in instances multiply                           |
+| Nodes shown by instances               | 100,000, counted with the design's own                            | `room_for` in `edit/mod.rs`, `Expander`    | Instances nested in instances multiply                           |
 | HTML nesting before parsing            | 4,096 by a quick count                                            | `html::parse`                              | html5ever is quadratic in depth                                  |
 | Undo steps per actor and stack         | 200 steps, about 32 MB                                            | `History::LIMIT`, `History::BYTE_LIMIT`    | Undoing a big delete recreates every node in it                  |
 | Undo for a named agent                 | 6 idle hours                                                      | `HISTORY_TTL` in `hub/mod.rs`              | Histories keep memory and snapshots busy                         |

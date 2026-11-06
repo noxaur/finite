@@ -121,9 +121,7 @@ pub fn create_artboard(doc: &Document, id: NodeId, spec: NewArtboard) -> Result<
         page(doc, id)?;
     }
     let on = spec.page.as_deref().unwrap_or_else(|| doc.first_page());
-    let (x, y) = spec
-        .position
-        .unwrap_or_else(|| find_placement(doc, on));
+    let (x, y) = spec.position.unwrap_or_else(|| find_placement(doc, on));
     let mut styles = default_artboard_styles();
     for (name, value) in normalize_styles(spec.styles) {
         for longhand in longhands(&name) {

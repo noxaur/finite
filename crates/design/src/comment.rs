@@ -47,7 +47,7 @@ pub const MAX_MESSAGES: usize = 200;
 /// How many elements one comment can point at, counting `node_id`.
 pub const MAX_SELECTION: usize = 50;
 /// How many recent changes a design remembers: [`ChangeLog`] and the merge
-/// log in `design.rs` both keep this many.
+/// log in `design/three_way.rs` both keep this many.
 pub(crate) const LOG_LIMIT: usize = 512;
 /// How many nodes a [`ChangeRef`] lists.
 const NODE_LIMIT: usize = 24;

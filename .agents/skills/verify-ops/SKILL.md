@@ -1,6 +1,6 @@
 ---
 name: verify-ops
-description: Exhaustively check that every op's inverse puts the document back exactly, and that undo and redo stacks rebuilt after a restart match the live ones. Use when a change touches Document::try_apply, apply_all, insert or remove in crates/design/src/document.rs, Node::get/set in node.rs, History in history.rs, or Design::commit, undo, redo, step, finish, replay, replay_change, replay_with_history, snapshot_to_save or from_snapshot in design.rs, or when asked whether undo can corrupt a design or stop working after a restart.
+description: Exhaustively check that every op's inverse puts the document back exactly, and that undo and redo stacks rebuilt after a restart match the live ones. Use when a change touches Document::try_apply, apply_all, insert or remove in crates/design/src/document.rs, Node::get/set in node.rs, History in history.rs, or Design::commit, undo, redo, step, finish, replay, replay_change, replay_with_history, snapshot_to_save or from_snapshot in design/mod.rs, or when asked whether undo can corrupt a design or stop working after a restart.
 ---
 
 # Verify ops
@@ -16,17 +16,17 @@ The code today passes the second check and breaks the first in two known ways, l
 
 Yes, if it changes a function in this table.
 
-| Check                     | Code                                                                                                                                                                                                                                                                                                                                   |
-| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `every_op_undoes_exactly` | `document.rs`: `Document::try_apply`, `apply`, `apply_all`, `insert`, `remove`, `can_parent`, `subtree`, `is_ancestor`, `link_instance`, `unlink_instance`. `node.rs`: `Node::get`, `Node::set`. `fractional::is_valid`. `tokens::check_name`, `check_value`                                                                           |
-| `undo_survives_a_restart` | `design.rs`: `Design::commit`, `undo`, `redo`, `step`, `finish`, `replay`, `replay_change`, `replay_with_history`, `snapshot_to_save`, `from_snapshot`, `history_mut`. `history.rs`: `History::record`, `push`, `trim`, and the pop and push methods. The serde derives on `Snapshot`, `Record`, `Change`, `History`, `Entry` and `Op` |
+| Check                     | Code                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `every_op_undoes_exactly` | `document.rs`: `Document::try_apply`, `apply`, `apply_all`, `insert`, `remove`, `can_parent`, `subtree`, `is_ancestor`, `link_instance`, `unlink_instance`. `node.rs`: `Node::get`, `Node::set`. `fractional::is_valid`. `tokens::check_name`, `check_value`                                                                               |
+| `undo_survives_a_restart` | `design/mod.rs`: `Design::commit`, `undo`, `redo`, `step`, `finish`, `replay`, `replay_change`, `replay_with_history`, `snapshot_to_save`, `from_snapshot`, `history_mut`. `history.rs`: `History::record`, `push`, `trim`, and the pop and push methods. The serde derives on `Snapshot`, `Record`, `Change`, `History`, `Entry` and `Op` |
 
 Paths are under `crates/design/src/`. The server calls these from `DesignState::restore` and `DesignHandle::edit` in `crates/server/src/hub/design.rs`, but the check runs only the design crate.
 
 **Sync commit: `f52aa74`.** That's the last commit at which the check was confirmed to describe this code. To see what changed since then, run:
 
 ```sh
-git diff f52aa74 -- crates/design/src/document.rs crates/design/src/node.rs crates/design/src/design.rs crates/design/src/history.rs crates/design/src/fractional.rs
+git diff f52aa74 -- crates/design/src/document.rs crates/design/src/node.rs crates/design/src/design/mod.rs crates/design/src/history.rs crates/design/src/fractional.rs
 ```
 
 If the diff touches a function in the table, read the check's op lists (`ops()` and `edits()`) next to it before you trust a pass. A new `Op` variant, a new `PropKey`, or a new validation rule in `try_apply` needs new entries in `ops()`, or the check won't try it. Move the sync commit forward, in this file, only after you've confirmed that the op lists still cover the code at the new commit.
