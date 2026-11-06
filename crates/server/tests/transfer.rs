@@ -76,7 +76,18 @@ async fn an_import_keeps_its_bytes_and_survives_a_restart() {
 
     // After a restart, the record and the nodes are both still there.
     hub.flush();
-    drop((hub, store));
+    drop(hub);
+    // The hub's background tasks let go of the store a moment later, and
+    // the folder stays locked until they do.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while Arc::strong_count(&store) > 1 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the old hub kept the store"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    drop(store);
     let hub = Hub::new(Arc::new(FileStore::new(&dir).unwrap())).unwrap();
     let (record, bytes) = transfer::original(&hub, &id, &result.import.id)
         .await
