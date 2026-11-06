@@ -31,6 +31,9 @@ pub use router::{File, Package, Page, Router, RouterKind};
 /// The name a screen imports the router's link component by.
 const LINK: &str = "Link";
 
+/// The prop of the link component that holds where to go.
+const LINK_PROP: &str = "to";
+
 pub struct App;
 
 impl Codec for App {
@@ -121,24 +124,22 @@ pub fn write_with(
     };
     let links = Links {
         component: LINK,
-        prop: router.link_prop(),
+        prop: LINK_PROP,
         resolve: &resolve,
     };
 
     let mut diagnostics = Vec::new();
     for bad in &flow.bad_routes {
-        diagnostics.push(Diagnostic {
-            node: Some(bad.artboard.clone()),
-            path: format!("#{}", bad.artboard),
-            what: format!("data-route={:?}", bad.route),
-            feature: Feature::Frame,
-            reason: "it isn't a path like /cart, so the artboard's route is made from its name"
-                .into(),
-            preserved: Score::No,
-            visual: Score::Yes,
-            editable: Score::Yes,
-            quarantined: false,
-        });
+        diagnostics.push(
+            Diagnostic::new(
+                Feature::Frame,
+                format!("data-route={:?}", bad.route),
+                "it isn't a path like /cart, so the artboard's route is made from its name",
+                [Score::No, Score::Yes, Score::Yes],
+            )
+            .at(format!("#{}", bad.artboard))
+            .on(&bad.artboard),
+        );
     }
     let mut css = String::new();
     let mut pages = Vec::new();
@@ -146,17 +147,16 @@ pub fn write_with(
     for ((route, name), path) in flow.routes.iter().zip(&names).zip(&served) {
         let (screens, dropped) = shown(route);
         for (screen, reason) in dropped {
-            diagnostics.push(Diagnostic {
-                node: Some(screen.artboard.clone()),
-                path: format!("#{}", screen.artboard),
-                what: format!("the screen {}", artboard_name(doc, &screen.artboard)),
-                feature: Feature::Frame,
-                reason: format!("{reason}, so it was left out of the route {}", route.path),
-                preserved: Score::No,
-                visual: Score::No,
-                editable: Score::Yes,
-                quarantined: false,
-            });
+            diagnostics.push(
+                Diagnostic::new(
+                    Feature::Frame,
+                    format!("the screen {}", artboard_name(doc, &screen.artboard)),
+                    format!("{reason}, so it was left out of the route {}", route.path),
+                    [Score::No, Score::No, Score::Yes],
+                )
+                .at(format!("#{}", screen.artboard))
+                .on(&screen.artboard),
+            );
         }
         let page = write_page(doc, name, &screens, &links);
         diagnostics.extend(page.diagnostics);

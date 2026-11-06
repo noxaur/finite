@@ -16,38 +16,24 @@ mod text;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use base64::{Engine, engine::general_purpose::STANDARD};
 use finite_design::{
     NodeKind,
     html::{self, Dropped, Fragment, Policy},
-    import::{BlobHash, Dependency},
+    import::BlobHash,
     label,
-    version::VersionError,
 };
 use serde_json::Value;
 
 use super::payload::{FigNode, KIND, PAYLOAD, Paint, Payload};
-use crate::{Anchor, Board, Diagnostic, Error, Feature, Imported, Input, Score, assets};
+use crate::{
+    Anchor, Board, Diagnostic, Error, Feature, Imported, Input, Score, assets, json_file::JsonFile,
+};
 
 /// Styles for one node, as CSS property names and values.
 type Styles = BTreeMap<String, String>;
 
 pub fn read(input: &Input<'_>) -> Result<Imported, Error> {
-    let json = std::str::from_utf8(input.bytes)
-        .map_err(|_| Error("the file isn't UTF-8 text, so it can't be a Figma payload".into()))?;
-    // Each layer nests an object and its children's array, and a layer's
-    // paints and text runs nest a few levels more.
-    let limit = 2 * finite_design::MAX_DEPTH + 16;
-    let payload: Payload = PAYLOAD.decode_nested(json, limit).map_err(|e| match e {
-        VersionError::Json(e) => Error(format!("this isn't a Figma payload: {e}")),
-        other => Error(other.to_string()),
-    })?;
-    if payload.kind != KIND {
-        return Err(Error(format!(
-            "this isn't a Figma payload: its kind is {:?}",
-            payload.kind
-        )));
-    }
+    let payload = Payload::read(input.bytes)?;
     let (images, blobs) = images(&payload)?;
     let mut diagnostics = Vec::new();
     let mut reported = BTreeSet::new();
@@ -66,21 +52,15 @@ pub fn read(input: &Input<'_>) -> Result<Imported, Error> {
             walk.board(node)
         })
         .collect();
-    let dependencies = blobs
-        .iter()
-        .map(|(hash, _)| Dependency {
-            url: format!("{}{hash}", assets::SCHEME),
-            blob: Some(hash.clone()),
-        })
-        .collect();
+    let (blobs, dependencies) = assets::carried(blobs);
     Ok(Imported {
         pages: Vec::new(),
         format: "figma",
-        input_kind: format!("figma-plugin-payload v{}", PAYLOAD.version),
+        input_kind: format!("{KIND} v{}", PAYLOAD.version),
         boards,
         tokens: Default::default(),
         css: None,
-        blobs: blobs.into_iter().map(|(_, bytes)| bytes).collect(),
+        blobs,
         dependencies,
         diagnostics,
     })
@@ -119,10 +99,7 @@ fn images(
     let mut hashes = BTreeMap::new();
     let mut blobs: Vec<(BlobHash, Vec<u8>)> = Vec::new();
     for (figma, base64) in &payload.images {
-        let bytes = STANDARD
-            .decode(base64)
-            .map_err(|_| Error(format!("the payload's image {figma} isn't valid base64")))?;
-        let hash = BlobHash::of(&bytes);
+        let (hash, bytes) = assets::decode(&format!("the payload's image {figma}"), base64)?;
         if !blobs.iter().any(|(h, _)| *h == hash) {
             blobs.push((hash.clone(), bytes));
         }
@@ -361,28 +338,14 @@ impl Walk<'_> {
 
     /// Reports what the SVG parser left out, on the nearest node it kept.
     fn quarantine(&mut self, me: Option<usize>, base: usize, id: &str, dropped: Dropped) {
-        let script = dropped.what == "<script>" || !dropped.what.starts_with('<');
-        let (feature, visual) = if script {
-            (Feature::Script, Score::Unknown)
-        } else {
-            (Feature::Embed, Score::No)
+        let anchor = Anchor {
+            board: self.board,
+            node: dropped.anchor.map(|a| base + a).or(me),
         };
+        let path = format!("{id}/svg{}", dropped.path);
         self.diagnostics.push((
-            Anchor {
-                board: self.board,
-                node: dropped.anchor.map(|a| base + a).or(me),
-            },
-            Diagnostic {
-                node: None,
-                path: format!("{id}/svg{}", dropped.path),
-                what: dropped.what,
-                feature,
-                reason: dropped.reason.to_owned(),
-                preserved: Score::Yes,
-                visual,
-                editable: Score::No,
-                quarantined: true,
-            },
+            anchor,
+            Diagnostic::quarantined(path, dropped.what, dropped.reason),
         ));
     }
 
@@ -416,25 +379,14 @@ impl Walk<'_> {
         what: impl Into<String>,
         feature: Feature,
         reason: &str,
-        [preserved, visual, editable]: [Score; 3],
+        scores: [Score; 3],
     ) {
-        self.diagnostics.push((
-            Anchor {
-                board: self.board,
-                node: me,
-            },
-            Diagnostic {
-                node: None,
-                path: path.to_owned(),
-                what: what.into(),
-                feature,
-                reason: reason.to_owned(),
-                preserved,
-                visual,
-                editable,
-                quarantined: false,
-            },
-        ));
+        let anchor = Anchor {
+            board: self.board,
+            node: me,
+        };
+        let diagnostic = Diagnostic::new(feature, what, reason, scores).at(path);
+        self.diagnostics.push((anchor, diagnostic));
     }
 }
 
@@ -478,7 +430,11 @@ fn image_url(images: &BTreeMap<String, BlobHash>, paint: &Paint) -> Option<Strin
 mod tests {
     use std::{fs, path::PathBuf};
 
-    use finite_design::{Design, DesignMeta, Document, import::ImportRecord};
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use finite_design::{
+        Design, DesignMeta, Document,
+        import::{Dependency, ImportRecord},
+    };
     use serde_json::json;
 
     use super::*;
@@ -549,7 +505,7 @@ mod tests {
     #[test]
     fn a_payload_becomes_artboards() {
         let imported = import(&fixture()).unwrap();
-        assert_eq!(imported.input_kind, "figma-plugin-payload v1");
+        assert_eq!(imported.input_kind, "figma-payload v1");
         // Two Figma hashes share one image's bytes, which are stored once.
         assert_eq!(imported.blobs, [PNG.to_vec()]);
         let hash = BlobHash::of(PNG);

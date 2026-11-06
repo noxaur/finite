@@ -8,20 +8,16 @@ pub(crate) mod page_css;
 use std::collections::BTreeSet;
 
 use finite_design::{
-    edit,
-    html::{self, Dropped, ExportOptions, Fragment, Policy},
+    css_scan, edit,
+    html::{self, DEFAULT_ARTBOARD_SIZE, Dropped, ExportOptions, Fragment, Policy},
     import::Dependency,
     tokens,
 };
 
 use crate::{
     Anchor, Board, Codec, Diagnostic, Direction, Error, Exported, Feature, Imported, Input, LOOK,
-    Revision, Scope, Score, Support, assets, file_stem,
+    Revision, Scope, Score, Support, assets, feature, file_stem,
 };
-
-/// The width of the artboard an HTML file goes into: a desktop screen. It
-/// grows to fit the content, since a file says nothing about a height.
-const WIDTH: f64 = 1440.0;
 
 pub struct Html;
 
@@ -31,29 +27,7 @@ impl Codec for Html {
     }
 
     fn support(&self, feature: Feature, direction: Direction) -> Support {
-        use {Direction::*, Support::*};
-        match (feature, direction) {
-            (
-                Feature::Frame
-                | Feature::Text
-                | Feature::SolidFill
-                | Feature::Image
-                | Feature::FlexLayout,
-                Import | Export,
-            ) => Exact,
-            // Imported scripts are quarantined; scripts written in Finite export as they are.
-            (Feature::Script, Import) => Opaque,
-            (Feature::Script, Export) => Exact,
-            // Finite never holds embeds, so there are none to export.
-            (Feature::Embed, Import) => Opaque,
-            (Feature::Embed, Export) => Unsupported,
-            // A page is the design, not how it got there.
-            (Feature::ImportHistory, Import | Export) => Unsupported,
-            // `data-instance-of` would point at a component the file's reader
-            // doesn't have, so an instance is written as the elements it shows.
-            (Feature::Instance, Import) => Unsupported,
-            (Feature::Instance, Export) => Approximate,
-        }
+        feature::finite_markup(feature, direction)
     }
 
     fn read(&self, input: &Input<'_>) -> Result<Imported, Error> {
@@ -65,7 +39,8 @@ impl Codec for Html {
             .filter(|name| !name.is_empty());
         let mut board = Board {
             name: file_stem.unwrap_or("Imported HTML").to_owned(),
-            width: WIDTH,
+            // A file says nothing about a height, so the artboard grows to fit.
+            width: DEFAULT_ARTBOARD_SIZE.0,
             auto_height: true,
             ..Board::default()
         };
@@ -154,32 +129,13 @@ fn is_page(source: &str) -> bool {
         .any(|tag| head.contains(tag))
 }
 
-/// A diagnostic for content the parser left out. All of it stays in the
-/// import's original bytes, so it's preserved but not editable.
+/// A diagnostic for content the parser left out.
 pub(crate) fn quarantine(dropped: Dropped) -> (Anchor, Diagnostic) {
-    let script = dropped.what == "<script>" || !dropped.what.starts_with('<');
-    let (feature, visual) = if script {
-        // A script might change how the page looks once it runs, or not.
-        (Feature::Script, Score::Unknown)
-    } else {
-        // An embed shows something, and Finite won't.
-        (Feature::Embed, Score::No)
-    };
     let anchor = Anchor {
         board: 0,
         node: dropped.anchor,
     };
-    let diagnostic = Diagnostic {
-        node: None,
-        path: dropped.path,
-        what: dropped.what,
-        feature,
-        reason: dropped.reason.to_owned(),
-        preserved: Score::Yes,
-        visual,
-        editable: Score::No,
-        quarantined: true,
-    };
+    let diagnostic = Diagnostic::quarantined(dropped.path, dropped.what, dropped.reason);
     (anchor, diagnostic)
 }
 
@@ -221,20 +177,15 @@ fn page_css(board: &mut Board, fragments: &mut [Fragment]) -> Vec<(Anchor, Diagn
                     board: 0,
                     node: Some(*ordinal),
                 },
-                Diagnostic {
-                    node: None,
-                    path: String::new(),
-                    what: "<style>".into(),
-                    feature: Feature::Frame,
-                    reason: format!(
+                Diagnostic::new(
+                    Feature::Frame,
+                    "<style>",
+                    format!(
                         "{} selector(s) for <html> or <body> don't map onto the artboard, which became both",
                         rewritten.unmapped
                     ),
-                    preserved: Score::Yes,
-                    visual: Score::Unknown,
-                    editable: Score::Yes,
-                    quarantined: false,
-                },
+                    [Score::Yes, Score::Unknown, Score::Yes],
+                ),
             ));
         }
     }
@@ -302,31 +253,12 @@ fn dependencies(board: &Board) -> Vec<Dependency> {
     }
     walk(&board.content, &mut values, &mut urls);
     for value in values {
-        urls.extend(css_urls(value));
+        urls.extend(css_scan::urls(value));
     }
     urls.into_iter()
         .filter(|url| is_external(url))
         .map(|url| Dependency { url, blob: None })
         .collect()
-}
-
-/// The URLs in CSS: each `url(…)`, and each `@import "…"`.
-fn css_urls(css: &str) -> Vec<String> {
-    let mut urls = Vec::new();
-    let lower = css.to_ascii_lowercase();
-    for (marker, close) in [("url(", ")"), ("@import \"", "\""), ("@import '", "'")] {
-        let mut from = 0;
-        while let Some(at) = lower[from..].find(marker) {
-            let start = from + at + marker.len();
-            let Some(len) = css[start..].find(close) else {
-                break;
-            };
-            let url = css[start..start + len].trim().trim_matches(['"', '\'']);
-            urls.push(url.to_owned());
-            from = start + len;
-        }
-    }
-    urls
 }
 
 /// Whether `url` names something outside the file: not inline data, not a

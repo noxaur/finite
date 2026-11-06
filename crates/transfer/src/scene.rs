@@ -20,7 +20,6 @@ pub const COMPUTED: &[&str] = &[
     "visibility",
     "opacity",
     "overflow",
-    "box-sizing",
     "flex-direction",
     "flex-wrap",
     "flex-grow",
