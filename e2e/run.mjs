@@ -160,7 +160,7 @@ try {
   await check("the Prototypes tab opens an empty prototype with a composer", async () => {
     await (await page.waitForSelector('[role="tab"]::-p-text(Prototypes)')).click();
     await page.waitForFunction(() => location.search.includes("tab=prototypes"));
-    await page.waitForSelector("::-p-text(New prototype)", { timeout: 10_000 });
+    await page.waitForSelector("::-p-text(Describe something to prototype)", { timeout: 10_000 });
     await page.waitForSelector('[aria-label="Message"]', { visible: true, timeout: 10_000 });
   });
 
