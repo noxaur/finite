@@ -92,7 +92,7 @@ Sibling order uses fractional indexes, so inserting or moving a node rewrites on
 | `apps/desktop`        | Electron main and preload processes, bundled with `vp pack`                                             |
 | `apps/figma-plugin`   | The Finite plugin for Figma, which trades `.figma.json` files with Finite's Import and Export           |
 | `crates/design`       | The document model with no I/O: nodes, ops and inverses, history, edit commands, HTML import/export     |
-| `crates/transfer`     | Import and export: the HTML, `.finite`, repo, Figma and JSX codecs (`docs/import-export.md`)            |
+| `crates/transfer`     | Import and export: the HTML, `.finite`, repo, Figma, JSX and app codecs (`docs/import-export.md`)       |
 | `crates/wasm`         | The same model built as WebAssembly (`dist/finite.wasm`), which the web app loads                       |
 | `crates/server`       | Rust server (axum). Serves `/api/*`, the MCP endpoint at `/mcp`, and the built frontend in release mode |
 | `Cargo.toml`          | Cargo workspace for everything in `crates/`                                                             |

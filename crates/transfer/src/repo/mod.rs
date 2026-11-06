@@ -23,8 +23,6 @@
 //! Reading applies the same rules as an HTML import: scripts and other
 //! code that could run are quarantined.
 
-mod tar;
-
 use std::collections::BTreeMap;
 
 use finite_design::{
@@ -38,7 +36,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Anchor, Board, Codec, Diagnostic, Direction, Error, Exported, Feature, Imported, Input,
-    Revision, Scope, Score, Support, Tokens, assets, file_stem, html::quarantine,
+    Revision, Scope, Score, Support, Tokens, assets, file_stem, html::quarantine, tar,
 };
 
 /// The manifest's format and version. See `finite_design::version`.
@@ -298,7 +296,7 @@ impl Codec for Repo {
         for hash in hashes {
             match revision.blobs.get(&hash)? {
                 Some(bytes) => entries.push(tar::Entry {
-                    path: format!("assets/{hash}{}", extension(&bytes)),
+                    path: format!("assets/{hash}{}", assets::extension(&bytes)),
                     bytes,
                 }),
                 None => diagnostics.push(Diagnostic {
@@ -499,18 +497,6 @@ fn lay_out(compact: &str) -> String {
     }
     out.push('\n');
     out
-}
-
-/// The extension that lets a file manager open a blob, from its first bytes.
-fn extension(bytes: &[u8]) -> &'static str {
-    match assets::media_type(bytes) {
-        "image/png" => ".png",
-        "image/jpeg" => ".jpg",
-        "image/gif" => ".gif",
-        "image/webp" => ".webp",
-        "image/svg+xml" => ".svg",
-        _ => "",
-    }
 }
 
 /// The files of an archive, by path relative to the folder's top.

@@ -1,6 +1,6 @@
 # Import and export
 
-Finite moves designs in and out through one Rust crate, `crates/transfer`. Each format is a **codec** that converts between that format and Finite's own `Document`, so the document is the hub and there are no converters between pairs of formats. v1 ships four codecs that go both ways: HTML, a native `.finite` bundle, a folder of text files for git (`repo`), and Figma. A fifth, JSX, only exports.
+Finite moves designs in and out through one Rust crate, `crates/transfer`. Each format is a **codec** that converts between that format and Finite's own `Document`, so the document is the hub and there are no converters between pairs of formats. v1 ships four codecs that go both ways: HTML, a native `.finite` bundle, a folder of text files for git (`repo`), and Figma. Two more, JSX and the app, only export.
 
 Two rules hold everything else up. Import never throws data away: Finite keeps the exact bytes it received, and anything it can't turn into nodes stays recoverable from them. And nothing that could run code reaches the document unless someone wrote it there on purpose.
 
@@ -9,6 +9,16 @@ Two rules hold everything else up. Import never throws data away: Finite keeps t
 ## JSX
 
 `crates/transfer/src/jsx.rs` writes a node as JSX for a React codebase. The `get_jsx` MCP tool calls `jsx::convert` on any node, and the codec's `write` wraps an artboard in a component file (`?format=jsx`, `export_design`, and **as JSX** for each artboard in the web app's Export menu). Attributes take React's names (`class` is `className`, `for` is `htmlFor`, SVG `stroke-width` is `strokeWidth`). Text JSX can't hold, like `{` or leading spaces, goes out as a string expression. By default each node's styles become a `style` object. With `tailwind`, they become classes: a utility where its meaning is plain (`flex`, `gap-[8px]`) and an arbitrary property (`[background-color:#fff]`) for the rest. A value a class can't hold, like a `url(…)`, stays in a `style` object. `<script>` elements are left out with a diagnostic, and so is `!important`, which a style object can't carry and a Tailwind arbitrary value rejects. `SUPPORT.md` marks frame, solid fill and flex layout approximate for that reason and because a Tailwind class has less weight than an inline style. `get_jsx` keeps stored images as this server's URLs, like `get_html`, and says so; the codec's file inlines them. A `<textarea>`'s text becomes `defaultValue`. Not handled: `selected` on an `<option>` stays as is, so React warns until it moves to the `<select>`'s `defaultValue`. JSX can't be imported.
+
+## App
+
+`crates/transfer/src/app/` writes the whole prototype as a Vite + React project in one tar archive (`<name>-app.tar`). Unpack it, then `npm install && npm run dev` for a clickable prototype or `npm run build` for `dist/`. One artboard can't be exported: links go between artboards, so `Scope::Artboard` is refused and the message says to export the design.
+
+`flow::flow` gives the routes. Each route is a component in `src/pages/` that holds all its screens, as `jsx::convert_with` writes them. CSS media queries show one: the widest screen that fits the window, or the narrowest below that. A screen without a pixel width fits any window, so it hides the others, and of two screens as wide as each other the first shows. Both cases are left out with a diagnostic. The first route is served at `/` (no redirect), unless some route is `/` already. Links to artboards become the router's link component with the route as its target. A broken link becomes a plain `<a>` without its `href`, with a diagnostic. Scripts are left out with a diagnostic. Tokens are CSS variables in `src/global.css`: the first mode on `:root`, and each other mode on the screens that use it (`data-finite-mode`). Images are files in `public/assets/<sha256>.<ext>`.
+
+Only the router differs between projects: a `Router` in `app/router.rs` has four functions: its `name`, its npm `packages`, the `link_prop` of its link component (`to`, or `href` for Next) and the `files` that set up routing (`src/link.ts` and `src/router.tsx`). `RouterKind` lists the routers and finds one by name, and React Router 7 is the only one so far. `app::write_with` takes the router.
+
+`crates/transfer/tests/app.rs` compares a small flow with `fixtures/app/shop.txt`, and `the_project_builds` unpacks the archive and runs `npm run build`. It installs the packages once under the cargo target folder, keyed by the hash of `package.json`, and skips itself when `npm` isn't on `PATH` or `FINITE_SKIP_APP_BUILD=1`. CI runs it, since it has Node and network.
 
 ## Adding a format or a feature
 

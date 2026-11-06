@@ -32,6 +32,7 @@ pub mod jsx;
 mod repo;
 mod report;
 pub mod scene;
+pub mod tar;
 
 use std::collections::BTreeMap;
 
@@ -788,11 +789,14 @@ mod tests {
                 blobs: &NoBlobs,
                 measure: &scene::NoMeasure,
             };
+            // An app only holds the whole design.
+            let scope = match format {
+                Format::App => Scope::Design,
+                _ => Scope::Artboard("b".into()),
+            };
             // The raw document has nothing to write for the instance.
-            let raw = format
-                .codec()
-                .write(&revision, &Scope::Artboard("b".into()));
-            let exported = export(format, &revision, &Scope::Artboard("b".into()));
+            let raw = format.codec().write(&revision, &scope);
+            let exported = export(format, &revision, &scope);
             let name = format.codec().name();
             let Ok(exported) = exported else {
                 // Figma measures layout, which this test can't.

@@ -8,6 +8,7 @@
 
 use finite_design::{
     Document, Node, NodeKind,
+    flow::link_target,
     html::{self, NAME_ATTR},
 };
 
@@ -86,10 +87,42 @@ pub struct Converted {
 
 /// The subtree at `id` as JSX, indented `level` steps of two spaces.
 pub fn convert(doc: &Document, id: &str, options: &Options, level: usize) -> Option<Converted> {
+    convert_with(doc, id, options, None, level)
+}
+
+/// How [`convert_with`] writes the links that go to an artboard
+/// (`<a href="#finite-artboard=…">`, see [`link_target`]).
+pub struct Links<'a> {
+    /// The component a link becomes, like `Link`.
+    pub component: &'a str,
+    /// The component's prop for where to go, like `to`.
+    pub prop: &'a str,
+    /// What to write for the link element it's given.
+    pub resolve: &'a dyn Fn(&Node) -> Link,
+}
+
+/// What [`Links::resolve`] answers.
+pub enum Link {
+    /// The component, going to this path.
+    To(String),
+    /// The element as it is, without its `href`, since nothing it could go
+    /// to exists. The reason goes in the diagnostic.
+    Plain(String),
+}
+
+/// [`convert`], with the links to artboards written as `links` says.
+pub fn convert_with(
+    doc: &Document,
+    id: &str,
+    options: &Options,
+    links: Option<&Links<'_>>,
+    level: usize,
+) -> Option<Converted> {
     let node = doc.get(id)?;
     let mut writer = Writer {
         doc,
         options,
+        links,
         out: String::new(),
         diagnostics: Vec::new(),
     };
@@ -104,7 +137,7 @@ pub fn convert(doc: &Document, id: &str, options: &Options, level: usize) -> Opt
 
 /// A component name from an artboard's name: `Home — Desktop` is
 /// `HomeDesktop`.
-fn component_name(name: &str) -> String {
+pub(crate) fn component_name(name: &str) -> String {
     let mut out = String::new();
     for word in name.split(|c: char| !c.is_ascii_alphanumeric()) {
         let mut chars = word.chars();
@@ -122,6 +155,7 @@ fn component_name(name: &str) -> String {
 struct Writer<'a> {
     doc: &'a Document,
     options: &'a Options,
+    links: Option<&'a Links<'a>>,
     out: String,
     diagnostics: Vec<Diagnostic>,
 }
@@ -155,9 +189,37 @@ impl Writer<'_> {
             });
             return;
         }
+        let mut shown = tag.as_str();
+        let mut to = None;
+        let mut linked = false;
+        if let Some(links) = self.links
+            && let Some(target) = link_target(node)
+        {
+            linked = true;
+            match (links.resolve)(node) {
+                Link::To(path) => {
+                    shown = links.component;
+                    to = Some((links.prop, path));
+                }
+                Link::Plain(reason) => self.diagnostics.push(Diagnostic {
+                    node: Some(node.id.clone()),
+                    path: format!("#{}", node.id),
+                    what: format!("a link to {target:?}"),
+                    feature: Feature::Frame,
+                    reason,
+                    preserved: Score::No,
+                    visual: Score::Yes,
+                    editable: Score::Yes,
+                    quarantined: false,
+                }),
+            }
+        }
         self.pad(level);
         self.out.push('<');
-        self.out.push_str(tag);
+        self.out.push_str(shown);
+        if let Some((prop, path)) = to {
+            self.attr(prop, &path);
+        }
         if let Some(name) = &node.name {
             self.attr(NAME_ATTR, name);
         }
@@ -192,9 +254,10 @@ impl Writer<'_> {
             let lower = name.to_ascii_lowercase();
             if lower == "class" && self.options.tailwind {
                 classes.insert(0, value.clone());
-            } else if lower == "style" {
+            } else if lower == "style" || (linked && lower == "href") {
                 // The model keeps styles in `styles`; a stray attribute
-                // would be a string, which React rejects.
+                // would be a string, which React rejects. A link to an
+                // artboard has no `href` of its own to keep.
             } else {
                 self.react_attr(tag, name, value);
             }
@@ -249,10 +312,10 @@ impl Writer<'_> {
             return;
         }
         match children.as_slice() {
-            [] => self.out.push_str(&format!("></{tag}>\n")),
+            [] => self.out.push_str(&format!("></{shown}>\n")),
             [only] if only.kind == NodeKind::Text && is_plain(only.text.as_deref()) => {
                 self.out.push_str(&format!(
-                    ">{}</{tag}>\n",
+                    ">{}</{shown}>\n",
                     only.text.as_deref().unwrap_or_default()
                 ));
             }
@@ -262,7 +325,7 @@ impl Writer<'_> {
                     self.node(child, level + 1);
                 }
                 self.pad(level);
-                self.out.push_str(&format!("</{tag}>\n"));
+                self.out.push_str(&format!("</{shown}>\n"));
             }
         }
     }
