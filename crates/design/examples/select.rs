@@ -49,6 +49,7 @@ fn main() {
         position: None,
         page: None,
         styles: Default::default(),
+        ..Default::default()
     };
     let ops = edit::create_artboard(design.doc(), "page".into(), spec).unwrap();
     design.commit("agent", "Add page", &ops, 0).unwrap();

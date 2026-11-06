@@ -27,6 +27,7 @@ pub mod flow;
 pub mod fractional;
 mod history;
 pub mod html;
+pub mod id;
 pub mod import;
 pub mod label;
 mod node;

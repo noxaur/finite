@@ -249,11 +249,11 @@ async fn the_design_list_survives_a_server_being_down() {
             streamable_http_client::StreamableHttpClientTransportConfig,
         },
     };
-    let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp/classic"));
+    let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp"));
     let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
     for _ in 0..2 {
-        let params = rmcp::model::CallToolRequestParams::new("create_design")
-            .with_arguments(json!({ "name": "By agent" }).as_object().unwrap().clone());
+        let params = rmcp::model::CallToolRequestParams::new("designs")
+            .with_arguments(json!({ "create": "By agent" }).as_object().unwrap().clone());
         let result = client.call_tool(params).await.unwrap();
         assert_ne!(result.is_error, Some(true));
     }
@@ -355,30 +355,6 @@ mod relay {
             .to_owned()
     }
 
-    /// Scripts and the e2e and AX harnesses use `/mcp/classic`, so the
-    /// router relays it to the servers' `/mcp/classic` too.
-    #[tokio::test]
-    async fn the_router_relays_mcp_classic() {
-        let (front, nodes) = deployment().await;
-        let config = StreamableHttpClientTransportConfig::with_uri(format!("{front}/mcp/classic"));
-        let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
-        let tools = client.list_all_tools().await.unwrap();
-        assert!(tools.iter().any(|t| t.name == "write_html"));
-        let mut ids = Vec::new();
-        for name in ["First", "Second"] {
-            ids.push(design_id(
-                &call(&client, "create_design", json!({ "name": name })).await,
-            ));
-        }
-        let cluster = Cluster::new(nodes, 0).unwrap();
-        let mut owners: Vec<usize> = ids.iter().map(|id| cluster.owner(id).unwrap()).collect();
-        owners.sort();
-        assert_eq!(owners, [0, 1], "creation takes turns across both servers");
-        for id in &ids {
-            call(&client, "get_basic_info", json!({ "designId": id })).await;
-        }
-    }
-
     #[tokio::test]
     async fn one_agent_session_reaches_every_server() {
         let (front, nodes) = deployment().await;
@@ -387,18 +363,18 @@ mod relay {
             http::HeaderName::from_static("x-finite-agent"),
             http::HeaderValue::from_static("Alice"),
         );
-        let config = StreamableHttpClientTransportConfig::with_uri(format!("{front}/mcp/classic"))
+        let config = StreamableHttpClientTransportConfig::with_uri(format!("{front}/mcp"))
             .custom_headers(headers);
         let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
 
         let tools = client.list_all_tools().await.unwrap();
-        assert!(tools.iter().any(|t| t.name == "write_html"));
+        assert!(tools.iter().any(|t| t.name == "edit"));
 
         // Two designs: creation takes turns, so one lands on each server.
         let mut ids = Vec::new();
         for name in ["First", "Second"] {
             ids.push(design_id(
-                &call(&client, "create_design", json!({ "name": name })).await,
+                &call(&client, "designs", json!({ "create": name })).await,
             ));
         }
         let cluster = Cluster::new(nodes.clone(), 0).unwrap();
@@ -409,8 +385,9 @@ mod relay {
         for id in &ids {
             let board = call(
                 &client,
-                "create_artboard",
-                json!({ "designId": id, "name": "Home", "width": 400, "height": 300 }),
+                "edit",
+                json!({ "designId": id, "check": false, "ops": [
+                    { "op": "artboard", "name": "Home", "width": 400, "height": 300 }] }),
             )
             .await;
             let board = board
@@ -423,29 +400,28 @@ mod relay {
                 .to_owned();
             call(
                 &client,
-                "update_styles",
-                json!({ "designId": id, "updates": [{ "nodeIds": [board], "styles": { "color": "red" } }] }),
+                "edit",
+                json!({ "designId": id, "check": false, "ops": [
+                    { "op": "css", "select": format!("#{board}"), "css": "color: red" }] }),
             )
             .await;
             // Undo works per server, because the relay keeps one session on each.
             call(&client, "undo", json!({ "designId": id })).await;
             let html = call(
                 &client,
-                "get_html",
-                json!({ "designId": id, "nodeId": board }),
+                "read",
+                json!({ "designId": id, "select": format!("#{board}"), "as": "html" }),
             )
             .await;
             assert!(!html.contains("red"), "{html}");
-            let history = call(&client, "get_history", json!({ "designId": id })).await;
-            assert!(history.contains("Create artboard"), "{history}");
         }
 
-        let listed = call(&client, "list_designs", json!({})).await;
+        let listed = call(&client, "designs", json!({})).await;
         for id in &ids {
             assert!(listed.contains(id.as_str()), "{listed}");
         }
         // The merged list is cut to the limit too, and says so.
-        let one = call(&client, "list_designs", json!({ "limit": 1 })).await;
+        let one = call(&client, "designs", json!({ "limit": 1 })).await;
         let shown = ids.iter().filter(|id| one.contains(id.as_str())).count();
         assert_eq!(shown, 1, "{one}");
         assert!(one.contains("Showing the 1 most recently edited"), "{one}");
@@ -456,25 +432,20 @@ mod relay {
         let prefix = &ids[0][..4];
         call(
             &client,
-            "rename_design",
-            json!({ "designId": ids[1], "name": format!("Mixed {prefix}") }),
+            "designs",
+            json!({ "designId": ids[1], "rename": format!("Mixed {prefix}") }),
         )
         .await;
         call(
             &client,
-            "rename_design",
-            json!({ "designId": ids[0], "name": "Newest" }),
+            "designs",
+            json!({ "designId": ids[0], "rename": "Newest" }),
         )
         .await;
-        let mixed = call(
-            &client,
-            "list_designs",
-            json!({ "query": prefix, "limit": 1 }),
-        )
-        .await;
+        let mixed = call(&client, "designs", json!({ "query": prefix, "limit": 1 })).await;
         assert!(mixed.contains(ids[0].as_str()), "{mixed}");
         assert!(!mixed.contains("matched the designId"), "{mixed}");
-        let alone = call(&client, "list_designs", json!({ "query": ids[0] })).await;
+        let alone = call(&client, "designs", json!({ "query": ids[0] })).await;
         assert!(
             alone.contains("matched the designId, not the name"),
             "{alone}"
@@ -487,9 +458,9 @@ mod relay {
     #[tokio::test]
     async fn the_relay_follows_a_server_that_says_its_elsewhere() {
         let (front, id) = lagging_router().await;
-        let config = StreamableHttpClientTransportConfig::with_uri(format!("{front}/mcp/classic"));
+        let config = StreamableHttpClientTransportConfig::with_uri(format!("{front}/mcp"));
         let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
-        let info = call(&client, "get_basic_info", json!({ "designId": id })).await;
+        let info = call(&client, "read", json!({ "designId": id })).await;
         assert!(info.contains("On B"), "{info}");
         client.cancel().await.unwrap();
     }
@@ -545,31 +516,30 @@ mod relay {
         let routes = router::app(nodes.clone(), None);
         tokio::spawn(async move { axum::serve(front, routes).await });
 
-        let config =
-            StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp/classic"));
+        let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp"));
         let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
         // Creation takes turns: the first design is A's, the second B's.
-        let on_a = design_id(&call(&client, "create_design", json!({ "name": "On A" })).await);
-        let on_b = design_id(&call(&client, "create_design", json!({ "name": "On B" })).await);
+        let on_a = design_id(&call(&client, "designs", json!({ "create": "On A" })).await);
+        let on_b = design_id(&call(&client, "designs", json!({ "create": "On B" })).await);
         assert_eq!(cluster(0).owner(&on_b), Some(1));
-        call(&client, "get_basic_info", json!({ "designId": on_b })).await;
+        call(&client, "read", json!({ "designId": on_b })).await;
 
         // While B is down, its designs fail, but the list still shows A's.
         drop(b_node);
-        let params = CallToolRequestParams::new("get_basic_info")
+        let params = CallToolRequestParams::new("read")
             .with_arguments(json!({ "designId": on_b }).as_object().unwrap().clone());
         let down = client.call_tool(params).await;
         assert!(down.is_err() || down.unwrap().is_error == Some(true));
-        let listed = call(&client, "list_designs", json!({})).await;
+        let listed = call(&client, "designs", json!({})).await;
         assert!(listed.contains(&on_a), "{listed}");
         assert!(listed.contains("didn't answer"), "{listed}");
 
         // Once B is back, the same agent session reaches it again.
         let b = std::net::TcpListener::bind(b_addr).unwrap();
         let _b = Node::start(b, cluster(1), b_store);
-        let info = call(&client, "get_basic_info", json!({ "designId": on_b })).await;
+        let info = call(&client, "read", json!({ "designId": on_b })).await;
         assert!(info.contains("On B"), "{info}");
-        let listed = call(&client, "list_designs", json!({})).await;
+        let listed = call(&client, "designs", json!({})).await;
         assert!(listed.contains(&on_a) && listed.contains(&on_b), "{listed}");
         client.cancel().await.unwrap();
     }
@@ -591,7 +561,7 @@ mod failover {
         async fn post(&mut self, base: &str, body: Value) -> (u16, Option<Value>) {
             let mut req = self
                 .http
-                .post(format!("{base}/mcp/classic"))
+                .post(format!("{base}/mcp"))
                 .header("accept", "application/json, text/event-stream")
                 .header("mcp-protocol-version", "2025-06-18")
                 .json(&body);
@@ -675,7 +645,7 @@ mod failover {
         // An unnamed agent starts on router A.
         let mut agent = Session::start(&a).await;
         let (_, created) = agent
-            .call(&a, "create_design", json!({ "name": "Moving" }))
+            .call(&a, "designs", json!({ "create": "Moving" }))
             .await;
         let id: String = created
             .split(|c: char| !c.is_ascii_alphanumeric())
@@ -685,8 +655,9 @@ mod failover {
         let (_, board) = agent
             .call(
                 &a,
-                "create_artboard",
-                json!({ "designId": id, "name": "Home", "width": 400, "height": 300 }),
+                "edit",
+                json!({ "designId": id, "check": false, "ops": [
+                    { "op": "artboard", "name": "Home", "width": 400, "height": 300 }] }),
             )
             .await;
         let board = board
@@ -700,9 +671,9 @@ mod failover {
         agent
             .call(
                 &a,
-                "update_styles",
-                json!({ "designId": id,
-                "updates": [{ "nodeIds": [board], "styles": { "color": "red" } }] }),
+                "edit",
+                json!({ "designId": id, "check": false, "ops": [
+                    { "op": "css", "select": format!("#{board}"), "css": "color: red" }] }),
             )
             .await;
 
@@ -710,11 +681,15 @@ mod failover {
         let (status, undone) = agent.call(&b, "undo", json!({ "designId": id })).await;
         assert_eq!(status, 200);
         assert!(
-            undone.contains("Update styles"),
+            undone.starts_with("Undid your last edit"),
             "B undid A's edit: {undone}"
         );
         let (_, html) = agent
-            .call(&b, "get_html", json!({ "designId": id, "nodeId": board }))
+            .call(
+                &b,
+                "read",
+                json!({ "designId": id, "select": format!("#{board}"), "as": "html" }),
+            )
             .await;
         assert!(!html.contains("red"), "{html}");
         std::fs::remove_dir_all(dir).unwrap();
@@ -724,7 +699,7 @@ mod failover {
     async fn without_a_shared_store_routers_dont_know_each_others_sessions() {
         let (a, b) = two_routers(None).await;
         let mut agent = Session::start(&a).await;
-        let (status, _) = agent.call(&b, "list_designs", json!({})).await;
+        let (status, _) = agent.call(&b, "designs", json!({})).await;
         assert_eq!(status, 404);
     }
 }
@@ -751,6 +726,7 @@ async fn the_router_relays_large_designs() {
         position: None,
         page: None,
         styles: Default::default(),
+        ..Default::default()
     };
     design
         .edit(&agent, "Add page", |doc| {
@@ -879,10 +855,10 @@ async fn tools_are_listed_while_the_first_server_is_down() {
     let routes = router::app(nodes, None);
     tokio::spawn(async move { axum::serve(front, routes).await });
 
-    let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp/classic"));
+    let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp"));
     let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
     let tools = client.list_all_tools().await.unwrap();
-    assert!(tools.iter().any(|t| t.name == "write_html"));
+    assert!(tools.iter().any(|t| t.name == "edit"));
     client.cancel().await.unwrap();
 }
 
@@ -899,10 +875,10 @@ async fn the_design_list_fails_when_no_server_answers() {
     assert_eq!(res.status(), 502);
 }
 
-/// With every server down, `list_designs` through the router is an error,
+/// With every server down, `designs` through the router is an error,
 /// not an empty list that would say there are no designs.
 #[tokio::test]
-async fn list_designs_fails_when_no_server_answers() {
+async fn an_agents_design_list_fails_when_no_server_answers() {
     use rmcp::{
         ServiceExt,
         transport::{
@@ -913,10 +889,10 @@ async fn list_designs_fails_when_no_server_answers() {
     let (front, front_url) = listen().await;
     let routes = router::app(vec!["http://127.0.0.1:9".to_owned()], None);
     tokio::spawn(async move { axum::serve(front, routes).await });
-    let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp/classic"));
+    let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp"));
     let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
     let result = client
-        .call_tool(rmcp::model::CallToolRequestParams::new("list_designs"))
+        .call_tool(rmcp::model::CallToolRequestParams::new("designs"))
         .await
         .unwrap();
     assert_eq!(result.is_error, Some(true));
@@ -1006,12 +982,12 @@ async fn agents_get_past_a_stuck_server() {
     let routes = router::app(nodes, None);
     tokio::spawn(async move { axum::serve(front, routes).await });
 
-    let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp/classic"));
+    let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp"));
     let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
     let both = async {
         let tools = client.list_all_tools().await.unwrap();
         let listed = client
-            .call_tool(rmcp::model::CallToolRequestParams::new("list_designs"))
+            .call_tool(rmcp::model::CallToolRequestParams::new("designs"))
             .await
             .unwrap();
         (tools, listed)
@@ -1019,7 +995,7 @@ async fn agents_get_past_a_stuck_server() {
     let (tools, listed) = tokio::time::timeout(std::time::Duration::from_secs(20), both)
         .await
         .expect("the relay waited for the stuck server");
-    assert!(tools.iter().any(|t| t.name == "write_html"));
+    assert!(tools.iter().any(|t| t.name == "edit"));
     assert_ne!(listed.is_error, Some(true));
     let text: Vec<&str> = listed
         .content

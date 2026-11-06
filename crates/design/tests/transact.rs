@@ -32,6 +32,7 @@ fn artboard() -> NewArtboard {
         position: None,
         page: None,
         styles: BTreeMap::new(),
+        ..Default::default()
     }
 }
 

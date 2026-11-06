@@ -8,13 +8,12 @@ mod agent;
 mod layout_common;
 
 use agent::{Agent, test_app};
-use layout_common::{Board, board, clip, enable_group, read};
+use layout_common::{Board, board, clip, read, set_wait};
 use serde_json::json;
 use std::time::Duration;
 
-/// Clips the artboard, waits out the check, and says whether it is waiting.
-/// It is waiting if the edit's own result has no note and a plain read finds
-/// one, so this takes the note: use it only to set up the control.
+/// Clips the artboard and waits out the check. The edit's own result has no
+/// note, so the note is waiting for the next one.
 async fn clipped_and_checked(agent: &mut Agent, b: &Board) {
     let written = clip(agent, b, 600).await;
     assert!(
@@ -26,12 +25,14 @@ async fn clipped_and_checked(agent: &mut Agent, b: &Board) {
 
 #[tokio::test]
 async fn a_deferred_note_is_given_once_and_dropped_when_it_goes_stale() {
-    enable_group(Some(0));
+    set_wait(0);
     let app = test_app();
     let mut agent = Agent::connect(&app, "Checker").await;
     let Some(b) = board(&mut agent).await else {
         return;
     };
+    let on_board = format!("#{}", b.board);
+    let on_title = format!("#{}", b.title);
 
     // Control: the next result carries the note, once.
     clipped_and_checked(&mut agent, &b).await;
@@ -39,54 +40,41 @@ async fn a_deferred_note_is_given_once_and_dropped_when_it_goes_stale() {
     assert!(text.contains("cut off by the artboard's edge"), "{text}");
     assert!(!read(&mut agent, &b).await.contains("Layout:"));
 
-    // The layout tools report the layout themselves, so they drop it.
-    for tool in ["get_layout", "get_screenshot"] {
+    // render reports the layout itself, so it drops the note.
+    for args in [
+        json!({ "designId": b.design, "select": on_board, "output": "layout" }),
+        json!({ "designId": b.design, "select": on_board }),
+    ] {
         clipped_and_checked(&mut agent, &b).await;
-        let args = if tool == "get_layout" {
-            json!({ "designId": b.design, "nodeId": b.board })
-        } else {
-            json!({ "designId": b.design, "nodeIds": [b.board] })
-        };
-        agent.ok(tool, args).await;
+        agent.ok("render", args.clone()).await;
         let after = read(&mut agent, &b).await;
         assert!(
             !after.contains("Layout:"),
-            "{tool} left a stale note: {after}"
+            "render {args} left a stale note: {after}"
         );
     }
 
     // Any other edit makes it stale.
     let edits = [
-        (
-            "set_text_content",
-            json!({ "designId": b.design, "nodeId": b.title, "text": "Still fits" }),
-        ),
-        (
-            "set_tokens",
-            json!({ "designId": b.design, "tokens": { "--x": "red" } }),
-        ),
-        (
-            "replace_values",
-            json!({ "designId": b.design, "find": "Still fits", "replace": "Fits" }),
-        ),
-        (
-            "set_attributes",
-            json!({ "designId": b.design,
-                    "updates": [{ "nodeIds": [b.title], "attributes": { "title": "t" } }] }),
-        ),
-        (
-            "move_nodes",
-            json!({ "designId": b.design, "nodeIds": [b.title], "parentId": b.board, "index": 0 }),
-        ),
+        json!({ "op": "replace", "find": "Fits", "replace": "Still fits", "in": "text" }),
+        json!({ "op": "tokens", "set": { "--x": "red" } }),
+        json!({ "op": "replace", "find": "Still fits", "replace": "Fits", "in": "text" }),
+        json!({ "op": "attrs", "select": on_title, "set": { "title": "t" } }),
+        json!({ "op": "move", "select": on_title, "to": on_board, "position": "prepend" }),
     ];
-    for (tool, args) in edits {
+    for op in edits {
         clipped_and_checked(&mut agent, &b).await;
-        let (result, failed) = agent.call(tool, args).await;
-        assert!(!failed, "{tool}: {result}");
+        let (result, failed) = agent
+            .call(
+                "edit",
+                json!({ "designId": b.design, "ops": [op], "check": false }),
+            )
+            .await;
+        assert!(!failed, "{op}: {result}");
         let after = read(&mut agent, &b).await;
         assert!(
             !after.contains("Layout:"),
-            "{tool} left a stale note: {after}"
+            "{op} left a stale note: {after}"
         );
     }
     let (undone, failed) = agent.call("undo", json!({ "designId": b.design })).await;
@@ -97,16 +85,16 @@ async fn a_deferred_note_is_given_once_and_dropped_when_it_goes_stale() {
     clipped_and_checked(&mut agent, &b).await;
     let (error, failed) = agent
         .call(
-            "update_styles",
-            json!({ "designId": b.design,
-                    "updates": [{ "nodeIds": ["nosuchnode"], "styles": { "color": "red" } }] }),
+            "edit",
+            json!({ "designId": b.design, "op": "css", "select": "#nosuchnode",
+                    "css": "color: red", "check": false }),
         )
         .await;
     assert!(failed, "{error}");
     let (error, failed) = agent
         .call(
-            "get_html",
-            json!({ "designId": b.design, "nodeId": "nosuchnode" }),
+            "read",
+            json!({ "designId": b.design, "select": "#nosuchnode" }),
         )
         .await;
     assert!(failed, "{error}");

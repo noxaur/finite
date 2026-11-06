@@ -1,7 +1,11 @@
 //! The `read` tool's views of a design: the overview, and for what a
 //! selector matches, its outline, HTML, CSS or JSX, or a search inside it.
 
-use std::{collections::HashMap, fmt::Write, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt::Write,
+    sync::Arc,
+};
 
 use finite_design::{
     Design, Document, NodeId, NodeKind, css, html,
@@ -9,17 +13,59 @@ use finite_design::{
     select,
 };
 use finite_transfer::jsx;
-use rmcp::handler::server::wrapper::Parameters;
+use rmcp::schemars::{self, JsonSchema};
+use serde::Deserialize;
+use serde_json::{Map, Value};
 
-use super::{ReadParams, describe, label, line, matched, ops::Kind, page_id, selector_text};
+use super::{
+    FiniteMcp,
+    edit::Kind,
+    format::{OUTPUT_LIMIT, cut, outline},
+    notes::html_component_note,
+    result::{ToolResult, fail, ok},
+    selector::{Select, describe, label, line, matched, page_id, selector_text},
+    transfer,
+};
 use crate::{
     hub::{Actor, DesignHandle},
-    mcp::{
-        FiniteMcp, ToolResult, cut, fail, format::OUTPUT_LIMIT, html_component_note, ok, outline,
-        params::ExportParams, search::found_text, tokens::listed,
-    },
     screenshot,
 };
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadParams {
+    pub(super) design_id: String,
+    /// A CSS selector: #k3x9a2bq (a node id), .card, button, [data-name="Hero"] h1, :root (artboards), :contains("Sign in"). A list of selectors works too.
+    #[serde(default)]
+    select: Option<Select>,
+    /// What to show for select: "outline" (default), "html", "css", "jsx" or "computed".
+    #[serde(default, rename = "as", alias = "view")]
+    view: Option<String>,
+    /// With as: "computed", the CSS properties to read, like ["color", "background-color", "--bg"]. Default: color, background-color, font, width, height, padding, gap, border, border-radius, display.
+    #[serde(default)]
+    properties: Option<Vec<String>>,
+    /// With as: "jsx", Tailwind classes.
+    #[serde(default)]
+    tailwind: bool,
+    /// Only this page's artboards: its name or id.
+    #[serde(default)]
+    page: Option<String>,
+    /// Return the design, or select's artboard, as a file in this format: html, finite, repo, figma, jsx or app (the whole design as a Vite + React project of the prototype flow, one route per data-route).
+    #[serde(default)]
+    export: Option<String>,
+    /// "react-router" (default) or "tanstack-router".
+    #[serde(default)]
+    router: Option<String>,
+    /// Search for this text or value, like "#3b82f6" or "Sign in".
+    #[serde(default)]
+    contains: Option<String>,
+    /// How many levels below each match (or each artboard) to show.
+    #[serde(default)]
+    depth: Option<usize>,
+    /// With as: "html" on a <style> or <script> longer than a result: the character to start at. Each page says where the next one starts.
+    #[serde(default)]
+    offset: usize,
+}
 
 /// How many matches a view shows before it asks to narrow select.
 const SHOWN: usize = 20;
@@ -543,10 +589,14 @@ fn html_of(design: &Design, id: &str, depth: Option<usize>, offset: usize, limit
     }
     let lowered = used != depth;
     if export.html.len() > limit || (lowered && used == Some(0)) {
+        let children = cut(
+            outline(doc, id, 1),
+            "Narrow select to see the rest of its children.",
+        );
         return format!(
             "{}'s HTML is more than a result holds. Read one of its children with select and as: \"html\":\n{}",
             label(doc, id),
-            outline(doc, id, 1).trim_end()
+            children.trim_end()
         );
     }
     let mut out = export.html;
@@ -803,7 +853,11 @@ fn jsx_view(doc: &Document, ids: &[NodeId], tailwind: bool) -> String {
                 "{}'s JSX is {} characters, more than a result holds. Read one of its children with select and as: \"jsx\":\n{}",
                 label(doc, id),
                 converted.jsx.len(),
-                outline(doc, id, 1).trim_end()
+                cut(
+                    outline(doc, id, 1),
+                    "Narrow select to see the rest of its children."
+                )
+                .trim_end()
             ));
             continue;
         }
@@ -942,11 +996,81 @@ async fn export(
     if format.trim().eq_ignore_ascii_case("jsx") && boards.is_empty() {
         return fail("export \"jsx\" takes one artboard: pass select, like \"#k3x9a2bq\".");
     }
-    mcp.export_design(Parameters(ExportParams {
-        design_id: design.to_owned(),
-        format: format.to_owned(),
-        artboard_id: boards.first().cloned(),
-        router: router.map(str::to_owned),
-    }))
-    .await
+    transfer::export(&mcp.hub, design, format, boards.first().cloned(), router).await
+}
+
+/// How many matches a search lists.
+const FOUND_SHOWN: usize = 200;
+
+/// What a search found: how many, then each match's outline line, grouped
+/// by artboard, with what matched. Lists the first [`FOUND_SHOWN`].
+pub(super) fn found_text(doc: &Document, found: &[search::Found]) -> String {
+    let mut text = format!(
+        "{} element{} match:\n",
+        found.len(),
+        if found.len() == 1 { "" } else { "s" }
+    );
+    let mut board: Option<String> = None;
+    for f in found.iter().take(FOUND_SHOWN) {
+        let here = doc.artboard_of(&f.id).map(|b| b.id.clone());
+        if here != board {
+            if let Some(b) = here.as_deref().and_then(|id| doc.get(id)) {
+                text.push_str(&format!("Artboard {:?} #{}:\n", b.display_name(), b.id));
+            }
+            board = here;
+        }
+        text.push_str("  ");
+        text.push_str(outline(doc, &f.id, 0).lines().next().unwrap_or("").trim());
+        for detail in &f.details {
+            text.push_str(&format!("\n      {detail}"));
+        }
+        text.push('\n');
+    }
+    text
+}
+
+/// The design's tokens as an edit's tokens op takes them: the modes by name, and
+/// each token's values by mode name, or one value when only the first mode
+/// has one.
+pub(super) fn listed(doc: &Document) -> Value {
+    let modes = doc.modes();
+    let name = |id: &str| {
+        modes
+            .iter()
+            .find(|(m, _)| *m == id)
+            .map(|(_, m)| m.name.clone())
+    };
+    let first = doc.first_mode();
+    let tokens: Map<String, Value> = doc
+        .tokens()
+        .iter()
+        .map(|(token, values)| {
+            let value = match values.iter().next() {
+                Some((mode, value)) if values.len() == 1 && mode == first => value.clone().into(),
+                _ => values
+                    .iter()
+                    .filter_map(|(mode, value)| Some((name(mode)?, Value::from(value.clone()))))
+                    .collect::<Map<_, _>>()
+                    .into(),
+            };
+            (token.clone(), value)
+        })
+        .collect();
+    let mut by_mode: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+    for board in doc.artboards() {
+        let mode = doc.mode_of(board);
+        if mode != first
+            && let Some(name) = name(mode)
+        {
+            by_mode.entry(name).or_default().push(&board.id);
+        }
+    }
+    let mut out = serde_json::json!({
+        "modes": modes.iter().map(|(_, m)| m.name.clone()).collect::<Vec<_>>(),
+        "tokens": tokens,
+    });
+    if !by_mode.is_empty() {
+        out["artboardModes"] = serde_json::to_value(by_mode).expect("ids serialize");
+    }
+    out
 }

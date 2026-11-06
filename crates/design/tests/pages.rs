@@ -26,6 +26,7 @@ fn artboard(design: &mut Design, id: &str, page: Option<&str>) {
         position: None,
         page: page.map(Into::into),
         styles: BTreeMap::new(),
+        ..Default::default()
     };
     let ops = edit::create_artboard(design.doc(), id.into(), spec).unwrap();
     design.commit("agent", "Create artboard", &ops, 0).unwrap();
@@ -85,6 +86,7 @@ fn artboards_on_a_new_page_are_placed_apart_from_the_first() {
         position: None,
         page: Some("nope".into()),
         styles: BTreeMap::new(),
+        ..Default::default()
     };
     let error = edit::create_artboard(d.doc(), "x".into(), unknown).unwrap_err();
     assert!(error.0.contains("page \"nope\" not found"), "{error}");

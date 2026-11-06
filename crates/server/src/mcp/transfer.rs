@@ -1,15 +1,15 @@
-//! Importing files into a design and exporting it, over `crate::transfer`.
-//! The conversion is all in `finite-transfer`; these tools only read
-//! arguments and say what happened.
+//! Saying what an import or an export did, over `crate::transfer`. The
+//! conversion is all in `finite-transfer`; this only words the result.
 
-use base64::Engine;
+use finite_design::NodeId;
 use finite_transfer::{Diagnostic, Scope, Score};
-use rmcp::{
-    RoleServer, handler::server::wrapper::Parameters, service::RequestContext, tool, tool_router,
-};
 
-use super::{FiniteMcp, ToolResult, cut, fail, ok, params::*};
-use crate::transfer::{self, ImportRequest};
+use super::{
+    format::cut,
+    result::{ToolResult, fail, ok},
+};
+use crate::{hub::Hub, transfer};
+use std::sync::Arc;
 
 fn score(score: Score) -> &'static str {
     match score {
@@ -83,129 +83,60 @@ pub(super) fn diagnostics(text: &mut String, diagnostics: &[Diagnostic], record:
     }
 }
 
-#[tool_router(router = transfer_router, vis = "pub(super)")]
-impl FiniteMcp {
-    #[tool(
-        description = "Import a file into the design as new artboards, as one undo step. Pass the file as content (text) or contentBase64 (bytes). Returns the new artboards, a diagnostic for anything that didn't convert exactly, and the import's id. Each diagnostic scores preserved (the data is kept, maybe only in the original file), visual (it looks the same) and editable (it can be changed in Finite) as yes, no or unknown (not checked). Scripts, handlers and embeds never reach the design; Finite keeps the original file. strict refuses the import, changing nothing, if anything scores no or unknown on the axes you name."
-    )]
-    async fn import_design(
-        &self,
-        Parameters(p): Parameters<ImportParams>,
-        ctx: RequestContext<RoleServer>,
-    ) -> ToolResult {
-        let handle = design!(self, &p.design_id);
-        let bytes = match (p.content, p.content_base64) {
-            (Some(text), None) => text.into_bytes(),
-            (None, Some(encoded)) => {
-                match base64::engine::general_purpose::STANDARD.decode(encoded.trim()) {
-                    Ok(bytes) => bytes,
-                    Err(error) => return fail(format!("contentBase64 isn't base64: {error}")),
-                }
-            }
-            _ => return fail("pass exactly one of content or contentBase64"),
-        };
-        let strict = p.strict.unwrap_or_default();
-        let request = match (
-            transfer::format_named(&p.format),
-            transfer::strict_named(strict.iter().map(String::as_str)),
-        ) {
-            (Ok(format), Ok(strict)) => ImportRequest {
-                format,
-                bytes,
-                file_name: p.file_name,
-                page: p.page_id,
-                strict,
-            },
-            (Err(error), _) | (_, Err(error)) => return fail(error.to_string()),
-        };
-        let result =
-            match transfer::import(&self.hub, &p.design_id, &self.actor(&ctx), request).await {
-                Ok(result) => result,
-                Err(error) => return fail(error.to_string()),
-            };
-        let mut text = handle.read(|d| {
-            let mut text = format!("Imported {} artboard(s):\n", result.artboards.len());
-            let doc = d.doc();
-            for id in &result.artboards {
-                let Some(board) = doc.get(id) else { continue };
-                let page = doc.page(doc.page_of(board)).map_or("", |p| p.name.as_str());
-                text.push_str(&format!(
-                    "  #{id} {:?} on page {page:?}\n",
-                    board.display_name()
-                ));
-            }
-            text
-        });
-        let record = format!(
-            "The import record lists every quarantined item with its path: GET /api/designs/{}/imports.",
-            p.design_id
-        );
-        diagnostics(&mut text, &result.diagnostics, Some(&record));
-        text.push_str(&format!(
-            "Import #{}. Finite keeps the original file's bytes.",
-            result.import.id
-        ));
-        ok(cut(text, "Check the artboards with get_screenshot."))
-    }
-
-    #[tool(
-        description = "Export the design, or one artboard, as a file: html, finite (a bundle that imports back exactly), repo (a tar of text files for keeping in git: one HTML file per artboard and a manifest with the tokens; it imports back, but scripts are left out on import), figma (for the Finite Figma plugin), jsx (one artboard as a React component) or app (a Vite + React project of the whole prototype flow, one route per data-route). Returns a diagnostic for anything that didn't convert exactly, and the file's text, cut off past 60,000 characters.",
-        annotations(read_only_hint = true)
-    )]
-    pub(super) async fn export_design(
-        &self,
-        Parameters(p): Parameters<ExportParams>,
-    ) -> ToolResult {
-        let format = match transfer::format_named(&p.format) {
-            Ok(format) => format,
-            Err(error) => return fail(error.to_string()),
-        };
-        let router = match p.router.as_deref().map(transfer::router_named).transpose() {
-            Ok(router) => router,
-            Err(error) => return fail(error.to_string()),
-        };
-        let _ = design!(self, &p.design_id);
-        let router_query = router.map_or_else(String::new, |router| {
-            format!("&router={}", router.router().name())
-        });
-        let route = match &p.artboard_id {
-            Some(board) => format!(
-                "GET /api/designs/{}/export?format={}&artboard={board}{router_query}",
-                p.design_id, p.format
-            ),
-            None => format!(
-                "GET /api/designs/{}/export?format={}{router_query}",
-                p.design_id, p.format
-            ),
-        };
-        let scope = p.artboard_id.map_or(Scope::Design, Scope::Artboard);
-        let exported =
-            match transfer::export_with(&self.hub, &p.design_id, format, scope, router).await {
-                Ok(exported) => exported,
-                Err(error) => return fail(error.to_string()),
-            };
-        let mut text = String::new();
-        diagnostics(&mut text, &exported.diagnostics, None);
-        // A tar archive is padded with NULs, which are valid UTF-8 but not text to read.
-        let file = match exported.media_type {
-            "application/x-tar" => None,
-            _ => std::str::from_utf8(&exported.bytes).ok(),
-        };
-        match file {
-            Some(file) => {
-                text.push_str(&format!(
-                    "{} ({}):\n",
-                    exported.file_name, exported.media_type
-                ));
-                text.push_str(file);
-                ok(cut(text, &format!("The whole file is at {route}.")))
-            }
-            None => ok(format!(
-                "{text}{} is {} bytes of {}, not text. Download it from {route}.",
-                exported.file_name,
-                exported.bytes.len(),
-                exported.media_type
-            )),
+/// The design, or one artboard, as a file in `format`: a diagnostic for
+/// anything that didn't convert exactly, then the file's text, cut off past
+/// [`super::format::OUTPUT_LIMIT`]. A binary file is named, with where to
+/// download it.
+pub(super) async fn export(
+    hub: &Arc<Hub>,
+    design_id: &str,
+    format_name: &str,
+    artboard: Option<NodeId>,
+    router: Option<&str>,
+) -> ToolResult {
+    let format = match transfer::format_named(format_name) {
+        Ok(format) => format,
+        Err(error) => return fail(error.to_string()),
+    };
+    let router = match router.map(transfer::router_named).transpose() {
+        Ok(router) => router,
+        Err(error) => return fail(error.to_string()),
+    };
+    let router_query = router.map_or_else(String::new, |router| {
+        format!("&router={}", router.router().name())
+    });
+    let route = match &artboard {
+        Some(board) => format!(
+            "GET /api/designs/{design_id}/export?format={format_name}&artboard={board}{router_query}"
+        ),
+        None => format!("GET /api/designs/{design_id}/export?format={format_name}{router_query}"),
+    };
+    let scope = artboard.map_or(Scope::Design, Scope::Artboard);
+    let exported = match transfer::export_with(hub, design_id, format, scope, router).await {
+        Ok(exported) => exported,
+        Err(error) => return fail(error.to_string()),
+    };
+    let mut text = String::new();
+    diagnostics(&mut text, &exported.diagnostics, None);
+    // A tar archive is padded with NULs, which are valid UTF-8 but not text to read.
+    let file = match exported.media_type {
+        "application/x-tar" => None,
+        _ => std::str::from_utf8(&exported.bytes).ok(),
+    };
+    match file {
+        Some(file) => {
+            text.push_str(&format!(
+                "{} ({}):\n",
+                exported.file_name, exported.media_type
+            ));
+            text.push_str(file);
+            ok(cut(text, &format!("The whole file is at {route}.")))
         }
+        None => ok(format!(
+            "{text}{} is {} bytes of {}, not text. Download it from {route}.",
+            exported.file_name,
+            exported.bytes.len(),
+            exported.media_type
+        )),
     }
 }

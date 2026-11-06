@@ -1,4 +1,4 @@
-//! The six-tool surface, served at `/mcp` by default, driven over MCP the way
+//! The six tools, served at `/mcp`, driven over MCP the way
 //! an agent drives it: every tool, and every op of `edit`.
 
 mod agent;
@@ -11,8 +11,8 @@ use finite_design::comment::{Anchor, Audience, Author, AuthorKind};
 use finite_server::{Hub, app, store::MemoryStore};
 use serde_json::{Value, json};
 
-/// A server, whose `/mcp` serves the doc6 tools by default.
-fn doc6() -> (Router, Arc<Hub>) {
+/// A server.
+fn server() -> (Router, Arc<Hub>) {
     let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
     (app(hub.clone(), None), hub)
 }
@@ -75,8 +75,8 @@ async fn landing(agent: &mut Agent) -> (String, String) {
 
 #[tokio::test]
 async fn it_serves_exactly_six_tools_and_their_instructions() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Six").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Six").await;
     let tools = agent.rpc("tools/list", None).await;
     let mut names: Vec<&str> = tools["tools"]
         .as_array()
@@ -89,7 +89,7 @@ async fn it_serves_exactly_six_tools_and_their_instructions() {
         names,
         ["comments", "designs", "edit", "read", "render", "undo"]
     );
-    let mut fresh = Agent::connect_doc6(&app, "Fresh").await;
+    let mut fresh = Agent::connect(&app, "Fresh").await;
     let init = fresh
         .rpc(
             "initialize",
@@ -103,22 +103,9 @@ async fn it_serves_exactly_six_tools_and_their_instructions() {
 }
 
 #[tokio::test]
-async fn scripts_keep_todays_tools_at_mcp_classic() {
-    let (app, _) = doc6();
-    let mut script = Agent::connect_at(&app, "Seeder", "/mcp/classic").await;
-    let created = script
-        .ok("create_design", json!({ "name": "Seeded" }))
-        .await;
-    assert!(created.contains("Next: create_artboard."), "{created}");
-    let mut agent = Agent::connect_doc6(&app, "Six").await;
-    let read = agent.ok("read", json!({ "designId": "Seeded" })).await;
-    assert!(read.contains("No artboards yet"), "{read}");
-}
-
-#[tokio::test]
 async fn designs_are_listed_created_renamed_and_deleted() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Lister").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Lister").await;
     let id = design(&mut agent, "Acme site").await;
     assert!(
         agent
@@ -140,8 +127,8 @@ async fn designs_are_listed_created_renamed_and_deleted() {
 /// alone, which a rename through a long article needs.
 #[tokio::test]
 async fn replace_in_text_leaves_attributes_alone() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Replacer").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Replacer").await;
     let id = design(&mut agent, "Article").await;
     edit(
         &mut agent,
@@ -180,8 +167,8 @@ async fn replace_in_text_leaves_attributes_alone() {
 /// including an SVG <style>. in: "code" is what reaches that code.
 #[tokio::test]
 async fn replace_in_text_skips_script_and_style() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Replacer").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Replacer").await;
     let id = design(&mut agent, "Rates").await;
     edit(
         &mut agent,
@@ -247,8 +234,8 @@ async fn replace_in_text_skips_script_and_style() {
 /// A copy is what x, y, page and mode place, not its original.
 #[tokio::test]
 async fn move_with_copy_places_the_copy() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Copier").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Copier").await;
     let id = design(&mut agent, "Copies").await;
     let made = edit(
         &mut agent,
@@ -273,8 +260,8 @@ async fn move_with_copy_places_the_copy() {
 
 #[tokio::test]
 async fn delete_takes_only_an_exact_id_or_name() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Deleter").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Deleter").await;
     let id = design(&mut agent, "Keep me").await;
     let (refused, error) = agent.call("designs", json!({ "delete": &id[..6] })).await;
     assert!(
@@ -288,8 +275,8 @@ async fn delete_takes_only_an_exact_id_or_name() {
 
 #[tokio::test]
 async fn design_ids_take_a_name_or_the_start_of_an_id() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Namer").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Namer").await;
     let id = design(&mut agent, "Checkout flow").await;
     for given in ["Checkout flow", "checkout FLOW", &id, &id[..6]] {
         let read = agent.ok("read", json!({ "designId": given })).await;
@@ -311,8 +298,8 @@ async fn design_ids_take_a_name_or_the_start_of_an_id() {
 
 #[tokio::test]
 async fn read_shows_an_overview_outline_html_css_and_search() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Reader").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Reader").await;
     let (id, board) = landing(&mut agent).await;
     let overview = agent.ok("read", json!({ "designId": id })).await;
     assert!(
@@ -397,8 +384,8 @@ async fn read_shows_an_overview_outline_html_css_and_search() {
 
 #[tokio::test]
 async fn every_op_runs_in_one_edit() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Builder").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Builder").await;
     let (id, board) = landing(&mut agent).await;
     let text = edit(
         &mut agent,
@@ -518,8 +505,8 @@ async fn every_op_runs_in_one_edit() {
 
 #[tokio::test]
 async fn a_flat_op_and_old_habits_work() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Habits").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Habits").await;
     let (id, _) = landing(&mut agent).await;
     let flat = agent
         .ok(
@@ -545,8 +532,8 @@ async fn a_flat_op_and_old_habits_work() {
 
 #[tokio::test]
 async fn an_edit_is_one_undo_step_and_one_broadcast() {
-    let (app, hub) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Atomic").await;
+    let (app, hub) = server();
+    let mut agent = Agent::connect(&app, "Atomic").await;
     let (id, board) = landing(&mut agent).await;
     let handle = hub.open(&id).await.unwrap();
     let (_, seq, mut changes) = handle.subscribe();
@@ -609,8 +596,8 @@ async fn an_edit_is_one_undo_step_and_one_broadcast() {
 
 #[tokio::test]
 async fn a_failing_op_changes_nothing_and_nobody_sees_it() {
-    let (app, hub) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Careful").await;
+    let (app, hub) = server();
+    let mut agent = Agent::connect(&app, "Careful").await;
     let (id, _) = landing(&mut agent).await;
     let handle = hub.open(&id).await.unwrap();
     let before = handle.read(|d| d.seq());
@@ -636,7 +623,7 @@ async fn a_failing_op_changes_nothing_and_nobody_sees_it() {
         agent.ok("undo", json!({ "designId": id })).await,
         "Undid your last edit (Artboard \"Home\")."
     );
-    // Errors name doc6's own ops.
+    // Errors name the edit ops.
     let unknown = refused(&mut agent, &id, json!([{ "op": "paint" }])).await;
     assert!(unknown.contains("Ops are artboard, html, css"), "{unknown}");
     let missing = refused(&mut agent, &id, json!([{ "op": "attrs", "select": "h1" }])).await;
@@ -648,8 +635,8 @@ async fn a_failing_op_changes_nothing_and_nobody_sees_it() {
 
 #[tokio::test]
 async fn a_dry_run_changes_nothing() {
-    let (app, hub) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Dry").await;
+    let (app, hub) = server();
+    let mut agent = Agent::connect(&app, "Dry").await;
     let (id, _) = landing(&mut agent).await;
     let handle = hub.open(&id).await.unwrap();
     let before = handle.read(|d| d.seq());
@@ -672,8 +659,8 @@ async fn a_dry_run_changes_nothing() {
 
 #[tokio::test]
 async fn refs_name_what_earlier_ops_made() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Refs").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Refs").await;
     let id = design(&mut agent, "Refs").await;
     // A ref inside a quoted string is text, not a ref.
     edit(
@@ -710,8 +697,8 @@ async fn refs_name_what_earlier_ops_made() {
 
 #[tokio::test]
 async fn remove_refuses_matches_nested_inside_each_other() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Guard").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Guard").await;
     let (id, _) = landing(&mut agent).await;
     // :has(p) matches the artboard and both cards.
     let error = refused(
@@ -736,9 +723,9 @@ async fn remove_refuses_matches_nested_inside_each_other() {
 
 #[tokio::test]
 async fn html_inner_and_replace_apply_to_every_match() {
-    let (app, _) = doc6();
-    let mut alice = Agent::connect_doc6(&app, "Alice").await;
-    let mut bob = Agent::connect_doc6(&app, "Bob").await;
+    let (app, _) = server();
+    let mut alice = Agent::connect(&app, "Alice").await;
+    let mut bob = Agent::connect(&app, "Bob").await;
     let (id, _) = landing(&mut alice).await;
     // A match inside another would be deleted by the outer replace.
     let nested = refused(
@@ -870,8 +857,8 @@ fn tag_ids(html: &str, tag: &str) -> Vec<String> {
 
 #[tokio::test]
 async fn path_ids_and_instance_edits_take_either_slash() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Paths").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Paths").await;
     let (id, _) = landing(&mut agent).await;
     // A slash in a value, and a color hash, are not path ids.
     let styled = edit(
@@ -1100,9 +1087,9 @@ async fn path_ids_and_instance_edits_take_either_slash() {
 
 #[tokio::test]
 async fn a_stale_rewrite_keeps_another_agents_change() {
-    let (app, _) = doc6();
-    let mut alice = Agent::connect_doc6(&app, "Alice").await;
-    let mut bob = Agent::connect_doc6(&app, "Bob").await;
+    let (app, _) = server();
+    let mut alice = Agent::connect(&app, "Alice").await;
+    let mut bob = Agent::connect(&app, "Bob").await;
     let (id, _) = landing(&mut alice).await;
     let read = html(&mut alice, &id, "[data-name=One]").await;
     let card = read.trim().to_owned();
@@ -1134,9 +1121,9 @@ async fn a_stale_rewrite_keeps_another_agents_change() {
 
 #[tokio::test]
 async fn two_agents_edit_at_once() {
-    let (app, _) = doc6();
-    let mut alice = Agent::connect_doc6(&app, "Alice").await;
-    let mut bob = Agent::connect_doc6(&app, "Bob").await;
+    let (app, _) = server();
+    let mut alice = Agent::connect(&app, "Alice").await;
+    let mut bob = Agent::connect(&app, "Bob").await;
     let (id, _) = landing(&mut alice).await;
     let a = json!({ "designId": id, "check": false, "ops": [
         { "op": "html", "select": "[data-name=One]", "html": "<b>alice</b>" },
@@ -1163,8 +1150,8 @@ async fn two_agents_edit_at_once() {
 
 #[tokio::test]
 async fn jsx_and_export_are_read_views() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Exporter").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Exporter").await;
     let (id, board) = landing(&mut agent).await;
     let jsx = agent
         .ok(
@@ -1228,8 +1215,8 @@ async fn jsx_and_export_are_read_views() {
 
 #[tokio::test]
 async fn comments_are_listed_awaited_and_answered() {
-    let (app, hub) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Helper").await;
+    let (app, hub) = server();
+    let mut agent = Agent::connect(&app, "Helper").await;
     let (id, board) = landing(&mut agent).await;
     let handle = hub.open(&id).await.unwrap();
     let h1 = handle.read(|d| {
@@ -1299,8 +1286,8 @@ async fn comments_are_listed_awaited_and_answered() {
 /// seconds and reset from the wall clock, so auto-advance would crawl.
 #[tokio::test(start_paused = true)]
 async fn a_comment_wait_over_55_seconds_is_clamped() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Helper").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Helper").await;
     let id = design(&mut agent, "Wait").await;
     let again = "Call again to keep listening.";
     let one = agent
@@ -1321,7 +1308,7 @@ async fn a_comment_wait_over_55_seconds_is_clamped() {
         let app = app.clone();
         let id = id.clone();
         waits.push(tokio::spawn(async move {
-            let mut agent = Agent::connect_doc6(&app, name).await;
+            let mut agent = Agent::connect(&app, name).await;
             let started = tokio::time::Instant::now();
             let text = agent
                 .ok("comments", json!({ "designId": id, "wait": wait.clone() }))
@@ -1388,8 +1375,8 @@ async fn layout_of(agent: &mut Agent, design: &str) -> Option<String> {
 /// viewer's iframe, and the check measures it the same way.
 #[tokio::test]
 async fn clipped_content_is_not_cut_off_by_the_artboard() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Clipper").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Clipper").await;
     for script in [false, true] {
         let id = design(&mut agent, "Clips").await;
         let script = if script { "<script>1 + 1</script>" } else { "" };
@@ -1470,8 +1457,8 @@ async fn clipped_content_is_not_cut_off_by_the_artboard() {
 /// iframe, and the check measures it the same way.
 #[tokio::test]
 async fn clip_path_clips_only_to_its_own_bounds() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Clipper").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Clipper").await;
     for script in [false, true] {
         let id = design(&mut agent, "Paths").await;
         let script = if script { "<script>1 + 1</script>" } else { "" };
@@ -1511,8 +1498,8 @@ async fn clip_path_clips_only_to_its_own_bounds() {
 /// a transformed one, are taken to crop nothing, so the overflow is reported.
 #[tokio::test]
 async fn clip_path_bounds_that_cant_be_worked_out_hide_nothing() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Clipper").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Clipper").await;
     for script in [false, true] {
         let id = design(&mut agent, "Unread").await;
         let script = if script { "<script>1 + 1</script>" } else { "" };
@@ -1543,8 +1530,8 @@ async fn clip_path_bounds_that_cant_be_worked_out_hide_nothing() {
 /// positioned against something outside it.
 #[tokio::test]
 async fn clip_path_crops_descendants_whatever_positions_them() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Clipper").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Clipper").await;
     for script in [false, true] {
         let id = design(&mut agent, "Escapees").await;
         let script = if script { "<script>1 + 1</script>" } else { "" };
@@ -1573,8 +1560,8 @@ async fn clip_path_crops_descendants_whatever_positions_them() {
 /// axis only (`overflow-x: clip`) and what a `clip-path` crops away.
 #[tokio::test]
 async fn overlaps_count_only_what_shows() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Clipper").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Clipper").await;
     for script in [false, true] {
         let id = design(&mut agent, "Overlaps").await;
         let script = if script { "<script>1 + 1</script>" } else { "" };
@@ -1652,8 +1639,8 @@ async fn checked(agent: &mut Agent, id: &str, args: Value) -> String {
 /// finding on every edit taught agents to turn the check off.
 #[tokio::test]
 async fn an_edit_reports_what_it_changed_and_counts_the_rest() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Checker").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Checker").await;
     let (id, board) = landing(&mut agent).await;
     // Warms the browser, so each check beats the edit's wait.
     if layout_of(&mut agent, &id).await.is_none() {
@@ -1712,8 +1699,8 @@ async fn an_edit_reports_what_it_changed_and_counts_the_rest() {
 /// worse isn't "unchanged by this edit".
 #[tokio::test]
 async fn a_stylesheet_edit_lists_the_findings_it_restyles() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Styler").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Styler").await;
     let (id, board) = landing(&mut agent).await;
     // Warms the browser, so each check beats the edit's wait.
     if layout_of(&mut agent, &id).await.is_none() {
@@ -1747,8 +1734,8 @@ async fn a_stylesheet_edit_lists_the_findings_it_restyles() {
 /// script, and the outline shows a size token as the size.
 #[tokio::test]
 async fn computed_values_follow_the_artboards_mode() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Prober").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Prober").await;
     let id = design(&mut agent, "Modes").await;
     let button = "<button class=\"btn\" style=\"background-color: var(--bg); width: 100%; height: var(--button-h); color: var(--fg)\">Go</button>";
     let made = edit(
@@ -1867,9 +1854,9 @@ async fn computed_values_follow_the_artboards_mode() {
 /// values or showing a deleted element's values as current.
 #[tokio::test]
 async fn computed_values_say_when_the_design_changed_meanwhile() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Prober").await;
-    let mut editor = Agent::connect_doc6(&app, "Editor").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Prober").await;
+    let mut editor = Agent::connect(&app, "Editor").await;
     let id = design(&mut agent, "Race").await;
     // The animation makes the browser wait out the settle delay, so there is time to edit.
     let board = "<style>@keyframes fade { to { opacity: .5 } } .fade { animation: fade 10s infinite }</style><div class=\"fade\">…</div><button class=\"btn\" style=\"background-color: var(--bg)\">Go</button>";
@@ -1933,8 +1920,8 @@ async fn computed_values_say_when_the_design_changed_meanwhile() {
 /// attribute, or a `<style>` block, which the outline doesn't evaluate.
 #[tokio::test]
 async fn the_outline_keeps_var_where_the_cascade_sets_it() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Sizer").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Sizer").await;
     let id = design(&mut agent, "Cascade").await;
     edit(
         &mut agent,
@@ -2013,8 +2000,8 @@ async fn the_outline_keeps_var_where_the_cascade_sets_it() {
 /// edit to the component reaches every instance.
 #[tokio::test]
 async fn components_are_made_used_and_detached_in_edits() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Builder").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Builder").await;
     let id = design(&mut agent, "App").await;
     let nav = |title: &str| {
         format!(
@@ -2157,8 +2144,8 @@ async fn two_screens(agent: &mut Agent) -> (String, String, String) {
 
 #[tokio::test]
 async fn a_copy_can_be_frozen_so_component_edits_leave_it_alone() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Snapshot").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Snapshot").await;
     let (id, home, bar) = two_screens(&mut agent).await;
 
     // A plain copy still follows the component, and says so.
@@ -2236,8 +2223,8 @@ async fn a_copy_can_be_frozen_so_component_edits_leave_it_alone() {
 
 #[tokio::test]
 async fn detach_takes_an_artboard_and_frees_every_instance_inside_it() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Detacher").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Detacher").await;
     let (id, home, _) = two_screens(&mut agent).await;
     let settings = id_after(
         &agent.ok("read", json!({ "designId": id })).await,
@@ -2268,8 +2255,8 @@ async fn detach_takes_an_artboard_and_frees_every_instance_inside_it() {
 
 #[tokio::test]
 async fn detaching_a_screen_freezes_nested_components_and_spares_definitions() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Freezer").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Freezer").await;
     let id = design(&mut agent, "Nested").await;
     let made = edit(
         &mut agent,
@@ -2345,8 +2332,8 @@ async fn detaching_a_screen_freezes_nested_components_and_spares_definitions() {
 
 #[tokio::test]
 async fn removing_a_screen_warns_about_comments_and_pin_moves_them() {
-    let (app, hub) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Rebuilder").await;
+    let (app, hub) = server();
+    let mut agent = Agent::connect(&app, "Rebuilder").await;
     let (id, board) = landing(&mut agent).await;
     let handle = hub.open(&id).await.unwrap();
     let title = handle.read(|d| {
@@ -2461,8 +2448,8 @@ async fn removing_a_screen_warns_about_comments_and_pin_moves_them() {
     assert!(error && many.contains("pin takes one"), "{many}");
 }
 
-/// Classic tool names in a string an agent on this surface was shown.
-fn classic_tool(text: &str) -> Option<&'static str> {
+/// The name of a tool that no longer exists, if `text` mentions one.
+fn old_tool_name(text: &str) -> Option<&'static str> {
     [
         "update_styles",
         "write_html",
@@ -2481,11 +2468,11 @@ fn classic_tool(text: &str) -> Option<&'static str> {
     .find(|name| text.contains(name))
 }
 
-/// A failed edit says what to do with a doc6 op, and never names a classic tool.
+/// A failed edit says what to do with an edit op, and never names a tool that no longer exists.
 #[tokio::test]
-async fn errors_tell_doc6_agents_which_op_to_use() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Errors").await;
+async fn errors_tell_agents_which_op_to_use() {
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Errors").await;
     let (id, board) = landing(&mut agent).await;
 
     let style = refused(
@@ -2507,7 +2494,7 @@ async fn errors_tell_doc6_agents_which_op_to_use() {
         style.contains(&format!("\"select\": \"#{styled}\"")),
         "{style}"
     );
-    assert_eq!(classic_tool(&style), None, "{style}");
+    assert_eq!(old_tool_name(&style), None, "{style}");
 
     let replaced = refused(
         &mut agent,
@@ -2517,7 +2504,7 @@ async fn errors_tell_doc6_agents_which_op_to_use() {
     .await;
     assert!(replaced.contains("mode \"inner\""), "{replaced}");
     assert!(!replaced.contains("replace-children"), "{replaced}");
-    assert_eq!(classic_tool(&replaced), None, "{replaced}");
+    assert_eq!(old_tool_name(&replaced), None, "{replaced}");
 
     let nav = |title: &str| {
         format!("<header data-name=\"Nav\"><h1 data-name=\"Title\">{title}</h1></header>")
@@ -2575,7 +2562,7 @@ async fn errors_tell_doc6_agents_which_op_to_use() {
         !other_part,
         "names a node other than the selection: {inner}"
     );
-    assert_eq!(classic_tool(&inner), None, "{inner}");
+    assert_eq!(old_tool_name(&inner), None, "{inner}");
 
     let deep = refused(
         &mut agent,
@@ -2587,7 +2574,7 @@ async fn errors_tell_doc6_agents_which_op_to_use() {
         deep.contains(&format!("\"select\": \"#{instance}\"")) && deep.contains("\"detach\": true"),
         "{deep}"
     );
-    assert_eq!(classic_tool(&deep), None, "{deep}");
+    assert_eq!(old_tool_name(&deep), None, "{deep}");
 
     let removed = refused(
         &mut agent,
@@ -2600,7 +2587,7 @@ async fn errors_tell_doc6_agents_which_op_to_use() {
             && removed.contains("\"detach\": true"),
         "{removed}"
     );
-    assert_eq!(classic_tool(&removed), None, "{removed}");
+    assert_eq!(old_tool_name(&removed), None, "{removed}");
 
     let nested = refused(
         &mut agent,
@@ -2613,7 +2600,7 @@ async fn errors_tell_doc6_agents_which_op_to_use() {
             && nested.contains("\"detach\": true"),
         "{nested}"
     );
-    assert_eq!(classic_tool(&nested), None, "{nested}");
+    assert_eq!(old_tool_name(&nested), None, "{nested}");
 
     let plain = edit(
         &mut agent,
@@ -2637,7 +2624,7 @@ async fn errors_tell_doc6_agents_which_op_to_use() {
             && not_component.contains(&format!("\"select\": \"#{plain_id}\"")),
         "{not_component}"
     );
-    assert_eq!(classic_tool(&not_component), None, "{not_component}");
+    assert_eq!(old_tool_name(&not_component), None, "{not_component}");
 
     let extra = refused(
         &mut agent,
@@ -2650,7 +2637,7 @@ async fn errors_tell_doc6_agents_which_op_to_use() {
     )
     .await;
     assert!(extra.contains("read with as: \"html\""), "{extra}");
-    assert_eq!(classic_tool(&extra), None, "{extra}");
+    assert_eq!(old_tool_name(&extra), None, "{extra}");
 
     // The advice above is the edit that actually sets one instance's text.
     let changed = edit(
@@ -2717,7 +2704,7 @@ async fn errors_tell_doc6_agents_which_op_to_use() {
             && !script_inner.contains("\"in\": \"text\""),
         "{script_inner}"
     );
-    assert_eq!(classic_tool(&script_inner), None, "{script_inner}");
+    assert_eq!(old_tool_name(&script_inner), None, "{script_inner}");
     let script_changed = edit(
         &mut agent,
         &id,
@@ -2750,8 +2737,8 @@ async fn errors_tell_doc6_agents_which_op_to_use() {
 /// HTML writes, including under an artboard.
 #[tokio::test]
 async fn detach_finds_instances_by_data_instance_of() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Builder").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Builder").await;
     let id = design(&mut agent, "App").await;
     let made = edit(
         &mut agent,
@@ -2827,9 +2814,9 @@ async fn detach_finds_instances_by_data_instance_of() {
 
 #[tokio::test]
 async fn each_comment_goes_to_one_agent() {
-    let (app, hub) = doc6();
-    let mut ada = Agent::connect_doc6(&app, "Ada").await;
-    let mut bo = Agent::connect_doc6(&app, "Bo").await;
+    let (app, hub) = server();
+    let mut ada = Agent::connect(&app, "Ada").await;
+    let mut bo = Agent::connect(&app, "Bo").await;
     let (id, board) = landing(&mut ada).await;
     edit(&mut ada, &id, json!([{ "op": "page", "create": "Drafts" }])).await;
     let handle = hub.open(&id).await.unwrap();
@@ -2963,8 +2950,8 @@ async fn each_comment_goes_to_one_agent() {
 /// Instances that changed the same way are one note, not a line each.
 #[tokio::test]
 async fn component_notes_name_many_instances_in_one_line() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Rows").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Rows").await;
     let id = design(&mut agent, "Rows").await;
     let rows =
         "<div data-component=\"Sum row\" class=\"row\"><span class=\"v\">0</span></div>".repeat(7);
@@ -3029,8 +3016,8 @@ async fn component_notes_name_many_instances_in_one_line() {
 /// its refusal says where the matches are.
 #[tokio::test]
 async fn replace_groups_identical_matches() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Copies").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Copies").await;
     let id = design(&mut agent, "Copies").await;
     let sheet = "<style>@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');\n.card { border: 1px solid #ccc }</style><p>x</p>";
     for name in ["A", "B", "C", "D", "E"] {
@@ -3083,8 +3070,8 @@ async fn replace_groups_identical_matches() {
 /// An html op over many elements reports the same result once.
 #[tokio::test]
 async fn html_dry_run_collapses_equal_results() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Spans").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Spans").await;
     let id = design(&mut agent, "Spans").await;
     let spans = "<span>a</span>".repeat(6);
     edit(
@@ -3111,8 +3098,8 @@ async fn html_dry_run_collapses_equal_results() {
 /// A whole artboard's HTML hides long stylesheets, which read gives on request.
 #[tokio::test]
 async fn read_html_hides_long_stylesheets_in_an_artboard() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Big").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Big").await;
     let id = design(&mut agent, "Big").await;
     let css: String = (0..1500)
         .map(|i| format!(".c{i} {{ color: red }}\n"))
@@ -3151,8 +3138,8 @@ async fn read_html_hides_long_stylesheets_in_an_artboard() {
 /// A stylesheet longer than a result reads in pieces that add up to all of it.
 #[tokio::test]
 async fn read_html_pages_through_a_stylesheet_longer_than_a_result() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Huge").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Huge").await;
     let id = design(&mut agent, "Huge").await;
     let css: String = (0..2500)
         // Trailing spaces and tabs, and text past ASCII, must survive paging.
@@ -3199,8 +3186,8 @@ async fn read_html_pages_through_a_stylesheet_longer_than_a_result() {
 /// Stylesheets that change alike but hold different rules are not copies.
 #[tokio::test]
 async fn replace_preview_groups_only_identical_stylesheets_and_names_their_rules() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Rules").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Rules").await;
     let id = design(&mut agent, "Rules").await;
     edit(
         &mut agent,
@@ -3227,8 +3214,8 @@ async fn replace_preview_groups_only_identical_stylesheets_and_names_their_rules
 /// the notation that matched, not around the find.
 #[tokio::test]
 async fn replace_preview_shows_code_around_a_color_in_another_notation() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Gradient").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Gradient").await;
     let id = design(&mut agent, "Gradient").await;
     let stops = (0..8)
         .map(|i| format!("rgba(0, 0, {i}, 0.5) {}%", i * 10))
@@ -3256,8 +3243,8 @@ async fn replace_preview_shows_code_around_a_color_in_another_notation() {
 
 #[tokio::test]
 async fn a_reply_links_each_edit_once() {
-    let (app, hub) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Linker").await;
+    let (app, hub) = server();
+    let mut agent = Agent::connect(&app, "Linker").await;
     let (id, board) = landing(&mut agent).await;
     let handle = hub.open(&id).await.unwrap();
     let person = Author {
@@ -3345,8 +3332,8 @@ async fn a_reply_links_each_edit_once() {
 
 #[tokio::test]
 async fn links_between_artboards_report_when_they_break() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Flow").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Flow").await;
     let id = design(&mut agent, "Shop").await;
     edit(
         &mut agent,
@@ -3403,8 +3390,8 @@ async fn links_between_artboards_report_when_they_break() {
 
 #[tokio::test]
 async fn the_flow_note_covers_instances_and_screens_that_share_a_width() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Flow").await;
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Flow").await;
     let id = design(&mut agent, "Shop").await;
     let nav = "<header data-name=\"Nav\"><a data-name=\"Pay\" href=\"#finite-artboard=cart\">Pay</a></header>";
     edit(

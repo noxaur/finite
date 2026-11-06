@@ -62,6 +62,7 @@ async fn a_tab_edits_and_undoes_its_own_work() {
                 position: Some((0.0, 0.0)),
                 page: None,
                 styles: BTreeMap::new(),
+                ..Default::default()
             };
             Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
         })

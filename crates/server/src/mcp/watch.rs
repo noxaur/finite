@@ -1,10 +1,10 @@
-//! The layout note on edit results, behind `FINITE_MCP_EXTRA=layout`.
+//! The layout note on edit results.
 //!
-//! Agents rarely call `get_layout` or `get_screenshot` to check an edit, and
+//! Agents rarely call `render` to check an edit, and
 //! content that overflows its artboard or box goes unnoticed. Measuring takes
 //! a browser: about 0.5 s with Chrome warm and 2 s for the first call, against
 //! 1 ms for the edit itself. So the edit starts the measuring and waits for it
-//! up to [`WAIT`]. If the note is ready, it goes on that edit's result. If not
+//! up to [`wait`]. If the note is ready, it goes on that edit's result. If not
 //! (a cold browser, a busy one), the measuring finishes after the response and
 //! the note goes on the agent's next result for that design. Agents often send
 //! several edits at once, so a note from an earlier edit can arrive with a
@@ -18,10 +18,10 @@
 //! off, which hid the real regressions too.
 //!
 //! A note describes the design as of one edit, so anything that changes the
-//! design afterwards drops it: a newer `write_html` or `update_styles` on the
+//! design afterwards drops it: a newer `edit` on the
 //! artboard replaces it, any other edit clears every note on the design (see
-//! [`LayoutWatch::invalidate`]), and `get_layout` and `get_screenshot` drop it
-//! because they report the layout themselves. A tool that fails leaves a note
+//! [`LayoutWatch::invalidate`]), and `render` drops it because it reports the
+//! layout itself. A tool that fails leaves a note
 //! where it was.
 //!
 //! Measurements run one at a time, and one whose artboard has been edited
@@ -39,10 +39,10 @@ use finite_design::{Change, Document};
 use super::layout::{Found, Named, Report, Texts};
 use crate::{hub::DesignHandle, screenshot};
 
-/// How long a doc6 edit waits at least: its check is on by default, and AX
-/// runs saw a cold browser miss the classic wait on most first edits, so
-/// agents rendered to find out instead.
-const DOC6_WAIT: Duration = Duration::from_secs(5);
+/// How long an edit waits for its layout check by default. AX runs saw a
+/// cold browser miss a shorter wait on most first edits, so agents rendered
+/// to find out instead.
+const DEFAULT_WAIT: Duration = Duration::from_secs(5);
 
 /// How long an edit waits for its layout check before it answers without one.
 /// `FINITE_LAYOUT_WAIT_MS` sets it; the deferred-note tests set 0.
@@ -52,7 +52,7 @@ fn wait() -> Duration {
         std::env::var("FINITE_LAYOUT_WAIT_MS")
             .ok()
             .and_then(|ms| ms.parse().ok())
-            .map_or(Duration::from_millis(1_000), Duration::from_millis)
+            .map_or(DEFAULT_WAIT, Duration::from_millis)
     })
 }
 
@@ -118,18 +118,9 @@ impl Taken {
 pub(super) struct LayoutWatch {
     /// By design id, then artboard id.
     boards: Mutex<HashMap<String, HashMap<String, Entry>>>,
-    /// Whose tools the notes name.
-    surface: super::Surface,
 }
 
 impl LayoutWatch {
-    pub(super) fn new(surface: super::Surface) -> Self {
-        Self {
-            surface,
-            ..Self::default()
-        }
-    }
-
     /// Starts measuring the artboards `change` touched, and waits up to
     /// [`wait`] for it. What it finds is then waiting in [`Self::take`].
     /// Returns whether every artboard it touched was measured in time and
@@ -185,9 +176,8 @@ impl LayoutWatch {
                 generation,
                 Some(Measured {
                     note: Some(format!(
-                        "Layout: this edit touched {} artboards and only the first {BOARDS_PER_EDIT} were checked. {} checks the rest.",
+                        "Layout: this edit touched {} artboards and only the first {BOARDS_PER_EDIT} were checked. {LAYOUT_TOOL} checks the rest.",
                         boards.len() + left_out,
-                        layout_tool(self.surface)
                     )),
                     found: HashSet::new(),
                 }),
@@ -212,19 +202,14 @@ impl LayoutWatch {
                     return false;
                 }
                 let (touched, before) = watch.checked_so_far(&design, &board);
-                let measured = measure(&handle, &board, watch.surface, &touched, before).await;
+                let measured = measure(&handle, &board, &touched, before).await;
                 let clean = matches!(&measured, Some(m) if m.note.is_none());
                 watch.finish(&design, &board, generation, measured);
                 clean
             }));
         }
         // On time out the tasks carry on and leave their notes for later.
-        let wait = if self.surface.doc6() {
-            wait().max(DOC6_WAIT)
-        } else {
-            wait()
-        };
-        match tokio::time::timeout(wait, futures::future::join_all(tasks)).await {
+        match tokio::time::timeout(wait(), futures::future::join_all(tasks)).await {
             Ok(done) => {
                 left_out == 0 && !done.is_empty() && done.into_iter().all(|d| d.unwrap_or(false))
             }
@@ -447,7 +432,6 @@ impl<'a> Touched<'a> {
 async fn measure(
     handle: &DesignHandle,
     board: &str,
-    surface: super::Surface,
     touched: &HashSet<String>,
     before: Option<HashSet<u64>>,
 ) -> Option<Measured> {
@@ -473,9 +457,8 @@ async fn measure(
         let doc = d.view();
         let touched = Touched::new(doc, board, touched);
         Some((
-            Report::new(doc, board, &boxes, surface),
-            // doc6 promises overlapping text too, as get_layout reports it.
-            surface.doc6().then(|| Texts::new(doc, &boxes)),
+            Report::new(doc, board, &boxes),
+            Texts::new(doc, &boxes),
             boxes
                 .iter()
                 .map(|b| b.id.as_str())
@@ -483,9 +466,9 @@ async fn measure(
                 .collect::<HashSet<&str>>(),
         ))
     })?;
-    let report = match (texts, boxes.first()) {
-        (Some(texts), Some(board)) => report.with_overlaps(board, &texts),
-        _ => report,
+    let report = match boxes.first() {
+        Some(board) => report.with_overlaps(board, &texts),
+        None => report,
     };
     let keys: Vec<u64> = report.found.iter().map(Found::key).collect();
     let kept: Vec<&Found> = report
@@ -507,7 +490,7 @@ async fn measure(
         handle.read(|d| (d.seq() == seq).then(|| report.text(d.view(), &named)))?
     };
     let found: HashSet<u64> = keys.into_iter().collect();
-    let tool = layout_tool(surface);
+    let tool = LAYOUT_TOOL;
     let note = match (notes.is_empty(), hidden) {
         (true, 0) => None,
         (true, n) => Some(format!(
@@ -527,14 +510,8 @@ async fn measure(
     Some(Measured { note, found })
 }
 
-/// The tool that shows the whole layout, as this surface names it.
-fn layout_tool(surface: super::Surface) -> &'static str {
-    if surface.doc6() {
-        "render with output: \"layout\""
-    } else {
-        "get_layout"
-    }
-}
+/// How a note names the call that shows the whole layout.
+const LAYOUT_TOOL: &str = "render with output: \"layout\"";
 
 #[cfg(test)]
 mod tests {
