@@ -24,6 +24,7 @@
 
 pub mod app;
 pub mod assets;
+mod css_scope;
 mod feature;
 pub mod figma;
 pub mod finite;

@@ -441,6 +441,43 @@ fn a_path_is_written_as_a_string_literal() {
     );
 }
 
+/// The cart at 390 and 1440 wide, each with a `.title` of its own color.
+fn cart_with_styles() -> Design {
+    let mut d = design();
+    screen(
+        &mut d,
+        "m",
+        "Cart mobile",
+        390.0,
+        Some("/cart"),
+        "<style>.title{color:red}</style><p class=\"title\">Mobile</p>",
+    );
+    screen(
+        &mut d,
+        "w",
+        "Cart",
+        1440.0,
+        Some("/cart"),
+        "<style>.title{color:blue} body{margin:4px}</style><p class=\"title\">Wide</p>",
+    );
+    d
+}
+
+#[test]
+fn a_screens_css_only_reaches_that_screen() {
+    let files = files(&export(&cart_with_styles(), react_router()).unwrap());
+    let cart = &files["src/pages/PageCart.tsx"];
+    // Both screens are in the document at once, so each style is limited to its wrapper.
+    assert!(
+        cart.contains("{`:where(.PageCart-0) .title{color:red}`}"),
+        "{cart}"
+    );
+    assert!(
+        cart.contains("{`:where(.PageCart-1) .title{color:blue} :where(.PageCart-1){margin:4px}`}"),
+        "{cart}"
+    );
+}
+
 #[test]
 fn names_jsx_cant_write_are_left_out_and_reported() {
     let exported = export(&awkward(), react_router()).unwrap();
@@ -595,7 +632,11 @@ fn the_project_builds() {
         eprintln!("skipping the app build: npm isn't on PATH");
         return;
     }
-    for (name, design) in [("shop", shop()), ("awkward", awkward())] {
+    for (name, design) in [
+        ("shop", shop()),
+        ("awkward", awkward()),
+        ("styles", cart_with_styles()),
+    ] {
         builds(work, name, &design);
     }
 }

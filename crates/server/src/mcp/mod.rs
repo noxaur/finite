@@ -1437,6 +1437,7 @@ impl FiniteMcp {
         let handle = design!(self, &p.design_id);
         let options = jsx::Options {
             tailwind: p.tailwind,
+            ..Default::default()
         };
         let converted = handle.read(|d| {
             // The expanded view: an instance has no children of its own.

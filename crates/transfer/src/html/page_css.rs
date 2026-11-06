@@ -1,6 +1,8 @@
 //! A page's `<html>` and `<body>` become one artboard, so the page's rules
 //! for `html`, `body` and `:root` would match nothing. These functions write
 //! those selectors as selectors for the artboard, which carries [`CLASS`].
+//! The app export writes them for a screen's wrapper instead, through
+//! [`map_selector`], along with the scanning helpers it shares.
 
 /// The class an imported page's artboard carries.
 pub(super) const CLASS: &str = "finite-root";
@@ -11,7 +13,7 @@ pub(super) const LAYER: &str = "finite-artboard";
 
 /// At-rules whose block holds rules, so their selectors are rewritten too.
 /// Any other at-rule's block, like `@keyframes` or `@font-face`, is copied.
-const GROUPING: [&str; 8] = [
+pub(crate) const GROUPING: [&str; 8] = [
     "media",
     "supports",
     "layer",
@@ -64,12 +66,12 @@ pub(super) fn rewrite(css: &str) -> Rewritten {
                         out.css.push_str(&css[i..=end]);
                         i = end + 1;
                     } else {
-                        let close = block_end(css, end);
+                        let close = block_end(css, end).map_or(css.len(), |brace| brace + 1);
                         out.css.push_str(&css[i..close]);
                         i = close;
                     }
                 } else {
-                    let selectors = selector_list(prelude, &mut out);
+                    let selectors = selector_list(prelude, CLASS, &mut out);
                     out.css.push_str(&selectors);
                     out.css.push('{');
                     i = end + 1;
@@ -91,7 +93,7 @@ pub(super) fn rewrite(css: &str) -> Rewritten {
 
 /// Where the prelude that starts at `from` ends: at the first `{`, `;` or
 /// `}` outside strings, comments and brackets, or at the end.
-fn prelude_end(css: &str, from: usize) -> usize {
+pub(crate) fn prelude_end(css: &str, from: usize) -> usize {
     let mut end = css.len();
     scan(&css[from..], |at, byte, depth| {
         if depth == 0 && matches!(byte, b'{' | b';' | b'}') {
@@ -103,17 +105,17 @@ fn prelude_end(css: &str, from: usize) -> usize {
     end
 }
 
-/// Past the `}` that closes the block opening at `open`.
-fn block_end(css: &str, open: usize) -> usize {
+/// The offset of the `}` that closes the block opening at `open`, if there is one.
+pub(crate) fn block_end(css: &str, open: usize) -> Option<usize> {
     let mut level = 0usize;
-    let mut end = css.len();
+    let mut end = None;
     scan(&css[open..], |at, byte, _| {
         match byte {
             b'{' => level += 1,
             b'}' => {
                 level -= 1;
                 if level == 0 {
-                    end = open + at + 1;
+                    end = Some(open + at);
                     return false;
                 }
             }
@@ -126,7 +128,7 @@ fn block_end(css: &str, open: usize) -> usize {
 
 /// Calls `f` with each byte outside strings and comments, its offset and
 /// how deep it is in `()` and `[]`, until `f` returns false.
-fn scan(s: &str, mut f: impl FnMut(usize, u8, usize) -> bool) {
+pub(crate) fn scan(s: &str, mut f: impl FnMut(usize, u8, usize) -> bool) {
     let bytes = s.as_bytes();
     let (mut i, mut depth) = (0, 0usize);
     while i < bytes.len() {
@@ -164,7 +166,7 @@ fn scan(s: &str, mut f: impl FnMut(usize, u8, usize) -> bool) {
 }
 
 /// `s` split at each top-level byte that `split` accepts.
-fn split_top(s: &str, split: impl Fn(u8) -> bool) -> Vec<&str> {
+pub(crate) fn split_top(s: &str, split: impl Fn(u8) -> bool) -> Vec<&str> {
     let mut pieces = Vec::new();
     let mut start = 0;
     scan(s, |at, byte, depth| {
@@ -184,7 +186,7 @@ fn mentions_page(s: &str) -> bool {
 }
 
 /// A comma-separated selector list, rewritten.
-fn selector_list(list: &str, out: &mut Rewritten) -> String {
+fn selector_list(list: &str, class: &str, out: &mut Rewritten) -> String {
     if !mentions_page(list) {
         return list.to_owned();
     }
@@ -195,8 +197,8 @@ fn selector_list(list: &str, out: &mut Rewritten) -> String {
             let lead = selector.len() - selector.trim_start().len();
             let trail = selector.trim_end().len();
             let core = &selector[lead..trail];
-            let rewritten = match complex(core, out) {
-                Some(rewritten) => rewritten,
+            let rewritten = match complex(core, class, out) {
+                Some((rewritten, _)) => rewritten,
                 None => {
                     out.unmapped += 1;
                     core.to_owned()
@@ -208,7 +210,7 @@ fn selector_list(list: &str, out: &mut Rewritten) -> String {
         .join(",")
 }
 
-fn strip_comments(s: &str) -> String {
+pub(crate) fn strip_comments(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(start) = rest.find("/*") {
@@ -222,8 +224,9 @@ fn strip_comments(s: &str) -> String {
 }
 
 /// One complex selector, like `html.dark body > main`, rewritten, or `None`
-/// if it names the page in a way that doesn't map onto the artboard.
-fn complex(selector: &str, out: &mut Rewritten) -> Option<String> {
+/// if it names the page in a way that doesn't map onto the artboard. The
+/// flag says whether it starts with the artboard, because it named the page.
+fn complex(selector: &str, class: &str, out: &mut Rewritten) -> Option<(String, bool)> {
     // Compounds, each with the combinator before it ("" for the first).
     let mut separators = vec![false; selector.len()];
     scan(selector, |at, byte, depth| {
@@ -249,12 +252,12 @@ fn complex(selector: &str, out: &mut Rewritten) -> Option<String> {
         .map(|(combinator, text)| {
             (
                 combinator.to_owned(),
-                Compound::parse(&arguments(text, out)),
+                Compound::parse(&arguments(text, class, out)),
             )
         })
         .collect();
     let Some(last_page) = parts.iter().rposition(|(_, c)| c.is_page()) else {
-        return Some(join(&parts));
+        return Some((join(&parts), false));
     };
     // Everything up to the last `html` or `body` must be them too, joined by
     // descendant or child combinators, since both are now one element.
@@ -273,16 +276,27 @@ fn complex(selector: &str, out: &mut Rewritten) -> Option<String> {
     }
     let root = parts[..=last_page].iter().any(|(_, c)| c.root);
     let mut head = if root {
-        format!(".{CLASS}")
+        format!(".{class}")
     } else {
-        format!(":where(.{CLASS})")
+        format!(":where(.{class})")
     };
     for (_, c) in &parts[..=last_page] {
         head.push_str(&c.rest);
     }
     out.mapped += 1;
     let tail = parts.split_off(last_page + 1);
-    Some(format!("{head}{}", join(&tail)))
+    Some((format!("{head}{}", join(&tail)), true))
+}
+
+/// `selector` with its `html`, `body` and `:root` written for the element
+/// with `class`, if it starts with one of them: `html.dark body > main` is
+/// `:where(.screen).dark > main`. `None` if it doesn't, or names them in a
+/// way that doesn't map onto one element, like `html + p`.
+pub(crate) fn map_selector(selector: &str, class: &str) -> Option<String> {
+    match complex(selector, class, &mut Rewritten::default()) {
+        Some((mapped, true)) => Some(mapped),
+        _ => None,
+    }
 }
 
 fn join(parts: &[(String, Compound)]) -> String {
@@ -354,7 +368,7 @@ impl Compound {
 }
 
 /// `compound` with the selectors inside `:is()`, `:not()` and the like rewritten.
-fn arguments(compound: &str, out: &mut Rewritten) -> String {
+fn arguments(compound: &str, class: &str, out: &mut Rewritten) -> String {
     if !compound.contains('(') || !mentions_page(compound) {
         return compound.to_owned();
     }
@@ -377,7 +391,7 @@ fn arguments(compound: &str, out: &mut Rewritten) -> String {
             (b')', 0) => {
                 if let Some(start) = open.take() {
                     result.push_str(&compound[copied..start]);
-                    result.push_str(&selector_list(&compound[start..at], out));
+                    result.push_str(&selector_list(&compound[start..at], class, out));
                     copied = at;
                 }
             }

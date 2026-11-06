@@ -311,13 +311,13 @@ fn write_page(doc: &Document, name: &str, screens: &[&Screen], links: &Links<'_>
         text.push_str(&format!(
             "      <div className=\"finite-screen {name}-{i}\"{mode}>\n"
         ));
-        if let Some(converted) = jsx::convert_with(
-            doc,
-            &screen.artboard,
-            &jsx::Options::default(),
-            Some(links),
-            4,
-        ) {
+        let class = format!("{name}-{i}");
+        let options = jsx::Options {
+            scope: Some(&class),
+            ..Default::default()
+        };
+        if let Some(converted) = jsx::convert_with(doc, &screen.artboard, &options, Some(links), 4)
+        {
             text.push_str(&converted.jsx);
             text.push('\n');
             diagnostics.extend(converted.diagnostics);

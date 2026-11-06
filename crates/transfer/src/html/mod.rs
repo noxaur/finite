@@ -3,7 +3,7 @@
 //! this module adds what a file needs on top: a page around the artboard on
 //! the way out, and on the way in, a record of everything left out.
 
-mod page_css;
+pub(crate) mod page_css;
 
 use std::collections::BTreeSet;
 

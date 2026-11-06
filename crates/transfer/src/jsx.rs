@@ -14,7 +14,7 @@ use finite_design::{
 
 use crate::{
     Codec, Diagnostic, Direction, Error, Exported, Feature, Imported, Input, Revision, Scope,
-    Score, Support, assets, file_stem,
+    Score, Support, assets, css_scope, file_stem,
 };
 
 pub struct Jsx;
@@ -73,9 +73,13 @@ impl Codec for Jsx {
 
 /// What [`convert`] writes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Options {
+pub struct Options<'a> {
     /// Styles as Tailwind classes instead of `style` objects.
     pub tailwind: bool,
+    /// A class of the element the JSX goes in. Each `<style>` is limited to
+    /// elements inside it, so the CSS of one screen can't restyle another
+    /// on the same page.
+    pub scope: Option<&'a str>,
 }
 
 /// JSX from [`convert`], and what it left out.
@@ -86,7 +90,7 @@ pub struct Converted {
 }
 
 /// The subtree at `id` as JSX, indented `level` steps of two spaces.
-pub fn convert(doc: &Document, id: &str, options: &Options, level: usize) -> Option<Converted> {
+pub fn convert(doc: &Document, id: &str, options: &Options<'_>, level: usize) -> Option<Converted> {
     convert_with(doc, id, options, None, level)
 }
 
@@ -114,7 +118,7 @@ pub enum Link {
 pub fn convert_with(
     doc: &Document,
     id: &str,
-    options: &Options,
+    options: &Options<'_>,
     links: Option<&Links<'_>>,
     level: usize,
 ) -> Option<Converted> {
@@ -154,7 +158,7 @@ pub(crate) fn component_name(name: &str) -> String {
 
 struct Writer<'a> {
     doc: &'a Document,
-    options: &'a Options,
+    options: &'a Options<'a>,
     links: Option<&'a Links<'a>>,
     out: String,
     diagnostics: Vec<Diagnostic>,
@@ -307,7 +311,10 @@ impl Writer<'_> {
             return;
         }
         if tag.eq_ignore_ascii_case("style") {
-            let css: String = children.iter().filter_map(|c| c.text.as_deref()).collect();
+            let mut css: String = children.iter().filter_map(|c| c.text.as_deref()).collect();
+            if let Some(class) = self.options.scope {
+                css = css_scope::scope(&css, class);
+            }
             let css = css
                 .replace('\\', "\\\\")
                 .replace('`', "\\`")
@@ -688,7 +695,16 @@ mod tests {
     fn jsx(source: &str, tailwind: bool) -> Converted {
         let (design, id) = board(source);
         let content = design.doc().children(Some(&id))[0].id.clone();
-        convert(design.doc(), &content, &Options { tailwind }, 0).unwrap()
+        convert(
+            design.doc(),
+            &content,
+            &Options {
+                tailwind,
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap()
     }
 
     #[test]
