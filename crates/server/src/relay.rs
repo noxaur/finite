@@ -115,9 +115,10 @@ impl Gathered<'_> {
 pub fn service(
     members: Arc<Members>,
     sessions: Option<Arc<dyn SessionStore>>,
+    allowed_hosts: &[String],
 ) -> StreamableHttpService<Relay, LocalSessionManager> {
-    let mut config =
-        StreamableHttpServerConfig::default().with_allowed_hosts(members.now().allowed_hosts());
+    let mut config = StreamableHttpServerConfig::default()
+        .with_allowed_hosts(members.now().allowed_hosts(allowed_hosts));
     config.session_store = sessions;
     let next = Arc::new(AtomicUsize::new(0));
     StreamableHttpService::new(
@@ -146,8 +147,8 @@ fn header(ctx: &RequestContext<RoleServer>, name: &str) -> Option<http::HeaderVa
 /// and shown as its client's name.
 fn identity(ctx: &RequestContext<RoleServer>) -> HashMap<http::HeaderName, http::HeaderValue> {
     let mut headers = HashMap::new();
-    let agent = http::HeaderName::from_static("x-finite-agent");
-    if let Some(named) = header(ctx, "x-finite-agent") {
+    let agent = http::HeaderName::from_static(crate::wire::AGENT);
+    if let Some(named) = header(ctx, crate::wire::AGENT) {
         headers.insert(agent, named);
         return headers;
     }
@@ -169,7 +170,7 @@ fn identity(ctx: &RequestContext<RoleServer>) -> HashMap<http::HeaderName, http:
         headers.insert(agent, id);
     }
     if let Ok(name) = http::HeaderValue::from_str(&format!("{client} ({short})")) {
-        headers.insert(http::HeaderName::from_static("x-finite-agent-name"), name);
+        headers.insert(http::HeaderName::from_static(crate::wire::AGENT_NAME), name);
     }
     headers
 }
@@ -306,14 +307,12 @@ impl Relay {
                 match serde_json::from_str(&text.text) {
                     Ok(Value::Array(list)) => gathered.designs.extend(list),
                     // A server's own note about its list, which is redone below.
-                    _ if text.text.starts_with("The query matched") => {}
+                    _ if text.text == ID_MATCH_NOTE => {}
                     _ => gathered.cut = true,
                 }
             }
         }
-        gathered
-            .designs
-            .sort_by_key(|d| std::cmp::Reverse(d["updatedAt"].as_u64().unwrap_or(0)));
+        crate::wire::newest_first(&mut gathered.designs);
         let mut known = self.known.lock().unwrap();
         for (id, _) in gathered.pairs() {
             known.insert(id.to_owned());
@@ -479,7 +478,7 @@ impl ServerHandler for Relay {
                 Err(error) => last = Some(error),
             }
         }
-        Err(last.unwrap_or_else(|| McpError::internal_error("no Finite server is running", None)))
+        Err(last.unwrap_or_else(|| McpError::internal_error(crate::wire::NO_SERVER, None)))
     }
 
     async fn call_tool(
@@ -499,10 +498,9 @@ impl ServerHandler for Relay {
         let cluster = self.members.now();
         let nodes = cluster.nodes();
         if nodes.is_empty() {
-            return Ok(CallToolResult::error(vec![ContentBlock::text(
-                "No Finite server is running. Try again in a few seconds.",
-            )])
-            .into());
+            return Ok(
+                CallToolResult::error(vec![ContentBlock::text(crate::wire::NO_SERVER)]).into(),
+            );
         }
         let designs = request.name == "designs";
         if designs && arg("create").is_some() {
@@ -595,7 +593,7 @@ impl SessionStore for DirSessionStore {
     /// same session would write into the same file.
     async fn store(&self, session_id: &str, state: &SessionState) -> Result<(), SessionStoreError> {
         let path = self.path(session_id);
-        let tmp = path.with_extension(format!("{}.tmp", crate::hub::random_id(8)));
+        let tmp = path.with_extension(format!("{}.tmp", crate::id::random_id(8)));
         let bytes = serde_json::to_vec(state)?;
         let written = tmp.clone();
         tokio::task::spawn_blocking(move || -> std::io::Result<()> {
@@ -624,8 +622,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unreadable_session_file_counts_as_no_session() {
-        let dir =
-            std::env::temp_dir().join(format!("finite-sessions-{}", crate::hub::random_id(8)));
+        let dir = std::env::temp_dir().join(format!("finite-sessions-{}", crate::id::random_id(8)));
         let store = DirSessionStore::new(&dir).unwrap();
         std::fs::write(dir.join("abc.json"), b"{\"cut sh").unwrap();
         assert!(store.load("abc").await.unwrap().is_none());

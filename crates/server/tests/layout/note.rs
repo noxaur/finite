@@ -1,18 +1,16 @@
 //! The layout note on `edit` results. An edit waits for its check, so with a
 //! warm browser the note is on the edit's own result.
 
-mod agent;
-mod layout_common;
-
-use agent::{Agent, test_app};
-use layout_common::{board, clip, edit, note_after, read, set_wait};
+use super::{
+    agent::Agent,
+    common::{board, clip, edit, note_after, read, waiting_app},
+};
 use serde_json::json;
 use std::time::Duration;
 
 #[tokio::test]
 async fn an_edit_that_clips_content_gets_a_note() {
-    set_wait(5_000);
-    let app = test_app();
+    let app = waiting_app(15_000);
     let mut agent = Agent::connect(&app, "Checker").await;
     let Some(b) = board(&mut agent).await else {
         return;
@@ -66,7 +64,7 @@ async fn an_edit_that_clips_content_gets_a_note() {
             json!([{ "op": "artboard", "name": format!("Extra {n}"), "width": 300, "height": 200 }]),
         )
         .await;
-        ids.push(agent::id_after(&made, "Created artboard"));
+        ids.push(super::agent::id_after(&made, "Created artboard"));
     }
     let select: Vec<String> = ids.iter().map(|id| format!("#{id}")).collect();
     let wide = agent

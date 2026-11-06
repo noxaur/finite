@@ -1,11 +1,13 @@
-//! Shared by the layout note tests, which each run in their own process
-//! because `FINITE_LAYOUT_WAIT_MS` is read once.
-
-#![allow(dead_code, reason = "each test binary uses some of these")]
+//! Shared by the layout tests.
 
 use super::agent::{Agent, id_after};
+use axum::Router;
+use finite_server::{Hub, app, config::Settings, store::MemoryStore, testing::require_browser};
 use serde_json::{Value, json};
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 /// A design with one 300 × 200 artboard holding a "Title", and the ids.
 pub struct Board {
@@ -14,12 +16,17 @@ pub struct Board {
     pub title: String,
 }
 
-/// Sets how long an edit waits for its layout check, in milliseconds. Call
-/// before anything else.
-pub fn set_wait(ms: u64) {
-    // SAFETY: each test binary has one test, and this runs first, so no other
-    // thread reads the environment yet.
-    unsafe { std::env::set_var("FINITE_LAYOUT_WAIT_MS", ms.to_string()) };
+/// A server whose edits wait `ms` milliseconds for their layout check. 0
+/// leaves every note for the next result. A wait that is long enough to
+/// outlast other tests' Chrome measurements, which queue behind one another,
+/// is what lets a clean check or an overlap note reach the edit's own result.
+pub fn waiting_app(ms: u64) -> Router {
+    let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
+    hub.configure(Settings {
+        layout_wait: Duration::from_millis(ms),
+        ..Settings::default()
+    });
+    app(hub, None)
 }
 
 /// Runs `ops` as one edit without the layout check.
@@ -32,9 +39,8 @@ pub async fn edit(agent: &mut Agent, design: &str, ops: Value) -> String {
         .await
 }
 
-/// Sets up the design, or says why the test can't run. Without a browser
-/// there is nothing to measure: that is announced on stderr and the test
-/// passes, unless `FINITE_REQUIRE_BROWSER` is set, as CI can, to fail instead.
+/// Sets up the design, or `None` when there is no browser to measure with
+/// (see [`require_browser`]).
 pub async fn board(agent: &mut Agent) -> Option<Board> {
     let created = agent.ok("designs", json!({ "create": "Notes" })).await;
     let design = created
@@ -57,14 +63,7 @@ pub async fn board(agent: &mut Agent) -> Option<Board> {
             json!({ "designId": design, "select": format!("#{board}"), "output": "layout" }),
         )
         .await;
-    if probe.contains("no Chrome") {
-        assert!(
-            std::env::var_os("FINITE_REQUIRE_BROWSER").is_none(),
-            "FINITE_REQUIRE_BROWSER is set but there is no browser: {probe}"
-        );
-        eprintln!(
-            "SKIPPED, NOTHING WAS TESTED: no Chrome, Chromium or Edge found (set FINITE_CHROME)"
-        );
+    if !require_browser(&probe) {
         return None;
     }
     Some(Board {

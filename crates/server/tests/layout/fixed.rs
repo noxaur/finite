@@ -1,19 +1,16 @@
 //! A note waiting on an artboard must not ride on the result of the edit that
-//! fixes it. `FINITE_LAYOUT_WAIT_MS=0` leaves the note waiting when the fix
-//! arrives. Its own process, since the environment is read once.
+//! fixes it. A layout wait of 0 leaves the note waiting when the fix arrives.
 
-mod agent;
-mod layout_common;
-
-use agent::{Agent, id_after, test_app};
-use layout_common::{board, clip, set_wait};
+use super::{
+    agent::{Agent, id_after},
+    common::{board, clip, waiting_app},
+};
 use serde_json::json;
 use std::time::Duration;
 
 #[tokio::test]
 async fn an_edit_that_fixes_the_problem_does_not_return_the_note_about_it() {
-    set_wait(0);
-    let app = test_app();
+    let app = waiting_app(0);
     let mut agent = Agent::connect(&app, "Fixer").await;
     let Some(b) = board(&mut agent).await else {
         return;

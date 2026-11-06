@@ -9,7 +9,12 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use finite_design::import::{BlobHash, Dependency, ImportRecord};
-use finite_server::{Hub, app, cluster::Cluster, store::MemoryStore};
+use finite_server::{
+    Hub, app,
+    cluster::Cluster,
+    store::{Claim, MemoryStore},
+    testing::serve,
+};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -98,9 +103,9 @@ async fn designs_move_to_their_new_owner() {
         .to_vec();
     let cluster = |me| Cluster::new(nodes.clone(), me).unwrap();
     let new_hub = Hub::with_cluster(Arc::new(MemoryStore::default()), cluster(1)).unwrap();
-    tokio::spawn(async move { axum::serve(b, app(new_hub, None)).await });
+    serve(b, app(new_hub, None));
     let old_hub = Hub::with_cluster(old_store.clone(), cluster(0)).unwrap();
-    tokio::spawn(async move { axum::serve(a, app(old_hub, None)).await });
+    serve(a, app(old_hub, None));
 
     let moving: Vec<&String> = ids
         .iter()
@@ -299,14 +304,17 @@ async fn blobs_move_with_their_design() {
     snapshot
         .imports
         .push(import_record(artifact.clone(), dependencies));
-    old_store.remove(&id).unwrap();
+    let Claim::Granted(token) = old_store.claim(&id).unwrap() else {
+        panic!("the store has no other server");
+    };
+    old_store.delete(&id, token).unwrap();
     old_store.save(&snapshot, 0).unwrap();
 
     let new_store = Arc::new(MemoryStore::default());
     let new_hub = Hub::with_cluster(new_store.clone(), cluster(1)).unwrap();
-    tokio::spawn(async move { axum::serve(b, app(new_hub, None)).await });
+    serve(b, app(new_hub, None));
     let old_hub = Hub::with_cluster(old_store.clone(), cluster(0)).unwrap();
-    tokio::spawn(async move { axum::serve(a, app(old_hub, None)).await });
+    serve(a, app(old_hub, None));
 
     for _ in 0..50 {
         if !old_store.ids().unwrap().contains(&id) {

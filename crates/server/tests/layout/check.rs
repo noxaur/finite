@@ -1,15 +1,15 @@
 //! The layout check on an edit result, with a wait that fits a loaded
-//! machine. Its own process, since `FINITE_LAYOUT_WAIT_MS` is read once and
-//! the tool tests, run together, queue their Chrome measurements behind one
-//! another: one waiting 5 seconds (the floor) then misses its note.
-//! A clean check and the overlap note are only said if the edit waited for
-//! them, so the test must outwait the queue.
-
-mod agent;
+//! machine. A clean check and the overlap note are only said if the edit
+//! waited for them, so the test must outwait the Chrome measurements that
+//! queue behind one another.
 
 use std::time::Duration;
 
-use agent::{Agent, id_after, test_app};
+use super::{
+    agent::{Agent, id_after},
+    common::waiting_app,
+};
+use finite_server::testing::require_browser;
 use serde_json::{Value, json};
 
 /// A new design's id.
@@ -49,22 +49,15 @@ async fn landing(agent: &mut Agent) -> (String, String) {
 
 #[tokio::test]
 async fn render_and_the_layout_check_after_an_edit() {
-    // SAFETY: this binary has one test, and this runs first, so no other
-    // thread reads the environment yet. Longer than a measurement may take
-    // (8 seconds), so a slow Chrome start cannot outlast the wait.
-    unsafe { std::env::set_var("FINITE_LAYOUT_WAIT_MS", "15000") };
-    let app = test_app();
+    // Longer than a measurement may take (8 seconds), so a slow Chrome start
+    // cannot outlast the wait.
+    let app = waiting_app(15_000);
     let mut agent = Agent::connect(&app, "Checker").await;
     let (id, board) = landing(&mut agent).await;
     let (probe, _) = agent
         .call("render", json!({ "designId": id, "output": "layout" }))
         .await;
-    if probe.contains("no Chrome") {
-        assert!(
-            std::env::var_os("FINITE_REQUIRE_BROWSER").is_none(),
-            "FINITE_REQUIRE_BROWSER is set but there is no browser: {probe}"
-        );
-        eprintln!("SKIPPED, NOTHING WAS TESTED: no Chrome, Chromium or Edge found");
+    if !require_browser(&probe) {
         return;
     }
     assert!(

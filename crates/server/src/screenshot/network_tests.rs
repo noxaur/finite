@@ -75,10 +75,7 @@ async fn run(body: &str, policy: Policy) -> bool {
             });
             true
         }
-        Err(error) if error.contains("no Chrome") => {
-            eprintln!("skipped: {error}");
-            false
-        }
+        Err(error) if !crate::testing::require_browser(&error) => false,
         Err(error) => panic!("{error}"),
     }
 }
