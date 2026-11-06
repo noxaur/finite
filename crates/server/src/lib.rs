@@ -23,6 +23,7 @@ pub mod store;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod transfer;
+pub mod wire;
 
 pub use hub::Hub;
 
@@ -32,7 +33,7 @@ pub struct Health {
     version: &'static str,
 }
 
-async fn health() -> Json<Health> {
+pub(crate) async fn health() -> Json<Health> {
     Json(Health {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),

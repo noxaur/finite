@@ -147,8 +147,8 @@ fn header(ctx: &RequestContext<RoleServer>, name: &str) -> Option<http::HeaderVa
 /// and shown as its client's name.
 fn identity(ctx: &RequestContext<RoleServer>) -> HashMap<http::HeaderName, http::HeaderValue> {
     let mut headers = HashMap::new();
-    let agent = http::HeaderName::from_static("x-finite-agent");
-    if let Some(named) = header(ctx, "x-finite-agent") {
+    let agent = http::HeaderName::from_static(crate::wire::AGENT);
+    if let Some(named) = header(ctx, crate::wire::AGENT) {
         headers.insert(agent, named);
         return headers;
     }
@@ -170,7 +170,7 @@ fn identity(ctx: &RequestContext<RoleServer>) -> HashMap<http::HeaderName, http:
         headers.insert(agent, id);
     }
     if let Ok(name) = http::HeaderValue::from_str(&format!("{client} ({short})")) {
-        headers.insert(http::HeaderName::from_static("x-finite-agent-name"), name);
+        headers.insert(http::HeaderName::from_static(crate::wire::AGENT_NAME), name);
     }
     headers
 }
@@ -307,14 +307,12 @@ impl Relay {
                 match serde_json::from_str(&text.text) {
                     Ok(Value::Array(list)) => gathered.designs.extend(list),
                     // A server's own note about its list, which is redone below.
-                    _ if text.text.starts_with("The query matched") => {}
+                    _ if text.text == ID_MATCH_NOTE => {}
                     _ => gathered.cut = true,
                 }
             }
         }
-        gathered
-            .designs
-            .sort_by_key(|d| std::cmp::Reverse(d["updatedAt"].as_u64().unwrap_or(0)));
+        crate::wire::newest_first(&mut gathered.designs);
         let mut known = self.known.lock().unwrap();
         for (id, _) in gathered.pairs() {
             known.insert(id.to_owned());
@@ -480,7 +478,7 @@ impl ServerHandler for Relay {
                 Err(error) => last = Some(error),
             }
         }
-        Err(last.unwrap_or_else(|| McpError::internal_error("no Finite server is running", None)))
+        Err(last.unwrap_or_else(|| McpError::internal_error(crate::wire::NO_SERVER, None)))
     }
 
     async fn call_tool(
@@ -500,10 +498,9 @@ impl ServerHandler for Relay {
         let cluster = self.members.now();
         let nodes = cluster.nodes();
         if nodes.is_empty() {
-            return Ok(CallToolResult::error(vec![ContentBlock::text(
-                "No Finite server is running. Try again in a few seconds.",
-            )])
-            .into());
+            return Ok(
+                CallToolResult::error(vec![ContentBlock::text(crate::wire::NO_SERVER)]).into(),
+            );
         }
         let designs = request.name == "designs";
         if designs && arg("create").is_some() {

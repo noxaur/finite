@@ -147,12 +147,12 @@ impl FiniteMcp {
             .unwrap_or_else(|| "Agent".into());
         // Every viewer shows it, so it's held to the same limit as people's names.
         let display = |name: &str| label::clip(name, comment::MAX_NAME);
-        if let Some(agent) = header("x-finite-agent") {
+        if let Some(agent) = header(crate::wire::AGENT) {
             // The id goes into every change it broadcasts and every saved
             // history, so it's held to the limit on people's ids.
             let agent = label::clip(&agent, comment::MAX_USER_ID);
             // The router names relayed agents separately from their identity.
-            let name = header("x-finite-agent-name").unwrap_or_else(|| agent.clone());
+            let name = header(crate::wire::AGENT_NAME).unwrap_or_else(|| agent.clone());
             return Actor {
                 id: format!("agent:{agent}"),
                 name: display(&name),
@@ -184,10 +184,7 @@ impl FiniteMcp {
                 .with_meta(Some(meta));
             }
             let text = match error {
-                OpenError::Nowhere => {
-                    "No Finite server is serving designs right now. Try again in a few seconds."
-                        .to_string()
-                }
+                OpenError::Nowhere => crate::wire::NO_SERVER.to_string(),
                 OpenError::Busy(_) => format!("design {id:?}: {error}."),
                 _ => format!("design {id:?} not found. Call designs to see the available ids."),
             };

@@ -130,7 +130,7 @@ impl std::fmt::Display for OpenError {
             Self::Elsewhere { id, owner } => {
                 write!(f, "design {id:?} lives on another Finite server: {owner}")
             }
-            Self::Nowhere => f.write_str("no Finite server is serving designs right now"),
+            Self::Nowhere => f.write_str(crate::wire::NO_SERVER),
             Self::Busy(holder) if holder.is_empty() => {
                 f.write_str("the design is moving between servers; try again in a few seconds")
             }

@@ -26,8 +26,8 @@ use tokio::sync::broadcast::{self, error::RecvError};
 use crate::blob::{self, BlobHash};
 use crate::heartbeat::{self, Heartbeat};
 use crate::hub::{
-    Actor, AdoptError, ClientMessage, DesignHandle, DesignSummary, Hub, LOBBY_LIMIT, OpenError,
-    Outgoing, Since, UserAuthor,
+    Actor, AdoptError, ClientMessage, DesignHandle, DesignSummary, Hub, OpenError, Outgoing, Since,
+    UserAuthor,
 };
 use crate::id::{is_stored_id, node_id};
 use crate::transfer::{self, ImportRequest, ImportResult, TransferError};
@@ -105,7 +105,7 @@ async fn list_designs(
     State(hub): State<Arc<Hub>>,
     Query(query): Query<ListQuery>,
 ) -> Json<Vec<DesignSummary>> {
-    let limit = query.limit.unwrap_or(LOBBY_LIMIT).clamp(1, 1000);
+    let limit = crate::wire::list_limit(query.limit);
     Json(hub.find(query.q.as_deref(), limit))
 }
 
@@ -151,7 +151,7 @@ impl IntoResponse for ApiError {
             Self::NotFound(message) => (StatusCode::NOT_FOUND, message).into_response(),
             Self::Misdirected { id, owner } => (
                 StatusCode::MISDIRECTED_REQUEST,
-                [("finite-owner", owner.clone())],
+                [(crate::wire::OWNER, owner.clone())],
                 format!("design {id:?} lives on {owner}"),
             )
                 .into_response(),
@@ -159,12 +159,7 @@ impl IntoResponse for ApiError {
                 (StatusCode::UNPROCESSABLE_ENTITY, message).into_response()
             }
             Self::Failed(message) => (StatusCode::INTERNAL_SERVER_ERROR, message).into_response(),
-            Self::Unavailable(message) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                [("retry-after", "1")],
-                message,
-            )
-                .into_response(),
+            Self::Unavailable(message) => crate::wire::unavailable(message),
         }
     }
 }

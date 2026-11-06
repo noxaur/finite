@@ -111,10 +111,7 @@ pub fn app(members: Arc<Members>, options: Options) -> Router {
         next: AtomicUsize::new(0),
     });
     let router = Router::new()
-        .route(
-            "/api/health",
-            get(|| async { Json(json!({ "status": "ok" })) }),
-        )
+        .route("/api/health", get(crate::health))
         .route("/api/designs", get(list).post(create))
         .route("/api/designs/ws", get(lobby))
         .route("/api/designs/{id}", any(forward))
@@ -150,12 +147,7 @@ fn bad_gateway(error: impl std::fmt::Display) -> Response {
 
 /// The answer while no server is live, as when they all restart at once.
 fn no_servers() -> Response {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        [("retry-after", "1")],
-        "no Finite server is running",
-    )
-        .into_response()
+    crate::wire::unavailable(crate::wire::NO_SERVER)
 }
 
 impl Front {
@@ -168,7 +160,7 @@ impl Front {
         if status != StatusCode::MISDIRECTED_REQUEST {
             return None;
         }
-        let owner = headers.get("finite-owner")?.to_str().ok()?;
+        let owner = headers.get(crate::wire::OWNER)?.to_str().ok()?;
         (owner != base && crate::cluster::is_base_url(owner)).then(|| owner.to_owned())
     }
 }
@@ -203,7 +195,8 @@ async fn send(
 /// The headers of a server's answer the browser gets too. Some are what
 /// keeps a download safe, like `sandbox` on an SVG someone uploaded, so
 /// leaving one out here would quietly undo it.
-const PASSED_ON: [&str; 6] = [
+const PASSED_ON: [&str; 7] = [
+    "retry-after",
     "content-type",
     "cache-control",
     "content-security-policy",
@@ -289,12 +282,12 @@ async fn create(State(front): State<Arc<Front>>, headers: HeaderMap, body: Bytes
 /// `q` and `limit`, so the merged list is cut to the limit again. Servers that
 /// don't answer are left out rather than failing the whole list.
 async fn list(State(front): State<Arc<Front>>, RawQuery(query): RawQuery) -> Response {
-    let limit = query
-        .as_deref()
-        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("limit=")))
-        .and_then(|n| n.parse::<usize>().ok())
-        .unwrap_or(LOBBY_LIMIT)
-        .clamp(1, 1000);
+    let limit = crate::wire::list_limit(
+        query
+            .as_deref()
+            .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("limit=")))
+            .and_then(|n| n.parse::<usize>().ok()),
+    );
     let query = query.map(|q| format!("?{q}")).unwrap_or_default();
     let cluster = front.members.now();
     let requests = cluster.nodes().iter().map(|base| {
@@ -330,13 +323,9 @@ async fn list(State(front): State<Arc<Front>>, RawQuery(query): RawQuery) -> Res
     if !answered {
         return bad_gateway("no server answered the design list");
     }
-    sort_newest_first(&mut designs);
+    crate::wire::newest_first(&mut designs);
     designs.truncate(limit);
     Json(designs).into_response()
-}
-
-fn sort_newest_first(designs: &mut [Value]) {
-    designs.sort_by_key(|d| std::cmp::Reverse(d["updatedAt"].as_u64().unwrap_or(0)));
 }
 
 async fn owner(State(front): State<Arc<Front>>, Path(id): Path<String>) -> Json<Value> {
@@ -496,7 +485,7 @@ fn list_of(message: &Value) -> (Vec<Value>, u64) {
 /// to `LOBBY_LIMIT`, with the totals added up.
 fn merged(lists: &[(Vec<Value>, u64)]) -> String {
     let mut designs: Vec<Value> = lists.iter().flat_map(|(list, _)| list.clone()).collect();
-    sort_newest_first(&mut designs);
+    crate::wire::newest_first(&mut designs);
     designs.truncate(LOBBY_LIMIT);
     let total: u64 = lists.iter().map(|(_, total)| total).sum();
     json!({ "type": "designs", "designs": designs, "total": total }).to_string()
@@ -586,7 +575,7 @@ async fn relay_lobby(
                         list.retain(|d| d["id"] != design["id"]);
                         list.push(design.clone());
                         *total = (*total).max(list.len() as u64);
-                        sort_newest_first(list);
+                        crate::wire::newest_first(list);
                         list.truncate(LOBBY_LIMIT);
                     }
                     message.to_string()

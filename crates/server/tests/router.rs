@@ -1156,3 +1156,32 @@ async fn deleting_a_design_keeps_other_servers_live_updates() {
         break;
     }
 }
+
+/// A server's "try again in a second" reaches the client with its hint.
+#[tokio::test]
+async fn the_router_passes_on_the_retry_hint() {
+    let (listener, url) = listen().await;
+    let busy = axum::Router::new().fallback(|| async { finite_server::wire::unavailable("busy") });
+    serve(listener, busy);
+    let (front, front_url) = listen().await;
+    serve(front, front_for(vec![url]));
+
+    let answer = reqwest::get(format!("{front_url}/api/designs/abc"))
+        .await
+        .unwrap();
+    assert_eq!(answer.status(), 503);
+    assert_eq!(answer.headers()["retry-after"], "1");
+}
+
+/// The router's health answer says what version it is, as a server's does.
+#[tokio::test]
+async fn the_router_reports_its_version() {
+    let (front, _) = deployment().await;
+    let health: Value = reqwest::get(format!("{front}/api/health"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(health["version"], env!("CARGO_PKG_VERSION"));
+}
