@@ -478,6 +478,53 @@ fn duplicating_a_flow_repoints_links_inside_instances() {
 }
 
 #[test]
+fn duplicating_a_flow_repoints_links_in_component_definitions() {
+    // Two definitions on Home and no instances yet: one holds the link,
+    // one is the link. A copy of a definition is an instance of it.
+    let mut d = shop();
+    screen(
+        &mut d,
+        "lib",
+        "Library",
+        390.0,
+        r##"<div><a href="#finite-artboard=cart">Buy</a></div><a href="#finite-artboard=cart">Go</a>"##,
+    );
+    let tops: Vec<String> = d
+        .doc()
+        .children(Some("lib"))
+        .iter()
+        .map(|n| n.id.clone())
+        .collect();
+    for id in &tops {
+        commit(&mut d, |doc| edit::create_component(doc, id, None, &[]));
+    }
+    assert!(!d.doc().has_instances());
+    let (doc, roots) = duplicated(&d, &["lib", "cart"]);
+    let (lib, cart) = (&roots[0], &roots[1]);
+    let flow = flow::flow(&components::expand(&doc));
+    let from_copy: Vec<&str> = flow
+        .links
+        .iter()
+        .filter(|l| &l.from == lib)
+        .map(|l| l.to.as_str())
+        .collect();
+    assert_eq!(
+        from_copy,
+        [cart.as_str(), cart.as_str()],
+        "{:?}",
+        flow.links
+    );
+    // The definitions themselves still go to the original.
+    let from_original: Vec<&str> = flow
+        .links
+        .iter()
+        .filter(|l| l.from == "lib")
+        .map(|l| l.to.as_str())
+        .collect();
+    assert_eq!(from_original, ["cart", "cart"]);
+}
+
+#[test]
 fn a_copy_of_one_screen_keeps_its_instances_links() {
     let (d, _, _) = linked_component();
     let (doc, roots) = duplicated(&d, &["home"]);

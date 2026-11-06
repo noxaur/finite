@@ -1907,25 +1907,27 @@ pub fn duplicate(
         let parent = original.parent.clone();
         let first = ops.len();
         roots.push(fragment.create_ops(parent.as_deref(), index, position, new_id, &mut ops));
-        if doc.has_instances() {
-            // The nodes `Fragment::from_document` copied, in the order it made them.
-            let mut copied = Vec::new();
-            let mut stack = vec![id.as_str()];
-            while let Some(at) = stack.pop() {
-                copied.push(at);
-                if doc
-                    .get(at)
-                    .is_some_and(|n| !n.is_instance() && !n.component)
-                {
-                    stack.extend(doc.children(Some(at)).iter().rev().map(|c| c.id.as_str()));
-                }
+        // The nodes `Fragment::from_document` copied, in the order it made
+        // them. It copies an instance, and a component's definition, as an
+        // instance with no children of its own.
+        let mut copied = Vec::new();
+        let mut stack = vec![id.as_str()];
+        while let Some(at) = stack.pop() {
+            copied.push(at);
+            if doc
+                .get(at)
+                .is_some_and(|n| !n.is_instance() && !n.component)
+            {
+                stack.extend(doc.children(Some(at)).iter().rev().map(|c| c.id.as_str()));
             }
-            for (original, op) in copied.into_iter().zip(&ops[first..]) {
-                if let Op::Create { node } = op
-                    && doc.get(original).is_some_and(Node::is_instance)
-                {
-                    instances.insert(node.id.clone(), original);
-                }
+        }
+        for (original, op) in copied.into_iter().zip(&ops[first..]) {
+            if let Op::Create { node } = op
+                && doc
+                    .get(original)
+                    .is_some_and(|n| n.is_instance() || n.component)
+            {
+                instances.insert(node.id.clone(), original);
             }
         }
         // A copied artboard goes on its original's page.
@@ -1968,8 +1970,17 @@ pub fn duplicate(
                         else {
                             continue;
                         };
-                        let path = (link.id.strip_prefix(original))
-                            .and_then(|p| p.strip_prefix(components::SEPARATOR));
+                        // Inside an instance a node's id is `instance/path`;
+                        // in a definition it's the path itself.
+                        let path = if link.id == original {
+                            None
+                        } else {
+                            Some(
+                                (link.id.strip_prefix(original))
+                                    .and_then(|p| p.strip_prefix(components::SEPARATOR))
+                                    .unwrap_or(&link.id),
+                            )
+                        };
                         let key = match path {
                             Some(path) => format!("{path}/attr:href"),
                             None => "attr:href".to_owned(),
