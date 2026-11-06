@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { clamp, clampedText, PX_PER_STEP, scrubbed, steppedText } from "./scrub";
+import { clamp, clampedText, PX_PER_STEP, scrubbed, scrubber, steppedText } from "./scrub";
 
 describe("scrubbed", () => {
   it("moves one step for each PX_PER_STEP of travel", () => {
@@ -24,11 +24,34 @@ describe("scrubbed", () => {
   });
 
   it("answers at once when dragged back from a limit", () => {
-    // 400px left of 4 is far below 0, but the value is cut from `start`, so
-    // coming back to 40px left of the press is 4 - 10 -> 0, and 8px left of it is 2.
-    expect(scrubbed(4, -400, { min: 0 })).toBe(0);
-    expect(scrubbed(4, -8, { min: 0 })).toBe(2);
-    expect(scrubbed(4, 0, { min: 0 })).toBe(4);
+    // 400px past the limit, then back: the first step back comes after one step's travel.
+    const up = scrubber(90);
+    expect(up(400, { max: 100 })).toBe(100);
+    expect(up(400 - PX_PER_STEP + 0.1, { max: 100 })).toBe(100);
+    expect(up(400 - PX_PER_STEP, { max: 100 })).toBe(99);
+    expect(up(400 - 2 * PX_PER_STEP, { max: 100 })).toBe(98);
+    const down = scrubber(4);
+    expect(down(-400, { min: 0 })).toBe(0);
+    expect(down(-400 + PX_PER_STEP - 0.1, { min: 0 })).toBe(0);
+    expect(down(-400 + PX_PER_STEP, { min: 0 })).toBe(1);
+  });
+
+  it("drops travel past a limit each time the limit holds it", () => {
+    const up = scrubber(90);
+    expect(up(100, { max: 100 })).toBe(100);
+    expect(up(400, { max: 100 })).toBe(100);
+    expect(up(400 - PX_PER_STEP, { max: 100 })).toBe(99);
+    // Within the limits, it's as `scrubbed` has it.
+    expect(scrubber(90)(-8, { max: 100 })).toBe(scrubbed(90, -8, { max: 100 }));
+  });
+
+  it("steps back by Shift and Alt steps from a limit", () => {
+    const shifted = scrubber(90);
+    expect(shifted(400, { shift: true, max: 100 })).toBe(100);
+    expect(shifted(400 - PX_PER_STEP, { shift: true, max: 100 })).toBe(90);
+    const fine = scrubber(0.5);
+    expect(fine(-400, { step: 0.1, fine: true, min: 0 })).toBe(0);
+    expect(fine(-400 + PX_PER_STEP, { step: 0.1, fine: true, min: 0 })).toBeCloseTo(0.01);
   });
 
   it("holds a radius at 0 when dragged left from 0", () => {

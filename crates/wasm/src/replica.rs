@@ -57,6 +57,16 @@ enum Applied<'a> {
         id: &'a str,
         page: Option<&'a Page>,
     },
+    /// The page `id` was renamed and is now `page`.
+    PageName {
+        id: &'a str,
+        page: Option<&'a Page>,
+    },
+    /// The page `id` has a new background and is now `page`.
+    PageBackground {
+        id: &'a str,
+        page: Option<&'a Page>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -560,6 +570,14 @@ fn describe<'a>(doc: &'a Document, op: &'a Op, inverse: &'a [Op]) -> Applied<'a>
             id,
             page: doc.page_map().get(id),
         },
+        Op::PageName { id, .. } => Applied::PageName {
+            id,
+            page: doc.page_map().get(id),
+        },
+        Op::PageBackground { id, .. } => Applied::PageBackground {
+            id,
+            page: doc.page_map().get(id),
+        },
     }
 }
 
@@ -689,6 +707,32 @@ mod tests {
         assert_eq!(results[0], json!({ "op": "page", "id": "p", "page": page }));
         assert_eq!(results[1], Value::Null);
         assert_eq!(results[2], json!({ "op": "page", "id": "p", "page": null }));
+    }
+
+    #[test]
+    fn page_name_and_background_results_hold_the_page() {
+        let mut r = replica();
+        let results = apply(
+            &mut r,
+            json!([
+                { "op": "pageBackground", "id": "page-1", "background": "#000" },
+                { "op": "pageName", "id": "page-1", "name": "Home" },
+                { "op": "pageName", "id": "page-1", "name": "Home" },
+                { "op": "pageName", "id": "nope", "name": "Home" },
+            ]),
+        );
+        let page = json!({ "name": "Home", "index": "V", "background": "#000" });
+        let named = json!({ "name": "Page 1", "index": "V", "background": "#000" });
+        assert_eq!(
+            results[0],
+            json!({ "op": "pageBackground", "id": "page-1", "page": named })
+        );
+        assert_eq!(
+            results[1],
+            json!({ "op": "pageName", "id": "page-1", "page": page })
+        );
+        assert_eq!(results[2], Value::Null);
+        assert_eq!(results[3], Value::Null);
     }
 
     #[test]

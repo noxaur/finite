@@ -52,7 +52,7 @@ describe("position", () => {
     expect(constraintOf({ right: "0" }, "x")).toBe("far");
     expect(constraintOf({ top: "1px", bottom: "2px" }, "y")).toBe("both");
     expect(constraintStyles("x", "far", { left: "10px" }, box)).toEqual({
-      left: null,
+      left: "auto",
       right: "30px",
     });
     // Both insets size it, so its own width comes off.
@@ -64,8 +64,53 @@ describe("position", () => {
     // Leaving both, it keeps the size the insets gave it.
     expect(constraintStyles("y", "near", { top: "10px", bottom: "30px" }, box)).toEqual({
       top: "10px",
-      bottom: null,
+      bottom: "auto",
       height: "60px",
+    });
+  });
+
+  it("lets go of an edge an inset shorthand pins", () => {
+    // 100px wide, 10px from the left of a 500px parent.
+    const box = { near: 10, far: 390, size: 100 };
+    expect(constraintStyles("x", "far", { inset: "10px", width: "100px" }, box)).toEqual({
+      inset: null,
+      top: "10px",
+      bottom: "10px",
+      left: "auto",
+      right: "390px",
+    });
+    // Each side as `margin` reads it, and an edge set on its own wins.
+    expect(
+      constraintStyles("y", "near", { inset: "1px calc(2px + 3px) 4px", left: "9px" }, box),
+    ).toEqual({
+      inset: null,
+      top: "10px",
+      right: "calc(2px + 3px)",
+      bottom: "auto",
+      height: "100px",
+    });
+    expect(constraintStyles("x", "near", { "inset-inline": "10px 390px" }, box)).toEqual({
+      "inset-inline": null,
+      left: "10px",
+      right: "auto",
+      width: "100px",
+    });
+  });
+
+  it("pins by the left edge after both", () => {
+    const box = { near: 10, far: 390, size: 100 };
+    expect(constraintStyles("x", "near", { left: "10px", right: "390px" }, box)).toEqual({
+      left: "10px",
+      right: "auto",
+      width: "100px",
+    });
+  });
+
+  it("overrides a left inset that a stylesheet sets", () => {
+    // No inline insets: the stylesheet's `left` would still pin it.
+    expect(constraintStyles("x", "far", {}, { near: 10, far: 390, size: 100 })).toEqual({
+      left: "auto",
+      right: "390px",
     });
   });
 

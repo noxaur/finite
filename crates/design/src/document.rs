@@ -47,13 +47,25 @@ pub enum Op {
         #[serde(default)]
         css: Option<String>,
     },
-    /// Creates, renames, reorders or recolors one page, or removes it when
-    /// `page` is `None`. Removing a page leaves its artboards, which fall
-    /// back to the first page.
+    /// Creates or replaces one page, or removes it when `page` is `None`.
+    /// Removing a page leaves its artboards, which fall back to the first
+    /// page. Edits rename and recolor a page with [`Op::PageName`] and
+    /// [`Op::PageBackground`], which change one field.
     Page {
         id: String,
         #[serde(default)]
         page: Option<Page>,
+    },
+    /// Renames one page and leaves its other fields alone, so undoing a
+    /// rename can't undo another actor's background.
+    PageName { id: String, name: String },
+    /// Sets the canvas color behind one page's artboards, or clears it
+    /// when `background` is `None`. It leaves the page's other fields
+    /// alone, so undoing it can't undo another actor's rename.
+    PageBackground {
+        id: String,
+        #[serde(default)]
+        background: Option<String>,
     },
     /// Sets one token's value in one mode, or removes it when `value` is
     /// `None` (see [`crate::tokens`]). A token without values is gone. One
@@ -124,6 +136,8 @@ impl<'de> Deserialize<'de> for Op {
             Move,
             Css,
             Page,
+            PageName,
+            PageBackground,
             Token,
             Mode,
         }
@@ -141,6 +155,8 @@ impl<'de> Deserialize<'de> for Op {
             css: Option<String>,
             #[serde(default)]
             page: Option<Page>,
+            #[serde(default)]
+            background: Option<String>,
             name: Option<String>,
             #[serde(rename = "modeId")]
             mode_id: Option<String>,
@@ -170,6 +186,14 @@ impl<'de> Deserialize<'de> for Op {
             Kind::Page => Op::Page {
                 id: wire.id.ok_or_else(|| need("id"))?,
                 page: wire.page,
+            },
+            Kind::PageName => Op::PageName {
+                id: wire.id.ok_or_else(|| need("id"))?,
+                name: wire.name.ok_or_else(|| need("name"))?,
+            },
+            Kind::PageBackground => Op::PageBackground {
+                id: wire.id.ok_or_else(|| need("id"))?,
+                background: wire.background,
             },
             Kind::Token => Op::Token {
                 name: wire.name.ok_or_else(|| need("name"))?,
@@ -229,6 +253,10 @@ impl Op {
                         p.name.len() + p.index.len() + p.background.as_ref().map_or(0, String::len)
                     })
             }
+            Op::PageName { id, name } => BASE + id.len() + name.len(),
+            Op::PageBackground { id, background } => {
+                BASE + id.len() + background.as_ref().map_or(0, String::len)
+            }
             Op::Token {
                 name,
                 mode_id,
@@ -241,13 +269,18 @@ impl Op {
     }
 
     /// The node this op creates, deletes or changes. Empty for the ops that
-    /// change the design rather than a node: [`Op::Css`], [`Op::Page`],
+    /// change the design rather than a node: [`Op::Css`], the page ops,
     /// [`Op::Token`] and [`Op::Mode`].
     pub fn id(&self) -> &str {
         match self {
             Op::Create { node } => &node.id,
             Op::Delete { id } | Op::Set { id, .. } | Op::Move { id, .. } => id,
-            Op::Css { .. } | Op::Page { .. } | Op::Token { .. } | Op::Mode { .. } => "",
+            Op::Css { .. }
+            | Op::Page { .. }
+            | Op::PageName { .. }
+            | Op::PageBackground { .. }
+            | Op::Token { .. }
+            | Op::Mode { .. } => "",
         }
     }
 }
@@ -422,6 +455,24 @@ impl Document {
         match self.pages.get(id) {
             None if self.pages.is_empty() && id == FIRST_PAGE => Some(&IMPLICIT_PAGE),
             page => page,
+        }
+    }
+
+    /// The page with this id to change in place, for a page that
+    /// [`Document::page`] finds. The implicit first page becomes a real
+    /// one, as it is.
+    fn page_mut(&mut self, id: &str) -> &mut Page {
+        self.pages
+            .entry(id.to_owned())
+            .or_insert_with(|| IMPLICIT_PAGE.clone())
+    }
+
+    /// Makes the first page implicit again when it's the only page and
+    /// as it started, so undoing a rename or a background leaves the
+    /// design as it was. Both list the same pages.
+    fn forget_implicit_page(&mut self) {
+        if self.pages.len() == 1 && self.pages.get(FIRST_PAGE) == Some(&*IMPLICIT_PAGE) {
+            self.pages.clear();
         }
     }
 
@@ -879,6 +930,31 @@ impl Document {
                 Ok(Changed(vec![Op::Page {
                     id: id.clone(),
                     page: previous,
+                }]))
+            }
+            Op::PageName { id, name } => {
+                let page = self.page(id).ok_or_else(|| Rejected::Missing(id.clone()))?;
+                if page.name == *name {
+                    return Ok(Unchanged);
+                }
+                let previous = std::mem::replace(&mut self.page_mut(id).name, name.clone());
+                self.forget_implicit_page();
+                Ok(Changed(vec![Op::PageName {
+                    id: id.clone(),
+                    name: previous,
+                }]))
+            }
+            Op::PageBackground { id, background } => {
+                let page = self.page(id).ok_or_else(|| Rejected::Missing(id.clone()))?;
+                if page.background == *background {
+                    return Ok(Unchanged);
+                }
+                let previous =
+                    std::mem::replace(&mut self.page_mut(id).background, background.clone());
+                self.forget_implicit_page();
+                Ok(Changed(vec![Op::PageBackground {
+                    id: id.clone(),
+                    background: previous,
                 }]))
             }
         }

@@ -113,6 +113,8 @@ type Touched =
   | { readonly op: "token" }
   | { readonly op: "mode" }
   | { readonly op: "page" }
+  | { readonly op: "pageName" }
+  | { readonly op: "pageBackground" }
   | null;
 
 /**
@@ -419,6 +421,8 @@ export class Replica {
         this.tokens = JSON.parse(this.doc.tokens()) as TokenTable;
         return { op: "tokens" };
       case "page":
+      case "pageName":
+      case "pageBackground":
         this.pages = JSON.parse(this.doc.pages()) as PageEntry[];
         return { op: "page" };
     }

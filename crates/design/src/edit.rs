@@ -1623,16 +1623,13 @@ fn is_canvas_color(value: &str) -> bool {
 }
 
 pub fn rename_page(doc: &Document, id: &str, name: &str) -> Result<Vec<Op>> {
-    let page = page(doc, id)?;
+    page(doc, id)?;
     if name.trim().is_empty() {
         return err("give the page a name");
     }
-    Ok(vec![Op::Page {
+    Ok(vec![Op::PageName {
         id: id.to_owned(),
-        page: Some(Page {
-            name: label::clip(name.trim(), label::LAYER_NAME),
-            ..page.clone()
-        }),
+        name: label::clip(name.trim(), label::LAYER_NAME),
     }])
 }
 
@@ -1642,7 +1639,7 @@ pub fn rename_page(doc: &Document, id: &str, name: &str) -> Result<Vec<Op>> {
 /// function like `rgb()` or `oklch()`, a token as `var(--name)`, or a
 /// `color-mix()` that gives one opacity.
 pub fn set_page_background(doc: &Document, id: &str, background: Option<&str>) -> Result<Vec<Op>> {
-    let page = page(doc, id)?;
+    page(doc, id)?;
     let background = background.map(str::trim);
     if let Some(color) = background
         && !is_canvas_color(color)
@@ -1651,12 +1648,9 @@ pub fn set_page_background(doc: &Document, id: &str, background: Option<&str>) -
             "{color:?} isn't a color. Use a hex color like \"#e8eef0\", rgb(232 238 240), a token like var(--bg), or null for the viewer's own"
         ));
     }
-    Ok(vec![Op::Page {
+    Ok(vec![Op::PageBackground {
         id: id.to_owned(),
-        page: Some(Page {
-            background: background.map(str::to_owned),
-            ..page.clone()
-        }),
+        background: background.map(str::to_owned),
     }])
 }
 

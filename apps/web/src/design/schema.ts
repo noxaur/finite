@@ -99,6 +99,14 @@ export const Op = Schema.Union([
     id: Schema.String,
     page: Schema.NullOr(Page),
   }),
+  /** Renames a page and leaves its other fields alone. */
+  Schema.Struct({ op: Schema.Literal("pageName"), id: Schema.String, name: Schema.String }),
+  /** Sets a page's canvas color, or clears it when `background` is `null`. */
+  Schema.Struct({
+    op: Schema.Literal("pageBackground"),
+    id: Schema.String,
+    background: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  }),
 ]);
 export type Op = typeof Op.Type;
 

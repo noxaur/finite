@@ -19,8 +19,8 @@ export function clamp(n: number, min?: number, max?: number): number {
 
 /**
  * The value `travel` pixels from `start`: each `PX_PER_STEP` is a `step`,
- * ten times that with Shift, a tenth with Alt. It's cut off from `start`, not
- * from the last value, so dragging back from the limit answers at once.
+ * ten times that with Shift, a tenth with Alt. Half a step's travel either
+ * way rounds to a whole step.
  */
 export function scrubbed(
   start: number,
@@ -28,7 +28,31 @@ export function scrubbed(
   { step = 1, shift = false, fine = false, min, max }: ScrubLimits,
 ): number {
   const by = shift ? 10 : fine ? 0.1 : 1;
-  return clamp(start + Math.round(travel / PX_PER_STEP) * step * by, min, max);
+  const steps = travel / PX_PER_STEP;
+  return clamp(start + Math.sign(steps) * Math.round(Math.abs(steps)) * step * by, min, max);
+}
+
+/**
+ * One scrub from `start`: it takes the pointer's travel since the press and
+ * gives the value, as `scrubbed` does. Travel past `min` or `max` is dropped
+ * as it happens, so the scrub starts again from the limit: dragging back
+ * moves the number one step after `PX_PER_STEP` of travel, however far the
+ * pointer went past it.
+ */
+export function scrubber(start: number): (travel: number, limits: ScrubLimits) => number {
+  let from = start;
+  let base = 0;
+  return (travel, limits) => {
+    const value = scrubbed(from, travel - base, { ...limits, min: undefined, max: undefined });
+    const held = clamp(value, limits.min, limits.max);
+    if (held !== value) {
+      // Half a step back toward the press, so the next step back is a
+      // whole step's travel away.
+      from = held;
+      base = travel + (Math.sign(held - value) * PX_PER_STEP) / 2;
+    }
+    return held;
+  };
 }
 
 export interface ScrubLimits {

@@ -6,7 +6,7 @@ import { createPortal } from "react-dom";
 import type { Draft, Editor } from "@/design/editing/editor";
 import type { UserEdit } from "@/design/schema";
 import { colors, cursors, motion } from "@/styles/tokens.stylex";
-import { clampedText, numberOf, scrubbed, steppedText, tidy } from "./scrub";
+import { clampedText, numberOf, scrubber, steppedText, tidy } from "./scrub";
 
 export { numberOf };
 
@@ -175,6 +175,7 @@ export function ScrubLabel({
           const label = e.currentTarget;
           const from = e.clientX;
           let travel = 0;
+          const scrub = scrubber(start);
           let fine = false;
           let locked = false;
           let holding = false;
@@ -228,7 +229,7 @@ export function ScrubLabel({
                   refused,
                 );
               }
-              const value = scrubbed(start, travel, { step, shift: p.shift, fine, min, max });
+              const value = scrub(travel, { step, shift: p.shift, fine, min, max });
               return value === start ? null : toEdits(Number(tidy(value)));
             },
             end: done,

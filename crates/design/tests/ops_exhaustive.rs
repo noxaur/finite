@@ -8,8 +8,8 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use finite_design::{
-    Applied, Design, DesignMeta, Document, Node, NodeKind, Op, Page, PropKey, Record, fractional,
-    tokens::Mode,
+    Applied, Design, DesignMeta, Document, FIRST_PAGE, Node, NodeKind, Op, Page, PropKey, Record,
+    fractional, tokens::Mode,
 };
 use serde_json::{Value, json};
 
@@ -101,6 +101,20 @@ fn ops() -> Vec<Op> {
             page,
         });
     }
+    // On `p` once it exists, and on the implicit first page, which they
+    // make a real one.
+    for id in ["p", FIRST_PAGE] {
+        ops.push(Op::PageName {
+            id: id.into(),
+            name: "Q".into(),
+        });
+        for background in [Some("#000"), None] {
+            ops.push(Op::PageBackground {
+                id: id.into(),
+                background: background.map(str::to_owned),
+            });
+        }
+    }
     for mode in [
         Some(Mode {
             name: "Dark".into(),
@@ -129,7 +143,11 @@ fn ops() -> Vec<Op> {
 }
 
 /// Everything about a document that a reader can see, in a fixed order, so
-/// two documents are the same exactly when their states are equal.
+/// two documents are the same exactly when their states are equal. Pages
+/// are compared as `Document::pages` lists them: an empty page map and one
+/// holding only the implicit first page, unchanged, are the same design.
+/// `PageName` and `PageBackground` make the implicit page a real one, and
+/// make it implicit again when it's back as it started.
 fn state(doc: &Document) -> String {
     let mut nodes: Vec<&Node> = doc.nodes().collect();
     nodes.sort_by(|a, b| a.id.cmp(&b.id));
@@ -144,7 +162,7 @@ fn state(doc: &Document) -> String {
     format!(
         "{nodes:?}\n{children:?}\n{instances:?}\n{:?}\n{:?}\n{:?}\n{:?}",
         doc.css(),
-        doc.page_map(),
+        doc.pages(),
         doc.tokens(),
         doc.mode_map()
     )
@@ -426,6 +444,14 @@ fn edits() -> Vec<Op> {
                 index: "V".into(),
                 background: Some("#e8eef0".into()),
             }),
+        },
+        Op::PageName {
+            id: FIRST_PAGE.into(),
+            name: "Home".into(),
+        },
+        Op::PageBackground {
+            id: FIRST_PAGE.into(),
+            background: Some("#000".into()),
         },
     ]
 }

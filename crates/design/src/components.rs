@@ -597,7 +597,12 @@ pub fn redirect(
                 detaching |= !orphans(doc, id).is_empty();
             }
             // The design's tokens, modes and pages aren't part of any instance.
-            Op::Css { .. } | Op::Page { .. } | Op::Token { .. } | Op::Mode { .. } => {}
+            Op::Css { .. }
+            | Op::Page { .. }
+            | Op::PageName { .. }
+            | Op::PageBackground { .. }
+            | Op::Token { .. }
+            | Op::Mode { .. } => {}
             Op::Move { id, parent, .. } => {
                 if is_virtual(id) {
                     return Err(refuse_inside(doc, id, "it can't be moved on its own"));

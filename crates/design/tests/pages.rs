@@ -253,3 +253,48 @@ fn a_page_background_saves_and_undoes_back_to_unset() {
     let error = edit::set_page_background(d.doc(), "nope", Some("#000")).unwrap_err();
     assert!(error.0.contains("not found"), "{error}");
 }
+
+#[test]
+fn undoing_a_background_or_a_rename_leaves_the_other_actors_change() {
+    fn as_(d: &mut Design, actor: &str, build: impl FnOnce(&Document) -> edit::Result<Vec<Op>>) {
+        let ops = build(d.doc()).unwrap();
+        d.commit(actor, "Edit", &ops, 0).unwrap();
+    }
+    let page = |d: &Design, id: &str| {
+        let page = d.doc().page(id).unwrap();
+        (page.name.clone(), page.background.clone())
+    };
+    // On the implicit first page and on a page made with create_page.
+    let start = |id: &str| {
+        let mut d = design();
+        if id != FIRST_PAGE {
+            commit(&mut d, |doc| edit::create_page(doc, id.into(), "Kit"));
+        }
+        d
+    };
+    for (id, name) in [(FIRST_PAGE, "Page 1"), ("kit", "Kit")] {
+        // Alice sets a background, Bob renames the page, Alice undoes.
+        let mut d = start(id);
+        as_(&mut d, "alice", |doc| {
+            edit::set_page_background(doc, id, Some("#000"))
+        });
+        as_(&mut d, "bob", |doc| edit::rename_page(doc, id, "Home"));
+        d.undo("alice", 0).unwrap();
+        assert_eq!(page(&d, id), ("Home".into(), None), "{id}");
+        d.redo("alice", 0).unwrap();
+        assert_eq!(page(&d, id), ("Home".into(), Some("#000".into())), "{id}");
+
+        // Bob renames the page, Alice sets a background, Bob undoes.
+        let mut d = start(id);
+        as_(&mut d, "bob", |doc| edit::rename_page(doc, id, "Home"));
+        as_(&mut d, "alice", |doc| {
+            edit::set_page_background(doc, id, Some("#000"))
+        });
+        d.undo("bob", 0).unwrap();
+        assert_eq!(page(&d, id), (name.into(), Some("#000".into())), "{id}");
+
+        // Undoing both leaves the design as it started.
+        d.undo("alice", 0).unwrap();
+        assert_eq!(d.doc().page_map(), start(id).doc().page_map(), "{id}");
+    }
+}

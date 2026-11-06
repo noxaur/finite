@@ -114,12 +114,64 @@ export interface AxisBox {
   readonly size: number;
 }
 
+type Edge = "top" | "right" | "bottom" | "left";
+
+/** The inset shorthands, each with the edges its values set, as `margin` reads them. */
+const SHORTHANDS: ReadonlyArray<readonly [string, ReadonlyArray<Edge>]> = [
+  ["inset", ["top", "right", "bottom", "left"]],
+  // Logical insets, in a left-to-right, top-to-bottom writing mode.
+  ["inset-block", ["top", "bottom"]],
+  ["inset-inline", ["left", "right"]],
+];
+
+/** Splits a CSS value at the spaces outside brackets: `calc(1px + 2px) 0` is two values. */
+function splitValues(value: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let part = "";
+  for (const c of value.trim()) {
+    if (c === "(") depth++;
+    else if (c === ")") depth--;
+    if (depth === 0 && /\s/.test(c)) {
+      if (part) parts.push(part);
+      part = "";
+    } else part += c;
+  }
+  if (part) parts.push(part);
+  return parts;
+}
+
+/**
+ * The edges that `styles`' inset shorthands set, as longhands. A later
+ * shorthand in `SHORTHANDS` wins over `inset`, and an edge the element
+ * sets on its own wins over both.
+ */
+function shorthandEdges(styles: Readonly<Record<string, string>>): Partial<Record<Edge, string>> {
+  const edges: Partial<Record<Edge, string>> = {};
+  for (const [shorthand, sides] of SHORTHANDS) {
+    const raw = styles[shorthand];
+    if (raw === undefined) continue;
+    const values = splitValues(raw);
+    if (values.length === 0) continue;
+    // Like `margin`: a missing value repeats the one across from it.
+    sides.forEach((side, i) => {
+      edges[side] = values[i] ?? (i === 3 ? values[1] : undefined) ?? values[0]!;
+    });
+  }
+  for (const side of Object.keys(edges) as Edge[]) {
+    if (styles[side] !== undefined) delete edges[side];
+  }
+  return edges;
+}
+
 /**
  * The styles that pin an absolute or fixed element on `axis` by
  * `constraint`, keeping it where it is: each inset it pins by gets the
- * distance it has now, and one it no longer pins by comes off. Pinned by
- * both, its insets size it, so its own size comes off; leaving that, it
- * gets the size it has.
+ * distance it has now, and one it no longer pins by becomes `auto`, which
+ * also overrides one a stylesheet sets. Pinned by both, its insets size
+ * it, so its own size comes off; leaving that, it gets the size it has.
+ * An `inset`, `inset-block` or `inset-inline` shorthand becomes the
+ * longhands it sets first, so it can't pin the edge that was let go.
  */
 export function constraintStyles(
   axis: ConstraintAxis,
@@ -129,12 +181,14 @@ export function constraintStyles(
 ): Record<string, string | null> {
   const { near, far, size } = EDGES[axis];
   const px = (n: number) => `${Math.round(n)}px`;
-  const set = (p: string) => styles[p] !== undefined && styles[p] !== "auto";
   const out: Record<string, string | null> = {};
-  if (constraint !== "far") out[near] = px(box.near);
-  else if (styles[near] !== undefined) out[near] = null;
-  if (constraint !== "near") out[far] = px(box.far);
-  else if (styles[far] !== undefined) out[far] = null;
+  for (const [shorthand] of SHORTHANDS) if (styles[shorthand] !== undefined) out[shorthand] = null;
+  const expanded = shorthandEdges(styles);
+  Object.assign(out, expanded);
+  const own: Readonly<Record<string, string>> = { ...styles, ...expanded };
+  const set = (p: string) => own[p] !== undefined && own[p] !== "auto";
+  out[near] = constraint === "far" ? "auto" : px(box.near);
+  out[far] = constraint === "near" ? "auto" : px(box.far);
   if (constraint === "both") {
     if (styles[size] !== undefined) out[size] = null;
   } else if (set(near) && set(far) && styles[size] === undefined) out[size] = px(box.size);
