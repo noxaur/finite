@@ -20,6 +20,7 @@ import { IconButton, Strip, StripItem } from "./Button";
 import { selectionStore, useSelection } from "@/canvas";
 import { selectionFor } from "@/lib/composer";
 import { Icon } from "./Icons";
+import { Reason } from "./Reason";
 import { toast } from "./Toast";
 import { useDismiss } from "./useDismiss";
 
@@ -155,11 +156,10 @@ export function Composer({
     if (files.some((f) => f.path === null)) return toast("Wait for the attachments to upload.");
     setSending(true);
     try {
-      const picked = selectionFor(selection);
       await onSend({
-        text: message + picked.note,
+        text: message,
         attachments: files.map((f) => f.path!),
-        selection: picked.selection,
+        selection: selectionFor(selection),
         model,
         effort,
         fast,
@@ -241,32 +241,15 @@ export function Composer({
         )}
         {blocked ? (
           <p {...stylex.props(styles.blocked)}>
-            {claude?.installed ? (
-              <>
-                Run <code {...stylex.props(styles.code)}>claude</code> in a terminal to log in, then{" "}
-                <button
-                  type="button"
-                  onClick={() => void finite.refreshClaude()}
-                  {...stylex.props(styles.link)}
-                >
-                  check again
-                </button>
-                .
-              </>
-            ) : (
-              <>
-                Install Claude Code and run <code {...stylex.props(styles.code)}>claude</code> to
-                log in, then{" "}
-                <button
-                  type="button"
-                  onClick={() => void finite.refreshClaude()}
-                  {...stylex.props(styles.link)}
-                >
-                  check again
-                </button>
-                .
-              </>
-            )}
+            <Reason text={claude?.reason ?? "Claude Code isn't ready."} code={styles.code} /> Then{" "}
+            <button
+              type="button"
+              onClick={() => void finite.refreshClaude()}
+              {...stylex.props(styles.link)}
+            >
+              check again
+            </button>
+            .
           </p>
         ) : (
           <textarea

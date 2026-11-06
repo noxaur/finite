@@ -16,6 +16,7 @@ import { useSyncExternalStore } from "react";
 import type { Camera } from "@/design/camera";
 import { bridgeOf, mountedBridges } from "./bridge";
 import { childrenIn, pathIn } from "./layers";
+import { undoOrderFor } from "./undoOrder";
 import { finite } from "@/client/finite";
 import {
   baseName,
@@ -949,7 +950,9 @@ export class CanvasEditor {
   }
 
   fitAll() {
-    this.camera.fitTo(union(this.canvas.frames.map((f) => this.boxOf(f))));
+    // Text labels have no height of their own; a label's box ends where the frame below it starts.
+    const labels = this.canvas.texts.map((t) => ({ x: t.x, y: t.y, width: t.width, height: 100 }));
+    this.camera.fitTo(union([...this.canvas.frames.map((f) => this.boxOf(f)), ...labels]));
   }
 
   fitSelection() {
@@ -1032,11 +1035,23 @@ export class CanvasEditor {
     ]);
   }
 
+  /** Takes back (or redoes) this person's last source edit or canvas patch, whichever came last. */
   async undo(which: "undo" | "redo") {
+    const order = undoOrderFor(this.designId);
+    // Nothing recorded (the page reloaded): the server still has the source edits.
+    const step = (which === "undo" ? order.undo() : order.redo()) ?? { kind: "source" };
     try {
-      await finite.request(which === "undo" ? "source.undo" : "source.redo", {
+      if (step.kind === "source") {
+        await finite.request(which === "undo" ? "source.undo" : "source.redo", {
+          designId: this.designId,
+        });
+        return;
+      }
+      const canvas = await finite.request(which === "undo" ? "canvas.undo" : "canvas.redo", {
         designId: this.designId,
+        canvasId: step.canvasId,
       });
+      if (canvas.id === this.canvas.id) this.setCanvas(canvas);
     } catch (e) {
       this.say(errorText(e));
     }
@@ -1091,6 +1106,7 @@ export class CanvasEditor {
         canvasId: this.canvas.id,
         edits,
       });
+      undoOrderFor(this.designId).did({ kind: "source" });
       const before = selectionStore.get();
       const after = remapSelection(before, remap);
       after.forEach((item, i) => {
@@ -1114,6 +1130,7 @@ export class CanvasEditor {
         canvasId: this.canvas.id,
         patch,
       });
+      undoOrderFor(this.designId).did({ kind: "canvas", canvasId: this.canvas.id });
       this.setCanvas(canvas);
     } catch (e) {
       this.say(errorText(e));

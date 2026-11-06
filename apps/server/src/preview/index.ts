@@ -1,4 +1,5 @@
 import { type ChildProcess, fork } from "node:child_process";
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
   type Design,
@@ -23,16 +24,12 @@ export type PreviewsOptions = {
   plugin?: string;
 };
 
-/** `Previews` plus the call the hub makes when a design's last viewer leaves. */
-export type DesignPreviews = Previews & {
-  /** Stops the design's preview after the grace period, unless `ensure` is called again first. */
-  idle(designId: string): void;
-};
-
 const HOST_SCRIPT = fileURLToPath(new URL("./vite-host.mjs", import.meta.url));
-const DEFAULT_PLUGIN = fileURLToPath(
-  new URL("../../../../packages/vite-plugin/src/index.ts", import.meta.url),
-);
+/** The plugin bundled beside the server (`vp pack`, in the desktop app), else its source. */
+const BUNDLED_PLUGIN = fileURLToPath(new URL("./vite-plugin.mjs", import.meta.url));
+const DEFAULT_PLUGIN = fs.existsSync(BUNDLED_PLUGIN)
+  ? BUNDLED_PLUGIN
+  : fileURLToPath(new URL("../../../../packages/vite-plugin/src/index.ts", import.meta.url));
 const LOG_TAIL = 4_000;
 const KILL_AFTER_MS = 5_000;
 const MAX_ERRORS_PER_FRAME = 50;
@@ -50,7 +47,7 @@ type Run = {
 };
 
 /** One Vite dev server per open design, each in a child process running `vite-host.mjs`. */
-export function createPreviews(options: PreviewsOptions): DesignPreviews {
+export function createPreviews(options: PreviewsOptions): Previews {
   const graceMs = options.graceMs ?? 60_000;
   const startTimeoutMs = options.startTimeoutMs ?? 60_000;
   const plugin = options.plugin ?? DEFAULT_PLUGIN;

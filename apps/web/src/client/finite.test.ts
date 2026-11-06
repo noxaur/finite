@@ -147,6 +147,8 @@ describe("finite client", () => {
     expect(f.design("d").state?.threads.map((t) => t.title)).toEqual(["Named"]);
     ws.push({ type: "preview", designId: "d", status: "ready", url: "http://p" });
     expect(f.design("d").state?.preview).toEqual({ status: "ready", url: "http://p" });
+    ws.push({ type: "install", designId: "d", install: { status: "running", log: "pnpm…" } });
+    expect(f.design("d").state?.install).toEqual({ status: "running", log: "pnpm…" });
 
     ws.close();
     expect(f.status()).toBe("closed");

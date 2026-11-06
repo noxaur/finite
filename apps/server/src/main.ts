@@ -9,7 +9,7 @@ const config = readConfig(process.env, process.cwd());
 
 const store = createStore({ dataDir: config.dataDir });
 const previews = createPreviews({ host: config.host });
-const source = createSourceEditor();
+const source = createSourceEditor({ routes: (design) => previews.routes(design.id) });
 const agents = createAgents({ store, previews, source });
 
 const server = await startServer({

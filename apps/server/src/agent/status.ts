@@ -6,6 +6,15 @@ import type { QueryFn } from "./index.ts";
 const run = promisify(execFile);
 const EFFORTS = new Set<string>(["low", "medium", "high", "xhigh", "max"]);
 
+export const NOT_INSTALLED = "Install Claude Code, then run `claude` to log in.";
+export const NOT_LOGGED_IN = "Run `claude` in a terminal to log in.";
+const missing: ClaudeStatus = {
+  installed: false,
+  loggedIn: false,
+  reason: NOT_INSTALLED,
+  models: [],
+};
+
 /** The `claude` executable on PATH, or undefined. */
 export async function findClaude(): Promise<string | undefined> {
   try {
@@ -47,12 +56,12 @@ export function createStatus(query: QueryFn, claudePath: () => Promise<string | 
 
   return async function status(): Promise<ClaudeStatus> {
     const bin = await claudePath();
-    if (!bin) return { installed: false, loggedIn: false, models: [] };
+    if (!bin) return missing;
     let version: string;
     try {
       version = (await run(bin, ["--version"])).stdout.trim().split(" ")[0] ?? "";
     } catch {
-      return { installed: false, loggedIn: false, models: [] };
+      return missing;
     }
     let auth: { loggedIn?: unknown; email?: unknown } = {};
     try {
@@ -73,7 +82,7 @@ export function createStatus(query: QueryFn, claudePath: () => Promise<string | 
       ...(version ? { version } : {}),
       ...(typeof auth.email === "string" ? { email: auth.email } : {}),
     };
-    if (!loggedIn) return { ...base, models: [] };
+    if (!loggedIn) return { ...base, reason: NOT_LOGGED_IN, models: [] };
     models ??= listModels(bin);
     models.catch(() => (models = undefined));
     return { ...base, models: await models.catch(() => []) };

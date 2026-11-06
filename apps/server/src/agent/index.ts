@@ -24,7 +24,7 @@ import { FINITE_INSTRUCTIONS } from "./instructions.ts";
 import { userMessage } from "./message.ts";
 import { policy } from "./policy.ts";
 import { createScreenshots, type Screenshots } from "./screenshot.ts";
-import { createStatus, findClaude } from "./status.ts";
+import { createStatus, findClaude, NOT_INSTALLED } from "./status.ts";
 import { boardDir, canvasServer } from "./tools.ts";
 
 /** The part of the SDK's `Query` the agents use; tests pass a fake. */
@@ -50,7 +50,6 @@ export type AgentsOptions = {
 
 export const IDLE_MS = 10 * 60_000;
 export const DEFAULT_TITLE = "New prototype";
-const NOT_INSTALLED = "Install Claude Code and run `claude` to log in.";
 
 /** The actor for a thread's agent: its id is the thread id. */
 export function agentActor(threadId: string): Actor {
@@ -58,17 +57,28 @@ export function agentActor(threadId: string): Actor {
 }
 
 /**
- * Creates a thread for `turn`, titled from its text, and links it to `canvasId` both ways.
- * Call `Agents.send` next to start it.
+ * Creates a thread for `turn`, titled from its text, and links it to `canvasId` both ways. With
+ * `prototype` it makes a prototype canvas for it first, named like the thread. Call
+ * `Agents.send` next to start it.
  */
 export async function startThread(
   open: OpenDesign,
-  where: { canvasId?: string | undefined; parentId?: string | undefined },
+  where: {
+    canvasId?: string | undefined;
+    parentId?: string | undefined;
+    prototype?: boolean | undefined;
+  },
   turn: Pick<Turn, "text" | "model" | "effort" | "fast" | "by">,
 ): Promise<ThreadMeta> {
-  const { canvasId, parentId } = where;
+  const { parentId } = where;
+  const title = shortTitle(turn.text);
+  const canvasId =
+    where.canvasId ??
+    (where.prototype
+      ? (await open.createCanvas({ kind: "prototype", name: title }, turn.by)).id
+      : undefined);
   const meta = await open.createThread({
-    title: shortTitle(turn.text),
+    title,
     model: turn.model,
     fast: turn.fast,
     ...(turn.effort === undefined ? {} : { effort: turn.effort }),

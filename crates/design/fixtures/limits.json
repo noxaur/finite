@@ -1,6 +1,0 @@
-{
-  "about": "Limits the server enforces, recorded from crates/design/tests/limits.rs. apps/web/src/lib/limits.test.ts checks the web app's copies.",
-  "authorName": 48,
-  "commentBody": 4000,
-  "commentSelection": 50
-}

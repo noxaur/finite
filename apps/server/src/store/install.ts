@@ -1,10 +1,10 @@
 import { spawn, spawnSync } from "node:child_process";
-import type { PreviewState } from "@finite/protocol";
+import type { InstallState } from "@finite/protocol";
 
 /** A dependency install running in a new design's folder. */
 export type Install = {
-  /** What the design's preview shows meanwhile: `starting` with the output so far, or `error`. */
-  readonly state: PreviewState;
+  /** `running` with the output so far, then `done` or `error`. */
+  readonly state: InstallState;
   /** Settles when the install ends; rejects when it fails. */
   readonly done: Promise<void>;
 };
@@ -27,18 +27,18 @@ function pickPackageManager(): "pnpm" | "npm" {
  * Runs `pnpm install` (or `npm install`) in `root` as a background child. `onProgress` gets the
  * state now and then while it runs, and once at the end.
  */
-export function install(root: string, onProgress: (state: PreviewState) => void): Install {
+export function install(root: string, onProgress: (state: InstallState) => void): Install {
   const pm = pickPackageManager();
   // A design folder can sit inside another pnpm workspace (the dev data dir does); stay out of it.
   const args =
     pm === "pnpm" ? ["install", "--ignore-workspace"] : ["install", "--no-fund", "--no-audit"];
   let log = `Installing dependencies with ${pm}…\n`;
-  const handle: { state: PreviewState; done: Promise<void> } = {
-    state: { status: "starting", log },
+  const handle: { state: InstallState; done: Promise<void> } = {
+    state: { status: "running", log },
     done: Promise.resolve(),
   };
   let timer: NodeJS.Timeout | undefined;
-  const report = (state: PreviewState) => {
+  const report = (state: InstallState) => {
     handle.state = state;
     if (timer) return;
     timer = setTimeout(() => {
@@ -55,7 +55,7 @@ export function install(root: string, onProgress: (state: PreviewState) => void)
     });
     const append = (chunk: Buffer) => {
       log = (log + chunk.toString("utf8")).slice(-LOG_TAIL);
-      report({ status: "starting", log });
+      report({ status: "running", log });
     };
     child.stdout.on("data", append);
     child.stderr.on("data", append);
@@ -67,7 +67,7 @@ export function install(root: string, onProgress: (state: PreviewState) => void)
       timer = undefined;
       handle.state = error
         ? { status: "error", log: `${log}\n${error}`.slice(-LOG_TAIL) }
-        : { status: "starting", log: "Dependencies installed. Starting the dev server…" };
+        : { status: "done", log: `${log}\nDependencies installed.`.slice(-LOG_TAIL) };
       onProgress(handle.state);
       if (error) reject(new Error(error));
       else resolve();

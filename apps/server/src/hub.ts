@@ -19,6 +19,7 @@ import {
 } from "@finite/protocol";
 import type { WebSocket } from "ws";
 import { handlers } from "./handlers.ts";
+import { syncRoutes } from "./store/routes.ts";
 
 export type Modules = {
   store: Store;
@@ -54,6 +55,8 @@ export type Hub = {
   broadcast(designId: string, message: ServerEvent): void;
   /** Sends to every client that said hello. */
   broadcastAll(message: ServerEvent): void;
+  /** Drops the client's subscription; the design's preview idles when nobody else watches it. */
+  unsubscribe(client: Client, designId: string): void;
   /** The design, opened once and kept; its changes are broadcast to its subscribers. */
   open(designId: string): Promise<OpenDesign>;
   close(): Promise<void>;
@@ -95,6 +98,7 @@ export function createHub(modules: Modules, handle: Handlers = handlers): Hub {
       });
       socket.on("close", () => {
         clearInterval(heartbeat);
+        for (const designId of client.subscriptions) hub.unsubscribe(client, designId);
         clients.delete(client);
       });
     },
@@ -103,6 +107,12 @@ export function createHub(modules: Modules, handle: Handlers = handlers): Hub {
       for (const client of clients) {
         if (client.subscriptions.has(designId)) client.send(message);
       }
+    },
+
+    unsubscribe(client, designId) {
+      if (!client.subscriptions.delete(designId)) return;
+      for (const other of clients) if (other.subscriptions.has(designId)) return;
+      modules.previews.idle(designId);
     },
 
     broadcastAll(message) {
@@ -115,9 +125,14 @@ export function createHub(modules: Modules, handle: Handlers = handlers): Hub {
         pending = modules.store.open(designId).then((design) => {
           const offs = [
             design.on((change) => hub.broadcast(designId, { ...change, designId })),
-            modules.previews.on(designId, (event) =>
-              hub.broadcast(designId, { ...event, designId }),
-            ),
+            modules.previews.on(designId, (event) => {
+              hub.broadcast(designId, { ...event, designId });
+              if (event.type === "routes") {
+                syncRoutes(design, event.routes).catch((error: unknown) =>
+                  console.error(`updating the Routes page of ${designId} failed:`, error),
+                );
+              }
+            }),
           ];
           perDesign.set(designId, () => offs.forEach((off) => off()));
           return design;

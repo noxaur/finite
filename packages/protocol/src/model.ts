@@ -47,6 +47,10 @@ export const DesignEntry = z.object({
   name: z.string(),
   root: z.string(),
   origin: DesignOrigin,
+  /** When anything in the design last changed: a canvas, a thread, its name. */
+  updatedAt: z.number().default(0),
+  /** Set while a new design's dependencies install. Never stored. */
+  installing: z.boolean().optional(),
 });
 export type DesignEntry = z.infer<typeof DesignEntry>;
 
@@ -64,7 +68,7 @@ export const DesignConfig = z.object({
 });
 export type DesignConfig = z.infer<typeof DesignConfig>;
 
-export const Design = DesignEntry.extend({
+export const Design = DesignEntry.omit({ updatedAt: true, installing: true }).extend({
   router: Router,
   styling: Styling,
   css: z.array(z.string()),
@@ -94,6 +98,8 @@ export const Frame = z.object({
   height: z.number().positive(),
   /** Height follows the content. */
   hug: z.boolean().optional(),
+  /** The route this frame shows is no longer in the app. The frame stays until someone removes it. */
+  gone: z.boolean().optional(),
   source: FrameSource,
 });
 export type Frame = z.infer<typeof Frame>;
@@ -182,8 +188,15 @@ export type CanvasPatch = z.infer<typeof CanvasPatch>;
 
 // Threads
 
-/** Which rendered element a person picked: `index` is which instance of `loc` in the frame. */
-export const Selection = z.object({ frameId: Id, loc: Loc, index: z.number().int().min(0) });
+/**
+ * What a person picked: a whole frame (no `loc`), or one rendered element in it (`index` is which
+ * instance of `loc` in the frame, default 0).
+ */
+export const Selection = z.object({
+  frameId: Id,
+  loc: Loc.optional(),
+  index: z.number().int().min(0).optional(),
+});
 export type Selection = z.infer<typeof Selection>;
 
 /** A message waiting to run after the current turn. People can edit or drop it. */
@@ -294,6 +307,8 @@ export type ModelInfo = z.infer<typeof ModelInfo>;
 export const ClaudeStatus = z.object({
   installed: z.boolean(),
   loggedIn: z.boolean(),
+  /** What the person should do before agents can run, when they can't. */
+  reason: z.string().optional(),
   version: z.string().optional(),
   email: z.string().optional(),
   models: z.array(ModelInfo),
@@ -321,6 +336,14 @@ export const PreviewState = z.object({
   log: z.string().optional(),
 });
 export type PreviewState = z.infer<typeof PreviewState>;
+
+/** A new design's dependency install. */
+export const InstallState = z.object({
+  status: z.enum(["running", "done", "error"]),
+  /** The tail of the package manager's output. */
+  log: z.string(),
+});
+export type InstallState = z.infer<typeof InstallState>;
 
 export const FrameError = z.object({
   frameId: Id,

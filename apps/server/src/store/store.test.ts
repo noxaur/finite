@@ -68,6 +68,15 @@ describe("settings", () => {
     expect(next).toEqual({ ...DEFAULT_SETTINGS, sendMode: "queue", effort: "high" });
     expect(await newStore(dir).settings()).toEqual(next);
   });
+
+  it("reads an old pinned default model as Claude's alias for it", async () => {
+    const dir = await tempDir();
+    await fs.writeFile(
+      path.join(dir, "settings.json"),
+      JSON.stringify({ model: "claude-opus-5-5" }),
+    );
+    expect((await newStore(dir).settings()).model).toBe("opus");
+  });
 });
 
 describe("connect", () => {
@@ -105,8 +114,9 @@ describe("connect", () => {
       "Routes",
     ]);
     // Connecting the same folder again is the same design.
-    expect(await store.connect(root)).toEqual(entry);
-    expect(await store.designs()).toEqual([entry]);
+    const same = { ...entry, updatedAt: expect.any(Number) };
+    expect(await store.connect(root)).toEqual(same);
+    expect(await store.designs()).toEqual([same]);
   });
 
   it("tells TanStack, CSS modules and inline styles apart", async () => {
@@ -130,6 +140,20 @@ describe("connect", () => {
       { "src/A.tsx": "export const A = () => <div style={{ color: 'red' }} />;" },
     );
     expect((await store.open((await store.connect(inline)).id)).design.styling).toBe("inline");
+  });
+
+  it("renames a design and bumps updatedAt on any change", async () => {
+    const { dataDir, store, entry, open } = await connected();
+    const renamed = await store.rename(entry.id, "Storefront");
+    expect(renamed).toMatchObject({ name: "Storefront", updatedAt: expect.any(Number) });
+    const before = renamed.updatedAt;
+    await new Promise((r) => setTimeout(r, 5));
+    await open.createCanvas({ kind: "page", name: "Checkout" }, by);
+    const [touched] = await store.designs();
+    expect(touched!.updatedAt).toBeGreaterThan(before);
+    // The bump reaches designs.json when the store closes, at the latest.
+    await store.close();
+    expect(await newStore(dataDir).designs()).toEqual([touched]);
   });
 
   it("forgets a connected design on remove but leaves its folder", async () => {
@@ -283,6 +307,19 @@ describe("threads", () => {
     const lines = await fs.readFile(path.join(root, ".finite/threads", `${meta.id}.jsonl`), "utf8");
     expect(lines.trim().split("\n")).toHaveLength(2);
     await expect(open.updateThread("nope", (m) => m)).rejects.toMatchObject({ code: "not-found" });
+  });
+
+  it("stops threads a crash left running when the design opens again", async () => {
+    const { dataDir, store, entry, open } = await connected();
+    const meta = await open.createThread({ model: "opus", fast: false });
+    await open.updateThread(meta.id, (m) => ({ ...m, running: true }));
+    await store.close();
+    const [thread] = await (await newStore(dataDir).open(entry.id)).threads();
+    expect(thread).toMatchObject({
+      id: meta.id,
+      running: false,
+      awaitingSince: expect.any(Number),
+    });
   });
 
   it("saves attachments under .finite/attachments", async () => {

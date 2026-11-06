@@ -79,6 +79,24 @@ describe("parseClientMessage", () => {
   });
 });
 
+describe("thread.send", () => {
+  it("starts a prototype and carries a whole selected frame", () => {
+    const parsed = parseClientMessage({
+      type: "thread.send",
+      rid: "6",
+      designId: "d",
+      new: { prototype: true },
+      text: "Make a pricing card",
+      attachments: [],
+      selection: [{ frameId: "f1" }, { frameId: "f2", loc: "src/A.tsx:3:2", index: 1 }],
+      model: "opus",
+      fast: false,
+      mode: "steer",
+    });
+    expect(parsed).toMatchObject({ ok: true, message: { new: { prototype: true } } });
+  });
+});
+
 describe("bridge messages", () => {
   it("parses requests from the parent", () => {
     expect(ParentMessage.safeParse({ type: "hit", id: 1, x: 3, y: 4 }).success).toBe(true);

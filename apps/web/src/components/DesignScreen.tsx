@@ -1,7 +1,7 @@
 "use client";
 
 import * as stylex from "@stylexjs/stylex";
-import type { Canvas as CanvasDoc, ThreadMeta } from "@finite/protocol";
+import type { Canvas as CanvasDoc, InstallState, PreviewState, ThreadMeta } from "@finite/protocol";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { finite, findThread, useDesignState, useSettings } from "@/client/finite";
@@ -111,7 +111,9 @@ export function DesignScreen({ id }: { id: string }) {
 
   const sendTo = async (
     message: Outgoing,
-    target: { threadId: string } | { new: { canvasId?: string; parentId?: string } },
+    target:
+      | { threadId: string }
+      | { new: { canvasId?: string; parentId?: string; prototype?: boolean } },
   ) => {
     const { threadId: sent } = await finite.request("thread.send", {
       designId: id,
@@ -127,17 +129,13 @@ export function DesignScreen({ id }: { id: string }) {
     return sent;
   };
 
-  /** A new prototype: its canvas first, then the thread on it, then the screen goes there. */
+  /** A new prototype: the server makes its thread and canvas together, then the screen goes there. */
   const startPrototype = async (message: Outgoing, parentId?: string) => {
-    const created = await finite.request("canvas.create", {
-      designId: id,
-      kind: "prototype",
-      name: "New prototype",
-    });
     const sent = await sendTo(message, {
-      new: { canvasId: created.id, ...(parentId ? { parentId } : {}) },
+      new: { prototype: true, ...(parentId ? { parentId } : {}) },
     });
-    go({ tab: "prototypes", thread: sent, canvas: created.id }, place.thread !== null);
+    const canvas = findThread(finite.design(id), sent)?.canvasIds[0] ?? null;
+    go({ tab: "prototypes", thread: sent, canvas }, place.thread !== null);
   };
 
   const send = async (message: Outgoing) => {
@@ -152,11 +150,10 @@ export function DesignScreen({ id }: { id: string }) {
   };
 
   const composerChoice = (text: string): Outgoing => {
-    const picked = selectionFor(selection);
     return {
-      text: text + picked.note,
+      text,
       attachments: [],
-      selection: picked.selection,
+      selection: selectionFor(selection),
       model: thread?.model ?? settings?.model ?? "",
       effort: thread?.effort ?? settings?.effort,
       fast: thread?.fast ?? settings?.fast ?? false,
@@ -271,7 +268,7 @@ export function DesignScreen({ id }: { id: string }) {
             canvas={canvas}
             mode={place.tab === "design" ? "design" : "prototypes"}
           />
-          <Preview state={state?.preview} />
+          <Preview state={state?.preview} install={state?.install} />
           {place.tab === "prototypes" && !thread && (
             <div {...stylex.props(styles.hello)}>
               <p {...stylex.props(styles.helloTitle)}>New prototype</p>
@@ -326,16 +323,31 @@ export function DesignScreen({ id }: { id: string }) {
   );
 }
 
-/** While the design's dev server starts (installing packages for a new project) or fails. */
-function Preview({ state }: { state: { status: string; log?: string | undefined } | undefined }) {
-  if (!state || state.status === "ready" || state.status === "stopped") return null;
-  const failed = state.status === "error";
-  const tail = state.log?.trim().split("\n").slice(-6).join("\n");
+/** While a new design's dependencies install, its dev server starts, or either fails. */
+function Preview({
+  state,
+  install,
+}: {
+  state: PreviewState | undefined;
+  install: InstallState | undefined;
+}) {
+  const installing = install && install.status !== "done" ? install : undefined;
+  if (!installing && (!state || state.status === "ready" || state.status === "stopped")) {
+    return null;
+  }
+  const failed = installing ? installing.status === "error" : state?.status === "error";
+  const title = installing
+    ? failed
+      ? "Installing dependencies failed"
+      : "Installing dependencies…"
+    : failed
+      ? "The dev server stopped"
+      : "Starting the dev server…";
+  const log = installing ? installing.log : state?.log;
+  const tail = log?.trim().split("\n").slice(-6).join("\n");
   return (
     <div role="status" {...stylex.props(styles.preview)}>
-      <p {...stylex.props(styles.previewTitle)}>
-        {failed ? "The dev server stopped" : "Starting the dev server…"}
-      </p>
+      <p {...stylex.props(styles.previewTitle)}>{title}</p>
       {tail && <pre {...stylex.props(styles.log)}>{tail}</pre>}
     </div>
   );

@@ -1,4 +1,10 @@
-import type { DesignEntry, ServerMessage, Store } from "@finite/protocol";
+import {
+  type Agents,
+  type DesignEntry,
+  Refused,
+  type ServerMessage,
+  type Store,
+} from "@finite/protocol";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 import WebSocket from "ws";
 import { createAgents } from "./agent/index.ts";
@@ -8,7 +14,9 @@ import { createPreviews } from "./preview/index.ts";
 import { createSourceEditor } from "./source/index.ts";
 import { createStore } from "./store/index.ts";
 
-const designs: DesignEntry[] = [{ id: "d1", name: "Shop", root: "/tmp/shop", origin: "connected" }];
+const designs: DesignEntry[] = [
+  { id: "d1", name: "Shop", root: "/tmp/shop", origin: "connected", updatedAt: 1 },
+];
 
 let running: RunningServer | undefined;
 afterEach(async () => {
@@ -16,7 +24,7 @@ afterEach(async () => {
   running = undefined;
 });
 
-async function start(store: Partial<Store> = {}) {
+async function start(store: Partial<Store> = {}, agents: Partial<Agents> = {}) {
   const base = createStore({ dataDir: "/nonexistent" });
   const fake: Store = { ...base, designs: async () => designs, ...store };
   const previews = createPreviews({ host: "127.0.0.1" });
@@ -29,7 +37,7 @@ async function start(store: Partial<Store> = {}) {
       store: fake,
       previews,
       source,
-      agents: createAgents({ store: fake, previews, source }),
+      agents: { ...createAgents({ store: fake, previews, source }), ...agents },
     },
   });
   return running.url.replace("http", "ws") + "/api/ws";
@@ -98,14 +106,17 @@ describe("hub", () => {
   });
 
   it("passes a module's refusal through", async () => {
-    const client = connect(await start());
+    const status = async () => {
+      throw new Refused("Claude Code is busy; try again.", "not-implemented");
+    };
+    const client = connect(await start({}, { status }));
     await client.opened;
     await client.request({ type: "hello", rid: "1", user: { id: "u", name: "Per" } });
     expect(await client.request({ type: "claude.status", rid: "2" })).toEqual({
       type: "reply",
       rid: "2",
       ok: false,
-      reason: "agents.status isn't built yet",
+      reason: "Claude Code is busy; try again.",
       code: "not-implemented",
     });
     client.ws.close();

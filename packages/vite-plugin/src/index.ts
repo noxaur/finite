@@ -25,6 +25,8 @@ const FRAME_ID = "\0finite:frame";
 /** React Router framework mode's React Refresh preamble, which its route modules check for. */
 const REACT_ROUTER_PREAMBLE = "virtual:react-router/inject-hmr-runtime";
 const BRIDGE_SOURCE = new URL("./client/bridge.ts", import.meta.url);
+/** The bridge as JavaScript, beside the bundled plugin in the desktop app (`vite-plugin.mjs`). */
+const BRIDGE_BUILT = new URL("./vite-plugin-bridge.mjs", import.meta.url);
 
 /** Stamps `data-finite-loc`/`data-finite-rev`, injects the bridge, serves frames and routes. */
 export function finite(options: FiniteOptions): Plugin[] {
@@ -116,6 +118,9 @@ export function finite(options: FiniteOptions): Plugin[] {
     },
     load(id) {
       if (id === BRIDGE_ID) {
+        if (fs.existsSync(BRIDGE_BUILT)) {
+          return fs.readFileSync(BRIDGE_BUILT, "utf8").replace(/^\/\/# sourceMappingURL=.*$/m, "");
+        }
         return stripTypeScriptTypes(fs.readFileSync(BRIDGE_SOURCE, "utf8"));
       }
       if (!id.startsWith(FRAME_ID)) return null;

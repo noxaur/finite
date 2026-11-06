@@ -11,6 +11,8 @@ import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.styl
 import { Button, IconButton } from "./Button";
 import { Icon } from "./Icons";
 import { Menu } from "./Menu";
+import { NameInput } from "./NameInput";
+import { TimeAgo } from "./TimeAgo";
 import { toast, ToastSlot } from "./Toast";
 
 type Start = "blank" | "import" | "connect";
@@ -308,26 +310,75 @@ const ORIGIN: Record<DesignEntry["origin"], string> = {
 
 function DesignCard({ design }: { design: DesignEntry }) {
   const [menu, setMenu] = useState(false);
+  const [renaming, setRenaming] = useState(false);
   const more = useRef<HTMLButtonElement>(null);
   const connected = design.origin === "connected";
+  const rename = (name: string) =>
+    void finite
+      .request("design.rename", { id: design.id, name })
+      .catch((e: unknown) => toast(e instanceof Error ? e.message : String(e)));
+  const meta = (
+    <span title={design.root} {...stylex.props(styles.origin)}>
+      {design.installing ? (
+        <span {...stylex.props(styles.installing)}>
+          <span {...stylex.props(styles.spinner)} aria-hidden />
+          Installing dependencies…
+        </span>
+      ) : (
+        <>
+          {ORIGIN[design.origin]}
+          {design.updatedAt > 0 && (
+            <>
+              {" · updated "}
+              <TimeAgo at={design.updatedAt} />
+            </>
+          )}
+          {connected && ` · ${design.root}`}
+        </>
+      )}
+    </span>
+  );
   return (
     <li {...stylex.props(stylex.defaultMarker(), styles.cardItem)}>
-      <Link href={`/design/?id=${design.id}`} {...stylex.props(styles.card)}>
-        <span {...stylex.props(styles.cardIcon)}>
-          <Icon name={connected ? "folder" : "artboard"} size={15} />
-        </span>
-        <span {...stylex.props(styles.meta)}>
-          <span {...stylex.props(styles.name)}>{design.name}</span>
-          <span title={design.root} {...stylex.props(styles.origin)}>
-            {ORIGIN[design.origin]}
-            {connected && ` · ${design.root}`}
+      {renaming ? (
+        <div {...stylex.props(styles.card)}>
+          <span {...stylex.props(styles.cardIcon)}>
+            <Icon name={connected ? "folder" : "artboard"} size={15} />
           </span>
-        </span>
-      </Link>
+          <span {...stylex.props(styles.meta)}>
+            <NameInput
+              label="Design name"
+              value={design.name}
+              autoFocus
+              onRename={rename}
+              onDone={() => setRenaming(false)}
+              style={styles.nameInput}
+            />
+            {meta}
+          </span>
+        </div>
+      ) : (
+        <Link
+          href={`/design/?id=${design.id}`}
+          onDoubleClick={(e) => {
+            e.preventDefault();
+            setRenaming(true);
+          }}
+          {...stylex.props(styles.card)}
+        >
+          <span {...stylex.props(styles.cardIcon)}>
+            <Icon name={connected ? "folder" : "artboard"} size={15} />
+          </span>
+          <span {...stylex.props(styles.meta)}>
+            <span {...stylex.props(styles.name)}>{design.name}</span>
+            {meta}
+          </span>
+        </Link>
+      )}
       <IconButton
         ref={more}
-        icon="close"
-        label={connected ? `Remove ${design.name} from Finite` : `Delete ${design.name}`}
+        icon="more"
+        label={`${design.name} options`}
         variant="ghost"
         size="small"
         expanded={menu}
@@ -341,6 +392,7 @@ function DesignCard({ design }: { design: DesignEntry }) {
           trigger={more.current}
           onClose={() => setMenu(false)}
           items={[
+            { key: "rename", label: "Rename", icon: "pencil", run: () => setRenaming(true) },
             {
               key: "remove",
               label: connected ? "Remove from Finite" : "Delete design",
@@ -485,6 +537,22 @@ const styles = stylex.create({
   },
   meta: { display: "flex", flexDirection: "column", gap: space.xs, minWidth: 0 },
   name: { fontSize: 14, fontWeight: 500 },
+  nameInput: {
+    width: "100%",
+    margin: 0,
+    paddingBlock: 0,
+    paddingInline: space.xs,
+    marginInline: `calc(-1 * ${space.xs})`,
+    borderWidth: 0,
+    borderRadius: radii.sm,
+    backgroundColor: colors.sunk,
+    color: colors.text,
+    fontFamily: fonts.sans,
+    fontSize: 14,
+    fontWeight: 500,
+    outline: { default: "none", ":focus": `1px solid ${colors.brand}` },
+  },
+  installing: { display: "inline-flex", alignItems: "center", gap: space.sm },
   origin: {
     fontSize: 12,
     color: colors.muted,

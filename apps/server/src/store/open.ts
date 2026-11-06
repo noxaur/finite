@@ -3,6 +3,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import {
+  type Actor,
   Canvas,
   type Design,
   type DesignChange,
@@ -12,11 +13,13 @@ import {
   ThreadMeta,
 } from "@finite/protocol";
 import type { z } from "zod";
-import { applyPatch, moveFramesTo } from "./canvas.ts";
+import { applyPatch, inversePatch, moveFramesTo, type Step } from "./canvas.ts";
 import { readText, serial, toJson, writeAtomic } from "./files.ts";
 
 /** A removed canvas is kept this long, then deleted when the design opens. */
 export const REMOVED_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
+/** How many canvas patches each person can undo per canvas. */
+const UNDO_DEPTH = 100;
 /** How long external edits to `.finite/` settle before they're read back. */
 const WATCH_DEBOUNCE_MS = 100;
 
@@ -42,6 +45,19 @@ export async function openDesign(design: Design): Promise<OpenedDesign> {
   const known = new Map<string, string>();
   const canvases = new Map<string, Canvas>();
   const threads = new Map<string, ThreadMeta>();
+
+  /** Per canvas and actor: the steps that undo their patches, and the ones that redo their undos. */
+  const stacks = new Map<string, { undo: Step[]; redo: Step[] }>();
+  const stackOf = (canvasId: string, by: Actor) => {
+    const key = `${canvasId}\u0000${by.kind}:${by.id}`;
+    let stack = stacks.get(key);
+    if (!stack) stacks.set(key, (stack = { undo: [], redo: [] }));
+    return stack;
+  };
+  const push = (list: Step[], step: Step) => {
+    list.push(step);
+    if (list.length > UNDO_DEPTH) list.shift();
+  };
 
   const canvasFile = (id: string) => path.join(canvasDir, `${safeId(id)}.json`);
   const threadFile = (id: string) => path.join(threadDir, `${safeId(id)}.json`);
@@ -92,8 +108,15 @@ export async function openDesign(design: Design): Promise<OpenedDesign> {
   }
   for (const name of await fsp.readdir(threadDir)) {
     if (!name.endsWith(".json")) continue;
-    const meta = await load<ThreadMeta>(path.join(threadDir, name), ThreadMeta);
-    if (meta) threads.set(meta.id, meta);
+    const file = path.join(threadDir, name);
+    const meta = await load<ThreadMeta>(file, ThreadMeta);
+    if (!meta) continue;
+    // No session outlives this process, so a thread still marked running was cut off by a crash.
+    if (meta.running) {
+      const stopped = { ...meta, running: false, awaitingSince: now, updatedAt: now };
+      await save(file, stopped);
+      threads.set(meta.id, stopped);
+    } else threads.set(meta.id, meta);
   }
 
   function canvasOf(id: string): Canvas {
@@ -120,6 +143,21 @@ export async function openDesign(design: Design): Promise<OpenedDesign> {
     threads.set(meta.id, meta);
     emit({ type: "thread", meta });
     return meta;
+  }
+
+  /** Applies one patch; returns the canvas it named and the step that takes it back. */
+  async function apply({ canvasId, patch }: Step): Promise<{ canvas: Canvas; step: Step }> {
+    const canvas = canvasOf(canvasId);
+    // Applying first refuses a patch that doesn't fit, before its inverse is worked out.
+    if (patch.op !== "moveFramesTo") {
+      const next = applyPatch(canvas, patch);
+      const step = inversePatch(canvas, patch);
+      return { canvas: await putCanvas(next), step };
+    }
+    const moved = moveFramesTo(canvas, canvasOf(patch.toCanvasId), patch.frameIds);
+    const step = inversePatch(canvas, patch);
+    await putCanvas(moved.to);
+    return { canvas: await putCanvas(moved.from), step };
   }
 
   // Git pulls and editors change these folders too; read back what changed and pass it on.
@@ -188,20 +226,49 @@ export async function openDesign(design: Design): Promise<OpenedDesign> {
       });
     },
 
-    patchCanvas(canvasId, patch, _by) {
+    patchCanvas(canvasId, patch, by) {
       return run(async () => {
-        const canvas = canvasOf(canvasId);
-        if (patch.op !== "moveFramesTo") return putCanvas(applyPatch(canvas, patch));
-        const moved = moveFramesTo(canvas, canvasOf(patch.toCanvasId), patch.frameIds);
-        await putCanvas(moved.to);
-        return putCanvas(moved.from);
+        const { step, canvas } = await apply({ canvasId, patch });
+        const stack = stackOf(canvasId, by);
+        push(stack.undo, step);
+        stack.redo = [];
+        return canvas;
+      });
+    },
+
+    undoCanvas(canvasId, by, redo = false) {
+      return run(async () => {
+        canvasOf(canvasId);
+        const stack = stackOf(canvasId, by);
+        const from = redo ? stack.redo : stack.undo;
+        const step = from.pop();
+        if (!step) {
+          throw new Refused(
+            redo ? "Nothing to redo on this canvas." : "Nothing to undo on this canvas.",
+            "not-found",
+          );
+        }
+        try {
+          const applied = await apply(step);
+          push(redo ? stack.undo : stack.redo, applied.step);
+          return canvasOf(canvasId);
+        } catch (error) {
+          if (!(error instanceof Refused)) throw error;
+          throw new Refused(
+            `Can't ${redo ? "redo" : "undo"} that: ${error.message}. Someone else changed it since.`,
+            error.code,
+          );
+        }
       });
     },
 
     updateCanvas(canvasId, fn, _by) {
       return run(async () => {
         const canvas = canvasOf(canvasId);
-        return putCanvas({ ...fn(canvas), id: canvas.id });
+        const next = fn(canvas);
+        // Returning the canvas itself means nothing changed.
+        if (next === canvas) return canvas;
+        return putCanvas({ ...next, id: canvas.id });
       });
     },
 

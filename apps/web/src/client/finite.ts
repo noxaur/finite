@@ -257,6 +257,9 @@ export function createFinite(options: FiniteOptions) {
       case "routes":
         updateState(event.designId, (s) => ({ ...s, routes: event.routes }));
         return;
+      case "install":
+        updateState(event.designId, (s) => ({ ...s, install: event.install }));
+        return;
       case "thread.event":
         appendThreadEvent(event.threadId, event.event);
         return;
@@ -332,7 +335,12 @@ export function createFinite(options: FiniteOptions) {
       claude = await request("claude.status", {});
       notify();
     } catch {
-      claude = { installed: false, loggedIn: false, models: [] };
+      claude = {
+        installed: false,
+        loggedIn: false,
+        reason: "Finite couldn't ask Claude Code for its status. Check again in a moment.",
+        models: [],
+      };
       notify();
     }
   }

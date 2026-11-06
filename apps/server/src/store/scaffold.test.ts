@@ -33,9 +33,11 @@ describe("a blank design", () => {
     expect(pkg.name).toBe("acme-shop");
 
     const install = installOf(open);
-    expect(install?.state.status).toBe("starting");
+    expect(install?.state.status).toBe("running");
+    expect((await store.designs())[0]?.installing).toBe(true);
     await install!.done;
     expect(installOf(open)).toBeUndefined();
+    expect((await store.designs())[0]?.installing).toBeUndefined();
 
     const { stdout } = await promisify(execFile)("npx", ["vite", "build"], { cwd: entry.root });
     expect(stdout).toContain("built in");

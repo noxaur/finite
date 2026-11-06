@@ -125,3 +125,46 @@ function byId(canvas: Canvas, ids: string[]): void {
     );
   }
 }
+
+/** A patch and the canvas it applies to. */
+export type Step = { canvasId: string; patch: CanvasPatch };
+
+/** The patch that takes `patch` back, given the canvas before it was applied. */
+export function inversePatch(before: Canvas, patch: CanvasPatch): Step {
+  const frame = (id: string) => before.frames.find((f) => f.id === id)!;
+  const on = (p: CanvasPatch): Step => ({ canvasId: before.id, patch: p });
+  switch (patch.op) {
+    case "moveFrames":
+      return on({
+        op: "moveFrames",
+        frames: patch.frames.map(({ id }) => ({ id, x: frame(id).x, y: frame(id).y })),
+      });
+    case "resizeFrames":
+      return on({
+        op: "resizeFrames",
+        frames: patch.frames.map(({ id }) => {
+          const { x, y, width, height, hug } = frame(id);
+          return { id, x, y, width, height, hug: hug ?? false };
+        }),
+      });
+    case "addFrames":
+      return on({ op: "removeFrames", frameIds: patch.frames.map((f) => f.id) });
+    case "removeFrames":
+      return on({ op: "addFrames", frames: patch.frameIds.map(frame) });
+    case "renameFrame":
+      return on({ op: "renameFrame", frameId: patch.frameId, name: frame(patch.frameId).name });
+    case "moveFramesTo":
+      return {
+        canvasId: patch.toCanvasId,
+        patch: { op: "moveFramesTo", frameIds: patch.frameIds, toCanvasId: before.id },
+      };
+    case "setText": {
+      const old = before.texts.find((t) => t.id === patch.text.id);
+      return on(old ? { op: "setText", text: old } : { op: "removeText", textId: patch.text.id });
+    }
+    case "removeText": {
+      const old = before.texts.find((t) => t.id === patch.textId)!;
+      return on({ op: "setText", text: old });
+    }
+  }
+}

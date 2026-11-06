@@ -1,8 +1,0 @@
-{
-  "name": "transfer",
-  "version": "0.0.2",
-  "private": true,
-  "scripts": {
-    "test": "cargo test -p finite-transfer"
-  }
-}

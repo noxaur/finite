@@ -299,9 +299,9 @@ export function canvasServer(ctx: ToolContext) {
 
     safeTool(
       "comment",
-      "Pins a comment on a frame, or on one element in it (loc = file:line:col from a selection or the source). Use it to point people at what you changed or what you need from them.",
+      "Pins a comment on a frame, or on one element in it (loc = file:line:col from a selection or the source; index = which rendered instance of loc, from the selection). Use it to point people at what you changed or what you need from them.",
       canvasTools.comment,
-      async ({ frameId, loc, text }) => {
+      async ({ frameId, loc, index, text }) => {
         const { canvas: c } = await findFrame(frameId);
         const id = randomUUID();
         await open.updateCanvas(
@@ -312,7 +312,11 @@ export function canvasServer(ctx: ToolContext) {
               ...cv.comments,
               {
                 id,
-                anchor: { frameId, ...(loc === undefined ? {} : { loc }) },
+                anchor: {
+                  frameId,
+                  ...(loc === undefined ? {} : { loc }),
+                  ...(loc === undefined || index === undefined ? {} : { index }),
+                },
                 author: actor,
                 text,
                 replies: [],
@@ -426,10 +430,19 @@ export function canvasServer(ctx: ToolContext) {
 
     safeTool(
       "name_thread",
-      "Names this thread in the prototypes list: 2–4 words about what it's for.",
+      "Names this thread, and its prototype canvas, in the prototypes list: 2–4 words about what it's for.",
       canvasTools.name_thread,
       async ({ title }) => {
-        await open.updateThread(ctx.threadId, (m) => ({ ...m, title, updatedAt: Date.now() }));
+        const thread = await open.updateThread(ctx.threadId, (m) => ({
+          ...m,
+          title,
+          updatedAt: Date.now(),
+        }));
+        // A prototype is its thread and first canvas, so the canvas takes the name too.
+        const first = (await open.canvases()).find((c) => c.id === thread.canvasIds[0]);
+        if (first?.kind === "prototype" && first.name !== title) {
+          await open.updateCanvas(first.id, (c) => ({ ...c, name: title }), actor);
+        }
         return json({ title });
       },
     ),

@@ -10,6 +10,7 @@ import type {
   Frame,
   FrameError,
   FrameSource,
+  InstallState,
   PreviewState,
   Remap,
   Route,
@@ -36,6 +37,7 @@ export interface Store {
   create(input: { name: string; kind: "blank" | "import"; source?: string }): Promise<DesignEntry>;
   /** Refuses (`unsupported-project`) without a package.json, Vite, or a supported router. */
   connect(path: string): Promise<DesignEntry>;
+  rename(id: string, name: string): Promise<DesignEntry>;
   /** Forgets the design. A connected root stays on disk. */
   remove(id: string): Promise<void>;
   open(id: string): Promise<OpenDesign>;
@@ -48,7 +50,8 @@ export interface Store {
 export type DesignChange =
   | { type: "canvas"; canvas: Canvas }
   | { type: "thread"; meta: ThreadMeta }
-  | { type: "thread.event"; threadId: string; event: ThreadEvent };
+  | { type: "thread.event"; threadId: string; event: ThreadEvent }
+  | { type: "install"; install: InstallState };
 
 /** One design's `.finite/` folder. Writes are serialized per design and atomic. */
 export interface OpenDesign {
@@ -59,6 +62,8 @@ export interface OpenDesign {
     by: Actor,
   ): Promise<Canvas>;
   patchCanvas(canvasId: string, patch: CanvasPatch, by: Actor): Promise<Canvas>;
+  /** Applies the inverse of `by`'s last patch on the canvas (`redo`: of their last undo). */
+  undoCanvas(canvasId: string, by: Actor, redo?: boolean): Promise<Canvas>;
   /** Rename, remove (sets `removedAt`), restore, and comment changes. */
   updateCanvas(canvasId: string, fn: (canvas: Canvas) => Canvas, by: Actor): Promise<Canvas>;
   threads(): Promise<ThreadMeta[]>;
@@ -88,6 +93,8 @@ export interface Previews {
   /** Where an iframe loads a frame from. */
   frameUrl(designId: string, source: FrameSource): string;
   stop(designId: string): Promise<void>;
+  /** Nobody views the design any more: stops its dev server after a grace period. */
+  idle(designId: string): void;
   on(designId: string, fn: (event: PreviewEvent) => void): Unsubscribe;
   reportError(designId: string, error: FrameError): void;
   errors(designId: string, frameId: string): FrameError[];

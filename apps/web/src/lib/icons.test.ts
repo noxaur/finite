@@ -3,6 +3,7 @@ import { ICON_NAMES, iconMarkup, strokeFor } from "./icons";
 
 /** Icons drawn solid on purpose, where solid is the convention. */
 const FILLED = new Set([
+  "more",
   "play",
   "fillSolid",
   "fillConic",

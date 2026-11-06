@@ -102,6 +102,16 @@ function CanvasView({
 
   useEffect(() => editor?.setCanvas(canvas), [editor, canvas]);
 
+  // A canvas that opened empty (routes not reported yet, a prototype before its first frame)
+  // fits its first frames when they arrive.
+  const hasFrames = canvas.frames.length > 0;
+  const wasEmpty = useRef(!hasFrames);
+  useEffect(() => {
+    if (!editor || !hasFrames || !wasEmpty.current) return;
+    wasEmpty.current = false;
+    requestAnimationFrame(() => editor.fitAll());
+  }, [editor, hasFrames]);
+
   useEffect(() => {
     if (!editor) return;
     editor.routeFile = (frame) =>
@@ -162,6 +172,14 @@ function CanvasView({
                     style={{ maxWidth: `calc(${box.width}px / var(--inv-zoom, 1))` }}
                   >
                     {frame.name}
+                    {frame.gone && (
+                      <span
+                        title="This route isn't in the app any more. Remove the frame when you're done with it."
+                        {...stylex.props(styles.gone)}
+                      >
+                        {" · route removed"}
+                      </span>
+                    )}
                   </div>
                   <FrameView
                     designId={designId}
@@ -262,6 +280,7 @@ const styles = stylex.create({
     cursor: "default",
   },
   titleSelected: { color: colors.hover },
+  gone: { color: colors.danger },
   noticeSpot: (x: number, y: number) => ({
     position: "absolute",
     left: x,

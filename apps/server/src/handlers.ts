@@ -5,11 +5,13 @@ import {
   type OpenDesign,
   PROTOCOL_VERSION,
   Refused,
+  type Route,
   type ThreadMeta,
 } from "@finite/protocol";
 import { startThread } from "./agent/index.ts";
 import type { Context, Handlers } from "./hub.ts";
 import { installOf } from "./store/index.ts";
+import { syncRoutes } from "./store/routes.ts";
 
 /**
  * One function per request type: thin glue from the wire to the modules in store/, preview/,
@@ -25,6 +27,7 @@ export const handlers: Handlers = {
   "design.create": ({ name, kind, source }, { modules }) =>
     modules.store.create({ name, kind, ...(source === undefined ? {} : { source }) }),
   "design.connect": ({ path }, { modules }) => modules.store.connect(path),
+  "design.rename": ({ id, name }, { modules }) => modules.store.rename(id, name),
   async "design.remove"({ id }, { modules }) {
     await modules.previews.stop(id);
     await modules.store.remove(id);
@@ -34,26 +37,25 @@ export const handlers: Handlers = {
   async subscribe({ designId }, { client, hub, modules }) {
     const open = await hub.open(designId);
     client.subscriptions.add(designId);
-    // A new blank design installs its dependencies first; its preview shows the install meanwhile.
+    // A new blank design installs its dependencies first; the dev server starts after.
     const install = installOf(open);
     (install?.done ?? Promise.resolve())
       .then(() => modules.previews.ensure(open.design))
       .catch((error: unknown) => console.error(`preview for ${designId} failed:`, error));
-    const [canvases, threads, routes] = await Promise.all([
-      open.canvases(),
-      open.threads(),
-      install ? [] : modules.previews.routes(designId).catch(() => []),
-    ]);
+    const routes: Route[] = install ? [] : await modules.previews.routes(designId).catch(() => []);
+    if (routes.length) await syncRoutes(open, routes);
+    const [canvases, threads] = await Promise.all([open.canvases(), open.threads()]);
     return {
       design: open.design,
       canvases,
       threads,
-      preview: install?.state ?? modules.previews.state(designId),
+      preview: modules.previews.state(designId),
       routes,
+      ...(install ? { install: install.state } : {}),
     };
   },
-  async unsubscribe({ designId }, { client }) {
-    client.subscriptions.delete(designId);
+  async unsubscribe({ designId }, { client, hub }) {
+    hub.unsubscribe(client, designId);
     return null;
   },
 
@@ -73,6 +75,12 @@ export const handlers: Handlers = {
   async "canvas.patch"({ designId, canvasId, patch }, ctx) {
     const open = await ctx.hub.open(designId);
     return open.patchCanvas(canvasId, patch, ctx.by);
+  },
+  async "canvas.undo"({ designId, canvasId }, ctx) {
+    return (await ctx.hub.open(designId)).undoCanvas(canvasId, ctx.by);
+  },
+  async "canvas.redo"({ designId, canvasId }, ctx) {
+    return (await ctx.hub.open(designId)).undoCanvas(canvasId, ctx.by, true);
   },
 
   async "source.edit"({ designId, canvasId, edits }, ctx) {
@@ -129,7 +137,7 @@ export const handlers: Handlers = {
       ...(selection === undefined ? {} : { selection }),
       ...(effort === undefined ? {} : { effort }),
     };
-    // A new prototype's canvas comes from `canvas.create` first; without one the thread has none.
+    // `new.prototype` makes the thread's canvas with it; `new.canvasId` joins one; else it has none.
     const threadId = params.threadId ?? (await startThread(open, params.new ?? {}, turn)).id;
     await ctx.modules.agents.send(open, threadId, turn, mode);
     return { threadId };

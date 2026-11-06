@@ -16,6 +16,7 @@ import { createEventMapper } from "./events.ts";
 import { createAgents, type QueryFn, type QueryLike, shortTitle, startThread } from "./index.ts";
 import { FINITE_INSTRUCTIONS } from "./instructions.ts";
 import { policy } from "./policy.ts";
+import { createStatus, NOT_INSTALLED, NOT_LOGGED_IN } from "./status.ts";
 import { DEFAULT_SIZE, GAP, LABEL_OFFSET, layoutRow } from "./tools.ts";
 
 const person = { kind: "person" as const, id: "u1", name: "Ada" };
@@ -429,6 +430,13 @@ describe("agents", () => {
     expect(m.settledAt).toBeUndefined();
   });
 
+  it("starts a prototype: a thread and its canvas, linked and named alike", async () => {
+    const thread = await startThread(open, { prototype: true }, turn("Make a small pricing card"));
+    const [canvas] = (await open.canvases()).filter((c) => c.kind === "prototype");
+    expect(canvas).toMatchObject({ name: "Make a small pricing card", threadIds: [thread.id] });
+    expect(thread.canvasIds).toEqual([canvas!.id]);
+  });
+
   it("sends attachments and the selection in the message", async () => {
     await mkdir(path.join(root, ".finite/attachments"), { recursive: true });
     await writeFile(path.join(root, ".finite/attachments/shot.png"), new Uint8Array([1, 2, 3]));
@@ -453,7 +461,7 @@ describe("agents", () => {
     );
     const t = turn("Fix this", {
       attachments: [".finite/attachments/shot.png"],
-      selection: [{ frameId: "f1", loc: "src/Cart.tsx:4:2", index: 1 }],
+      selection: [{ frameId: "f1", loc: "src/Cart.tsx:4:2", index: 1 }, { frameId: "f1" }],
     });
     const thread = await startThread(open, { canvasId: canvas.id }, t);
     await agents.send(open, thread.id, t, "steer");
@@ -462,6 +470,7 @@ describe("agents", () => {
     const text = textOf(q.sent[0]!);
     expect(text).toContain(path.join(root, ".finite/attachments/shot.png"));
     expect(text).toContain('"Cart" (frame f1): element src/Cart.tsx:4:2, instance 1');
+    expect(text).toContain('"Cart" (frame f1, file .finite/boards/x/Cart.tsx): the whole frame');
     const content = q.sent[0]!.message.content as { type: string }[];
     expect(content.map((b) => b.type)).toEqual(["text", "image"]);
   });
@@ -526,11 +535,18 @@ describe("agents", () => {
 
     await call("name_thread", { title: "Pricing page" });
     expect((await meta(thread.id)).title).toBe("Pricing page");
+    // The thread's prototype canvas takes its name.
+    expect((await open.canvases()).find((x) => x.id === canvas.id)!.name).toBe("Pricing page");
 
-    await call("comment", { frameId: placed[0].id, loc: "src/A.tsx:1:1", text: "Look here" });
+    await call("comment", {
+      frameId: placed[0].id,
+      loc: "src/A.tsx:1:1",
+      index: 2,
+      text: "Look here",
+    });
     const comments = (await open.canvases()).find((x) => x.id === canvas.id)!.comments;
     expect(comments[0]).toMatchObject({
-      anchor: { frameId: placed[0].id, loc: "src/A.tsx:1:1" },
+      anchor: { frameId: placed[0].id, loc: "src/A.tsx:1:1", index: 2 },
       author: { kind: "agent", id: thread.id },
       text: "Look here",
     });
@@ -586,5 +602,37 @@ describe("agents", () => {
     expect(child.running).toBe(true);
     await vi.waitFor(() => expect(sdk.queries[1]?.sent).toHaveLength(1));
     expect(textOf(sdk.queries[1]!.sent[0]!)).toBe("Import the brand logo");
+  });
+});
+
+describe("status", () => {
+  it("says what to do when Claude Code is missing or logged out", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "finite-claude-"));
+    const bin = path.join(dir, "claude");
+    await writeFile(
+      bin,
+      `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "2.1.0 (Claude Code)"; exit 0; fi\necho '{"loggedIn":false}'; exit 1\n`,
+      { mode: 0o755 },
+    );
+    const query = (() => {
+      throw new Error("no query while logged out");
+    }) as unknown as QueryFn;
+    try {
+      expect(await createStatus(query, async () => undefined)()).toEqual({
+        installed: false,
+        loggedIn: false,
+        reason: NOT_INSTALLED,
+        models: [],
+      });
+      expect(await createStatus(query, async () => bin)()).toEqual({
+        installed: true,
+        loggedIn: false,
+        version: "2.1.0",
+        reason: NOT_LOGGED_IN,
+        models: [],
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

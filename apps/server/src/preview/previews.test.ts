@@ -3,17 +3,17 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import type { Design, LayerNode, PreviewEvent } from "@finite/protocol";
+import type { Design, LayerNode, PreviewEvent, Previews } from "@finite/protocol";
 import { getChromePath } from "chrome-launcher";
 import puppeteer, { type Browser, type Frame, type Page } from "puppeteer-core";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
 import { prepareFixture } from "./fixtures.ts";
-import { createPreviews, type DesignPreviews, fillParams } from "./index.ts";
+import { createPreviews, fillParams } from "./index.ts";
 
 const FIXTURES = ["rr-spa", "rr-framework", "tanstack"] as const;
 type FixtureName = (typeof FIXTURES)[number];
 
-let previews: DesignPreviews;
+let previews: Previews;
 const roots = {} as Record<FixtureName, string>;
 const urls = {} as Record<FixtureName, string>;
 const events: PreviewEvent[] = [];

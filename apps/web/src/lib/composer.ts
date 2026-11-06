@@ -41,28 +41,13 @@ export function explorePrompt(
   return `Explore ${n} ${what} ${n === 1 ? "direction" : "directions"} for ${target}`;
 }
 
-const FAMILIES = ["opus", "sonnet", "haiku", "fable"] as const;
-
-/**
- * What Claude says about a model: the exact entry, else the family alias Claude lists for a full
- * id (`claude-opus-5-5` → `opus`), so its effort levels and fast mode are known.
- */
+/** What Claude says about a model. Settings and threads store values `claude.status` lists. */
 export function findModel(models: ReadonlyArray<ModelInfo>, value: string): ModelInfo | undefined {
-  const exact = models.find((m) => m.value === value);
-  if (exact) return exact;
-  const family = FAMILIES.find((f) => value.includes(f));
-  return family ? models.find((m) => m.value === family) : undefined;
+  return models.find((m) => m.value === value);
 }
 
-/** "Opus 5.5" for `claude-opus-5-5`: Claude's name for it, else one read from the id. */
+/** "Opus 5.5" for `opus`: Claude's name for the model, else its value. */
 export function modelName(models: ReadonlyArray<ModelInfo>, value: string): string {
-  const exact = models.find((m) => m.value === value);
-  if (exact) return exact.displayName;
-  const parts = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$/.exec(value);
-  if (parts) {
-    const [, family, major, minor] = parts;
-    return `${family![0]!.toUpperCase()}${family!.slice(1)} ${major}${minor ? `.${minor}` : ""}`;
-  }
   return findModel(models, value)?.displayName ?? value;
 }
 
@@ -105,27 +90,12 @@ export interface Picked {
   readonly frameId: string;
   readonly loc?: Loc | undefined;
   readonly index?: number | undefined;
-  readonly name?: string | undefined;
 }
 
-/**
- * What a message carries for the selection: picked elements as `selection`, and picked whole
- * frames (which have no element loc) named in a note after the text.
- */
-export function selectionFor(items: ReadonlyArray<Picked>): {
-  selection: Selection[] | undefined;
-  note: string;
-} {
-  const elements: Selection[] = [];
-  const frames: string[] = [];
-  for (const item of items) {
-    if (item.loc === undefined) frames.push(`“${item.name || item.frameId}”`);
-    else elements.push({ frameId: item.frameId, loc: item.loc, index: item.index ?? 0 });
-  }
-  return {
-    selection: elements.length ? elements : undefined,
-    note: frames.length
-      ? `\n\n(Selected ${frames.length === 1 ? "frame" : "frames"}: ${frames.join(", ")})`
-      : "",
-  };
+/** What a message carries for the selection: whole frames without a loc, elements with one. */
+export function selectionFor(items: ReadonlyArray<Picked>): Selection[] | undefined {
+  const out = items.map(({ frameId, loc, index }): Selection =>
+    loc === undefined ? { frameId } : { frameId, loc, index: index ?? 0 },
+  );
+  return out.length ? out : undefined;
 }

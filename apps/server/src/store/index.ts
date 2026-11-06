@@ -6,9 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   type Design,
   DesignConfig,
-  type DesignChange,
   DesignEntry,
-  type Frame,
   type OpenDesign,
   Refused,
   Settings,
@@ -18,6 +16,7 @@ import { detectProject } from "./detect.ts";
 import { readJson, serial, toJson, writeAtomic } from "./files.ts";
 import { type Install, install } from "./install.ts";
 import { type OpenedDesign, openDesign } from "./open.ts";
+import { ROUTES_PAGE, routeFrames } from "./routes.ts";
 
 export type StoreOptions = {
   /** `$FINITE_DATA_DIR`: designs.json, settings.json, projects/. */
@@ -32,15 +31,16 @@ export type FileStore = Store & {
 };
 
 export const DEFAULT_SETTINGS: Settings = {
-  model: "claude-opus-5-5",
+  /** Claude's alias for its newest Opus, one of the models `claude.status` lists. */
+  model: "opus",
   effort: "medium",
   fast: false,
   sendMode: "steer",
   showWorkingSeparately: true,
 };
 
-/** The frame size a route opens at on the Routes page. */
-const ROUTE_FRAME = { width: 1440, height: 900 };
+/** How long a design's `updatedAt` bumps collect before designs.json is written. */
+const TOUCH_MS = 2_000;
 
 const installers = new WeakMap<OpenDesign, () => Install | undefined>();
 
@@ -66,6 +66,7 @@ export function createStore(options: StoreOptions): FileStore {
   const opened = new Map<string, Promise<OpenedDesign>>();
   const installs = new Map<string, Install>();
   let registry: DesignEntry[] | undefined;
+  let touchTimer: NodeJS.Timeout | undefined;
 
   async function list(): Promise<DesignEntry[]> {
     if (!registry) {
@@ -81,10 +82,40 @@ export function createStore(options: StoreOptions): FileStore {
     return registry;
   }
 
+  /** The list as clients see it: stored rows plus which ones are installing. */
+  function shown(rows: DesignEntry[]): DesignEntry[] {
+    return rows.map((row) =>
+      installs.get(row.id)?.state.status === "running" ? { ...row, installing: true } : row,
+    );
+  }
+
+  function announce() {
+    const list = shown(registry ?? []);
+    for (const fn of listeners) fn(list);
+  }
+
   async function saveList(next: DesignEntry[]) {
-    await writeAtomic(registryFile, toJson(next));
-    registry = next;
-    for (const fn of listeners) fn(next);
+    const rows = next.map(({ installing: _installing, ...row }) => row);
+    clearTimeout(touchTimer);
+    touchTimer = undefined;
+    await writeAtomic(registryFile, toJson(rows));
+    registry = rows;
+    announce();
+  }
+
+  /** Bumps a design's `updatedAt`; designs.json is written a little later, once per burst. */
+  function touch(id: string) {
+    const rows = registry;
+    const row = rows?.find((d) => d.id === id);
+    if (!rows || !row) return;
+    registry = rows.map((d) => (d === row ? { ...d, updatedAt: Date.now() } : d));
+    touchTimer ??= setTimeout(() => {
+      touchTimer = undefined;
+      void run(async () => saveList(await list())).catch((error: unknown) =>
+        console.error(`saving ${registryFile} failed:`, error),
+      );
+    }, TOUCH_MS);
+    touchTimer.unref();
   }
 
   async function entry(id: string): Promise<DesignEntry> {
@@ -96,18 +127,20 @@ export function createStore(options: StoreOptions): FileStore {
   function startInstall(design: DesignEntry): Install | undefined {
     if (design.origin === "connected") return undefined;
     const running = installs.get(design.id);
-    if (running && running.state.status === "starting") return running;
+    if (running && running.state.status === "running") return running;
     if (fs.existsSync(path.join(design.root, "node_modules"))) return undefined;
     const job = install(design.root, (state) => {
-      // Shown as the design's preview state (a `preview` server event) until the dev server starts.
-      const change = { type: "preview", ...state } as unknown as DesignChange;
-      void opened.get(design.id)?.then((open) => open.emit(change));
+      void opened.get(design.id)?.then((open) => open.emit({ type: "install", install: state }));
     });
     installs.set(design.id, job);
-    job.done.then(
-      () => installs.delete(design.id),
-      () => {},
-    );
+    const finished = () => {
+      announce();
+    };
+    job.done.then(() => {
+      installs.delete(design.id);
+      finished();
+    }, finished);
+    announce();
     return job;
   }
 
@@ -125,9 +158,13 @@ export function createStore(options: StoreOptions): FileStore {
           );
         }
         const { version: _version, id: _id, ...rest } = config.data;
-        const design: Design = { ...row, ...rest };
+        const { updatedAt: _at, installing: _installing, ...base } = row;
+        const design: Design = { ...base, ...rest };
         const opened = await openDesign(design);
         installers.set(opened, () => startInstall(row));
+        opened.on((change) => {
+          if (change.type === "canvas" || change.type === "thread") touch(id);
+        });
         return opened;
       })();
       pending.catch(() => opened.delete(id));
@@ -136,27 +173,27 @@ export function createStore(options: StoreOptions): FileStore {
     return pending;
   }
 
-  /** The Routes, Brand and Components pages a new design starts with. */
+  /**
+   * The Routes, Brand and Components pages a new design starts with. The Routes page follows the
+   * routes the dev server reports (see `syncRoutes`); `routes` is what it shows before that.
+   */
   async function addPages(design: OpenDesign, routes: string[]) {
     if ((await design.canvases()).length) return;
     const by = { kind: "person", id: "finite", name: "Finite" } as const;
-    const routesPage = await design.createCanvas({ kind: "page", name: "Routes" }, by);
-    const gap = 160;
-    const frames: Frame[] = routes.map((route, i) => ({
-      id: randomUUID(),
-      name: routeName(route),
-      x: i * (ROUTE_FRAME.width + gap),
-      y: 0,
-      ...ROUTE_FRAME,
-      source: { kind: "route", path: route },
-    }));
-    if (frames.length) await design.patchCanvas(routesPage.id, { op: "addFrames", frames }, by);
+    const routesPage = await design.createCanvas({ kind: "page", name: ROUTES_PAGE }, by);
+    const frames = routeFrames(
+      routes.map((route) => ({ path: route, params: [] })),
+      [],
+    );
+    if (frames.length) {
+      await design.updateCanvas(routesPage.id, (c) => ({ ...c, frames }), by);
+    }
     await design.createCanvas({ kind: "page", name: "Brand" }, by);
     await design.createCanvas({ kind: "page", name: "Components" }, by);
   }
 
   const store: FileStore = {
-    designs: () => run(list),
+    designs: () => run(async () => shown(await list())),
 
     create({ name, kind }) {
       return run(async () => {
@@ -176,7 +213,7 @@ export function createStore(options: StoreOptions): FileStore {
           brandDir: "src/assets/brand",
         };
         await writeAtomic(path.join(root, ".finite", "design.json"), toJson(config));
-        const row: DesignEntry = { id, name, root, origin: kind };
+        const row: DesignEntry = { id, name, root, origin: kind, updatedAt: Date.now() };
         await saveList([...(await list()), row]);
         await addPages(await open(id), ["/"]);
         startInstall(row);
@@ -206,11 +243,26 @@ export function createStore(options: StoreOptions): FileStore {
           const { name: _name, ...rest } = detected;
           await writeAtomic(configFile, toJson({ version: 1, id, ...rest } satisfies DesignConfig));
         }
-        const row: DesignEntry = { id, name: detected.name, root, origin: "connected" };
+        const row: DesignEntry = {
+          id,
+          name: detected.name,
+          root,
+          origin: "connected",
+          updatedAt: Date.now(),
+        };
         await saveList([...rows, row]);
         // Routes come from the dev server once it runs; until then the Routes page is empty.
         await addPages(await open(id), []);
         return row;
+      });
+    },
+
+    rename(id, name) {
+      return run(async () => {
+        const row = await entry(id);
+        const next = { ...row, name, updatedAt: Date.now() };
+        await saveList((await list()).map((d) => (d.id === id ? next : d)));
+        return shown([next])[0]!;
       });
     },
 
@@ -238,7 +290,11 @@ export function createStore(options: StoreOptions): FileStore {
     async settings() {
       const raw = await readJson(settingsFile).catch(() => undefined);
       const saved = Settings.partial().safeParse(raw);
-      return Settings.parse({ ...DEFAULT_SETTINGS, ...(saved.success ? clean(saved.data) : {}) });
+      const next = Settings.parse({
+        ...DEFAULT_SETTINGS,
+        ...(saved.success ? clean(saved.data) : {}),
+      });
+      return { ...next, model: modelAlias(next.model) };
     },
 
     setSettings(patch) {
@@ -255,6 +311,11 @@ export function createStore(options: StoreOptions): FileStore {
     },
 
     async close() {
+      if (touchTimer) {
+        clearTimeout(touchTimer);
+        touchTimer = undefined;
+        await run(async () => saveList(await list()));
+      }
       const all = [...opened.values()];
       opened.clear();
       for (const pending of all) (await pending.catch(() => undefined))?.close();
@@ -293,11 +354,12 @@ function scaffoldDir(override: string | undefined): string {
   );
 }
 
-function routeName(route: string): string {
-  const last = route.split("/").filter(Boolean).pop();
-  if (!last) return "Home";
-  const word = last.replace(/^[:$]/, "").replace(/[-_]+/g, " ");
-  return word.charAt(0).toUpperCase() + word.slice(1);
+/**
+ * Claude's alias for a pinned model id an older Finite saved as the default (`claude-opus-5-5` →
+ * `opus`), so the model is one `claude.status` lists. Anything else stays as it is.
+ */
+export function modelAlias(model: string): string {
+  return /^claude-(opus|sonnet|haiku|fable)-\d+(-\d{1,2})?$/.exec(model)?.[1] ?? model;
 }
 
 /** Drops `undefined` fields, so a partial never overwrites a value with nothing. */

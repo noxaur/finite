@@ -9,6 +9,7 @@ import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.styl
 import { buttonStyle, Button, IconButton, Strip, StripItem } from "./Button";
 import { Icon } from "./Icons";
 import { Dropdown } from "./Menu";
+import { Reason } from "./Reason";
 import { toast } from "./Toast";
 
 const set = (patch: Partial<SettingsValue>) =>
@@ -65,15 +66,12 @@ export function Settings({ onClose }: { onClose: () => void }) {
             />
             {claude === null ? (
               <span {...stylex.props(styles.muted)}>Checking…</span>
-            ) : !claude.installed ? (
+            ) : !claude.installed || !claude.loggedIn ? (
               <span>
-                Not installed. Install Claude Code, then run{" "}
-                <code {...stylex.props(styles.code)}>claude</code> to log in.
-              </span>
-            ) : !claude.loggedIn ? (
-              <span>
-                Installed{claude.version ? ` (${claude.version})` : ""}, not logged in. Run{" "}
-                <code {...stylex.props(styles.code)}>claude</code> in a terminal to log in.
+                {claude.installed
+                  ? `Installed${claude.version ? ` (${claude.version})` : ""}, not logged in. `
+                  : "Not installed. "}
+                <Reason text={claude.reason ?? ""} code={styles.code} />
               </span>
             ) : (
               <span>
@@ -97,16 +95,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
                 <Dropdown
                   label="Default model"
                   value={settings.model}
-                  options={[
-                    ...(pickableModels(models, settings.model).some(
-                      (m) => m.value === settings.model,
-                    )
-                      ? []
-                      : [[settings.model, modelName(models, settings.model)] as const]),
-                    ...pickableModels(models, settings.model).map(
-                      (m) => [m.value, m.displayName] as const,
-                    ),
-                  ]}
+                  options={pickableModels(models, settings.model).map(
+                    (m) => [m.value, m.displayName] as const,
+                  )}
                   onPick={(model) => void set({ model })}
                   style={[buttonStyle({}), styles.dropdown]}
                 >

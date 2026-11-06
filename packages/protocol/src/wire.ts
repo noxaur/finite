@@ -10,6 +10,7 @@ import {
   DesignEntry,
   EffortLevel,
   Id,
+  InstallState,
   Loc,
   PreviewState,
   RefusalCode,
@@ -40,6 +41,8 @@ export const DesignState = z.object({
   threads: z.array(ThreadMeta),
   preview: PreviewState,
   routes: z.array(Route),
+  /** The dependency install a new design waits on, while it runs or after it failed. */
+  install: InstallState.optional(),
 });
 export type DesignState = z.infer<typeof DesignState>;
 
@@ -63,6 +66,7 @@ export const requests = {
     result: DesignEntry,
   },
   "design.connect": { params: { path: z.string().min(1) }, result: DesignEntry },
+  "design.rename": { params: { id: designId, name: z.string().min(1) }, result: DesignEntry },
   "design.remove": { params: { id: designId }, result: z.null() },
 
   subscribe: { params: { designId }, result: DesignState },
@@ -76,6 +80,9 @@ export const requests = {
   "canvas.remove": { params: { designId, canvasId: Id }, result: Canvas },
   "canvas.restore": { params: { designId, canvasId: Id }, result: Canvas },
   "canvas.patch": { params: { designId, canvasId: Id, patch: CanvasPatch }, result: Canvas },
+  /** Takes back (or redoes) this person's last `canvas.patch` on the canvas. */
+  "canvas.undo": { params: { designId, canvasId: Id }, result: Canvas },
+  "canvas.redo": { params: { designId, canvasId: Id }, result: Canvas },
 
   "source.edit": {
     /** `canvasId` is the canvas the edit was made on: a prototype refuses edits outside `.finite/`. */
@@ -106,7 +113,14 @@ export const requests = {
     params: {
       designId,
       threadId: Id.optional(),
-      new: z.object({ canvasId: Id.optional(), parentId: Id.optional() }).optional(),
+      new: z
+        .object({
+          canvasId: Id.optional(),
+          parentId: Id.optional(),
+          /** Makes a prototype canvas for the thread (instead of `canvasId`), named with it. */
+          prototype: z.boolean().optional(),
+        })
+        .optional(),
       text: z.string().min(1),
       /** Paths returned by `POST /api/designs/:id/attachments`. */
       attachments: z.array(z.string()),
@@ -222,6 +236,8 @@ export const ServerEvent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("thread.event"), designId, threadId: Id, event: ThreadEvent }),
   z.object({ type: z.literal("preview"), designId, ...PreviewState.shape }),
   z.object({ type: z.literal("routes"), designId, routes: z.array(Route) }),
+  /** A new design's dependency install (the designs list shows it through `installing`). */
+  z.object({ type: z.literal("install"), designId, install: InstallState }),
   z.object({ type: z.literal("settings"), settings: Settings }),
 ]);
 export type ServerEvent = z.infer<typeof ServerEvent>;

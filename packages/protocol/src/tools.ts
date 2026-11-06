@@ -33,7 +33,13 @@ export const canvasTools = {
     y: z.number().optional(),
     width: z.number().positive().optional(),
   },
-  comment: { frameId: z.string(), loc: Loc.optional(), text: z.string().min(1) },
+  comment: {
+    frameId: z.string(),
+    loc: Loc.optional(),
+    /** Which rendered instance of `loc` (from a selection), default 0. */
+    index: z.number().int().min(0).optional(),
+    text: z.string().min(1),
+  },
   copy_production: {
     canvasId: z.string(),
     name: z.string().optional(),

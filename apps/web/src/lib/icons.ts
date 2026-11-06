@@ -111,7 +111,9 @@ export type IconName =
   | "folder"
   | "download"
   | "spark"
-  | "trash";
+  | "trash"
+  | "more"
+  | "pencil";
 
 const path = (d: string, extra = "") => `<path d="${d}"${extra}/>`;
 const rect = (x: number, y: number, w: number, h: number, r: number, extra = "") =>
@@ -317,6 +319,10 @@ const SHAPES: Record<IconName, string | ((s: number) => string)> = {
   download: path("M12 4v11.2M7.2 10.4 12 15.2l4.8-4.8M4.8 19.2h14.4"),
   // Eight rays from the center: the ✱ that opens the selection's actions.
   spark: path("M12 4v16M4 12h16M6.4 6.4l11.2 11.2M17.6 6.4 6.4 17.6"),
+  // Three dots in a row: more actions.
+  more: dot(6, 12, 1.3) + dot(12, 12, 1.3) + dot(18, 12, 1.3),
+  // A pencil, tip down-left: rename or edit.
+  pencil: path("M15.6 4.8l3.6 3.6L8.4 19.2H4.8v-3.6zM13.2 7.2l3.6 3.6"),
   trash: path(
     "M4.8 7.2h14.4M9.6 7.2V5.6a1.6 1.6 0 0 1 1.6-1.6h1.6a1.6 1.6 0 0 1 1.6 1.6v1.6M6.4 7.2l.8 11.2a1.6 1.6 0 0 0 1.6 1.6h6.4a1.6 1.6 0 0 0 1.6-1.6l.8-11.2",
   ),

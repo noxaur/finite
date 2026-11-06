@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { ContentBlockParam } from "@anthropic-ai/sdk/resources";
-import type { Canvas, Turn } from "@finite/protocol";
+import type { Canvas, FrameSource, Turn } from "@finite/protocol";
 
 const IMAGE_TYPES: Record<string, "image/png" | "image/jpeg" | "image/gif" | "image/webp"> = {
   ".png": "image/png",
@@ -32,7 +32,10 @@ export async function userMessage(
     const lines = turn.selection.map(({ frameId, loc, index }) => {
       const frame = canvases.flatMap((c) => c.frames).find((f) => f.id === frameId);
       const name = frame ? `"${frame.name}"` : "a frame";
-      return `- ${name} (frame ${frameId}): element ${loc}, instance ${index}`;
+      const what = `- ${name} (frame ${frameId}`;
+      if (loc === undefined)
+        return `${what}${frame ? `, ${describeSource(frame.source)}` : ""}): the whole frame`;
+      return `${what}): element ${loc}, instance ${index ?? 0}`;
     });
     prompt += `\n\nSelected on the canvas:\n${lines.join("\n")}`;
   }
@@ -49,4 +52,8 @@ export async function userMessage(
     });
   }
   return { type: "user", message: { role: "user", content }, parent_tool_use_id: null };
+}
+
+function describeSource(source: FrameSource): string {
+  return source.kind === "route" ? `route ${source.path}` : `file ${source.file}`;
 }
