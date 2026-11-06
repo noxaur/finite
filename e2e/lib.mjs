@@ -67,13 +67,14 @@ export async function startServer({
   env = {},
   port,
   data = true,
+  dataPrefix = "finite-data-",
   staticDir,
   stdio = ["ignore", "inherit", "inherit"],
   detached = false,
   wait = true,
 } = {}) {
   port ??= await freePort();
-  const dataDir = data ? fs.mkdtempSync(path.join(os.tmpdir(), "finite-data-")) : null;
+  const dataDir = data ? fs.mkdtempSync(path.join(os.tmpdir(), dataPrefix)) : null;
   const child = spawn(bin, args, {
     env: {
       ...process.env,
@@ -96,8 +97,12 @@ export async function startServer({
     dataDir,
     ready: () => (health ??= waitHealthy(url)),
     async stop() {
+      // A process killed by a signal has a null exitCode but a signalCode,
+      // and its exit event has already fired.
       const exited =
-        child.exitCode === null ? new Promise((r) => child.once("exit", r)) : Promise.resolve();
+        child.exitCode === null && child.signalCode === null
+          ? new Promise((r) => child.once("exit", r))
+          : Promise.resolve();
       child.kill();
       await exited;
       if (dataDir)
