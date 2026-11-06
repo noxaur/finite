@@ -41,10 +41,6 @@ pub trait Router: Sync {
     /// The packages it needs, beyond React, Vite and TypeScript.
     fn packages(&self) -> &'static [Package];
 
-    /// The prop of its link component that holds where to go: `to` for
-    /// React Router and TanStack Router, `href` for Next.
-    fn link_prop(&self) -> &'static str;
-
     /// The files that set up routing for `pages`. It must write
     /// `src/link.ts`, which exports the link component as `Link`, and
     /// `src/router.tsx`, which exports `App`, the element `src/main.tsx`
@@ -94,10 +90,6 @@ impl Router for ReactRouter {
         }]
     }
 
-    fn link_prop(&self) -> &'static str {
-        "to"
-    }
-
     fn files(&self, pages: &[Page]) -> Vec<File> {
         let mut router = String::from(
             "import { useEffect } from \"react\";\nimport { BrowserRouter, Route, Routes, useLocation } from \"react-router\";\n",
@@ -144,10 +136,6 @@ impl Router for TanStackRouter {
             name: "@tanstack/react-router",
             version: "1.170.46",
         }]
-    }
-
-    fn link_prop(&self) -> &'static str {
-        "to"
     }
 
     fn files(&self, pages: &[Page]) -> Vec<File> {

@@ -17,6 +17,8 @@ use finite_design::version::Schema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::json_file::JsonFile;
+
 /// The payload's format and version. See `finite_design::version`.
 pub const PAYLOAD: Schema = Schema {
     name: "Figma payload",
@@ -38,6 +40,18 @@ pub struct Payload {
     /// image hash; on export by sha256.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub images: BTreeMap<String, String>,
+}
+
+impl JsonFile for Payload {
+    const SCHEMA: &'static Schema = &PAYLOAD;
+    const NAME: &'static str = "a Figma payload";
+    const KIND: &'static str = KIND;
+    // A layer's paints and text runs nest a few levels more than other layers.
+    const EXTRA_DEPTH: usize = 16;
+
+    fn kind(&self) -> &str {
+        &self.kind
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

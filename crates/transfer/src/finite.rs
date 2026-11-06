@@ -15,17 +15,16 @@ use std::collections::BTreeMap;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use finite_design::{
-    MAX_DEPTH, Node, NodeKind,
-    edit::pixel_size,
-    html::{self, Fragment},
-    import::{BlobHash, Dependency},
-    version::{Schema, VersionError},
+    Node, NodeKind,
+    html::{self, Fragment, Policy},
+    import::BlobHash,
+    version::Schema,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
     Anchor, Board, Codec, Diagnostic, Direction, Error, Exported, Feature, Imported, Input,
-    Revision, Scope, Score, Support, Tokens, assets, file_stem,
+    Revision, Scope, Score, Support, Tokens, assets, feature, file_stem, json_file::JsonFile,
 };
 
 /// The bundle's format and version. See `finite_design::version`.
@@ -35,11 +34,7 @@ pub const BUNDLE: Schema = Schema {
     upgrades: &[],
 };
 
-/// What a bundle's `kind` says, so a stray JSON file isn't taken for one.
 const KIND: &str = "finite-bundle";
-
-/// Used for an artboard whose width or height isn't in pixels.
-const FALLBACK: (f64, f64) = (1440.0, 900.0);
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,6 +65,17 @@ pub struct Bundle {
     /// Every file a layer or the CSS refers to, as base64, by its sha256.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub blobs: BTreeMap<BlobHash, String>,
+}
+
+impl JsonFile for Bundle {
+    const SCHEMA: &'static Schema = &BUNDLE;
+    const NAME: &'static str = "a Finite bundle";
+    const KIND: &'static str = KIND;
+    const EXTRA_DEPTH: usize = 8;
+
+    fn kind(&self) -> &str {
+        &self.kind
+    }
 }
 
 /// One layer and everything inside it. A layer without a tag is text.
@@ -107,45 +113,11 @@ impl Codec for Finite {
     }
 
     fn support(&self, feature: Feature, direction: Direction) -> Support {
-        use {Direction::*, Support::*};
-        match (feature, direction) {
-            (
-                Feature::Frame
-                | Feature::Text
-                | Feature::SolidFill
-                | Feature::Image
-                | Feature::FlexLayout,
-                Import | Export,
-            ) => Exact,
-            // Like HTML: a bundle's scripts are quarantined on the way in.
-            (Feature::Script, Import) => Opaque,
-            (Feature::Script, Export) => Exact,
-            (Feature::Embed, Import) => Opaque,
-            (Feature::Embed, Export) => Unsupported,
-            // A bundle holds the design, not how it got there.
-            (Feature::ImportHistory, Import | Export) => Unsupported,
-            // A bundle has no components, so an instance is written as the
-            // elements it shows.
-            (Feature::Instance, Import) => Unsupported,
-            (Feature::Instance, Export) => Approximate,
-        }
+        feature::finite_markup(feature, direction)
     }
 
     fn read(&self, input: &Input<'_>) -> Result<Imported, Error> {
-        let json = std::str::from_utf8(input.bytes)
-            .map_err(|_| Error("the file isn't UTF-8 text, so it can't be a bundle".into()))?;
-        // Each layer nests an object and its children's array.
-        let limit = 2 * MAX_DEPTH + 8;
-        let bundle: Bundle = BUNDLE.decode_nested(json, limit).map_err(|e| match e {
-            VersionError::Json(e) => Error(format!("this isn't a Finite bundle: {e}")),
-            other => Error(other.to_string()),
-        })?;
-        if bundle.kind != KIND {
-            return Err(Error(format!(
-                "this isn't a Finite bundle: its kind is {:?}",
-                bundle.kind
-            )));
-        }
+        let bundle = Bundle::read(input.bytes)?;
         let blobs = verified_blobs(&bundle)?;
         let mut diagnostics = Vec::new();
         let boards = bundle
@@ -157,24 +129,18 @@ impl Codec for Finite {
                 ..board(i, layer, &mut diagnostics)
             })
             .collect();
-        let dependencies = blobs
-            .iter()
-            .map(|(hash, _)| Dependency {
-                url: format!("{}{hash}", assets::SCHEME),
-                blob: Some(hash.clone()),
-            })
-            .collect();
+        let (blobs, dependencies) = assets::carried(blobs);
         Ok(Imported {
             pages: bundle.pages,
             format: self.name(),
-            input_kind: format!("finite-bundle v{}", BUNDLE.version),
+            input_kind: format!("{KIND} v{}", BUNDLE.version),
             boards,
             tokens: Tokens {
                 modes: bundle.modes,
                 values: bundle.tokens,
             },
             css: bundle.css,
-            blobs: blobs.into_iter().map(|(_, bytes)| bytes).collect(),
+            blobs,
             dependencies,
             diagnostics,
         })
@@ -224,31 +190,19 @@ impl Codec for Finite {
                 Some(bytes) => {
                     blobs.insert(hash, STANDARD.encode(bytes));
                 }
-                None => diagnostics.push(Diagnostic {
-                    node: None,
-                    path: format!("{}{hash}", assets::SCHEME),
-                    what: "a file".into(),
-                    feature: Feature::Image,
-                    reason: "the design points at a file its store doesn't have".into(),
-                    preserved: Score::No,
-                    visual: Score::No,
-                    editable: Score::No,
-                    quarantined: false,
-                }),
+                None => diagnostics.push(Diagnostic::missing_file(
+                    format!("{}{hash}", assets::SCHEME),
+                    "a file",
+                )),
             }
         }
         if *scope == Scope::Design && !revision.imports.is_empty() {
-            diagnostics.push(Diagnostic {
-                node: None,
-                path: String::new(),
-                what: format!("{} import record(s)", revision.imports.len()),
-                feature: Feature::ImportHistory,
-                reason: "a bundle doesn't carry the files the design was imported from".into(),
-                preserved: Score::No,
-                visual: Score::Yes,
-                editable: Score::Yes,
-                quarantined: false,
-            });
+            diagnostics.push(Diagnostic::new(
+                Feature::ImportHistory,
+                format!("{} import record(s)", revision.imports.len()),
+                "a bundle doesn't carry the files the design was imported from",
+                [Score::No, Score::Yes, Score::Yes],
+            ));
         }
         let bundle = Bundle {
             kind: KIND.into(),
@@ -314,10 +268,8 @@ fn verified_blobs(bundle: &Bundle) -> Result<Vec<(BlobHash, Vec<u8>)>, Error> {
         .blobs
         .iter()
         .map(|(hash, base64)| {
-            let bytes = STANDARD
-                .decode(base64)
-                .map_err(|_| Error(format!("the bundle's file {hash} isn't valid base64")))?;
-            if BlobHash::of(&bytes) != *hash {
+            let (actual, bytes) = assets::decode(&format!("the bundle's file {hash}"), base64)?;
+            if actual != *hash {
                 return Err(Error(format!(
                     "the bundle's file {hash} doesn't match its hash"
                 )));
@@ -330,42 +282,15 @@ fn verified_blobs(bundle: &Bundle) -> Result<Vec<(BlobHash, Vec<u8>)>, Error> {
 /// An artboard of a bundle, as a board to create.
 fn board(i: usize, layer: Layer, diagnostics: &mut Vec<(Anchor, Diagnostic)>) -> Board {
     let path = format!("/artboards/{i}");
-    let probe = Node {
-        styles: layer.styles.clone(),
-        ..Node::element("", "div")
-    };
-    // An artboard without a height, or with `auto`, grows to fit.
-    let auto_height = layer
-        .styles
-        .get("height")
-        .is_none_or(|h| h.trim().eq_ignore_ascii_case("auto"));
-    let (width, height) = match pixel_size(&probe) {
-        (Some(w), Some(h)) if w > 0.0 && h > 0.0 => (w, h),
-        (Some(w), None) if w > 0.0 && auto_height => (w, FALLBACK.1),
-        _ => {
-            diagnostics.push((
-                Anchor {
-                    board: i,
-                    node: None,
-                },
-                Diagnostic {
-                    node: None,
-                    path: path.clone(),
-                    what: "the artboard's size".into(),
-                    feature: Feature::Frame,
-                    reason: format!(
-                        "it isn't in pixels, so the artboard is {} × {}",
-                        FALLBACK.0, FALLBACK.1
-                    ),
-                    preserved: Score::No,
-                    visual: Score::No,
-                    editable: Score::Yes,
-                    quarantined: false,
-                },
-            ));
-            FALLBACK
-        }
-    };
+    let mut board = Board::default();
+    let size = board.size_from(&layer.styles, &path);
+    diagnostics.extend(size.map(|diagnostic| {
+        let anchor = Anchor {
+            board: i,
+            node: None,
+        };
+        (anchor, diagnostic)
+    }));
     let mut walk = Walk {
         board: i,
         paths: Vec::new(),
@@ -376,18 +301,14 @@ fn board(i: usize, layer: Layer, diagnostics: &mut Vec<(Anchor, Diagnostic)>) ->
     let content = walk.children(layer.children, &path, None);
     Board {
         page: layer.page,
-        name: layer.name.unwrap_or_else(|| format!("Artboard {}", i + 1)),
-        width,
-        height,
-        auto_height,
-        mode: None,
-        look_in_css: false,
+        name: layer.name.unwrap_or_else(|| Board::unnamed(i)),
         position: layer.x.zip(layer.y),
         styles: layer.styles,
         attrs,
         content,
         source: Some(path),
         paths: walk.paths,
+        ..board
     }
 }
 
@@ -422,21 +343,18 @@ impl Walk<'_> {
                 ..Fragment::empty(NodeKind::Text)
             });
         };
-        let lower = tag.to_ascii_lowercase();
-        let refused = if !html::is_attr_name(&tag) {
-            Some((Feature::Embed, "its tag isn't a valid element name"))
-        } else if html::is_blocked_tag(&tag) {
-            Some((
-                Feature::Embed,
-                "it loads another document or changes the page outside the artboard",
-            ))
-        } else if lower == "script" {
-            Some((Feature::Script, "scripts in imported files don't run"))
+        let refused = if html::is_attr_name(&tag) {
+            html::refused_element(&tag, Policy::Import)
         } else {
-            None
+            Some("its tag isn't a valid element name")
         };
-        if let Some((feature, reason)) = refused {
-            self.quarantine(anchor, &path, format!("<{lower}>"), feature, reason);
+        if let Some(reason) = refused {
+            self.quarantine(
+                anchor,
+                &path,
+                format!("<{}>", tag.to_ascii_lowercase()),
+                reason,
+            );
             return None;
         }
         let me = self.paths.len();
@@ -465,39 +383,17 @@ impl Walk<'_> {
             .collect();
         for name in refused {
             attrs.remove(&name);
-            self.quarantine(anchor, path, name, Feature::Script, "it could run code");
+            self.quarantine(anchor, path, name, html::UNSAFE_ATTR_REASON);
         }
     }
 
-    fn quarantine(
-        &mut self,
-        anchor: Option<usize>,
-        path: &str,
-        what: String,
-        feature: Feature,
-        reason: &str,
-    ) {
-        let visual = match feature {
-            Feature::Script => Score::Unknown,
-            _ => Score::No,
+    fn quarantine(&mut self, anchor: Option<usize>, path: &str, what: String, reason: &str) {
+        let anchor = Anchor {
+            board: self.board,
+            node: anchor,
         };
-        self.diagnostics.push((
-            Anchor {
-                board: self.board,
-                node: anchor,
-            },
-            Diagnostic {
-                node: None,
-                path: path.to_owned(),
-                what,
-                feature,
-                reason: reason.to_owned(),
-                preserved: Score::Yes,
-                visual,
-                editable: Score::No,
-                quarantined: true,
-            },
-        ));
+        self.diagnostics
+            .push((anchor, Diagnostic::quarantined(path, what, reason)));
     }
 }
 
@@ -539,8 +435,9 @@ fn layer(revision: &Revision<'_>, node: &Node, portable: &mut impl FnMut(&str) -
 
 #[cfg(test)]
 mod tests {
+    use base64::{Engine, engine::general_purpose::STANDARD};
     use finite_design::{
-        Design, DesignMeta,
+        Design, DesignMeta, MAX_DEPTH,
         edit::{self, TokenChange},
         html::export,
         import::ImportRecord,

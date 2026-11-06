@@ -27,6 +27,68 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
+    /// A loss in `feature`, scored `[preserved, visual, editable]`. It has no
+    /// node or path yet: add them with [`Diagnostic::on`] and [`Diagnostic::at`].
+    pub fn new(
+        feature: Feature,
+        what: impl Into<String>,
+        reason: impl Into<String>,
+        [preserved, visual, editable]: [Score; 3],
+    ) -> Self {
+        Self {
+            node: None,
+            path: String::new(),
+            what: what.into(),
+            feature,
+            reason: reason.into(),
+            preserved,
+            visual,
+            editable,
+            quarantined: false,
+        }
+    }
+
+    pub fn at(mut self, path: impl Into<String>) -> Self {
+        self.path = path.into();
+        self
+    }
+
+    pub fn on(mut self, node: &str) -> Self {
+        self.node = Some(node.to_owned());
+        self
+    }
+
+    /// Content an import left out of the document because it could run code
+    /// or load another document. All of it stays in the import's original
+    /// bytes, so it's preserved but not editable. `what` says which kind:
+    /// an element is written `<tag>`, and anything else (an attribute, the
+    /// `src` of a script) is code. A script might change how the page looks
+    /// once it runs, or not; an embed shows something Finite won't.
+    pub fn quarantined(path: impl Into<String>, what: impl Into<String>, reason: &str) -> Self {
+        let what = what.into();
+        let script = what == "<script>" || !what.starts_with('<');
+        let (feature, visual) = if script {
+            (Feature::Script, Score::Unknown)
+        } else {
+            (Feature::Embed, Score::No)
+        };
+        Self {
+            quarantined: true,
+            ..Self::new(feature, what, reason, [Score::Yes, visual, Score::No]).at(path)
+        }
+    }
+
+    /// The design points at a file its store doesn't have.
+    pub fn missing_file(path: impl Into<String>, what: impl Into<String>) -> Self {
+        Self::new(
+            Feature::Image,
+            what,
+            "the design points at a file its store doesn't have",
+            [Score::No; 3],
+        )
+        .at(path)
+    }
+
     pub fn score(&self, axis: Axis) -> Score {
         match axis {
             Axis::Preserved => self.preserved,

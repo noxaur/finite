@@ -2,6 +2,8 @@
 //! way, like colors as `rgb()` and lengths in `px`, so these parse that
 //! form and give up on anything else.
 
+use finite_design::css_scan;
+
 use crate::figma::payload::Rgba;
 
 /// A length in pixels, like `12px` or `0`.
@@ -64,27 +66,14 @@ pub fn color(value: &str) -> Option<Rgba> {
     })
 }
 
-/// `value` split at each `sep` that isn't inside parentheses or quotes.
+/// `value` split at each `sep` that isn't inside parentheses or quotes,
+/// without the empty pieces.
 pub fn split_top(value: &str, sep: char) -> Vec<&str> {
-    let mut out = Vec::new();
-    let (mut depth, mut quote, mut start) = (0usize, None, 0);
-    for (i, c) in value.char_indices() {
-        match (c, quote) {
-            ('"' | '\'', None) => quote = Some(c),
-            (c, Some(q)) if c == q => quote = None,
-            (_, Some(_)) => {}
-            ('(', None) => depth += 1,
-            (')', None) => depth = depth.saturating_sub(1),
-            (c, None) if c == sep && depth == 0 => {
-                out.push(value[start..i].trim());
-                start = i + c.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    out.push(value[start..].trim());
-    out.retain(|part| !part.is_empty());
-    out
+    css_scan::split_top(value, |byte| byte == sep as u8)
+        .into_iter()
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect()
 }
 
 /// One layer of a `background-image`.
@@ -110,27 +99,17 @@ pub fn backgrounds(value: &str) -> Vec<Background<'_>> {
         .collect()
 }
 
-/// What's inside `url(…)`, unquoted.
+/// What's inside `url(…)`, unquoted, when that is all of `value`.
 fn url(value: &str) -> Option<String> {
-    let inner = value.strip_prefix("url(")?.strip_suffix(')')?.trim();
-    Some(unquote(inner).replace("\\\"", "\""))
-}
-
-fn unquote(value: &str) -> &str {
-    let value = value.trim();
-    for q in ['"', '\''] {
-        if let Some(inner) = value.strip_prefix(q).and_then(|v| v.strip_suffix(q)) {
-            return inner;
-        }
-    }
-    value
+    let (url, end) = css_scan::url_token(value)?;
+    (end == value.len()).then(|| url.replace("\\\"", "\""))
 }
 
 /// The first family in a `font-family` list, unquoted.
 pub fn first_family(value: &str) -> String {
     split_top(value, ',')
         .first()
-        .map(|f| unquote(f).to_owned())
+        .map(|f| css_scan::unquote(f).to_owned())
         .unwrap_or_default()
 }
 

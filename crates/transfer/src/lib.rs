@@ -29,6 +29,7 @@ mod feature;
 pub mod figma;
 pub mod finite;
 mod html;
+mod json_file;
 pub mod jsx;
 mod repo;
 mod report;
@@ -40,7 +41,7 @@ use std::collections::BTreeMap;
 use finite_design::{
     Document, Node, NodeId, Op, Rejected, Transaction, components,
     edit::{self, EditError, NewArtboard, TokenChange, WriteMode},
-    html::Fragment,
+    html::{DEFAULT_ARTBOARD_SIZE, Fragment},
     import::{BlobHash, Dependency, ImportRecord, Quarantined},
     tokens,
 };
@@ -137,8 +138,12 @@ pub struct Revision<'a> {
     pub measure: &'a dyn scene::Measure,
 }
 
+/// How many components deep [`collect_instances`] looks. A component that
+/// (through others) shows itself would never end, and each level can hold
+/// several instances, so the cap is far below the document's `MAX_DEPTH`.
+const NESTED_COMPONENTS: usize = 8;
+
 /// `instance` and the instances inside the component it shows, and so on.
-/// The depth cap stops a component that (through others) shows itself.
 fn collect_instances<'a>(
     doc: &'a Document,
     instance: &'a Node,
@@ -149,7 +154,7 @@ fn collect_instances<'a>(
     let Some(component) = instance.instance_of.as_deref().and_then(|c| doc.get(c)) else {
         return;
     };
-    if depth >= 8 {
+    if depth >= NESTED_COMPONENTS {
         return;
     }
     for inner in doc
@@ -216,25 +221,25 @@ pub fn export_with(
             .collect();
         names.sort();
         names.dedup();
-        exported.diagnostics.push(Diagnostic {
-            node: instances.first().map(|i| i.id.clone()),
-            path: instances.first().map_or_else(String::new, |i| format!("#{}", i.id)),
-            what: format!(
-                "{} instance(s) of {}",
-                instances.len(),
-                if names.is_empty() {
-                    "missing components".to_owned()
-                } else {
-                    names.join(", ")
-                }
-            ),
-            feature: Feature::Instance,
-            reason: "no format has components, so each instance is written as the elements it shows and no longer follows its component".into(),
-            preserved: Score::No,
-            visual: Score::Yes,
-            editable: Score::Yes,
-            quarantined: false,
-        });
+        let first = &instances[0].id;
+        exported.diagnostics.push(
+            Diagnostic::new(
+                Feature::Instance,
+                format!(
+                    "{} instance(s) of {}",
+                    instances.len(),
+                    if names.is_empty() {
+                        "missing components".to_owned()
+                    } else {
+                        names.join(", ")
+                    }
+                ),
+                "no format has components, so each instance is written as the elements it shows and no longer follows its component",
+                [Score::No, Score::Yes, Score::Yes],
+            )
+            .at(format!("#{first}"))
+            .on(first),
+        );
     }
     Ok(exported)
 }
@@ -295,7 +300,7 @@ pub struct Exported {
 pub struct Imported {
     /// The codec that read it.
     pub format: &'static str,
-    /// Precisely what the bytes were, like `html` or `figma-plugin-payload v1`.
+    /// Precisely what the bytes were, like `html` or `figma-payload v1`.
     pub input_kind: String,
     pub boards: Vec<Board>,
     /// Pages the import brings, by name, in order. Each one the design
@@ -405,6 +410,56 @@ pub struct Board {
     pub paths: Vec<String>,
 }
 
+impl Board {
+    /// The name of the artboard at `index` when its source doesn't name it.
+    pub(crate) fn unnamed(index: usize) -> String {
+        format!("Artboard {}", index + 1)
+    }
+
+    /// Sets the board's size from the width and height in `styles`, as the
+    /// artboard element of a file states them. A width or height that isn't
+    /// in pixels falls back to [`DEFAULT_ARTBOARD_SIZE`], and a missing or
+    /// `auto` height makes the artboard grow to fit. Returns a diagnostic
+    /// for the fallbacks, naming `path` in the source.
+    pub(crate) fn size_from(
+        &mut self,
+        styles: &BTreeMap<String, String>,
+        path: &str,
+    ) -> Option<Diagnostic> {
+        let probe = Node {
+            styles: styles.clone(),
+            ..Node::element("", "div")
+        };
+        let (width, height) = edit::pixel_size(&probe);
+        let (width, height) = (width.filter(|w| *w > 0.0), height.filter(|h| *h > 0.0));
+        self.auto_height = styles
+            .get("height")
+            .is_none_or(|h| h.trim().eq_ignore_ascii_case("auto"));
+        let (default_width, default_height) = DEFAULT_ARTBOARD_SIZE;
+        let mut fallen = Vec::new();
+        if width.is_none() {
+            fallen.push(format!("{default_width} wide"));
+        }
+        if height.is_none() && !self.auto_height {
+            fallen.push(format!("{default_height} tall"));
+        }
+        self.width = width.unwrap_or(default_width);
+        self.height = height.unwrap_or(default_height);
+        (!fallen.is_empty()).then(|| {
+            Diagnostic::new(
+                Feature::Frame,
+                "the artboard's size",
+                format!(
+                    "it isn't in pixels, so the artboard is {}",
+                    fallen.join(" and ")
+                ),
+                [Score::No, Score::No, Score::Yes],
+            )
+            .at(path)
+        })
+    }
+}
+
 /// Where a diagnostic belongs before its nodes have ids: a board, and a node
 /// inside it numbered in the order [`Fragment::create_ops`] creates them
 /// (`None` for the board itself).
@@ -502,13 +557,10 @@ impl Imported {
             )?;
             if let Some(Op::Create { node }) = ops.first_mut() {
                 node.attrs.extend(board.attrs);
-                node.mode = board.mode.or_else(|| first_mode.clone()).and_then(|name| {
-                    let modes = tx.doc().mode_map();
-                    let (id, _) = modes
-                        .iter()
-                        .find(|(_, m)| m.name.eq_ignore_ascii_case(&name))?;
-                    Some(id.clone())
-                });
+                node.mode = board
+                    .mode
+                    .or_else(|| first_mode.clone())
+                    .and_then(|name| edit::artboard_mode(tx.doc(), &name).ok().flatten());
                 for name in unset {
                     node.styles.remove(name);
                 }
@@ -574,8 +626,6 @@ impl Imported {
     }
 }
 
-/// The id of the page named `name`, created after the others if the design
-/// has none by that name.
 /// Adds an import's modes and tokens to the design, and the custom
 /// properties of its old shared CSS, if it has some. Returns the rest of
 /// that CSS, for each new artboard. A design that has no tokens and only
@@ -645,6 +695,8 @@ fn add_tokens(
     Ok(migrated.rest)
 }
 
+/// The id of the page named `name`, created after the others if the design
+/// has none by that name.
 fn page_named(
     tx: &mut Transaction<'_>,
     name: &str,
@@ -686,20 +738,28 @@ impl From<Rejected> for Error {
 /// The file name for an export of `name`: letters, digits and dashes, so
 /// it's safe in a `Content-Disposition` header and on any disk.
 pub fn file_stem(name: &str) -> String {
-    let mut stem = String::new();
-    for c in name.chars() {
-        if c.is_ascii_alphanumeric() {
-            stem.push(c.to_ascii_lowercase());
-        } else if !stem.ends_with('-') && !stem.is_empty() {
-            stem.push('-');
-        }
-    }
-    let stem = stem.trim_end_matches('-');
+    let stem = slug(name);
     if stem.is_empty() {
         "design".into()
     } else {
-        stem.into()
+        stem
     }
+}
+
+/// The runs of ASCII letters and digits in a name. Every file name and
+/// identifier made from a layer name is built from these.
+pub(crate) fn words(name: &str) -> impl Iterator<Item = &str> {
+    name.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+}
+
+/// `name` as lowercase [`words`] joined by dashes, or empty if it has none.
+/// `Home — Desktop 2` is `home-desktop-2`.
+pub(crate) fn slug(name: &str) -> String {
+    words(name)
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 #[cfg(test)]
