@@ -998,6 +998,13 @@ export class Renderer {
       frame.commentStyle.textContent = this.tool === "comment" ? COMMENTING_CSS : "";
     }
     frame.pin.hidden = !this.used.has(id) && id !== this.presenting;
+    // In interactive mode Tab walks the shown page and the pill, nothing else
+    // on the canvas. The label buttons stay clickable, only out of the Tab
+    // order. Other pages go inert, which also drops them from hit testing, so
+    // comment mode (hold C) keeps them live to pin elements in them.
+    const presenting = this.presenting !== null;
+    frame.play.tabIndex = frame.pin.tabIndex = presenting ? -1 : 0;
+    frame.content.inert = presenting && id !== this.presenting && this.tool !== "comment";
     this.sendState(id, frame);
   }
 
