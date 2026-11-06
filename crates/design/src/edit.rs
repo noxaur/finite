@@ -2168,7 +2168,7 @@ fn instance_overrides(
         preview.iter().map(|n| (n.id.as_str(), n)).collect();
     let mut overrides = Overrides::new();
     for v in values {
-        // `I/x` from get_html names component node `x` too.
+        // `I/x` from `read` names component node `x` too.
         let wanted = v.node_id.as_deref().filter(|id| *id != component);
         let path = match wanted {
             None => String::new(),
@@ -3045,7 +3045,7 @@ mod tests {
     }
 
     #[test]
-    fn set_attributes_follows_the_same_rules_as_write_html() {
+    fn update_attributes_follows_the_same_rules_as_write_html() {
         let mut doc = Document::default();
         let board = board(&mut doc);
         let set = |name: &str, value: &str| {
@@ -3072,7 +3072,7 @@ mod tests {
     }
 
     #[test]
-    fn set_attributes_renames_a_layer_through_data_name() {
+    fn update_attributes_renames_a_layer_through_data_name() {
         let mut doc = Document::default();
         let board = board(&mut doc);
         let mut set = |value: Option<&str>| {
@@ -3096,7 +3096,7 @@ mod tests {
     }
 
     #[test]
-    fn set_attributes_clears_every_stale_data_name_copy() {
+    fn update_attributes_clears_every_stale_data_name_copy() {
         let mut doc = Document::default();
         let board = board(&mut doc);
         // Older calls could leave the same attribute under two spellings.

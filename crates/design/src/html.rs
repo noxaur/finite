@@ -254,7 +254,7 @@ pub const ID_ATTR: &str = "data-id";
 pub const INSTANCE_ATTR: &str = "data-instance-of";
 /// Marks a component's root in exported HTML.
 pub const COMPONENT_ATTR: &str = "data-component";
-/// The design's change counter when `get_html` read the HTML, on its root.
+/// The design's change counter when `read` returned the HTML, on its root.
 /// Written back, it's the base of a three-way merge (see [`Parsed::read_at`]).
 pub const READ_ATTR: &str = "data-read-at";
 
@@ -628,7 +628,7 @@ pub fn is_attr_name(name: &str) -> bool {
 
 /// Whether an attribute is allowed on a node: no event handlers, no
 /// `srcdoc`, no `javascript:` or `vbscript:` URLs. `write_html` drops the
-/// ones that fail, and `set_attributes` refuses them.
+/// ones that fail, and `update_attributes` refuses them.
 ///
 /// A script URL is refused anywhere in the value, not just at the start:
 /// SVG animation can set an `href` at runtime from a list such as

@@ -754,7 +754,7 @@ pub fn detach(
 
 /// The overrides that make an instance of `component` look like
 /// `fragment`, HTML an agent wrote for an instance, often after reading it
-/// with get_html. Elements say which node of the component they show with
+/// with `read`. Elements say which node of the component they show with
 /// [`Fragment::source`] (their `data-id`), and text inside them matches the
 /// component's text by position. Returns the overrides and how many
 /// elements didn't match a node of the component and were left out.
@@ -1492,7 +1492,7 @@ mod tests {
             text(&doc, "c"),
             r#"<div><header style="display: flex"><span>Home</span></header></div>"#
         );
-        // get_html names it, so writing that back means the same component.
+        // `read` names it, so writing that back means the same component.
         let html = crate::html::export(&expand(&doc), &bar, true).unwrap();
         assert!(html.contains(r#"data-component="Bar""#), "{html}");
 
@@ -1710,7 +1710,7 @@ mod tests {
     #[test]
     fn html_written_for_an_instance_becomes_overrides() {
         let doc = design();
-        // What get_html shows, with the title and the button's color changed.
+        // What `read` shows, with the title and the button's color changed.
         let html = r#"<header data-id="i" data-instance-of="new1" style="color: black; padding: 8px"><h1 data-id="i/new2">Settings</h1><button data-id="i/new4" style="background: red">Go</button><p>new</p></header>"#;
         let fragment = html::parse(html).unwrap().remove(0);
         assert_eq!(fragment.instance_of.as_deref(), Some("new1"));

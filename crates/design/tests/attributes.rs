@@ -1,5 +1,5 @@
 //! Which attributes may be set. `write_html` drops the unsafe ones and
-//! `set_attributes` refuses them. The web viewer checks again before it sets
+//! `update_attributes` refuses them. The web viewer checks again before it sets
 //! an attribute, by calling this same function through WebAssembly.
 
 use finite_design::html;

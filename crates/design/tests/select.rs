@@ -150,7 +150,7 @@ fn attribute_operators() {
     assert_eq!(pick(&d, "[title='our blog']"), Vec::<String>::new());
     assert_eq!(pick(&d, "[title='our blog' i]"), ["Blog"]);
     assert_eq!(pick(&d, "[title*=BLOG i]"), ["Blog"]);
-    // The layer name, id and inline styles read as get_html writes them.
+    // The layer name, id and inline styles read as `read` writes them.
     assert_eq!(
         pick(&d, "[data-name^='Card ']"),
         ["Card 1", "Card 2", "Card 3"]
@@ -434,7 +434,7 @@ fn nested_has_says_why() {
     assert!(select::parse(":has(> div > #k3x9a2bq)").is_ok());
 }
 
-/// `#instance/node` names a node inside an instance, as `get_html` writes
+/// `#instance/node` names a node inside an instance, as `read` writes
 /// its `data-id`.
 #[test]
 fn virtual_ids_name_nodes_inside_instances() {
@@ -494,7 +494,7 @@ fn virtual_id_spellings_are_the_same_id() {
 }
 
 /// `[data-instance-of]` and `[data-component]` match the attributes
-/// `get_html` writes, which live on the node rather than in its attrs.
+/// `read` writes, which live on the node rather than in its attrs.
 #[test]
 fn component_markers_match_what_html_writes() {
     let d = design(&[(
