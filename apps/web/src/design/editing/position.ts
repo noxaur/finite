@@ -1,4 +1,4 @@
-import { angle } from "./transform";
+import { parseAngle } from "./units";
 
 /** How an element is positioned: in the flow, or moved by its insets. */
 export type PositionKind = "static" | "relative" | "absolute" | "fixed" | "sticky";
@@ -56,5 +56,5 @@ export function positionStyles(
  */
 export function degreesOf(raw: string): number | null {
   const v = raw.trim();
-  return v === "none" ? 0 : angle(v.replace(/^z\s+/i, ""));
+  return v === "none" ? 0 : parseAngle(v.replace(/^z\s+/i, ""));
 }

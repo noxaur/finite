@@ -1,4 +1,5 @@
 import { parts } from "./lists";
+import { roundTo } from "./units";
 
 /** One `box-shadow` or `text-shadow` entry, taken apart. Lengths keep their units. */
 export interface Shadow {
@@ -64,7 +65,7 @@ export function parseFilter(entry: string): Filter | null {
   if (info.unit === "deg") {
     const turns: Record<string, number> = { deg: 1, "": 1, turn: 360, rad: 180 / Math.PI };
     const k = turns[unit];
-    return k === undefined ? null : { fn, amount: Math.round(n * k * 100) / 100 };
+    return k === undefined ? null : { fn, amount: roundTo(n * k, 2) };
   }
   return unit === "px" || (unit === "" && n === 0) ? { fn, amount: n } : null;
 }

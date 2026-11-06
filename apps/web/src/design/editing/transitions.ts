@@ -1,5 +1,6 @@
 import { tokenOf } from "./inspect";
 import { type ListEntry, parts } from "./lists";
+import { roundTo } from "./units";
 
 /** One transition, as its four parts in CSS. `duration` and `delay` may be tokens. */
 export interface Transition {
@@ -98,7 +99,7 @@ export function transitionText(t: Transition): string {
 export function msOf(time: string): number | null {
   const m = time.trim().match(/^(-?\d*\.?\d+)(m?s)$/i);
   if (!m) return null;
-  return Math.round(Number(m[1]) * (m[2]!.toLowerCase() === "s" ? 1000 : 1) * 100) / 100;
+  return roundTo(Number(m[1]) * (m[2]!.toLowerCase() === "s" ? 1000 : 1), 2);
 }
 
 /** Properties a row shows as one, written as one entry each with the same timing. */

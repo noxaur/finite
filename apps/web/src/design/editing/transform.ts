@@ -1,6 +1,7 @@
 import { CELL_X, CELL_Y, cellOf } from "./cells";
 import { tokenOf } from "./inspect";
 import { commas, parts } from "./lists";
+import { parseAngle, roundTo } from "./units";
 
 /**
  * A layer's transform as the Transform section shows it. The browser
@@ -45,7 +46,7 @@ export const TRANSFORM_PROPS = [
   "transform-origin",
 ] as const;
 
-const round = (n: number) => Math.round(n * 1e4) / 1e4;
+const round = (n: number) => roundTo(n, 4);
 
 /** A length, a percentage or a length token, as written; `null` for a `calc()` or a keyword. */
 function length(v: string): string | null {
@@ -53,17 +54,6 @@ function length(v: string): string | null {
   const m = v.trim().match(/^(-?\d*\.?\d+)([a-z%]*)$/i);
   if (!m) return null;
   return Number(m[1]) === 0 ? "0" : `${m[1]}${m[2]}`;
-}
-
-/** An angle in degrees: `45deg`, `0.25turn`, `1rad`, `50grad` or `0`. */
-export function angle(v: string): number | null {
-  const m = v.trim().match(/^(-?\d*\.?\d+)(deg|turn|rad|grad)?$/i);
-  if (!m) return null;
-  const n = Number(m[1]);
-  const unit = m[2]?.toLowerCase();
-  if (unit === undefined) return n === 0 ? 0 : null;
-  const k = { deg: 1, turn: 360, rad: 180 / Math.PI, grad: 0.9 }[unit]!;
-  return round(n * k);
 }
 
 /** A scale factor: `1.2` or `120%`. */
@@ -95,8 +85,8 @@ export function parseScale(v: string | undefined): [number, number] | null {
 export function parseRotate(v: string | undefined): number | null {
   const all = parts(v ?? "none");
   if (all.length === 0 || (all.length === 1 && all[0] === "none")) return 0;
-  if (all.length === 2 && /^z$/i.test(all[0]!)) return angle(all[1]!);
-  return all.length === 1 ? angle(all[0]!) : null;
+  if (all.length === 2 && /^z$/i.test(all[0]!)) return parseAngle(all[1]!);
+  return all.length === 1 ? parseAngle(all[0]!) : null;
 }
 
 /** Where each function goes in translate, rotate, scale, skew order. */
@@ -169,7 +159,7 @@ export function parseTransform(
       }
       case "rotate":
       case "rotatez": {
-        const deg = b === undefined ? angle(a) : null;
+        const deg = b === undefined ? parseAngle(a) : null;
         if (deg === null) return null;
         out.rotate = deg;
         break;
@@ -186,8 +176,8 @@ export function parseTransform(
         break;
       }
       default: {
-        const x = angle(a);
-        const y = b === undefined ? 0 : angle(b);
+        const x = parseAngle(a);
+        const y = b === undefined ? 0 : parseAngle(b);
         if (x === null || y === null) return null;
         if (name === "skewy") out.skewY = x;
         else Object.assign(out, name === "skewx" ? { skewX: x } : { skewX: x, skewY: y });

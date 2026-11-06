@@ -28,6 +28,8 @@ import {
   Section,
   TokenChip,
   Toggle,
+  EyeToggle,
+  MixedRow,
 } from "./controls";
 import { type Changes, rawOf, readOf, removal, resolve, type Scope } from "./scope";
 
@@ -108,19 +110,7 @@ export function TransitionsSection({ scope }: { scope: Scope }) {
   if (rows === null) {
     return (
       <Section title="Transitions" action={add}>
-        <Row
-          action={
-            <Toggle
-              icon="minus"
-              title="Remove the transitions from every layer"
-              onClick={() => commit([])}
-            />
-          }
-        >
-          <RowBody title="The selected layers have different transitions">
-            <RowName>Mixed</RowName>
-          </RowBody>
-        </Row>
+        <MixedRow what="transitions" onRemove={() => commit([])} />
       </Section>
     );
   }
@@ -168,13 +158,7 @@ function TransitionItem({
   );
   const hide = () => commit(row.entries.map((e) => ({ ...e, hidden: !row.hidden })));
   // In the gutter it's the same eye as Fill's and Effects'.
-  const eye = (
-    <Toggle
-      icon={row.hidden ? "eyeOff" : "eye"}
-      title={row.hidden ? "Show" : "Hide"}
-      onClick={hide}
-    />
-  );
+  const eye = <EyeToggle hidden={row.hidden} onClick={hide} />;
   const timing = row.timing;
   const seen = partialTransition(row.entries[0]?.css ?? "");
   const seenMs = seen.duration === undefined ? null : msOf(seen.duration);

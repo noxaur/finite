@@ -1,6 +1,7 @@
 import { alphaOf, setAlpha } from "./colors";
 import { CELL_X, CELL_Y } from "./cells";
 import { commas, parts, readList, stashOf, writeList } from "./lists";
+import { parseAngle, roundTo } from "./units";
 
 /**
  * A layer's fill as the Fill section shows it. Gradient stops sit at a
@@ -71,15 +72,6 @@ const SIDES: Readonly<Record<string, number>> = {
   "top left": 315,
 };
 
-/** An angle in degrees, from `45deg`, `0.25turn`, `1rad` or `100grad`; `null` for anything else. */
-function degrees(text: string): number | null {
-  const m = text.trim().match(/^(-?\d*\.?\d+)(deg|turn|rad|grad)?$/i);
-  if (!m || (!m[2] && Number(m[1]) !== 0)) return null;
-  const n = Number(m[1]);
-  const k = { deg: 1, turn: 360, rad: 180 / Math.PI, grad: 0.9 }[m[2]?.toLowerCase() ?? "deg"]!;
-  return Math.round(n * k * 100) / 100;
-}
-
 /** `to top right` (either way round) as the side it names, or `null`. */
 function sideOf(text: string): string | null {
   const words = text.trim().toLowerCase().split(/\s+/);
@@ -96,7 +88,7 @@ function percent(text: string, conic: boolean): number | null {
   const m = text.trim().match(/^(-?\d*\.?\d+)(%?)$/);
   if (m && (m[2] || Number(m[1]) === 0)) return Number(m[1]);
   if (!conic) return null;
-  const deg = degrees(text);
+  const deg = parseAngle(text);
   return deg === null ? null : (deg / 360) * 100;
 }
 
@@ -133,7 +125,7 @@ function stopsOf(
     for (let k = i; k < j; k++) at[k] = from + step * (k - i + 1);
   }
   return {
-    stops: raw.map((s, i) => ({ color: s.color, at: Math.round(at[i]! * 100) / 100 })),
+    stops: raw.map((s, i) => ({ color: s.color, at: roundTo(at[i]!, 2) })),
     auto,
   };
 }
@@ -159,7 +151,7 @@ export function parseFill(css: string): Fill {
   const first = args[0] ?? "";
   if (kind === "linear") {
     const side = sideOf(first);
-    const angle = side !== null ? SIDES[side]! : degrees(first);
+    const angle = side !== null ? SIDES[side]! : parseAngle(first);
     const head = side !== null || angle !== null;
     const read = stopsOf(head ? args.slice(1) : args, false);
     if (!read) return custom;
@@ -190,13 +182,13 @@ export function parseFill(css: string): Fill {
   const read = stopsOf(head ? args.slice(1) : args, true);
   if (!read) return custom;
   const from = head ? first.match(/from\s+(\S+)/i)?.[1] : undefined;
-  const angle = from === undefined ? 0 : degrees(from);
+  const angle = from === undefined ? 0 : parseAngle(from);
   if (angle === null) return custom;
   const at = head ? (first.match(/\bat\s+(.+)$/i)?.[1]?.trim() ?? "center") : "center";
   return { type: "conic", angle, at, ...read, repeating };
 }
 
-const round = (n: number) => Math.round(n * 10) / 10;
+const round = (n: number) => roundTo(n, 1);
 
 /** A fill as one `background-image` layer. A solid is a gradient from its color to itself. */
 export function fillText(fill: Fill): string {

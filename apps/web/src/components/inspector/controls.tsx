@@ -1223,6 +1223,28 @@ export function ExpandButton({
   );
 }
 
+/** The eye in a list row's gutter, as a toggle: hides the entry without losing it, or shows it again. */
+export function EyeToggle({ hidden, onClick }: { hidden: boolean; onClick: () => void }) {
+  return (
+    <Toggle icon={hidden ? "eyeOff" : "eye"} title={hidden ? "Show" : "Hide"} onClick={onClick} />
+  );
+}
+
+/** The row that stands for a list the selected layers don't share, with a way to clear it from all of them. */
+export function MixedRow({ what, onRemove }: { what: string; onRemove: () => void }) {
+  return (
+    <Row
+      action={
+        <Toggle icon="minus" title={`Remove the ${what} from every layer`} onClick={onRemove} />
+      }
+    >
+      <RowBody title={`The selected layers have different ${what}`}>
+        <RowName>Mixed</RowName>
+      </RowBody>
+    </Row>
+  );
+}
+
 /** The eye on a list's row: hides the entry without losing it, or shows it again. */
 export function EyeButton({ hidden, onClick }: { hidden: boolean; onClick: () => void }) {
   const title = hidden ? "Show" : "Hide";

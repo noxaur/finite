@@ -32,6 +32,7 @@ import {
 } from "@/design/editing/fills";
 import { tokenOf } from "@/design/editing/inspect";
 import { moveEntry, stashOf } from "@/design/editing/lists";
+import { roundTo } from "@/design/editing/units";
 import type { Node } from "@/design/schema";
 import { colors, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import type { IconName } from "@/lib/icons";
@@ -50,7 +51,10 @@ import {
   Section,
   Segments,
   Toggle,
+  EyeToggle,
+  MixedRow,
 } from "./controls";
+import { whenNumber } from "../DraftField";
 import { type Changes, isPainted, resolve, type Scope, swatchOf } from "./scope";
 
 /** The mockup's row of fill types. Conic is one level down, in a gradient's editor. */
@@ -195,28 +199,18 @@ export function FillSection({ scope }: { scope: Scope }) {
   return (
     <Section title="Fill" action={<Toggle icon="plus" title="Add fill" onClick={add} />}>
       {layers === null ? (
-        <Row
-          action={
-            <Toggle
-              icon="minus"
-              title="Remove the fills from every layer"
-              onClick={() => scope.commitEach((t) => writeFills(t.styles, [], of(t).empties))}
-            />
-          }
-        >
-          <RowBody title="The selected layers have different fills">
-            <RowName>Mixed</RowName>
-          </RowBody>
-        </Row>
+        <MixedRow
+          what="fills"
+          onRemove={() => scope.commitEach((t) => writeFills(t.styles, [], of(t).empties))}
+        />
       ) : (
         layers.length > 0 &&
         current && (
           <>
             <Row
               action={
-                <Toggle
-                  icon={current.hidden ? "eyeOff" : "eye"}
-                  title={current.hidden ? "Show fill" : "Hide fill"}
+                <EyeToggle
+                  hidden={current.hidden}
                   onClick={() =>
                     commitLayers(replace(selected, { ...current, hidden: !current.hidden }))
                   }
@@ -570,10 +564,7 @@ function GradientControls({
             label="Angle"
             title="Angle"
             text={String(fill.angle)}
-            toChanges={(typed) => {
-              const n = parseFloat(typed);
-              return Number.isFinite(n) ? set(withAngle(fill, n)) : null;
-            }}
+            toChanges={(typed) => whenNumber(typed, (n) => set(withAngle(fill, n)))}
             lead={<LeadIcon name="rotate" />}
             scrub={{ start: fill.angle, to: (n) => set(withAngle(fill, n)) }}
             unit="°"
@@ -607,11 +598,10 @@ function GradientControls({
             scope={scope}
             label={`Stop ${i + 1} position`}
             title="Position"
-            text={String(Math.round(s.at * 10) / 10)}
-            toChanges={(typed) => {
-              const n = parseFloat(typed);
-              return Number.isFinite(n) ? set(moved(i, Math.min(100, Math.max(0, n)))) : null;
-            }}
+            text={String(roundTo(s.at, 1))}
+            toChanges={(typed) =>
+              whenNumber(typed, (n) => set(moved(i, Math.min(100, Math.max(0, n)))))
+            }
             unit="%"
             short
           />
