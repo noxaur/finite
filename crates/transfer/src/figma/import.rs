@@ -26,7 +26,8 @@ use serde_json::Value;
 
 use super::payload::{FigNode, KIND, PAYLOAD, Paint, Payload};
 use crate::{
-    Anchor, Board, Diagnostic, Error, Feature, Imported, Input, Score, assets, json_file::JsonFile,
+    Anchor, Board, Diagnostic, Error, Feature, Imported, Input, Refused, Score, assets,
+    json_file::JsonFile,
 };
 
 /// Styles for one node, as CSS property names and values.
@@ -345,7 +346,12 @@ impl Walk<'_> {
         let path = format!("{id}/svg{}", dropped.path);
         self.diagnostics.push((
             anchor,
-            Diagnostic::quarantined(path, dropped.what, dropped.reason),
+            Diagnostic::quarantined(
+                path,
+                dropped.what.clone(),
+                Refused::of(&dropped),
+                dropped.reason,
+            ),
         ));
     }
 

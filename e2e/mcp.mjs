@@ -83,9 +83,18 @@ export async function connect(base, agent = "E2E") {
     readHtml(designId, select) {
       return this.call("read", { designId, select, as: "html" });
     },
+    /** Like `readHtml`, but throws if the result left something out. */
+    async readFullHtml(designId, select) {
+      const text = await this.readHtml(designId, select);
+      const cut = text.match(/not shown|more than a result holds|cut short|cut off after/);
+      if (cut)
+        throw new Error(`read ${select} left something out (${cut[0]}): ${text.slice(-400)}`);
+      return text;
+    },
     /** A design's size and artboards, read from `read`'s overview. */
     async overview(designId) {
-      const text = await this.call("read", { designId });
+      // Depth 0 lists only the artboards, so a big design isn't cut off.
+      const text = await this.call("read", { designId, depth: 0 });
       const nodes = Number(text.match(/: \d+ artboards?, (\d+) nodes/)?.[1] ?? 0);
       const artboards = [];
       let page = null;
@@ -105,6 +114,9 @@ export async function connect(base, agent = "E2E") {
             page,
           });
       }
+      const reported = Number(text.match(/: (\d+) artboards?,/)?.[1] ?? 0);
+      if (artboards.length !== reported)
+        throw new Error(`overview parsed ${artboards.length} of ${reported} artboards: ${text}`);
       return { nodes, artboards };
     },
   };

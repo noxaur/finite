@@ -59,6 +59,13 @@ describe("the schemas match the server's messages", () => {
     roundTrips(ClientMessage, message);
   });
 
+  it("has a listener in some message, so renaming one of its fields fails", () => {
+    const listening = fixture.design.flatMap(
+      (m) => (m as { listening?: ReadonlyArray<unknown> }).listening ?? [],
+    );
+    expect(listening.length).toBeGreaterThan(0);
+  });
+
   it("has an example of every kind", () => {
     const seen = (messages: ReadonlyArray<unknown>) =>
       new Set(messages.map((m) => (m as { type: string }).type));
@@ -92,6 +99,13 @@ const userEdits = JSON.parse(
 describe("the user edit schema matches the server's", () => {
   it.each(userEdits.map((e, i) => [`${i} ${e.kind}`, e] as const))("%s", (_, edit) => {
     expect(Schema.decodeUnknownSync(UserEdit)(edit)).toEqual(edit);
+  });
+
+  it("has a listener in some message, so renaming one of its fields fails", () => {
+    const listening = fixture.design.flatMap(
+      (m) => (m as { listening?: ReadonlyArray<unknown> }).listening ?? [],
+    );
+    expect(listening.length).toBeGreaterThan(0);
   });
 
   it("has an example of every kind", () => {

@@ -16,7 +16,7 @@ use finite_design::{
 
 use crate::{
     Anchor, Board, Codec, Diagnostic, Direction, Error, Exported, Feature, Imported, Input, LOOK,
-    Revision, Scope, Score, Support, assets, feature, file_stem,
+    Refused, Revision, Scope, Score, Support, assets, feature, file_stem,
 };
 
 pub struct Html;
@@ -135,7 +135,8 @@ pub(crate) fn quarantine(dropped: Dropped) -> (Anchor, Diagnostic) {
         board: 0,
         node: dropped.anchor,
     };
-    let diagnostic = Diagnostic::quarantined(dropped.path, dropped.what, dropped.reason);
+    let refused = Refused::of(&dropped);
+    let diagnostic = Diagnostic::quarantined(dropped.path, dropped.what, refused, dropped.reason);
     (anchor, diagnostic)
 }
 
