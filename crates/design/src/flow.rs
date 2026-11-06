@@ -12,6 +12,12 @@
 //! [`flow`] reads them once and resolves every link to a route, so preview
 //! and export share one answer and one list of broken links. It's
 //! router-neutral: an export writes these routes for whichever router.
+//!
+//! Links inside components count where they are shown. Pass the design as
+//! it renders ([`crate::components::expand`], or `Design::view`), and a link
+//! in a component's definition counts there and in each instance, with the
+//! instance's overrides of `href` applied. An instance's links have virtual
+//! ids (`instance/node`), so a broken one names the instance that shows it.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -36,6 +42,9 @@ pub struct Flow {
     /// `data-route` values that aren't a path; those artboards get a route
     /// from their name instead.
     pub bad_routes: Vec<BadRoute>,
+    /// Routes with two or more screens of the same pixel width. A link can
+    /// only open one of them, and an export can't tell them apart.
+    pub shared_widths: Vec<SharedWidth>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -73,6 +82,15 @@ pub struct Broken {
     pub to: String,
     /// Whether `to` names a node that isn't an artboard, rather than nothing.
     pub not_artboard: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedWidth {
+    pub route: String,
+    pub width: f64,
+    /// In artboard order.
+    pub artboards: Vec<NodeId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -129,8 +147,8 @@ fn slug(name: &str, fallback: &str) -> String {
     }
 }
 
-/// Reads the design's routes and links. Links inside a component count
-/// once, in the component.
+/// Reads the design's routes and links. Give it the design as it renders
+/// (instances expanded) so links inside instances count.
 pub fn flow(doc: &Document) -> Flow {
     let mut boards = Vec::new();
     for (page, _) in doc.pages() {
@@ -183,12 +201,23 @@ pub fn flow(doc: &Document) -> Flow {
         }
         route_of.insert(&board.id, path);
     }
+    let mut shared_widths = Vec::new();
     for route in &mut routes {
+        // Stable, so screens of one width stay in artboard order.
         route.screens.sort_by(|a, b| {
             a.width
                 .unwrap_or(f64::MAX)
                 .total_cmp(&b.width.unwrap_or(f64::MAX))
         });
+        for same in route.screens.chunk_by(|a, b| a.width == b.width) {
+            if let (Some(width), true) = (same[0].width, same.len() > 1) {
+                shared_widths.push(SharedWidth {
+                    route: route.path.clone(),
+                    width,
+                    artboards: same.iter().map(|s| s.artboard.clone()).collect(),
+                });
+            }
+        }
     }
 
     let mut links = Vec::new();
@@ -221,6 +250,7 @@ pub fn flow(doc: &Document) -> Flow {
         links,
         broken,
         bad_routes,
+        shared_widths,
     }
 }
 

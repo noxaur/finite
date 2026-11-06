@@ -449,10 +449,11 @@ fn shown_id(op: &Op) -> String {
     op.id().to_owned()
 }
 
-/// Broken links and bad routes (see [`finite_design::flow`]), for the end of
-/// the result of a change that could have made them: one that deletes or
-/// moves nodes, or sets an `href` or a `data-route`. A deleted artboard keeps
-/// its id, so undo mends the links to it.
+/// Broken links, bad routes and screens that share a route and a width (see
+/// [`finite_design::flow`]), for the end of the result of a change that could
+/// have made them: one that deletes or moves nodes, sets an `href` (an
+/// instance's override of one too) or a `data-route`, or sets an artboard's
+/// width. A deleted artboard keeps its id, so undo mends the links to it.
 fn flow_note(handle: &DesignHandle, change: &Change) -> Option<String> {
     use finite_design::flow::{self, ROUTE_ATTR};
     let linked = |attrs: &std::collections::BTreeMap<String, String>| {
@@ -460,20 +461,38 @@ fn flow_note(handle: &DesignHandle, change: &Change) -> Option<String> {
     };
     let relevant = change.ops.iter().any(|op| match op {
         Op::Delete { .. } | Op::Move { .. } => true,
-        Op::Create { node } => linked(&node.attrs),
+        Op::Create { node } => {
+            linked(&node.attrs) || node.overrides.keys().any(|k| k.ends_with("attr:href"))
+        }
         Op::Set {
             key: PropKey::Attr(name),
             ..
         } => name == "href" || name == ROUTE_ATTR,
+        Op::Set {
+            key: PropKey::Override(key),
+            ..
+        } => key.ends_with("attr:href"),
         _ => false,
     });
-    if !relevant {
+    let sets_width =
+        |op: &Op| matches!(op, Op::Set { key: PropKey::Style(name), .. } if name == "width");
+    if !relevant && !change.ops.iter().any(sets_width) {
         return None;
     }
     handle.read(|d| {
-        let doc = d.doc();
+        // The design as it renders, so links inside instances count.
+        let doc = d.view();
+        // A width only matters on an artboard.
+        if !relevant
+            && !change
+                .ops
+                .iter()
+                .any(|op| sets_width(op) && doc.get(op.id()).is_some_and(|n| n.is_artboard()))
+        {
+            return None;
+        }
         let flow = flow::flow(doc);
-        if flow.broken.is_empty() && flow.bad_routes.is_empty() {
+        if flow.broken.is_empty() && flow.bad_routes.is_empty() && flow.shared_widths.is_empty() {
             return None;
         }
         let name = |id: &str| {
@@ -511,6 +530,21 @@ fn flow_note(handle: &DesignHandle, change: &Change) -> Option<String> {
                 "Route: data-route={:?} on {} isn't a path like /checkout, so it's ignored.",
                 bad.route,
                 name(&bad.artboard)
+            ));
+        }
+        if let Some(shared) = flow.shared_widths.first() {
+            let n = flow.shared_widths.len();
+            let boards: Vec<String> = shared.artboards.iter().map(|id| name(id)).collect();
+            let more = if n > 1 {
+                format!(" ({} more routes have this too)", n - 1)
+            } else {
+                String::new()
+            };
+            lines.push(format!(
+                "Route: {} has {} at {}px wide, so a link can't tell them apart. Give one of them its own data-route{more}.",
+                shared.route,
+                boards.join(" and "),
+                shared.width,
             ));
         }
         Some(lines.join("\n"))

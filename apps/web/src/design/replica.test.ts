@@ -236,6 +236,33 @@ describe("Replica", () => {
     expect(r.flowTarget("deleted", 390)).toBeUndefined();
   });
 
+  it("reads links inside instances, with their overridden hrefs", () => {
+    const r = new Replica();
+    r.load({
+      meta: { id: "d", name: "D", createdAt: 0, updatedAt: 0 },
+      seq: 0,
+      nodes: [
+        { ...node("lib", null, "a"), name: "Lib" },
+        { ...node("home", null, "b"), name: "Home" },
+        { ...node("cart", null, "c"), name: "Cart" },
+        { ...node("card", "lib"), component: true },
+        { ...node("pay", "card"), tag: "a", attrs: { href: "#finite-artboard=cart" } },
+        { ...node("i", "home"), instanceOf: "card" },
+      ],
+      comments: [],
+    });
+    expect(r.flow().links.map((l) => [l.element, l.from, l.to])).toEqual([
+      ["pay", "lib", "cart"],
+      ["i/pay", "home", "cart"],
+    ]);
+    expect(r.flow().sharedWidths).toEqual([]);
+    r.apply({ op: "set", id: "i", key: "override:pay/attr:href", value: "#finite-artboard=gone" });
+    expect(r.flow().broken).toEqual([
+      { element: "i/pay", from: "home", to: "gone", notArtboard: false },
+    ]);
+    expect(r.flow().links.map((l) => l.element)).toEqual(["pay"]);
+  });
+
   it("lists pages and which page each artboard is on", () => {
     const r = new Replica();
     const snapshot = {

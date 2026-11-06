@@ -70,6 +70,12 @@ export interface Flow {
     readonly notArtboard: boolean;
   }>;
   readonly badRoutes: ReadonlyArray<{ readonly artboard: string; readonly route: string }>;
+  /** Routes with two or more screens of the same pixel width. */
+  readonly sharedWidths: ReadonlyArray<{
+    readonly route: string;
+    readonly width: number;
+    readonly artboards: ReadonlyArray<string>;
+  }>;
 }
 
 /** What a call on the tab's own edits did, besides patching the document. */

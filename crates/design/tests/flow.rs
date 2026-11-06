@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 
 use finite_design::{
     Design, DesignMeta, Document, Op,
-    edit::{self, NewArtboard, WriteMode},
-    flow::{self, Flow},
+    edit::{self, InstanceValues, NewArtboard, WriteMode},
+    flow::{self, Flow, SharedWidth},
     user_edit::{self, UserEdit},
 };
 
@@ -243,6 +243,164 @@ fn duplicating_a_flow_links_the_copies_to_each_other() {
     let flow = flow::flow(&doc);
     let link = flow.links.iter().find(|l| l.from == roots[0]).unwrap();
     assert_eq!(link.to, "cart");
+}
+
+/// The document after duplicating `ids`, and the copies' ids.
+fn duplicated(design: &Design, ids: &[&str]) -> (Document, Vec<String>) {
+    let ids: Vec<String> = ids.iter().map(|id| (*id).to_owned()).collect();
+    let (ops, roots) = edit::duplicate(design.doc(), &ids, &mut self::ids()).unwrap();
+    let mut doc = design.doc().clone();
+    for op in &ops {
+        doc.apply(op).unwrap();
+    }
+    (doc, roots)
+}
+
+#[test]
+fn a_copy_of_one_screen_keeps_its_route_and_shared_widths_are_reported() {
+    let d = shop();
+    assert!(flow::flow(d.doc()).shared_widths.is_empty());
+    let (doc, roots) = duplicated(&d, &["home-m"]);
+    assert_eq!(doc.get(&roots[0]).unwrap().attrs["data-route"], "/");
+    // The copy is on "/" at 390 wide, like the original: a link can only
+    // open one of them, so the flow says which two.
+    let flow = flow::flow(&doc);
+    let [
+        SharedWidth {
+            route,
+            width,
+            artboards,
+        },
+    ] = &flow.shared_widths[..]
+    else {
+        panic!("{:?}", flow.shared_widths);
+    };
+    assert_eq!((route.as_str(), *width), ("/", 390.0));
+    let mut artboards = artboards.clone();
+    artboards.sort();
+    let mut expected = vec!["home-m".to_owned(), roots[0].clone()];
+    expected.sort();
+    assert_eq!(artboards, expected);
+    assert_eq!(
+        serde_json::to_value(&flow).unwrap()["sharedWidths"][0]["width"],
+        390.0
+    );
+}
+
+#[test]
+fn copies_of_several_screens_fall_back_to_their_own_routes() {
+    let d = shop();
+    let (doc, roots) = duplicated(&d, &["home", "home-m", "cart", "cart-m", "done"]);
+    for copy in &roots {
+        assert!(!doc.get(copy).unwrap().attrs.contains_key("data-route"));
+    }
+    // The originals keep theirs.
+    assert_eq!(doc.get("home").unwrap().attrs["data-route"], "/");
+    let flow = flow::flow(&doc);
+    assert!(flow.shared_widths.is_empty(), "{:?}", flow.shared_widths);
+    for copy in &roots {
+        assert!(!flow.route_of(copy).unwrap().explicit);
+        assert_eq!(flow.route_of(copy).unwrap().screens.len(), 1);
+    }
+    // Their links still reach the copies, at the copies' own routes.
+    let from_copies: Vec<&str> = flow
+        .links
+        .iter()
+        .filter(|l| roots.contains(&l.from))
+        .map(|l| l.to.as_str())
+        .collect();
+    assert_eq!(from_copies.len(), 4);
+    assert!(from_copies.iter().all(|to| roots.iter().any(|r| r == to)));
+}
+
+/// A component holding a link to "cart" on its own artboard, and its
+/// instances: one on "home" with the link overridden to "done", one on
+/// "cart" as is, and one on "done" overridden to a "gone" artboard. Returns
+/// the design, the link's id in the component and the instances by the
+/// board they're on.
+fn linked_component() -> (Design, String, BTreeMap<&'static str, String>) {
+    let mut d = shop();
+    screen(&mut d, "gone", "Gone", 390.0, "");
+    screen(
+        &mut d,
+        "lib",
+        "Library",
+        390.0,
+        r##"<div><a href="#finite-artboard=cart">Buy</a></div>"##,
+    );
+    let link = d
+        .doc()
+        .subtree("lib")
+        .into_iter()
+        .find(|n| flow::link_target(n).is_some())
+        .unwrap()
+        .id
+        .clone();
+    let card = d.doc().get(&link).unwrap().parent.clone().unwrap();
+    commit(&mut d, |doc| edit::create_component(doc, &card, None, &[]));
+    let mut new_id = ids();
+    let mut instances = BTreeMap::new();
+    for (board, href) in [
+        ("home", Some("done")),
+        ("cart", None),
+        ("done", Some("gone")),
+    ] {
+        let values: Vec<InstanceValues> = href
+            .map(|to| InstanceValues {
+                node_id: Some(link.clone()),
+                attributes: BTreeMap::from([("href".into(), Some(flow::link_href(to)))]),
+                ..InstanceValues::default()
+            })
+            .into_iter()
+            .collect();
+        let (ops, id) =
+            edit::insert_instance(d.doc(), &card, board, None, None, &values, &mut new_id).unwrap();
+        d.commit("agent", "Instance", &ops, 0).unwrap();
+        instances.insert(board, id);
+    }
+    (d, link, instances)
+}
+
+#[test]
+fn links_in_components_and_their_instances_count_with_overridden_hrefs() {
+    let (mut d, link, instances) = linked_component();
+    let at = |board: &str| format!("{}/{link}", instances[board]);
+    let flow = flow::flow(d.view());
+    let seen: Vec<(&str, &str, &str)> = flow
+        .links
+        .iter()
+        .map(|l| (l.from.as_str(), l.element.as_str(), l.to.as_str()))
+        .filter(|(from, _, _)| ["lib", "home", "cart", "done"].contains(from))
+        .collect();
+    // The definition, then each instance with its own href.
+    assert!(seen.contains(&("lib", link.as_str(), "cart")), "{seen:?}");
+    for (board, to) in [("home", "done"), ("cart", "cart"), ("done", "gone")] {
+        assert!(seen.contains(&(board, at(board).as_str(), to)), "{seen:?}");
+    }
+    assert!(flow.broken.is_empty());
+    // Without expanding instances, only the definition is there.
+    let plain = flow::flow(d.doc());
+    assert!(plain.links.iter().all(|l| !l.element.contains('/')));
+    assert_eq!(plain.links.iter().filter(|l| l.from == "lib").count(), 1);
+
+    // Delete "gone": the instance that overrode the link to it is broken,
+    // and named by its virtual id.
+    commit(&mut d, |doc| edit::delete(doc, &["gone".into()]));
+    let flow = flow::flow(d.view());
+    let broken: Vec<(&str, &str, &str)> = flow
+        .broken
+        .iter()
+        .map(|b| (b.from.as_str(), b.element.as_str(), b.to.as_str()))
+        .collect();
+    assert_eq!(broken, [("done", at("done").as_str(), "gone")]);
+    d.undo("agent", 0).unwrap();
+    assert!(flow::flow(d.view()).broken.is_empty());
+}
+
+#[test]
+fn a_design_without_instances_has_the_same_flow_expanded_or_not() {
+    let d = shop();
+    assert_eq!(flow::flow(d.view()), flow::flow(d.doc()));
 }
 
 #[test]

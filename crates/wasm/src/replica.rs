@@ -387,18 +387,29 @@ impl Replica {
         .expect("tokens serialize")
     }
 
-    /// The design's routes, links and broken links, as JSON (see [`flow::flow`]).
+    /// The design's routes, links and broken links, as JSON (see
+    /// [`flow::flow`]), with the links inside instances.
     pub fn flow(&self) -> String {
-        serde_json::to_string(&flow::flow(&self.doc)).expect("a flow serializes")
+        serde_json::to_string(&self.flow_view()).expect("a flow serializes")
     }
 
     /// Where a link to artboard `to` goes from a screen `width` pixels wide
     /// ([`flow::Flow::target`]), or an empty string when `to` isn't an artboard.
     pub fn flow_target(&self, to: &str, width: Option<f64>) -> String {
-        flow::flow(&self.doc)
+        self.flow_view()
             .target(to, width)
             .unwrap_or_default()
             .to_owned()
+    }
+
+    /// The flow of the design as it renders; instances are expanded only
+    /// when there are any, as [`Self::export`] does.
+    fn flow_view(&self) -> flow::Flow {
+        if self.doc.has_instances() {
+            flow::flow(&components::expand(&self.doc))
+        } else {
+            flow::flow(&self.doc)
+        }
     }
 
     /// The tokens for artboard `id` in its mode, as a `<style>` element's

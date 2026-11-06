@@ -1921,12 +1921,21 @@ pub fn duplicate(
         .map(|(id, copy)| (id.as_str(), copy.as_str()))
         .collect();
     if !copies.is_empty() {
+        // Copies of a flow drop their route, so they fall back to routes
+        // made from their names instead of sharing the originals' at the
+        // same widths. One copied artboard keeps it: that's how a mobile
+        // version starts.
+        let own_routes = copies.len() > 1;
+        let copied: HashSet<&str> = copies.values().copied().collect();
         for op in &mut ops {
-            if let Op::Create { node } = op
-                && let Some(copy) = flow::link_target(node).and_then(|to| copies.get(to))
-            {
-                let href = flow::link_href(copy);
-                node.attrs.insert("href".to_owned(), href);
+            if let Op::Create { node } = op {
+                if let Some(copy) = flow::link_target(node).and_then(|to| copies.get(to)) {
+                    let href = flow::link_href(copy);
+                    node.attrs.insert("href".to_owned(), href);
+                }
+                if own_routes && copied.contains(node.id.as_str()) {
+                    node.attrs.remove(flow::ROUTE_ATTR);
+                }
             }
         }
     }

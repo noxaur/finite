@@ -3447,3 +3447,77 @@ async fn links_between_artboards_report_when_they_break() {
     .await;
     assert!(bad.contains("isn't a path like /checkout"), "{bad}");
 }
+
+#[tokio::test]
+async fn the_flow_note_covers_instances_and_screens_that_share_a_width() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Flow").await;
+    let id = design(&mut agent, "Shop").await;
+    let nav = "<header data-name=\"Nav\"><a data-name=\"Pay\" href=\"#finite-artboard=cart\">Pay</a></header>";
+    edit(
+        &mut agent,
+        &id,
+        json!([
+            { "op": "artboard", "name": "Cart", "width": 390, "height": 200, "html": nav },
+            { "op": "artboard", "name": "Cart wide", "width": 1440, "height": 200, "html": nav },
+            { "op": "artboard", "name": "Cart copy", "width": 390, "height": 200, "html": nav },
+        ]),
+    )
+    .await;
+
+    // Every artboard is on /cart: two screens at 390.
+    let routed = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "attrs", "select": ":root", "set": { "data-route": "/cart" } }]),
+    )
+    .await;
+    assert!(
+        routed.contains("Route: /cart has") && routed.contains("390px wide"),
+        "{routed}"
+    );
+    assert!(
+        routed.contains("Give one of them its own data-route"),
+        "{routed}"
+    );
+    assert!(routed.contains("\"Cart copy\""), "{routed}");
+
+    // Widening one clears it, and narrowing it again brings it back.
+    let wide = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "css", "select": "[data-name=\"Cart copy\"]", "css": "width: 600px" }]),
+    )
+    .await;
+    assert!(!wide.contains("Route:"), "{wide}");
+    let narrow = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "css", "select": "[data-name=\"Cart copy\"]", "css": "width: 390px" }]),
+    )
+    .await;
+    assert!(narrow.contains("Route: /cart has"), "{narrow}");
+
+    // An instance's override of a link counts, named by its virtual id.
+    let made = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "component", "select": "[data-name=Nav]", "name": "Top bar" }]),
+    )
+    .await;
+    assert!(made.contains("Replaced 2 copies"), "{made}");
+    let broken = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "attrs", "select": "[data-name=Pay]", "set": { "href": "#finite-artboard=nowhere" } }]),
+    )
+    .await;
+    assert!(broken.contains("Links: "), "{broken}");
+    assert!(broken.contains("\"nowhere\" doesn't exist"), "{broken}");
+    // The instances' links are named by their virtual ids.
+    let virtual_links = broken
+        .lines()
+        .filter(|l| l.starts_with("- ") && l.split(" on ").next().is_some_and(|e| e.contains('/')))
+        .count();
+    assert_eq!(virtual_links, 2, "{broken}");
+}
