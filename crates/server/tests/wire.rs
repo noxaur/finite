@@ -11,7 +11,7 @@
 use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc};
 
 use finite_design::{
-    comment::{Anchor, Audience, Author, AuthorKind},
+    comment::{Anchor, Audience, Author, AuthorKind, Listening},
     edit::{self, NewArtboard, WriteMode},
     user_edit::{Position, UserEdit},
 };
@@ -92,6 +92,9 @@ async fn wire_messages_match_the_fixture() {
             edit::write_html(doc, "board", html, WriteMode::Append, None, &mut new_id)
         })
         .unwrap();
+    // The agent waits for comments, so presence messages list it as a
+    // listener. Nothing is waiting yet, so this takes none.
+    assert!(handle.take_waiting(&agent, Listening::default()).is_empty());
     handle.set_presence(&agent, vec!["n1".into()], Some("Styling the CTA".into()));
     let user = Author {
         id: "user:1".into(),
@@ -315,6 +318,14 @@ async fn wire_messages_match_the_fixture() {
     ] {
         assert!(types.contains(&kind), "no {kind} message recorded");
     }
+    assert!(
+        messages["design"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["listening"].as_array().is_some_and(|l| !l.is_empty())),
+        "no listener recorded"
+    );
     let lobby_types: Vec<&str> = messages["lobby"]
         .as_array()
         .unwrap()

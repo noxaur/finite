@@ -3,8 +3,11 @@ export type LayoutKind = "block" | "column" | "row" | "grid";
 
 /** Which layout a computed `display` and `flex-direction` make. */
 export function layoutOf(display: string, direction: string): LayoutKind {
-  if (display.includes("grid")) return "grid";
-  if (display.includes("flex")) return direction.startsWith("column") ? "column" : "row";
+  const words = display.trim().toLowerCase().split(/\s+/);
+  if (words.some((w) => w === "grid" || w === "inline-grid")) return "grid";
+  if (words.some((w) => w === "flex" || w === "inline-flex")) {
+    return direction.startsWith("column") ? "column" : "row";
+  }
   return "block";
 }
 
