@@ -8,8 +8,8 @@
 use std::{cell::OnceCell, collections::BTreeSet};
 
 use finite_design::{
-    Document, Node, NodeId, Op, Page, PropKey, components, flow, html,
-    tokens::{self, Mode, Values},
+    Document, Node, NodeId, Op, PropKey, components, edit, flow, html,
+    tokens::{self, Values},
     user_edit::{self, UserEdit},
 };
 use serde::Serialize;
@@ -41,22 +41,19 @@ enum Applied<'a> {
     /// The old shared stylesheet changed. Only journals from before
     /// tokens hold it, so the viewer has nothing to draw.
     Css,
-    /// The token `name` now has `values`, all its modes' values, or is gone
-    /// when it's `None`.
-    Token {
-        name: &'a str,
-        values: Option<&'a Values>,
-    },
-    /// The mode `id` is now `mode`, or was removed when it's `None`.
-    Mode {
-        id: &'a str,
-        mode: Option<&'a Mode>,
-    },
-    /// The page `id` is now `page`, or was removed when it's `None`.
-    Page {
-        id: &'a str,
-        page: Option<&'a Page>,
-    },
+    /// A token changed. The viewer reads the new table with [`Replica::tokens`].
+    Token,
+    /// A mode changed. The viewer reads [`Replica::tokens`].
+    Mode,
+    /// A page changed. The viewer reads [`Replica::pages`].
+    Page,
+}
+
+/// An id and name, as the viewer lists pages and modes.
+#[derive(Serialize)]
+struct Listed<'a> {
+    id: &'a str,
+    name: &'a str,
 }
 
 #[derive(Debug, Default)]
@@ -119,6 +116,7 @@ struct Outcome {
 }
 
 impl Replica {
+    #[cfg(test)]
     pub fn document(&self) -> &Document {
         &self.doc
     }
@@ -344,14 +342,17 @@ impl Replica {
         to_json(&outcome)
     }
 
+    /// The `width` and `height` styles of node `id` when they are plain
+    /// pixels ([`finite_design::edit::pixel_size`]), as a JSON array of two
+    /// numbers or `null`s.
+    pub fn pixel_size(&self, id: &str) -> String {
+        let size = self.doc.get(id).map(edit::pixel_size);
+        serde_json::to_string(&size.unwrap_or((None, None))).expect("a size serializes")
+    }
+
     /// The design's pages in order, as a JSON array of `{id, name}`. Never
     /// empty: a design without pages has its implicit first page.
     pub fn pages(&self) -> String {
-        #[derive(Serialize)]
-        struct Listed<'a> {
-            id: &'a str,
-            name: &'a str,
-        }
         let pages: Vec<Listed> = self
             .doc
             .pages()
@@ -368,11 +369,6 @@ impl Replica {
     /// `{"modes": [{id, name}], "tokens": {name: {modeId: value}}}`. Never
     /// without a mode: a design without modes has its implicit first one.
     pub fn tokens(&self) -> String {
-        #[derive(Serialize)]
-        struct Listed<'a> {
-            id: &'a str,
-            name: &'a str,
-        }
         #[derive(Serialize)]
         struct Tokens<'a> {
             modes: Vec<Listed<'a>>,
@@ -544,18 +540,9 @@ fn describe<'a>(doc: &'a Document, op: &'a Op, inverse: &'a [Op]) -> Applied<'a>
             before: next(id),
         },
         Op::Css { .. } => Applied::Css,
-        Op::Token { name, .. } => Applied::Token {
-            name,
-            values: doc.tokens().get(name),
-        },
-        Op::Mode { id, .. } => Applied::Mode {
-            id,
-            mode: doc.mode_map().get(id),
-        },
-        Op::Page { id, .. } => Applied::Page {
-            id,
-            page: doc.page_map().get(id),
-        },
+        Op::Token { .. } => Applied::Token,
+        Op::Mode { .. } => Applied::Mode,
+        Op::Page { .. } => Applied::Page,
     }
 }
 
@@ -632,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn token_and_mode_results_hold_the_new_values() {
+    fn token_and_mode_results_say_what_changed() {
         let mut r = replica();
         let dark = json!({ "name": "Dark", "index": "W" });
         let results = apply(
@@ -647,14 +634,8 @@ mod tests {
                 { "op": "token", "name": "--gone", "modeId": "dark", "value": null },
             ]),
         );
-        assert_eq!(
-            results[1],
-            json!({ "op": "mode", "id": "dark", "mode": dark })
-        );
-        assert_eq!(
-            results[3],
-            json!({ "op": "token", "name": "--bg", "values": { "mode-1": "#fff", "dark": "#111" } })
-        );
+        assert_eq!(results[1], json!({ "op": "mode" }));
+        assert_eq!(results[3], json!({ "op": "token" }));
         assert_eq!(results[4], Value::Null);
         assert_eq!(results[6], Value::Null);
         assert_eq!(
@@ -671,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn page_results_hold_the_new_page() {
+    fn page_results_say_a_page_changed() {
         let mut r = replica();
         let page = json!({ "name": "Components", "index": "V" });
         let results = apply(
@@ -682,9 +663,9 @@ mod tests {
                 { "op": "page", "id": "p", "page": null },
             ]),
         );
-        assert_eq!(results[0], json!({ "op": "page", "id": "p", "page": page }));
+        assert_eq!(results[0], json!({ "op": "page" }));
         assert_eq!(results[1], Value::Null);
-        assert_eq!(results[2], json!({ "op": "page", "id": "p", "page": null }));
+        assert_eq!(results[2], json!({ "op": "page" }));
     }
 
     #[test]

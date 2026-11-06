@@ -2,12 +2,21 @@ import * as stylex from "@stylexjs/stylex";
 import { iconMarkup } from "@/lib/icons";
 import { colors } from "@/styles/tokens.stylex";
 import { Culler, pageBox } from "./culling";
-import { artboardDocument, artboardLinkTarget, BASE_LAYER, pixelSize } from "./html";
+import {
+  decodeFrameMessage,
+  decodeHello,
+  type FrameKey,
+  type FrameWheel,
+  type StorageChange,
+} from "./frameMessages";
+import { artboardDocument, artboardLinkTarget } from "./html";
 import { type Outset, strokeOutset } from "./outset";
 import type { Applied, Replica } from "./replica";
 import type { Node } from "./schema";
 import type { Bounds, Hit, Measured } from "./types";
 import { designModel } from "./wasm";
+
+export type { FrameKey, StorageChange };
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -22,20 +31,6 @@ const COMMENTING_CSS = "* { cursor: inherit !important; }";
 /** What the pointer does on the canvas: select and edit, use pages, or place comments. */
 export type Tool = "pointer" | "interact" | "comment";
 
-/** A key pressed inside a sandboxed artboard that the canvas acts on. */
-export interface FrameKey {
-  readonly key: string;
-  readonly phase: "down" | "up";
-  readonly meta: boolean;
-  readonly repeat: boolean;
-}
-
-/** A change to the design's page storage: keys to set (`null` removes one), or clear it all. */
-export interface StorageChange {
-  readonly set?: ReadonlyArray<readonly [string, string | null]>;
-  readonly clear?: boolean;
-}
-
 /** Where pages' `localStorage` lives: one map per design, shared by its artboards. */
 export interface PageStorage {
   read(): Record<string, string>;
@@ -47,23 +42,6 @@ export interface PageStorage {
 const KEEP_USED = 4;
 /** How long "Updated by …" stays on a label. */
 const UPDATED_MS = 1800;
-
-/**
- * Tags never created in the app's own document. Scripts only run inside a
- * sandboxed iframe, and the server strips the rest too.
- */
-const BLOCKED_TAGS = new Set([
-  "script",
-  "link",
-  "meta",
-  "base",
-  "iframe",
-  "frame",
-  "frameset",
-  "object",
-  "embed",
-  "template",
-]);
 
 /** How long a sandboxed artboard waits for edits to settle before reloading. */
 const RELOAD_DELAY_MS = 150;
@@ -151,16 +129,7 @@ interface Inside {
 }
 
 /** A wheel event forwarded out of a sandboxed artboard, in page coordinates. */
-export interface ForwardedWheel {
-  readonly deltaX: number;
-  readonly deltaY: number;
-  readonly deltaMode: number;
-  readonly ctrlKey: boolean;
-  readonly metaKey: boolean;
-  readonly shiftKey: boolean;
-  readonly clientX: number;
-  readonly clientY: number;
-}
+export type ForwardedWheel = FrameWheel;
 
 export interface RendererOptions {
   /** Run artboards that contain scripts. Off for thumbnails, which stay static. */
@@ -422,8 +391,7 @@ export class Renderer {
 
   /** The page shown: the one asked for, or the first page if it's gone. */
   shownPage(): string {
-    const { pages } = this.replica;
-    return pages.some((p) => p.id === this.page) ? this.page! : pages[0]!.id;
+    return this.replica.pageOrFirst(this.page);
   }
 
   /** Mounts the shown page's artboards and unmounts the rest. */
@@ -1063,7 +1031,7 @@ export class Renderer {
     } else if (href.startsWith("#")) {
       const root = link.getRootNode();
       const target =
-        root instanceof ShadowRoot ? root.getElementById(decodeURIComponent(href.slice(1))) : null;
+        root instanceof ShadowRoot ? root.getElementById(anchorId(href.slice(1))) : null;
       target?.scrollIntoView({ block: "start" });
     } else openExternal(link.href);
   }
@@ -1226,7 +1194,7 @@ export class Renderer {
     } else {
       const tag = node.tag ?? "div";
       const svg = inSvg || tag === "svg";
-      if (BLOCKED_TAGS.has(tag.toLowerCase())) {
+      if (isBlockedTag(tag)) {
         el = document.createElement("div");
         (el as HTMLElement).hidden = true;
       } else {
@@ -1284,6 +1252,7 @@ export class Renderer {
   }
 
   private createFrame(node: Node, live: boolean): Frame {
+    const { rules } = designModel();
     const root = document.createElement("div");
     root.dataset.artboard = node.id;
     positionFrame(root, node);
@@ -1358,14 +1327,13 @@ export class Renderer {
       // or allow-pointer-lock: an opaque origin that can't take over the app.
       // Forms run their submit handlers; the content policy's form-action
       // keeps them from sending anything.
-      iframe.sandbox.add("allow-scripts", "allow-forms");
-      iframe.allow =
-        "autoplay 'none'; fullscreen 'none'; camera 'none'; microphone 'none'; geolocation 'none'; display-capture 'none'";
+      iframe.setAttribute("sandbox", rules.sandbox);
+      iframe.allow = rules.framePermissions;
       iframe.title = labelOf(node);
       iframe.className = stylex.props(styles.iframe).className ?? "";
-      const size = pixelSize(node);
-      iframe.style.width = `${size.width ?? 1440}px`;
-      iframe.style.height = `${size.height ?? 900}px`;
+      const size = this.replica.pixelSize(node.id);
+      iframe.style.width = `${size.width ?? rules.defaultArtboardSize[0]}px`;
+      iframe.style.height = `${size.height ?? rules.defaultArtboardSize[1]}px`;
       iframe.addEventListener("load", () => this.onLoad(node.id), { signal: this.abort.signal });
       content.append(iframe);
       const frame: Frame = {
@@ -1393,7 +1361,7 @@ export class Renderer {
     // In a layer, so the artboard's styles can set what `HOST_CSS` resets,
     // like the font on `:root`.
     const base = document.createElement("style");
-    base.textContent = `@layer ${BASE_LAYER} { ${HOST_CSS} ${designModel().baseCss} }`;
+    base.textContent = `@layer ${rules.baseLayer} { ${HOST_CSS} ${rules.baseCss} }`;
     const tokenStyle = document.createElement("style");
     tokenStyle.textContent = this.replica.tokenStyle(node.id, true);
     const commentStyle = document.createElement("style");
@@ -1425,17 +1393,7 @@ export class Renderer {
   }
 
   /** A page changed its storage: keep it, and tell the design's other pages. */
-  private onStorage(boardId: string, m: Record<string, unknown>) {
-    const set: Array<readonly [string, string | null]> = [];
-    if (Array.isArray(m.set)) {
-      for (const entry of m.set as unknown[]) {
-        if (!Array.isArray(entry) || typeof entry[0] !== "string") return;
-        const value: unknown = entry[1];
-        if (value !== null && typeof value !== "string") return;
-        set.push([entry[0], value]);
-      }
-    }
-    const change: StorageChange = { set, clear: m.clear === true };
+  private onStorage(boardId: string, change: StorageChange) {
     if (this.options.storage && !this.options.storage.write(change)) return;
     for (const [id, frame] of this.frames) {
       if (id !== boardId) frame.port?.postMessage({ type: "storage", ...change });
@@ -1455,12 +1413,12 @@ export class Renderer {
    * the current document's nonce gets one, and the bootstrap's comes first.
    */
   private onHello(event: MessageEvent) {
-    const m = (event.data as { finite?: { type?: unknown; nonce?: unknown } } | null)?.finite;
-    if (m?.type !== "hello") return;
+    const nonce = decodeHello(event.data);
+    if (nonce === null) return;
     for (const [id, frame] of this.frames) {
       const iframe = frame.iframe;
       if (!iframe || iframe.contentWindow !== event.source) continue;
-      if (frame.port || m.nonce !== frame.nonce) return;
+      if (frame.port || nonce !== frame.nonce) return;
       const channel = new MessageChannel();
       frame.port = channel.port1;
       channel.port1.onmessage = (e) => {
@@ -1492,114 +1450,110 @@ export class Renderer {
   }
 
   /** Handles messages from the bootstrap in sandboxed artboards, over the private port. */
-  private onMessage(boardId: string, frame: Frame, message: unknown) {
-    if (typeof message !== "object" || message === null) return;
+  private onMessage(boardId: string, frame: Frame, data: unknown) {
+    const m = decodeFrameMessage(data);
+    if (!m) return;
     const iframe = frame.iframe!;
-    const m = message as Record<string, unknown>;
-    const num = (key: string) =>
-      typeof m[key] === "number" && Number.isFinite(m[key]) ? (m[key] as number) : 0;
     // The artboard's own scripts can post too, so only trust ids of nodes in this artboard.
-    const nodeInBoard = (value: unknown) =>
-      typeof value === "string" && this.replica.artboardOf(value)?.id === boardId ? value : null;
-    const bounds = (value: unknown): Bounds | null => {
-      const r = value as Record<string, unknown> | null;
-      const ok = (k: string) => typeof r?.[k] === "number" && Number.isFinite(r[k]);
-      const o = r?.outset as Record<string, unknown> | undefined;
-      const side = (k: string) =>
-        typeof o?.[k] === "number" && Number.isFinite(o[k]) ? Math.max(0, o[k] as number) : 0;
-      return r && ok("x") && ok("y") && ok("width") && ok("height")
-        ? {
-            x: r.x as number,
-            y: r.y as number,
-            width: r.width as number,
-            height: r.height as number,
-            outset: {
-              top: side("top"),
-              right: side("right"),
-              bottom: side("bottom"),
-              left: side("left"),
-            },
-          }
-        : null;
-    };
-    if (m.type === "hit") {
-      const id = nodeInBoard(m.id);
-      const rect = bounds(m.rect);
-      if (id && rect) frame.rects.set(id, { rect, at: performance.now() });
-      const changed = frame.hit?.id !== id;
-      frame.hit = { x: num("x"), y: num("y"), id };
-      if (changed) this.options.onLayout?.();
-    } else if (m.type === "rect") {
-      const id = nodeInBoard(m.id);
-      if (!id) return;
-      frame.pendingRects.delete(id);
-      const rect = bounds(m.rect);
-      if (!rect) return;
-      const before = frame.rects.get(id)?.rect;
-      frame.rects.set(id, { rect, at: performance.now() });
-      const moved =
-        !before ||
-        before.x !== rect.x ||
-        before.y !== rect.y ||
-        before.width !== rect.width ||
-        before.height !== rect.height;
-      if (moved) this.options.onLayout?.();
-    } else if (m.type === "size") {
-      // A new document reports zero both ways before its content lays out.
-      // Keep the size it has, or a tiny box could get it culled, and a culled
-      // iframe is unloaded before it can report its real size.
-      if (num("width") === 0 && num("height") === 0) return;
-      const fit = (n: number) => `${Math.min(MAX_SIDE, Math.max(1, n))}px`;
-      const [width, height] = [fit(num("width")), fit(num("height"))];
-      frame.awaitingSize = false;
-      // In interactive mode's window, the page's size changes what's behind it.
-      if (frame.clip) {
-        frame.clip = { ...frame.clip, full: { width: num("width"), height: num("height") } };
-        iframe.style.width = width;
+    const nodeInBoard = (id: string | null) =>
+      id !== null && this.replica.artboardOf(id)?.id === boardId ? id : null;
+    switch (m.type) {
+      case "hit": {
+        const id = nodeInBoard(m.id);
+        if (id && m.rect) frame.rects.set(id, { rect: m.rect, at: performance.now() });
+        const changed = frame.hit?.id !== id;
+        frame.hit = { x: m.x, y: m.y, id };
+        if (changed) this.options.onLayout?.();
         return;
       }
-      const changed = iframe.style.width !== width || iframe.style.height !== height;
-      this.culler.touch(boardId);
-      iframe.style.width = width;
-      iframe.style.height = height;
-      if (changed) this.options.onResize?.();
-    } else if (m.type === "storage") {
-      this.onStorage(boardId, m);
-    } else if (m.type === "network" && typeof m.host === "string" && m.host.length <= 253) {
-      if (frame.hosts.size >= 50 || frame.hosts.has(m.host)) return;
-      frame.hosts.add(m.host);
-      this.showNetwork(boardId, frame);
-    } else if (m.type === "goto" && typeof m.target === "string") {
-      if (this.takesInput(boardId)) this.options.onGoto?.(boardId, m.target);
-    } else if (m.type === "open" && typeof m.url === "string") {
-      // The bootstrap sends this only for a person's click on a link.
-      if (this.takesInput(boardId)) openExternal(m.url);
-    } else if (m.type === "key" && typeof m.key === "string") {
-      this.options.onFrameKey?.(boardId, {
-        key: m.key,
-        phase: m.phase === "up" ? "up" : "down",
-        meta: m.meta === true,
-        repeat: m.repeat === true,
-      });
-    } else if (m.type === "pan") {
-      this.options.onFramePan?.(boardId);
-    } else if (m.type === "blur") {
-      this.options.onFrameBlur?.();
-    } else if (m.type === "used") {
-      // Sent on every press and key, so skip it while it's already the latest.
-      if (this.takesInput(boardId) && [...this.used.keys()].at(-1) !== boardId) this.use(boardId);
-    } else if (m.type === "wheel" && this.options.onWheel) {
-      const { left, top, scale } = iframeBox(iframe);
-      this.options.onWheel({
-        deltaX: num("deltaX"),
-        deltaY: num("deltaY"),
-        deltaMode: num("deltaMode"),
-        ctrlKey: m.ctrlKey === true,
-        metaKey: m.metaKey === true,
-        shiftKey: m.shiftKey === true,
-        clientX: left + num("clientX") * scale,
-        clientY: top + num("clientY") * scale,
-      });
+      case "rect": {
+        const id = nodeInBoard(m.id);
+        if (!id) return;
+        frame.pendingRects.delete(id);
+        const rect = m.rect;
+        if (!rect) return;
+        const before = frame.rects.get(id)?.rect;
+        frame.rects.set(id, { rect, at: performance.now() });
+        const moved =
+          !before ||
+          before.x !== rect.x ||
+          before.y !== rect.y ||
+          before.width !== rect.width ||
+          before.height !== rect.height;
+        if (moved) this.options.onLayout?.();
+        return;
+      }
+      case "size": {
+        // A new document reports zero both ways before its content lays out.
+        // Keep the size it has, or a tiny box could get it culled, and a culled
+        // iframe is unloaded before it can report its real size.
+        if (m.width === 0 && m.height === 0) return;
+        const fit = (n: number) => `${Math.min(MAX_SIDE, Math.max(1, n))}px`;
+        const [width, height] = [fit(m.width), fit(m.height)];
+        frame.awaitingSize = false;
+        // In interactive mode's window, the page's size changes what's behind it.
+        if (frame.clip) {
+          frame.clip = { ...frame.clip, full: { width: m.width, height: m.height } };
+          iframe.style.width = width;
+          return;
+        }
+        const changed = iframe.style.width !== width || iframe.style.height !== height;
+        this.culler.touch(boardId);
+        iframe.style.width = width;
+        iframe.style.height = height;
+        if (changed) this.options.onResize?.();
+        return;
+      }
+      case "storage":
+        this.onStorage(boardId, m.change);
+        return;
+      case "network":
+        if (frame.hosts.size >= 50 || frame.hosts.has(m.host)) return;
+        frame.hosts.add(m.host);
+        this.showNetwork(boardId, frame);
+        return;
+      case "goto": {
+        const target = artboardLinkTarget(m.href);
+        if (target !== null && this.takesInput(boardId)) this.options.onGoto?.(boardId, target);
+        return;
+      }
+      case "open":
+        // The bootstrap sends this only for a person's click on a link.
+        if (this.takesInput(boardId)) openExternal(m.url);
+        return;
+      case "key":
+        this.options.onFrameKey?.(boardId, {
+          key: m.key,
+          phase: m.phase,
+          meta: m.meta,
+          repeat: m.repeat,
+        });
+        return;
+      case "pan":
+        this.options.onFramePan?.(boardId);
+        return;
+      case "blur":
+        this.options.onFrameBlur?.();
+        return;
+      case "used":
+        // Sent on every press and key, so skip it while it's already the latest.
+        if (this.takesInput(boardId) && [...this.used.keys()].at(-1) !== boardId) this.use(boardId);
+        return;
+      case "wheel": {
+        if (!this.options.onWheel) return;
+        const { left, top, scale } = iframeBox(iframe);
+        this.options.onWheel({
+          deltaX: m.deltaX,
+          deltaY: m.deltaY,
+          deltaMode: m.deltaMode,
+          ctrlKey: m.ctrlKey,
+          metaKey: m.metaKey,
+          shiftKey: m.shiftKey,
+          clientX: left + m.clientX * scale,
+          clientY: top + m.clientY * scale,
+        });
+        return;
+      }
     }
   }
 }
@@ -1685,6 +1639,20 @@ function setStyle(el: Element, name: string, value: string) {
     important ? value.replace(/!\s*important\s*$/i, "").trim() : value,
     important ? "important" : "",
   );
+}
+
+/**
+ * Tags never created in the app's own document: the ones the server strips
+ * (`html::BLOCKED_TAGS`), and scripts, which only run in a sandboxed iframe.
+ */
+function isBlockedTag(tag: string): boolean {
+  const lower = tag.toLowerCase();
+  return lower === "script" || designModel().rules.blockedTags.includes(lower);
+}
+
+/** The id a link to a section of the page names. A malformed escape stays as written. */
+function anchorId(fragment: string): string {
+  return designModel().percentDecode(fragment) ?? fragment;
 }
 
 /** Sets an attribute the server's own check (`html::is_safe_attr`) allows. */
