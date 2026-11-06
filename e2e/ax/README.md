@@ -12,7 +12,7 @@ node e2e/ax/grade.mjs              # blind 1-10 grades of each final screenshot
 node e2e/ax/report.mjs --tools     # one row per label and task, plus calls per tool
 ```
 
-Pass `--env FINITE_MCP_EXTRA=layout` to try a tool group that's off by default. Results go to `e2e/ax/results/<label>/<task>-<n>/`, which git ignores. Each run folder holds `transcript.jsonl`, `feedback.md` (the agent's own account), `metrics.json` and `final.png`. Runs cost real money and use your Claude plan, about $0.05 to $0.80 each. A full round of 18 runs per variant can reach a 5-hour usage limit. A run cut off by a limit is marked `api error` in `metrics.json`, and `report.mjs` leaves it out. `--budget` caps each run at $4 by default.
+Results go to `e2e/ax/results/<label>/<task>-<n>/`, which git ignores. Each run folder holds `transcript.jsonl`, `feedback.md` (the agent's own account), `metrics.json` and `final.png`. Runs cost real money and use your Claude plan, about $0.05 to $0.80 each. A full round of 18 runs per variant can reach a 5-hour usage limit. A run cut off by a limit is marked `api error` in `metrics.json`, and `report.mjs` leaves it out. `--budget` caps each run at $4 by default.
 
 ## Trying a tool design before building it
 
