@@ -54,12 +54,6 @@ export type AgentsOptions = {
   writeLockMs?: number;
 };
 
-/** The agents, plus what the server needs beyond the protocol's `Agents`. */
-export type ServerAgents = Agents & {
-  /** Ends every session working in the design and waits for them to stop, before it's removed. */
-  stopDesign(designId: string): Promise<void>;
-};
-
 export const IDLE_MS = 10 * 60_000;
 export const WRITE_LOCK_MS = 30_000;
 const WRITE_TOOLS = "Write|Edit|MultiEdit|NotebookEdit";
@@ -142,7 +136,7 @@ type Live = {
   writing: Map<string, () => void>;
 };
 
-export function createAgents(options: AgentsOptions): ServerAgents {
+export function createAgents(options: AgentsOptions): Agents {
   const query: QueryFn = options.query ?? ((p) => sdkQuery(p));
   let claudeBin: Promise<string | undefined> | undefined;
   const claudePath =
@@ -462,7 +456,7 @@ export function createAgents(options: AgentsOptions): ServerAgents {
     return child;
   }
 
-  const agents: ServerAgents = {
+  const agents: Agents = {
     send: (open, threadId, turn, mode) =>
       inThread(threadId, async () => {
         const thread = await meta(open, threadId);

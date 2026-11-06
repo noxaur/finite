@@ -98,7 +98,11 @@ export function FrameView({
       src={src}
       title={frame.name}
       data-frame-id={frame.id}
-      {...stylex.props(styles.iframe, interact ? styles.live : styles.still)}
+      {...stylex.props(
+        styles.iframe,
+        frame.source.kind === "route" && styles.route,
+        interact ? styles.live : styles.still,
+      )}
       style={{ width, height }}
     />
   );
@@ -110,8 +114,9 @@ const styles = stylex.create({
     maxWidth: "none",
     flexShrink: 0,
     borderWidth: 0,
-    backgroundColor: colors.halo,
   },
+  // A file frame's page is transparent so rounded cards show the canvas; a route paints its own.
+  route: { backgroundColor: colors.halo },
   still: { pointerEvents: "none" },
   live: { pointerEvents: "auto" },
   card: {

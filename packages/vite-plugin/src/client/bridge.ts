@@ -155,8 +155,12 @@ function ownText(element: Element): string | undefined {
 }
 
 function layerName(element: Element): string {
-  const named = element.getAttribute("data-name") ?? element.getAttribute("aria-label");
-  if (named) return named;
+  const named =
+    element.getAttribute("data-name") ??
+    element.getAttribute("alt") ??
+    element.getAttribute("aria-label") ??
+    element.getAttribute("title");
+  if (named?.trim()) return named.trim();
   const text = ownText(element)?.trim();
   if (text) return text.length > 40 ? `${text.slice(0, 39)}…` : text;
   return element.tagName.toLowerCase();

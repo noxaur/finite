@@ -6,7 +6,7 @@ import path from "node:path";
 import { BRIDGE_CONNECT, BRIDGE_HELLO } from "@finite/protocol";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { allowsOrigin, CONNECT, HELLO } from "./client/bridge.ts";
-import { frameEntry, frameFile } from "./frame.ts";
+import { frameEntry, frameFile, frameHtml } from "./frame.ts";
 import { finite } from "./index.ts";
 import { injectIntoHtml } from "./html.ts";
 import { routeParams, scanRoutes } from "./routes.ts";
@@ -102,6 +102,10 @@ describe("frames", () => {
     expect(code).toContain(`import Wrapper from "/.finite/Wrapper.tsx";`);
     expect(code).toContain(`const Component = frame["Card"];`);
     expect(code).toContain(`createMemoryRouter([{ path: "*", Component: element }])`);
+  });
+
+  test("the file frame page is transparent", () => {
+    expect(frameHtml("/entry")).toContain("background: transparent");
   });
 
   test("checks the frame file", () => {

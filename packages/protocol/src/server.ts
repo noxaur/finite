@@ -156,6 +156,8 @@ export interface Agents {
     queuedId: string,
     text: string | null,
   ): Promise<ThreadMeta>;
+  /** Ends every session working in the design and waits for them to stop, before it's removed. */
+  stopDesign(designId: string): Promise<void>;
   status(): Promise<ClaudeStatus>;
   close(): Promise<void>;
 }

@@ -15,9 +15,9 @@ import {
   type Store,
   type Unsubscribe,
   type User,
+  type Agents,
 } from "@finite/protocol";
 import type { WebSocket } from "ws";
-import type { ServerAgents } from "./agent/index.ts";
 import { handlers } from "./handlers.ts";
 import { syncRoutes } from "./store/routes.ts";
 
@@ -25,7 +25,7 @@ export type Modules = {
   store: Store;
   previews: Previews;
   source: SourceEditor;
-  agents: ServerAgents;
+  agents: Agents;
 };
 
 /** One open socket. */
