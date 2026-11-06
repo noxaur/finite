@@ -9,7 +9,7 @@ import { type ReactElement, useId } from "react";
  * `display: none` never takes another copy's filter with it.
  */
 
-export type IconName = "play" | "previous" | "next" | "close";
+export type IconName = "play" | "previous" | "next" | "close" | "back" | "restart";
 
 interface Shape {
   readonly d: string;
@@ -31,6 +31,16 @@ const SHAPES: Record<IconName, Shape> = {
     d: "M6.2 6.5c3.9 3.6 7.7 7.4 11.6 11.2M17.7 5.9c-3.8 3.9-7.6 8-11.4 12.2",
     filled: false,
     seed: 11,
+  },
+  back: {
+    d: "M10.1 6.2c-1.9 1.9-3.8 3.8-5.6 5.8 1.9 1.9 3.8 3.9 5.7 5.8M5 12.1c4.8-.2 9.7-.1 14.6 0",
+    filled: false,
+    seed: 13,
+  },
+  restart: {
+    d: "M5.6 9.4c1.2-3 4.1-5 7.4-4.9 4.1.2 7.2 3.6 7 7.6-.2 4-3.6 7.1-7.6 6.9-2.9-.1-5.3-2-6.3-4.6M5.3 4.8c.1 1.6.2 3.2.3 4.7 1.6-.1 3.1-.2 4.7-.4",
+    filled: false,
+    seed: 17,
   },
 };
 

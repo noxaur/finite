@@ -72,6 +72,16 @@ pub enum UserEdit {
     Detach {
         ids: Vec<NodeId>,
     },
+    /// Makes elements links to the artboard `to`, or plain when it's `None`.
+    SetLink {
+        ids: Vec<NodeId>,
+        to: Option<NodeId>,
+    },
+    /// Puts an artboard on a route, or on one made from its name when `None`.
+    SetRoute {
+        id: NodeId,
+        route: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -176,6 +186,8 @@ pub fn plan(
                 edit::create_component(view, id, name.as_deref(), &[])?
             }
             UserEdit::Detach { ids } => edit::detach_instances(view, ids, new_id)?,
+            UserEdit::SetLink { ids, to } => edit::set_link(view, ids, to.as_deref())?,
+            UserEdit::SetRoute { id, route } => edit::set_route(view, id, route.as_deref())?,
         });
     }
     components::redirect(doc, ops, new_id)
@@ -193,6 +205,8 @@ pub fn label(edits: &[UserEdit]) -> &'static str {
         UserEdit::SetText { .. } => "Edit text",
         UserEdit::MakeComponent { .. } => "Make component",
         UserEdit::Detach { .. } => "Detach instance",
+        UserEdit::SetLink { .. } => "Link",
+        UserEdit::SetRoute { .. } => "Set route",
     });
     let first = kinds.next().unwrap_or("Edit");
     if kinds.all(|k| k == first) {
@@ -213,10 +227,11 @@ impl UserEdit {
             | Self::Duplicate { ids }
             | Self::Group { ids }
             | Self::Ungroup { ids }
-            | Self::Detach { ids } => Box::new(ids.iter()),
-            Self::SetText { id, .. } | Self::MakeComponent { id, .. } => {
-                Box::new(std::iter::once(id))
-            }
+            | Self::Detach { ids }
+            | Self::SetLink { ids, .. } => Box::new(ids.iter()),
+            Self::SetText { id, .. }
+            | Self::MakeComponent { id, .. }
+            | Self::SetRoute { id, .. } => Box::new(std::iter::once(id)),
         }
     }
 
@@ -270,6 +285,22 @@ impl UserEdit {
             },
             Self::Detach {
                 ids: vec!["instance".into()],
+            },
+            Self::SetLink {
+                ids: vec!["button".into()],
+                to: Some("board".into()),
+            },
+            Self::SetLink {
+                ids: vec!["button".into()],
+                to: None,
+            },
+            Self::SetRoute {
+                id: "board".into(),
+                route: Some("/checkout".into()),
+            },
+            Self::SetRoute {
+                id: "board".into(),
+                route: None,
             },
         ]
     }

@@ -1,7 +1,7 @@
 "use client";
 
 import * as stylex from "@stylexjs/stylex";
-import { type RefObject, useEffect, useRef, useState } from "react";
+import { type RefObject, useEffect, useMemo, useRef, useState } from "react";
 import { artboardDocument, pixelSize } from "@/design/html";
 import type { Replica } from "@/design/replica";
 import { colors, radii, space } from "@/styles/tokens.stylex";
@@ -9,6 +9,8 @@ import { Icon } from "./Icons";
 
 /** How long preview mode waits for edits to settle before reloading the artboard. */
 const RELOAD_DELAY_MS = 150;
+/** How long the note about a broken link stays up. */
+const NOTICE_MS = 3000;
 
 interface PreviewProps {
   readonly replica: Replica;
@@ -24,21 +26,58 @@ interface PreviewProps {
 /**
  * Preview mode: one artboard at full size over the canvas, running as a real
  * page. It scrolls, takes clicks and runs its scripts in a sandboxed iframe,
- * and reloads after each burst of edits. Links and forms still do nothing.
+ * and reloads after each burst of edits. An element with `data-to` is a link
+ * to another artboard, which opens at the width closest to this one's (see
+ * `flow.rs`); other links and forms do nothing. Back and Restart walk this
+ * viewer's own history, which never reaches the design or its undo.
  * It's a modal `<dialog>`, so the canvas behind it is inert, and focus goes
  * back to where it was when it closes.
  */
 export function Preview({ replica, boards, current, version, onSelect, onClose }: PreviewProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  // The screens shown before this one, and the one the preview opened on.
+  const [history, setHistory] = useState<ReadonlyArray<string>>([]);
+  const [start] = useState(current);
+  const [notice, setNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (notice === null) return;
+    const timer = setTimeout(() => setNotice(null), NOTICE_MS);
+    return () => clearTimeout(timer);
+  }, [notice]);
   const index = boards.indexOf(current);
+  const go = (id: string) => {
+    if (id === current) return;
+    setHistory((h) => [...h, current]);
+    onSelect(id);
+  };
   const step = (by: number) => {
     const next = boards[(index + by + boards.length) % boards.length];
-    if (next) onSelect(next);
+    if (next) go(next);
+  };
+  // Screens deleted since they were shown are skipped.
+  const shown = history.filter((id) => replica.get(id)?.parent === null);
+  const back = () => {
+    const previous = shown.at(-1);
+    if (previous === undefined) return;
+    setHistory(shown.slice(0, -1));
+    onSelect(previous);
+  };
+  const startsHere = replica.get(start)?.parent === null;
+  const restart = () => {
+    setHistory([]);
+    if (startsHere) onSelect(start);
+  };
+  const follow = (to: unknown) => {
+    if (typeof to !== "string") return;
+    const target = replica.flowTarget(to, pixelSize(replica.get(current)!).width);
+    if (target === undefined) setNotice("This link goes to an artboard that isn't there anymore.");
+    else go(target);
   };
   // Read by the message listener, which outlives this render.
-  const stepRef = useRef(step);
-  stepRef.current = step;
+  const actions = { step, back, restart, follow };
+  const actionsRef = useRef(actions);
+  actionsRef.current = actions;
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
 
@@ -48,24 +87,32 @@ export function Preview({ replica, boards, current, version, onSelect, onClose }
     return () => dialog?.close();
   }, []);
 
-  // Escape leaves (the dialog's own `cancel`) and the arrows step. Keys
-  // pressed inside the artboard arrive by message (see `./html`).
+  // Escape leaves (the dialog's own `cancel`), the arrows step, Backspace
+  // goes back and R restarts. Keys pressed and links followed inside the
+  // artboard arrive by message (see `./html`).
   useEffect(() => {
     const press = (key: unknown) => {
       if (key === "Escape") closeRef.current();
-      else if (key === "ArrowLeft") stepRef.current(-1);
-      else if (key === "ArrowRight") stepRef.current(1);
+      else if (key === "ArrowLeft") actionsRef.current.step(-1);
+      else if (key === "ArrowRight") actionsRef.current.step(1);
+      else if (key === "Backspace") actionsRef.current.back();
+      else if (key === "r" || key === "R") actionsRef.current.restart();
       else return false;
       return true;
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || e.key === "Escape") return;
+      // The bar's buttons take Enter and Space themselves.
+      if (e.target instanceof HTMLButtonElement && (e.key === "Enter" || e.key === " ")) return;
       if (press(e.key)) e.preventDefault();
     };
     const onMessage = (e: MessageEvent) => {
       if (e.source !== iframeRef.current?.contentWindow) return;
-      const message = (e.data as { finite?: { type?: unknown; key?: unknown } } | null)?.finite;
+      const message = (
+        e.data as { finite?: { type?: unknown; key?: unknown; to?: unknown } } | null
+      )?.finite;
       if (message?.type === "key") press(message.key);
+      else if (message?.type === "navigate") actionsRef.current.follow(message.to);
     };
     window.addEventListener("keydown", onKey);
     window.addEventListener("message", onMessage);
@@ -75,6 +122,11 @@ export function Preview({ replica, boards, current, version, onSelect, onClose }
     };
   }, []);
 
+  // Recomputed with the design, so a fixed link stops counting at once.
+  const broken = useMemo(
+    () => replica.flow().broken.filter((b) => b.from === current),
+    [replica, current, version],
+  );
   const board = replica.get(current);
   if (!board) return null;
   const size = pixelSize(board);
@@ -116,6 +168,37 @@ export function Preview({ replica, boards, current, version, onSelect, onClose }
             </button>
           </>
         )}
+        <button
+          type="button"
+          onClick={back}
+          disabled={shown.length === 0}
+          {...stylex.props(styles.tool)}
+          aria-label="Back"
+          title="Back (Backspace)"
+        >
+          <Icon name="back" size={14} />
+        </button>
+        <button
+          type="button"
+          onClick={restart}
+          disabled={!startsHere || (current === start && shown.length === 0)}
+          {...stylex.props(styles.tool)}
+          aria-label="Restart"
+          title="Restart from the first screen (R)"
+        >
+          <Icon name="restart" size={14} />
+        </button>
+        {broken.length > 0 && (
+          <span
+            {...stylex.props(styles.warning)}
+            title="Links here go to artboards that were deleted. Undo the delete, or pick another target."
+          >
+            {broken.length} broken link{broken.length === 1 ? "" : "s"}
+          </span>
+        )}
+        <span role="status" {...stylex.props(styles.muted)}>
+          {notice}
+        </span>
         <span {...stylex.props(styles.spacer)} />
         <button
           type="button"
@@ -206,6 +289,7 @@ const styles = stylex.create({
   },
   name: { fontWeight: 500 },
   muted: { color: colors.muted, fontVariantNumeric: "tabular-nums" },
+  warning: { color: colors.danger },
   spacer: { flexGrow: 1 },
   tool: {
     display: "inline-grid",
@@ -215,10 +299,10 @@ const styles = stylex.create({
     paddingInline: 6,
     borderWidth: 0,
     borderRadius: 4,
-    backgroundColor: { default: "transparent", ":hover": colors.bg },
-    color: "inherit",
+    backgroundColor: { default: "transparent", ":hover:enabled": colors.bg },
+    color: { default: "inherit", ":disabled": colors.muted },
     font: "inherit",
-    cursor: "var(--cursor-pointer, pointer)",
+    cursor: { default: "var(--cursor-pointer, pointer)", ":disabled": "default" },
   },
   stage: {
     flexGrow: 1,

@@ -202,6 +202,38 @@ describe("Replica", () => {
     expect(r.tokenStyle("a", true)).toBe("");
   });
 
+  it("reads the flow and opens each link at the closest width", () => {
+    const r = new Replica();
+    const board = (id: string, width: number, route: string, index: string): Node => ({
+      ...node(id, null, index),
+      name: id,
+      styles: { width: `${width}px` },
+      attrs: { "data-route": route },
+    });
+    r.load({
+      meta: { id: "d", name: "D", createdAt: 0, updatedAt: 0 },
+      seq: 0,
+      nodes: [
+        board("home", 1440, "/", "a"),
+        board("cart", 1440, "/cart", "b"),
+        board("cart-m", 390, "/cart", "c"),
+        { ...node("buy", "home"), attrs: { "data-to": "cart" } },
+        { ...node("gone", "home", "k"), attrs: { "data-to": "deleted" } },
+      ],
+      comments: [],
+    });
+    const flow = r.flow();
+    expect(flow.routes.map((route) => route.path)).toEqual(["/", "/cart"]);
+    expect(flow.links).toEqual([{ element: "buy", from: "home", to: "cart", route: "/cart" }]);
+    expect(flow.broken).toEqual([
+      { element: "gone", from: "home", to: "deleted", notArtboard: false },
+    ]);
+    expect(r.flowTarget("cart", 390)).toBe("cart-m");
+    expect(r.flowTarget("cart", 1440)).toBe("cart");
+    expect(r.flowTarget("cart", null)).toBe("cart");
+    expect(r.flowTarget("deleted", 390)).toBeUndefined();
+  });
+
   it("lists pages and which page each artboard is on", () => {
     const r = new Replica();
     const snapshot = {

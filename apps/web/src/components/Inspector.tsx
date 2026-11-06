@@ -19,7 +19,8 @@ type Field = "x" | "y" | "w" | "h";
  * is placed by its layout, so its X and Y only show where it is.
  * `version` changes with the design, so the values follow every edit.
  * Next to them, a button makes the element a component, or detaches the
- * instance it is.
+ * instance it is. An element can link to an artboard for preview mode
+ * (`data-to`), and an artboard sets the route it's on (`data-route`).
  */
 export function Inspector({
   editor,
@@ -38,6 +39,7 @@ export function Inspector({
   }, [editor]);
   // What the person is typing, until it's committed or put back.
   const [typing, setTyping] = useState<{ id: string; field: Field; text: string } | null>(null);
+  const [route, setRoute] = useState<{ id: string; text: string } | null>(null);
   // Escape blurs the field, and the blur mustn't commit what it put back.
   const putBack = useRef(false);
 
@@ -66,6 +68,20 @@ export function Inspector({
   };
   const movable = board || isPositioned(facts);
   const action = editor.componentAction(node.id);
+  // Links go on the design's own elements, not inside an instance.
+  const linkable = !board && node.type === "element" && !node.id.includes("/");
+  const linkTo = node.attrs["data-to"]?.trim() ?? "";
+  const boards = linkable || board ? replica.artboards() : [];
+  const routePath = board
+    ? (replica.flow().routes.find((r) => r.screens.some((s) => s.artboard === node.id))?.path ?? "")
+    : "";
+  const commitRoute = () => {
+    if (!route || route.id !== node.id) return setRoute(null);
+    const text = route.text.trim();
+    setRoute(null);
+    if (text === (node.attrs["data-route"] ?? "")) return;
+    void editor.commit([{ kind: "setRoute", id: node.id, route: text === "" ? null : text }]);
+  };
 
   /** The edit that gives `field` the value `n`. */
   const editFor = (field: Field, n: number): UserEdit | null => {
@@ -126,6 +142,61 @@ export function Inspector({
           </label>
         );
       })}
+      {linkable && (
+        <label {...stylex.props(styles.field)}>
+          <span {...stylex.props(styles.label)}>Link</span>
+          <select
+            aria-label="Link to artboard"
+            title="Where a click goes in preview mode"
+            value={linkTo}
+            onChange={(e) =>
+              void editor.commit([
+                {
+                  kind: "setLink",
+                  ids: [node.id],
+                  to: e.target.value === "" ? null : e.target.value,
+                },
+              ])
+            }
+            {...stylex.props(styles.input, styles.select)}
+          >
+            <option value="">None</option>
+            {linkTo !== "" && !boards.some((b) => b.id === linkTo) && (
+              <option value={linkTo}>Missing artboard</option>
+            )}
+            {boards
+              .filter((b) => b.id !== artboard?.id)
+              .map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.name ?? "Artboard"}
+                </option>
+              ))}
+          </select>
+        </label>
+      )}
+      {board && (
+        <label {...stylex.props(styles.field)}>
+          <span {...stylex.props(styles.label)}>Route</span>
+          <input
+            aria-label="Route"
+            title="Artboards with the same route are one page at different widths"
+            placeholder={routePath}
+            value={route?.id === node.id ? route.text : (node.attrs["data-route"] ?? "")}
+            onChange={(e) => setRoute({ id: node.id, text: e.target.value })}
+            onBlur={commitRoute}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                commitRoute();
+              } else if (e.key === "Escape") {
+                setRoute({ id: "", text: "" });
+                e.currentTarget.blur();
+              }
+            }}
+            {...stylex.props(styles.input, styles.route)}
+          />
+        </label>
+      )}
       {action && (
         <button
           type="button"
@@ -163,6 +234,9 @@ const styles = stylex.create({
     gap: 4,
   },
   name: { color: colors.muted, width: 10 },
+  label: { color: colors.muted },
+  select: { width: 120 },
+  route: { width: 112 },
   action: {
     height: 24,
     paddingInline: space.sm,

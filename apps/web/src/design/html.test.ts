@@ -56,6 +56,17 @@ describe("artboardDocument", () => {
     expect(preview).toContain('type: "key"');
     expect(preview).toContain('<body><div data-finite-id="a"></div></body>');
   });
+
+  it("keeps links in a preview page, where its runtime follows them", () => {
+    const r = replica([
+      el("a", null, "div"),
+      el("b", "a", "button", { attrs: { "data-to": "c" } }),
+      el("c", null, "div"),
+    ]);
+    const preview = artboardDocument(r, "a", true);
+    expect(preview).toContain('data-to="c"');
+    expect(preview).toContain('type: "navigate"');
+  });
 });
 
 describe("pixelSize", () => {

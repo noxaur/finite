@@ -9,6 +9,7 @@
 //! - [`tokens`] holds the design tokens every artboard can use.
 //! - [`css`] merges a patch into a stylesheet, keeping what it doesn't touch.
 //! - [`components`] expands instances of components and turns edits inside them into overrides.
+//! - [`flow`] reads a prototype's routes and links, and finds broken links.
 //! - [`user_edit`] plans the edits people make on the canvas, on the server and in the browser.
 //!
 //! This crate has no I/O, so the same rules run in the browser (via WASM),
@@ -20,6 +21,7 @@ pub mod css;
 mod design;
 mod document;
 pub mod edit;
+pub mod flow;
 pub mod fractional;
 mod history;
 pub mod html;

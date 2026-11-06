@@ -1182,3 +1182,60 @@ async fn each_comment_goes_to_one_agent() {
             .contains("Make it pink")
     );
 }
+
+#[tokio::test]
+async fn links_between_artboards_report_when_they_break() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Flow").await;
+    let id = design(&mut agent, "Shop").await;
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Cart", "width": 390, "height": 844,
+                 "html": "<button data-name=\"Pay\">Pay</button>" }]),
+    )
+    .await;
+    let made = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Done", "width": 390, "height": 844 }]),
+    )
+    .await;
+    let done = id_after(&made, "Created artboard");
+    let linked = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "attrs", "select": "[data-name=Pay]", "set": { "data-to": done } }]),
+    )
+    .await;
+    assert!(!linked.contains("Links:"), "{linked}");
+
+    let removed = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "remove", "select": format!("#{done}") }]),
+    )
+    .await;
+    assert!(
+        removed.contains("Links: 1 data-to goes to no artboard"),
+        "{removed}"
+    );
+    assert!(removed.contains("\"Pay\""), "{removed}");
+    assert!(removed.contains("undo brings it back"), "{removed}");
+
+    // The artboard comes back with its id, so the link works again.
+    let undone = agent.ok("undo", json!({ "designId": id })).await;
+    assert!(!undone.contains("Links:"), "{undone}");
+    let redone = agent
+        .ok("undo", json!({ "designId": id, "redo": true }))
+        .await;
+    assert!(redone.contains("Links: 1"), "{redone}");
+
+    let bad = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "attrs", "select": ":root", "set": { "data-route": "cart" } }]),
+    )
+    .await;
+    assert!(bad.contains("isn't a path like /checkout"), "{bad}");
+}

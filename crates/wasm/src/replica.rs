@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 use finite_design::{
-    Document, Node, NodeId, Op, Page, PropKey, components, html,
+    Document, Node, NodeId, Op, Page, PropKey, components, flow, html,
     tokens::{self, Mode, Values},
     user_edit::{self, UserEdit},
 };
@@ -385,6 +385,20 @@ impl Replica {
             tokens: self.doc.tokens(),
         })
         .expect("tokens serialize")
+    }
+
+    /// The design's routes, links and broken links, as JSON (see [`flow::flow`]).
+    pub fn flow(&self) -> String {
+        serde_json::to_string(&flow::flow(&self.doc)).expect("a flow serializes")
+    }
+
+    /// Where a link to artboard `to` goes from a screen `width` pixels wide
+    /// ([`flow::Flow::target`]), or an empty string when `to` isn't an artboard.
+    pub fn flow_target(&self, to: &str, width: Option<f64>) -> String {
+        flow::flow(&self.doc)
+            .target(to, width)
+            .unwrap_or_default()
+            .to_owned()
     }
 
     /// The tokens for artboard `id` in its mode, as a `<style>` element's

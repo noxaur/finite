@@ -46,6 +46,32 @@ export interface PageEntry {
   readonly name: string;
 }
 
+/**
+ * A prototype's routes and links (`flow::Flow` in Rust). A link is an
+ * element's `data-to`, naming an artboard; a route groups the artboards
+ * whose `data-route` match, one per width.
+ */
+export interface Flow {
+  readonly routes: ReadonlyArray<{
+    readonly path: string;
+    readonly explicit: boolean;
+    readonly screens: ReadonlyArray<{ readonly artboard: string; readonly width: number | null }>;
+  }>;
+  readonly links: ReadonlyArray<{
+    readonly element: string;
+    readonly from: string;
+    readonly to: string;
+    readonly route: string;
+  }>;
+  readonly broken: ReadonlyArray<{
+    readonly element: string;
+    readonly from: string;
+    readonly to: string;
+    readonly notArtboard: boolean;
+  }>;
+  readonly badRoutes: ReadonlyArray<{ readonly artboard: string; readonly route: string }>;
+}
+
 /** What a call on the tab's own edits did, besides patching the document. */
 export interface LocalOutcome {
   /** Why the edits asked for couldn't be planned, like a move inside an instance. */
@@ -165,6 +191,19 @@ export class Replica {
   /** Artboard `id`'s tokens in its mode, as a `<style>`'s text; empty without tokens. */
   tokenStyle(id: string, shadow: boolean): string {
     return this.doc.tokenStyle(id, shadow);
+  }
+
+  /** The design's routes, links and broken links. */
+  flow(): Flow {
+    return JSON.parse(this.doc.flow()) as Flow;
+  }
+
+  /**
+   * The artboard a link to `to` opens from a screen `width` pixels wide: the
+   * one on `to`'s route closest to that width. `undefined` when `to` isn't an artboard.
+   */
+  flowTarget(to: string, width: number | null): string | undefined {
+    return this.doc.flowTarget(to, width) || undefined;
   }
 
   /** Frees the WebAssembly side. The replica can't be used afterwards. */

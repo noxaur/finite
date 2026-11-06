@@ -75,5 +75,29 @@
       "instance"
     ],
     "kind": "detach"
+  },
+  {
+    "ids": [
+      "button"
+    ],
+    "kind": "setLink",
+    "to": "board"
+  },
+  {
+    "ids": [
+      "button"
+    ],
+    "kind": "setLink",
+    "to": null
+  },
+  {
+    "id": "board",
+    "kind": "setRoute",
+    "route": "/checkout"
+  },
+  {
+    "id": "board",
+    "kind": "setRoute",
+    "route": null
   }
 ]

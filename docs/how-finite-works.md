@@ -576,7 +576,24 @@ Running the rules in WebAssembly costs time, because the document now exists twi
 
 A `write_html` of 30,000 nodes went from 249 ms to 316 ms, and a 5,000-node thumbnail from 28 ms to 33 ms of main-thread time. The module adds 239 KB to the download, 94 KB gzipped. Panning didn't change. One fix along the way helped the server too. The code serde derives for tagged and flattened types reads each op twice, so `Op` and `Node` now read their fields by hand. That made parsing a change's ops a third faster.
 
-`components/DesignCanvas.tsx` wires these together and adds what's specific to the page: the comment tool, hover outlines, the zoom controls and keyboard shortcuts. `components/Preview.tsx` is preview mode: the focused artboard in its own sandboxed iframe, built by `artboardDocument(replica, id, true)`. That page's runtime cancels link clicks and submits and sends Escape and the arrow keys to the page, instead of forwarding the wheel, so the artboard scrolls like a page. It rebuilds the document 150 ms after a burst of edits and keeps the iframe when the markup didn't change.
+`components/DesignCanvas.tsx` wires these together and adds what's specific to the page: the comment tool, hover outlines, the zoom controls and keyboard shortcuts. `components/Preview.tsx` is preview mode: the focused artboard in its own sandboxed iframe, built by `artboardDocument(replica, id, true)`. That page's runtime cancels link clicks and submits and sends Escape, the arrow keys, Backspace and R to the page, instead of forwarding the wheel, so the artboard scrolls like a page. It rebuilds the document 150 ms after a burst of edits and keeps the iframe when the markup didn't change. A click or Enter on an element with `data-to` posts a `navigate` message, and the preview opens the screen `Replica.flowTarget` picks (see "Prototype links and routes").
+
+### Prototype links and routes
+
+A prototype is two attributes, so ops, undo, both stores and every tool carry it with nothing new to save:
+
+- `data-to="<artboard id>"` on an element makes it a link. It names the artboard by id, so a rename keeps it.
+- `data-route="/cart"` on an artboard puts it on a route. Artboards aren't routes: a desktop and a mobile cart with the same route are one page at two widths. An artboard without a route has one made from its name (`/order-placed`), made unique with `-2`.
+
+`finite_design::flow::flow` reads both in one pass over the document and returns a `Flow`: the routes in page order, each with its screens narrowest first, every link resolved to a route, the links whose target isn't an artboard, and `data-route` values that aren't a path. It doesn't know about any router, so an export can write these routes for React Router, TanStack Router or anything else. `Flow::target` picks where a link goes from a screen of a given width: the screen on the target's route closest to that width, and the target itself among equally close ones. That's how a link drawn on the desktop artboard opens the mobile one in a mobile preview.
+
+What sees it:
+
+- **Preview** asks `Replica.flowTarget` through WebAssembly when a link fires. Its history (the screens shown, and the one it opened on, for Back and Restart) is React state in `Preview.tsx`. It's per viewer and never becomes an op, so it stays out of shared edits and undo. The bar counts the current screen's broken links.
+- **Agents** set the attributes with any op (`attrs`, `html`). After an edit that deletes or moves nodes or sets either attribute, `flow_note` in `mcp/mod.rs` appends the broken links and bad routes to the result, and so does doc6's `undo`.
+- **People** pick a target under **Link** and type a route under **Route** in the inspector. These send the `setLink` and `setRoute` user edits (`edit::set_link` and `edit::set_route`), which refuse a target that isn't an artboard and a route that isn't a path. A delete that breaks links shows a notice saying undo brings the artboard back.
+
+Deleting an artboard leaves the links to it in place, as broken links. Undo recreates the artboard with its id, so they work again. `edit::duplicate` points links among the artboards it copies at the copies, so a duplicated flow runs on its own. A copy of one screen keeps linking to the original targets. Links inside a component count once, on the component, and an instance's override of `data-to` isn't read yet.
 
 The design list page (`DesignGrid.tsx`) uses the lobby socket. It starts with the 200 most recently edited designs and the total, because every design at about 200 bytes each would be 20 MB for 100,000 of them. When there are more, the page says how many it shows and offers a search box, which calls `GET /api/designs?q=`. Through the router, both the search and the lobby's total cover every server. While the search runs, the page filters the designs it already has by the same rule (name contains the query, ignoring case), so typing shows matches at once. If the search fails, the page keeps those matches and says it couldn't search every design. Before, it showed the whole unfiltered list, as if the search had matched everything.
 
@@ -950,6 +967,9 @@ The guide explains each limit where it applies. This is the list in one place. M
 | ------------- | ------------------------------------------------------------------------------------ |
 | Design        | One canvas. Also called a canvas in the MCP tools.                                   |
 | Artboard      | A top-level node: a fixed-size frame placed on the canvas.                           |
+| Link          | An element's `data-to`: the id of the artboard preview opens when it's clicked.      |
+| Route         | An artboard's `data-route`: the URL path it shares with its other widths.            |
+| Flow          | The routes and links `flow::flow` reads from a design, with any broken links.        |
 | Node          | One element or text node.                                                            |
 | Op            | The smallest edit: `create`, `delete`, `set` or `move`.                              |
 | Change        | The ops from one commit, transaction, undo or redo, with a `seq`, actor and label.   |

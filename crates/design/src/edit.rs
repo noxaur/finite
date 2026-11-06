@@ -12,7 +12,7 @@ use serde_json::Value;
 use crate::{
     components::{self, Overrides},
     document::{Document, FIRST_PAGE, MAX_DEPTH, MAX_NODES, MAX_PAGES, Op, Page},
-    fractional,
+    flow, fractional,
     html::{self, Fragment},
     label,
     node::{Node, NodeId, NodeKind, PropKey},
@@ -1129,6 +1129,53 @@ pub fn update_attributes(
     Ok(ops)
 }
 
+/// Makes elements links to artboard `to` (see [`flow`]), or plain again
+/// when `to` is `None`.
+pub fn set_link(doc: &Document, ids: &[NodeId], to: Option<&str>) -> Result<Vec<Op>> {
+    if let Some(to) = to
+        && !doc.get(to).is_some_and(Node::is_artboard)
+    {
+        return err(format!(
+            "{to:?} isn't an artboard; a link goes to an artboard"
+        ));
+    }
+    let mut ops = Vec::with_capacity(ids.len());
+    for id in ids {
+        if element(doc, id)?.is_artboard() {
+            return err("an artboard can't be a link; link an element on it");
+        }
+        ops.push(Op::Set {
+            id: id.clone(),
+            key: PropKey::Attr(flow::TO_ATTR.to_owned()),
+            value: to.map(Value::from),
+        });
+    }
+    Ok(ops)
+}
+
+/// Puts artboard `id` on `route` (see [`flow`]), or on a route made from its
+/// name when `route` is `None`.
+pub fn set_route(doc: &Document, id: &str, route: Option<&str>) -> Result<Vec<Op>> {
+    if !node(doc, id)?.is_artboard() {
+        return err(format!(
+            "node {id:?} isn't an artboard; routes are set on artboards"
+        ));
+    }
+    let route = route.map(str::trim).filter(|r| !r.is_empty());
+    if let Some(route) = route
+        && !flow::is_route(route)
+    {
+        return err(format!(
+            "{route:?} isn't a route: start with / and use letters, digits and - . _ ~, like /checkout/done"
+        ));
+    }
+    Ok(vec![Op::Set {
+        id: id.to_owned(),
+        key: PropKey::Attr(flow::ROUTE_ATTR.to_owned()),
+        value: route.map(Value::from),
+    }])
+}
+
 /// Replaces the text of a node. On a text node this sets its text; on an
 /// element it reuses a lone text child, or replaces all children with one.
 pub fn set_text(
@@ -1850,6 +1897,24 @@ pub fn duplicate(
             && original.is_artboard()
         {
             node.page = original.page.clone();
+        }
+    }
+    // Links between the artboards copied together go to the copies, so a
+    // copied flow runs on its own.
+    let copies: BTreeMap<&str, &str> = top_level(doc, ids)
+        .into_iter()
+        .zip(&roots)
+        .filter(|(id, _)| doc.get(id).is_some_and(Node::is_artboard))
+        .map(|(id, copy)| (id.as_str(), copy.as_str()))
+        .collect();
+    if !copies.is_empty() {
+        for op in &mut ops {
+            if let Op::Create { node } = op
+                && let Some(to) = node.attrs.get_mut(flow::TO_ATTR)
+                && let Some(copy) = copies.get(to.trim())
+            {
+                *to = (*copy).to_owned();
+            }
         }
     }
     room_for(doc, 0, ops.len())?;

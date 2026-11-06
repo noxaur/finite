@@ -624,17 +624,20 @@ export function DesignCanvas({ id }: { id: string }) {
 
   const openCount = [...comments.values()].filter((c) => !c.resolved).length;
 
-  // Preview mode steps through the shown page's artboards in reading order.
+  // Preview mode steps through the previewed page's artboards in reading
+  // order. A link can lead to an artboard on another page.
   const replica = sessionRef.current?.replica;
+  const previewBoard = previewId === null ? undefined : replica?.get(previewId);
+  const previewPage = previewBoard && replica ? replica.pageOf(previewBoard) : page?.id;
   const pageBoards =
-    replica && page
+    replica && previewPage
       ? replica
           .artboards()
-          .filter((board) => replica.pageOf(board) === page.id)
+          .filter((board) => replica.pageOf(board) === previewPage)
           .sort((a, b) => (a.y ?? 0) - (b.y ?? 0) || (a.x ?? 0) - (b.x ?? 0))
           .map((board) => board.id)
       : [];
-  // An artboard deleted or moved to another page while previewed closes the preview.
+  // An artboard deleted while previewed closes the preview.
   const previewing = previewId !== null && pageBoards.includes(previewId) ? previewId : null;
   previewRef.current = previewing !== null;
   useEffect(() => {

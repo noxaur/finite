@@ -46,25 +46,49 @@ const RUNTIME = `(() => {
 })();`;
 
 /**
- * Runs first in an artboard shown in preview mode. Links and forms do
- * nothing, as on the canvas, and the keys that leave or step through the
- * preview reach the page even after a click inside the artboard.
+ * Runs first in an artboard shown in preview mode. An element with
+ * `data-to` is a link to that artboard (see `flow.rs`): a click, or Enter
+ * on it, asks the preview to go there. Other links and forms do nothing,
+ * as on the canvas. The keys that leave, step, go back or restart reach the
+ * page even after a click inside the artboard.
  */
 const PREVIEW_RUNTIME = `(() => {
+  const post = (message) => parent.postMessage({ finite: message }, "*");
+  // The whole path, so a link around or inside a shadow root counts too.
+  const linkOf = (e) => e.composedPath().find((el) => el instanceof Element && el.hasAttribute("data-to"));
   addEventListener("click", (e) => {
-    // The whole path, so a link around or inside a shadow root counts too.
-    if (e.composedPath().some((el) => el instanceof Element && el.matches("a[href], area[href]"))) e.preventDefault();
+    const path = e.composedPath();
+    if (path.some((el) => el instanceof Element && el.matches("a[href], area[href]"))) e.preventDefault();
+    const link = linkOf(e);
+    if (link) post({ type: "navigate", to: link.getAttribute("data-to").trim() });
   }, true);
   addEventListener("submit", (e) => e.preventDefault(), true);
-  // Escape always leaves. The arrows step only when the artboard didn't use
-  // them, outside fields and editable text (inside shadow roots too). The
-  // check waits until the event has reached the artboard's own listeners.
+  // A link on a plain element takes focus and Enter, like a real link.
+  // Enter on a button or a link already clicks it.
+  const clicks = "a[href], area[href], button, input, select, textarea, summary";
+  addEventListener("DOMContentLoaded", () => {
+    for (const el of document.querySelectorAll("[data-to]")) {
+      if (el.matches(clicks + ", [tabindex], [contenteditable]")) continue;
+      el.tabIndex = 0;
+      if (!el.hasAttribute("role")) el.setAttribute("role", "link");
+    }
+  });
+  // Escape always leaves. The other keys act only when the artboard didn't
+  // use them, outside fields and editable text (inside shadow roots too).
+  // The check waits until the event has reached the artboard's own listeners.
   const editing = (el) => el instanceof Element && (el.isContentEditable || el.closest("input, textarea, select"));
+  const keys = ["ArrowLeft", "ArrowRight", "Backspace", "r", "R"];
   addEventListener("keydown", (e) => {
-    if (e.key === "Escape") return parent.postMessage({ finite: { type: "key", key: e.key } }, "*");
-    if ((e.key !== "ArrowLeft" && e.key !== "ArrowRight") || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+    if (e.key === "Escape") return post({ type: "key", key: e.key });
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const focused = e.composedPath()[0];
+    if (e.key === "Enter" && focused instanceof Element && focused.hasAttribute("data-to") && !focused.matches(clicks)) {
+      e.preventDefault();
+      return post({ type: "navigate", to: focused.getAttribute("data-to").trim() });
+    }
+    if (!keys.includes(e.key) || (e.shiftKey && e.key.startsWith("Arrow"))) return;
     if (editing(e.composedPath()[0])) return;
-    setTimeout(() => e.defaultPrevented || parent.postMessage({ finite: { type: "key", key: e.key } }, "*"));
+    setTimeout(() => e.defaultPrevented || post({ type: "key", key: e.key.toLowerCase() === "r" ? "r" : e.key }));
   });
 })();`;
 

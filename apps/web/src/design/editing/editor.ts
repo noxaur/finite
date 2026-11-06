@@ -138,10 +138,21 @@ export class Editor {
     this.update({ selection });
   }
 
-  /** Commits `edits` as one undo step, and says why if they're refused. */
+  /**
+   * Commits `edits` as one undo step, and says why if they're refused, or
+   * when a delete left links going to an artboard that's gone.
+   */
   async commit(edits: ReadonlyArray<UserEdit>) {
+    const broken = () => this.session.replica.flow().broken.length;
+    const before = edits.some((e) => e.kind === "delete") ? broken() : null;
     const result = await this.session.commit(edits);
-    if (result.kind === "refused") this.say(result.message);
+    if (result.kind === "refused") return this.say(result.message);
+    const added = before === null ? 0 : broken() - before;
+    if (added > 0) {
+      this.say(
+        `${added} link${added === 1 ? " goes" : "s go"} to the deleted artboard now. Undo (⌘Z) brings it back.`,
+      );
+    }
   }
 
   /**

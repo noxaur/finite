@@ -140,6 +140,18 @@ export const UserEdit = Schema.Union([
   }),
   /** Turns instances into plain copies of what they show. */
   Schema.Struct({ kind: Schema.Literal("detach"), ids: Schema.Array(Schema.String) }),
+  /** Makes elements links to the artboard `to` (`data-to`), or plain when it's `null`. */
+  Schema.Struct({
+    kind: Schema.Literal("setLink"),
+    ids: Schema.Array(Schema.String),
+    to: Schema.NullOr(Schema.String),
+  }),
+  /** Puts an artboard on a route (`data-route`), or on one made from its name when `null`. */
+  Schema.Struct({
+    kind: Schema.Literal("setRoute"),
+    id: Schema.String,
+    route: Schema.NullOr(Schema.String),
+  }),
 ]);
 export type UserEdit = typeof UserEdit.Type;
 

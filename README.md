@@ -43,7 +43,11 @@ Thumbnails never run scripts. Screenshots run them under the same content policy
 
 ## Preview mode
 
-Preview mode shows one artboard at its own size over the canvas, running as a real page. It scrolls, takes clicks and hovers, and runs its scripts, while links and forms still do nothing. The Preview button in the top bar opens the focused artboard: the one that fills most of the view. That artboard's name on the canvas also has a play button. The left and right arrow keys step through the page's artboards, and `Esc` goes back to the canvas. The artboard renders in a sandboxed iframe under the same content policy as script artboards, and it reloads after each burst of edits.
+Preview mode shows one artboard at its own size over the canvas, running as a real page. It scrolls, takes clicks and hovers, and runs its scripts. Ordinary links and forms do nothing. The Preview button in the top bar opens the focused artboard: the one that fills most of the view. That artboard's name on the canvas also has a play button. The left and right arrow keys step through the page's artboards, and `Esc` goes back to the canvas. The artboard renders in a sandboxed iframe under the same content policy as script artboards, and it reloads after each burst of edits.
+
+To make a clickable prototype, link an element to another artboard. Select it and pick the target under **Link** in the inspector, or have an agent set `data-to="<artboard id>"` on it. In preview, a click or `Enter` on the element opens that artboard. **Back** (`Backspace`) and **Restart** (`R`) walk your own history, which nobody else sees. Links hold the target's id, so renaming the target keeps them working. Deleting it breaks them, and the preview and the agent's edit result say so until you undo.
+
+An artboard's **Route** in the inspector (`data-route="/cart"`) groups artboards into one page at several widths. Give the desktop and the mobile cart the same route, and a link drawn to the desktop cart opens the mobile one when you're previewing on mobile. An artboard without a route has one made from its name. Duplicating several artboards at once points the links between them at the copies.
 
 ## Comments
 
