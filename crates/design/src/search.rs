@@ -642,7 +642,7 @@ fn snippets<'a>(code: &'a str, uses: &'a [Use]) -> impl Iterator<Item = (String,
 type Color = ([u8; 3], Option<f64>);
 
 /// `text` as a color, if all of it is one.
-pub fn parse_color(text: &str) -> Option<Color> {
+pub(crate) fn parse_color(text: &str) -> Option<Color> {
     let text = text.trim();
     let (color, len) = color_at(text, 0)?;
     (len == text.len()).then_some(color)

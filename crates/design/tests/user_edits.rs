@@ -273,26 +273,112 @@ fn labels_name_the_gesture() {
     assert_eq!(user_edit::label(&[place(&["a"], None), delete]), "Edit");
 }
 
+/// One of each kind of edit, for the golden file the web app's schema is
+/// checked against (`fixtures/user_edits.json`).
+fn examples() -> Vec<UserEdit> {
+    vec![
+        UserEdit::SetPosition {
+            moves: vec![Position {
+                id: "board".into(),
+                x: 120.0,
+                y: -40.0,
+            }],
+        },
+        UserEdit::SetStyles {
+            ids: vec!["card".into()],
+            styles: BTreeMap::from([("left".into(), Some("24px".into())), ("right".into(), None)]),
+        },
+        UserEdit::Place {
+            ids: vec!["card".into()],
+            parent: Some("list".into()),
+            before: Some("other".into()),
+        },
+        UserEdit::Place {
+            ids: vec!["card".into()],
+            parent: None,
+            before: None,
+        },
+        UserEdit::Delete {
+            ids: vec!["card".into()],
+        },
+        UserEdit::Duplicate {
+            ids: vec!["card".into()],
+        },
+        UserEdit::Group {
+            ids: vec!["card".into(), "other".into()],
+        },
+        UserEdit::Ungroup {
+            ids: vec!["group".into()],
+        },
+        UserEdit::SetText {
+            id: "title".into(),
+            text: "Hello".into(),
+        },
+        UserEdit::MakeComponent {
+            id: "card".into(),
+            name: Some("Card".into()),
+        },
+        UserEdit::Detach {
+            ids: vec!["instance".into()],
+        },
+        UserEdit::SetLink {
+            ids: vec!["button".into()],
+            to: Some("board".into()),
+        },
+        UserEdit::SetLink {
+            ids: vec!["button".into()],
+            to: None,
+        },
+        UserEdit::SetRoute {
+            id: "board".into(),
+            route: Some("/checkout".into()),
+        },
+        UserEdit::SetRoute {
+            id: "board".into(),
+            route: None,
+        },
+        UserEdit::SetAttributes {
+            ids: vec!["card".into()],
+            attrs: BTreeMap::from([
+                ("hidden".into(), Some(String::new())),
+                ("data-locked".into(), None),
+            ]),
+        },
+        UserEdit::CreatePage {
+            name: "Flows".into(),
+        },
+        UserEdit::RenamePage {
+            id: "page".into(),
+            name: "Drafts".into(),
+        },
+        UserEdit::DeletePage { id: "page".into() },
+        UserEdit::MoveToPage {
+            ids: vec!["board".into()],
+            page: "page".into(),
+        },
+    ]
+}
+
 #[test]
 fn examples_match_the_shared_fixture() {
-    let examples = serde_json::to_value(UserEdit::examples()).unwrap();
+    let shipped = serde_json::to_value(examples()).unwrap();
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/user_edits.json");
     if std::env::var_os("FINITE_UPDATE_FIXTURES").is_some() {
         fs::write(
             &path,
-            serde_json::to_string_pretty(&examples).unwrap() + "\n",
+            serde_json::to_string_pretty(&shipped).unwrap() + "\n",
         )
         .unwrap();
         return;
     }
     let stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(
-        examples, stored,
+        shipped, stored,
         "a user edit changed; regenerate the fixture"
     );
     // Every example reads back as itself.
     let back: Vec<UserEdit> = serde_json::from_value(stored).unwrap();
-    assert_eq!(back, UserEdit::examples());
+    assert_eq!(back, examples());
 }
 
 fn attrs(ids: &[&str], attrs: &[(&str, Option<&str>)]) -> UserEdit {

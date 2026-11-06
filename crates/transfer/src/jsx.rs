@@ -288,7 +288,7 @@ impl Writer<'_> {
             self.out
                 .push_str(&format!(" style={{{{ {} }}}}", object.join(", ")));
         }
-        if html::VOID_TAGS.contains(&tag.to_ascii_lowercase().as_str()) {
+        if html::is_void(tag) {
             self.out.push_str(" />\n");
             return;
         }

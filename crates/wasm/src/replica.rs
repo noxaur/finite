@@ -767,7 +767,6 @@ mod tests {
         assert_eq!(link_counts(&r), (1, 0));
         assert_eq!(r.flow_target("cart", None), "cart");
 
-        // A snapshot.
         let nodes = json!([node("home", None, "V")]);
         r.load(&nodes.to_string()).unwrap();
         assert_eq!(r.flow_target("cart", None), "");
@@ -776,7 +775,6 @@ mod tests {
             .unwrap();
         assert_eq!(link_counts(&r), (1, 0));
 
-        // A change from the server.
         let ops = json!([{ "op": "delete", "id": "cart" }]);
         r.receive(&ops.to_string(), None).unwrap();
         assert_eq!(link_counts(&r), (0, 1));
@@ -785,14 +783,12 @@ mod tests {
         apply(&mut r, ops);
         assert_eq!(link_counts(&r), (1, 0));
 
-        // A gesture's draft, which the next draft or none takes back.
         let unlink = json!([{ "kind": "setLink", "ids": ["go"], "to": null }]).to_string();
         r.draft(1, &unlink).unwrap();
         assert_eq!(link_counts(&r), (0, 0));
         r.draft(1, "null").unwrap();
         assert_eq!(link_counts(&r), (1, 0));
 
-        // Sending it, and the server's answer without a change.
         r.propose(2, &unlink).unwrap();
         assert_eq!(link_counts(&r), (0, 0));
         r.settle(2);

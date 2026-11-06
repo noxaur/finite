@@ -91,7 +91,7 @@ impl Board {
         self.design.commit(actor, "Update styles", &ops, 0).unwrap();
     }
 
-    /// What `get_html` returns for `id`, with the read mark.
+    /// What `read` returns for `id`, with the read mark.
     fn read(&self, id: &str) -> String {
         let options = ExportOptions {
             ids: true,

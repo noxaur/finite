@@ -579,14 +579,12 @@ mod tests {
     fn what_a_note_found_counts_as_heard_once_the_note_is_taken() {
         let watch = LayoutWatch::default();
         let seen = |watch: &LayoutWatch| watch.checked_so_far("d", "a").1;
-        // Replaced before anyone took it, so the agent never heard it.
         let g = watch.bump("d", "a");
         watch.touch("d", "a", &HashSet::from(["n".to_owned()]));
         watch.finish("d", "a", g, measured("lost", &[10]));
         watch.bump("d", "a");
         assert_eq!(seen(&watch), None);
         assert!(watch.checked_so_far("d", "a").0.contains("n"));
-        // Taken, so it was.
         let g = watch.bump("d", "a");
         watch.finish("d", "a", g, measured("heard", &[10]));
         watch.deliver("d", watch.take("d"));

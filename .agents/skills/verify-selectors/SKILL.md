@@ -1,6 +1,6 @@
 ---
 name: verify-selectors
-description: Check selectors used by the six MCP tools after changes to select.rs or doc6 selector normalization, aliases, page filtering, or text-node fallback.
+description: Check selectors used by the six MCP tools after changes to select.rs or the selector normalization in `crates/server/src/mcp/selector.rs`, aliases, page filtering, or text-node fallback.
 ---
 
 # Verify selectors

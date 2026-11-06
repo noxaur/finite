@@ -370,7 +370,7 @@ fn a_transaction_keeps_the_imports_it_recorded_only_if_it_succeeds() {
 
 const SECTION: &str = r#"<section style="padding: 24px"><h2>Pro</h2><button style="color: white">Buy</button></section>"#;
 
-/// The rewrite `get_html` HTML would be, with ids and the read mark.
+/// The rewrite `read` HTML would be, with ids and the read mark.
 fn read(design: &Design, id: &str) -> String {
     let options = ExportOptions {
         ids: true,

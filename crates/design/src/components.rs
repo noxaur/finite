@@ -200,7 +200,11 @@ fn uses(doc: &Document, component: &str, other: &str) -> bool {
 
 /// Refuses an instance of `component` under `parent` when the component
 /// would end up showing itself.
-pub fn check_cycle(doc: &Document, component: &str, parent: Option<&str>) -> Result<(), EditError> {
+pub(crate) fn check_cycle(
+    doc: &Document,
+    component: &str,
+    parent: Option<&str>,
+) -> Result<(), EditError> {
     let mut node = parent.and_then(|p| doc.get(real_id(p)));
     while let Some(n) = node {
         if n.component && uses(doc, component, &n.id) {
@@ -223,7 +227,7 @@ pub fn check_cycle(doc: &Document, component: &str, parent: Option<&str>) -> Res
 }
 
 /// The component `id`, or why it isn't one.
-pub fn check_component<'a>(doc: &'a Document, id: &str) -> Result<&'a Node, EditError> {
+pub(crate) fn check_component<'a>(doc: &'a Document, id: &str) -> Result<&'a Node, EditError> {
     match doc.get(id) {
         Some(node) if node.component => Ok(node),
         Some(node) if node.is_instance() => err(format!(
@@ -238,7 +242,7 @@ pub fn check_component<'a>(doc: &'a Document, id: &str) -> Result<&'a Node, Edit
 }
 
 /// How many nodes an instance of `component` adds to the expanded design.
-pub fn expanded_size(doc: &Document, component: &str) -> usize {
+pub(crate) fn expanded_size(doc: &Document, component: &str) -> usize {
     preview(doc, component).len()
 }
 
@@ -754,7 +758,7 @@ pub fn detach(
 
 /// The overrides that make an instance of `component` look like
 /// `fragment`, HTML an agent wrote for an instance, often after reading it
-/// with get_html. Elements say which node of the component they show with
+/// with `read`. Elements say which node of the component they show with
 /// [`Fragment::source`] (their `data-id`), and text inside them matches the
 /// component's text by position. Returns the overrides and how many
 /// elements didn't match a node of the component and were left out.
@@ -1492,7 +1496,7 @@ mod tests {
             text(&doc, "c"),
             r#"<div><header style="display: flex"><span>Home</span></header></div>"#
         );
-        // get_html names it, so writing that back means the same component.
+        // `read` names it, so writing that back means the same component.
         let html = crate::html::export(&expand(&doc), &bar, true).unwrap();
         assert!(html.contains(r#"data-component="Bar""#), "{html}");
 
@@ -1710,7 +1714,7 @@ mod tests {
     #[test]
     fn html_written_for_an_instance_becomes_overrides() {
         let doc = design();
-        // What get_html shows, with the title and the button's color changed.
+        // What `read` shows, with the title and the button's color changed.
         let html = r#"<header data-id="i" data-instance-of="new1" style="color: black; padding: 8px"><h1 data-id="i/new2">Settings</h1><button data-id="i/new4" style="background: red">Go</button><p>new</p></header>"#;
         let fragment = html::parse(html).unwrap().remove(0);
         assert_eq!(fragment.instance_of.as_deref(), Some("new1"));

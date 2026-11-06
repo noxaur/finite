@@ -169,7 +169,7 @@ pub fn style_at(doc: &Document, mode: &str, selector: &str) -> String {
     css
 }
 
-/// Old shared CSS split for [`crate::Design::migrate_css`].
+/// Old shared CSS split by [`migrate`].
 #[derive(Debug, Default, PartialEq)]
 pub struct Migrated {
     /// The custom properties its top-level `:root` rules defined, in order.
