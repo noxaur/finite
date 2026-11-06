@@ -181,7 +181,7 @@ The formatter skips `crates/*/fixtures`, so a regenerated file only changes wher
 
 ## Edit commands: from a tool call to ops
 
-Agents don't send ops. They call tools with friendlier arguments, and `crates/design/src/edit.rs` translates them. If you want to add a tool, you start here. Each command reads the current document, checks the request, and returns ops. It never changes the document itself.
+Agents don't send ops. They call tools with friendlier arguments, and `crates/design/src/edit/` translates them. If you want to add a tool, you start here. Each command reads the current document, checks the request, and returns ops. It never changes the document itself.
 
 Some of the work these commands do:
 
@@ -201,13 +201,13 @@ Deep HTML is also slow to parse. html5ever, the HTML parser behind `scraper`, ta
 
 Still, parsing thousands of levels would tie up a thread, so `html::parse` first runs a one-pass scan that counts start tags minus end tags. If that count passes 4,096, sixteen times the limit, it refuses the HTML without parsing it. The count can be too high, for example when a `<p>` is left open and the parser closes it at the next `<p>`. It's never too low, and that margin keeps ordinary HTML from being refused by mistake.
 
-A test in `edit.rs` writes 1,000,000 levels on a thread with a Tokio worker's 2 MiB stack and gets the error in well under 2 seconds. It also checks that a tree at the limit still exports on that stack in a debug build.
+A test in `edit/write.rs` writes 1,000,000 levels on a thread with a Tokio worker's 2 MiB stack and gets the error in well under 2 seconds. It also checks that a tree at the limit still exports on that stack in a debug build.
 
 A design also holds at most 100,000 nodes (`MAX_NODES`), and an `html` op and `duplicate` refuse edits that would pass it. When an `html` op replaces nodes, the ones it removes count against what it adds. For scale, the `big_design` example's 20,201-node artboard is already a big design. Without a limit, the largest an `html` op one MCP call can carry, 4 MB of `<i></i>`, made about 600,000 nodes. Its ops came to 92 MB of JSON, which the server journals and sends to every viewer, and an agent stuck in a loop could keep going. `cargo run --release -p finite-design --example big_design` now shows that write refused in about 0.2 seconds, most of it parsing.
 
 ### Rewriting HTML in place
 
-An agent changes a section by reading it with `read` as html, editing the HTML and writing it back with an `html` op in mode `replace` or `inner`. That rewrite is a **keyed reconciliation**, like React's keyed lists: an element written with the `data-id` that `read` as html gave it keeps its node. `rewrite_in_place` and `reconcile` in `edit.rs` turn the rewrite into ops on the nodes already there. A changed value is a `set`, a reordered child a `move`, a new element a `create` and a missing one a `delete`. So the elements keep their ids, the comments pinned to them and every agent's undo steps on them.
+An agent changes a section by reading it with `read` as html, editing the HTML and writing it back with an `html` op in mode `replace` or `inner`. That rewrite is a **keyed reconciliation**, like React's keyed lists: an element written with the `data-id` that `read` as html gave it keeps its node. `rewrite_in_place` and `reconcile` in `edit/write.rs` turn the rewrite into ops on the nodes already there. A changed value is a `set`, a reordered child a `move`, a new element a `create` and a missing one a `delete`. So the elements keep their ids, the comments pinned to them and every agent's undo steps on them.
 
 Before, a rewrite deleted every node and created new ones. A person's comment then pointed at a node that no longer existed, and another agent's undo said "Nothing to undo", because its step targeted a deleted node.
 
@@ -290,7 +290,7 @@ Agents can't tell from the HTML which of these happened, so every edit's result 
 
 Agents mostly make components without a tool, by naming them in HTML. The first element written with `data-component="Top bar"` defines a component called "Top bar". A later element with the same name, in the same HTML or another call, becomes an instance of it. Its text, styles and attributes can differ, and the differences become its overrides, but its elements have to match. So an agent that pastes the same bar into each screen, with each screen's title, gets one component and two instances, for no extra call. `read` as html writes a component's root with its name, so HTML read back and written again means the same component.
 
-A component changes by being rewritten in place. an `html` op with `replace` or `replace-children` inside a component edits the nodes that are already there. A new element matches an old one by its `data-id`, as in any rewrite, and otherwise by the same tag and layer name, in order (`rewrite_in_place` in `edit.rs`). Those nodes keep their ids, so the instances' overrides still find them. Before, a rewrite made new nodes, and every instance quietly lost its own title. A screen rewritten with its `data-component` element redefines the component under the same id, so its instances keep following it.
+A component changes by being rewritten in place. an `html` op with `replace` or `replace-children` inside a component edits the nodes that are already there. A new element matches an old one by its `data-id`, as in any rewrite, and otherwise by the same tag and layer name, in order (`rewrite_in_place` in `edit/write.rs`). Those nodes keep their ids, so the instances' overrides still find them. Before, a rewrite made new nodes, and every instance quietly lost its own title. A screen rewritten with its `data-component` element redefines the component under the same id, so its instances keep following it.
 
 An `html` op understands that marker: `<header data-instance-of="4biyjm26"></header>` writes an instance. HTML that `read` returned for an instance can be written back too. Elements inside it carry their virtual `data-id`, and where they differ from the component, the differences become overrides. An element without one isn't in the component, so an `html` op refuses the HTML rather than drop the element. `move` with `copy: true` copies an instance as an instance. It copies a component's root as a new instance of it, so a copied screen keeps following its top bar.
 
@@ -949,7 +949,7 @@ The guide explains each limit where it applies. This is the list in one place. M
 | Nodes in a design                      | 100,000                                                           | `MAX_NODES` in `document.rs`               | Every node is journaled, held in memory and sent to viewers      |
 | Pages in a design                      | 100                                                               | `MAX_PAGES` in `document.rs`               | Every page shows in the sidebar and in `read`'s overview         |
 | Nesting depth                          | 256 levels                                                        | `MAX_DEPTH` in `document.rs`               | Tree walks are recursive; deeper overflowed the stack            |
-| Nodes shown by instances               | 100,000, counted with the design's own                            | `room_for` in `edit.rs`, `Expander`        | Instances nested in instances multiply                           |
+| Nodes shown by instances               | 100,000, counted with the design's own                            | `room_for` in `edit/mod.rs`, `Expander`        | Instances nested in instances multiply                           |
 | HTML nesting before parsing            | 4,096 by a quick count                                            | `html::parse`                              | html5ever is quadratic in depth                                  |
 | Undo steps per actor and stack         | 200 steps, about 32 MB                                            | `History::LIMIT`, `History::BYTE_LIMIT`    | Undoing a big delete recreates every node in it                  |
 | Undo for a named agent                 | 6 idle hours                                                      | `HISTORY_TTL` in `hub/mod.rs`              | Histories keep memory and snapshots busy                         |

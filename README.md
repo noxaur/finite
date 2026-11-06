@@ -76,7 +76,7 @@ The history belongs to an actor, per design. Today an actor is an MCP session, o
 
 ## How a change flows
 
-1. An MCP tool call, like an `edit` with a `css` op, runs an edit command from `crates/design/src/edit.rs`. The command validates the request and turns it into ops: `create`, `delete`, `set` (one property) or `move`.
+1. An MCP tool call, like an `edit` with a `css` op, runs an edit command from `crates/design/src/edit/`. The command validates the request and turns it into ops: `create`, `delete`, `set` (one property) or `move`.
 2. `Design::commit` applies the ops to the server's document, pushes the inverse onto the actor's undo stack, and assigns the change a sequence number. Each design has its own lock, so edits to one design are applied in a single order, and edits to different designs never wait on each other.
 3. The hub broadcasts the change to every viewer's WebSocket and saves the design to disk a moment later.
 4. In the browser, `Replica` applies the same ops with the same Rust code, built as WebAssembly. `Renderer` patches only the DOM nodes they touched.
