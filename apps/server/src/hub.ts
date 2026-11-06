@@ -1,6 +1,5 @@
 import {
   type Actor,
-  type Agents,
   type ClientMessage,
   type OpenDesign,
   type Params,
@@ -18,6 +17,7 @@ import {
   type User,
 } from "@finite/protocol";
 import type { WebSocket } from "ws";
+import type { ServerAgents } from "./agent/index.ts";
 import { handlers } from "./handlers.ts";
 import { syncRoutes } from "./store/routes.ts";
 
@@ -25,7 +25,7 @@ export type Modules = {
   store: Store;
   previews: Previews;
   source: SourceEditor;
-  agents: Agents;
+  agents: ServerAgents;
 };
 
 /** One open socket. */

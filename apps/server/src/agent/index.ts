@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
+import path from "node:path";
 import {
   type HookCallbackMatcher,
   type Options,
@@ -19,10 +20,11 @@ import {
   type ThreadMeta,
   type Turn,
 } from "@finite/protocol";
+import { createLocks, fileLocks, type Locked } from "../source/files.ts";
 import { createEventMapper } from "./events.ts";
 import { FINITE_INSTRUCTIONS } from "./instructions.ts";
 import { userMessage } from "./message.ts";
-import { policy } from "./policy.ts";
+import { policy, underRoot } from "./policy.ts";
 import { createScreenshots, type Screenshots } from "./screenshot.ts";
 import { createStatus, findClaude, NOT_INSTALLED } from "./status.ts";
 import { boardDir, canvasServer } from "./tools.ts";
@@ -46,9 +48,21 @@ export type AgentsOptions = {
   /** Close a thread's session after this long without a turn (default 10 minutes). */
   idleMs?: number;
   screenshots?: Screenshots;
+  /** The file locks the SourceEditor writes under (default: the process's `fileLocks`). */
+  locks?: Locked;
+  /** The longest a Write/Edit holds its file's lock when Claude Code never reports it done. */
+  writeLockMs?: number;
+};
+
+/** The agents, plus what the server needs beyond the protocol's `Agents`. */
+export type ServerAgents = Agents & {
+  /** Ends every session working in the design and waits for them to stop, before it's removed. */
+  stopDesign(designId: string): Promise<void>;
 };
 
 export const IDLE_MS = 10 * 60_000;
+export const WRITE_LOCK_MS = 30_000;
+const WRITE_TOOLS = "Write|Edit|MultiEdit|NotebookEdit";
 export const DEFAULT_TITLE = "New prototype";
 
 /** The actor for a thread's agent: its id is the thread id. */
@@ -122,9 +136,13 @@ type Live = {
   /** The session reported its id (so resuming worked). */
   started: boolean;
   idle: NodeJS.Timeout | undefined;
+  /** Settles when the session's messages have all been read. */
+  done: Promise<void>;
+  /** File locks held by Write/Edit calls in flight, by tool use id. */
+  writing: Map<string, () => void>;
 };
 
-export function createAgents(options: AgentsOptions): Agents {
+export function createAgents(options: AgentsOptions): ServerAgents {
   const query: QueryFn = options.query ?? ((p) => sdkQuery(p));
   let claudeBin: Promise<string | undefined> | undefined;
   const claudePath =
@@ -138,6 +156,14 @@ export function createAgents(options: AgentsOptions): Agents {
   const screenshots = options.screenshots ?? createScreenshots();
   const status = createStatus(query, claudePath);
   const lives = new Map<string, Live>();
+  const locks = options.locks ?? fileLocks;
+  const writeLockMs = options.writeLockMs ?? WRITE_LOCK_MS;
+  /**
+   * One thread's sends, results and interrupts run one at a time, so two sends can't both start a
+   * session and a send can't queue a message just after the turn decided the queue was empty.
+   */
+  const serial = createLocks();
+  const inThread = <T>(threadId: string, fn: () => Promise<T>) => serial([threadId], fn);
 
   async function meta(open: OpenDesign, threadId: string): Promise<ThreadMeta> {
     const found = (await open.threads()).find((t) => t.id === threadId);
@@ -165,21 +191,27 @@ export function createAgents(options: AgentsOptions): Agents {
       closing: false,
       started: false,
       idle: undefined,
+      done: Promise.resolve(),
+      writing: new Map(),
     };
     const fence = (name: string, toolInput: Record<string, unknown>) =>
       policy(name, toolInput, { root, realRoot, brandDir, prodWrite: live.prodWrite });
     // A PreToolUse hook runs even when the person's own settings pre-approve a tool, so the
     // write fence holds whatever their allow rules say; canUseTool answers everything else.
+    // An allowed write then holds the file's lock until PostToolUse, so a SourceEditor edit can't
+    // land between Claude Code reading the file and saving it.
     const writeFence: HookCallbackMatcher = {
-      matcher: "Write|Edit|MultiEdit|NotebookEdit",
+      matcher: WRITE_TOOLS,
       hooks: [
         async (hook) => {
           if (hook.hook_event_name !== "PreToolUse") return {};
-          const decision = fence(
-            hook.tool_name,
-            (hook.tool_input ?? {}) as Record<string, unknown>,
-          );
-          if (decision.behavior === "allow") return {};
+          const toolInput = (hook.tool_input ?? {}) as Record<string, unknown>;
+          const decision = fence(hook.tool_name, toolInput);
+          if (decision.behavior === "allow") {
+            const file = toolInput.file_path ?? toolInput.notebook_path;
+            if (typeof file === "string") await holdLock(live, hook.tool_use_id, file);
+            return {};
+          }
           return {
             hookSpecificOutput: {
               hookEventName: "PreToolUse",
@@ -190,6 +222,28 @@ export function createAgents(options: AgentsOptions): Agents {
         },
       ],
     };
+    const writeDone: HookCallbackMatcher = {
+      matcher: WRITE_TOOLS,
+      hooks: [
+        async (hook) => {
+          if ("tool_use_id" in hook) live.writing.get(hook.tool_use_id)?.();
+          return {};
+        },
+      ],
+    };
+    async function holdLock(live: Live, toolUseId: string, file: string): Promise<void> {
+      const abs = underRoot({ root, realRoot }, path.resolve(root, file));
+      const release = await locks.acquire([abs]);
+      const timer = setTimeout(() => done(), writeLockMs);
+      timer.unref?.();
+      const done = () => {
+        clearTimeout(timer);
+        live.writing.delete(toolUseId);
+        release();
+      };
+      live.writing.get(toolUseId)?.();
+      live.writing.set(toolUseId, done);
+    }
     const server = canvasServer({
       open,
       threadId: thread.id,
@@ -216,14 +270,18 @@ export function createAgents(options: AgentsOptions): Agents {
         strictMcpConfig: true,
         permissionMode: "default",
         canUseTool: async (name, toolInput) => fence(name, toolInput),
-        hooks: { PreToolUse: [writeFence] },
+        hooks: {
+          PreToolUse: [writeFence],
+          PostToolUse: [writeDone],
+          PostToolUseFailure: [writeDone],
+        },
         model: turn.model,
         ...(turn.effort === undefined ? {} : { effort: turn.effort }),
         settings: { fastMode: turn.fast },
       },
     });
     lives.set(thread.id, live);
-    void consume(live, thread.sessionId);
+    live.done = consume(live, thread.sessionId);
     return live;
   }
 
@@ -244,35 +302,47 @@ export function createAgents(options: AgentsOptions): Agents {
           await open.appendEvent(threadId, event);
         }
         if (message.type === "result") {
-          await finishTurn(live, message.subtype === "success" && !message.is_error, {
-            more: (message.queued_turn_count ?? 0) > 0,
-          });
+          const ok = message.subtype === "success" && !message.is_error;
+          const more = (message.queued_turn_count ?? 0) > 0;
+          await inThread(threadId, () => finishTurn(live, ok, { more }));
         }
       }
       if (!live.closing) throw new Error("Claude Code stopped.");
     } catch (error) {
       if (live.closing) return;
-      lives.delete(threadId);
-      clearTimeout(live.idle);
-      live.input.end();
-      // A session that can't be resumed (moved project, deleted transcript) starts fresh next time.
-      const fresh = resumed !== undefined && !live.started;
-      const reason = error instanceof Error ? error.message : String(error);
-      await open
-        .appendEvent(threadId, {
-          type: "error",
-          message: fresh ? `${reason} The next message starts a new session.` : reason,
-          at: Date.now(),
-        })
-        .catch(() => {});
-      await open
-        .updateThread(threadId, (m) => {
-          const next = { ...m, running: false, awaitingSince: Date.now(), updatedAt: Date.now() };
-          if (fresh) delete next.sessionId;
-          return next;
-        })
-        .catch(() => {});
+      await inThread(threadId, () => ended(live, resumed, error));
+    } finally {
+      releaseWrites(live);
     }
+  }
+
+  /** A session that stopped on its own: report it and hand the thread back. */
+  async function ended(live: Live, resumed: string | undefined, error: unknown): Promise<void> {
+    const { open, threadId } = live;
+    if (lives.get(threadId) === live) lives.delete(threadId);
+    clearTimeout(live.idle);
+    live.input.end();
+    // A session that can't be resumed (moved project, deleted transcript) starts fresh next time.
+    const fresh = resumed !== undefined && !live.started;
+    const reason = error instanceof Error ? error.message : String(error);
+    await open
+      .appendEvent(threadId, {
+        type: "error",
+        message: fresh ? `${reason} The next message starts a new session.` : reason,
+        at: Date.now(),
+      })
+      .catch(() => {});
+    await open
+      .updateThread(threadId, (m) => {
+        const next = { ...m, running: false, awaitingSince: Date.now(), updatedAt: Date.now() };
+        if (fresh) delete next.sessionId;
+        return next;
+      })
+      .catch(() => {});
+  }
+
+  function releaseWrites(live: Live): void {
+    for (const release of live.writing.values()) release();
   }
 
   /** After a turn's result: revoke prod writes, settle, send the next queued message or hand back. */
@@ -315,8 +385,9 @@ export function createAgents(options: AgentsOptions): Agents {
   function armIdle(live: Live): void {
     clearTimeout(live.idle);
     live.idle = setTimeout(() => {
-      if (live.running) return;
-      shut(live);
+      void inThread(live.threadId, async () => {
+        if (!live.running && lives.get(live.threadId) === live) shut(live);
+      });
     }, idleMs);
     live.idle.unref?.();
   }
@@ -324,9 +395,10 @@ export function createAgents(options: AgentsOptions): Agents {
   function shut(live: Live): void {
     live.closing = true;
     clearTimeout(live.idle);
-    lives.delete(live.threadId);
+    if (lives.get(live.threadId) === live) lives.delete(live.threadId);
     live.input.end();
     live.query.close();
+    releaseWrites(live);
   }
 
   /** Pushes a message into the session and records it. */
@@ -390,63 +462,82 @@ export function createAgents(options: AgentsOptions): Agents {
     return child;
   }
 
-  const agents: Agents = {
-    async send(open, threadId, turn, mode) {
-      const thread = await meta(open, threadId);
-      const live = lives.get(threadId);
-      if (live?.running && mode === "queue") {
+  const agents: ServerAgents = {
+    send: (open, threadId, turn, mode) =>
+      inThread(threadId, async () => {
+        const thread = await meta(open, threadId);
+        const live = lives.get(threadId);
+        if (live?.running && mode === "queue") {
+          await open.updateThread(threadId, (m) => ({
+            ...m,
+            queued: [
+              ...m.queued,
+              {
+                id: randomUUID(),
+                text: turn.text,
+                attachments: turn.attachments,
+                ...(turn.selection ? { selection: turn.selection } : {}),
+                by: turn.by,
+              },
+            ],
+            updatedAt: Date.now(),
+          }));
+          return;
+        }
+        if (live) return deliver(live, turn, live.running ? "now" : undefined);
+        return deliver(await start(open, thread, turn), turn);
+      }),
+
+    interrupt: (open, threadId) =>
+      inThread(threadId, async () => {
+        const live = lives.get(threadId);
+        if (live?.running) {
+          live.interrupted = true;
+          live.running = false;
+          live.prodWrite = false;
+          await live.query.interrupt();
+          armIdle(live);
+        } else {
+          await meta(open, threadId);
+        }
         await open.updateThread(threadId, (m) => ({
           ...m,
-          queued: [
-            ...m.queued,
-            {
-              id: randomUUID(),
-              text: turn.text,
-              attachments: turn.attachments,
-              ...(turn.selection ? { selection: turn.selection } : {}),
-              by: turn.by,
-            },
-          ],
+          running: false,
+          awaitingSince: Date.now(),
           updatedAt: Date.now(),
         }));
-        return;
-      }
-      if (live) return deliver(live, turn, live.running ? "now" : undefined);
-      return deliver(await start(open, thread, turn), turn);
-    },
+      }),
 
-    async interrupt(open, threadId) {
-      const live = lives.get(threadId);
-      if (live?.running) {
-        live.interrupted = true;
-        live.running = false;
-        live.prodWrite = false;
-        await live.query.interrupt();
-        armIdle(live);
-      } else {
-        await meta(open, threadId);
-      }
-      await open.updateThread(threadId, (m) => ({
-        ...m,
-        running: false,
-        awaitingSince: Date.now(),
-        updatedAt: Date.now(),
-      }));
-    },
+    editQueued: (open, threadId, queuedId, text) =>
+      inThread(threadId, async () => {
+        const thread = await meta(open, threadId);
+        if (!thread.queued.some((q) => q.id === queuedId)) {
+          throw new Refused("That queued message was already sent or removed.", "not-found");
+        }
+        return open.updateThread(threadId, (m) => ({
+          ...m,
+          queued:
+            text === null
+              ? m.queued.filter((q) => q.id !== queuedId)
+              : m.queued.map((q) => (q.id === queuedId ? { ...q, text } : q)),
+          updatedAt: Date.now(),
+        }));
+      }),
 
-    async editQueued(open, threadId, queuedId, text) {
-      const thread = await meta(open, threadId);
-      if (!thread.queued.some((q) => q.id === queuedId)) {
-        throw new Refused("That queued message was already sent or removed.", "not-found");
-      }
-      return open.updateThread(threadId, (m) => ({
-        ...m,
-        queued:
-          text === null
-            ? m.queued.filter((q) => q.id !== queuedId)
-            : m.queued.map((q) => (q.id === queuedId ? { ...q, text } : q)),
-        updatedAt: Date.now(),
-      }));
+    async stopDesign(designId) {
+      const threadIds = [...lives.values()]
+        .filter((live) => live.open.design.id === designId)
+        .map((live) => live.threadId);
+      await Promise.all(
+        threadIds.map((threadId) =>
+          inThread(threadId, async () => {
+            const live = lives.get(threadId);
+            if (!live) return;
+            shut(live);
+            await live.done;
+          }),
+        ),
+      );
     },
 
     status,

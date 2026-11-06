@@ -167,6 +167,31 @@ describe("finite client", () => {
     expect(f.design("d").state).toBeNull();
   });
 
+  it("keeps design events that arrive while subscribe waits, across a reconnect too", async () => {
+    const f = make();
+    f.holdDesign("d");
+    const ws = FakeSocket.all[0]!;
+    ws.greet();
+    await flush();
+    // The server subscribed us, then sent an event before answering with an older snapshot.
+    ws.push({ type: "thread", designId: "d", meta: meta("t1") });
+    ws.reply("subscribe", state());
+    await flush();
+    expect(f.design("d").state?.threads.map((t) => t.id)).toEqual(["t1"]);
+
+    ws.close();
+    await vi.advanceTimersByTimeAsync(300);
+    const ws2 = FakeSocket.all[1]!;
+    ws2.greet();
+    await flush();
+    ws2.push({ type: "thread", designId: "d", meta: { ...meta("t1"), title: "Named" } });
+    ws2.push({ type: "preview", designId: "d", status: "ready", url: "http://p" });
+    ws2.reply("subscribe", state([meta("t1")]));
+    await flush();
+    expect(f.design("d").state?.threads.map((t) => t.title)).toEqual(["Named"]);
+    expect(f.design("d").state?.preview).toEqual({ status: "ready", url: "http://p" });
+  });
+
   it("merges a thread's history with live events and streams deltas", async () => {
     const f = make();
     f.holdThread("d", "t1");

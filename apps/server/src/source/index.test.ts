@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Actor, Canvas, Design, OpenDesign, SourceEdit, Styling } from "@finite/protocol";
 import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
-import { rev } from "./files.ts";
+import { createLocks, rev } from "./files.ts";
 import { createSourceEditor } from "./index.ts";
 
 const ana: Actor = { kind: "person", id: "ana", name: "Ana" };
@@ -123,8 +123,34 @@ describe("SourceEditor.apply", () => {
       source.apply(open(design()), [a], ana, page),
       source.apply(open(design()), [b], bo, page),
     ]);
-    expect(results.map((r) => r.status)).toEqual(["fulfilled", "rejected"]);
-    expect(await get("src/App.tsx")).toContain("<p>A</p>");
+    // Whichever takes the lock first wins; the other is stale.
+    expect(results.map((r) => r.status).sort()).toEqual(["fulfilled", "rejected"]);
+    const winner = results[0]!.status === "fulfilled" ? "A" : "B";
+    expect(await get("src/App.tsx")).toContain(`<p>${winner}</p>`);
+  });
+
+  it("waits for a writer holding the file's lock, then refuses the edit as stale", async () => {
+    await put("src/App.tsx", APP);
+    const locks = createLocks();
+    const source = createSourceEditor({ locks });
+    const e = await edit("src/App.tsx", {
+      kind: "text",
+      loc: "src/App.tsx:7:6",
+      tag: "p",
+      text: "Human",
+    });
+    // The agent's Write holds the lock from its PreToolUse hook to its PostToolUse hook.
+    const release = await locks.acquire([path.join(root, "src/App.tsx")]);
+    let settled = false;
+    const applying = source.apply(open(design()), [e], ana, page).finally(() => (settled = true));
+    applying.catch(() => {});
+    await new Promise((r) => setTimeout(r, 30));
+    expect(settled).toBe(false);
+    const agentSave = APP.replace("<p>One</p>", "<p>Agent</p>");
+    await put("src/App.tsx", agentSave);
+    release();
+    await expect(applying).rejects.toMatchObject({ code: "stale" });
+    expect(await get("src/App.tsx")).toBe(agentSave);
   });
 
   it("refuses production files on a prototype canvas and edits board files", async () => {
@@ -150,6 +176,27 @@ describe("SourceEditor.apply", () => {
       proto,
     );
     expect(await get(f)).not.toContain("<p>One</p>");
+  });
+
+  it("refuses a production file spelled through .finite/.. on a prototype canvas", async () => {
+    await put("src/App.tsx", APP);
+    const sneaky = ".finite/../src/App.tsx";
+    const source = createSourceEditor();
+    await expect(
+      source.apply(
+        open(design()),
+        [
+          {
+            kind: "remove",
+            locs: [`${sneaky}:7:6`],
+            revs: { [sneaky]: rev(APP) },
+          } as SourceEdit,
+        ],
+        ana,
+        proto,
+      ),
+    ).rejects.toMatchObject({ code: "outside-prototype" });
+    expect(await get("src/App.tsx")).toBe(APP);
   });
 
   it("edits the imported module stylesheet for css-modules", async () => {
@@ -322,8 +369,26 @@ export function Card() {
       source.copyComponent(design(), { name: "Card" }, "src/Copy.tsx"),
     ).rejects.toMatchObject({ code: "outside-prototype" });
     await expect(
+      source.copyComponent(design(), { name: "Card" }, ".finite/../src/Copy.tsx"),
+    ).rejects.toMatchObject({ code: "outside-prototype" });
+    await expect(
       source.copyComponent(design(), { name: "Nope" }, ".finite/boards/c1/X.tsx"),
     ).rejects.toMatchObject({ code: "not-found" });
+  });
+
+  it("gives concurrent copies to the same name different files", async () => {
+    await put("src/components/Card.tsx", CARD);
+    const source = createSourceEditor();
+    const copies = await Promise.all(
+      [1, 2, 3].map(() =>
+        source.copyComponent(design(), { name: "Card" }, ".finite/boards/c1/Card.tsx"),
+      ),
+    );
+    expect(copies.map((c) => c.file).sort()).toEqual([
+      ".finite/boards/c1/Card-2.tsx",
+      ".finite/boards/c1/Card-3.tsx",
+      ".finite/boards/c1/Card.tsx",
+    ]);
   });
 
   it("copies a route's file when told how to find routes", async () => {

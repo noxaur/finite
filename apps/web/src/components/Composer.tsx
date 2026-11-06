@@ -35,10 +35,11 @@ export interface Outgoing {
   readonly mode: SendMode;
 }
 
-// Anything can ask the composer to open and take focus: ⌘L, the ✱ menu's "Ask about this".
-const focusListeners = new Set<() => void>();
-export function focusComposer(): void {
-  for (const l of focusListeners) l();
+// Anything can ask the composer to open and take focus: ⌘L, the ✱ menu's "Ask about this", or an
+// example prompt, which `text` puts in the box.
+const focusListeners = new Set<(text?: string) => void>();
+export function focusComposer(text?: string): void {
+  for (const l of focusListeners) l(text);
 }
 
 interface Attachment {
@@ -100,15 +101,21 @@ export function Composer({
   const blocked = claude !== null && (!claude.installed || !claude.loggedIn);
 
   useEffect(() => {
-    const focus = () => {
+    const focus = (prefill?: string) => {
       setOpen(true);
-      requestAnimationFrame(() => box.current?.focus());
+      if (prefill !== undefined) setText(prefill);
+      requestAnimationFrame(() => {
+        const el = box.current;
+        if (!el) return;
+        el.focus();
+        if (prefill !== undefined) el.setSelectionRange(prefill.length, prefill.length);
+      });
     };
     focusListeners.add(focus);
     const key = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "l") {
         e.preventDefault();
-        focus();
+        focus(undefined);
       }
     };
     window.addEventListener("keydown", key);

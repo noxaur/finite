@@ -1,16 +1,13 @@
-import type { FrameSource } from "@finite/protocol";
+import { type FrameSource, routeHref } from "@finite/protocol";
 
 /**
  * Where a frame's iframe loads from on the design's Vite server: the route's path with its
- * params filled in (`:id` and `$id` both), or the plugin's frame page for one file's export.
+ * params filled in by `routeHref` (the same formatter the server uses), or the plugin's frame page
+ * for one file's export.
  */
 export function frameSrc(previewUrl: string, source: FrameSource): string {
   if (source.kind === "route") {
-    const params = source.params ?? {};
-    const path = source.path.replace(/[:$]([A-Za-z_][\w]*)/g, (whole, name: string) =>
-      params[name] !== undefined ? encodeURIComponent(params[name]) : whole,
-    );
-    return new URL(path.startsWith("/") ? path : `/${path}`, previewUrl).href;
+    return new URL(routeHref(source.path, source.params ?? {}), previewUrl).href;
   }
   const url = new URL("/__finite/frame", previewUrl);
   url.searchParams.set("file", source.file);

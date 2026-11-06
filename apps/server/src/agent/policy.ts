@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 
@@ -37,20 +38,38 @@ export function policy(
 
   const raw = input[field];
   if (typeof raw !== "string" || raw === "") return deny(`${toolName} needs a ${field}.`);
-  const file = underRoot(ctx, path.resolve(ctx.root, raw));
+  // Symlinks resolved, so a link under .finite/ can't point the write at src/ or outside.
+  const realRoot = ctx.realRoot ?? realFile(ctx.root);
+  const file = realFile(path.resolve(ctx.root, raw));
   const brand = ctx.brandDir.replace(/\/+$/, "");
-  if (!inside(ctx.root, file)) {
+  if (!inside(realRoot, file)) {
     return deny(`${raw} is outside this project. Write files under ${ctx.root}.`);
   }
-  if (inside(path.join(ctx.root, ".finite"), file) || inside(path.join(ctx.root, brand), file)) {
+  if (inside(path.join(realRoot, ".finite"), file) || inside(path.join(realRoot, brand), file)) {
     return { behavior: "allow", updatedInput: input };
   }
   if (ctx.prodWrite) return { behavior: "allow", updatedInput: input };
   return deny(
     `Production code is read-only here. Write prototypes under .finite/boards/<canvasId>/ and brand ` +
-      `assets under ${brand}/. To change ${path.relative(ctx.root, file)}, the person has to ask ` +
+      `assets under ${brand}/. To change ${path.relative(realRoot, file)}, the person has to ask ` +
       `you to move it to prod: then call move_to_prod first.`,
   );
+}
+
+/** `abs` with symlinks resolved; for a file that doesn't exist yet, its nearest existing folder's. */
+export function realFile(abs: string): string {
+  const rest: string[] = [];
+  let at = abs;
+  while (true) {
+    try {
+      return path.join(realpathSync(at), ...rest.reverse());
+    } catch {
+      const up = path.dirname(at);
+      if (up === at) return abs;
+      rest.push(path.basename(at));
+      at = up;
+    }
+  }
 }
 
 /** `file` spelled under `root` when it's spelled under the real root. */

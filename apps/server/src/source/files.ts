@@ -50,7 +50,10 @@ export async function writeAtomic(abs: string, contents: string): Promise<void> 
   }
 }
 
-/** A mutex per absolute path. `locked` takes every lock in sorted order, so two callers can't deadlock. */
+/**
+ * A mutex per absolute path. `locked` takes every lock in sorted order, so two callers can't
+ * deadlock; `acquire` takes them and hands back the release, for a lock held across callbacks.
+ */
 export function createLocks() {
   const tails = new Map<string, Promise<void>>();
 
@@ -67,18 +70,36 @@ export function createLocks() {
     };
   }
 
-  return async function locked<T>(paths: string[], fn: () => Promise<T>): Promise<T> {
+  async function acquire(paths: string[]): Promise<() => void> {
     const releases: (() => void)[] = [];
+    for (const key of [...new Set(paths)].sort()) releases.push(await lockOne(key));
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      for (const release of releases.reverse()) release();
+    };
+  }
+
+  async function locked<T>(paths: string[], fn: () => Promise<T>): Promise<T> {
+    const release = await acquire(paths);
     try {
-      for (const key of [...new Set(paths)].sort()) releases.push(await lockOne(key));
       return await fn();
     } finally {
-      for (const release of releases.reverse()) release();
+      release();
     }
-  };
+  }
+
+  return Object.assign(locked, { acquire });
 }
 
 export type Locked = ReturnType<typeof createLocks>;
+
+/**
+ * The process's file locks, shared by every writer of a design's source: the SourceEditor and the
+ * agents' Write/Edit tools. Keys are absolute paths spelled under `Design.root`.
+ */
+export const fileLocks: Locked = createLocks();
 
 /** Picks `dir/name.ext`, or `dir/name-2.ext`, … if that's taken. */
 export async function freeName(abs: string): Promise<string> {

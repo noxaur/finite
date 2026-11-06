@@ -5,8 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { BRIDGE_CONNECT, BRIDGE_HELLO } from "@finite/protocol";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import { CONNECT, HELLO } from "./client/bridge.ts";
+import { allowsOrigin, CONNECT, HELLO } from "./client/bridge.ts";
 import { frameEntry, frameFile } from "./frame.ts";
+import { finite } from "./index.ts";
 import { injectIntoHtml } from "./html.ts";
 import { routeParams, scanRoutes } from "./routes.ts";
 import { addFiniteSource } from "./tailwind.ts";
@@ -170,4 +171,42 @@ describe("html injection", () => {
 test("the bridge client speaks the protocol's handshake", () => {
   expect(HELLO).toBe(BRIDGE_HELLO);
   expect(CONNECT).toBe(BRIDGE_CONNECT);
+});
+
+describe("the Finite shell's origin", () => {
+  test("is allowed when its host is listed (any port) or its host:port is", () => {
+    const hosts = ["localhost", "127.0.0.1", "::1", "finite.lan:8443"];
+    expect(allowsOrigin(hosts, "http://127.0.0.1:4100")).toBe(true);
+    expect(allowsOrigin(hosts, "http://localhost:3000")).toBe(true);
+    expect(allowsOrigin(hosts, "http://[::1]:4100")).toBe(true);
+    expect(allowsOrigin(hosts, "https://finite.lan:8443")).toBe(true);
+    expect(allowsOrigin(hosts, "https://finite.lan:9000")).toBe(false);
+    expect(allowsOrigin(hosts, "https://evil.example")).toBe(false);
+    expect(allowsOrigin(hosts, "http://localhost.evil.example")).toBe(false);
+    expect(allowsOrigin(hosts, "null")).toBe(false);
+    expect(allowsOrigin(hosts, "file:///Users/x/index.html")).toBe(false);
+  });
+
+  test("limits the dev server's CORS and the bridge to the allowed hosts", async () => {
+    const root = project({});
+    const frames = finite({ root, allowedHosts: ["127.0.0.1", "studio.lan"] }).find(
+      (p) => p.name === "finite:frames",
+    )!;
+    type Origin = (origin: string | undefined, done: (error: unknown, ok: boolean) => void) => void;
+    const config = (frames.config as unknown as () => { server: { cors: { origin: Origin } } })();
+    const cors = (origin: string | undefined) =>
+      new Promise((resolve) => config.server.cors.origin(origin, (_, ok) => resolve(ok)));
+    expect(await cors("http://127.0.0.1:4100")).toBe(true);
+    expect(await cors("http://studio.lan:3000")).toBe(true);
+    expect(await cors("http://localhost:3000")).toBe(false);
+    expect(await cors("https://evil.example")).toBe(false);
+    expect(await cors(undefined)).toBe(false);
+
+    const resolved = (frames.resolveId as (id: string) => string)("/@finite/bridge");
+    const bridge = await (frames.load as (id: string) => Promise<string> | string)(resolved);
+    expect(bridge.startsWith('const FINITE_ALLOWED_HOSTS = ["127.0.0.1","studio.lan"];\n')).toBe(
+      true,
+    );
+    expect(bridge).toContain("allowsOrigin(hosts, event.origin)");
+  });
 });

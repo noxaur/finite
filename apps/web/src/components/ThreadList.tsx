@@ -236,7 +236,9 @@ function Thread({
   const on = current?.threadId === meta.id;
   const title = meta.title || "New prototype";
   const snoozed = section === "snoozed" && meta.snoozedUntil !== undefined;
-  const extra = meta.canvasIds.slice(1);
+  // One canvas is the thread itself; only two or more are worth listing under it.
+  const nested = meta.canvasIds.length > 1 ? meta.canvasIds : [];
+  const queued = meta.queued.length > 0 ? `${meta.queued.length} queued` : "";
 
   const status = meta.running ? (
     <span {...stylex.props(styles.working)}>
@@ -260,7 +262,7 @@ function Thread({
         {...stylex.props(
           stylex.defaultMarker(),
           styles.row,
-          on && current?.canvasId === first && styles.rowOn,
+          on && nested.length === 0 && styles.rowOn,
           (snoozing || on) && styles.rowHeld,
         )}
         style={{ paddingLeft: `calc(${depth} * 15px + 9px)` }}
@@ -274,12 +276,11 @@ function Thread({
           <span {...stylex.props(styles.line)}>
             <span {...stylex.props(styles.title, !meta.title && styles.untitled)}>{title}</span>
           </span>
-          {(first || meta.queued.length > 0 || !meta.running) && (
+          {(!first || queued) && (
             <span {...stylex.props(styles.sub)}>
               <Icon name={first ? "page" : "history"} size={12} />
               <span {...stylex.props(styles.subText)}>
-                {first ? canvasLabel(names.get(first)) : "Chat"}
-                {meta.queued.length > 0 && ` · ${meta.queued.length} queued`}
+                {first ? queued : queued ? `Chat · ${queued}` : "Chat"}
               </span>
             </span>
           )}
@@ -340,9 +341,9 @@ function Thread({
           />
         )}
       </div>
-      {extra.length > 0 && (
+      {nested.length > 0 && (
         <ul {...stylex.props(styles.list)}>
-          {extra.map((canvasId) => (
+          {nested.map((canvasId) => (
             <li key={canvasId}>
               <button
                 type="button"

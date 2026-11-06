@@ -10,8 +10,10 @@ import {
   type PreviewState,
   Refused,
   type Route,
+  routeHref,
   type Unsubscribe,
 } from "@finite/protocol";
+import { allowedHosts } from "../guard.ts";
 
 export type PreviewsOptions = {
   /** The host each design's Vite dev server binds, the same one Finite listens on. */
@@ -22,6 +24,8 @@ export type PreviewsOptions = {
   startTimeoutMs?: number;
   /** The `@finite/vite-plugin` entry the dev server loads. */
   plugin?: string;
+  /** Hosts the Finite shell is served from, as the server allows them (default: loopback names). */
+  allowedHosts?: readonly string[];
 };
 
 const HOST_SCRIPT = fileURLToPath(new URL("./vite-host.mjs", import.meta.url));
@@ -74,7 +78,12 @@ export function createPreviews(options: PreviewsOptions): Previews {
       execArgv: [],
       env: {
         ...process.env,
-        FINITE_PREVIEW: JSON.stringify({ root: design.root, host: options.host, plugin }),
+        FINITE_PREVIEW: JSON.stringify({
+          root: design.root,
+          host: options.host,
+          plugin,
+          allowedHosts: options.allowedHosts ?? allowedHosts(undefined),
+        }),
       },
       stdio: ["ignore", "pipe", "pipe", "ipc"],
     });
@@ -201,7 +210,7 @@ export function createPreviews(options: PreviewsOptions): Previews {
         if (source.exportName) query.set("export", source.exportName);
         return `${url}/__finite/frame?${query.toString()}`;
       }
-      return url + fillParams(source.path, source.params ?? {});
+      return url + routeHref(source.path, source.params ?? {});
     },
 
     stop: stopRun,
@@ -234,21 +243,4 @@ export function createPreviews(options: PreviewsOptions): Previews {
       await Promise.all([...runs.keys()].map(stopRun));
     },
   };
-}
-
-/** `/users/:id` or `/users/$id` with `{ id: "7" }` → `/users/7`. Unfilled params stay as written. */
-export function fillParams(routePath: string, params: Record<string, string>): string {
-  return routePath
-    .split("/")
-    .map((segment) => {
-      const name =
-        /^:([^?]+)\??$/.exec(segment)?.[1] ??
-        /^\{-?\$([^}]+)\}$/.exec(segment)?.[1] ??
-        /^\$(.+)$/.exec(segment)?.[1] ??
-        (segment === "*" ? "*" : segment === "$" ? "_splat" : undefined);
-      const value = name === undefined ? undefined : params[name];
-      if (value === undefined) return segment;
-      return name === "*" || name === "_splat" ? encodeURI(value) : encodeURIComponent(value);
-    })
-    .join("/");
 }

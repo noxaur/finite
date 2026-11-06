@@ -24,10 +24,14 @@ import type { Screenshots } from "./screenshot.ts";
 type CallToolResult = Awaited<ReturnType<Parameters<typeof tool>[3]>>;
 
 export const GAP = 80;
-export const DEFAULT_SIZE = { width: 1440, height: 900 };
+/** A hugging frame's size when its content can't be measured (no Chrome, preview down). */
+export const DEFAULT_SIZE = { width: 480, height: 320 };
+/** The smallest a hugging frame gets, so a lone button still reads as a frame. */
+export const MIN_HUG = { width: 200, height: 120 };
 /** How far above its frame a label's top sits. */
 export const LABEL_OFFSET = 120;
 const NOTE_WIDTH = 480;
+const MAX_HUG_WIDTH = 1920;
 
 export type ToolContext = {
   open: OpenDesign;
@@ -68,6 +72,27 @@ export function layoutRow(existing: Box[], sizes: Size[], rightOf?: Box): Box[] 
     x = box.x + box.width + GAP;
     return box;
   });
+}
+
+/**
+ * A new frame's size: what place_frames was given, the rest measured from its rendered content
+ * (natural width without `width`), and never smaller than `MIN_HUG`.
+ */
+export async function frameSize(
+  f: { width?: number | undefined; height?: number | undefined },
+  measure: (width: number | undefined) => Promise<Size>,
+): Promise<Size> {
+  if (f.width !== undefined && f.height !== undefined) return { width: f.width, height: f.height };
+  let measured: Size = { width: f.width ?? DEFAULT_SIZE.width, height: DEFAULT_SIZE.height };
+  try {
+    measured = await measure(f.width);
+  } catch {
+    // Unmeasured: the canvas still sizes a hugging frame's height once it renders.
+  }
+  return {
+    width: f.width ?? Math.min(MAX_HUG_WIDTH, Math.max(MIN_HUG.width, measured.width)),
+    height: f.height ?? Math.max(MIN_HUG.height, measured.height),
+  };
 }
 
 function overlap(boxes: Box[], b: Box): Box | undefined {
@@ -205,7 +230,7 @@ export function canvasServer(ctx: ToolContext) {
 
     safeTool(
       "place_frames",
-      `Puts TSX files on a canvas as frames, in a row right of rightOf (a frame id) or of the rightmost frame, with a title and why label above each. Files are paths under ${boardDir("<canvasId>")}/ (or relative to it) with a default-exported component. Default size ${DEFAULT_SIZE.width}×${DEFAULT_SIZE.height}.`,
+      `Puts TSX files on a canvas as frames, in a row right of rightOf (a frame id) or of the rightmost frame, with a title and why label above each. Files are paths under ${boardDir("<canvasId>")}/ (or relative to it) with a default-exported component. Frames hug their content: leave width out for a component (the frame takes its natural size, at least ${MIN_HUG.width}×${MIN_HUG.height}), pass width for a full page or screen (e.g. 1440 desktop, 390 mobile) and its height follows the content. Pass height only for a fixed viewport.`,
       canvasTools.place_frames,
       async ({ canvasId, frames, rightOf }) => {
         const c = await canvas(canvasId);
@@ -230,18 +255,21 @@ export function canvasServer(ctx: ToolContext) {
         if (rightOf !== undefined && !anchor) {
           throw new Refused(`There's no frame ${rightOf} on ${c.name}. Call read_canvas.`);
         }
-        const boxes = layoutRow(
-          c.frames,
-          frames.map((f) => ({
-            width: f.width ?? DEFAULT_SIZE.width,
-            height: f.height ?? DEFAULT_SIZE.height,
-          })),
-          anchor,
+        const sizes = await Promise.all(
+          frames.map((f, i) =>
+            frameSize(f, async (width) => {
+              await ctx.previews.ensure(design);
+              const url = ctx.previews.frameUrl(design.id, { kind: "file", file: files[i]! });
+              return ctx.screenshots.measure(url, width);
+            }),
+          ),
         );
+        const boxes = layoutRow(c.frames, sizes, anchor);
         const placed: Frame[] = frames.map((f, i) => ({
           id: randomUUID(),
           name: f.name,
           ...boxes[i]!,
+          ...(f.height === undefined ? { hug: true } : {}),
           source: { kind: "file", file: files[i]! },
         }));
         await open.patchCanvas(canvasId, { op: "addFrames", frames: placed }, actor);

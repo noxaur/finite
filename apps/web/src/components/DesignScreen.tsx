@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import { finite, findThread, useDesignState, useSettings } from "@/client/finite";
 import { UNTIL_OPENED } from "@/lib/threads";
 import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
-import { IconButton } from "./Button";
+import { Button, IconButton } from "./Button";
 import {
   Canvas,
   Inspector,
@@ -271,10 +271,17 @@ export function DesignScreen({ id }: { id: string }) {
           <Preview state={state?.preview} install={state?.install} />
           {place.tab === "prototypes" && !thread && (
             <div {...stylex.props(styles.hello)}>
-              <p {...stylex.props(styles.helloTitle)}>New prototype</p>
+              <p {...stylex.props(styles.helloTitle)}>Describe something to prototype</p>
               <p {...stylex.props(styles.helloText)}>
-                Say what to make. The agent builds it here and names it.
+                The agent builds it on this canvas from your app&apos;s code and names it.
               </p>
+              <div {...stylex.props(styles.examples)}>
+                {EXAMPLE_PROMPTS.map(([label, prompt]) => (
+                  <Button key={label} size="small" onClick={() => focusComposer(prompt)}>
+                    {label}
+                  </Button>
+                ))}
+              </div>
             </div>
           )}
           <StarMenu
@@ -353,6 +360,13 @@ function Preview({
   );
 }
 
+/** What the empty Prototypes canvas offers to start from; each fills the composer. */
+const EXAMPLE_PROMPTS = [
+  ["Pricing card, 3 styles", "A small pricing card, explore 3 style directions"],
+  ["Settings page", "A settings page for this app, in its own components and tokens"],
+  ["Empty search results", "An empty state for a search with no results"],
+] as const;
+
 const styles = stylex.create({
   screen: {
     display: "flex",
@@ -397,6 +411,14 @@ const styles = stylex.create({
     transform: "translate(-50%, -50%)",
     textAlign: "center",
     pointerEvents: "none",
+  },
+  examples: {
+    pointerEvents: "auto",
+    display: "flex",
+    flexWrap: "wrap",
+    justifyContent: "center",
+    gap: space.sm,
+    marginTop: space.lg,
   },
   helloTitle: { margin: 0, fontSize: 20, fontWeight: 500, color: colors.text },
   helloText: { marginTop: space.sm, marginBottom: 0, fontSize: 13, color: colors.muted },

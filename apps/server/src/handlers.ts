@@ -29,7 +29,8 @@ export const handlers: Handlers = {
   "design.connect": ({ path }, { modules }) => modules.store.connect(path),
   "design.rename": ({ id, name }, { modules }) => modules.store.rename(id, name),
   async "design.remove"({ id }, { modules }) {
-    await modules.previews.stop(id);
+    // Sessions working in the design stop first, so none writes into a folder on its way out.
+    await Promise.all([modules.previews.stop(id), modules.agents.stopDesign(id)]);
     await modules.store.remove(id);
     return null;
   },

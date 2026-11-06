@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 const CHANGED_DEBOUNCE_MS = 300;
 const SOURCE = /\.(tsx?|jsx?|mts|mjs|json)$/;
 
-const { root, host, plugin } = JSON.parse(process.env.FINITE_PREVIEW ?? "{}");
+const { root, host, plugin, allowedHosts } = JSON.parse(process.env.FINITE_PREVIEW ?? "{}");
 const send = (message) => process.send?.(message);
 
 // The Finite server went away: don't outlive it.
@@ -32,8 +32,9 @@ try {
     // `undefined` lets Vite find the project's own vite.config.*; our options merge over it.
     configFile: undefined,
     clearScreen: false,
-    plugins: [finite({ root })],
-    server: { port: 0, host, strictPort: false, hmr: true, cors: true },
+    // The plugin limits CORS and the bridge to the Finite shell's hosts.
+    plugins: [finite({ root, allowedHosts })],
+    server: { port: 0, host, strictPort: false, hmr: true },
   });
   await server.listen();
 

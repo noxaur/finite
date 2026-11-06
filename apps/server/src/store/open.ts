@@ -18,6 +18,9 @@ import { readText, serial, toJson, writeAtomic } from "./files.ts";
 
 /** A removed canvas is kept this long, then deleted when the design opens. */
 export const REMOVED_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
+/** The error a thread gets when Finite stopped in the middle of its turn. */
+export const INTERRUPTED_BY_RESTART =
+  "Finite stopped while this turn was running, so it was cut off. Send a message to pick it up again.";
 /** How many canvas patches each person can undo per canvas. */
 const UNDO_DEPTH = 100;
 /** How long external edits to `.finite/` settle before they're read back. */
@@ -114,6 +117,8 @@ export async function openDesign(design: Design): Promise<OpenedDesign> {
     // No session outlives this process, so a thread still marked running was cut off by a crash.
     if (meta.running) {
       const stopped = { ...meta, running: false, awaitingSince: now, updatedAt: now };
+      const cutOff: ThreadEvent = { type: "error", message: INTERRUPTED_BY_RESTART, at: now };
+      await fsp.appendFile(eventsFile(meta.id), `${JSON.stringify(cutOff)}\n`);
       await save(file, stopped);
       threads.set(meta.id, stopped);
     } else threads.set(meta.id, meta);

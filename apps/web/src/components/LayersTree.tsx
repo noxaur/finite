@@ -5,7 +5,7 @@ import type { Canvas, Frame, LayerNode } from "@finite/protocol";
 import { useEffect, useState } from "react";
 import { bridgeOf, onBridgesChange } from "@/canvas/bridge";
 import { useActiveEditor, useEditorState } from "@/canvas/editor";
-import { layerRows, pathIn } from "@/canvas/layers";
+import { groupKeyOf, layerRows, pathIn } from "@/canvas/layers";
 import { keyOf, selectionStore, toggleItem, useSelection } from "@/canvas/selection";
 import { colors, fonts, motion, radii, size, space } from "@/styles/tokens.stylex";
 import { Icon } from "./Icons";
@@ -62,8 +62,12 @@ export function LayersTree({ canvas }: { canvas: Canvas | null | undefined }) {
         next.add(item.frameId);
         if (item.loc === undefined) continue;
         const path = pathIn(layers[item.frameId] ?? [], item.loc, item.index ?? 0) ?? [];
+        next.add(groupKeyOf(item.frameId, item.loc));
         // A parent's instance index isn't in the path; the first is the common case.
-        for (const p of path) next.add(keyOf({ frameId: item.frameId, loc: p.loc, index: 0 }));
+        for (const p of path) {
+          next.add(keyOf({ frameId: item.frameId, loc: p.loc, index: 0 }));
+          next.add(groupKeyOf(item.frameId, p.loc));
+        }
       }
       return next.size === prev.size ? prev : next;
     });

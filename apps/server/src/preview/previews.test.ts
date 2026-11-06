@@ -2,13 +2,15 @@
 // The DOM types are for the code these tests run in Chrome.
 
 import fs from "node:fs";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import path from "node:path";
 import type { Design, LayerNode, PreviewEvent, Previews } from "@finite/protocol";
 import { getChromePath } from "chrome-launcher";
 import puppeteer, { type Browser, type Frame, type Page } from "puppeteer-core";
-import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
+import { afterAll, beforeAll, describe, expect, test, vi } from "vite-plus/test";
 import { prepareFixture } from "./fixtures.ts";
-import { createPreviews, fillParams } from "./index.ts";
+import { createPreviews } from "./index.ts";
 
 const FIXTURES = ["rr-spa", "rr-framework", "tanstack"] as const;
 type FixtureName = (typeof FIXTURES)[number];
@@ -56,6 +58,19 @@ afterAll(async () => {
 });
 
 describe("previews", () => {
+  test("answers cross-origin requests only from the Finite shell's hosts", async () => {
+    const origin = async (from: string) => {
+      const response = await fetch(`${urls["rr-spa"]}/__finite/routes`, {
+        headers: { origin: from },
+      });
+      await response.body?.cancel();
+      return response.headers.get("access-control-allow-origin");
+    };
+    expect(await origin("http://localhost:3000")).toBe("http://localhost:3000");
+    expect(await origin("http://127.0.0.1:4100")).toBe("http://127.0.0.1:4100");
+    expect(await origin("https://evil.example")).toBeNull();
+  });
+
   test("reports starting, then ready with the URL", () => {
     const states = events.filter((e) => e.type === "preview").map((e) => e.status);
     expect(states.slice(0, 2)).toEqual(["starting", "ready"]);
@@ -99,7 +114,10 @@ describe("previews", () => {
     expect(
       previews.frameUrl("rr-spa", { kind: "file", file: ".finite/boards/demo/Hero.tsx" }),
     ).toBe(`${url}/__finite/frame?file=.finite%2Fboards%2Fdemo%2FHero.tsx`);
-    expect(fillParams("/posts/$postId/$", { postId: "7", _splat: "a/b" })).toBe("/posts/7/a/b");
+    // The browser builds the same URL: both use the protocol's routeHref.
+    expect(
+      previews.frameUrl("rr-spa", { kind: "route", path: "/posts/{-$id}", params: { id: "42" } }),
+    ).toBe(`${url}/posts/42`);
     expect(() => previews.frameUrl("nope", { kind: "route", path: "/" })).toThrow(/isn't ready/);
   });
 
@@ -243,13 +261,23 @@ const PARENT = `<!doctype html><html><body style="margin:0">
 
 describe.skipIf(!chromePath)("bridge in Chrome", () => {
   let browser: Browser;
+  /** The parent page, served on loopback like the Finite shell. */
+  let parentServer: http.Server;
+  let parentUrl: string;
 
   beforeAll(async () => {
     browser = await puppeteer.launch({ executablePath: chromePath!, headless: true });
+    parentServer = http.createServer((_, res) => {
+      res.setHeader("content-type", "text/html");
+      res.end(PARENT);
+    });
+    await new Promise<void>((resolve) => parentServer.listen(0, "127.0.0.1", resolve));
+    parentUrl = `http://127.0.0.1:${(parentServer.address() as AddressInfo).port}/`;
   }, 30_000);
 
   afterAll(async () => {
     await browser?.close();
+    parentServer?.close();
   });
 
   async function open(
@@ -258,7 +286,7 @@ describe.skipIf(!chromePath)("bridge in Chrome", () => {
   ): Promise<{ page: Page; frame: Frame }> {
     const page = await browser.newPage();
     await page.setViewport({ width: 800, height: 600 });
-    await page.setContent(PARENT);
+    await page.goto(parentUrl);
     await page.evaluate((url) => {
       (document.getElementById("frame") as HTMLIFrameElement).src = url;
     }, src);
@@ -268,10 +296,33 @@ describe.skipIf(!chromePath)("bridge in Chrome", () => {
         timeout: 30_000,
       },
     );
-    const frame = page.frames().find((f) => f.url().startsWith(src.slice(0, 20)))!;
+    const frame = page
+      .frames()
+      .find((f) => f !== page.mainFrame() && f.url().startsWith(new URL(src).origin))!;
     await frame.waitForSelector(selector, { timeout: 30_000 });
     return { page, frame };
   }
+
+  test("connects only to a parent page on an allowed host", async () => {
+    const src = previews.frameUrl("rr-spa", { kind: "route", path: "/about" });
+    const { page } = await open(src);
+    await vi.waitFor(async () => expect((await bridgeEvents(page)).length).toBeGreaterThan(0));
+    await page.close();
+
+    // The same page from another origin (here `null`) says hello but never gets a port.
+    const stranger = await browser.newPage();
+    await stranger.setContent(PARENT);
+    await stranger.evaluate((url) => {
+      (document.getElementById("frame") as HTMLIFrameElement).src = url;
+    }, src);
+    await stranger.waitForFunction(
+      () => (window as unknown as { bridge: { hellos: number } }).bridge.hellos > 0,
+      { timeout: 30_000 },
+    );
+    await new Promise((r) => setTimeout(r, 1_000));
+    expect(await bridgeEvents(stranger)).toEqual([]);
+    await stranger.close();
+  }, 60_000);
 
   const ask = (page: Page, type: string, params: Record<string, unknown> = {}) =>
     page.evaluate(

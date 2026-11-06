@@ -56,6 +56,25 @@ export interface ThreadView {
 
 type EventType = ServerEvent["type"];
 type EventOf<T extends EventType> = Extract<ServerEvent, { type: T }>;
+type DesignEvent = EventOf<"canvas" | "thread" | "preview" | "routes" | "install">;
+
+/** One design event applied to a design's state. */
+function reduceDesign(state: DesignState, event: DesignEvent): DesignState {
+  switch (event.type) {
+    case "canvas":
+      return { ...state, canvases: upsert(state.canvases, event.canvas) };
+    case "thread":
+      return { ...state, threads: upsert(state.threads, event.meta) };
+    case "preview": {
+      const { type: _t, designId: _d, ...preview } = event;
+      return { ...state, preview };
+    }
+    case "routes":
+      return { ...state, routes: event.routes };
+    case "install":
+      return { ...state, install: event.install };
+  }
+}
 
 /** The parts of the browser's WebSocket this uses, so tests can pass a fake. */
 export interface SocketLike {
@@ -127,6 +146,8 @@ export function createFinite(options: FiniteOptions) {
   const lingering = new Map<string, ReturnType<typeof setTimeout>>();
   const threads = new Map<string, ThreadView>();
   const threadHolds = new Map<string, { designId: string; count: number }>();
+  /** Design events that arrived while a `subscribe` for that design waited for its snapshot. */
+  const buffers = new Map<string, Set<DesignEvent[]>>();
 
   const notify = () => {
     for (const listener of listeners) listener();
@@ -243,34 +264,22 @@ export function createFinite(options: FiniteOptions) {
       case "settings":
         settings = event.settings;
         break;
-      case "canvas":
-        updateState(event.designId, (s) => ({ ...s, canvases: upsert(s.canvases, event.canvas) }));
-        return;
-      case "thread":
-        updateState(event.designId, (s) => ({ ...s, threads: upsert(s.threads, event.meta) }));
-        return;
-      case "preview": {
-        const { type: _t, designId, ...preview } = event;
-        updateState(designId, (s) => ({ ...s, preview }));
-        return;
-      }
-      case "routes":
-        updateState(event.designId, (s) => ({ ...s, routes: event.routes }));
-        return;
-      case "install":
-        updateState(event.designId, (s) => ({ ...s, install: event.install }));
-        return;
       case "thread.event":
         appendThreadEvent(event.threadId, event.event);
         return;
+      case "canvas":
+      case "thread":
+      case "preview":
+      case "routes":
+      case "install": {
+        // A `subscribe` still in flight answers with a snapshot that may predate this event.
+        for (const buffer of buffers.get(event.designId) ?? []) buffer.push(event);
+        const view = views.get(event.designId);
+        if (!view?.state) return;
+        views.set(event.designId, { ...view, state: reduceDesign(view.state, event) });
+        break;
+      }
     }
-    notify();
-  }
-
-  function updateState(designId: string, fn: (state: DesignState) => DesignState) {
-    const view = views.get(designId);
-    if (!view?.state) return;
-    views.set(designId, { ...view, state: fn(view.state) });
     notify();
   }
 
@@ -346,16 +355,24 @@ export function createFinite(options: FiniteOptions) {
   }
 
   async function subscribeDesign(designId: string) {
+    const buffer: DesignEvent[] = [];
+    let set = buffers.get(designId);
+    if (!set) buffers.set(designId, (set = new Set()));
+    set.add(buffer);
     try {
-      const state = await request("subscribe", { designId });
+      const snapshot = await request("subscribe", { designId });
       if (!holds.has(designId)) return;
-      views.set(designId, { state, error: null });
+      // Replaying in arrival order is safe: every design event replaces what it names.
+      views.set(designId, { state: buffer.reduce(reduceDesign, snapshot), error: null });
     } catch (error) {
       if (!holds.has(designId)) return;
       const reason = error instanceof Error ? error.message : String(error);
       // A lost connection resubscribes on its own; keep what's on screen.
       if (status !== "open") return;
       views.set(designId, { state: views.get(designId)?.state ?? null, error: reason });
+    } finally {
+      set.delete(buffer);
+      if (set.size === 0) buffers.delete(designId);
     }
     notify();
   }

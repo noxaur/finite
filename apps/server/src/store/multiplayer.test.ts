@@ -1,15 +1,9 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type {
-  Agents,
-  Canvas,
-  PreviewEvent,
-  Previews,
-  ServerMessage,
-  SourceEditor,
-} from "@finite/protocol";
+import type { Canvas, PreviewEvent, Previews, ServerMessage, SourceEditor } from "@finite/protocol";
 import { afterEach, describe, expect, it } from "vite-plus/test";
+import type { ServerAgents } from "../agent/index.ts";
 import WebSocket from "ws";
 import { type RunningServer, startServer } from "../app.ts";
 import { allowedHosts } from "../guard.ts";
@@ -30,7 +24,7 @@ const previews: Previews = {
   errors: () => [],
   close: async () => {},
 };
-const agents = { close: async () => {} } as unknown as Agents;
+const agents = { close: async () => {} } as unknown as ServerAgents;
 const source = {} as SourceEditor;
 
 const cleanup: (() => Promise<void>)[] = [];

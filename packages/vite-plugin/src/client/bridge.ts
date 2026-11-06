@@ -13,6 +13,30 @@ const MAX_PENDING = 100;
 const MAX_MESSAGE = 4_000;
 /** React Refresh applies an update a moment after Vite's `vite:afterUpdate`. */
 const SETTLE_MS = 50;
+/** The plugin's default for `allowedHosts`, the same loopback names the Finite server allows. */
+export const LOOPBACK_HOSTS: readonly string[] = ["localhost", "127.0.0.1", "::1"];
+/** The plugin defines this above the bridge it serves: the hosts the Finite shell may be on. */
+declare const FINITE_ALLOWED_HOSTS: readonly string[] | undefined;
+
+/**
+ * Whether `origin` is one the Finite shell may be served from: its host is a name in `hosts`
+ * (any port), or its `host:port` is. The Finite server applies the same rule to requests.
+ */
+export function allowsOrigin(hosts: readonly string[], origin: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  const name = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  const authority = url.host.toLowerCase();
+  return hosts.some((h) => {
+    const listed = h.toLowerCase();
+    return listed === name || listed === authority;
+  });
+}
 
 /** The computed styles the inspector shows. */
 const COMPUTED = [
@@ -335,6 +359,10 @@ function start(): void {
   window.addEventListener("message", (event) => {
     const data = event.data as { type?: unknown } | null;
     if (event.source !== window.parent || data?.type !== CONNECT || !event.ports[0]) return;
+    // Only the Finite shell gets the port: another site framing this page can't drive it.
+    const hosts =
+      typeof FINITE_ALLOWED_HOSTS === "undefined" ? LOOPBACK_HOSTS : FINITE_ALLOWED_HOSTS;
+    if (!allowsOrigin(hosts, event.origin)) return;
     port?.close();
     port = event.ports[0];
     port.onmessage = receive;

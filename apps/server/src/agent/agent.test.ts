@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type {
@@ -7,10 +7,11 @@ import type {
   SDKMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { Design, Previews, SourceEditor, Store, Turn } from "@finite/protocol";
+import type { Design, OpenDesign, Previews, SourceEditor, Store, Turn } from "@finite/protocol";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { createLocks } from "../source/files.ts";
 import { openDesign, type OpenedDesign } from "../store/open.ts";
 import { createEventMapper } from "./events.ts";
 import { createAgents, type QueryFn, type QueryLike, shortTitle, startThread } from "./index.ts";
@@ -57,6 +58,28 @@ describe("policy", () => {
       "allow",
     );
     expect(policy("Write", { file_path: "/private/var/p/src/A.tsx" }, real).behavior).toBe("deny");
+  });
+
+  it("follows symlinks: a link under .finite/ to src/ or outside the project is still fenced", async () => {
+    const project = await mkdtemp(path.join(os.tmpdir(), "finite-policy-"));
+    const elsewhere = await mkdtemp(path.join(os.tmpdir(), "finite-elsewhere-"));
+    try {
+      await mkdir(path.join(project, ".finite/boards"), { recursive: true });
+      await mkdir(path.join(project, "src"));
+      await symlink(path.join(project, "src"), path.join(project, ".finite/boards/to-src"));
+      await symlink(elsewhere, path.join(project, ".finite/out"));
+      const real = { ...ctx, root: project };
+      const write = (file: string) => policy("Write", { file_path: file }, real).behavior;
+      expect(write(path.join(project, ".finite/boards/to-src/App.tsx"))).toBe("deny");
+      expect(write(".finite/boards/to-src/new/Deep.tsx")).toBe("deny");
+      expect(write(path.join(project, ".finite/out/x.ts"))).toBe("deny");
+      expect(write(path.join(project, ".finite/boards/c1/New.tsx"))).toBe("allow");
+      const prod = { ...real, prodWrite: true };
+      expect(policy("Write", { file_path: ".finite/out/x.ts" }, prod).behavior).toBe("deny");
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(elsewhere, { recursive: true, force: true });
+    }
   });
 
   it("refuses dialogs nobody can answer", () => {
@@ -413,6 +436,126 @@ describe("agents", () => {
     expect(next.options.resume).toBe("s9");
     expect(next.options.effort).toBe("high");
     await vi.waitFor(() => expect(next.sent).toHaveLength(1));
+  });
+
+  it("starts one session when two messages arrive while Claude Code is being found", async () => {
+    await agents.close();
+    agents = createAgents({
+      store: {} as Store,
+      previews,
+      source,
+      query: sdk.query,
+      claudePath: () => new Promise((r) => setTimeout(() => r("/bin/claude"), 20)),
+      idleMs: 50,
+    });
+    const thread = await startThread(open, {}, turn("first"));
+    await Promise.all([
+      agents.send(open, thread.id, turn("first"), "steer"),
+      agents.send(open, thread.id, turn("second"), "steer"),
+    ]);
+    expect(sdk.queries).toHaveLength(1);
+    await vi.waitFor(() => expect(sdk.queries[0]!.sent.map(textOf)).toEqual(["first", "second"]));
+  });
+
+  it("delivers a message queued while the finishing turn reads the queue", async () => {
+    // The turn's own view of the design pauses right after it reads the (empty) queue.
+    let gate!: () => void;
+    let reading!: () => void;
+    const read = new Promise<void>((r) => (reading = r));
+    let armed = false;
+    const slow: OpenDesign = {
+      ...open,
+      async threads() {
+        const threads = await open.threads();
+        if (armed) {
+          reading();
+          await new Promise<void>((r) => (gate = r));
+        }
+        return threads;
+      },
+    };
+    const t = turn("first");
+    const thread = await startThread(open, {}, t);
+    await agents.send(slow, thread.id, t, "steer");
+    const q = sdk.queries[0]!;
+    armed = true;
+    q.emit(result());
+    await read;
+    armed = false;
+    const sending = agents.send(open, thread.id, turn("second"), "queue");
+    await new Promise((r) => setTimeout(r, 10));
+    gate();
+    await sending;
+    await vi.waitFor(() => expect(q.sent.map(textOf)).toEqual(["first", "second"]));
+    expect((await meta(thread.id)).queued).toEqual([]);
+  });
+
+  it("holds a file's lock from a write's PreToolUse hook to its PostToolUse hook", async () => {
+    await agents.close();
+    const locks = createLocks();
+    agents = createAgents({
+      store: {} as Store,
+      previews,
+      source,
+      query: sdk.query,
+      claudePath: async () => "/bin/claude",
+      locks,
+      writeLockMs: 200,
+    });
+    await newThread("write a board");
+    const hooks = sdk.queries[0]!.options.hooks!;
+    const call = (event: "PreToolUse" | "PostToolUse", id: string, file: string) =>
+      hooks[event]![0]!.hooks[0]!(
+        {
+          hook_event_name: event,
+          tool_name: "Write",
+          tool_input: { file_path: file },
+          tool_use_id: id,
+          tool_response: {},
+        } as never,
+        id,
+        { signal: new AbortController().signal },
+      );
+    const file = path.join(root, ".finite/boards/c1/A.tsx");
+    /** Tries the lock for 20ms; `got` turns true whenever it's taken. */
+    const isFree = async () => {
+      const state = { got: false, taking: Promise.resolve() };
+      state.taking = locks.acquire([file]).then((release) => {
+        state.got = true;
+        release();
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      return state;
+    };
+
+    await call("PreToolUse", "t1", ".finite/boards/c1/A.tsx");
+    const held = await isFree();
+    expect(held.got).toBe(false);
+    await call("PostToolUse", "t1", ".finite/boards/c1/A.tsx");
+    await held.taking;
+    expect(held.got).toBe(true);
+
+    // A write Claude Code never reports back on lets go after writeLockMs.
+    await call("PreToolUse", "t2", file);
+    expect((await isFree()).got).toBe(false);
+    await new Promise((r) => setTimeout(r, 200));
+    expect((await isFree()).got).toBe(true);
+
+    // A denied write takes no lock.
+    const denied = await call("PreToolUse", "t3", path.join(root, "src/App.tsx"));
+    expect(denied).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
+    expect((await isFree()).got).toBe(true);
+  });
+
+  it("stops a design's sessions and waits for them before the design is removed", async () => {
+    const thread = await newThread("first");
+    const q = sdk.queries[0]!;
+    await agents.stopDesign("d1");
+    expect(q.closed).toBe(true);
+    await agents.send(open, thread.id, turn("again"), "steer");
+    expect(sdk.queries).toHaveLength(2);
+    await agents.stopDesign("other");
+    expect(sdk.queries[1]!.closed).toBe(false);
   });
 
   it("revives a snoozed or settled thread when messaged", async () => {

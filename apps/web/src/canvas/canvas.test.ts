@@ -1,6 +1,6 @@
 import type { LayerNode } from "@finite/protocol";
 import { describe, expect, it } from "vite-plus/test";
-import { childrenIn, layerRows, pathIn } from "./layers";
+import { childrenIn, layerName, layerRows, pathIn } from "./layers";
 import { pinSpot } from "./pins";
 import { frameSrc } from "./frameSrc";
 import { keyOf, remapSelection, toggleItem } from "./selection";
@@ -83,14 +83,31 @@ describe("layer trees", () => {
       { id: "f", name: "Home" },
       { id: "g", name: "About" },
     ];
-    const rows = layerRows(frames, { f: tree }, new Set(["f", "f|a.tsx:1:1|0"]));
+    const shut = layerRows(frames, { f: tree }, new Set(["f", "f|a.tsx:1:1|0"]));
+    expect(shut.map((r) => [r.name, r.depth, r.open])).toEqual([
+      ["Home", 0, true],
+      ["1", 1, true],
+      ["2 ×2", 2, false],
+      ["About", 0, false],
+    ]);
+    const rows = layerRows(frames, { f: tree }, new Set(["f", "f|a.tsx:1:1|0", "f|a.tsx:2:1|×"]));
     expect(rows.map((r) => [r.name, r.depth, r.open])).toEqual([
       ["Home", 0, true],
       ["1", 1, true],
-      ["2", 2, null],
-      ["2", 2, false],
+      ["2 ×2", 2, true],
+      ["2", 3, null],
+      ["2", 3, false],
       ["About", 0, false],
     ]);
+  });
+
+  it("names bare elements by their component, then by what their tag means", () => {
+    const bare = (loc: string, tag: string) => ({ loc, tag, name: tag });
+    expect(layerName({ loc: "a.tsx:1:1", tag: "div", name: "Buy now" }, "a.tsx")).toBe("Buy now");
+    expect(layerName(bare("src/components/Card.tsx:3:5", "div"), "src/App.tsx")).toBe("Card");
+    expect(layerName(bare("src/routes/pricing/index.tsx:3:5", "div"))).toBe("Pricing");
+    expect(layerName(bare("src/App.tsx:9:5", "nav"), "src/App.tsx")).toBe("Nav");
+    expect(layerName(bare("src/App.tsx:9:5", "div"), "src/App.tsx")).toBe("div");
   });
 });
 
@@ -141,5 +158,15 @@ describe("comment pins", () => {
     expect(pinSpot(anchor, frame, null)).toEqual({ at: { x: 500, y: 50 }, moved: false });
     expect(pinSpot({ frameId: "gone" }, frame, null)).toBeNull();
     expect(pinSpot({ x: 3, y: 4 }, frame, null)).toEqual({ at: { x: 3, y: 4 }, moved: false });
+  });
+});
+
+describe("frameSrc", () => {
+  it("fills route params the way the server does, optional ones and splats included", () => {
+    const route = (path: string, params?: Record<string, string>) =>
+      frameSrc("http://127.0.0.1:5000/", { kind: "route", path, ...(params ? { params } : {}) });
+    expect(route("/posts/{-$id}", { id: "42" })).toBe("http://127.0.0.1:5000/posts/42");
+    expect(route("/posts/{-$id}")).toBe("http://127.0.0.1:5000/posts");
+    expect(route("/docs/$", { _splat: "a/b" })).toBe("http://127.0.0.1:5000/docs/a/b");
   });
 });

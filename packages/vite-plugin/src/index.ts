@@ -4,6 +4,7 @@ import { createRequire, stripTypeScriptTypes } from "node:module";
 import path from "node:path";
 import type { Plugin, ViteDevServer } from "vite";
 import { frameEntry, frameFile, frameHtml, readFrameConfig } from "./frame.ts";
+import { allowsOrigin, LOOPBACK_HOSTS } from "./client/bridge.ts";
 import { injectIntoHtml } from "./html.ts";
 import { scanRoutes } from "./routes.ts";
 import { stamp } from "./stamp.ts";
@@ -15,6 +16,12 @@ export { stamp, rev } from "./stamp.ts";
 export type FiniteOptions = {
   /** The design root, where `.finite/` lives. */
   root: string;
+  /**
+   * Hosts the Finite shell may be served from (default: loopback names). The bridge connects only
+   * to a parent page on one of them, and the dev server answers cross-origin requests only from
+   * them. A name allows any port; `host:port` allows one.
+   */
+  allowedHosts?: readonly string[];
 };
 
 /** Where the bridge and frame entries are served. Requests under `/@finite/` never reach the app. */
@@ -31,6 +38,7 @@ const BRIDGE_BUILT = new URL("./vite-plugin-bridge.mjs", import.meta.url);
 /** Stamps `data-finite-loc`/`data-finite-rev`, injects the bridge, serves frames and routes. */
 export function finite(options: FiniteOptions): Plugin[] {
   const root = fs.realpathSync(options.root);
+  const allowedHosts = options.allowedHosts ?? LOOPBACK_HOSTS;
   const projectRequire = createRequire(path.join(root, "package.json"));
   const resolvable = (name: string) => {
     try {
@@ -100,6 +108,14 @@ export function finite(options: FiniteOptions): Plugin[] {
       // Frame entries import these; pre-bundle them up front so the first frame doesn't reload.
       const deps = ["react", "react-dom", ...routerPackages(config.router)].filter(resolvable);
       return {
+        server: {
+          // Over the project's own setting: other sites must not read its source and routes.
+          cors: {
+            origin: (origin, done) =>
+              // Vite's types say the error is an `Error`; the cors package takes `null` for none.
+              done(null as never, origin !== undefined && allowsOrigin(allowedHosts, origin)),
+          },
+        },
         optimizeDeps: {
           include: deps.map((dep) => (dep === "react-dom" ? "react-dom/client" : dep)),
         },
@@ -118,10 +134,12 @@ export function finite(options: FiniteOptions): Plugin[] {
     },
     load(id) {
       if (id === BRIDGE_ID) {
+        const hosts = `const FINITE_ALLOWED_HOSTS = ${JSON.stringify(allowedHosts)};\n`;
         if (fs.existsSync(BRIDGE_BUILT)) {
-          return fs.readFileSync(BRIDGE_BUILT, "utf8").replace(/^\/\/# sourceMappingURL=.*$/m, "");
+          const built = fs.readFileSync(BRIDGE_BUILT, "utf8");
+          return hosts + built.replace(/^\/\/# sourceMappingURL=.*$/m, "");
         }
-        return stripTypeScriptTypes(fs.readFileSync(BRIDGE_SOURCE, "utf8"));
+        return hosts + stripTypeScriptTypes(fs.readFileSync(BRIDGE_SOURCE, "utf8"));
       }
       if (!id.startsWith(FRAME_ID)) return null;
       const query = new URLSearchParams(id.slice(FRAME_ID.length));

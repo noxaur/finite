@@ -12,8 +12,9 @@ import {
 } from "@finite/protocol";
 import { listComponents } from "./components.ts";
 import {
-  createLocks,
+  fileLocks,
   freeName,
+  type Locked,
   inRoot,
   mustRead,
   posixRelative,
@@ -39,12 +40,14 @@ export { rewrite } from "./rewrite.ts";
 export type SourceEditorOptions = {
   /** The design's routes, to find the file behind a route for `copyComponent({ route })`. */
   routes?: (design: Design) => Promise<Route[]>;
+  /** The file locks to share with other writers (default: the process's `fileLocks`). */
+  locks?: Locked;
 };
 
 const PROTOTYPE_DIR = ".finite/";
 
 export function createSourceEditor(options: SourceEditorOptions = {}): SourceEditor {
-  const locked = createLocks();
+  const locked = options.locks ?? fileLocks;
   const history = createHistory();
   const actorKey = (design: Design, by: Actor) => `${design.id}\u0000${by.kind}:${by.id}`;
 
@@ -72,14 +75,19 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
           if (code !== undefined) before.set(file, code);
         }
         const after = await change(before);
-        const patches: Patch[] = [];
+        const writes: { file: string; code: string; patch: Patch }[] = [];
         for (const [file, code] of after) {
           const patch = diffPatch(file, before.get(file) ?? "", code);
-          if (!patch) continue;
-          await writeAtomic(inRoot(root, file), code);
-          patches.push(patch);
+          if (patch) writes.push({ file, code, patch });
         }
-        return patches;
+        // Someone outside the locks (an editor, git) may have saved since the read.
+        for (const { file } of writes) {
+          if ((await readText(inRoot(root, file))) !== before.get(file)) {
+            throw new Refused(`${file} changed while this edit ran; try again`, "stale");
+          }
+        }
+        for (const { file, code } of writes) await writeAtomic(inRoot(root, file), code);
+        return writes.map((w) => w.patch);
       },
     );
   }
@@ -117,9 +125,14 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
   /** Copies `file` to a free name at `toFile` with its relative imports pointing back at the originals. */
   async function copyInto(root: string, file: string, toFile: string): Promise<string> {
     const code = await mustRead(root, file);
-    const target = posixRelative(root, await freeName(inRoot(root, toFile)));
-    await transact(root, [target], () => new Map([[target, moveImports(code, file, target)]]));
-    return target;
+    const wanted = inRoot(root, toFile);
+    // Choosing the name and writing it happen under the folder's lock, so two copies can't pick
+    // the same free name.
+    return locked([`${path.dirname(wanted)}${path.sep}`], async () => {
+      const target = posixRelative(root, await freeName(wanted));
+      await transact(root, [target], () => new Map([[target, moveImports(code, file, target)]]));
+      return target;
+    });
   }
 
   return {
@@ -127,7 +140,7 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
       const design = open.design;
       const files = [...new Set(edits.flatMap(editFiles))];
       for (const file of files) inRoot(design.root, file);
-      guardPrototype(canvas, files);
+      guardPrototype(design.root, canvas, files);
 
       let modules: string[] = [];
       if (design.styling === "css-modules") {
@@ -136,7 +149,7 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
           modules.push(...cssModules(parseModule(code, file), file).values());
         }
         modules = [...new Set(modules)];
-        guardPrototype(canvas, modules);
+        guardPrototype(design.root, canvas, modules);
       }
       const theme =
         design.styling === "tailwind"
@@ -216,12 +229,11 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
     components: (design) => listComponents(design.root),
 
     async copyComponent(design, from, toFile) {
-      if (!toFile.startsWith(PROTOTYPE_DIR))
+      if (!inPrototypes(design.root, toFile))
         throw new Refused(
           `Copies go inside ${PROTOTYPE_DIR}, e.g. .finite/boards/<canvasId>/Home.tsx`,
           "outside-prototype",
         );
-      inRoot(design.root, toFile);
       return { file: await copyInto(design.root, await sourceFile(design, from), toFile) };
     },
 
@@ -272,15 +284,20 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
   }
 }
 
-function guardPrototype(canvas: Canvas, files: string[]): void {
+function guardPrototype(root: string, canvas: Canvas, files: string[]): void {
   if (canvas.kind !== "prototype") return;
-  const outside = files.find((f) => !f.startsWith(PROTOTYPE_DIR));
+  const outside = files.find((f) => !inPrototypes(root, f));
   if (outside) {
     throw new Refused(
       `${outside} is production code. Copy ${path.posix.basename(outside)} into this prototype to edit it here.`,
       "outside-prototype",
     );
   }
+}
+
+/** `file` is under `.finite/` once `..` and `.` are resolved. Refuses paths that leave the root. */
+function inPrototypes(root: string, file: string): boolean {
+  return posixRelative(root, inRoot(root, file)).startsWith(PROTOTYPE_DIR);
 }
 
 async function existing(root: string, files: string[]): Promise<string | undefined> {

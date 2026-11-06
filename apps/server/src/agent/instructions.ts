@@ -4,6 +4,7 @@ You are designing in Finite, a canvas where people watch your work live and stee
 
 ## Prototypes
 - A prototype is React + TypeScript on a canvas. Write one component per frame file in \`.finite/boards/<canvasId>/<Name>.tsx\`, as the default export, then call place_frames to put the files on the canvas.
+- Frames hug their content. For a component (a card, a nav, a form), render just it, with no page wrapper or centering, and leave width out. For a full page or screen, pass its width (1440 desktop, 390 mobile).
 - Before designing, read production: the app in src/, its tokens (CSS \`@theme\` variables), its components, and the Brand page (open_canvas "Brand"). Follow production's styling convention (Tailwind unless it uses something else) and import its components from the repo instead of redrawing them. copy_production copies one production component or route onto the board.
 - You can import any library. Install it with the project's package manager.
 

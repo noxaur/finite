@@ -8,7 +8,7 @@ import { createStore } from "./store/index.ts";
 const config = readConfig(process.env, process.cwd());
 
 const store = createStore({ dataDir: config.dataDir });
-const previews = createPreviews({ host: config.host });
+const previews = createPreviews({ host: config.host, allowedHosts: config.allowedHosts });
 const source = createSourceEditor({ routes: (design) => previews.routes(design.id) });
 const agents = createAgents({ store, previews, source });
 

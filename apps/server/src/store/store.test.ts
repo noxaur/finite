@@ -4,7 +4,7 @@ import path from "node:path";
 import type { Actor, Canvas, DesignChange, Frame } from "@finite/protocol";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 import { createStore, DEFAULT_SETTINGS, type FileStore } from "./index.ts";
-import { REMOVED_KEEP_MS } from "./open.ts";
+import { INTERRUPTED_BY_RESTART, REMOVED_KEEP_MS } from "./open.ts";
 
 const by: Actor = { kind: "person", id: "u1", name: "Per" };
 const cleanup: (() => Promise<void>)[] = [];
@@ -314,12 +314,16 @@ describe("threads", () => {
     const meta = await open.createThread({ model: "opus", fast: false });
     await open.updateThread(meta.id, (m) => ({ ...m, running: true }));
     await store.close();
-    const [thread] = await (await newStore(dataDir).open(entry.id)).threads();
+    const reopened = await newStore(dataDir).open(entry.id);
+    const [thread] = await reopened.threads();
     expect(thread).toMatchObject({
       id: meta.id,
       running: false,
       awaitingSince: expect.any(Number),
     });
+    expect(await reopened.history(meta.id)).toEqual([
+      { type: "error", message: INTERRUPTED_BY_RESTART, at: expect.any(Number) },
+    ]);
   });
 
   it("saves attachments under .finite/attachments", async () => {

@@ -5,6 +5,11 @@ import puppeteer, { type Browser } from "puppeteer-core";
 export type Screenshots = {
   /** A PNG of `url` in a `width`×`height` viewport. */
   capture(url: string, width: number, height: number): Promise<Uint8Array>;
+  /**
+   * How big `url`'s content is: its height at `width`, or with no `width` its natural
+   * (max-content) width and the height at that width. For frames that hug their content.
+   */
+  measure(url: string, width?: number): Promise<{ width: number; height: number }>;
   close(): Promise<void>;
 };
 
@@ -36,6 +41,23 @@ export function createScreenshots(): Screenshots {
         await page.setViewport({ width: Math.round(width), height: Math.round(height) });
         await page.goto(url, { waitUntil: "networkidle0", timeout: 20_000 });
         return await page.screenshot({ type: "png" });
+      } finally {
+        await page.close().catch(() => {});
+      }
+    },
+    async measure(url, width) {
+      const page = await (await launch()).newPage();
+      try {
+        // A short viewport, so `min-h-screen` wrappers don't pass for content.
+        await page.setViewport({ width: Math.round(width ?? 1440), height: 200 });
+        await page.goto(url, { waitUntil: "networkidle0", timeout: 20_000 });
+        return await page.evaluate((natural) => {
+          const html = document.documentElement;
+          if (natural) html.style.width = "max-content";
+          const w = natural ? html.getBoundingClientRect().width : html.scrollWidth;
+          const h = Math.max(html.getBoundingClientRect().height, document.body?.scrollHeight ?? 0);
+          return { width: Math.ceil(w), height: Math.ceil(h) };
+        }, width === undefined);
       } finally {
         await page.close().catch(() => {});
       }
