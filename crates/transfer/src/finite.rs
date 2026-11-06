@@ -24,7 +24,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Anchor, Board, Codec, Diagnostic, Direction, Error, Exported, Feature, Imported, Input,
-    Revision, Scope, Score, Support, Tokens, assets, feature, file_stem, json_file::JsonFile,
+    Refused, Revision, Scope, Score, Support, Tokens, assets, feature, file_stem,
+    json_file::JsonFile,
 };
 
 /// The bundle's format and version. See `finite_design::version`.
@@ -349,12 +350,8 @@ impl Walk<'_> {
             Some("its tag isn't a valid element name")
         };
         if let Some(reason) = refused {
-            self.quarantine(
-                anchor,
-                &path,
-                format!("<{}>", tag.to_ascii_lowercase()),
-                reason,
-            );
+            let what = format!("<{}>", tag.to_ascii_lowercase());
+            self.quarantine(anchor, &path, what.clone(), Refused::element(&what), reason);
             return None;
         }
         let me = self.paths.len();
@@ -383,17 +380,30 @@ impl Walk<'_> {
             .collect();
         for name in refused {
             attrs.remove(&name);
-            self.quarantine(anchor, path, name, html::UNSAFE_ATTR_REASON);
+            self.quarantine(
+                anchor,
+                path,
+                name,
+                Refused::Attribute,
+                html::UNSAFE_ATTR_REASON,
+            );
         }
     }
 
-    fn quarantine(&mut self, anchor: Option<usize>, path: &str, what: String, reason: &str) {
+    fn quarantine(
+        &mut self,
+        anchor: Option<usize>,
+        path: &str,
+        what: String,
+        refused: Refused,
+        reason: &str,
+    ) {
         let anchor = Anchor {
             board: self.board,
             node: anchor,
         };
         self.diagnostics
-            .push((anchor, Diagnostic::quarantined(path, what, reason)));
+            .push((anchor, Diagnostic::quarantined(path, what, refused, reason)));
     }
 }
 
@@ -618,6 +628,51 @@ mod tests {
         assert!(
             finite_design::tokens::style(doc, doc.mode_of(board), false).contains("--bg: white;")
         );
+    }
+
+    #[test]
+    fn an_imported_mode_name_is_not_matched_against_mode_ids() {
+        let bundle = json!({
+            "v": 1,
+            "kind": "finite-bundle",
+            "name": "Modes",
+            "artboardModes": { "0": "mode-1" },
+            "artboards": [{ "name": "Board", "styles": { "width": "100px", "height": "100px" } }]
+        });
+        let mut target = design("new");
+        let names = ["Light".to_owned(), "mode-1".to_owned()];
+        // The first mode keeps the implicit id "mode-1", now named "Light".
+        let mut ids = ["m2"].into_iter();
+        let (ops, _) =
+            edit::set_modes(target.doc(), &names, &mut || ids.next().unwrap().to_owned()).unwrap();
+        target.commit("agent", "Modes", &ops, 1);
+        let (_, placed) = place(&mut target, read(&bundle.to_string()).unwrap());
+        let doc = target.doc();
+        let board = doc.get(&placed.artboards[0]).unwrap();
+        assert_eq!(doc.mode_of(board), "m2");
+    }
+
+    #[test]
+    fn a_refused_attribute_is_code_whatever_its_name_starts_with() {
+        let bundle = json!({
+            "v": 1,
+            "kind": "finite-bundle",
+            "name": "Evil",
+            "artboards": [{
+                "name": "Board",
+                "styles": { "width": "100px", "height": "100px" },
+                "attrs": { "<onclick": "alert(1)" }
+            }]
+        });
+        let mut target = design("t");
+        let (_, placed) = place(&mut target, read(&bundle.to_string()).unwrap());
+        let diagnostic = placed
+            .diagnostics
+            .iter()
+            .find(|d| d.what == "<onclick")
+            .expect("reported");
+        assert_eq!(diagnostic.feature, Feature::Script);
+        assert_eq!(diagnostic.visual, Score::Unknown);
     }
 
     #[test]
