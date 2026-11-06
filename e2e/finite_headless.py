@@ -10,12 +10,14 @@ library.
     from finite_headless import Finite, design_id, id_after
 
     with Finite.start(build=False) as finite:
-        design = design_id(finite.call("create_design", name="Test"))
-        board = id_after(
-            finite.call("create_artboard", designId=design, name="Page", width=800, height=500),
-            "artboard",
+        design = design_id(finite.call("designs", create="Test"))
+        made = finite.call(
+            "edit",
+            designId=design,
+            ops=[{"op": "artboard", "name": "Page", "width": 800, "height": 500,
+                  "html": "<button>Go</button>"}],
         )
-        finite.call("write_html", designId=design, targetId=board, html="<button>Go</button>")
+        board = id_after(made, '"Page"')
         finite.design(design)
         finite.click(f'[data-artboard="{board}"] >>> button')
         print(finite.screenshot())
@@ -50,7 +52,7 @@ class ToolError(HeadlessError):
 
 
 def design_id(text: str) -> str:
-    """The designId in create_design's reply."""
+    """The designId in the reply to designs with create."""
     match = re.search(r'designId "([a-z0-9]+)"', text)
     if not match:
         raise ValueError(f"no designId in: {text}")

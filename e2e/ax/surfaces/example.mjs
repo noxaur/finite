@@ -1,27 +1,27 @@
 // One of each kind of mock tool, to copy from. Every other real tool passes
 // through unchanged.
 export default {
-  instructions: (real) => real.replaceAll("find_nodes", "search"),
-  drop: ["find_nodes"],
+  instructions: (real) => real.replaceAll("render", "look"),
+  drop: ["render"],
   tools: {
     // A rename, with a shorter description and the reply relabeled.
-    search: {
-      forward: "find_nodes",
-      description:
-        "Find elements by text, layer name, tag, CSS or attribute. Every filter you pass must match.",
-      reply: (text) => text.replaceAll("find_nodes", "search"),
+    look: {
+      forward: "render",
+      description: "An image of what select matches, with a layout check.",
+      reply: (text) => text.replaceAll("render", "look"),
     },
-    // Two real tools merged into one call.
+    // Two real calls merged into one tool.
     get_artboard: {
       description: "An artboard's HTML, and the box each element rendered in.",
       inputSchema: {
         type: "object",
-        properties: { designId: { type: "string" }, nodeId: { type: "string" } },
-        required: ["designId", "nodeId"],
+        properties: { designId: { type: "string" }, artboardId: { type: "string" } },
+        required: ["designId", "artboardId"],
       },
-      async run({ designId, nodeId }, real) {
-        const html = await real.call("get_html", { designId, nodeId });
-        const layout = await real.call("get_layout", { designId, nodeId });
+      async run({ designId, artboardId }, real) {
+        const select = `#${artboardId}`;
+        const html = await real.call("read", { designId, select, as: "html" });
+        const layout = await real.call("render", { designId, select, output: "layout" });
         return `${html}\n\nLayout:\n${layout}`;
       },
     },

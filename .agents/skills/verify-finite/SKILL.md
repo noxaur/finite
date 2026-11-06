@@ -5,7 +5,7 @@ description: Prove a Finite feature works in the real app and keep the evidence.
 
 # Verify Finite
 
-Finite has two surfaces, and most features need both. **Agents** edit designs through MCP tools at `/mcp` (the six doc6 tools; `call` drives the classic tools at `/mcp/classic`). **People** watch in the browser: the design list at `/` and the canvas at `/design/?id=<designId>`. A proof drives the agent side with `call` and checks the person's side in the page, or the other way round for comments.
+Finite has two surfaces, and most features need both. **Agents** edit designs through MCP tools at `/mcp` (the six tools `designs`, `read`, `edit`, `render`, `comments` and `undo`, which `call` drives). **People** watch in the browser: the design list at `/` and the canvas at `/design/?id=<designId>`. A proof drives the agent side with `call` and checks the person's side in the page, or the other way round for comments.
 
 The harness is `e2e/headless.mjs`. `.agents/skills/finite-headless/SKILL.md` is its command reference (selectors that reach into shadow roots, sandboxed iframes, `--agent`, Python). Read it once before your first drive. This skill adds isolation, a doctor, an evidence folder, before-and-after runs and the feature map.
 
@@ -56,7 +56,7 @@ It only reads state, and every line says `ok` or `FAIL`. It checks five things:
 - The session is alive and owns a private `finite-headless-data-*` folder.
 - `/api/health` answers `ok` with the version in `package.json`.
 - The running build matches the code. It compares a hash of the build inputs (`crates/`, `apps/web/`, the harness, the lockfiles, untracked files included) against the hash of the code the run was built from. Edits to docs, skills or tests don't count.
-- A Chrome, Chromium or Edge is there for `get_screenshot`.
+- A Chrome, Chromium or Edge is there for `render`.
 - The page answers.
 
 Then it prints the page's console since the last call. Run it first, after any surprise, and before you capture final proof. On a `FAIL`, clean up and launch again rather than driving on. After you change code, the build check fails by design: clean up and launch again.
@@ -66,8 +66,8 @@ Then it prints the page's console since the last call. Run it first, after any s
 `$V h $RUN <command> ...` runs any `e2e/headless.mjs` command against this run. The commands you'll use most:
 
 ```bash
-$V h $RUN call create_design '{"name":"Verify"}'      # agent side: prints designId "<id>"
-$V h $RUN call create_artboard @input.json            # JSON inline, @file, or - for stdin
+$V h $RUN call designs '{"create":"Verify"}'           # agent side: prints designId "<id>"
+$V h $RUN call edit @input.json                       # JSON inline, @file, or - for stdin
 $V h $RUN design <designId>                           # person side: open the canvas, wait for artboards
 $V h $RUN snapshot --selector main                    # accessibility tree, what a person sees
 $V h $RUN click 'button[title="Comment (C)"]'
@@ -94,10 +94,10 @@ Text entry has two traps. `type` appends to what a field holds, and `key Meta+a`
 
 ### Background calls
 
-`wait_for_comments` blocks until a person comments, so it has to run while you drive the page:
+`comments` with `wait` blocks until a person comments, so it has to run while you drive the page:
 
 ```bash
-$V bg $RUN 02-wait call wait_for_comments '{"designId":"<D>","timeoutSeconds":30}'
+$V bg $RUN 02-wait call comments '{"designId":"<D>","wait":30}'
 # ...drive the page...
 $V await $RUN 02-wait 30      # blocks until the call returns, then prints .verify/<run>/02-wait.txt
 ```
@@ -114,13 +114,13 @@ $V shot $RUN 02-canvas                                      # .verify/<run>/02-c
 $V shot $RUN 03-panel --selector 'aside[aria-label=Comments]'
 ```
 
-`save` takes any headless command, `call` included, and writes `<name>.txt` holding the command, its output and `[exit N]`. Number the names so the run reads in order. Read each PNG with the Read tool before you rely on it. `get_screenshot` images and any page screenshot taken without a path land in the session's temp folder. Cleanup copies them into `.verify/<run>/tool-images/`, and the server's log to `.verify/<run>/server.log`. Files you make as test input, like a file to import, go in `.verify/<run>/` too.
+`save` takes any headless command, `call` included, and writes `<name>.txt` holding the command, its output and `[exit N]`. Number the names so the run reads in order. Read each PNG with the Read tool before you rely on it. `render` images and any page screenshot taken without a path land in the session's temp folder. Cleanup copies them into `.verify/<run>/tool-images/`, and the server's log to `.verify/<run>/server.log`. Files you make as test input, like a file to import, go in `.verify/<run>/` too.
 
 A proof meets these standards:
 
 - **The real path.** A person's action goes through the page (click, key, type, upload), and an agent's action goes through an MCP `call`. Use the REST API only to read stored state. Writing through it skips the UI you're proving.
 - **Action and result.** Save the step that does the thing and the state after it, not only a final screenshot.
-- **Side effects.** Show the change stored as well as shown. `api GET /api/designs/<id>` returns `meta`, `nodes` and `comments` as the server saved them, and an agent's read tool (`get_comments`, `get_tokens`, `get_tree_summary`) shows what the next agent will see.
+- **Side effects.** Show the change stored as well as shown. `api GET /api/designs/<id>` returns `meta`, `nodes` and `comments` as the server saved them, and an agent's `read` (an overview with no `select`, or `as: "css"` for the tokens) and `comments` show what the next agent will see.
 - **Both directions for live features.** An agent's edit must appear in the page without a reload. A person's comment must reach a waiting agent.
 - **No mocks.** The run uses the real server, the real browser and real MCP sessions.
 - **A clean console.** End with `$V save $RUN <n>-console console`. An exception or failed request there spoils the proof.

@@ -13,9 +13,9 @@ It differs from `vp run e2e`, which runs a fixed script of checks and exits. Use
 
 ```bash
 node e2e/headless.mjs start              # builds first; --no-build reuses the last builds
-node e2e/headless.mjs call create_design '{"name":"Test"}'
-node e2e/headless.mjs call create_artboard '{"designId":"<id>","name":"Page","width":800,"height":500}'
-node e2e/headless.mjs call write_html @input.json
+node e2e/headless.mjs call designs '{"create":"Test"}'
+node e2e/headless.mjs call edit '{"designId":"<id>","ops":[{"op":"artboard","name":"Page","width":800,"height":500,"html":"<button>Go</button>"}]}'
+node e2e/headless.mjs call edit @input.json
 node e2e/headless.mjs design <designId>  # opens it and waits for the artboards to render
 node e2e/headless.mjs screenshot         # prints a PNG path: Read it to see the page
 node e2e/headless.mjs stop               # stops the server and Chrome, and deletes the data
@@ -56,14 +56,14 @@ node e2e/headless.mjs click '[data-artboard] >>> button'
 node e2e/headless.mjs click textarea
 node e2e/headless.mjs type "Make it orange"
 node e2e/headless.mjs key Enter
-node e2e/headless.mjs call wait_for_comments '{"designId":"<id>","timeoutSeconds":5}'
+node e2e/headless.mjs call comments '{"designId":"<id>","wait":5}'
 ```
 
-Page commands run one at a time, but `call` doesn't wait for them. So you can start `call wait_for_comments` in the background first, then post the comment, and check that the agent gets it while it waits.
+Page commands run one at a time, but `call` doesn't wait for them. So you can start `call comments` with `wait` in the background first, then post the comment, and check that the agent gets it while it waits.
 
 ## Several agents
 
-Each `--agent <name>` on `call` opens a separate MCP session with that name, sent as `X-Finite-Agent`. So `--agent Alice` and `--agent Bob` have separate undo histories and show as separate presence badges. Without `--agent`, calls go out as "Agent". `call`'s input is JSON inline, `@file`, or `-` for stdin. Images a tool returns, like `get_screenshot`'s, are saved as PNG files and their paths printed.
+Each `--agent <name>` on `call` opens a separate MCP session with that name, sent as `X-Finite-Agent`. So `--agent Alice` and `--agent Bob` have separate undo histories and show as separate presence badges. Without `--agent`, calls go out as "Agent". `call`'s input is JSON inline, `@file`, or `-` for stdin. Images a tool returns, like `render`'s, are saved as PNG files and their paths printed.
 
 ## From Python
 
@@ -75,14 +75,14 @@ sys.path.insert(0, "e2e")
 from finite_headless import Finite, design_id, id_after
 
 with Finite.start(build=False) as finite:  # stops the session when the block ends
-    design = design_id(finite.call("create_design", name="Test"))
-    board = id_after(finite.call("create_artboard", designId=design, name="Page", width=800, height=500), "artboard")
-    finite.call("write_html", designId=design, targetId=board, html="<button>Go</button>")
+    design = design_id(finite.call("designs", create="Test"))
+    made = finite.call("edit", designId=design, ops=[{"op": "artboard", "name": "Page", "width": 800, "height": 500, "html": "<button>Go</button>"}])
+    board = id_after(made, '"Page"')
     finite.design(design)
     assert finite.query(f'[data-artboard="{board}"] >>> button')[0]["text"] == "Go"
 ```
 
-`Finite.connect()` attaches to a session you started from the shell, and leaves it running. A failed command raises `HeadlessError`, and a tool error raises `ToolError`, with the same message the CLI prints. `call_full` also returns the paths of any images, like `get_screenshot`'s. To test `wait_for_comments`, call it from a thread, then post the comment from the main thread.
+`Finite.connect()` attaches to a session you started from the shell, and leaves it running. A failed command raises `HeadlessError`, and a tool error raises `ToolError`, with the same message the CLI prints. `call_full` also returns the paths of any images, like `render`'s. To test `comments` with `wait`, call it from a thread, then post the comment from the main thread.
 
 ## Against `vp run dev`
 

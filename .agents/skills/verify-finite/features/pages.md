@@ -6,7 +6,7 @@ An agent splits a design into pages to keep components or drafts away from the s
 
 - `pages-sidebar` lists every page with its artboard count.
 - `pages-switch` shows only the picked page's artboards and marks it `aria-current="page"`.
-- `pages-agent` moves the sidebar live when an agent calls `create_page`, `rename_page`, `move_to_page` or `delete_page`.
+- `pages-agent` moves the sidebar live when an agent runs a `page` op, or a `move` op with `page`.
 
 ## How to get to it (user POV)
 
@@ -19,12 +19,12 @@ Preconditions:
 
 - A design with one artboard, open in the page.
 
-- **Agent adds a page.** Run `$V h $RUN call create_page '{"designId":"<D>","name":"Drafts"}'`, then `$V save $RUN 01-sidebar snapshot --selector 'nav[aria-label=Pages]'`. It lists `Page 1 1` and `Drafts 0`, with no reload.
-- **Agent fills it.** Run `$V h $RUN call create_artboard '{"designId":"<D>","pageId":"<P>","name":"Draft","width":400,"height":300,"html":"<p>draft</p>"}'`. The sidebar count for `Drafts` becomes `1`.
+- **Agent adds a page.** Run `$V h $RUN call edit '{"designId":"<D>","ops":[{"op":"page","create":"Drafts"}]}'`, then `$V save $RUN 01-sidebar snapshot --selector 'nav[aria-label=Pages]'`. It lists `Page 1 1` and `Drafts 0`, with no reload.
+- **Agent fills it.** Run `$V h $RUN call edit '{"designId":"<D>","ops":[{"op":"artboard","page":"Drafts","name":"Draft","width":400,"height":300,"html":"<p>draft</p>"}]}'`. The sidebar count for `Drafts` becomes `1`.
 - **Person switches.** Run `$V h $RUN click 'nav[aria-label=Pages] li:nth-child(2) button'`, then `$V save $RUN 02-switched query '[data-artboard]'`. Only the `Draft` artboard is listed, and the button has `aria-current="page"` (check it with `eval`).
-- **Proof.** Run `$V shot $RUN 03-pages` and `$V save $RUN 04-info call get_basic_info '{"designId":"<D>"}'`. The agent's view lists both pages.
+- **Proof.** Run `$V shot $RUN 03-pages` and `$V save $RUN 04-info call read '{"designId":"<D>"}'`. The agent's overview lists both pages.
 
 ## Gotchas
 
-- A new design has one page, `Page 1`, and the sidebar lists it alone. That's not proof `create_page` worked: check for the second row.
+- A new design has one page, `Page 1`, and the sidebar lists it alone. That's not proof the `page` op worked: check for the second row.
 - `query '[data-artboard]'` lists only the artboards that rendered. An artboard on another page isn't in the DOM.

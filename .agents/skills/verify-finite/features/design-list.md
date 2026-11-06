@@ -25,7 +25,7 @@ Preconditions:
 - The page is on `/` (`$V h $RUN open /`).
 
 - **Empty state.** Look at the list. Run `$V save $RUN 01-empty snapshot --selector main`. It shows `No designs yet. Create one, or ask an agent to.` and an empty `list`.
-- **Agent's design appears.** An agent creates a design. Run `$V h $RUN call create_design '{"name":"Verify list"}'`, then `$V h $RUN wait '$deep("main a")?.textContent.includes("Verify list")'`. A card `link` named with `Verify list` and `0 artboards` appears without a reload.
+- **Agent's design appears.** An agent creates a design. Run `$V h $RUN call designs '{"create":"Verify list"}'`, then `$V h $RUN wait '$deep("main a")?.textContent.includes("Verify list")'`. A card `link` named with `Verify list` and `0 artboards` appears without a reload.
 - **Create from the list.** Choose `New design`. Run `$V h $RUN click 'main header button'`, then `$V h $RUN wait 'location.pathname.startsWith("/design")'`. The URL becomes `/design/?id=<id>`, and the top bar shows `Untitled`.
 - **Stored.** Read the list back. Run `$V save $RUN 02-designs api GET /api/designs`. It lists both `Untitled` and `Verify list`.
 - **Open from a card.** Choose `← Designs`, then the `Verify list` card. Run `$V h $RUN click 'header a[href="/"]'`, wait for `location.pathname === "/"`, then `$V h $RUN click 'main li a' --nth <i>`, picking `<i>` from `$V h $RUN query 'main li a'`. The canvas top bar shows `Verify list`.

@@ -15,16 +15,13 @@
 //
 // `start` runs its own finite-server (--bin, default target/debug) with an
 // empty data folder, in the background, until `stop`.
-import { spawn } from "node:child_process";
 import fs from "node:fs";
-import net from "node:net";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { findChrome, root, startServer } from "../lib.mjs";
 import { connect, idAfter } from "../mcp.mjs";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const [command, dirArg, ...rest] = process.argv.slice(2);
 const { values: opts, positionals } = parseArgs({
   args: rest,
@@ -50,23 +47,22 @@ const body = (title) =>
 
 /** Three screens with the same top bar, as copies; returns their ids. */
 async function seedScreens(mcp) {
-  const design = (await mcp.call("create_design", { name: "Plantpal" })).match(
-    /designId "([^"]+)"/,
-  )[1];
+  const design = await mcp.createDesign("Plantpal");
   const boards = [];
   const bars = [];
   for (const [i, title] of TITLES.entries()) {
-    const out = await mcp.call("create_artboard", {
-      designId: design,
-      name: title,
-      width: 390,
-      height: 400,
-      x: i * 450,
-      y: 0,
-      html: bar(title) + body(title),
-    });
-    boards.push(idAfter(out, "artboard"));
-    bars.push(idAfter(out, '"Top bar"'));
+    boards.push(
+      await mcp.artboard(design, {
+        name: title,
+        width: 390,
+        height: 400,
+        x: i * 450,
+        y: 0,
+        html: bar(title) + body(title),
+      }),
+    );
+    const outline = await mcp.call("read", { designId: design, select: `#${boards[i]}` });
+    bars.push(idAfter(outline, '"Top bar"'));
   }
   return { design, boards, bars };
 }
@@ -81,11 +77,10 @@ async function checkChange(mcp, ctx) {
   const notes = [];
   let done = 0;
   // A bold title can come from a token, whose value the HTML doesn't show.
-  const listed = await mcp.callRaw("get_tokens", { designId: ctx.design }).catch(() => null);
-  const tokens = listed && !listed.isError ? (listed.content?.[0]?.text ?? "") : "";
+  const tokens = await mcp.call("read", { designId: ctx.design, as: "css" }).catch(() => "");
   const boldShared = /"(6|7|8|9)00"|"bold"/i.test(tokens);
   for (const [i, board] of ctx.boards.entries()) {
-    const html = await mcp.call("get_html", { designId: ctx.design, nodeId: board });
+    const html = await mcp.readHtml(ctx.design, `#${board}`);
     // The top bar's own HTML: the artboard's name repeats the title.
     const start = html.indexOf("<header");
     const header = start < 0 ? "" : html.slice(start, html.indexOf("</header>", start));
@@ -123,12 +118,10 @@ export const scenarios = {
   "change-component": {
     async seed(mcp) {
       const ctx = await seedScreens(mcp);
-      await mcp.call("create_component", {
-        designId: ctx.design,
-        nodeId: ctx.bars[0],
-        name: "Top bar",
-        replaceNodeIds: ctx.bars.slice(1),
-      });
+      // The first match defines the component; the others become instances.
+      await mcp.edit(ctx.design, [
+        { op: "component", select: ctx.bars.map((id) => `#${id}`).join(", "), name: "Top bar" },
+      ]);
       return ctx;
     },
     prompt: () => CHANGE,
@@ -137,44 +130,21 @@ export const scenarios = {
   // Building from nothing: does the agent share the bar, and what does the change cost?
   build: {
     async seed(mcp) {
-      const design = (await mcp.call("create_design", { name: "Plantpal" })).match(
-        /designId "([^"]+)"/,
-      )[1];
-      return { design };
+      return { design: await mcp.createDesign("Plantpal") };
     },
     prompt: () =>
       `In the Finite design "Plantpal", build three small mobile screens (390 × 400) for a plant-care app: ` +
       `${TITLES.map((t) => `"${t}"`).join(", ")}. They share one top bar (a logo and the screen's title) and each has a line of text. ` +
       `Keep it simple. When they're built, run \`node e2e/ax/micro.mjs mark <dir> change\`, then make this change: ${CHANGE.replace(/^In the Finite design "Plantpal", /, "")}`,
     async check(mcp, ctx) {
-      const info = JSON.parse(await mcp.call("get_basic_info", { designId: ctx.design }));
-      const boards = info.artboards.slice(0, 3);
-      return checkChange(mcp, { ...ctx, boards: boards.map((b) => b.id) });
+      const { artboards } = await mcp.overview(ctx.design);
+      return checkChange(mcp, { ...ctx, boards: artboards.slice(0, 3).map((b) => b.id) });
     },
   },
 };
 
-/** A Chromium for get_screenshot and get_layout, if the server wouldn't find one itself. */
-function defaultChrome() {
-  return (
-    ["/opt/helium-browser-bin/chrome", "/usr/bin/google-chrome", "/usr/bin/chromium"].find((p) =>
-      fs.existsSync(p),
-    ) ?? ""
-  );
-}
-
-/** Tools that only read, and the ones that only say what an agent is doing. */
-const READS = /^(list_designs|get_|find_nodes|find_placement|wait_for_comments)/;
-const STATUS = /^(start|finish)_working_on_nodes$/;
-
-const freePort = () =>
-  new Promise((resolve) => {
-    const srv = net.createServer();
-    srv.listen(0, "127.0.0.1", () => {
-      const { port } = srv.address();
-      srv.close(() => resolve(port));
-    });
-  });
+/** Tools that only read: the other calls change the design. */
+const READS = new Set(["designs", "read", "render", "comments"]);
 
 const statePath = (dir) => path.join(dir, "state.json");
 const readState = (dir) => JSON.parse(fs.readFileSync(statePath(dir), "utf8"));
@@ -211,38 +181,28 @@ async function start(dir) {
   const scenario = scenarios[opts.scenario];
   if (!scenario) throw new Error(`--scenario: one of ${Object.keys(scenarios).join(", ")}`);
   fs.mkdirSync(dir, { recursive: true });
-  const port = await freePort();
-  const data = fs.mkdtempSync(path.join(os.tmpdir(), "finite-micro-data-"));
   const env = Object.fromEntries(
     opts.env.map((pair) => [pair.slice(0, pair.indexOf("=")), pair.slice(pair.indexOf("=") + 1)]),
   );
   const log = fs.openSync(path.join(dir, "server.log"), "a");
-  const child = spawn(opts.bin, [], {
-    env: {
-      // Screenshots and get_layout need a browser.
-      FINITE_CHROME: defaultChrome(),
-      ...process.env,
-      ...env,
-      FINITE_PORT: String(port),
-      FINITE_DATA_DIR: data,
-      RUST_LOG: "warn",
-    },
+  const chrome = findChrome();
+  const server = await startServer({
+    bin: opts.bin,
+    // Renders need a browser.
+    env: { ...(chrome && { FINITE_CHROME: chrome }), ...env },
     stdio: ["ignore", log, log],
     detached: true,
   });
-  child.unref();
-  const base = `http://127.0.0.1:${port}`;
-  for (let i = 0; i < 100; i++) {
-    try {
-      if ((await fetch(`${base}/api/health`)).ok) break;
-    } catch {}
-    await new Promise((r) => setTimeout(r, 100));
-  }
+  const base = server.url;
   const seeder = await connect(base, "Seeder");
   const ctx = await scenario.seed(seeder);
   fs.writeFileSync(
     statePath(dir),
-    JSON.stringify({ base, pid: child.pid, data, scenario: opts.scenario, env, ctx }, null, 2),
+    JSON.stringify(
+      { base, pid: server.child.pid, data: server.dataDir, scenario: opts.scenario, env, ctx },
+      null,
+      2,
+    ),
   );
   fs.writeFileSync(path.join(dir, "calls.jsonl"), "");
   console.log(`Started ${opts.scenario} at ${base}. Brief: node e2e/ax/micro.mjs brief ${dir}`);
@@ -333,7 +293,7 @@ function calls(dir) {
       {
         calls: list.length,
         // Calls that change the design: what an idea for editing should cut.
-        edits: list.filter((c) => !READS.test(c.tool) && !STATUS.test(c.tool)).length,
+        edits: list.filter((c) => !READS.has(c.tool)).length,
         errors: list.filter((c) => c.error).length,
         readKChars: Math.round(list.reduce((a, c) => a + c.resultChars, 0) / 100) / 10,
         writeKChars: Math.round(list.reduce((a, c) => a + c.argsChars, 0) / 100) / 10,
