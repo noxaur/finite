@@ -1626,7 +1626,7 @@ const styles = stylex.create({
     padding: 0,
     borderWidth: 0,
     borderRadius: radii.xs,
-    boxShadow: `inset 0 0 0 1px ${colors.borderStrong}`,
+    boxShadow: shadows.edge,
   },
   picker: {
     position: "absolute",

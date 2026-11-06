@@ -34,7 +34,7 @@ import { tokenOf } from "@/design/editing/inspect";
 import { moveEntry, stashOf } from "@/design/editing/lists";
 import { roundTo } from "@/design/editing/units";
 import type { Node } from "@/design/schema";
-import { colors, radii, shadows, size, space } from "@/styles/tokens.stylex";
+import { colors, outlines, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import type { IconName } from "@/lib/icons";
 import {
   AlphaChip,
@@ -711,10 +711,10 @@ const styles = stylex.create({
     padding: 0,
     borderWidth: 0,
     borderRadius: radii.xs,
-    boxShadow: `inset 0 0 0 1px ${colors.borderStrong}`,
+    boxShadow: shadows.edge,
     cursor: "var(--cursor-pointer, pointer)",
   },
-  swatchOpen: { outline: `2px solid ${colors.brand}`, outlineOffset: 1 },
+  swatchOpen: { outline: outlines.focus, outlineOffset: 1 },
   thumb: { backgroundColor: colors.surface, backgroundSize: "cover", backgroundPosition: "center" },
   line: { display: "flex", alignItems: "center", gap: space.sm, minWidth: 0 },
   column: { flexGrow: 1, display: "flex", flexDirection: "column", gap: space.sm, minWidth: 0 },
@@ -725,7 +725,7 @@ const styles = stylex.create({
     height: size.xs,
     marginInline: 6,
     borderRadius: radii.xs,
-    boxShadow: `inset 0 0 0 1px ${colors.borderStrong}`,
+    boxShadow: shadows.edge,
     cursor: "copy",
   },
   stop: {

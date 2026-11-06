@@ -312,7 +312,7 @@ const styles = stylex.create({
     width: 12,
     height: 12,
     borderRadius: radii.xs,
-    boxShadow: `inset 0 0 0 1px ${colors.borderStrong}`,
+    boxShadow: shadows.edge,
   },
   label: { flexGrow: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" },
   note: {

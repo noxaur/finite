@@ -3,7 +3,16 @@
 import * as stylex from "@stylexjs/stylex";
 import { type ReactNode, useRef, useState } from "react";
 import type { Listener, Presence } from "@/design/schema";
-import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
+import {
+  colors,
+  fonts,
+  motion,
+  outlines,
+  radii,
+  shadows,
+  size,
+  space,
+} from "@/styles/tokens.stylex";
 import { Icon } from "./Icons";
 import { NameInput } from "./NameInput";
 
@@ -316,7 +325,7 @@ const styles = stylex.create({
     fontSize: 14,
     fontWeight: 500,
     textOverflow: "ellipsis",
-    outline: { default: "none", ":focus-visible": `2px solid ${colors.brand}` },
+    outline: { default: "none", ":focus-visible": outlines.focus },
   },
   iconButton: {
     display: "grid",
@@ -405,9 +414,9 @@ const styles = stylex.create({
     color: colors.text,
     font: "inherit",
     fontSize: 14,
-    outline: `2px solid ${colors.brand}`,
+    outline: outlines.focus,
   },
-  rowDrop: { boxShadow: `inset 0 0 0 2px ${colors.brand}` },
+  rowDrop: { boxShadow: shadows.target },
   label: {
     display: "flex",
     alignItems: "center",
@@ -435,7 +444,7 @@ const styles = stylex.create({
   chevron: {
     display: "flex",
     color: colors.faint,
-    transition: "transform 200ms cubic-bezier(.23, 1, .32, 1)",
+    transition: `transform ${motion.base} ${motion.out}`,
   },
   chevronOpen: { transform: "rotate(90deg)" },
   footerChevron: { color: colors.muted },
@@ -497,7 +506,7 @@ const styles = stylex.create({
     color: colors.text,
     font: "inherit",
     fontSize: 13,
-    outline: { default: "none", ":focus-visible": `2px solid ${colors.brand}` },
+    outline: { default: "none", ":focus-visible": outlines.focus },
   },
   footer: {
     flexShrink: 0,

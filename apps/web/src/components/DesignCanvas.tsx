@@ -1377,7 +1377,7 @@ const styles = stylex.create({
     transformOrigin: "bottom left",
   },
   flash: {
-    backgroundColor: "rgba(21, 128, 61, 0.12)",
+    backgroundColor: `color-mix(in srgb, ${colors.ok} 12%, transparent)`,
     outlineColor: colors.ok,
     outlineWidth: "calc(2px * var(--inv-zoom, 1))",
   },

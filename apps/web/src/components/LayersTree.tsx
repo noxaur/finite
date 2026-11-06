@@ -26,7 +26,7 @@ import {
 } from "@/design/editing/layers";
 import type { Replica } from "@/design/replica";
 import type { UserEdit } from "@/design/schema";
-import { colors, radii, size, space } from "@/styles/tokens.stylex";
+import { colors, motion, outlines, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import { Icon } from "./Icons";
 
 /** Each row's pitch: its height (`size.sm`) and the 3px gap under it, so the list can draw only the rows in view. */
@@ -602,7 +602,7 @@ const styles = stylex.create({
     touchAction: "none",
   },
   rowHover: { boxShadow: `inset 0 0 0 1px ${colors.brand}` },
-  rowTarget: { boxShadow: `inset 0 0 0 2px ${colors.brand}` },
+  rowTarget: { boxShadow: shadows.target },
   rowOn: { backgroundColor: colors.brandWash, color: colors.brandText },
   dimmed: { opacity: 0.45 },
   twisty: {
@@ -620,7 +620,7 @@ const styles = stylex.create({
     cursor: "var(--cursor-pointer, pointer)",
   },
   invisible: { visibility: "hidden" },
-  chevron: { display: "flex", transition: "transform 200ms cubic-bezier(.23, 1, .32, 1)" },
+  chevron: { display: "flex", transition: `transform ${motion.base} ${motion.out}` },
   chevronOpen: { transform: "rotate(90deg)" },
   icon: { display: "flex", flexShrink: 0, color: colors.faint },
   part: { color: colors.component },
@@ -643,7 +643,7 @@ const styles = stylex.create({
     backgroundColor: colors.surface,
     color: colors.text,
     font: "inherit",
-    outline: `2px solid ${colors.brand}`,
+    outline: outlines.focus,
   },
   flags: { display: "flex", flexShrink: 0, gap: space.px },
   flag: {
@@ -672,7 +672,7 @@ const styles = stylex.create({
     right: 0,
     height: size.sm,
     borderRadius: radii.xs,
-    boxShadow: `inset 0 0 0 2px ${colors.brand}`,
+    boxShadow: shadows.target,
     pointerEvents: "none",
   },
 });

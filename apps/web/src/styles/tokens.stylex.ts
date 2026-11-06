@@ -93,10 +93,19 @@ export const shadows = stylex.defineVars({
     default: "inset 0 0 0 1px rgba(42, 49, 45, 0.1), inset 0 0 2px 1px rgba(42, 49, 45, 0.12)",
     [DARK]: "inset 0 0 0 1px rgba(20, 23, 21, 0.35), inset 0 0 2px 1px rgba(20, 23, 21, 0.4)",
   },
+  /** A 1px line drawn inside a control's edge, which takes no room. */
+  edge: `inset 0 0 0 1px ${colors.borderStrong}`,
+  /** A 2px brand line inside a row's edge: what a drag would drop into. */
+  target: `inset 0 0 0 2px ${colors.brand}`,
   raised: {
     default: "0 4px 12px rgba(42, 49, 45, 0.09), 0 1px 3px rgba(42, 49, 45, 0.06)",
     [DARK]: "0 4px 12px rgba(20, 23, 21, 0.4), 0 1px 3px rgba(20, 23, 21, 0.3)",
   },
+});
+
+/** Outlines, for focus and for what is open. */
+export const outlines = stylex.defineVars({
+  focus: `2px solid ${colors.brand}`,
 });
 
 export const motion = stylex.defineVars({
