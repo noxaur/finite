@@ -26,17 +26,17 @@
 use std::collections::BTreeMap;
 
 use finite_design::{
-    MAX_DEPTH, NodeKind,
-    edit::pixel_size,
+    NodeKind,
     html::{self, ExportOptions, Fragment, Policy},
-    import::{BlobHash, Dependency},
-    version::{Schema, VersionError},
+    import::BlobHash,
+    version::Schema,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
     Anchor, Board, Codec, Diagnostic, Direction, Error, Exported, Feature, Imported, Input,
-    Revision, Scope, Score, Support, Tokens, assets, file_stem, html::quarantine, tar,
+    Revision, Scope, Score, Support, Tokens, assets, feature, file_stem, html::quarantine,
+    json_file::JsonFile, slug, tar,
 };
 
 /// The manifest's format and version. See `finite_design::version`.
@@ -46,12 +46,8 @@ pub const REPO: Schema = Schema {
     upgrades: &[],
 };
 
-/// What the manifest's `kind` says, so a stray JSON file isn't taken for one.
 const KIND: &str = "finite-repo";
 const MANIFEST: &str = "finite.json";
-
-/// Used for an artboard whose width or height isn't in pixels.
-const FALLBACK: (f64, f64) = (1440.0, 900.0);
 
 /// The longest file name stem, so a path fits in a tar header.
 const STEM: usize = 60;
@@ -78,6 +74,17 @@ struct Manifest {
     artboards: Vec<Artboard>,
 }
 
+impl JsonFile for Manifest {
+    const SCHEMA: &'static Schema = &REPO;
+    const NAME: &'static str = "a Finite folder";
+    const KIND: &'static str = KIND;
+    const EXTRA_DEPTH: usize = 8;
+
+    fn kind(&self) -> &str {
+        &self.kind
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Artboard {
     file: String,
@@ -101,28 +108,7 @@ impl Codec for Repo {
     }
 
     fn support(&self, feature: Feature, direction: Direction) -> Support {
-        use {Direction::*, Support::*};
-        match (feature, direction) {
-            (
-                Feature::Frame
-                | Feature::Text
-                | Feature::SolidFill
-                | Feature::Image
-                | Feature::FlexLayout,
-                Import | Export,
-            ) => Exact,
-            // Like HTML: scripts are quarantined on the way in.
-            (Feature::Script, Import) => Opaque,
-            (Feature::Script, Export) => Exact,
-            (Feature::Embed, Import) => Opaque,
-            (Feature::Embed, Export) => Unsupported,
-            // The folder holds the design, not how it got there.
-            (Feature::ImportHistory, Import | Export) => Unsupported,
-            // The folder has no components, so an instance is written as the
-            // elements it shows.
-            (Feature::Instance, Import) => Unsupported,
-            (Feature::Instance, Export) => Approximate,
-        }
+        feature::finite_markup(feature, direction)
     }
 
     fn read(&self, input: &Input<'_>) -> Result<Imported, Error> {
@@ -132,19 +118,7 @@ impl Codec for Repo {
                 "this isn't a Finite folder: it has no {MANIFEST} at its top"
             ))
         })?;
-        let limit = 2 * MAX_DEPTH + 8;
-        let manifest: Manifest = REPO
-            .decode_nested(manifest_json, limit)
-            .map_err(|e| match e {
-                VersionError::Json(e) => Error(format!("this isn't a Finite folder: {e}")),
-                other => Error(other.to_string()),
-            })?;
-        if manifest.kind != KIND {
-            return Err(Error(format!(
-                "this isn't a Finite folder: its kind is {:?}",
-                manifest.kind
-            )));
-        }
+        let manifest = Manifest::parse(manifest_json)?;
         let mut diagnostics = Vec::new();
         let mut boards = Vec::new();
         for (i, entry) in manifest.artboards.iter().enumerate() {
@@ -175,21 +149,15 @@ impl Codec for Repo {
         };
         let texts: Vec<&str> = css.as_deref().into_iter().chain(tokens.texts()).collect();
         let blobs = files.blobs(&mut boards, &texts)?;
-        let dependencies = blobs
-            .iter()
-            .map(|(hash, _)| Dependency {
-                url: format!("{}{hash}", assets::SCHEME),
-                blob: Some(hash.clone()),
-            })
-            .collect();
+        let (blobs, dependencies) = assets::carried(blobs);
         Ok(Imported {
             format: self.name(),
-            input_kind: format!("finite-repo v{}", REPO.version),
+            input_kind: format!("{KIND} v{}", REPO.version),
             pages: manifest.pages,
             boards,
             tokens,
             css,
-            blobs: blobs.into_iter().map(|(_, bytes)| bytes).collect(),
+            blobs,
             dependencies,
             diagnostics,
         })
@@ -223,19 +191,17 @@ impl Codec for Repo {
                 label = format!("{} ({n})", page.name);
             }
             if label != page.name {
-                diagnostics.push(Diagnostic {
-                    node: None,
-                    path: MANIFEST.into(),
-                    what: format!("the page {:?}", page.name),
-                    feature: Feature::Frame,
-                    reason: format!(
-                        "another page has the same name, so this one is written as {label:?}"
-                    ),
-                    preserved: Score::No,
-                    visual: Score::Yes,
-                    editable: Score::Yes,
-                    quarantined: false,
-                });
+                diagnostics.push(
+                    Diagnostic::new(
+                        Feature::Frame,
+                        format!("the page {:?}", page.name),
+                        format!(
+                            "another page has the same name, so this one is written as {label:?}"
+                        ),
+                        [Score::No, Score::Yes, Score::Yes],
+                    )
+                    .at(MANIFEST),
+                );
             }
             used.push(label.clone());
             labels.insert(id, label);
@@ -299,31 +265,19 @@ impl Codec for Repo {
                     path: format!("assets/{hash}{}", assets::extension(&bytes)),
                     bytes,
                 }),
-                None => diagnostics.push(Diagnostic {
-                    node: None,
-                    path: format!("{}{hash}", assets::SCHEME),
-                    what: "a file".into(),
-                    feature: Feature::Image,
-                    reason: "the design points at a file its store doesn't have".into(),
-                    preserved: Score::No,
-                    visual: Score::No,
-                    editable: Score::No,
-                    quarantined: false,
-                }),
+                None => diagnostics.push(Diagnostic::missing_file(
+                    format!("{}{hash}", assets::SCHEME),
+                    "a file",
+                )),
             }
         }
         if *scope == Scope::Design && !revision.imports.is_empty() {
-            diagnostics.push(Diagnostic {
-                node: None,
-                path: String::new(),
-                what: format!("{} import record(s)", revision.imports.len()),
-                feature: Feature::ImportHistory,
-                reason: "a folder doesn't carry the files the design was imported from".into(),
-                preserved: Score::No,
-                visual: Score::Yes,
-                editable: Score::Yes,
-                quarantined: false,
-            });
+            diagnostics.push(Diagnostic::new(
+                Feature::ImportHistory,
+                format!("{} import record(s)", revision.imports.len()),
+                "a folder doesn't carry the files the design was imported from",
+                [Score::No, Score::Yes, Score::Yes],
+            ));
         }
         let stem = match scope {
             Scope::Design => revision.name.to_owned(),
@@ -358,16 +312,8 @@ fn is_reserved(stem: &str) -> bool {
 /// name added, so two names that reduce to the same letters stay apart and
 /// the stem changes only when the name does.
 fn stem(name: &str) -> String {
-    let mut slug = String::new();
-    for c in name.chars() {
-        if c.is_ascii_alphanumeric() {
-            slug.push(c.to_ascii_lowercase());
-        } else if !slug.ends_with('-') && !slug.is_empty() {
-            slug.push('-');
-        }
-    }
     // Cutting to length can leave a dash at the end, so trim after.
-    let mut slug: String = slug.chars().take(STEM).collect();
+    let mut slug: String = slug(name).chars().take(STEM).collect();
     slug.truncate(slug.trim_end_matches('-').len());
     let hashed = slug.is_empty() || !name.is_ascii();
     if slug.is_empty() {
@@ -409,13 +355,8 @@ fn file_names(boards: &[&finite_design::Node]) -> Vec<String> {
         .collect()
 }
 
-/// Tags that have no end tag.
-const VOID: [&str; 14] = [
-    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
-    "track", "wbr",
-];
-
-/// Tags whose content is written as it is, never laid out.
+/// Tags whose content is written as it is, never laid out: the raw text
+/// elements, and the ones whose whitespace shows.
 const VERBATIM: [&str; 5] = ["pre", "script", "style", "textarea", "title"];
 
 /// Puts each tag on its own line, indented by depth, wherever another tag
@@ -467,7 +408,7 @@ fn lay_out(compact: &str) -> String {
             .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
             .collect::<String>()
             .to_ascii_lowercase();
-        let void = tag.ends_with("/>") || VOID.contains(&name.as_str());
+        let void = tag.ends_with("/>") || html::VOID_TAGS.contains(&name.as_str());
         let mut had_text = false;
         if closing {
             depth = depth.saturating_sub(1);
@@ -601,61 +542,16 @@ fn board(
     if !matches!(root.kind, NodeKind::Element { .. }) {
         return Err(Error(format!("{file} should hold an element, not text")));
     }
-    let root = std::mem::replace(
-        root,
-        Fragment {
-            kind: NodeKind::Text,
-            name: None,
-            text: None,
-            styles: BTreeMap::new(),
-            attrs: BTreeMap::new(),
-            children: Vec::new(),
-            ..Fragment::empty(NodeKind::Text)
-        },
-    );
-    let probe = finite_design::Node {
-        styles: root.styles.clone(),
-        ..finite_design::Node::element("", "div")
-    };
-    // A missing height, or `auto`, is an artboard that grows to fit.
-    let (w, h) = pixel_size(&probe);
-    let auto_height = h.is_none()
-        && root
-            .styles
-            .get("height")
-            .is_none_or(|v| v.trim().eq_ignore_ascii_case("auto"));
-    let width = w.filter(|w| *w > 0.0);
-    let height = h.filter(|h| *h > 0.0);
-    let mut fallen = Vec::new();
-    if width.is_none() {
-        fallen.push(format!("{} wide", FALLBACK.0));
-    }
-    if height.is_none() && !auto_height {
-        fallen.push(format!("{} tall", FALLBACK.1));
-    }
-    if !fallen.is_empty() {
-        diagnostics.push((
-            Anchor {
-                board: i,
-                node: None,
-            },
-            Diagnostic {
-                node: None,
-                path: file.clone(),
-                what: "the artboard's size".into(),
-                feature: Feature::Frame,
-                reason: format!(
-                    "it isn't in pixels, so the artboard is {}",
-                    fallen.join(" and ")
-                ),
-                preserved: Score::No,
-                visual: Score::No,
-                editable: Score::Yes,
-                quarantined: false,
-            },
-        ));
-    }
-    let (width, height) = (width.unwrap_or(FALLBACK.0), height.unwrap_or(FALLBACK.1));
+    let root = std::mem::replace(root, Fragment::empty(NodeKind::Text));
+    let mut board = Board::default();
+    let size = board.size_from(&root.styles, file);
+    diagnostics.extend(size.map(|diagnostic| {
+        let anchor = Anchor {
+            board: i,
+            node: None,
+        };
+        (anchor, diagnostic)
+    }));
     // The artboard is fragment 0 of the parse; the content starts at 1.
     for mut dropped in parsed.dropped {
         dropped.anchor = dropped.anchor.and_then(|n| n.checked_sub(1));
@@ -667,11 +563,7 @@ fn board(
     Ok(Board {
         page: entry.page.clone(),
         mode: entry.mode.clone(),
-        name: root.name.unwrap_or_else(|| format!("Artboard {}", i + 1)),
-        width,
-        height,
-        auto_height,
-        look_in_css: false,
+        name: root.name.unwrap_or_else(|| Board::unnamed(i)),
         position: entry.x.zip(entry.y),
         styles: root.styles,
         attrs: root.attrs,
@@ -683,6 +575,7 @@ fn board(
             .skip(1)
             .map(|path| format!("{file}{path}"))
             .collect(),
+        ..board
     })
 }
 

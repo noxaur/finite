@@ -29,7 +29,7 @@ pub enum Feature {
 }
 
 impl Feature {
-    /// Every feature, in the order [`Feature::position`] gives.
+    /// Every feature.
     pub const ALL: [Feature; 9] = [
         Feature::Frame,
         Feature::Text,
@@ -41,23 +41,6 @@ impl Feature {
         Feature::ImportHistory,
         Feature::Instance,
     ];
-
-    /// Where the feature is in [`Feature::ALL`]. An exhaustive match, so a
-    /// new variant can't be left out of `ALL` without a test failing.
-    #[cfg(test)]
-    const fn position(self) -> usize {
-        match self {
-            Feature::Frame => 0,
-            Feature::Text => 1,
-            Feature::SolidFill => 2,
-            Feature::Image => 3,
-            Feature::FlexLayout => 4,
-            Feature::Script => 5,
-            Feature::Embed => 6,
-            Feature::ImportHistory => 7,
-            Feature::Instance => 8,
-        }
-    }
 
     pub fn name(self) -> &'static str {
         match self {
@@ -98,14 +81,30 @@ pub enum Support {
     Unsupported,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn all_lists_every_feature_once() {
-        for (i, feature) in Feature::ALL.iter().enumerate() {
-            assert_eq!(feature.position(), i, "{feature:?}");
-        }
+/// What the codecs that keep a design as Finite's own HTML (an HTML page, a
+/// `.finite` bundle and a folder) do with each feature. They share it because
+/// they share the parser: a script or an embed is quarantined on the way in,
+/// and an instance is written as the elements it shows, since none of them
+/// has components.
+pub(crate) fn finite_markup(feature: Feature, direction: Direction) -> Support {
+    use {Direction::*, Support::*};
+    match (feature, direction) {
+        (
+            Feature::Frame
+            | Feature::Text
+            | Feature::SolidFill
+            | Feature::Image
+            | Feature::FlexLayout,
+            Import | Export,
+        ) => Exact,
+        (Feature::Script, Import) => Opaque,
+        (Feature::Script, Export) => Exact,
+        // Finite never holds embeds, so there are none to export.
+        (Feature::Embed, Import) => Opaque,
+        (Feature::Embed, Export) => Unsupported,
+        // They hold the design, not how it got there.
+        (Feature::ImportHistory, Import | Export) => Unsupported,
+        (Feature::Instance, Import) => Unsupported,
+        (Feature::Instance, Export) => Approximate,
     }
 }

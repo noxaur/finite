@@ -2,7 +2,9 @@
 //! for `html`, `body` and `:root` would match nothing. These functions write
 //! those selectors as selectors for the artboard, which carries [`CLASS`].
 //! The app export writes them for a screen's wrapper instead, through
-//! [`map_selector`], along with the scanning helpers it shares.
+//! [`map_selector`].
+
+use finite_design::css_scan::{Block, map_rules, scan, split_top, strip_comments};
 
 /// The class an imported page's artboard carries.
 pub(super) const CLASS: &str = "finite-root";
@@ -10,19 +12,6 @@ pub(super) const CLASS: &str = "finite-root";
 /// The cascade layer that holds the artboard's default look on an imported
 /// page, so the page's own rules, layered or not, override it.
 pub(super) const LAYER: &str = "finite-artboard";
-
-/// At-rules whose block holds rules, so their selectors are rewritten too.
-/// Any other at-rule's block, like `@keyframes` or `@font-face`, is copied.
-pub(crate) const GROUPING: [&str; 8] = [
-    "media",
-    "supports",
-    "layer",
-    "container",
-    "scope",
-    "document",
-    "-moz-document",
-    "starting-style",
-];
 
 /// Pseudo-classes that take selectors, which are rewritten too.
 const TAKES_SELECTORS: [&str; 5] = ["is", "where", "not", "has", "matches"];
@@ -45,139 +34,12 @@ pub(super) struct Rewritten {
 /// specificity inside `:where()`; `:root` keeps a class's. Strings,
 /// comments, declarations and at-rule preludes stay as they are.
 pub(super) fn rewrite(css: &str) -> Rewritten {
-    let mut out = Rewritten {
-        css: String::with_capacity(css.len() + 64),
-        ..Rewritten::default()
-    };
-    let bytes = css.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let end = prelude_end(css, i);
-        let prelude = &css[i..end];
-        match bytes.get(end) {
-            Some(b'{') => {
-                if let Some(at) = prelude.trim_start().strip_prefix('@') {
-                    let name: String = at
-                        .chars()
-                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
-                        .collect::<String>()
-                        .to_ascii_lowercase();
-                    if GROUPING.contains(&name.as_str()) {
-                        out.css.push_str(&css[i..=end]);
-                        i = end + 1;
-                    } else {
-                        let close = block_end(css, end).map_or(css.len(), |brace| brace + 1);
-                        out.css.push_str(&css[i..close]);
-                        i = close;
-                    }
-                } else {
-                    let selectors = selector_list(prelude, CLASS, &mut out);
-                    out.css.push_str(&selectors);
-                    out.css.push('{');
-                    i = end + 1;
-                }
-            }
-            // A declaration, an at-rule statement or the end of a block.
-            Some(_) => {
-                out.css.push_str(&css[i..=end]);
-                i = end + 1;
-            }
-            None => {
-                out.css.push_str(prelude);
-                break;
-            }
-        }
-    }
-    out
-}
-
-/// Where the prelude that starts at `from` ends: at the first `{`, `;` or
-/// `}` outside strings, comments and brackets, or at the end.
-pub(crate) fn prelude_end(css: &str, from: usize) -> usize {
-    let mut end = css.len();
-    scan(&css[from..], |at, byte, depth| {
-        if depth == 0 && matches!(byte, b'{' | b';' | b'}') {
-            end = from + at;
-            return false;
-        }
-        true
+    let mut out = Rewritten::default();
+    // Nested rules can name the page too, so look inside style rules.
+    let css = map_rules(css, |selectors| {
+        (selector_list(selectors, CLASS, &mut out), Block::Rules)
     });
-    end
-}
-
-/// The offset of the `}` that closes the block opening at `open`, if there is one.
-pub(crate) fn block_end(css: &str, open: usize) -> Option<usize> {
-    let mut level = 0usize;
-    let mut end = None;
-    scan(&css[open..], |at, byte, _| {
-        match byte {
-            b'{' => level += 1,
-            b'}' => {
-                level -= 1;
-                if level == 0 {
-                    end = Some(open + at);
-                    return false;
-                }
-            }
-            _ => {}
-        }
-        true
-    });
-    end
-}
-
-/// Calls `f` with each byte outside strings and comments, its offset and
-/// how deep it is in `()` and `[]`, until `f` returns false.
-pub(crate) fn scan(s: &str, mut f: impl FnMut(usize, u8, usize) -> bool) {
-    let bytes = s.as_bytes();
-    let (mut i, mut depth) = (0, 0usize);
-    while i < bytes.len() {
-        match bytes[i] {
-            quote @ (b'"' | b'\'') => {
-                i += 1;
-                while i < bytes.len() && bytes[i] != quote {
-                    i += if bytes[i] == b'\\' { 2 } else { 1 };
-                }
-                i += 1;
-                continue;
-            }
-            b'/' if bytes.get(i + 1) == Some(&b'*') => {
-                i = s[i + 2..].find("*/").map_or(s.len(), |end| i + 2 + end + 2);
-                continue;
-            }
-            b'\\' => {
-                i += 2;
-                continue;
-            }
-            byte => {
-                if matches!(byte, b')' | b']') {
-                    depth = depth.saturating_sub(1);
-                }
-                if !f(i, byte, depth) {
-                    return;
-                }
-                if matches!(byte, b'(' | b'[') {
-                    depth += 1;
-                }
-            }
-        }
-        i += 1;
-    }
-}
-
-/// `s` split at each top-level byte that `split` accepts.
-pub(crate) fn split_top(s: &str, split: impl Fn(u8) -> bool) -> Vec<&str> {
-    let mut pieces = Vec::new();
-    let mut start = 0;
-    scan(s, |at, byte, depth| {
-        if depth == 0 && split(byte) {
-            pieces.push(&s[start..at]);
-            start = at + 1;
-        }
-        true
-    });
-    pieces.push(&s[start..]);
-    pieces
+    Rewritten { css, ..out }
 }
 
 fn mentions_page(s: &str) -> bool {
@@ -211,34 +73,6 @@ fn selector_list(list: &str, class: &str, out: &mut Rewritten) -> String {
         })
         .collect::<Vec<_>>()
         .join(",")
-}
-
-/// `s` without its comments. A `/*` inside a string or after a backslash
-/// isn't one.
-pub(crate) fn strip_comments(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = String::with_capacity(s.len());
-    let (mut copied, mut i) = (0, 0);
-    while i < bytes.len() {
-        match bytes[i] {
-            quote @ (b'"' | b'\'') => {
-                i += 1;
-                while i < bytes.len() && bytes[i] != quote {
-                    i += if bytes[i] == b'\\' { 2 } else { 1 };
-                }
-                i += 1;
-            }
-            b'\\' => i += 2,
-            b'/' if bytes.get(i + 1) == Some(&b'*') => {
-                out.push_str(&s[copied..i]);
-                i = s[i + 2..].find("*/").map_or(s.len(), |end| i + 2 + end + 2);
-                copied = i;
-            }
-            _ => i += 1,
-        }
-    }
-    out.push_str(&s[copied.min(s.len())..]);
-    out
 }
 
 /// One complex selector, like `html.dark body > main`, rewritten, or `None`

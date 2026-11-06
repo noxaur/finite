@@ -2,9 +2,9 @@
 //! screen of a route in the page at once and hides all but one, so a rule in
 //! one screen's `<style>` would otherwise restyle the others.
 
-use crate::html::page_css::{
-    GROUPING, block_end, map_selector, prelude_end, split_top, strip_comments,
-};
+use finite_design::css_scan::{Block, map_rules, split_top, strip_comments};
+
+use crate::html::page_css::map_selector;
 
 /// `css` with each style rule limited to elements inside the one with
 /// `class`, at the specificity it had: `.title { … }` is
@@ -21,62 +21,16 @@ use crate::html::page_css::{
 /// `.a:is(body, .b)`, is left as it was, and so doesn't match, since the page
 /// is never inside the element.
 pub(crate) fn scope(css: &str, class: &str) -> String {
-    let mut out = String::with_capacity(css.len() + 32);
-    rules(css, class, &mut out);
-    out
-}
-
-fn rules(css: &str, class: &str, out: &mut String) {
-    let mut i = 0;
-    while i < css.len() {
-        let end = prelude_end(css, i);
-        let prelude = &css[i..end];
-        match css.as_bytes().get(end) {
-            Some(b'{') => {
-                let close = block_end(css, end);
-                let after = close.map_or(css.len(), |brace| brace + 1);
-                let comments = strip_comments(prelude);
-                if comments.trim_start().starts_with('@') {
-                    if at_rule(&comments).is_some_and(|name| GROUPING.contains(&name.as_str())) {
-                        out.push_str(&comments);
-                        out.push('{');
-                        rules(&css[end + 1..close.unwrap_or(css.len())], class, out);
-                        if close.is_some() {
-                            out.push('}');
-                        }
-                    } else {
-                        out.push_str(&css[i..after]);
-                    }
-                } else {
-                    let lead = comments.len() - comments.trim_start().len();
-                    out.push_str(&comments[..lead]);
-                    out.push_str(&selector_list(comments.trim_start(), class));
-                    out.push_str(&css[end..after]);
-                }
-                i = after;
-            }
-            // An at-rule statement like `@import`, a declaration, or a stray `}`.
-            Some(_) => {
-                out.push_str(&css[i..=end]);
-                i = end + 1;
-            }
-            None => {
-                out.push_str(prelude);
-                break;
-            }
-        }
-    }
-}
-
-/// The lowercase name of the at-rule that `prelude` starts.
-fn at_rule(prelude: &str) -> Option<String> {
-    let name: String = prelude
-        .trim_start()
-        .strip_prefix('@')?
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .collect();
-    (!name.is_empty()).then(|| name.to_ascii_lowercase())
+    map_rules(css, |prelude| {
+        let comments = strip_comments(prelude);
+        let lead = comments.len() - comments.trim_start().len();
+        let selectors = format!(
+            "{}{}",
+            &comments[..lead],
+            selector_list(comments.trim_start(), class)
+        );
+        (selectors, Block::Copy)
+    })
 }
 
 fn selector_list(list: &str, class: &str) -> String {
