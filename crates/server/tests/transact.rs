@@ -10,7 +10,8 @@ use finite_design::{
 };
 use finite_server::{
     Hub,
-    hub::{Actor, DesignHandle, random_id},
+    hub::{Actor, DesignHandle},
+    id::random_id,
     store::{MemoryStore, Store},
 };
 use serde_json::Value;

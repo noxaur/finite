@@ -24,10 +24,10 @@ use finite_server::{
     cluster::{self, Cluster, Lease, Members},
     router,
     store::{Claim, MemoryStore, Registry, Store, Stored, Token},
+    testing::{listen, serve},
 };
 use futures::StreamExt;
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
 /// Short, so a dead server's designs move within a second.
@@ -71,9 +71,9 @@ impl Store for Cut {
         self.check()?;
         self.inner.append(id, records, token)
     }
-    fn remove(&self, id: &str) -> io::Result<()> {
+    fn delete(&self, id: &str, token: Token) -> io::Result<()> {
         self.check()?;
-        self.inner.remove(id)
+        self.inner.delete(id, token)
     }
     fn create(&self, snapshot: &Snapshot) -> io::Result<Option<Token>> {
         self.check()?;
@@ -183,19 +183,15 @@ struct Server {
 
 impl Server {
     async fn start(backend: &Backend) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (listener, url) = listen().await;
         let store = backend.connect(&url);
         let hub = Hub::shared(store.clone(), store.clone(), &url, backend.lease()).unwrap();
         let routes = app(hub.clone(), None);
-        let serve = tokio::spawn(async move {
-            let _ = axum::serve(listener, routes).await;
-        });
         Self {
             url,
             hub,
             store,
-            serve,
+            serve: serve(listener, routes),
         }
     }
 
@@ -452,10 +448,9 @@ async fn the_router_follows_a_moved_design() {
         let watcher = backend.connect("http://router");
         let members = Arc::new(Members::fixed(Cluster::observer(watcher.live().unwrap())));
         cluster::follow(members.clone(), watcher, LEASE.every());
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let front = format!("http://{}", listener.local_addr().unwrap());
-        let routes = router::app_with_members(members.clone(), None, None);
-        tokio::spawn(async move { axum::serve(listener, routes).await });
+        let (listener, front) = listen().await;
+        let routes = router::app(members.clone(), router::Options::default());
+        serve(listener, routes);
 
         let http = client();
         let id = create(&http, &front, "Landing").await;

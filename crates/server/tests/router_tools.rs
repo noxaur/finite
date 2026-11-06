@@ -4,7 +4,12 @@
 
 use std::sync::Arc;
 
-use finite_server::{Hub, app, cluster::Cluster, router, store::MemoryStore};
+use finite_server::{
+    Hub, app,
+    cluster::Cluster,
+    store::MemoryStore,
+    testing::{front_for, listen, serve},
+};
 use rmcp::{
     ServiceExt,
     model::CallToolRequestParams,
@@ -13,15 +18,8 @@ use rmcp::{
     },
 };
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
 
 type Client = rmcp::service::RunningService<rmcp::RoleClient, ()>;
-
-async fn listen() -> (TcpListener, String) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    (listener, url)
-}
 
 /// Two servers and a router in front of them, and an agent connected to the
 /// router. Returns the agent, the servers' hubs and the cluster.
@@ -34,11 +32,11 @@ async fn deployment() -> (Client, Vec<Arc<Hub>>, Cluster) {
         let cluster = Cluster::new(nodes.clone(), me).unwrap();
         let hub = Hub::with_cluster(Arc::new(MemoryStore::default()), cluster).unwrap();
         hubs.push(hub.clone());
-        tokio::spawn(async move { axum::serve(listener, app(hub, None)).await });
+        serve(listener, app(hub, None));
     }
     let (front, front_url) = listen().await;
-    let routes = router::app(nodes.clone(), None);
-    tokio::spawn(async move { axum::serve(front, routes).await });
+    let routes = front_for(nodes.clone());
+    serve(front, routes);
     let mut headers = std::collections::HashMap::new();
     headers.insert(
         http::HeaderName::from_static("x-finite-agent"),
@@ -168,6 +166,27 @@ async fn names_and_prefixes_reach_the_server_that_owns_the_design() {
         unknown.starts_with("there's no design \"site\". Did you mean \"Alpha site\""),
         "{unknown}"
     );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_name_resolves_when_newer_designs_crowd_the_list() {
+    let (client, _hubs, _cluster) = deployment().await;
+    let ids = create(&client, &["Needle"]).await;
+    let long = format!("Needle {}", "x".repeat(110));
+    let crowd: Vec<String> = (0..400).map(|i| format!("{long} {i}")).collect();
+    let crowd: Vec<&str> = crowd.iter().map(String::as_str).collect();
+    create(&client, &crowd).await;
+    let made = ok(
+        &client,
+        "edit",
+        json!({ "designId": "Needle", "check": false,
+                "op": "artboard", "name": "Found", "width": 400, "height": 300 }),
+    )
+    .await;
+    assert!(made.contains("Created artboard"), "{made}");
+    let read = ok(&client, "read", json!({ "designId": ids[0] })).await;
+    assert!(read.contains("Found"), "{read}");
     client.cancel().await.unwrap();
 }
 

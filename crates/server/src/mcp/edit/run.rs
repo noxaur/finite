@@ -17,7 +17,7 @@ use serde_json::Value;
 
 use super::ops::{Fields, Kind, Step, failed, flag, need, number, object, select_of, text};
 use crate::{
-    hub::node_id,
+    id::node_id,
     mcp::{
         format::{cut, outline},
         notes::{following_note, kept_nodes_note, kept_note, left_out},

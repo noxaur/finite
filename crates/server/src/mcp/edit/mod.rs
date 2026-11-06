@@ -151,7 +151,10 @@ impl FiniteMcp {
                 text.push_str(&note);
             }
             if p.check != Some(false) {
-                let clean = self.watch.after_edit(&p.design_id, handle, change).await;
+                let clean = self
+                    .watch
+                    .after_edit(&p.design_id, handle, change, self.hub.layout_wait())
+                    .await;
                 let notes = self.watch.take_for_result(&p.design_id);
                 if !notes.is_empty() {
                     text.push('\n');

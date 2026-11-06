@@ -4,7 +4,7 @@
 //! content that overflows its artboard or box goes unnoticed. Measuring takes
 //! a browser: about 0.5 s with Chrome warm and 2 s for the first call, against
 //! 1 ms for the edit itself. So the edit starts the measuring and waits for it
-//! up to [`wait`]. If the note is ready, it goes on that edit's result. If not
+//! up to `Hub::layout_wait`. If the note is ready, it goes on that edit's result. If not
 //! (a cold browser, a busy one), the measuring finishes after the response and
 //! the note goes on the agent's next result for that design. Agents often send
 //! several edits at once, so a note from an earlier edit can arrive with a
@@ -38,23 +38,6 @@ use finite_design::{Change, Document};
 
 use super::layout::{Found, Named, Report, Texts};
 use crate::{hub::DesignHandle, screenshot};
-
-/// How long an edit waits for its layout check by default. AX runs saw a
-/// cold browser miss a shorter wait on most first edits, so agents rendered
-/// to find out instead.
-const DEFAULT_WAIT: Duration = Duration::from_secs(5);
-
-/// How long an edit waits for its layout check before it answers without one.
-/// `FINITE_LAYOUT_WAIT_MS` sets it; the deferred-note tests set 0.
-fn wait() -> Duration {
-    static WAIT: OnceLock<Duration> = OnceLock::new();
-    *WAIT.get_or_init(|| {
-        std::env::var("FINITE_LAYOUT_WAIT_MS")
-            .ok()
-            .and_then(|ms| ms.parse().ok())
-            .map_or(DEFAULT_WAIT, Duration::from_millis)
-    })
-}
 
 /// The longest one measurement may hold up the next. A hung browser is killed
 /// by `screenshot::layout`'s own, longer timeout.
@@ -122,7 +105,7 @@ pub(super) struct LayoutWatch {
 
 impl LayoutWatch {
     /// Starts measuring the artboards `change` touched, and waits up to
-    /// [`wait`] for it. What it finds is then waiting in [`Self::take`].
+    /// `wait` for it. What it finds is then waiting in [`Self::take`].
     /// Returns whether every artboard it touched was measured in time and
     /// had nothing to report.
     pub(super) async fn after_edit(
@@ -130,6 +113,7 @@ impl LayoutWatch {
         design: &str,
         handle: &Arc<DesignHandle>,
         change: &Change,
+        wait: Duration,
     ) -> bool {
         let touched: HashSet<String> = change
             .ops
@@ -209,7 +193,7 @@ impl LayoutWatch {
             }));
         }
         // On time out the tasks carry on and leave their notes for later.
-        match tokio::time::timeout(wait(), futures::future::join_all(tasks)).await {
+        match tokio::time::timeout(wait, futures::future::join_all(tasks)).await {
             Ok(done) => {
                 left_out == 0 && !done.is_empty() && done.into_iter().all(|d| d.unwrap_or(false))
             }
