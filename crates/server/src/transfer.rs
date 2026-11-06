@@ -106,22 +106,24 @@ pub fn router_named(name: &str) -> Result<RouterKind, TransferError> {
     })
 }
 
+const AXES: [Axis; 3] = [Axis::Preserved, Axis::Visual, Axis::Editable];
+
 /// The axes strict mode holds, from names like `preserved,editable`.
 pub fn strict_named<'a>(
     names: impl IntoIterator<Item = &'a str>,
 ) -> Result<Vec<Axis>, TransferError> {
     let mut axes = Vec::new();
     for name in names.into_iter().flat_map(|n| n.split(',')) {
-        let axis = match name.trim() {
-            "" => continue,
-            "preserved" => Axis::Preserved,
-            "visual" => Axis::Visual,
-            "editable" => Axis::Editable,
-            other => {
-                return Err(TransferError::Invalid(format!(
-                    "no strict axis {other:?}; use preserved, visual or editable"
-                )));
-            }
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let Some(axis) = AXES.into_iter().find(|axis| axis.name() == name) else {
+            let known: Vec<&str> = AXES.iter().map(|axis| axis.name()).collect();
+            return Err(TransferError::Invalid(format!(
+                "no strict axis {name:?}; use one of {}",
+                known.join(", ")
+            )));
         };
         if !axes.contains(&axis) {
             axes.push(axis);
@@ -281,16 +283,6 @@ pub async fn import(
         .transact(actor, &label, |tx| prepared.place(tx, page))
         .map_err(|e| TransferError::Invalid(e.0))?;
     Ok(result)
-}
-
-/// Writes `scope` of design `id` as `format`, with the default router.
-pub async fn export(
-    hub: &Arc<Hub>,
-    id: &str,
-    format: Format,
-    scope: Scope,
-) -> Result<Exported, TransferError> {
-    export_with(hub, id, format, scope, None).await
 }
 
 /// Writes `scope` of design `id` as `format`, routing an app export with
