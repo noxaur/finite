@@ -238,7 +238,7 @@ export function Composer({
             ))}
           </div>
         )}
-        {blocked ? (
+        {blocked && (
           <p {...stylex.props(styles.blocked)}>
             <Reason text={claude?.reason ?? "Claude Code isn't ready."} code={styles.code} /> Then{" "}
             <button
@@ -250,37 +250,36 @@ export function Composer({
             </button>
             .
           </p>
-        ) : (
-          <textarea
-            ref={box}
-            aria-label="Message"
-            placeholder={
-              running
-                ? defaultMode === "steer"
-                  ? "Steer the agent while it works…"
-                  : "Queue a message for after this turn…"
-                : "Ask anything. @ files, $ skills, / commands"
-            }
-            value={text}
-            rows={2}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                e.preventDefault();
-                void send(e.altKey);
-              } else if (e.key === "Escape" && pill && !text) {
-                setOpen(false);
-              }
-            }}
-            onPaste={(e) => {
-              if (e.clipboardData.files.length > 0) {
-                e.preventDefault();
-                void upload(e.clipboardData.files);
-              }
-            }}
-            {...stylex.props(styles.input)}
-          />
         )}
+        <textarea
+          ref={box}
+          aria-label="Message"
+          placeholder={
+            running
+              ? defaultMode === "steer"
+                ? "Steer the agent while it works…"
+                : "Queue a message for after this turn…"
+              : "Ask anything. @ files, $ skills, / commands"
+          }
+          value={text}
+          rows={2}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              void send(e.altKey);
+            } else if (e.key === "Escape" && pill && !text) {
+              setOpen(false);
+            }
+          }}
+          onPaste={(e) => {
+            if (e.clipboardData.files.length > 0) {
+              e.preventDefault();
+              void upload(e.clipboardData.files);
+            }
+          }}
+          {...stylex.props(styles.input)}
+        />
         <div {...stylex.props(styles.bar)}>
           <IconButton
             icon="paperclip"
