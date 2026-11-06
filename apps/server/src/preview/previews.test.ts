@@ -266,7 +266,12 @@ describe.skipIf(!chromePath)("bridge in Chrome", () => {
   let parentUrl: string;
 
   beforeAll(async () => {
-    browser = await puppeteer.launch({ executablePath: chromePath!, headless: true });
+    browser = await puppeteer.launch({
+      executablePath: chromePath!,
+      headless: true,
+      // CI's Ubuntu runners block the user namespaces Chrome's sandbox needs.
+      args: process.env.CI ? ["--no-sandbox"] : [],
+    });
     parentServer = http.createServer((_, res) => {
       res.setHeader("content-type", "text/html");
       res.end(PARENT);
