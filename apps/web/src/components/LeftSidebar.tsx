@@ -2,8 +2,8 @@
 
 import * as stylex from "@stylexjs/stylex";
 import { type ReactNode, useRef, useState } from "react";
-import type { Listener, Presence } from "@/design/schema";
-import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
+import { colors, radii, shadows, size, space } from "@/styles/tokens.stylex";
+import { IconButton, Strip, StripItem } from "./Button";
 import { Icon } from "./Icons";
 
 export type LeftMode = "design" | "tokens";
@@ -16,7 +16,7 @@ interface PageRow {
 
 /**
  * The left side of the canvas: the design's name, then either its pages
- * and layers or its tokens, and the agents working on it. The canvas
+ * and layers or its tokens. The canvas
  * shows one page at a time, so picking one swaps which artboards are
  * drawn. People and agents add, rename and delete pages; artboards dragged
  * from Layers onto a page move there.
@@ -32,8 +32,8 @@ export function LeftSidebar({
   pageActions,
   layers,
   tokens,
-  presence,
-  listening,
+  inert,
+  style,
 }: {
   name: string | null;
   onRename: (name: string) => void;
@@ -50,8 +50,10 @@ export function LeftSidebar({
   /** The layers of the shown page, matching the search typed. A drag over a page calls `onDropPage`. */
   layers: (query: string, onDropPage: (page: string | null) => void) => ReactNode;
   tokens: ReactNode;
-  presence: ReadonlyArray<Presence>;
-  listening: ReadonlyArray<Listener>;
+  /** Out of reach of the pointer, focus and screen readers, as while it's hidden. */
+  inert?: boolean;
+  /** The canvas's own placement for the panel, applied last: how it hides and comes back. */
+  style?: stylex.StyleXStyles;
 }) {
   const [query, setQuery] = useState<string | null>(null);
   const [pagesOpen, setPagesOpen] = useState(true);
@@ -60,7 +62,12 @@ export function LeftSidebar({
   const searchRef = useRef<HTMLInputElement>(null);
 
   return (
-    <aside data-camera-ignore aria-label="Design" {...stylex.props(styles.panel)}>
+    <aside
+      data-camera-ignore
+      aria-label="Design"
+      inert={inert}
+      {...stylex.props(styles.panel, style)}
+    >
       <header {...stylex.props(styles.head)}>
         <input
           key={name ?? ""}
@@ -82,11 +89,11 @@ export function LeftSidebar({
           }}
           {...stylex.props(styles.name)}
         />
-        <button
-          type="button"
-          aria-label="Search layers"
-          aria-expanded={query !== null}
-          title="Search layers"
+        <IconButton
+          icon="search"
+          label="Search layers"
+          size="small"
+          expanded={query !== null}
           onClick={() => {
             onMode("design");
             if (query === null) {
@@ -94,26 +101,16 @@ export function LeftSidebar({
               requestAnimationFrame(() => searchRef.current?.focus());
             } else setQuery(null);
           }}
-          {...stylex.props(styles.iconButton, query !== null && styles.iconButtonOn)}
-        >
-          <Icon name="search" size={16} />
-        </button>
+        />
       </header>
 
-      <div role="tablist" aria-label="Sidebar" {...stylex.props(styles.switch)}>
+      <Strip role="tablist" aria-label="Sidebar" style={styles.switch}>
         {(["design", "tokens"] as const).map((m) => (
-          <button
-            key={m}
-            type="button"
-            role="tab"
-            aria-selected={mode === m}
-            onClick={() => onMode(m)}
-            {...stylex.props(styles.seg, mode === m && styles.segOn)}
-          >
+          <StripItem key={m} picked={mode === m} onClick={() => onMode(m)}>
             {m === "design" ? "Design" : "Tokens"}
-          </button>
+          </StripItem>
         ))}
-      </div>
+      </Strip>
 
       {mode === "tokens" ? (
         tokens
@@ -128,23 +125,21 @@ export function LeftSidebar({
                   onClick={() => setPagesOpen(!pagesOpen)}
                   {...stylex.props(styles.label, styles.toggle)}
                 >
-                  <span {...stylex.props(styles.chevron, pagesOpen && styles.chevronOpen)}>
-                    <Icon name="next" size={16} />
-                  </span>
                   Pages
+                  <span {...stylex.props(styles.chevron, pagesOpen && styles.chevronOpen)}>
+                    <Icon name="next" size={12} />
+                  </span>
                 </button>
-                <button
-                  type="button"
-                  aria-label="Add page"
-                  title="Add page"
+                <IconButton
+                  icon="plus"
+                  label="Add page"
+                  size="small"
                   onClick={() => {
                     setPagesOpen(true);
                     pageActions.add();
                   }}
-                  {...stylex.props(styles.iconButton, styles.small, styles.onHover)}
-                >
-                  <Icon name="plus" size={14} />
-                </button>
+                  style={styles.onHover}
+                />
               </div>
               {pagesOpen && (
                 <ol {...stylex.props(styles.pages)}>
@@ -155,26 +150,31 @@ export function LeftSidebar({
                       {...stylex.props(stylex.defaultMarker(), styles.pageItem)}
                     >
                       {renaming === p.id ? (
-                        <input
-                          aria-label="Page name"
-                          defaultValue={p.name}
-                          autoFocus
-                          spellCheck={false}
-                          onFocus={(e) => e.currentTarget.select()}
-                          onBlur={(e) => {
-                            const next = e.target.value.trim();
-                            if (next && next !== p.name) pageActions.rename(p.id, next);
-                            setRenaming(null);
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") e.currentTarget.blur();
-                            else if (e.key === "Escape") {
-                              e.currentTarget.value = p.name;
-                              e.currentTarget.blur();
-                            }
-                          }}
-                          {...stylex.props(styles.pageInput)}
-                        />
+                        <div {...stylex.props(styles.row, styles.rowOn)}>
+                          <span {...stylex.props(styles.rowIcon, styles.rowIconOn)}>
+                            <Icon name="page" size={15} />
+                          </span>
+                          <input
+                            aria-label="Page name"
+                            defaultValue={p.name}
+                            autoFocus
+                            spellCheck={false}
+                            onFocus={(e) => e.currentTarget.select()}
+                            onBlur={(e) => {
+                              const next = e.target.value.trim();
+                              if (next && next !== p.name) pageActions.rename(p.id, next);
+                              setRenaming(null);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") e.currentTarget.blur();
+                              else if (e.key === "Escape") {
+                                e.currentTarget.value = p.name;
+                                e.currentTarget.blur();
+                              }
+                            }}
+                            {...stylex.props(styles.pageInput)}
+                          />
+                        </div>
                       ) : (
                         <button
                           type="button"
@@ -188,27 +188,23 @@ export function LeftSidebar({
                             dropPage === p.id && styles.rowDrop,
                           )}
                         >
-                          <span {...stylex.props(styles.rowIcon)}>
-                            <Icon name="page" size={16} />
+                          <span
+                            {...stylex.props(styles.rowIcon, p.id === page && styles.rowIconOn)}
+                          >
+                            <Icon name="page" size={15} />
                           </span>
                           <span {...stylex.props(styles.rowName)}>{p.name}</span>
                         </button>
                       )}
                       {pages.length > 1 && p.id === page && renaming !== p.id && (
-                        <button
-                          type="button"
-                          aria-label={`Delete ${p.name}`}
+                        <IconButton
+                          icon="close"
+                          label={`Delete ${p.name}`}
                           title="Delete page and its artboards (⌘Z brings it back)"
+                          size="small"
                           onClick={() => pageActions.remove(p.id)}
-                          {...stylex.props(
-                            styles.iconButton,
-                            styles.small,
-                            styles.pageDelete,
-                            styles.onHover,
-                          )}
-                        >
-                          <Icon name="close" size={12} />
-                        </button>
+                          style={[styles.pageDelete, styles.onHover]}
+                        />
                       )}
                     </li>
                   ))}
@@ -244,62 +240,7 @@ export function LeftSidebar({
           </section>
         </>
       )}
-
-      <AgentsFooter presence={presence} listening={listening} />
     </aside>
-  );
-}
-
-/** Who's connected: each agent and what it says it's doing. Folded, it counts them. */
-function AgentsFooter({
-  presence,
-  listening,
-}: {
-  presence: ReadonlyArray<Presence>;
-  listening: ReadonlyArray<Listener>;
-}) {
-  const [open, setOpen] = useState(false);
-  const agents = [
-    ...presence.map((p) => ({ id: p.actor, name: p.name, status: p.status })),
-    ...listening
-      .filter((l) => !presence.some((p) => p.actor === l.actor))
-      .map((l) => ({ id: l.actor, name: l.name, status: "Listening for comments" })),
-  ];
-  const working = presence.filter((p) => p.status).length;
-  return (
-    <footer aria-label="Agents" {...stylex.props(styles.footer)}>
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen(!open)}
-        {...stylex.props(styles.footerButton)}
-      >
-        <span {...stylex.props(styles.chevron, styles.footerChevron, open && styles.chevronOpen)}>
-          <Icon name="next" size={16} />
-        </span>
-        <span {...stylex.props(styles.rowName)}>Agents</span>
-        {!open && working > 0 && <span {...stylex.props(styles.working)}>{working} working</span>}
-        <span {...stylex.props(styles.count)}>{agents.length}</span>
-      </button>
-      {open && (
-        <ul {...stylex.props(styles.agents)}>
-          {agents.length === 0 && <li {...stylex.props(styles.idle)}>No agents connected.</li>}
-          {agents.map((a) => (
-            <li key={a.id} {...stylex.props(styles.agent)}>
-              <span {...stylex.props(styles.chip, a.status !== null && styles.chipOn)}>
-                {a.name}
-              </span>
-              <span
-                {...stylex.props(styles.status, a.status === null && styles.statusIdle)}
-                title={a.status ?? undefined}
-              >
-                {a.status ?? "Idle"}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </footer>
   );
 }
 
@@ -325,6 +266,7 @@ const styles = stylex.create({
     borderBottomStyle: "solid",
     borderBottomColor: colors.border,
   },
+  /** The design's name: plain text until it's edited, then a sunk field. */
   name: {
     flexGrow: 1,
     minWidth: 0,
@@ -332,54 +274,28 @@ const styles = stylex.create({
     marginLeft: `calc(-1 * ${space.xs})`,
     paddingInline: space.xs,
     borderWidth: 0,
-    borderRadius: radii.xs,
-    backgroundColor: { default: "transparent", ":hover": colors.bg, ":focus": colors.bg },
+    borderRadius: radii.sm,
+    backgroundColor: {
+      default: "transparent",
+      ":hover": colors.hoverFill,
+      ":focus": colors.sunk,
+    },
+    boxShadow: { default: "none", ":focus": shadows.field },
     color: colors.text,
     font: "inherit",
     fontSize: 14,
     fontWeight: 500,
     textOverflow: "ellipsis",
-    outline: { default: "none", ":focus-visible": `2px solid ${colors.brand}` },
+    outline: { default: "none", ":focus": `1px solid ${colors.brand}` },
   },
-  iconButton: {
-    display: "grid",
-    placeItems: "center",
-    width: size.xs,
-    height: size.xs,
-    flexShrink: 0,
-    padding: 0,
-    borderWidth: 0,
-    borderRadius: radii.xs,
-    backgroundColor: { default: "transparent", ":hover": colors.sunk },
-    color: { default: colors.muted, ":hover": colors.text },
-    cursor: "var(--cursor-pointer, pointer)",
-  },
-  iconButtonOn: { backgroundColor: colors.sunk, boxShadow: shadows.inset, color: colors.text },
+
+  /** The Design and Tokens tabs, as one strip; the open one is pressed in. */
   switch: {
-    display: "flex",
-    flexShrink: 0,
     marginInline: space.ms,
     marginTop: space.ms,
     marginBottom: space.xs,
-    padding: space.px,
-    borderRadius: radii.sm,
-    backgroundColor: colors.sunk,
   },
-  seg: {
-    flexGrow: 1,
-    flexBasis: 0,
-    height: size.sm,
-    padding: 0,
-    borderWidth: 0,
-    borderRadius: radii.xs,
-    backgroundColor: "transparent",
-    color: { default: colors.muted, ":hover": colors.text },
-    font: "inherit",
-    fontSize: 14,
-    fontWeight: 500,
-    cursor: "var(--cursor-pointer, pointer)",
-  },
-  segOn: { backgroundColor: colors.surface, boxShadow: shadows.inset, color: colors.text },
+
   section: {
     display: "flex",
     flexDirection: "column",
@@ -392,11 +308,12 @@ const styles = stylex.create({
     borderTopStyle: "solid",
     borderTopColor: colors.borderSoft,
   },
-  grow: { flexGrow: 1, flexShrink: 1, minHeight: 0 },
+  /** Layers runs to the bottom edge: the list scrolls there, with its own room after the last row. */
+  grow: { flexGrow: 1, flexShrink: 1, minHeight: 0, paddingBottom: 0 },
   labelRow: {
     display: "flex",
     alignItems: "center",
-    paddingRight: space.sm,
+    paddingRight: space.ms,
   },
   /** Shown while the pointer is over its row, or the control has focus. */
   onHover: {
@@ -406,30 +323,35 @@ const styles = stylex.create({
       ":focus-visible": 1,
     },
   },
-  small: { width: 21, height: 21 },
   pageItem: {
     position: "relative",
     display: "flex",
     alignItems: "center",
   },
+  /** On the current page's row, as far in from the side as the + above it. */
   pageDelete: {
     position: "absolute",
-    right: space.sm,
-    backgroundColor: { default: colors.sunk, ":hover": colors.bg },
+    right: space.ms,
   },
+
+  /** Over the name, as in Layers: a sunk field ringed in the brand while it's typed in. */
   pageInput: {
     flexGrow: 1,
-    height: size.sm,
-    marginInline: space.sm,
+    minWidth: 0,
+    height: size.xs,
+    marginLeft: `calc(-1 * ${space.xs})`,
     paddingInline: space.xs,
     borderWidth: 0,
-    borderRadius: radii.xs,
-    backgroundColor: colors.surface,
+    borderRadius: radii.sm,
+    backgroundColor: colors.sunk,
+    boxShadow: shadows.field,
     color: colors.text,
     font: "inherit",
     fontSize: 14,
-    outline: `2px solid ${colors.brand}`,
+    outline: `1px solid ${colors.brand}`,
   },
+
+  /** Where artboards dragged from Layers would move, ringed in the brand. */
   rowDrop: { boxShadow: `inset 0 0 0 2px ${colors.brand}` },
   label: {
     display: "flex",
@@ -441,7 +363,7 @@ const styles = stylex.create({
     color: colors.muted,
     fontSize: 12,
     fontWeight: 500,
-    lineHeight: "16px",
+    lineHeight: "15px",
   },
   toggle: {
     flexGrow: 1,
@@ -452,7 +374,7 @@ const styles = stylex.create({
     font: "inherit",
     fontSize: 12,
     fontWeight: 500,
-    lineHeight: "16px",
+    lineHeight: "15px",
     cursor: "var(--cursor-pointer, pointer)",
   },
   chevron: {
@@ -461,14 +383,14 @@ const styles = stylex.create({
     transition: "transform 200ms cubic-bezier(.23, 1, .32, 1)",
   },
   chevronOpen: { transform: "rotate(90deg)" },
-  footerChevron: { color: colors.muted },
   pages: {
     display: "flex",
     flexDirection: "column",
     gap: space.px,
     maxHeight: 180,
     margin: 0,
-    padding: 0,
+    paddingBlock: 0,
+    paddingInline: space.sm,
     overflowY: "auto",
     listStyle: "none",
   },
@@ -478,9 +400,11 @@ const styles = stylex.create({
     gap: space.sm,
     width: "100%",
     height: size.sm,
-    paddingInline: space.ms,
+    flexShrink: 0,
+    paddingInline: space.xs,
     borderWidth: 0,
-    backgroundColor: { default: "transparent", ":hover": colors.bg },
+    borderRadius: radii.sm,
+    backgroundColor: { default: "transparent", ":hover": colors.hoverFill },
     color: colors.text,
     font: "inherit",
     fontSize: 14,
@@ -488,11 +412,13 @@ const styles = stylex.create({
     textAlign: "left",
     cursor: "var(--cursor-pointer, pointer)",
   },
+  /** The page on the canvas. */
   rowOn: {
-    backgroundColor: { default: colors.sunk, ":hover": colors.sunk },
-    fontWeight: 500,
+    backgroundColor: { default: colors.activeFill, ":hover": colors.activeFill },
   },
-  rowIcon: { display: "flex", color: colors.faint },
+
+  rowIcon: { display: "flex", flexShrink: 0, color: colors.faint },
+  rowIconOn: { color: colors.text },
   rowName: {
     flexGrow: 1,
     minWidth: 0,
@@ -501,14 +427,6 @@ const styles = stylex.create({
     whiteSpace: "nowrap",
     textAlign: "left",
   },
-  count: {
-    color: colors.faint,
-    fontFamily: fonts.mono,
-    fontSize: 12,
-    fontVariantNumeric: "tabular-nums",
-    whiteSpace: "nowrap",
-  },
-  working: { color: colors.muted, fontSize: 12, whiteSpace: "nowrap" },
   search: {
     height: size.xs,
     marginInline: space.ms,
@@ -517,66 +435,11 @@ const styles = stylex.create({
     borderWidth: 0,
     borderRadius: radii.sm,
     backgroundColor: colors.sunk,
+    boxShadow: shadows.field,
     color: colors.text,
     font: "inherit",
-    fontSize: 13,
-    outline: { default: "none", ":focus-visible": `2px solid ${colors.brand}` },
-  },
-  footer: {
-    flexShrink: 0,
-    borderTopWidth: 1,
-    borderTopStyle: "solid",
-    borderTopColor: colors.border,
-  },
-  footerButton: {
-    display: "flex",
-    alignItems: "center",
-    gap: space.sm,
-    width: "100%",
-    height: `calc(${size.lg} - 1px)`,
-    paddingInline: space.ms,
-    borderWidth: 0,
-    backgroundColor: "transparent",
-    color: { default: colors.muted, ":hover": colors.text },
-    font: "inherit",
     fontSize: 12,
-    fontWeight: 500,
-    cursor: "var(--cursor-pointer, pointer)",
+    outline: { default: "none", ":focus": `1px solid ${colors.brand}` },
+    "::placeholder": { color: colors.faint },
   },
-  agents: {
-    display: "flex",
-    flexDirection: "column",
-    gap: space.sm,
-    maxHeight: 198,
-    margin: 0,
-    paddingTop: 0,
-    paddingBottom: space.ms,
-    paddingInline: space.ms,
-    overflowY: "auto",
-    listStyle: "none",
-  },
-  idle: { color: colors.muted, fontSize: 12 },
-  agent: { display: "flex", alignItems: "center", gap: space.sm, minWidth: 0 },
-  chip: {
-    flexShrink: 0,
-    paddingInline: space.sm,
-    height: 21,
-    display: "inline-flex",
-    alignItems: "center",
-    borderRadius: radii.xs,
-    backgroundColor: colors.sunk,
-    color: colors.muted,
-    fontSize: 12,
-    fontWeight: 500,
-  },
-  chipOn: { backgroundColor: colors.accent, color: colors.onAccent },
-  status: {
-    minWidth: 0,
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
-    color: colors.muted,
-    fontSize: 12,
-  },
-  statusIdle: { color: colors.faint },
 });

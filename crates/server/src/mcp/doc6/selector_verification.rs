@@ -21,6 +21,7 @@ fn exhaustive_selector_adapter() {
             finite_design::Page {
                 name: "Zero".into(),
                 index: "a0".into(),
+                background: None,
             },
         ),
         (
@@ -28,6 +29,7 @@ fn exhaustive_selector_adapter() {
             finite_design::Page {
                 name: "One".into(),
                 index: "a1".into(),
+                background: None,
             },
         ),
     ]));

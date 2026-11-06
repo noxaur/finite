@@ -1,7 +1,15 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { createServer } from "node:net";
 import path from "node:path";
-import { app, BrowserWindow, dialog, session, shell } from "electron";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  Menu,
+  type MenuItemConstructorOptions,
+  session,
+  shell,
+} from "electron";
 import { afterStop } from "./restarts.js";
 import { keepUpToDate, offerMoveToApplications } from "./updates.js";
 
@@ -119,11 +127,83 @@ function spawnServer(port: number) {
   });
 }
 
+/** What the menu asks the page to do; mirror changes in apps/web/src/global.d.ts and preload.ts. */
+type FiniteCommand = "closeTab" | "nextTab" | "previousTab";
+
+/** Sends a menu command to the focused window's page, which handles the tabs. */
+function sendCommand(command: FiniteCommand) {
+  BrowserWindow.getFocusedWindow()?.webContents.send("finite:command", command);
+}
+
+/** Whether `win` shows a design, which has a tab to close, rather than the designs list. */
+function showsDesign(win: BrowserWindow): boolean {
+  try {
+    return new URL(win.webContents.getURL()).pathname.startsWith("/design");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The app menu: the standard one, but ⌘W closes the design's tab (the
+ * window, on the designs list), ⇧⌘W closes the window, and ⇧⌘[ and ⇧⌘]
+ * step through the tabs, as in a browser.
+ */
+function setMenu() {
+  const mac = process.platform === "darwin";
+  const template: MenuItemConstructorOptions[] = [
+    ...(mac ? [{ role: "appMenu" } as const] : []),
+    {
+      label: "File",
+      submenu: [
+        {
+          label: "Close Tab",
+          accelerator: "CmdOrCtrl+W",
+          click: (_item, window) => {
+            if (!(window instanceof BrowserWindow)) return;
+            if (showsDesign(window)) sendCommand("closeTab");
+            else window.close();
+          },
+        },
+        { label: "Close Window", accelerator: "CmdOrCtrl+Shift+W", role: "close" },
+        ...(mac ? [] : [{ type: "separator" } as const, { role: "quit" } as const]),
+      ],
+    },
+    { role: "editMenu" },
+    { role: "viewMenu" },
+    {
+      label: "Window",
+      submenu: [
+        {
+          label: "Show Previous Tab",
+          accelerator: "CmdOrCtrl+Shift+[",
+          click: () => sendCommand("previousTab"),
+        },
+        {
+          label: "Show Next Tab",
+          accelerator: "CmdOrCtrl+Shift+]",
+          click: () => sendCommand("nextTab"),
+        },
+        { type: "separator" },
+        { role: "minimize" },
+        { role: "zoom" },
+        ...(mac ? [{ type: "separator" } as const, { role: "front" } as const] : []),
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
 async function createWindow() {
   const win = new BrowserWindow({
     width: 1100,
     height: 760,
     show: false,
+    // On macOS the page's tab bar is the title bar: the window buttons sit
+    // inside it, centered in its 42px (TabBar's MAC_BUTTONS keeps them clear).
+    ...(process.platform === "darwin"
+      ? { titleBarStyle: "hiddenInset" as const, trafficLightPosition: { x: 15, y: 14 } }
+      : {}),
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -157,6 +237,7 @@ app
     // server is local, so starting from an empty HTTP cache costs little.
     await session.defaultSession.clearCache();
     keepUpToDate();
+    setMenu();
     await createWindow();
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) void createWindow();

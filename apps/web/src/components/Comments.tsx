@@ -8,10 +8,12 @@ import { audienceLabel, audienceOf, routeLabel, type KnownAgent } from "@/lib/au
 import { COMMENT_LIMIT, NAME_LIMIT, SELECTION_LIMIT } from "@/lib/limits";
 import { isLocalUser, useLocalName } from "@/lib/user";
 import { timeAgo } from "@/lib/time";
+import { Button, buttonStyle, IconButton } from "./Button";
 import { Icon } from "./Icons";
 import { Dropdown } from "./Menu";
 import { PinFilters, PinIcon, type PinState } from "./PinIcon";
-import { colors, radii, space } from "@/styles/tokens.stylex";
+import { raised } from "@/styles/raised";
+import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
 
 /** How far right of its pin a popover starts, in pixels. */
 const POPOVER_GAP = 36;
@@ -226,14 +228,14 @@ function NameLine() {
   return (
     <span {...stylex.props(styles.muted)}>
       Commenting as{" "}
-      <button
-        type="button"
+      <Button
+        size="small"
         title="Change your name"
         onClick={() => setEditing(true)}
-        {...stylex.props(styles.nameButton)}
+        style={styles.nameButton}
       >
         {name}
-      </button>
+      </Button>
     </span>
   );
 }
@@ -278,7 +280,7 @@ function AudiencePicker({
         const agent = options.find((a) => a.id === picked);
         if (agent) onChange({ kind: "agent", id: agent.id, name: agent.name });
       }}
-      style={styles.audience}
+      style={[...buttonStyle({ size: "small" }), styles.audience]}
     >
       <span {...stylex.props(styles.audienceText)}>
         {choices.find(([v]) => v === (value.kind === "agent" ? value.id : value.kind))?.[1]}
@@ -362,21 +364,12 @@ function Thread({
         <p {...stylex.props(styles.body)}>Delete this comment and its replies?</p>
         <div {...stylex.props(styles.threadHead)}>
           <span {...stylex.props(styles.spacer)} />
-          <button
-            type="button"
-            autoFocus
-            onClick={() => setConfirming(false)}
-            {...stylex.props(styles.textButton)}
-          >
+          <Button size="small" autoFocus onClick={() => setConfirming(false)}>
             Cancel
-          </button>
-          <button
-            type="button"
-            onClick={onDelete}
-            {...stylex.props(styles.textButton, styles.danger)}
-          >
+          </Button>
+          <Button size="small" onClick={onDelete} style={styles.danger}>
             Delete
-          </button>
+          </Button>
         </div>
       </Popover>
     );
@@ -387,28 +380,13 @@ function Thread({
         <span {...stylex.props(styles.muted)}>{comment.resolved ? "Resolved" : "Open"}</span>
         <AudiencePicker comment={comment} agents={agents} onChange={onAudience} />
         <span {...stylex.props(styles.spacer)} />
-        <button
-          type="button"
-          onClick={() => setConfirming(true)}
-          {...stylex.props(styles.textButton)}
-        >
+        <Button size="small" onClick={() => setConfirming(true)}>
           Delete
-        </button>
-        <button
-          type="button"
-          onClick={() => onResolve(!comment.resolved)}
-          {...stylex.props(styles.textButton)}
-        >
+        </Button>
+        <Button size="small" onClick={() => onResolve(!comment.resolved)}>
           {comment.resolved ? "Reopen" : "Resolve"}
-        </button>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close"
-          {...stylex.props(styles.textButton)}
-        >
-          ×
-        </button>
+        </Button>
+        <IconButton size="small" icon="close" label="Close" onClick={onClose} />
       </div>
       <ol {...stylex.props(styles.messages)}>
         {comment.messages.map((message, i) => (
@@ -422,13 +400,14 @@ function Thread({
                 {message.editedAt !== undefined && " · edited"}
               </span>
               {i === last && editable && !editing && (
-                <button
-                  type="button"
+                <Button
+                  size="small"
+                  variant="ghost"
                   onClick={() => setEditing(true)}
-                  {...stylex.props(styles.textButton, styles.inlineButton)}
+                  style={styles.inlineButton}
                 >
                   Edit
-                </button>
+                </Button>
               )}
             </div>
             {i === last && editing ? (
@@ -455,7 +434,7 @@ function Thread({
                     type="button"
                     title="Show what changed"
                     onClick={() => onShowChange(change.nodeIds)}
-                    {...stylex.props(styles.change)}
+                    {...stylex.props(raised.control, styles.change)}
                   >
                     {change.label}
                   </button>
@@ -542,14 +521,13 @@ function Composer({
           }}
           {...stylex.props(styles.input)}
         />
-        <button
+        <IconButton
           type="submit"
+          variant="brand"
+          icon="arrowUp"
+          label={label}
           disabled={!body.trim() || sending}
-          aria-label={label}
-          {...stylex.props(styles.send)}
-        >
-          ↑
-        </button>
+        />
       </form>
       {failed && (
         <p role="alert" {...stylex.props(styles.failed)}>
@@ -561,8 +539,8 @@ function Composer({
 }
 
 const pulse = stylex.keyframes({
-  "0%": { boxShadow: `0 0 0 0 rgba(194, 65, 12, 0.5)` },
-  "100%": { boxShadow: `0 0 0 10px rgba(194, 65, 12, 0)` },
+  "0%": { boxShadow: `0 0 0 0 color-mix(in srgb, ${colors.accent} 60%, transparent)` },
+  "100%": { boxShadow: `0 0 0 9px color-mix(in srgb, ${colors.accent} 0%, transparent)` },
 });
 
 const styles = stylex.create({
@@ -572,7 +550,7 @@ const styles = stylex.create({
     top: 0,
     width: 0,
     height: 0,
-    fontFamily: "ui-sans-serif, system-ui, sans-serif",
+    fontFamily: fonts.sans,
     fontSize: 13,
     color: colors.text,
   },
@@ -599,17 +577,18 @@ const styles = stylex.create({
     position: "absolute",
     left: POPOVER_GAP,
     bottom: -3,
-    width: 279,
+    // As wide as the import card, so the thread's head fits its small buttons.
+    width: 300,
     display: "flex",
     flexDirection: "column",
     gap: space.sm,
     padding: space.sm,
-    borderRadius: radii.md,
+    borderRadius: radii.lg,
     borderWidth: 1,
     borderStyle: "solid",
     borderColor: colors.border,
     backgroundColor: colors.surface,
-    boxShadow: "0 8px 24px rgba(0, 0, 0, 0.12)",
+    boxShadow: shadows.raised,
     cursor: "var(--cursor-arrow, default)",
     userSelect: "text",
   },
@@ -620,57 +599,23 @@ const styles = stylex.create({
   spacer: { flexGrow: 1 },
   muted: { color: colors.muted, fontSize: 12 },
   audienceText: { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-  audience: {
-    display: "flex",
-    alignItems: "center",
-    gap: 3,
-    maxWidth: 156,
-    height: 21,
-    paddingInline: 3,
-    borderWidth: 0,
-    borderRadius: 4,
-    backgroundColor: { default: "transparent", ":hover": colors.bg },
-    color: colors.muted,
-    font: "inherit",
-    fontSize: 12,
-    cursor: "var(--cursor-pointer, pointer)",
-  },
-  nameButton: {
-    padding: 0,
-    borderWidth: 0,
-    backgroundColor: "transparent",
-    color: colors.text,
-    font: "inherit",
-    textDecoration: "underline",
-    textDecorationStyle: "dotted",
-    textUnderlineOffset: 2,
-    cursor: "var(--cursor-pointer, pointer)",
-  },
+  /** The audience picker: a small button, its label cut short with an ellipsis. */
+  audience: { gap: space.xs, maxWidth: 156, color: colors.muted },
+  nameButton: { verticalAlign: "middle" },
   nameInput: {
-    height: 24,
-    paddingInline: 6,
-    borderWidth: 1,
-    borderStyle: "solid",
-    borderColor: colors.border,
+    height: size.xs,
+    paddingInline: space.sm,
+    borderWidth: 0,
     borderRadius: radii.sm,
-    backgroundColor: "transparent",
+    backgroundColor: colors.sunk,
+    boxShadow: shadows.field,
     color: colors.text,
     fontSize: 12,
     fontFamily: "inherit",
+    outline: { default: "none", ":focus": `1px solid ${colors.brand}` },
   },
   danger: { color: colors.danger },
-  inlineButton: { height: 18, marginLeft: 3, color: colors.muted },
-  textButton: {
-    paddingInline: 6,
-    height: 21,
-    borderWidth: 0,
-    borderRadius: 4,
-    backgroundColor: { default: "transparent", ":hover": colors.bg },
-    color: "inherit",
-    font: "inherit",
-    fontSize: 12,
-    cursor: "var(--cursor-pointer, pointer)",
-  },
+  inlineButton: { marginLeft: space.xs },
   messages: {
     display: "flex",
     flexDirection: "column",
@@ -685,28 +630,30 @@ const styles = stylex.create({
   author: { fontWeight: 600 },
   body: { margin: 0, whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.4 },
   changes: { display: "flex", flexWrap: "wrap", gap: 3, marginTop: 3 },
+  /**
+   * A change's label, which can wrap, so it's a small button's padding and type with
+   * a minimum height rather than a fixed one.
+   */
   change: {
     maxWidth: "100%",
     minWidth: 0,
-    paddingInline: 6,
-    paddingBlock: 1,
+    minHeight: size.xs,
+    paddingInline: space.ms,
+    paddingBlock: space.xs,
     overflowWrap: "anywhere",
     textAlign: "start",
     whiteSpace: "normal",
-    borderWidth: 1,
-    borderStyle: "solid",
-    borderColor: colors.border,
-    borderRadius: 4,
-    backgroundColor: { default: colors.bg, ":hover": colors.surface },
-    color: "inherit",
-    font: "inherit",
+    borderRadius: radii.sm,
+    fontFamily: fonts.sans,
     fontSize: 12,
+    fontWeight: 500,
+    lineHeight: "15px",
     cursor: "var(--cursor-pointer, pointer)",
   },
   working: {
     display: "flex",
     alignItems: "center",
-    gap: 6,
+    gap: space.sm,
     margin: 0,
     color: colors.muted,
     fontSize: 12,
@@ -726,28 +673,14 @@ const styles = stylex.create({
     flexGrow: 1,
     minHeight: 36,
     maxHeight: 120,
-    padding: 6,
-    borderWidth: 1,
-    borderStyle: "solid",
-    borderColor: colors.border,
+    padding: space.sm,
+    borderWidth: 0,
     borderRadius: radii.sm,
-    backgroundColor: colors.bg,
+    backgroundColor: colors.sunk,
+    boxShadow: shadows.field,
     color: "inherit",
     font: "inherit",
     resize: "none",
-    outline: { default: "none", ":focus": `2px solid ${colors.accent}` },
-  },
-  send: {
-    width: 27,
-    height: 27,
-    borderWidth: 0,
-    borderRadius: "50%",
-    backgroundColor: { default: colors.accent, ":disabled": colors.border },
-    color: colors.onAccent,
-    fontSize: 14,
-    cursor: {
-      default: "var(--cursor-pointer, pointer)",
-      ":disabled": "var(--cursor-not-allowed, not-allowed)",
-    },
+    outline: { default: "none", ":focus": `1px solid ${colors.brand}` },
   },
 });

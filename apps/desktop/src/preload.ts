@@ -1,4 +1,7 @@
-import { contextBridge } from "electron";
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
+
+/** The menu commands main.ts sends; mirror changes in apps/web/src/global.d.ts. */
+type FiniteCommand = "closeTab" | "nextTab" | "previousTab";
 
 // Keep this surface small and typed; mirror changes in apps/web/src/global.d.ts.
 contextBridge.exposeInMainWorld("finite", {
@@ -6,5 +9,10 @@ contextBridge.exposeInMainWorld("finite", {
   versions: {
     electron: process.versions.electron,
     chrome: process.versions.chrome,
+  },
+  onCommand(listener: (command: FiniteCommand) => void) {
+    const handle = (_event: IpcRendererEvent, command: FiniteCommand) => listener(command);
+    ipcRenderer.on("finite:command", handle);
+    return () => void ipcRenderer.off("finite:command", handle);
   },
 });

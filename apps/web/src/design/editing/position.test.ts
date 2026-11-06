@@ -1,11 +1,82 @@
 import { describe, expect, it } from "vite-plus/test";
-import { degreesOf, positionKindOf, positionStyles } from "./position";
+import {
+  constraintOf,
+  constraintStyles,
+  containersFor,
+  degreesOf,
+  POSITIONS,
+  positionKindOf,
+  positionStyles,
+  stickyEdgeOf,
+  stickyEdgeStyles,
+} from "./position";
 
 describe("position", () => {
   it("reads the kind", () => {
     expect(positionKindOf(undefined)).toBe("static");
     expect(positionKindOf("absolute")).toBe("absolute");
     expect(positionKindOf("-webkit-sticky")).toBeNull();
+    // Relative still reads, but isn't offered.
+    expect(positionKindOf("relative")).toBe("relative");
+    expect(POSITIONS.map(([k]) => k)).toEqual(["static", "absolute", "fixed", "sticky"]);
+  });
+
+  it("makes a static parent the container of a child that goes absolute", () => {
+    const positions: Record<string, string> = { a: "static", b: "relative" };
+    const of = (id: string) => positions[id];
+    const targets = [
+      { id: "1", parent: "a" },
+      { id: "2", parent: "a" },
+      { id: "3", parent: "b" },
+      { id: "4", parent: null },
+    ];
+    expect(containersFor("absolute", targets, of)).toEqual(["a"]);
+    // A parent that's selected too gets its own change.
+    expect(
+      containersFor(
+        "absolute",
+        [
+          { id: "a", parent: "1" },
+          { id: "1", parent: "a" },
+        ],
+        of,
+      ),
+    ).toEqual([]);
+    expect(containersFor("fixed", targets, of)).toEqual([]);
+    expect(containersFor("sticky", targets, of)).toEqual([]);
+  });
+
+  it("pins by its constraints, keeping it where it is", () => {
+    const box = { near: 10, far: 30, size: 60 };
+    expect(constraintOf({}, "x")).toBe("near");
+    expect(constraintOf({ right: "0" }, "x")).toBe("far");
+    expect(constraintOf({ top: "1px", bottom: "2px" }, "y")).toBe("both");
+    expect(constraintStyles("x", "far", { left: "10px" }, box)).toEqual({
+      left: null,
+      right: "30px",
+    });
+    // Both insets size it, so its own width comes off.
+    expect(constraintStyles("x", "both", { left: "10px", width: "60px" }, box)).toEqual({
+      left: "10px",
+      right: "30px",
+      width: null,
+    });
+    // Leaving both, it keeps the size the insets gave it.
+    expect(constraintStyles("y", "near", { top: "10px", bottom: "30px" }, box)).toEqual({
+      top: "10px",
+      bottom: null,
+      height: "60px",
+    });
+  });
+
+  it("moves a sticky element's distance to another edge", () => {
+    expect(stickyEdgeOf({ position: "sticky", bottom: "8px" })).toBe("bottom");
+    expect(stickyEdgeOf({})).toBe("top");
+    expect(stickyEdgeStyles("top", "bottom", { top: "8px" })).toEqual({
+      top: null,
+      bottom: "8px",
+    });
+    expect(stickyEdgeStyles("top", "left", {})).toEqual({ left: "0px" });
   });
 
   it("takes the insets off going back into the flow", () => {

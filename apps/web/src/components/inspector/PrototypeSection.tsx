@@ -6,7 +6,7 @@ import type { Editor } from "@/design/editing/editor";
 import { artboardLinkTarget } from "@/design/html";
 import type { Replica } from "@/design/replica";
 import type { Node } from "@/design/schema";
-import { colors, fonts, radii, size, space } from "@/styles/tokens.stylex";
+import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import { Choice, Labeled, Section } from "./controls";
 
 /** Whether `node` is a link, which can go to an artboard in interactive mode. */
@@ -111,9 +111,9 @@ const styles = stylex.create({
     borderRadius: radii.sm,
     backgroundColor: colors.sunk,
     boxShadow: {
-      default: "none",
-      ":hover": `inset 0 0 0 1px ${colors.border}`,
-      ":focus-within": `inset 0 0 0 1px ${colors.borderStrong}`,
+      default: shadows.field,
+      ":hover": `${shadows.field}, inset 0 0 0 1px ${colors.border}`,
+      ":focus-within": `${shadows.field}, inset 0 0 0 1px ${colors.brand}`,
     },
     cursor: "text",
   },

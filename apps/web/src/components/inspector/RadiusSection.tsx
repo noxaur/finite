@@ -67,6 +67,7 @@ export function RadiusSection({ scope }: { scope: Scope }) {
             placeholder="Elliptical"
             toChanges={(typed) => ({ "border-radius": parseInput("border-radius", typed) })}
             lead={<LeadIcon name="radius" />}
+            min={0}
           />
         ) : (
           <StyleField
@@ -101,9 +102,10 @@ export function RadiusSection({ scope }: { scope: Scope }) {
                     scrub={
                       n && {
                         start: n.value,
-                        to: (x) => setCorner(i, axis, `${Math.max(x, 0)}${n.unit || "px"}`),
+                        to: (x) => setCorner(i, axis, `${x}${n.unit || "px"}`),
                       }
                     }
+                    min={0}
                     center
                   />
                 );

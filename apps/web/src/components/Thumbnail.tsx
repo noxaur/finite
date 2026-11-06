@@ -140,7 +140,7 @@ const styles = stylex.create({
     inset: 0,
     display: "grid",
     placeItems: "center",
-    fontSize: 13,
+    fontSize: 12,
     color: colors.muted,
   },
 });

@@ -11,6 +11,32 @@ describe("advanced", () => {
     ]);
   });
 
+  it("claims only the values a control can show", () => {
+    const shown = (styles: Record<string, string>, position?: string) =>
+      unclaimed(styles, position).map(([p]) => p);
+    // What the W and H modes write.
+    expect(shown({ flex: "1 1 0", "flex-shrink": "0", "align-self": "stretch" })).toEqual([]);
+    expect(shown({ flex: "none", "flex-basis": "auto", "align-self": "auto" })).toEqual([]);
+    expect(shown({ flex: "2", "flex-grow": "3", "flex-basis": "120px" })).toEqual([
+      "flex",
+      "flex-grow",
+      "flex-basis",
+    ]);
+    expect(shown({ "align-self": "center" })).toEqual(["align-self"]);
+    // A scale that only mirrors is a flip.
+    expect(shown({ scale: "-1 1" })).toEqual([]);
+    expect(shown({ scale: "1.05" })).toEqual(["scale"]);
+    // Insets are the position's only when they place the element.
+    expect(shown({ position: "absolute", top: "4px", left: "0" })).toEqual([]);
+    expect(shown({ top: "4px" }, "sticky")).toEqual([]);
+    expect(shown({ position: "relative", top: "4px", inset: "0" })).toEqual(["top", "inset"]);
+    expect(shown({ left: "4px" })).toEqual(["left"]);
+    // No control shows a stacking order.
+    expect(shown({ "z-index": "2" })).toEqual(["z-index"]);
+    // By name alone, a property with a control is claimed.
+    expect(isClaimed("flex")).toBe(true);
+  });
+
   it("says what a declaration holds without CSS", () => {
     expect(propName("clip-path")).toBe("Clip path");
     expect(propName("-webkit-line-clamp")).toBe("Line clamp");

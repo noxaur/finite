@@ -20,11 +20,10 @@ import { EffectsSection } from "./EffectsSection";
 import { FillSection } from "./FillSection";
 import { geometryOf } from "./geometry";
 import { LayoutSection } from "./LayoutSection";
-import { PositionSection } from "./PositionSection";
+import { PagePanel } from "./PagePanel";
 import { PrototypeSection } from "./PrototypeSection";
 import { RadiusSection } from "./RadiusSection";
 import type { Changes, Scope } from "./scope";
-import { SizeSection } from "./SizeSection";
 import { StrokeSection } from "./StrokeSection";
 import { TransformSection } from "./TransformSection";
 import { TransitionsSection } from "./TransitionsSection";
@@ -73,11 +72,9 @@ export function Inspector({
     .map((id) => nodeOf(replica, id))
     .filter((n): n is Node => n !== undefined);
   if (selected.length === 0) {
-    return (
-      <p {...stylex.props(styles.empty)}>
-        Select a layer on the canvas or in Layers to see and change its styles.
-      </p>
-    );
+    const shown = replica.pages.length > 0 ? renderer.shownPage() : null;
+    const page = replica.pages.find((p) => p.id === shown);
+    return page ? <PagePanel editor={editor} page={page} tokens={tokens} /> : null;
   }
   const targets = [
     ...new Map(
@@ -130,7 +127,7 @@ export function Inspector({
     <div key={key} role="group" aria-label="Inspector" {...stylex.props(styles.panel)}>
       <header {...stylex.props(styles.top)}>
         <span {...stylex.props(styles.topIcon)}>
-          <Icon name={one ? iconOf(one) : "box"} size={16} />
+          <Icon name={one ? iconOf(one) : "box"} size={15} />
         </span>
         <span {...stylex.props(styles.topName)}>
           {one ? (one.name ?? one.text ?? one.tag ?? "Layer") : `${selected.length} layers`}
@@ -144,9 +141,7 @@ export function Inspector({
           />
         )}
       </header>
-      <PositionSection scope={scope} />
       <LayoutSection scope={scope} editor={editor} geometry={geometry} />
-      <SizeSection scope={scope} editor={editor} geometry={geometry} />
       <FillSection scope={scope} />
       <StrokeSection scope={scope} />
       <RadiusSection scope={scope} />
@@ -167,13 +162,6 @@ const styles = stylex.create({
     flexDirection: "column",
     minHeight: 0,
   },
-  empty: {
-    margin: 0,
-    padding: space.ms,
-    color: colors.muted,
-    fontSize: 12,
-    lineHeight: "16px",
-  },
   top: {
     display: "flex",
     alignItems: "center",
@@ -193,13 +181,13 @@ const styles = stylex.create({
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
     fontSize: 14,
-    lineHeight: "20px",
+    lineHeight: "18px",
     fontWeight: 500,
   },
   tag: {
     flexShrink: 0,
     color: colors.faint,
     fontSize: 12,
-    lineHeight: "16px",
+    lineHeight: "15px",
   },
 });

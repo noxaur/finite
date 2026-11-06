@@ -214,8 +214,9 @@ function BorderStroke({ scope, outline }: { scope: Scope; outline: boolean }) {
               lead={<LeadIcon name="borderWidth" />}
               scrub={{
                 start: sameWidth ? (numberOf(firstWidth)?.value ?? null) : null,
-                to: (v) => onDrawn("width", `${Math.max(v, 0)}px`),
+                to: (v) => onDrawn("width", `${v}px`),
               }}
+              min={0}
             />
           )}
         </div>
@@ -304,6 +305,7 @@ function OutlineStroke({ scope, border }: { scope: Scope; border: boolean }) {
                 return n ? { "outline-width": `${n.value}${n.unit || "px"}` } : null;
               }}
               lead={<LeadIcon name="borderWidth" />}
+              min={0}
             />
           ) : (
             <StyleField

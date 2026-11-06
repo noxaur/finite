@@ -9,6 +9,7 @@ import { isLocalUser } from "@/lib/user";
 import { timeAgo } from "@/lib/time";
 import { colors, radii, size, space } from "@/styles/tokens.stylex";
 import { ANY_AGENT, audienceLabel, routeLabel } from "@/lib/audience";
+import { Button, Strip, StripItem } from "./Button";
 import { pinState } from "./Comments";
 import { PinIcon } from "./PinIcon";
 
@@ -97,25 +98,20 @@ export function CommentsPanel({
 
   return (
     <aside data-camera-ignore aria-label="Comments" {...stylex.props(styles.panel)}>
-      <div role="tablist" {...stylex.props(styles.tabs)}>
-        {(
-          [
-            ["comments", "Comments", open.length],
-            ["activity", "Activity", null],
-          ] as const
-        ).map(([key, label, count]) => (
-          <button
-            key={key}
-            type="button"
-            role="tab"
-            aria-selected={tab === key}
-            onClick={() => setTab(key)}
-            {...stylex.props(styles.tab, tab === key && styles.tabActive)}
-          >
-            {label}
-            {count !== null && count > 0 && <span {...stylex.props(styles.count)}>{count}</span>}
-          </button>
-        ))}
+      <div {...stylex.props(styles.tabs)}>
+        <Strip role="tablist" style={styles.strip}>
+          {(
+            [
+              ["comments", "Comments", open.length],
+              ["activity", "Activity", null],
+            ] as const
+          ).map(([key, label, count]) => (
+            <StripItem key={key} picked={tab === key} onClick={() => setTab(key)}>
+              {label}
+              {count !== null && count > 0 && <span {...stylex.props(styles.count)}>{count}</span>}
+            </StripItem>
+          ))}
+        </Strip>
       </div>
       <div {...stylex.props(styles.scroll)}>
         {tab === "activity" ? (
@@ -146,15 +142,15 @@ export function CommentsPanel({
             )}
             {resolved.length > 0 && (
               <>
-                <button
-                  type="button"
-                  aria-expanded={resolvedOpen}
+                <Button
+                  size="small"
+                  expanded={resolvedOpen}
                   onClick={() => setResolvedOpen(!resolvedOpen)}
-                  {...stylex.props(styles.heading, styles.toggle)}
+                  style={styles.toggle}
                 >
                   Resolved
                   <span {...stylex.props(styles.count)}>{resolved.length}</span>
-                </button>
+                </Button>
                 {resolvedOpen && list(resolved)}
               </>
             )}
@@ -172,36 +168,18 @@ const styles = stylex.create({
     flexGrow: 1,
     minHeight: 0,
   },
+  /** A regular strip with 6px around it, like the Tokens panel's Mode row. */
   tabs: {
     display: "flex",
     alignItems: "center",
     gap: space.xs,
-    height: size.lg,
     flexShrink: 0,
-    paddingInline: space.sm,
+    padding: space.sm,
     borderBottomWidth: 1,
     borderBottomStyle: "solid",
     borderBottomColor: colors.border,
   },
-  tab: {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 6,
-    height: size.sm,
-    paddingInline: space.sm,
-    borderWidth: 0,
-    borderRadius: radii.xs,
-    backgroundColor: { default: "transparent", ":hover": colors.bg },
-    color: { default: colors.muted, ":hover": colors.text },
-    font: "inherit",
-    fontSize: 14,
-    fontWeight: 500,
-    cursor: "var(--cursor-pointer, pointer)",
-  },
-  tabActive: {
-    backgroundColor: { default: colors.sunk, ":hover": colors.sunk },
-    color: colors.text,
-  },
+  strip: { flexGrow: 1 },
   count: { color: colors.faint, fontSize: 12, fontVariantNumeric: "tabular-nums" },
   scroll: { flexGrow: 1, minHeight: 0, overflowY: "auto", padding: space.sm },
   heading: {
@@ -215,16 +193,8 @@ const styles = stylex.create({
     fontSize: 12,
     fontWeight: 500,
   },
-  toggle: {
-    width: "100%",
-    marginTop: space.sm,
-    borderWidth: 0,
-    backgroundColor: "transparent",
-    font: "inherit",
-    fontSize: 12,
-    fontWeight: 500,
-    cursor: "var(--cursor-pointer, pointer)",
-  },
+  /** Full width, its label at the start like the Open heading above it. */
+  toggle: { width: "100%", marginTop: space.sm, justifyContent: "flex-start" },
   muted: { margin: 0, color: colors.muted, fontSize: 12 },
   empty: { padding: space.xs },
   activity: {
@@ -245,7 +215,7 @@ const styles = stylex.create({
   list: {
     display: "flex",
     flexDirection: "column",
-    gap: 3,
+    gap: space.sm,
     margin: 0,
     padding: 0,
     overflowY: "auto",
@@ -259,13 +229,14 @@ const styles = stylex.create({
     padding: space.sm,
     borderWidth: 0,
     borderRadius: radii.sm,
-    backgroundColor: { default: "transparent", ":hover": colors.bg },
-    color: "inherit",
+    backgroundColor: { default: "transparent", ":hover": colors.hoverFill },
+    color: colors.text,
     font: "inherit",
     textAlign: "left",
     cursor: "var(--cursor-pointer, pointer)",
   },
-  rowOpen: { backgroundColor: { default: colors.sunk, ":hover": colors.sunk } },
+  /** The comment open on the canvas. */
+  rowOpen: { backgroundColor: { default: colors.activeFill, ":hover": colors.activeFill } },
   rowResolved: { color: colors.muted },
   // The pin at 60%, so a row is about one line of text tall.
   icon: {

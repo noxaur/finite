@@ -231,6 +231,7 @@ function TransitionItem({
             ? null
             : { start: ms, step: 10, to: (n) => ({ [key]: `${Math.max(0, Math.round(n))}ms` }) }
         }
+        min={0}
         unit={token ? "" : "ms"}
       />
     );

@@ -344,13 +344,16 @@ impl Replica {
         to_json(&outcome)
     }
 
-    /// The design's pages in order, as a JSON array of `{id, name}`. Never
-    /// empty: a design without pages has its implicit first page.
+    /// The design's pages in order, as a JSON array of `{id, name}`, with
+    /// `background` when the page has one. Never empty: a design without
+    /// pages has its implicit first page.
     pub fn pages(&self) -> String {
         #[derive(Serialize)]
         struct Listed<'a> {
             id: &'a str,
             name: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            background: Option<&'a str>,
         }
         let pages: Vec<Listed> = self
             .doc
@@ -359,6 +362,7 @@ impl Replica {
             .map(|(id, page)| Listed {
                 id,
                 name: &page.name,
+                background: page.background.as_deref(),
             })
             .collect();
         serde_json::to_string(&pages).expect("pages serialize")

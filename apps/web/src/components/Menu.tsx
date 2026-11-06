@@ -189,12 +189,12 @@ export function Menu({
           >
             {choices && (
               <span {...stylex.props(styles.check)}>
-                {item.checked && <Icon name="check" size={14} />}
+                {item.checked && <Icon name="check" size={12} />}
               </span>
             )}
             {item.icon && (
               <span {...stylex.props(styles.icon)}>
-                <Icon name={item.icon} size={16} />
+                <Icon name={item.icon} size={15} />
               </span>
             )}
             {item.swatch && <span {...stylex.props(styles.swatch)} style={item.swatch} />}
@@ -277,7 +277,7 @@ export function Dropdown({
 }
 
 const styles = stylex.create({
-  /** A bare button: the caller gives it a look. */
+  /** A bare button: the caller gives it a look. Focus shows the brand ring. */
   trigger: {
     padding: 0,
     borderWidth: 0,
@@ -285,9 +285,11 @@ const styles = stylex.create({
     color: "inherit",
     font: "inherit",
     textAlign: "left",
-    outline: "none",
+    outline: { default: "none", ":focus-visible": `1px solid ${colors.brand}` },
+    outlineOffset: 1,
     cursor: { default: "var(--cursor-pointer, pointer)", ":disabled": "default" },
   },
+  /** A surface panel: a 1px border and a soft, deep shadow. */
   menu: {
     position: "fixed",
     zIndex: 50,
@@ -302,7 +304,7 @@ const styles = stylex.create({
     borderStyle: "solid",
     borderColor: colors.border,
     borderRadius: radii.md,
-    backgroundColor: colors.sunk,
+    backgroundColor: colors.surface,
     boxShadow: shadows.raised,
     outline: "none",
   },
@@ -315,18 +317,22 @@ const styles = stylex.create({
     paddingInline: space.sm,
     borderWidth: 0,
     borderRadius: radii.sm,
-    backgroundColor: { default: "transparent", ":focus": colors.borderSoft },
+    backgroundColor: { default: "transparent", ":focus": colors.hoverFill },
     color: colors.text,
     fontFamily: fonts.sans,
-    fontSize: 13,
-    lineHeight: "20px",
+    fontSize: 12,
+    fontWeight: 500,
+    lineHeight: "15px",
     textAlign: "left",
     whiteSpace: "nowrap",
     outline: "none",
     cursor: "var(--cursor-pointer, pointer)",
   },
-  check: { display: "flex", flexShrink: 0, width: 12, color: colors.brandText },
-  checked: { fontWeight: 600 },
+  check: { display: "flex", flexShrink: 0, width: 12, color: colors.text },
+  /** The current choice: the active fill, kept while the pointer or focus is on it. */
+  checked: {
+    backgroundColor: { default: colors.activeFill, ":focus": colors.activeFill },
+  },
   icon: { display: "flex", color: colors.muted },
   swatch: {
     flexShrink: 0,
@@ -341,7 +347,8 @@ const styles = stylex.create({
     color: colors.faint,
     fontFamily: fonts.sans,
     fontSize: 12,
-    lineHeight: "16px",
+    fontWeight: 400,
+    lineHeight: "15px",
   },
   sep: {
     flexShrink: 0,
@@ -354,8 +361,9 @@ const styles = stylex.create({
     margin: 0,
     padding: space.sm,
     color: colors.muted,
+    fontFamily: fonts.sans,
     fontSize: 12,
-    lineHeight: "16px",
+    lineHeight: "15px",
     whiteSpace: "normal",
   },
 });

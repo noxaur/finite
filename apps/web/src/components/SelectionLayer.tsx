@@ -7,7 +7,7 @@ import type { Editor } from "@/design/editing/editor";
 import { HANDLES, type Handle } from "@/design/editing/geometry";
 import type { Renderer } from "@/design/renderer";
 import type { DesignSession } from "@/design/session";
-import { colors, radii, space } from "@/styles/tokens.stylex";
+import { colors, radii, shadows, space } from "@/styles/tokens.stylex";
 
 /** The cursor over each resize handle. */
 const CURSORS: Record<Handle, string> = {
@@ -90,18 +90,6 @@ export function SelectionLayer({
   return (
     <>
       {hover && <div {...stylex.props(styles.box(hover), styles.hover)} />}
-      {/* The corner marks wobble like the tool icons. */}
-      <svg width="0" height="0" style={{ position: "absolute" }} aria-hidden="true">
-        <filter id="hover-wob" x="-20%" y="-20%" width="140%" height="140%">
-          <feTurbulence type="fractalNoise" baseFrequency="0.3" numOctaves="1" seed="3" />
-          <feDisplacementMap
-            in="SourceGraphic"
-            scale="1.2"
-            xChannelSelector="R"
-            yChannelSelector="G"
-          />
-        </filter>
-      </svg>
       {target && <div {...stylex.props(styles.box(target), styles.target)} />}
       {area && <div data-area {...stylex.props(styles.box(area), styles.area)} />}
       {state.guides.map((g, i) => (
@@ -154,7 +142,10 @@ export function SelectionLayer({
   );
 }
 
-/** A selection's corner mark: white inside, blue outside, wobbled like the tool icons. */
+/**
+ * A selection's corner mark: halo inside, brand outline. One unit is one pixel, so its
+ * 2px stroke runs from 1 to 3 and lands on whole pixels.
+ */
 function Mark() {
   return (
     <svg viewBox="0 0 12 12" overflow="visible" aria-hidden="true" {...stylex.props(styles.fill)}>
@@ -165,7 +156,6 @@ function Mark() {
         height="8"
         strokeWidth="2"
         strokeLinejoin="round"
-        filter="url(#hover-wob)"
         {...stylex.props(styles.mark)}
       />
     </svg>
@@ -203,8 +193,12 @@ const styles = stylex.create({
     paddingBlock: space.xs,
     paddingInline: space.sm,
     borderRadius: radii.sm,
+    borderWidth: 1,
+    borderStyle: "solid",
+    borderColor: colors.border,
     backgroundColor: colors.accent,
     color: colors.onAccent,
+    boxShadow: shadows.raised,
     fontSize: 13,
     lineHeight: 1.4,
     pointerEvents: "none",
@@ -223,7 +217,7 @@ const styles = stylex.create({
   },
   area: {
     outline: `calc(1px * var(--inv-zoom, 1)) solid ${colors.ink}`,
-    backgroundColor: "rgba(26, 26, 24, 0.06)",
+    backgroundColor: `color-mix(in srgb, ${colors.ink} 6%, transparent)`,
   },
   vertical: {
     borderLeft: `calc(1px * var(--inv-zoom, 1)) solid ${colors.danger}`,

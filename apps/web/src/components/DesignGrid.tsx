@@ -12,7 +12,8 @@ import { mcpUrl } from "@/lib/mcp";
 import { timeAgo } from "@/lib/time";
 import { runtime } from "@/runtime";
 import { matchesName, mergeLobby } from "@/lib/lobby";
-import { colors, radii, space } from "@/styles/tokens.stylex";
+import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
+import { Button } from "./Button";
 import { Thumbnail } from "./Thumbnail";
 
 /** How long the search waits after the last keystroke. */
@@ -113,9 +114,9 @@ export function DesignGrid() {
     <main {...stylex.props(styles.page)}>
       <header {...stylex.props(styles.header)}>
         <h1 {...stylex.props(styles.title)}>Designs</h1>
-        <button type="button" onClick={create} disabled={creating} {...stylex.props(styles.button)}>
+        <Button variant="brand" onClick={create} disabled={creating}>
           New design
-        </button>
+        </Button>
       </header>
 
       {createFailed && (
@@ -187,14 +188,15 @@ export function DesignGrid() {
 
 const styles = stylex.create({
   page: {
-    minHeight: "100vh",
+    // The tab bar sits above it.
+    minHeight: `calc(100vh - ${size.bar})`,
     display: "flex",
     flexDirection: "column",
     gap: space.lg,
     padding: space.xl,
     backgroundColor: colors.bg,
     color: colors.text,
-    fontFamily: "ui-sans-serif, system-ui, sans-serif",
+    fontFamily: fonts.sans,
   },
   header: {
     display: "flex",
@@ -206,31 +208,19 @@ const styles = stylex.create({
     fontSize: 20,
     fontWeight: 600,
   },
-  button: {
-    paddingBlock: space.xs,
-    paddingInline: space.md,
-    borderRadius: radii.sm,
-    borderWidth: 0,
-    backgroundColor: colors.text,
-    color: colors.bg,
-    font: "inherit",
-    fontSize: 14,
-    cursor: "var(--cursor-pointer, pointer)",
-    opacity: { default: 1, ":hover": 0.85, ":disabled": 0.5 },
-  },
   search: { display: "flex", flexDirection: "column", gap: space.xs, marginBottom: space.md },
   searchInput: {
     maxWidth: 360,
-    padding: space.xs,
+    height: size.sm,
     paddingInline: space.sm,
-    borderWidth: 1,
-    borderStyle: "solid",
-    borderColor: colors.border,
+    borderWidth: 0,
     borderRadius: radii.sm,
-    backgroundColor: colors.surface,
+    backgroundColor: colors.sunk,
+    boxShadow: shadows.field,
     color: "inherit",
-    font: "inherit",
-    fontSize: 14,
+    fontFamily: "inherit",
+    fontSize: 12,
+    outline: { default: "none", ":focus": `1px solid ${colors.brand}` },
   },
   grid: {
     display: "grid",
@@ -247,15 +237,16 @@ const styles = stylex.create({
     borderRadius: radii.md,
     borderWidth: 1,
     borderStyle: "solid",
-    borderColor: { default: colors.border, ":hover": colors.muted },
+    borderColor: { default: colors.border, ":hover": colors.borderStrong },
     backgroundColor: colors.surface,
     color: "inherit",
     textDecoration: "none",
+    outline: { default: "none", ":focus-visible": `1px solid ${colors.brand}` },
   },
   meta: {
     display: "flex",
     flexDirection: "column",
-    gap: 3,
+    gap: space.xs,
     padding: space.sm,
     paddingInline: space.md,
     borderTopWidth: 1,
@@ -263,22 +254,22 @@ const styles = stylex.create({
     borderTopColor: colors.border,
   },
   name: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: 500,
   },
   failed: { color: colors.danger, marginBottom: space.md },
   muted: {
     margin: 0,
-    fontSize: 13,
+    fontSize: 12,
     color: colors.muted,
   },
   footer: {
     marginTop: "auto",
-    fontSize: 13,
+    fontSize: 12,
     color: colors.muted,
   },
   code: {
-    fontFamily: "ui-monospace, monospace",
+    fontFamily: fonts.mono,
     color: colors.text,
     userSelect: "all",
   },

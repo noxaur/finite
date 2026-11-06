@@ -23,14 +23,18 @@ import {
 } from "@/design/editing/layers";
 import type { Replica } from "@/design/replica";
 import type { UserEdit } from "@/design/schema";
-import { colors, radii, size, space } from "@/styles/tokens.stylex";
+import { colors, radii, shadows, size, space } from "@/styles/tokens.stylex";
+import { IconButton } from "./Button";
 import { Icon } from "./Icons";
 
 /** Each row's pitch: its height (`size.sm`) and the 3px gap under it, so the list can draw only the rows in view. */
 const ROW = 30;
-/** Each level's indent, and the row's left padding. */
+/** Each level's indent. */
 const INDENT = 12;
-const PAD = 9;
+/** How far rows sit in from the panel's sides, so their fill reads as a rounded row. */
+const INSET = 6;
+/** A row's left padding, inside its inset: its chevron lines up with the section labels. */
+const PAD = 3;
 /** Rows drawn above and below the ones in view, so a fast scroll doesn't flash. */
 const OVERSCAN = 8;
 /** How long a drag rests on a closed row before it opens. */
@@ -192,7 +196,7 @@ export function LayersTree({
       const all = model.rows();
       const index = Math.min(Math.max(Math.floor(y / ROW), 0), all.length - 1);
       const fraction = y < 0 ? 0 : y >= all.length * ROW ? 1 : (y - index * ROW) / ROW;
-      const level = Math.round((pointer.x - box.left - PAD) / INDENT);
+      const level = Math.round((pointer.x - box.left - INSET - PAD) / INDENT);
       const drop = dropAt(all, index, fraction, level, dragged);
       const row = all[index];
       // Resting in the middle of a closed row opens it.
@@ -357,10 +361,10 @@ export function LayersTree({
             {...stylex.props(indicator.edge === "inside" ? styles.into : styles.line)}
             style={
               indicator.edge === "inside"
-                ? { top: indicator.row * ROW, left: indicator.depth * INDENT - 8 }
+                ? { top: indicator.row * ROW, left: (indicator.depth - 1) * INDENT + INSET }
                 : {
                     top: (indicator.row + (indicator.edge === "after" ? 1 : 0)) * ROW - 2,
-                    left: indicator.depth * INDENT + PAD + 16,
+                    left: indicator.depth * INDENT + INSET + PAD + 16,
                   }
             }
           />
@@ -468,8 +472,15 @@ const LayerRow = memo(function LayerRow({
           <Icon name="next" size={12} />
         </span>
       </button>
-      <span {...stylex.props(styles.icon, facts.part && styles.part, hidden && styles.faded)}>
-        <Icon name={facts.icon} size={16} />
+      <span
+        {...stylex.props(
+          styles.icon,
+          selected && styles.iconOn,
+          facts.part && styles.part,
+          hidden && styles.faded,
+        )}
+      >
+        <Icon name={facts.icon} size={15} />
       </span>
       {renaming ? (
         <RenameField id={facts.id} label={facts.label} editor={editor} onDone={actions.renamed} />
@@ -480,35 +491,33 @@ const LayerRow = memo(function LayerRow({
       )}
       {!facts.virtual && (
         <span {...stylex.props(styles.flags)}>
-          <button
-            type="button"
-            tabIndex={-1}
-            aria-label={facts.locked ? "Unlock" : "Lock"}
-            aria-pressed={facts.locked}
+          <IconButton
+            icon={locked ? "lock" : "unlock"}
+            label={facts.locked ? "Unlock" : "Lock"}
             title={facts.locked ? "Unlock (⇧⌘L)" : "Lock (⇧⌘L)"}
+            variant="ghost"
+            size="small"
+            tabIndex={-1}
+            // The look stays flat: the icon itself says it's locked.
+            aria-pressed={facts.locked}
             onClick={() => actions.flag(row, "data-locked")}
-            {...stylex.props(
+            style={[
               styles.flag,
               facts.locked ? styles.flagOn : !hovered && styles.invisible,
               row.lockedBy && !facts.locked && styles.faded,
-            )}
-          >
-            <Icon name={locked ? "lock" : "unlock"} size={13} />
-          </button>
-          <button
-            type="button"
-            tabIndex={-1}
-            aria-label={facts.hidden ? "Show" : "Hide"}
-            aria-pressed={facts.hidden}
+            ]}
+          />
+          <IconButton
+            icon={hidden ? "eyeOff" : "eye"}
+            label={facts.hidden ? "Show" : "Hide"}
             title={facts.hidden ? "Show (⇧⌘H)" : "Hide (⇧⌘H)"}
+            variant="ghost"
+            size="small"
+            tabIndex={-1}
+            aria-pressed={facts.hidden}
             onClick={() => actions.flag(row, "hidden")}
-            {...stylex.props(
-              styles.flag,
-              facts.hidden ? styles.flagOn : !hovered && styles.invisible,
-            )}
-          >
-            <Icon name={hidden ? "eyeOff" : "eye"} size={13} />
-          </button>
+            style={[styles.flag, facts.hidden ? styles.flagOn : !hovered && styles.invisible]}
+          />
         </span>
       )}
     </div>
@@ -581,16 +590,25 @@ const styles = stylex.create({
     outline: "none",
   },
   spacer: { position: "relative", flexShrink: 0 },
-  empty: { paddingInline: space.ms, color: colors.muted, fontSize: 12 },
+  empty: {
+    display: "flex",
+    alignItems: "center",
+    height: size.sm,
+    paddingInline: space.ms,
+    color: colors.muted,
+    fontSize: 12,
+  },
   row: {
     position: "absolute",
-    left: 0,
-    right: 0,
+    left: INSET,
+    right: INSET,
     display: "flex",
     alignItems: "center",
     gap: space.sm,
     height: size.sm,
-    paddingRight: space.ms,
+    // The flags' icons end about as far in as the buttons above them.
+    paddingRight: 0,
+    borderRadius: radii.sm,
     color: colors.text,
     fontSize: 14,
     lineHeight: "20px",
@@ -598,9 +616,11 @@ const styles = stylex.create({
     userSelect: "none",
     touchAction: "none",
   },
-  rowHover: { boxShadow: `inset 0 0 0 1px ${colors.brand}` },
+  /** Under the pointer, here or on the canvas. */
+  rowHover: { backgroundColor: colors.hoverFill },
+  /** What a drag drops into, ringed in the brand like its outline on the canvas. */
   rowTarget: { boxShadow: `inset 0 0 0 2px ${colors.brand}` },
-  rowOn: { backgroundColor: colors.brandWash, color: colors.brandText },
+  rowOn: { backgroundColor: colors.activeFill },
   dimmed: { opacity: 0.45 },
   twisty: {
     display: "grid",
@@ -620,6 +640,7 @@ const styles = stylex.create({
   chevron: { display: "flex", transition: "transform 200ms cubic-bezier(.23, 1, .32, 1)" },
   chevronOpen: { transform: "rotate(90deg)" },
   icon: { display: "flex", flexShrink: 0, color: colors.faint },
+  iconOn: { color: colors.text },
   part: { color: colors.component },
   faded: { opacity: 0.5 },
   name: {
@@ -629,6 +650,7 @@ const styles = stylex.create({
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
   },
+  /** A sunk field over the name, ringed in the brand while it's typed in. */
   rename: {
     flexGrow: 1,
     minWidth: 0,
@@ -636,25 +658,16 @@ const styles = stylex.create({
     marginLeft: `calc(-1 * ${space.xs})`,
     paddingInline: space.xs,
     borderWidth: 0,
-    borderRadius: radii.xs,
-    backgroundColor: colors.surface,
+    borderRadius: radii.sm,
+    backgroundColor: colors.sunk,
+    boxShadow: shadows.field,
     color: colors.text,
     font: "inherit",
-    outline: `2px solid ${colors.brand}`,
+    outline: `1px solid ${colors.brand}`,
   },
   flags: { display: "flex", flexShrink: 0, gap: space.px },
-  flag: {
-    display: "grid",
-    placeItems: "center",
-    width: 21,
-    height: 21,
-    padding: 0,
-    borderWidth: 0,
-    borderRadius: radii.xs,
-    backgroundColor: { default: "transparent", ":hover": colors.sunk },
-    color: { default: colors.faint, ":hover": colors.text },
-    cursor: "var(--cursor-pointer, pointer)",
-  },
+  /** Fainter than the ghost's muted, so a column of them stays behind the names. */
+  flag: { color: { default: colors.faint, ":hover": colors.text } },
   flagOn: { visibility: "visible" },
   line: {
     position: "absolute",
@@ -666,7 +679,7 @@ const styles = stylex.create({
   },
   into: {
     position: "absolute",
-    right: 0,
+    right: INSET,
     height: size.sm,
     borderRadius: radii.xs,
     boxShadow: `inset 0 0 0 2px ${colors.brand}`,

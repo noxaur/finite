@@ -47,9 +47,9 @@ pub enum Op {
         #[serde(default)]
         css: Option<String>,
     },
-    /// Creates, renames or reorders one page, or removes it when `page` is
-    /// `None`. Removing a page leaves its artboards, which fall back to the
-    /// first page.
+    /// Creates, renames, reorders or recolors one page, or removes it when
+    /// `page` is `None`. Removing a page leaves its artboards, which fall
+    /// back to the first page.
     Page {
         id: String,
         #[serde(default)]
@@ -87,6 +87,10 @@ pub struct Page {
     pub name: String,
     /// Fractional index among pages (see [`crate::fractional`]).
     pub index: String,
+    /// The color of the canvas behind the page's artboards, as a CSS
+    /// color. `None` leaves the viewer's own canvas color.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<String>,
 }
 
 /// The implicit first mode.
@@ -102,6 +106,7 @@ pub const FIRST_PAGE: &str = "page-1";
 static IMPLICIT_PAGE: std::sync::LazyLock<Page> = std::sync::LazyLock::new(|| Page {
     name: "Page 1".into(),
     index: "V".into(),
+    background: None,
 });
 
 /// Reads an op field by field. A derived `Deserialize` for an internally
@@ -219,7 +224,10 @@ impl Op {
             Op::Move { id, index, .. } => BASE + id.len() + index.len(),
             Op::Css { css } => BASE + css.as_ref().map_or(0, String::len),
             Op::Page { id, page } => {
-                BASE + id.len() + page.as_ref().map_or(0, |p| p.name.len() + p.index.len())
+                BASE + id.len()
+                    + page.as_ref().map_or(0, |p| {
+                        p.name.len() + p.index.len() + p.background.as_ref().map_or(0, String::len)
+                    })
             }
             Op::Token {
                 name,

@@ -1,12 +1,18 @@
-import { type ReactElement, useId } from "react";
+import type { ReactElement } from "react";
 
 /**
- * Small hand-inked icons, drawn like the tool pill's pointer: path data written
- * by hand, run through a turbulence + displacement wobble, in `currentColor`.
+ * The app's icon set: outline glyphs on a 24-unit grid, drawn for 15px.
  *
- * Every SVG carries its own filter, with an id unique to that copy, so an icon
- * works anywhere without a shared <defs> in the page, and hiding one copy with
- * `display: none` never takes another copy's filter with it.
+ * - Strokes are 1.6 units, which is exactly 1px at 15px. Below 15px the stroke
+ *   grows so it stays 1px (2 units at 12px), which keeps small chevrons crisp.
+ * - At 15px one pixel is 1.6 units, so pixel centers fall on 0.8 + 1.6k:
+ *   4, 5.6, 7.2, 8.8, 10.4, 12, 13.6, 15.2, 16.8, 18.4, 20. Horizontal and
+ *   vertical strokes sit on those lines, so they render without a blur.
+ * - The live area is 4 to 20 for square shapes, with 2.4 to 21.6 for wide ones.
+ * - Rectangles have rounded corners (2.4 units, 1.5px; 1.6 for small ones), and
+ *   every cap and join is round.
+ * - A glyph is filled only where filled is the convention (play, the solid
+ *   fill swatch, dots), and everything is drawn in `currentColor`.
  */
 
 export type IconName =
@@ -95,458 +101,219 @@ export type IconName =
   | "scale"
   | "origin"
   | "clock"
-  | "delay";
+  | "delay"
+  | "angle"
+  | "arrowUp";
 
-interface Shape {
-  readonly d: string;
-  /** Filled shapes are also stroked, so the wobble rounds their corners. */
-  readonly filled: boolean;
-  /** Seeds the noise, so the icons don't all wobble the same way. */
-  readonly seed: number;
-}
+const path = (d: string, extra = "") => `<path d="${d}"${extra}/>`;
+const rect = (x: number, y: number, w: number, h: number, r: number, extra = "") =>
+  `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${r}"${extra}/>`;
+const circle = (cx: number, cy: number, r: number, extra = "") =>
+  `<circle cx="${cx}" cy="${cy}" r="${r}"${extra}/>`;
+/** A small solid dot. */
+const dot = (cx: number, cy: number, r = 1.2) =>
+  circle(cx, cy, r, ' fill="currentColor" stroke="none"');
+const FILL = ' fill="currentColor"';
+/** A diamond: a rounded square turned 45°, corner to corner 4 to 20. */
+const diamond = rect(6.4, 6.4, 11.2, 11.2, 2, ' transform="rotate(45 12 12)"');
+/** The standard 16-unit square frame. */
+const square = rect(4, 4, 16, 16, 2.4);
+/** A lowercase single-storey "a", its bowl centered on `x`. */
+const lowerA = (x: number) => circle(x, 15.2, 3.2) + path(`M${x + 3.2} 12v6.4`);
+/** An uppercase "A" from `x` to `x + 8`. */
+const upperA = (x: number) => path(`M${x} 18.4l4-12.8 4 12.8M${x + 1.25} 14.4h5.5`);
 
-const SHAPES: Record<IconName, Shape> = {
-  play: {
-    d: "M6.8 4.3c4.2 2.3 8.6 5 12.8 7.4-4 2.7-8.2 5.5-12.3 8.2-.5-5.2-.6-10.3-.5-15.6z",
-    filled: true,
-    seed: 3,
-  },
-  previous: { d: "M14.9 5.1c-2.5 2.4-5 4.5-6.8 7 2 2.2 4.5 4.3 7 6.6", filled: false, seed: 5 },
-  next: { d: "M9.2 5c2.6 2.3 5 4.6 6.9 6.9-2.4 2.4-4.8 4.7-7.2 7.1", filled: false, seed: 8 },
-  close: {
-    d: "M6.2 6.5c3.9 3.6 7.7 7.4 11.6 11.2M17.7 5.9c-3.8 3.9-7.6 8-11.4 12.2",
-    filled: false,
-    seed: 11,
-  },
-  // Two arcs fanning up from a dot; the dot is a near-zero stroke the round cap fills.
-  wifi: {
-    d: "M12 19.6l.2.3M7.9 15.4c2.4-2.3 5.6-2.4 8.2.1M3.6 10.8c5.1-5 11.7-5.2 16.9-.1",
-    filled: false,
-    seed: 14,
-  },
-  search: {
-    d: "M10.5 4.6c3.4-.2 6 2.4 5.9 5.8-.1 3.2-2.8 5.7-6 5.6-3.2-.1-5.6-2.8-5.5-5.9.1-3 2.6-5.4 5.6-5.5zM15 15.2c1.5 1.4 2.9 2.9 4.4 4.4",
-    filled: false,
-    seed: 17,
-  },
-  artboard: {
-    d: "M8.6 4.2c-.2 5.2-.4 10.4-.6 15.6M15.6 4.4c-.1 5.1-.3 10.2-.4 15.4M4.3 8.8c5.1-.1 10.3-.2 15.4-.1M4.2 15.3c5.2-.1 10.3 0 15.5 0",
-    filled: false,
-    seed: 19,
-  },
-  text: { d: "M5.6 5.8c4.3-.2 8.6-.1 12.9 0M12 5.9c-.1 4.2 0 8.4.1 12.6", filled: false, seed: 21 },
-  box: {
-    d: "M5.3 5.4c4.5-.2 9-.1 13.4 0 .1 4.4.1 8.9 0 13.3-4.4.1-8.9.1-13.3 0-.2-4.4-.2-8.9-.1-13.3z",
-    filled: false,
-    seed: 23,
-  },
-  column: {
-    d: "M5.2 7c4.6-.1 9.1 0 13.7.1M5.1 12c4.6 0 9.2-.1 13.8 0M5.3 17c4.5-.1 9 0 13.5 0",
-    filled: false,
-    seed: 25,
-  },
-  row: {
-    d: "M7 5.2c.1 4.6 0 9.1-.1 13.7M12 5.1c0 4.6.1 9.2 0 13.8M17 5.3c-.1 4.5 0 9 0 13.5",
-    filled: false,
-    seed: 27,
-  },
-  grid: {
-    d: "M5.4 5.5c1.7-.1 3.5-.1 5.2 0 .1 1.7.1 3.4 0 5.1-1.7.1-3.5.1-5.2 0-.1-1.7-.1-3.4 0-5.1zM13.4 5.4c1.7 0 3.5 0 5.2.1 0 1.7 0 3.4-.1 5.1-1.7.1-3.4.1-5.1 0-.1-1.7-.1-3.5 0-5.2zM5.5 13.4c1.7 0 3.4 0 5.1.1.1 1.7.1 3.4 0 5.1-1.7.1-3.4.1-5.1 0-.1-1.7-.1-3.5 0-5.2zM13.4 13.5c1.7-.1 3.5-.1 5.2 0 .1 1.7.1 3.4 0 5.1-1.7.1-3.5.1-5.2 0-.1-1.7-.1-3.4 0-5.1z",
-    filled: false,
-    seed: 29,
-  },
-  component: {
-    d: "M12 4.2c2.6 2.6 5.2 5.2 7.8 7.8-2.6 2.6-5.2 5.2-7.8 7.8-2.6-2.6-5.2-5.2-7.8-7.8 2.6-2.6 5.2-5.2 7.8-7.8z",
-    filled: false,
-    seed: 31,
-  },
-  image: {
-    d: "M5.2 5.3c4.5-.1 9-.1 13.6 0 .1 4.5.1 8.9 0 13.4-4.5.1-9 .1-13.6 0-.1-4.5-.1-8.9 0-13.4zM5.4 16.2c2.4-2.5 4.4-4.4 6.4-6.2 2.3 2 4.6 4.2 7 6.6",
-    filled: false,
-    seed: 33,
-  },
-  page: {
-    d: "M7 3.8c3.3 0 6.6 0 9.9.1.1 5.4.1 10.8 0 16.2-3.3.1-6.6.1-9.9 0-.1-5.4-.1-10.9 0-16.3z",
-    filled: false,
-    seed: 35,
-  },
-  plus: { d: "M12 5.2c0 4.6.1 9.1 0 13.6M5.2 12c4.6-.1 9.1 0 13.6 0", filled: false, seed: 37 },
-  minus: { d: "M5.2 12c4.6-.1 9.1 0 13.6 0", filled: false, seed: 39 },
-  sidebar: {
-    d: "M4.5 5.3c5-.1 10-.1 15 0 .1 4.5.1 9 0 13.5-5 .1-10 .1-15 0-.1-4.5-.1-9 0-13.5zM9.5 5.4c-.1 4.4-.1 8.8 0 13.2",
-    filled: false,
-    seed: 41,
-  },
-  eye: {
-    d: "M3.5 12.1c2.3-3.7 5.2-5.6 8.6-5.6 3.3.1 6.2 1.9 8.4 5.5-2.2 3.6-5.1 5.5-8.5 5.5-3.4 0-6.3-1.8-8.5-5.4zM12 9.8c1.3 0 2.3 1 2.3 2.3 0 1.2-1 2.2-2.3 2.2-1.2 0-2.2-1-2.2-2.2 0-1.3 1-2.3 2.2-2.3z",
-    filled: false,
-    seed: 43,
-  },
-  eyeOff: {
-    d: "M3.5 12.1c2.3-3.7 5.2-5.6 8.6-5.6 3.3.1 6.2 1.9 8.4 5.5-2.2 3.6-5.1 5.5-8.5 5.5-3.4 0-6.3-1.8-8.5-5.4zM4.6 19.3c4.9-4.9 9.9-9.8 14.8-14.7",
-    filled: false,
-    seed: 45,
-  },
-  lock: {
-    d: "M6.2 11c3.9-.1 7.8-.1 11.7 0 .1 2.8.1 5.6 0 8.4-3.9.1-7.8.1-11.7 0-.1-2.8-.1-5.6 0-8.4zM8.6 10.9c-.1-1.6 0-3 .7-4 .7-1 1.6-1.6 2.8-1.6 1.2 0 2.1.6 2.7 1.5.7 1 .8 2.4.7 4.1",
-    filled: false,
-    seed: 47,
-  },
-  unlock: {
-    d: "M6.2 11c3.9-.1 7.8-.1 11.7 0 .1 2.8.1 5.6 0 8.4-3.9.1-7.8.1-11.7 0-.1-2.8-.1-5.6 0-8.4zM8.6 10.9c-.1-1.6 0-3 .7-4 .7-1 1.6-1.6 2.8-1.6 1.2 0 2.1.5 2.7 1.4",
-    filled: false,
-    seed: 49,
-  },
-  wrap: {
-    d: "M4.5 7.1c4 .1 8-.1 12 .1 4.6.2 4.6 6.8 0 7H8.2M11 11.3c-1 .9-2 1.9-2.8 2.9 1 .9 1.9 1.9 2.8 2.8",
-    filled: false,
-    seed: 51,
-  },
-  token: {
-    d: "M12.1 4.3c2.5 2.6 5 5.1 7.6 7.7-2.6 2.6-5.1 5.1-7.7 7.7-2.6-2.6-5.1-5.1-7.7-7.6 2.6-2.6 5.2-5.2 7.8-7.8zM12 11.9l.1.2",
-    filled: false,
-    seed: 53,
-  },
-  eyedropper: {
-    d: "M14.6 5.4c1.4-1.3 3.5-1.3 4.8.1 1.3 1.4 1.3 3.4 0 4.8l-1.7 1.6-4.8-4.8 1.7-1.7zM12.3 7.7l4 4c-2.7 2.6-5.3 5.3-7.9 7.9H4.5v-3.9c2.6-2.7 5.2-5.3 7.8-8z",
-    filled: false,
-    seed: 55,
-  },
-  gap: {
-    d: "M5.1 5c-.1 4.7.1 9.3-.1 14M18.9 5c.1 4.7-.1 9.3.1 14M9 12.1c2-.1 4 .1 6 0",
-    filled: false,
-    seed: 57,
-  },
-  padding: {
-    d: "M4.6 4.5h14.8v15H4.6zM9 9h6v6H9z",
-    filled: false,
-    seed: 59,
-  },
-  paddingX: {
-    d: "M4.6 4.5h14.8v15H4.6zM8.6 8.6v6.8M15.4 8.6v6.8",
-    filled: false,
-    seed: 301,
-  },
-  paddingY: {
-    d: "M4.6 4.5h14.8v15H4.6zM8.6 8.6h6.8M8.6 15.4h6.8",
-    filled: false,
-    seed: 303,
-  },
-  marginX: {
-    d: "M8.1 8.2c2.6-.1 5.2 0 7.8-.1.1 2.6 0 5.2.1 7.8-2.6.1-5.2 0-7.8.1-.1-2.6 0-5.2-.1-7.8zM3.6 12h2.2M18.2 12h2.2",
-    filled: false,
-    seed: 305,
-  },
-  marginY: {
-    d: "M8.1 8.2c2.6-.1 5.2 0 7.8-.1.1 2.6 0 5.2.1 7.8-2.6.1-5.2 0-7.8.1-.1-2.6 0-5.2-.1-7.8zM12 3.6v2.2M12 18.2v2.2",
-    filled: false,
-    seed: 307,
-  },
-  clip: {
-    d: "M5 3.6c3-.1 6 .1 9-.1.8 0 1.5.7 1.5 1.5.1 3-.1 6 0 9 0 .8-.7 1.5-1.5 1.5-3 .1-6-.1-9 0-.8 0-1.5-.7-1.5-1.5-.1-3 .1-6 0-9 0-.8.7-1.4 1.5-1.4zM15.6 8.6h4.9v11.9H8.6v-4.9",
-    filled: false,
-    seed: 61,
-  },
-  sides: {
-    d: "M7.5 5c3-.1 6 .1 9-.1M19 7.5c.1 3-.1 6 .1 9M16.5 19c-3 .1-6-.1-9 .1M5 16.5c-.1-3 .1-6-.1-9",
-    filled: false,
-    seed: 63,
-  },
-  borderWidth: {
-    d: "M4.5 6.2c5-.1 10 .1 15-.1M4.5 11.9c5 .1 10-.1 15 0M4.6 17.6c5-.1 9.9.1 14.9-.1",
-    filled: false,
-    seed: 65,
-  },
-  chevronDown: {
-    d: "M5 9.2c2.3 2.6 4.6 5 6.9 6.9 2.4-2.4 4.7-4.8 7.1-7.2",
-    filled: false,
-    seed: 67,
-  },
-  check: {
-    d: "M5.2 12.6c1.6 1.5 3.1 3.3 4.4 5.2 2.6-4.3 5.6-8.2 9.2-11.4",
-    filled: false,
-    seed: 73,
-  },
-  radius: {
-    d: "M5 9.2c-.1-2.4 1.8-4.3 4.2-4.2 1.9.1 3.8-.1 5.6 0 2.4-.1 4.3 1.8 4.2 4.2-.1 1.9.1 3.8 0 5.6.1 2.4-1.8 4.3-4.2 4.2-1.9-.1-3.8.1-5.6 0-2.4.1-4.3-1.8-4.2-4.2.1-1.9-.1-3.8 0-5.6z",
-    filled: false,
-    seed: 69,
-  },
-  corners: {
-    d: "M5 9.2V7.1C5 5.9 5.9 5 7.1 5h2.1M14.8 5h2.1C18.1 5 19 5.9 19 7.1v2.1M19 14.8v2.1c0 1.2-.9 2.1-2.1 2.1h-2.1M9.2 19H7.1C5.9 19 5 18.1 5 16.9v-2.1",
-    filled: false,
-    seed: 71,
-  },
-  corner: {
-    d: "M5.3 18.8V12c0-3.7 3-6.8 6.7-6.7h6.8",
-    filled: false,
-    seed: 73,
-  },
-  shadow: {
-    d: "M5.9 3.8c2.8-.1 5.6.1 8.4-.1 1.2 0 2.1 1 2.2 2.2-.1 2.8.1 5.6 0 8.4 0 1.2-1 2.1-2.2 2.2-2.8-.1-5.6.1-8.4 0-1.2 0-2.1-1-2.2-2.2.1-2.8-.1-5.6 0-8.4.1-1.2 1-2.1 2.2-2.1zM20.2 8.3c.1 3.5-.1 7 .1 10.5 0 .8-.7 1.5-1.5 1.5-3.5-.1-7 .1-10.5-.1",
-    filled: false,
-    seed: 75,
-  },
-  innerShadow: {
-    d: "M6 3.8c4-.1 8 .1 12-.1 1.2 0 2.2 1 2.3 2.2-.1 4 .1 8 0 12 0 1.2-1 2.2-2.2 2.3-4-.1-8 .1-12 0-1.2 0-2.2-1-2.3-2.2.1-4-.1-8 0-12 .1-1.2 1-2.2 2.2-2.2zM7.5 16.5c.1-2.3-.1-4.5 0-6.8 0-1.2 1-2.2 2.2-2.2 2.3.1 4.5-.1 6.8 0",
-    filled: false,
-    seed: 77,
-  },
-  opacity: {
-    d: "M12 3.8c4.5 0 8.2 3.7 8.2 8.2 0 4.6-3.7 8.3-8.2 8.2-4.6 0-8.3-3.7-8.2-8.2 0-4.5 3.7-8.2 8.2-8.2zM12 4.2c.1 5.2-.1 10.4.1 15.6M15.6 6c.1 4 0 8 .1 12",
-    filled: false,
-    seed: 79,
-  },
-  fontSize: {
-    d: "M4.5 18.5 9 6.5l4.5 12M6.2 14h5.6M15.5 18.5V12M13.5 12.2h4",
-    filled: false,
-    seed: 81,
-  },
-  lineHeight: {
-    d: "M4.5 4.5h15M4.5 19.5h15M12 8v8M9.5 10.2 12 7.8l2.5 2.4M9.5 13.8 12 16.2l2.5-2.4",
-    filled: false,
-    seed: 83,
-  },
-  letterSpacing: {
-    d: "M4.5 4.5v15M19.5 4.5v15M8 12h8M10.2 9.5 7.8 12l2.4 2.5M13.8 9.5l2.4 2.5-2.4 2.5",
-    filled: false,
-    seed: 85,
-  },
-  alignLeft: {
-    d: "M4.5 6.5h15M4.5 12h9M4.5 17.5h12",
-    filled: false,
-    seed: 87,
-  },
-  alignCenter: {
-    d: "M4.5 6.5h15M7.5 12h9M6 17.5h12",
-    filled: false,
-    seed: 89,
-  },
-  alignRight: {
-    d: "M4.5 6.5h15M10.5 12h9M7.5 17.5h12",
-    filled: false,
-    seed: 91,
-  },
-  justify: {
-    d: "M4.5 6.5h15M4.5 12h15M4.5 17.5h15",
-    filled: false,
-    seed: 93,
-  }, // A square scribbled full.
-  fillSolid: {
-    d: "M5.2 5.1c4.6-.1 9.1.1 13.7-.1.1 4.6-.1 9.2.1 13.8-4.6.1-9.2-.1-13.8.1-.1-4.6.1-9.2 0-13.8zM7.9 7.9c2.7-.1 5.5.1 8.2 0M7.9 10.6c2.7.1 5.5-.1 8.2 0M7.9 13.3c2.7-.1 5.5.1 8.2 0M7.9 16c2.7.1 5.5-.1 8.2 0",
-    filled: false,
-    seed: 95,
-  },
-  // A square with lines that thin out across it.
-  fillLinear: {
-    d: "M5.2 5.1c4.6-.1 9.1.1 13.7-.1.1 4.6-.1 9.2.1 13.8-4.6.1-9.2-.1-13.8.1-.1-4.6.1-9.2 0-13.8zM7.9 7.9c-.1 2.7.1 5.4 0 8.1M10.5 7.9c.1 2.7-.1 5.4 0 8.1M13.6 9.8c.1 1.5-.1 2.9 0 4.4",
-    filled: false,
-    seed: 97,
-  },
-  // A square with a ring around its middle.
-  fillRadial: {
-    d: "M5.2 5.1c4.6-.1 9.1.1 13.7-.1.1 4.6-.1 9.2.1 13.8-4.6.1-9.2-.1-13.8.1-.1-4.6.1-9.2 0-13.8zM12 9.4c1.5 0 2.6 1.2 2.6 2.7 0 1.4-1.1 2.6-2.6 2.6s-2.6-1.2-2.6-2.6c0-1.5 1.1-2.7 2.6-2.7z",
-    filled: false,
-    seed: 99,
-  },
-  button: {
-    d: "M6.6 8.4c3.6-.1 7.2-.1 10.8 0 1.6.1 2.4 1 2.4 2.5v2.3c0 1.5-.9 2.4-2.4 2.4-3.6.1-7.2.1-10.8 0-1.5 0-2.4-.9-2.4-2.4v-2.4c0-1.5.9-2.3 2.4-2.4z",
-    filled: false,
-    seed: 97,
-  },
-  rotate: {
-    d: "M18.6 12.4c-.1 3.7-3.1 6.6-6.8 6.5-3.6-.1-6.5-3.1-6.4-6.7.1-3.6 3.1-6.4 6.7-6.3 1.9 0 3.5.8 4.8 2.1M17.4 4.6c.1 1.4 0 2.8-.1 4.1-1.4.1-2.7.1-4.1 0",
-    filled: false,
-    seed: 101,
-  },
-  italic: {
-    d: "M10 5h7M7 19h7M14.5 5.2 9.5 18.8",
-    filled: false,
-    seed: 111,
-  },
-  underline: {
-    d: "M7.5 4.8v6c0 2.8 1.9 4.6 4.5 4.6s4.5-1.8 4.5-4.6v-6M5.5 19.4h13",
-    filled: false,
-    seed: 113,
-  },
-  strike: {
-    d: "M16.5 6.8c-.8-1.3-2.5-2.1-4.5-2.1-2.6 0-4.4 1.4-4.4 3.3 0 1.6 1 2.6 3.4 3.3M4.8 12.2h14.4M15.6 14.6c.6.6.9 1.3.9 2.1 0 2-1.9 3.2-4.6 3.2-2.1 0-3.9-.8-4.8-2.2",
-    filled: false,
-    seed: 115,
-  },
-  noWrap: {
-    d: "M4.5 12h13M14.8 9.2l2.9 2.8-2.9 2.8M20 5v14",
-    filled: false,
-    seed: 117,
-  },
-  truncate: {
-    d: "M4.5 12h7.5M15 12h.1M17.8 12h.1M20.5 12h.1",
-    filled: false,
-    seed: 119,
-  },
-  balance: {
-    d: "M5.5 8h13M7.5 12.5h9M5.5 17h13",
-    filled: false,
-    seed: 121,
-  },
-  maxLines: {
-    d: "M4.5 6.5h15M4.5 11.5h15M4.5 16.5h7M14.8 16.5h.1M17.4 16.5h.1M20 16.5h.1",
-    filled: false,
-    seed: 123,
-  },
-  flipH: {
-    d: "M12 4v16M9.5 6.8 4.6 17.2h4.9zM14.5 6.8l4.9 10.4h-4.9z",
-    filled: false,
-    seed: 125,
-  },
-  flipV: {
-    d: "M4 12h16M6.8 9.5 17.2 4.6v4.9zM6.8 14.5l10.4 4.9v-4.9z",
-    filled: false,
-    seed: 127,
-  },
-  link: {
-    d: "M10.2 13.8c1.4 1.5 3.6 1.5 5 .1l2.7-2.7c1.4-1.4 1.4-3.6 0-5s-3.6-1.4-5 0l-1 1M13.8 10.2c-1.4-1.5-3.6-1.5-5-.1l-2.7 2.7c-1.4 1.4-1.4 3.6 0 5s3.6 1.4 5 0l1-1",
-    filled: false,
-    seed: 129,
-  },
-  unlink: {
-    d: "M13.2 7.1 13 7.3c1.4-1.4 3.6-1.4 5 0s1.4 3.6 0 5l-1.8 1.8M10.8 16.9l-1 1c-1.4 1.4-3.6 1.4-5 0s-1.4-3.6 0-5l1.8-1.8M4.8 4.8l2 2M17.2 17.2l2 2",
-    filled: false,
-    seed: 131,
-  }, // A square with a wedge swept from its middle.
-  fillConic: {
-    d: "M5.2 5.1c4.6-.1 9.1.1 13.7-.1.1 4.6-.1 9.2.1 13.8-4.6.1-9.2-.1-13.8.1-.1-4.6.1-9.2 0-13.8zM12 12.1c0-1.4.1-2.8 0-4.2M12 12.1c1.2.8 2.4 1.5 3.6 2.2",
-    filled: false,
-    seed: 133,
-  },
+/** Each icon's SVG children; `s` is the stroke width, for the few that vary it. */
+const SHAPES: Record<IconName, string | ((s: number) => string)> = {
+  play: path("M8.4 5.6 18.8 12 8.4 18.4z", FILL),
+  previous: path("M14.8 6 8.8 12l6 6"),
+  next: path("M9.2 6l6 6-6 6"),
+  close: path("M6.4 6.4l11.2 11.2M17.6 6.4 6.4 17.6"),
+  // Two arcs fanning up from a dot.
+  wifi: path("M8.6 13.4a4.8 4.8 0 0 1 6.8 0M5.2 10a9.6 9.6 0 0 1 13.6 0") + dot(12, 16.8, 1.3),
+  search: circle(10.4, 10.4, 6.4) + path("M15.2 15.2 20 20"),
+  // A frame: two crossing pairs of lines.
+  artboard: path("M8.8 4v16M15.2 4v16M4 8.8h16M4 15.2h16"),
+  text: path("M5.6 7.2V5.6h12.8v1.6M12 5.6v12.8"),
+  box: square,
+  // Two bars stacked, two side by side, and four cells: the layout kinds next to `box`.
+  column: rect(4, 4, 16, 6.4, 1.6) + rect(4, 13.6, 16, 6.4, 1.6),
+  row: rect(4, 4, 6.4, 16, 1.6) + rect(13.6, 4, 6.4, 16, 1.6),
+  grid:
+    rect(4, 4, 6.4, 6.4, 1.6) +
+    rect(13.6, 4, 6.4, 6.4, 1.6) +
+    rect(4, 13.6, 6.4, 6.4, 1.6) +
+    rect(13.6, 13.6, 6.4, 6.4, 1.6),
+  component: diamond,
+  image: square + circle(15.2, 8.8, 1.6) + path("M4.4 16 9.2 11.2l8.4 8.4"),
+  // A sheet with its corner folded.
+  page: path(
+    "M13.6 3.2H8a2.4 2.4 0 0 0-2.4 2.4v12.8A2.4 2.4 0 0 0 8 20.8h8a2.4 2.4 0 0 0 2.4-2.4V8zM13.6 3.2v3.2a1.6 1.6 0 0 0 1.6 1.6h3.2",
+  ),
+  plus: path("M12 5.6v12.8M5.6 12h12.8"),
+  minus: path("M5.6 12h12.8"),
+  sidebar: rect(4, 5.6, 16, 12.8, 2.4) + path("M9.6 5.6v12.8"),
+  eye:
+    path("M3.2 12c1.9-3.7 5-5.6 8.8-5.6s6.9 1.9 8.8 5.6c-1.9 3.7-5 5.6-8.8 5.6S5.1 15.7 3.2 12z") +
+    circle(12, 12, 2.4),
+  eyeOff:
+    path("M3.2 12c1.9-3.7 5-5.6 8.8-5.6s6.9 1.9 8.8 5.6c-1.9 3.7-5 5.6-8.8 5.6S5.1 15.7 3.2 12z") +
+    path("M5.2 18.8 18.8 5.2"),
+  lock: rect(5.6, 10.4, 12.8, 9.6, 2.4) + path("M8.8 10.4V8a3.2 3.2 0 0 1 6.4 0v2.4"),
+  unlock: rect(5.6, 10.4, 12.8, 9.6, 2.4) + path("M8.8 10.4V8a3.2 3.2 0 0 1 6.3-.8"),
+  // A line that runs out and turns back under itself.
+  wrap: path("M4 6.4h12a4 4 0 0 1 0 8H8.8M11.2 12l-2.4 2.4 2.4 2.4"),
+  token: diamond + dot(12, 12, 2),
+  eyedropper: path(
+    "M12 6.4l5.6 5.6M14.8 9.2l2.4-2.4a2.26 2.26 0 0 1 3.2 3.2L18 12.4M16 10.4l-7.6 7.6-3.2.8.8-3.2 7.6-7.6",
+  ),
+  // Two walls with the space between them.
+  gap: path("M4 4.8v14.4M20 4.8v14.4M9.6 12h4.8"),
+  padding: square + rect(8.8, 8.8, 6.4, 6.4, 1.2),
+  paddingX: square + path("M8.8 8.8v6.4M15.2 8.8v6.4"),
+  paddingY: square + path("M8.8 8.8h6.4M8.8 15.2h6.4"),
+  marginX: rect(7.2, 7.2, 9.6, 9.6, 1.6) + path("M2.4 12h2.4M19.2 12h2.4"),
+  marginY: rect(7.2, 7.2, 9.6, 9.6, 1.6) + path("M12 2.4v2.4M12 19.2v2.4"),
+  // A box over a larger one, whose hidden part is faded.
+  clip:
+    rect(4, 4, 11.2, 11.2, 2.4) +
+    path(
+      "M15.2 8.8h2.4a2.4 2.4 0 0 1 2.4 2.4v6.4a2.4 2.4 0 0 1-2.4 2.4h-6.4a2.4 2.4 0 0 1-2.4-2.4v-2.4",
+      ' stroke-opacity=".4"',
+    ),
+  // A box's four sides, apart at the corners.
+  sides: path("M8 4h8M20 8v8M16 20H8M4 16V8"),
+  // Three lines, each thicker than the last.
+  borderWidth: (s) =>
+    path("M4 5.6h16", ` stroke-width="${s}"`) +
+    path("M4 11.6h16", ` stroke-width="${+(s * 1.35).toFixed(2)}"`) +
+    path("M4 17.6h16", ` stroke-width="${+(s * 1.75).toFixed(2)}"`),
+  chevronDown: path("M6 9l6 6 6-6"),
+  check: path("M5.2 12.4l4.4 4.4 9.2-9.6"),
+  radius: rect(4, 4, 16, 16, 5.6),
+  corners: path(
+    "M4 8.8V7.2A3.2 3.2 0 0 1 7.2 4h1.6M15.2 4h1.6A3.2 3.2 0 0 1 20 7.2v1.6M20 15.2v1.6a3.2 3.2 0 0 1-3.2 3.2h-1.6M8.8 20H7.2A3.2 3.2 0 0 1 4 16.8v-1.6",
+  ),
+  corner: path("M5.6 19.2V12a6.4 6.4 0 0 1 6.4-6.4h7.2"),
+  // A box with the edge of its shadow below and to the right.
+  shadow: rect(4, 4, 12.8, 12.8, 2.4) + path("M20 8.8v8.8a2.4 2.4 0 0 1-2.4 2.4H8.8"),
+  innerShadow: square + path("M7.2 16V9.6a2.4 2.4 0 0 1 2.4-2.4H16"),
+  // A disc, half solid: see-through to solid.
+  opacity: circle(12, 12, 8) + path("M12 4a8 8 0 0 1 0 16z", FILL),
+  // A large A beside a small T.
+  fontSize: path("M3.2 18.4 8 5.6l4.8 12.8M5 14.4h6M14.4 11.2h6.4M17.6 11.2v7.2"),
+  lineHeight: path("M4 4h16M4 20h16M12 8v8M9.6 10.4 12 8l2.4 2.4M9.6 13.6 12 16l2.4-2.4"),
+  letterSpacing: path("M4 4v16M20 4v16M8 12h8M10.4 9.6 8 12l2.4 2.4M13.6 9.6 16 12l-2.4 2.4"),
+  alignLeft: path("M4 5.6h16M4 12h10.4M4 18.4h12.8"),
+  alignCenter: path("M4 5.6h16M7.2 12h9.6M5.6 18.4h12.8"),
+  alignRight: path("M4 5.6h16M9.6 12h10.4M7.2 18.4h12.8"),
+  justify: path("M4 5.6h16M4 12h16M4 18.4h16"),
+  // A square with a solid square inside, built like the other fill kinds.
+  fillSolid: square + rect(7.2, 7.2, 9.6, 9.6, 1.2, FILL),
+  // A square with lines that shorten across it.
+  fillLinear: square + path("M8.8 7.2v9.6M12 8.8v6.4M15.2 10.4v3.2"),
+  // A square with a ring around a dot.
+  fillRadial: square + circle(12, 12, 4) + dot(12, 12),
+  // A square with a wedge swept from its middle.
+  fillConic: square + path("M12 12V6.4a5.6 5.6 0 0 1 4.85 8.4z", FILL),
+  button: rect(2.4, 7.2, 19.2, 9.6, 3.2),
+  rotate: path("M19.2 12a7.2 7.2 0 1 1-1.6-4.8M17.6 3.2v4h-4"),
+  italic: path("M10.4 4.8h7.2M6.4 19.2h7.2M14 4.8 10 19.2"),
+  underline: path("M7.2 4.8v5.6a4.8 4.8 0 0 0 9.6 0V4.8M5.6 19.2h12.8"),
+  strike: path(
+    "M16.4 7.2c-.8-1.4-2.4-2.4-4.4-2.4-2.6 0-4.4 1.4-4.4 3.4 0 1.6 1 2.6 3.2 3.4M4.8 12h14.4M15.6 14.4c.5.6.8 1.3.8 2.2 0 2-1.9 3.2-4.4 3.2-2.2 0-3.8-.9-4.6-2.4",
+  ),
+  // A line that runs into a wall instead of wrapping.
+  noWrap: path("M4 12h12M12.8 8.8 16 12l-3.2 3.2M20 4.8v14.4"),
+  truncate: path("M4 12h7.2") + dot(14.4, 12) + dot(17.2, 12) + dot(20, 12),
+  balance: path("M5.6 7.2h12.8M7.2 12h9.6M5.6 16.8h12.8"),
+  maxLines:
+    path("M4 5.6h16M4 12h16M4 18.4h7.2") + dot(14.4, 18.4) + dot(17.2, 18.4) + dot(20, 18.4),
+  // Mirrored across a vertical axis: one arrowhead points left, its solid twin right.
+  flipH: path("M12 3.2v17.6") + path("M8.8 7.2v9.6L3.2 12z") + path("M15.2 7.2v9.6l5.6-4.8z", FILL),
+  // Mirrored across a horizontal axis: one arrowhead points up, its solid twin down.
+  flipV: path("M3.2 12h17.6") + path("M7.2 8.8h9.6L12 3.2z") + path("M7.2 15.2h9.6L12 20.8z", FILL),
+  link: path(
+    "M10.4 13.6a3.4 3.4 0 0 0 4.8 0l3.2-3.2a3.4 3.4 0 0 0-4.8-4.8l-.8.8M13.6 10.4a3.4 3.4 0 0 0-4.8 0l-3.2 3.2a3.4 3.4 0 0 0 4.8 4.8l.8-.8",
+  ),
+  unlink: path(
+    "M13.2 7.2l.8-.8a3.4 3.4 0 0 1 4.8 4.8l-.8.8M10.8 16.8l-.8.8a3.4 3.4 0 0 1-4.8-4.8l.8-.8M4.8 4.8l2.4 2.4M16.8 16.8l2.4 2.4",
+  ),
   // Two circles that overlap.
-  blend: {
-    d: "M9.6 5.4c2.7 0 4.8 2.2 4.8 4.9s-2.2 4.8-4.8 4.8-4.9-2.2-4.9-4.8 2.2-4.9 4.9-4.9zM14.4 9c2.7 0 4.9 2.1 4.9 4.8s-2.2 4.9-4.9 4.9-4.8-2.2-4.8-4.9",
-    filled: false,
-    seed: 135,
-  },
+  blend: circle(9.2, 12, 5.2) + circle(14.8, 12, 5.2),
   // An arrow pointer.
-  cursor: {
-    d: "M6.3 4.9c4.1 1.6 8.3 3.1 12.4 4.8-1.9.7-3.8 1.3-5.6 2.1-.8 1.9-1.4 3.8-2.1 5.7-1.6-4.2-3.1-8.4-4.7-12.6zM13.3 12.2c1.5 1.5 3 3 4.4 4.5",
-    filled: false,
-    seed: 137,
-  },
-  margin: {
-    d: "M8.1 8.2c2.6-.1 5.2 0 7.8-.1.1 2.6 0 5.2.1 7.8-2.6.1-5.2 0-7.8.1-.1-2.6 0-5.2-.1-7.8zM12 3.6v2.2M12 18.2v2.2M3.6 12h2.2M18.2 12h2.2",
-    filled: false,
-    seed: 103,
-  },
-  inset: {
-    d: "M4.4 4.6c5.1.1 10.1-.1 15.2.1M8.2 10.1c2.6-.1 5.1 0 7.7-.1.1 2.9 0 5.8.1 8.7-2.6.1-5.1 0-7.7.1-.1-2.9 0-5.8-.1-8.7zM12 5.2v3.4",
-    filled: false,
-    seed: 107,
-  },
-  stack: {
-    d: "M4.6 9.2c3.2-.1 6.3 0 9.5-.1.1 3.5 0 7 .1 10.4-3.2.1-6.3 0-9.5.1-.1-3.5 0-7-.1-10.4zM9.4 5.6c3.3-.1 6.6 0 9.9-.1.1 3.3 0 6.6.1 9.9",
-    filled: false,
-    seed: 109,
-  },
-  noneMark: {
-    d: "M12 4.6c4.1 0 7.4 3.3 7.4 7.4s-3.3 7.4-7.4 7.4-7.4-3.3-7.4-7.4 3.3-7.4 7.4-7.4zM6.8 17.2 17.2 6.8",
-    filled: false,
-    seed: 141,
-  },
-  caseUpper: {
-    d: "M2.8 18.5 6.8 5.5l4 13M4.2 14.2h5.2M13.2 18.5l4-13 4 13M14.6 14.2h5.2",
-    filled: false,
-    seed: 143,
-  },
-  caseLower: {
-    d: "M9.6 11.2v7.3M9.6 14.8c0-2-1.2-3.4-2.9-3.4s-2.9 1.5-2.9 3.5 1.2 3.4 2.9 3.4 2.9-1.4 2.9-3.5M20.2 11.2v7.3M20.2 14.8c0-2-1.2-3.4-2.9-3.4s-2.9 1.5-2.9 3.5 1.2 3.4 2.9 3.4 2.9-1.4 2.9-3.5",
-    filled: false,
-    seed: 145,
-  },
-  caseTitle: {
-    d: "M2.8 18.5 6.8 5.5l4 13M4.2 14.2h5.2M20.4 11.2v7.3M20.4 14.8c0-2-1.2-3.4-2.9-3.4s-2.9 1.5-2.9 3.5 1.2 3.4 2.9 3.4 2.9-1.4 2.9-3.5",
-    filled: false,
-    seed: 147,
-  },
-  upright: {
-    d: "M6 5.5h12M12 5.5v13M9.5 18.5h5",
-    filled: false,
-    seed: 149,
-  },
-  move: {
-    d: "M12 3.8v16.4M3.8 12h16.4M9.6 6.2 12 3.8l2.4 2.4M9.6 17.8l2.4 2.4 2.4-2.4M6.2 9.6 3.8 12l2.4 2.4M17.8 9.6l2.4 2.4-2.4 2.4",
-    filled: false,
-    seed: 151,
-  },
-  skew: {
-    d: "M8.2 6h11.3l-3.7 12H4.5z",
-    filled: false,
-    seed: 153,
-  }, // A box's corner, with its stroke inside the edge.
-  strokeInside: { d: "M6 20V6h14M10 20v-10h10", filled: false, seed: 155 },
-  // A box's corner, its stroke crossing the edge.
-  strokeCenter: { d: "M6 20V6h14M3.5 10h5M3.5 15h5M10 3.5v5M15 3.5v5", filled: false, seed: 157 },
-  // A box's corner, with its stroke outside the edge.
-  strokeOutside: { d: "M9 20V9h11M4.5 20V4.5H20", filled: false, seed: 159 },
+  cursor: path("M5.6 5.6l13.6 4.8-6.4 2.4-2.4 6.4z"),
+  margin: rect(7.2, 7.2, 9.6, 9.6, 1.6) + path("M12 2.4v2.4M12 19.2v2.4M2.4 12h2.4M19.2 12h2.4"),
+  // A box hanging below an edge.
+  inset: path("M4 4h16M12 6.4v2.4") + rect(7.2, 10.4, 9.6, 8.8, 1.6),
+  // A box in front of another.
+  stack: rect(4, 8.8, 11.2, 11.2, 2.4) + path("M8.8 4h8.8A2.4 2.4 0 0 1 20 6.4v8.8"),
+  noneMark: circle(12, 12, 7.2) + path("M6.9 17.1 17.1 6.9"),
+  caseUpper: upperA(2.4) + upperA(13.6),
+  caseLower: lowerA(6.8) + lowerA(15.6),
+  caseTitle: upperA(2.4) + lowerA(15.6),
+  // An upright T with a foot: not italic.
+  upright: path("M6.4 5.6h11.2M12 5.6v12.8M9.6 18.4h4.8"),
+  move: path(
+    "M12 3.2v17.6M3.2 12h17.6M9.6 5.6 12 3.2l2.4 2.4M9.6 18.4l2.4 2.4 2.4-2.4M5.6 9.6 3.2 12l2.4 2.4M18.4 9.6l2.4 2.4-2.4 2.4",
+  ),
+  skew: path("M8.8 5.6H20l-4.8 12.8H4z"),
+  // A box's corner (the solid line) with its stroke (the shaded band) inside, across or outside it.
+  strokeInside:
+    path("M11.2 20V11.2H20", ' stroke-width="4" stroke-opacity=".35"') + path("M8.8 20V8.8H20"),
+  strokeCenter:
+    path("M8.8 20V8.8H20", ' stroke-width="4" stroke-opacity=".35"') + path("M8.8 20V8.8H20"),
+  strokeOutside:
+    path("M6.4 20V6.4H20", ' stroke-width="4" stroke-opacity=".35"') + path("M8.8 20V8.8H20"),
   // Two columns of dots, to drag a row by.
-  grip: {
-    d: "M9 6.5h.1M15 6.5h.1M9 12h.1M15 12h.1M9 17.5h.1M15 17.5h.1",
-    filled: false,
-    seed: 161,
-  },
-  scale: {
-    d: "M4.5 19.5v-6h6v6zM10.5 13.5 19.5 4.5M14 4.5h5.5V10",
-    filled: false,
-    seed: 155,
-  },
-  origin: {
-    d: "M12 4.6c4.1 0 7.4 3.3 7.4 7.4s-3.3 7.4-7.4 7.4-7.4-3.3-7.4-7.4 3.3-7.4 7.4-7.4zM12 11.2c.5 0 .8.3.8.8s-.3.8-.8.8-.8-.3-.8-.8.3-.8.8-.8z",
-    filled: false,
-    seed: 157,
-  },
-  clock: {
-    d: "M12 4.4c4.2 0 7.6 3.4 7.6 7.6s-3.4 7.6-7.6 7.6-7.6-3.4-7.6-7.6 3.4-7.6 7.6-7.6zM12 7.8V12l2.8 1.9",
-    filled: false,
-    seed: 159,
-  },
-  delay: {
-    d: "M12 4.4c4.2 0 7.6 3.4 7.6 7.6s-3.4 7.6-7.6 7.6-7.6-3.4-7.6-7.6M12 7.8V12l2.8 1.9M4.4 8.2h3.8V4.4",
-    filled: false,
-    seed: 161,
-  },
+  grip:
+    dot(9.6, 7.2) +
+    dot(14.4, 7.2) +
+    dot(9.6, 12) +
+    dot(14.4, 12) +
+    dot(9.6, 16.8) +
+    dot(14.4, 16.8),
+  scale: rect(4, 12.8, 7.2, 7.2, 1.6) + path("M14.4 4H20v5.6M20 4l-7.2 7.2"),
+  origin: circle(12, 12, 7.2) + dot(12, 12, 1.6),
+  clock: circle(12, 12, 8) + path("M12 7.2V12l3.2 2.4"),
+  // A clock hand inside an arrow turning back: time before it starts.
+  delay: path("M4.8 12a7.2 7.2 0 1 0 1.6-4.8M6.4 3.2v4h4M12 8.8V12l2.4 1.6"),
+  // Two arms meeting at a corner, with the arc between them: an angle, for a rotation's degrees.
+  angle: path("M4.8 19.2h14.4M4.8 19.2 15.2 6.4M12.8 19.2a8 8 0 0 0-2.95-6.21"),
+  // A shaft on the center pixel column, under a head that meets it at its tip: send.
+  arrowUp: path("M12 19.2V5.6M6.4 11.2 12 5.6l5.6 5.6"),
 };
 
 export const ICON_NAMES = Object.keys(SHAPES) as readonly IconName[];
 
-/** Stroke width in the 24-unit box. Thick enough to survive 10px. */
-const STROKE = 2.6;
+/** Stroke width in the 24-unit box: 1px at 15px and below, so small icons don't thin out. */
+export function strokeFor(size: number): number {
+  return size >= 15 ? 1.6 : +(24 / size).toFixed(2);
+}
 
 /**
  * The icon as SVG markup, for plain DOM callers (`el.innerHTML = iconMarkup(...)`).
- * `key` makes its filter id unique: pass one per copy on the page.
+ * The markup carries no ids, so any number of copies can share a page.
+ * `_key` is accepted for older callers and ignored.
  */
-export function iconMarkup(name: IconName, size = 16, key = ""): string {
-  const { d, filled, seed } = SHAPES[name];
-  const id = `fin-ico-${name}${key.replace(/[^\w-]/g, "")}`;
+export function iconMarkup(name: IconName, size = 16, _key = ""): string {
+  const s = strokeFor(size);
+  const shape = SHAPES[name];
+  const body = typeof shape === "function" ? shape(s) : shape;
   return (
     `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" aria-hidden="true" ` +
-    `style="display:block;overflow:visible;flex:none">` +
-    `<filter id="${id}" filterUnits="userSpaceOnUse" x="-3" y="-3" width="30" height="30">` +
-    `<feTurbulence type="fractalNoise" baseFrequency="0.045" numOctaves="1" seed="${seed}"/>` +
-    `<feDisplacementMap in="SourceGraphic" scale="2.6" xChannelSelector="R" yChannelSelector="G"/>` +
-    `</filter>` +
-    `<path d="${d}" fill="${filled ? "currentColor" : "none"}" stroke="currentColor" ` +
-    `stroke-width="${STROKE}" stroke-linecap="round" stroke-linejoin="round" filter="url(#${id})"/>` +
-    `</svg>`
+    `stroke="currentColor" stroke-width="${s}" stroke-linecap="round" stroke-linejoin="round" ` +
+    `style="display:block;overflow:visible;flex:none">${body}</svg>`
   );
 }
 
-/** A hand-drawn icon that follows the surrounding text color. */
+/** An icon that follows the surrounding text color. */
 export function Icon({ name, size = 16 }: { name: IconName; size?: number }): ReactElement {
-  const key = useId();
-  // The markup is built from constants, a number and React's id, never from user input.
+  // The markup is built from constants and a number, never from user input.
   return (
     <span
       style={{ display: "contents" }}
-      dangerouslySetInnerHTML={{ __html: iconMarkup(name, size, key) }}
+      dangerouslySetInnerHTML={{ __html: iconMarkup(name, size) }}
     />
   );
 }

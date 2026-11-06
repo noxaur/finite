@@ -191,3 +191,65 @@ fn pages_survive_a_snapshot() {
     assert_eq!(names(back.doc()), ["Page 1", "Components"]);
     assert_eq!(on(back.doc(), "kit"), ["button"]);
 }
+
+#[test]
+fn a_page_background_saves_and_undoes_back_to_unset() {
+    let mut d = design();
+    artboard(&mut d, "home", None);
+    let background = |d: &Design| d.doc().page(FIRST_PAGE).and_then(|p| p.background.clone());
+    commit(&mut d, |doc| {
+        edit::set_page_background(doc, FIRST_PAGE, Some(" #e8eef0 "))
+    });
+    assert_eq!(background(&d).as_deref(), Some("#e8eef0"));
+    // Renaming keeps it, and it survives a save.
+    commit(&mut d, |doc| edit::rename_page(doc, FIRST_PAGE, "Screens"));
+    let json = serde_json::to_string(&d.snapshot()).unwrap();
+    assert!(json.contains("\"background\":\"#e8eef0\""), "{json}");
+    let back = Design::from_snapshot(serde_json::from_str::<Snapshot>(&json).unwrap());
+    assert_eq!(background(&back).as_deref(), Some("#e8eef0"));
+
+    // One undo each: the name, then the color, back to the implicit page.
+    d.undo("agent", 0).unwrap();
+    assert_eq!(background(&d).as_deref(), Some("#e8eef0"));
+    d.undo("agent", 0).unwrap();
+    assert_eq!(background(&d), None);
+    assert!(d.doc().page_map().is_empty());
+
+    commit(&mut d, |doc| {
+        edit::set_page_background(doc, FIRST_PAGE, Some("rgb(10 20 30)"))
+    });
+    commit(&mut d, |doc| {
+        edit::set_page_background(doc, FIRST_PAGE, None)
+    });
+    assert_eq!(background(&d), None);
+    // A page without a background saves without the field.
+    let page = serde_json::to_string(d.doc().page(FIRST_PAGE).unwrap()).unwrap();
+    assert_eq!(page, r#"{"name":"Page 1","index":"V"}"#);
+    d.undo("agent", 0).unwrap();
+    assert_eq!(background(&d).as_deref(), Some("rgb(10 20 30)"));
+
+    for color in [
+        "var(--bg)",
+        "color-mix(in srgb, var(--bg) 50%, transparent)",
+        "#e8eef080",
+        "rebeccapurple",
+        "oklch(0.7 0.1 200)",
+    ] {
+        assert!(
+            edit::set_page_background(d.doc(), FIRST_PAGE, Some(color)).is_ok(),
+            "{color}"
+        );
+    }
+    for bad in [
+        "red; x",
+        "url(x)",
+        "var(--bg) url(x)",
+        "var(--a));background:url(x",
+        "",
+    ] {
+        let error = edit::set_page_background(d.doc(), FIRST_PAGE, Some(bad)).unwrap_err();
+        assert!(error.0.contains("isn't a color"), "{bad}: {error}");
+    }
+    let error = edit::set_page_background(d.doc(), "nope", Some("#000")).unwrap_err();
+    assert!(error.0.contains("not found"), "{error}");
+}

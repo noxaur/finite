@@ -1742,7 +1742,7 @@ const styles = stylex.create({
     position: "absolute",
     left: 0,
     top: 0,
-    boxShadow: "0 1px 3px rgba(0, 0, 0, 0.12), 0 0 0 1px rgba(0, 0, 0, 0.06)",
+    boxShadow: `0 1px 3px color-mix(in srgb, ${colors.ink} 12%, transparent), 0 0 0 1px color-mix(in srgb, ${colors.ink} 8%, transparent)`,
   },
   working: {
     outline: `calc(2px * var(--inv-zoom, 1)) solid ${colors.accent}`,
@@ -1824,8 +1824,8 @@ const styles = stylex.create({
     borderRadius: 4,
     fontSize: 11,
     lineHeight: 1,
-    backgroundColor: { default: "transparent", ":is([aria-pressed=true])": colors.accent },
-    color: { default: colors.muted, ":is([aria-pressed=true])": colors.onAccent },
+    backgroundColor: { default: "transparent", ":is([aria-pressed=true])": colors.activeFill },
+    color: { default: colors.muted, ":is([aria-pressed=true])": colors.text },
     cursor: "var(--cursor-pointer, pointer)",
   },
 });

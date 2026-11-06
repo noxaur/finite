@@ -82,10 +82,17 @@ fn ops() -> Vec<Op> {
         Some(Page {
             name: "P".into(),
             index: "V".into(),
+            background: None,
+        }),
+        Some(Page {
+            name: "P".into(),
+            index: "V".into(),
+            background: Some("#e8eef0".into()),
         }),
         Some(Page {
             name: "P".into(),
             index: "0".into(),
+            background: None,
         }),
         None,
     ] {
@@ -412,6 +419,14 @@ fn edits() -> Vec<Op> {
         Op::Delete { id: "a".into() },
         to(None, "W"),
         to(Some("a"), "V"),
+        Op::Page {
+            id: "p".into(),
+            page: Some(Page {
+                name: "P".into(),
+                index: "V".into(),
+                background: Some("#e8eef0".into()),
+            }),
+        },
     ]
 }
 

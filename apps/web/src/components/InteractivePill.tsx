@@ -2,7 +2,8 @@
 
 import * as stylex from "@stylexjs/stylex";
 import type { Presence } from "@/design/schema";
-import { colors, radii, space } from "@/styles/tokens.stylex";
+import { colors, fonts, radii, shadows, space } from "@/styles/tokens.stylex";
+import { Button, IconButton } from "./Button";
 import { Icon } from "./Icons";
 
 interface InteractivePillProps {
@@ -47,48 +48,38 @@ export function InteractivePill(props: InteractivePillProps) {
       <span {...stylex.props(styles.name)}>{name}</span>
       {total > 1 && (
         <>
-          <button
-            type="button"
-            onClick={() => props.onStep(-1)}
-            {...stylex.props(styles.tool)}
-            aria-label="Previous artboard"
+          <IconButton
+            size="small"
+            icon="previous"
+            label="Previous artboard"
             title="Previous artboard (←)"
-          >
-            <Icon name="previous" size={14} />
-          </button>
+            onClick={() => props.onStep(-1)}
+          />
           <span {...stylex.props(styles.muted)}>
             {index + 1} of {total}
           </span>
-          <button
-            type="button"
-            onClick={() => props.onStep(1)}
-            {...stylex.props(styles.tool)}
-            aria-label="Next artboard"
+          <IconButton
+            size="small"
+            icon="next"
+            label="Next artboard"
             title="Next artboard (→)"
-          >
-            <Icon name="next" size={14} />
-          </button>
+            onClick={() => props.onStep(1)}
+          />
         </>
       )}
       {canGoBack && (
-        <button
-          type="button"
-          onClick={props.onBack}
-          {...stylex.props(styles.tool)}
-          title="Back to where the link was (⌘[)"
-        >
+        <Button size="small" onClick={props.onBack} title="Back to where the link was (⌘[)">
           Back
-        </button>
+        </Button>
       )}
       {canRestart && (
-        <button
-          type="button"
+        <Button
+          size="small"
           onClick={props.onRestart}
-          {...stylex.props(styles.tool)}
           title="Back to the artboard you started on (R)"
         >
           Restart
-        </button>
+        </Button>
       )}
       {broken > 0 && (
         <span
@@ -100,30 +91,24 @@ export function InteractivePill(props: InteractivePillProps) {
       )}
       <span {...stylex.props(styles.divider)} />
       {note && <span {...stylex.props(styles.note)}>{note}</span>}
-      <button
-        type="button"
-        onClick={props.onReload}
-        {...stylex.props(styles.tool)}
-        title="Load the page again from the start"
-      >
+      <Button size="small" onClick={props.onReload} title="Load the page again from the start">
         Reload
-      </button>
-      <button
-        type="button"
-        aria-pressed={held}
+      </Button>
+      <Button
+        size="small"
+        pressed={held}
         onClick={props.onHold}
-        {...stylex.props(styles.tool, held && styles.pressed)}
         title={held ? "Changes wait until you let go" : "Hold off reloads while you use the page"}
       >
         Hold
-      </button>
+      </Button>
       {hosts.length > 0 && (
         <span
           {...stylex.props(styles.network)}
           title={`Uses the network: ${hosts.join(", ")}`}
           aria-label={`Uses the network: ${hosts.join(", ")}`}
         >
-          <Icon name="wifi" size={14} />
+          <Icon name="wifi" size={15} />
         </span>
       )}
       {presence.map((p) => (
@@ -131,15 +116,13 @@ export function InteractivePill(props: InteractivePillProps) {
           {p.name}
         </span>
       ))}
-      <button
-        type="button"
-        onClick={props.onExit}
-        {...stylex.props(styles.tool)}
-        aria-label="Exit"
+      <IconButton
+        size="small"
+        icon="close"
+        label="Exit"
         title="Back to the canvas (Esc)"
-      >
-        <Icon name="close" size={14} />
-      </button>
+        onClick={props.onExit}
+      />
     </div>
   );
 }
@@ -156,11 +139,14 @@ const styles = stylex.create({
     maxWidth: `calc(100% - 2 * ${space.sm})`,
     padding: space.xs,
     paddingInline: space.sm,
-    borderRadius: radii.sm,
+    borderRadius: radii.md,
     borderWidth: 1,
     borderStyle: "solid",
     borderColor: colors.border,
     backgroundColor: colors.surface,
+    boxShadow: shadows.raised,
+    fontFamily: fonts.sans,
+    fontSize: 12,
     whiteSpace: "nowrap",
   },
   name: { fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 },
@@ -168,28 +154,11 @@ const styles = stylex.create({
   divider: { width: 1, alignSelf: "stretch", backgroundColor: colors.border },
   note: { color: colors.muted },
   broken: { color: colors.danger, whiteSpace: "nowrap" },
-  tool: {
-    display: "inline-grid",
-    placeItems: "center",
-    minWidth: 27,
-    height: 24,
-    paddingInline: 6,
-    borderWidth: 0,
-    borderRadius: 4,
-    backgroundColor: { default: "transparent", ":hover": colors.bg },
-    color: "inherit",
-    font: "inherit",
-    cursor: "var(--cursor-pointer, pointer)",
-  },
-  pressed: {
-    backgroundColor: { default: colors.accent, ":hover": colors.accent },
-    color: colors.onAccent,
-  },
   network: { display: "inline-grid", placeItems: "center", color: colors.muted },
   chip: {
-    paddingInline: 6,
-    paddingBlock: 1,
-    borderRadius: 4,
+    paddingInline: space.sm,
+    paddingBlock: space.xs,
+    borderRadius: radii.sm,
     backgroundColor: colors.accent,
     color: colors.onAccent,
     fontSize: 12,

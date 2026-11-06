@@ -80,7 +80,8 @@ export function sizeModeOf(
  * The styles that size `axis` as `mode`. Fixed is `current`, in pixels;
  * Hug is `fit-content`; Fill is `flex: 1 1 0` along a flex parent's main
  * axis, `align-self: stretch` across it, and `100%` anywhere else. Leaving
- * Fill takes off what made it fill.
+ * Fill takes off what made it fill. Along a flex parent's main axis, Fixed
+ * and Hug also set `flex-shrink: 0`, so the size holds when room runs short.
  */
 export function sizeModeStyles(
   axis: Axis,
@@ -109,6 +110,8 @@ export function sizeModeStyles(
     drop("flex", "flex-grow", "flex-basis");
     // A stylesheet makes it grow, which only an inline 0 can stop.
     if (!own && ctx.grow > 0) out["flex-grow"] = "0";
+    // A fixed or hugging size holds when the line runs short of room, as in a design tool.
+    if (styles["flex-shrink"]?.trim() !== "0") out["flex-shrink"] = "0";
   } else if (main && styles["align-self"]?.trim() === "stretch") out["align-self"] = null;
   out[axis] = mode === "hug" ? "fit-content" : `${Math.round(current)}px`;
   return out;

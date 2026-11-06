@@ -52,16 +52,35 @@ describe("size modes", () => {
     const grown = { ...inColumn, grow: 1 };
     expect(sizeModeStyles("height", "fixed", { flex: "1 1 0" }, grown, 99.6)).toEqual({
       flex: null,
+      "flex-shrink": "0",
       height: "100px",
     });
     // A stylesheet makes it grow.
     expect(sizeModeStyles("height", "hug", {}, grown, 10)).toEqual({
       "flex-grow": "0",
+      "flex-shrink": "0",
       height: "fit-content",
     });
     expect(sizeModeStyles("width", "hug", { "align-self": "stretch" }, inColumn, 10)).toEqual({
       "align-self": null,
       width: "fit-content",
+    });
+  });
+
+  it("keeps a fixed or hugging size from shrinking along the main axis", () => {
+    expect(sizeModeStyles("height", "fixed", {}, inColumn, 40)).toEqual({
+      "flex-shrink": "0",
+      height: "40px",
+    });
+    expect(sizeModeStyles("height", "hug", { "flex-shrink": "0" }, inColumn, 40)).toEqual({
+      height: "fit-content",
+    });
+    // Across the line, shrinking doesn't apply.
+    expect(sizeModeStyles("width", "fixed", {}, inColumn, 80)).toEqual({ width: "80px" });
+    // Fill takes it off again.
+    expect(sizeModeStyles("height", "fill", { "flex-shrink": "0" }, inColumn, 40)).toEqual({
+      flex: "1 1 0",
+      "flex-shrink": null,
     });
   });
 

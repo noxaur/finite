@@ -1,14 +1,17 @@
 /**
- * Hand-inked cursors as CSS custom properties on :root. Each renders at 24px (the comment pin at 28)
- * in black ink with a white outline, a small wobble filter and a soft drop shadow, so they stay
- * sharp, readable on any background and under 32px.
+ * Cursors as CSS custom properties on :root. Each renders at 24px (the comment pin at 28) as a
+ * crisp ink shape with rounded joins, a halo outline and a soft drop shadow, so they stay sharp,
+ * readable on any background and under 32px.
  */
 
-const INK = "#1a1a18";
+const INK = "#171a1c";
 
-/** The speech-bubble outline every pin is drawn from, tail tip at (3, 34). */
+/**
+ * The speech pin every comment is drawn from, in a 40 × 36 box: a rounded bubble from (3, 2) to
+ * (38, 27) whose bottom-left corner runs down into a point, the tail tip, at (3, 34).
+ */
 export const PIN_PATH =
-  "M3 34C5 31 7 28 8 25C4 22 2 18 2 14C2 7 10 2 20 2C30 2 38 7 38 14C38 22 30 27 20 27C17 27 15 27 13 26C10 30 6 33 3 34Z";
+  "M3 34V12A10 10 0 0 1 13 2H28A10 10 0 0 1 38 12V17A10 10 0 0 1 28 27H15.5Q12.6 27 10.4 28.6Z";
 
 const HAND_POINTER =
   "M11 18.6V7A1.8 1.8 0 0 1 14.6 7V14.6L15.1 15.6L15.6 14.6A2 2 0 0 1 19.6 14.6L20.1 15.6L20.6 14.8A1.9 1.9 0 0 1 24.4 14.8L24.9 15.8L25.4 16.2A1.6 1.6 0 0 1 28.6 16.2V21.5C28.6 26.5 25.6 29.6 21 29.6H17C14 29.6 12.4 28.2 10.9 26L6 19.8C4.9 18.4 5.8 16.4 7.6 16.6C9 16.8 10.1 17.6 11 18.6Z";
@@ -61,8 +64,8 @@ const circle = (cx: number, cy: number, r: number) =>
   `M${cx} ${cy - r}A${r} ${r} 0 1 0 ${cx} ${cy + r}A${r} ${r} 0 1 0 ${cx} ${cy - r}Z`;
 
 /**
- * One inked stroke. Every layer gets a white outline under the ink pass; `halo: false` marks a
- * detail drawn over a filled shape, which is inked in white instead.
+ * One stroke. Every layer gets a white outline under the ink pass; `halo: false` marks a
+ * detail drawn over a filled shape, which is drawn in white instead.
  */
 interface Layer {
   readonly d: string;
@@ -88,14 +91,10 @@ function cursor(frame: Frame, layers: ReadonlyArray<Layer>) {
   const [bx, by, bw, bh] = frame.box;
   const px = frame.size / bw;
   const height = Math.round(bh * px);
-  const wobble = 'filter="url(#w)"';
   const stroke = (color: string, width: number) =>
     `stroke="${color}" stroke-linecap="round" stroke-linejoin="round" stroke-width="${width}"`;
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="${frame.size}" height="${height}" viewBox="${frame.box.join(" ")}">` +
-    `<filter id="w" x="-20%" y="-20%" width="140%" height="140%">` +
-    `<feTurbulence type="fractalNoise" baseFrequency="${+(0.07 * px).toFixed(4)}" numOctaves="1" seed="3"/>` +
-    `<feDisplacementMap in="SourceGraphic" scale="${+(1.3 / px).toFixed(2)}" xChannelSelector="R" yChannelSelector="G"/></filter>` +
     `<filter id="s" x="-30%" y="-30%" width="160%" height="160%">` +
     `<feDropShadow dx="0" dy="${+(0.8 / px).toFixed(2)}" stdDeviation="${+(0.7 / px).toFixed(2)}" flood-color="#000" flood-opacity="0.35"/></filter>` +
     `<g filter="url(#s)">` +
@@ -103,13 +102,13 @@ function cursor(frame: Frame, layers: ReadonlyArray<Layer>) {
       .filter((l) => l.halo !== false)
       .map(
         (l) =>
-          `<path d="${l.d}" fill="none" ${wobble} ${stroke("#fff", l.width + 2 * (l.outline ?? l.width / 2))}/>`,
+          `<path d="${l.d}" fill="none" ${stroke("#f8f9f9", l.width + 2 * (l.outline ?? l.width / 2))}/>`,
       )
       .join("") +
     layers
       .map(
         (l) =>
-          `<path d="${l.d}" fill="${l.fill ?? "none"}" ${wobble} ${stroke(l.halo === false ? "#fff" : INK, l.width)}/>`,
+          `<path d="${l.d}" fill="${l.fill ?? "none"}" ${stroke(l.halo === false ? "#f8f9f9" : INK, l.width)}/>`,
       )
       .join("") +
     `</g></svg>`;
@@ -128,7 +127,7 @@ const CENTER: Point = [12, 12];
 
 const CURSORS: Record<string, string> = {
   arrow: cursor(unit([4, 3], "default"), [{ d: ARROW, fill: INK, width: 1.5 }]),
-  // The hands are thin-inked with a wide outline, so the notches between fingers show white.
+  // The hands have a thin ink line and a wide outline, so the notches between fingers show white.
   pointer: cursor({ box: [1, 2, 30, 30], size: 24, hotspot: [12.8, 5.5], fallback: "pointer" }, [
     { d: HAND_POINTER, fill: INK, width: 0.6, outline: 1 },
   ]),
