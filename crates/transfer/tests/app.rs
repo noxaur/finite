@@ -812,9 +812,11 @@ fn installed(work: &Path, package: &[u8]) -> PathBuf {
         .join("app-node-modules")
         .join(BlobHash::of(package).to_string());
     let modules = cache.join("node_modules");
-    if modules.exists() {
+    // A restored target cache can keep the folder but lose `.bin`.
+    if modules.join(".bin").join("vite").is_file() {
         return modules;
     }
+    let _ = fs::remove_dir_all(&cache);
     let staging = cache.with_extension(format!("tmp-{}", std::process::id()));
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging).unwrap();
