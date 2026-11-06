@@ -293,8 +293,48 @@ fn undoing_a_background_or_a_rename_leaves_the_other_actors_change() {
         d.undo("bob", 0).unwrap();
         assert_eq!(page(&d, id), (name.into(), Some("#000".into())), "{id}");
 
-        // Undoing both leaves the design as it started.
+        // Undoing both leaves the page as it started. The first page stays
+        // in the page map: Bob's undo didn't take it out, as Alice had
+        // changed it since.
         d.undo("alice", 0).unwrap();
-        assert_eq!(d.doc().page_map(), start(id).doc().page_map(), "{id}");
+        assert_eq!(page(&d, id), (name.into(), None), "{id}");
+    }
+}
+
+#[test]
+fn undoing_a_new_page_keeps_a_background_set_on_the_first_page_since() {
+    let background = |d: &Design| d.doc().page(FIRST_PAGE).unwrap().background.clone();
+    // With the first page implicit, and saved in the page map as it starts.
+    let explicit = || {
+        let mut d = design();
+        let first = Op::Page {
+            id: FIRST_PAGE.into(),
+            page: Some(d.doc().page(FIRST_PAGE).unwrap().clone()),
+        };
+        d.commit("other", "Save", &[first], 0).unwrap();
+        d
+    };
+    let starts: [fn() -> Design; 2] = [design, explicit];
+    for start in starts {
+        let mut d = start();
+        let map = d.doc().page_map().clone();
+        // Alice sets a background and undoes it: the page map is as it was.
+        let ops = edit::set_page_background(d.doc(), FIRST_PAGE, Some("#000")).unwrap();
+        d.commit("alice", "Background", &ops, 0).unwrap();
+        d.undo("alice", 0).unwrap();
+        assert_eq!(d.doc().page_map(), &map);
+
+        // Bob adds a page, Carol sets the first page's background, Bob undoes.
+        let ops = edit::create_page(d.doc(), "kit".into(), "Kit").unwrap();
+        d.commit("bob", "Add page", &ops, 0).unwrap();
+        let ops = edit::set_page_background(d.doc(), FIRST_PAGE, Some("#123")).unwrap();
+        d.commit("carol", "Background", &ops, 0).unwrap();
+        d.undo("bob", 0).unwrap();
+        assert!(d.doc().page("kit").is_none());
+        assert_eq!(background(&d).as_deref(), Some("#123"), "{map:?}");
+        // Carol's undo then leaves the first page as it started.
+        d.undo("carol", 0).unwrap();
+        assert_eq!(background(&d), None);
+        assert_eq!(d.doc().pages().len(), 1);
     }
 }

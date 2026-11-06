@@ -115,6 +115,7 @@ type Touched =
   | { readonly op: "page" }
   | { readonly op: "pageName" }
   | { readonly op: "pageBackground" }
+  | { readonly op: "firstPage" }
   | null;
 
 /**
@@ -423,6 +424,7 @@ export class Replica {
       case "page":
       case "pageName":
       case "pageBackground":
+      case "firstPage":
         this.pages = JSON.parse(this.doc.pages()) as PageEntry[];
         return { op: "page" };
     }

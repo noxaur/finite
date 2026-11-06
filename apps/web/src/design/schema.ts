@@ -107,6 +107,8 @@ export const Op = Schema.Union([
     id: Schema.String,
     background: Schema.optionalKey(Schema.NullOr(Schema.String)),
   }),
+  /** Puts the implicit first page in the page map (`explicit`), or takes it out while it's unchanged. */
+  Schema.Struct({ op: Schema.Literal("firstPage"), explicit: Schema.Boolean }),
 ]);
 export type Op = typeof Op.Type;
 

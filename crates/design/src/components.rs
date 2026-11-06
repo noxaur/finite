@@ -601,6 +601,7 @@ pub fn redirect(
             | Op::Page { .. }
             | Op::PageName { .. }
             | Op::PageBackground { .. }
+            | Op::FirstPage { .. }
             | Op::Token { .. }
             | Op::Mode { .. } => {}
             Op::Move { id, parent, .. } => {

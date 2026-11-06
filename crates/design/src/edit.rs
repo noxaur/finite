@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::{
     components::{self, Overrides},
-    document::{Document, FIRST_PAGE, MAX_DEPTH, MAX_NODES, MAX_PAGES, Op, Page},
+    document::{Document, MAX_DEPTH, MAX_NODES, MAX_PAGES, Op, Page},
     flow, fractional,
     html::{self, Fragment},
     label,
@@ -1559,10 +1559,7 @@ pub fn create_page(doc: &Document, id: String, name: &str) -> Result<Vec<Op>> {
     }
     let mut ops = Vec::new();
     if doc.page_map().is_empty() {
-        ops.push(Op::Page {
-            id: FIRST_PAGE.into(),
-            page: Some(pages[0].1.clone()),
-        });
+        ops.push(Op::FirstPage { explicit: true });
     }
     let last = pages.last().map(|(_, p)| p.index.as_str());
     ops.push(Op::Page {
@@ -1627,10 +1624,13 @@ pub fn rename_page(doc: &Document, id: &str, name: &str) -> Result<Vec<Op>> {
     if name.trim().is_empty() {
         return err("give the page a name");
     }
-    Ok(vec![Op::PageName {
-        id: id.to_owned(),
-        name: label::clip(name.trim(), label::LAYER_NAME),
-    }])
+    Ok(explicit_first_page(doc)
+        .into_iter()
+        .chain([Op::PageName {
+            id: id.to_owned(),
+            name: label::clip(name.trim(), label::LAYER_NAME),
+        }])
+        .collect())
 }
 
 /// Sets the color of the canvas behind a page's artboards, or clears it
@@ -1648,10 +1648,21 @@ pub fn set_page_background(doc: &Document, id: &str, background: Option<&str>) -
             "{color:?} isn't a color. Use a hex color like \"#e8eef0\", rgb(232 238 240), a token like var(--bg), or null for the viewer's own"
         ));
     }
-    Ok(vec![Op::PageBackground {
-        id: id.to_owned(),
-        background: background.map(str::to_owned),
-    }])
+    Ok(explicit_first_page(doc)
+        .into_iter()
+        .chain([Op::PageBackground {
+            id: id.to_owned(),
+            background: background.map(str::to_owned),
+        }])
+        .collect())
+}
+
+/// The op that puts the implicit first page in the page map, so a field op
+/// can change it, for a design without pages.
+fn explicit_first_page(doc: &Document) -> Option<Op> {
+    doc.page_map()
+        .is_empty()
+        .then_some(Op::FirstPage { explicit: true })
 }
 
 /// Deletes a page and every artboard on it. A design keeps at least one page.
@@ -2415,6 +2426,7 @@ fn room_for(doc: &Document, removed: usize, added: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::FIRST_PAGE;
 
     fn ids() -> impl FnMut() -> NodeId {
         let mut n = 0;

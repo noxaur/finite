@@ -50,16 +50,17 @@ pub enum Op {
     /// Creates or replaces one page, or removes it when `page` is `None`.
     /// Removing a page leaves its artboards, which fall back to the first
     /// page. Edits rename and recolor a page with [`Op::PageName`] and
-    /// [`Op::PageBackground`], which change one field.
+    /// [`Op::PageBackground`], which change one field, and make the
+    /// implicit first page a real one with [`Op::FirstPage`].
     Page {
         id: String,
         #[serde(default)]
         page: Option<Page>,
     },
-    /// Renames one page and leaves its other fields alone, so undoing a
-    /// rename can't undo another actor's background.
+    /// Renames one page in the page map and leaves its other fields alone,
+    /// so undoing a rename can't undo another actor's background.
     PageName { id: String, name: String },
-    /// Sets the canvas color behind one page's artboards, or clears it
+    /// Sets the canvas color behind one page in the page map, or clears it
     /// when `background` is `None`. It leaves the page's other fields
     /// alone, so undoing it can't undo another actor's rename.
     PageBackground {
@@ -67,6 +68,12 @@ pub enum Op {
         #[serde(default)]
         background: Option<String>,
     },
+    /// With `explicit`, puts the implicit first page in a design without
+    /// pages into the page map, as it is. Without, takes [`FIRST_PAGE`]
+    /// out again when it's the only page and still as it started. Anything
+    /// else is no change, so undoing it never takes away a change another
+    /// actor made to the first page since.
+    FirstPage { explicit: bool },
     /// Sets one token's value in one mode, or removes it when `value` is
     /// `None` (see [`crate::tokens`]). A token without values is gone. One
     /// mode at a time, so undoing one agent's Light value leaves another's
@@ -138,6 +145,7 @@ impl<'de> Deserialize<'de> for Op {
             Page,
             PageName,
             PageBackground,
+            FirstPage,
             Token,
             Mode,
         }
@@ -157,6 +165,7 @@ impl<'de> Deserialize<'de> for Op {
             page: Option<Page>,
             #[serde(default)]
             background: Option<String>,
+            explicit: Option<bool>,
             name: Option<String>,
             #[serde(rename = "modeId")]
             mode_id: Option<String>,
@@ -194,6 +203,9 @@ impl<'de> Deserialize<'de> for Op {
             Kind::PageBackground => Op::PageBackground {
                 id: wire.id.ok_or_else(|| need("id"))?,
                 background: wire.background,
+            },
+            Kind::FirstPage => Op::FirstPage {
+                explicit: wire.explicit.ok_or_else(|| need("explicit"))?,
             },
             Kind::Token => Op::Token {
                 name: wire.name.ok_or_else(|| need("name"))?,
@@ -254,6 +266,7 @@ impl Op {
                     })
             }
             Op::PageName { id, name } => BASE + id.len() + name.len(),
+            Op::FirstPage { .. } => BASE,
             Op::PageBackground { id, background } => {
                 BASE + id.len() + background.as_ref().map_or(0, String::len)
             }
@@ -279,6 +292,7 @@ impl Op {
             | Op::Page { .. }
             | Op::PageName { .. }
             | Op::PageBackground { .. }
+            | Op::FirstPage { .. }
             | Op::Token { .. }
             | Op::Mode { .. } => "",
         }
@@ -455,24 +469,6 @@ impl Document {
         match self.pages.get(id) {
             None if self.pages.is_empty() && id == FIRST_PAGE => Some(&IMPLICIT_PAGE),
             page => page,
-        }
-    }
-
-    /// The page with this id to change in place, for a page that
-    /// [`Document::page`] finds. The implicit first page becomes a real
-    /// one, as it is.
-    fn page_mut(&mut self, id: &str) -> &mut Page {
-        self.pages
-            .entry(id.to_owned())
-            .or_insert_with(|| IMPLICIT_PAGE.clone())
-    }
-
-    /// Makes the first page implicit again when it's the only page and
-    /// as it started, so undoing a rename or a background leaves the
-    /// design as it was. Both list the same pages.
-    fn forget_implicit_page(&mut self) {
-        if self.pages.len() == 1 && self.pages.get(FIRST_PAGE) == Some(&*IMPLICIT_PAGE) {
-            self.pages.clear();
         }
     }
 
@@ -933,29 +929,40 @@ impl Document {
                 }]))
             }
             Op::PageName { id, name } => {
-                let page = self.page(id).ok_or_else(|| Rejected::Missing(id.clone()))?;
+                let page = (self.pages.get_mut(id)).ok_or_else(|| Rejected::Missing(id.clone()))?;
                 if page.name == *name {
                     return Ok(Unchanged);
                 }
-                let previous = std::mem::replace(&mut self.page_mut(id).name, name.clone());
-                self.forget_implicit_page();
+                let previous = std::mem::replace(&mut page.name, name.clone());
                 Ok(Changed(vec![Op::PageName {
                     id: id.clone(),
                     name: previous,
                 }]))
             }
             Op::PageBackground { id, background } => {
-                let page = self.page(id).ok_or_else(|| Rejected::Missing(id.clone()))?;
+                let page = (self.pages.get_mut(id)).ok_or_else(|| Rejected::Missing(id.clone()))?;
                 if page.background == *background {
                     return Ok(Unchanged);
                 }
-                let previous =
-                    std::mem::replace(&mut self.page_mut(id).background, background.clone());
-                self.forget_implicit_page();
+                let previous = std::mem::replace(&mut page.background, background.clone());
                 Ok(Changed(vec![Op::PageBackground {
                     id: id.clone(),
                     background: previous,
                 }]))
+            }
+            Op::FirstPage { explicit: true } => {
+                if !self.pages.is_empty() {
+                    return Ok(Unchanged);
+                }
+                self.pages.insert(FIRST_PAGE.into(), IMPLICIT_PAGE.clone());
+                Ok(Changed(vec![Op::FirstPage { explicit: false }]))
+            }
+            Op::FirstPage { explicit: false } => {
+                if self.pages.len() != 1 || self.pages.get(FIRST_PAGE) != Some(&*IMPLICIT_PAGE) {
+                    return Ok(Unchanged);
+                }
+                self.pages.clear();
+                Ok(Changed(vec![Op::FirstPage { explicit: true }]))
             }
         }
     }

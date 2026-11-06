@@ -51,18 +51,18 @@ describe("position", () => {
     expect(constraintOf({}, "x")).toBe("near");
     expect(constraintOf({ right: "0" }, "x")).toBe("far");
     expect(constraintOf({ top: "1px", bottom: "2px" }, "y")).toBe("both");
-    expect(constraintStyles("x", "far", { left: "10px" }, box)).toEqual({
+    expect(constraintStyles("x", "far", { left: "10px" }, box, box)).toEqual({
       left: "auto",
       right: "30px",
     });
     // Both insets size it, so its own width comes off.
-    expect(constraintStyles("x", "both", { left: "10px", width: "60px" }, box)).toEqual({
+    expect(constraintStyles("x", "both", { left: "10px", width: "60px" }, box, box)).toEqual({
       left: "10px",
       right: "30px",
       width: null,
     });
     // Leaving both, it keeps the size the insets gave it.
-    expect(constraintStyles("y", "near", { top: "10px", bottom: "30px" }, box)).toEqual({
+    expect(constraintStyles("y", "near", { top: "10px", bottom: "30px" }, box, box)).toEqual({
       top: "10px",
       bottom: "auto",
       height: "60px",
@@ -72,7 +72,7 @@ describe("position", () => {
   it("lets go of an edge an inset shorthand pins", () => {
     // 100px wide, 10px from the left of a 500px parent.
     const box = { near: 10, far: 390, size: 100 };
-    expect(constraintStyles("x", "far", { inset: "10px", width: "100px" }, box)).toEqual({
+    expect(constraintStyles("x", "far", { inset: "10px", width: "100px" }, box, box)).toEqual({
       inset: null,
       top: "10px",
       bottom: "10px",
@@ -81,7 +81,7 @@ describe("position", () => {
     });
     // Each side as `margin` reads it, and an edge set on its own wins.
     expect(
-      constraintStyles("y", "near", { inset: "1px calc(2px + 3px) 4px", left: "9px" }, box),
+      constraintStyles("y", "near", { inset: "1px calc(2px + 3px) 4px", left: "9px" }, box, box),
     ).toEqual({
       inset: null,
       top: "10px",
@@ -89,7 +89,7 @@ describe("position", () => {
       bottom: "auto",
       height: "100px",
     });
-    expect(constraintStyles("x", "near", { "inset-inline": "10px 390px" }, box)).toEqual({
+    expect(constraintStyles("x", "near", { "inset-inline": "10px 390px" }, box, box)).toEqual({
       "inset-inline": null,
       left: "10px",
       right: "auto",
@@ -97,9 +97,33 @@ describe("position", () => {
     });
   });
 
+  it("resolves an inset shorthand that uses var()", () => {
+    // `--edges: 10px 20px`, in a 500px by 400px parent.
+    const x = { near: 20, far: 20, size: 460 };
+    const y = { near: 10, far: 10, size: 380 };
+    expect(constraintStyles("x", "far", { inset: "var(--edges)" }, x, y)).toEqual({
+      inset: null,
+      top: "10px",
+      bottom: "10px",
+      left: "auto",
+      right: "20px",
+      // It was sized by its insets, so it keeps the width they gave it.
+      width: "460px",
+    });
+    expect(constraintStyles("y", "near", { "inset-inline": "var(--x)", top: "4px" }, y, x)).toEqual(
+      {
+        "inset-inline": null,
+        left: "20px",
+        right: "20px",
+        top: "10px",
+        bottom: "auto",
+      },
+    );
+  });
+
   it("pins by the left edge after both", () => {
     const box = { near: 10, far: 390, size: 100 };
-    expect(constraintStyles("x", "near", { left: "10px", right: "390px" }, box)).toEqual({
+    expect(constraintStyles("x", "near", { left: "10px", right: "390px" }, box, box)).toEqual({
       left: "10px",
       right: "auto",
       width: "100px",
@@ -108,7 +132,9 @@ describe("position", () => {
 
   it("overrides a left inset that a stylesheet sets", () => {
     // No inline insets: the stylesheet's `left` would still pin it.
-    expect(constraintStyles("x", "far", {}, { near: 10, far: 390, size: 100 })).toEqual({
+    expect(
+      constraintStyles("x", "far", {}, { near: 10, far: 390, size: 100 }, { near: 0, far: 0 }),
+    ).toEqual({
       left: "auto",
       right: "390px",
     });

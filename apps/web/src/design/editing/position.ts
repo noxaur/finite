@@ -141,16 +141,27 @@ function splitValues(value: string): string[] {
   return parts;
 }
 
+/** A value the browser fills in later, like `var(--edges)`, which may stand for several values. */
+const SUBSTITUTED = /\b(?:var|env|attr)\(/i;
+
 /**
  * The edges that `styles`' inset shorthands set, as longhands. A later
  * shorthand in `SHORTHANDS` wins over `inset`, and an edge the element
- * sets on its own wins over both.
+ * sets on its own wins over both. A shorthand with a `var()` in it can't
+ * be split, so its edges get the distances they resolve to, `resolved`.
  */
-function shorthandEdges(styles: Readonly<Record<string, string>>): Partial<Record<Edge, string>> {
+function shorthandEdges(
+  styles: Readonly<Record<string, string>>,
+  resolved: (edge: Edge) => string,
+): Partial<Record<Edge, string>> {
   const edges: Partial<Record<Edge, string>> = {};
   for (const [shorthand, sides] of SHORTHANDS) {
     const raw = styles[shorthand];
     if (raw === undefined) continue;
+    if (SUBSTITUTED.test(raw)) {
+      for (const side of sides) edges[side] = resolved(side);
+      continue;
+    }
     const values = splitValues(raw);
     if (values.length === 0) continue;
     // Like `margin`: a missing value repeats the one across from it.
@@ -171,19 +182,33 @@ function shorthandEdges(styles: Readonly<Record<string, string>>): Partial<Recor
  * also overrides one a stylesheet sets. Pinned by both, its insets size
  * it, so its own size comes off; leaving that, it gets the size it has.
  * An `inset`, `inset-block` or `inset-inline` shorthand becomes the
- * longhands it sets first, so it can't pin the edge that was let go.
+ * longhands it sets first, so it can't pin the edge that was let go; one
+ * that uses `var()` gives the other axis's edges `across`, the distances
+ * they have now.
  */
 export function constraintStyles(
   axis: ConstraintAxis,
   constraint: Constraint,
   styles: Readonly<Record<string, string>>,
   box: AxisBox,
+  across: Pick<AxisBox, "near" | "far">,
 ): Record<string, string | null> {
   const { near, far, size } = EDGES[axis];
   const px = (n: number) => `${Math.round(n)}px`;
   const out: Record<string, string | null> = {};
   for (const [shorthand] of SHORTHANDS) if (styles[shorthand] !== undefined) out[shorthand] = null;
-  const expanded = shorthandEdges(styles);
+  const other = EDGES[axis === "x" ? "y" : "x"];
+  const expanded = shorthandEdges(styles, (edge) =>
+    px(
+      edge === near
+        ? box.near
+        : edge === far
+          ? box.far
+          : edge === other.near
+            ? across.near
+            : across.far,
+    ),
+  );
   Object.assign(out, expanded);
   const own: Readonly<Record<string, string>> = { ...styles, ...expanded };
   const set = (p: string) => own[p] !== undefined && own[p] !== "auto";

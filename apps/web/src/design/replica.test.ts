@@ -335,6 +335,7 @@ describe("Replica", () => {
     expect(r.pageOf(r.get("b")!)).toBe("page-1");
 
     // Renaming and recoloring change one field each.
+    expect(r.apply({ op: "firstPage", explicit: true })).toBeNull();
     expect(r.apply({ op: "pageBackground", id: "page-1", background: "#000" })).toEqual({
       op: "page",
     });

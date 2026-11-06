@@ -8,7 +8,7 @@
 use std::{cell::OnceCell, collections::BTreeSet};
 
 use finite_design::{
-    Document, Node, NodeId, Op, Page, PropKey, components, flow, html,
+    Document, FIRST_PAGE, Node, NodeId, Op, Page, PropKey, components, flow, html,
     tokens::{self, Mode, Values},
     user_edit::{self, UserEdit},
 };
@@ -65,6 +65,11 @@ enum Applied<'a> {
     /// The page `id` has a new background and is now `page`.
     PageBackground {
         id: &'a str,
+        page: Option<&'a Page>,
+    },
+    /// The first page went into the page map as `page`, or came out again
+    /// when it's `None`.
+    FirstPage {
         page: Option<&'a Page>,
     },
 }
@@ -578,6 +583,9 @@ fn describe<'a>(doc: &'a Document, op: &'a Op, inverse: &'a [Op]) -> Applied<'a>
             id,
             page: doc.page_map().get(id),
         },
+        Op::FirstPage { .. } => Applied::FirstPage {
+            page: doc.page_map().get(FIRST_PAGE),
+        },
     }
 }
 
@@ -715,24 +723,30 @@ mod tests {
         let results = apply(
             &mut r,
             json!([
+                { "op": "pageName", "id": "page-1", "name": "Home" },
+                { "op": "firstPage", "explicit": true },
                 { "op": "pageBackground", "id": "page-1", "background": "#000" },
                 { "op": "pageName", "id": "page-1", "name": "Home" },
                 { "op": "pageName", "id": "page-1", "name": "Home" },
-                { "op": "pageName", "id": "nope", "name": "Home" },
+                { "op": "firstPage", "explicit": true },
             ]),
         );
-        let page = json!({ "name": "Home", "index": "V", "background": "#000" });
+        // The implicit first page isn't in the page map until `firstPage`.
+        assert_eq!(results[0], Value::Null);
+        let first = json!({ "name": "Page 1", "index": "V" });
+        assert_eq!(results[1], json!({ "op": "firstPage", "page": first }));
         let named = json!({ "name": "Page 1", "index": "V", "background": "#000" });
         assert_eq!(
-            results[0],
+            results[2],
             json!({ "op": "pageBackground", "id": "page-1", "page": named })
         );
+        let page = json!({ "name": "Home", "index": "V", "background": "#000" });
         assert_eq!(
-            results[1],
+            results[3],
             json!({ "op": "pageName", "id": "page-1", "page": page })
         );
-        assert_eq!(results[2], Value::Null);
-        assert_eq!(results[3], Value::Null);
+        assert_eq!(results[4], Value::Null);
+        assert_eq!(results[5], Value::Null);
     }
 
     #[test]

@@ -143,7 +143,13 @@ function Constraints({ scope }: { scope: Scope }) {
             options={CONSTRAINTS[axis]}
             onPick={(c) =>
               scope.commitEach((t) =>
-                constraintStyles(axis, c as Constraint, t.styles, boxOf(t, axis)),
+                constraintStyles(
+                  axis,
+                  c as Constraint,
+                  t.styles,
+                  boxOf(t, axis),
+                  boxOf(t, axis === "x" ? "y" : "x"),
+                ),
               )
             }
           />
