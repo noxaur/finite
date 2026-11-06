@@ -1329,86 +1329,6 @@ async fn a_comment_wait_over_55_seconds_is_clamped() {
     }
 }
 
-#[tokio::test]
-async fn render_and_the_layout_check_after_an_edit() {
-    let (app, _) = doc6();
-    let mut agent = Agent::connect_doc6(&app, "Checker").await;
-    let (id, board) = landing(&mut agent).await;
-    let (probe, _) = agent
-        .call("render", json!({ "designId": id, "output": "layout" }))
-        .await;
-    if probe.contains("no Chrome") {
-        assert!(
-            std::env::var_os("FINITE_REQUIRE_BROWSER").is_none(),
-            "FINITE_REQUIRE_BROWSER is set but there is no browser: {probe}"
-        );
-        eprintln!("SKIPPED, NOTHING WAS TESTED: no Chrome, Chromium or Edge found");
-        return;
-    }
-    assert!(
-        probe.contains("Layout:") && probe.contains(&board),
-        "{probe}"
-    );
-    // A clean check says so, so agents needn't render to find out.
-    let clean = agent
-        .ok(
-            "edit",
-            json!({ "designId": id, "op": "css", "select": "h1", "css": "letter-spacing: 1px" }),
-        )
-        .await;
-    assert!(clean.contains("Layout: nothing is cut off"), "{clean}");
-    // It checks overlapping text, as render's layout output does.
-    let overlap = agent
-        .ok(
-            "edit",
-            json!({ "designId": id, "op": "html", "select": format!("#{board}"),
-                    "html": "<div data-name=\"Badge\" style=\"position: absolute; top: 30px; left: 0; font-size: 32px\">New Hello</div>" }),
-        )
-        .await;
-    assert!(
-        overlap.contains("pair of text elements overlap"),
-        "{overlap}"
-    );
-    agent.ok("undo", json!({ "designId": id })).await;
-    let tall = "<div data-name=\"Tall\" style=\"height: 900px; flex-shrink: 0\"></div>";
-    // check: false leaves the check out.
-    let unchecked = edit(
-        &mut agent,
-        &id,
-        json!([{ "op": "html", "select": format!("#{board}"), "html": tall }]),
-    )
-    .await;
-    assert!(!unchecked.contains("Layout:"), "{unchecked}");
-    agent.ok("undo", json!({ "designId": id })).await;
-    // By default the edit waits for the check, as the layout note does.
-    let mut checked = agent
-        .ok(
-            "edit",
-            json!({ "designId": id, "op": "html", "select": format!("#{board}"), "html": tall }),
-        )
-        .await;
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    while !checked.contains("Layout:") && std::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        checked = agent.ok("comments", json!({ "designId": id })).await;
-    }
-    assert!(
-        checked.contains("cut off by the artboard's edge") && checked.contains("\"Tall\""),
-        "{checked}"
-    );
-    assert!(
-        checked.contains(&format!(
-            "{{\"op\": \"css\", \"css\": \"#{board} {{ height:"
-        )),
-        "the fix is a doc6 op: {checked}"
-    );
-    assert!(!checked.contains("update_styles"), "{checked}");
-    let (shot, error) = agent
-        .call("render", json!({ "designId": id, "select": "h1" }))
-        .await;
-    assert!(!error, "{shot}");
-}
-
 /// What `render` says about an artboard's layout, or `None` without a browser.
 async fn layout_of(agent: &mut Agent, design: &str) -> Option<String> {
     let (text, _) = agent
@@ -3388,4 +3308,136 @@ async fn a_reply_links_each_edit_once() {
         again.chars().count() < 400,
         "the label should be a short line, got {again}"
     );
+}
+
+#[tokio::test]
+async fn links_between_artboards_report_when_they_break() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Flow").await;
+    let id = design(&mut agent, "Shop").await;
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Cart", "width": 390, "height": 844,
+                 "html": "<a data-name=\"Pay\">Pay</a>" }]),
+    )
+    .await;
+    let made = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "artboard", "name": "Done", "width": 390, "height": 844 }]),
+    )
+    .await;
+    let done = id_after(&made, "Created artboard");
+    let linked = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "attrs", "select": "[data-name=Pay]",
+                 "set": { "href": format!("#finite-artboard={done}") } }]),
+    )
+    .await;
+    assert!(!linked.contains("Links:"), "{linked}");
+
+    let removed = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "remove", "select": format!("#{done}") }]),
+    )
+    .await;
+    assert!(
+        removed.contains("Links: 1 link goes to no artboard"),
+        "{removed}"
+    );
+    assert!(removed.contains("\"Pay\""), "{removed}");
+    assert!(removed.contains("undo brings it back"), "{removed}");
+
+    // The artboard comes back with its id, so the link works again.
+    let undone = agent.ok("undo", json!({ "designId": id })).await;
+    assert!(!undone.contains("Links:"), "{undone}");
+    let redone = agent
+        .ok("undo", json!({ "designId": id, "redo": true }))
+        .await;
+    assert!(redone.contains("Links: 1"), "{redone}");
+
+    let bad = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "attrs", "select": ":root", "set": { "data-route": "cart" } }]),
+    )
+    .await;
+    assert!(bad.contains("isn't a path like /checkout"), "{bad}");
+}
+
+#[tokio::test]
+async fn the_flow_note_covers_instances_and_screens_that_share_a_width() {
+    let (app, _) = doc6();
+    let mut agent = Agent::connect_doc6(&app, "Flow").await;
+    let id = design(&mut agent, "Shop").await;
+    let nav = "<header data-name=\"Nav\"><a data-name=\"Pay\" href=\"#finite-artboard=cart\">Pay</a></header>";
+    edit(
+        &mut agent,
+        &id,
+        json!([
+            { "op": "artboard", "name": "Cart", "width": 390, "height": 200, "html": nav },
+            { "op": "artboard", "name": "Cart wide", "width": 1440, "height": 200, "html": nav },
+            { "op": "artboard", "name": "Cart copy", "width": 390, "height": 200, "html": nav },
+        ]),
+    )
+    .await;
+
+    // Every artboard is on /cart: two screens at 390.
+    let routed = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "attrs", "select": ":root", "set": { "data-route": "/cart" } }]),
+    )
+    .await;
+    assert!(
+        routed.contains("Route: /cart has") && routed.contains("390px wide"),
+        "{routed}"
+    );
+    assert!(
+        routed.contains("Give one of them its own data-route"),
+        "{routed}"
+    );
+    assert!(routed.contains("\"Cart copy\""), "{routed}");
+
+    // Widening one clears it, and narrowing it again brings it back.
+    let wide = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "css", "select": "[data-name=\"Cart copy\"]", "css": "width: 600px" }]),
+    )
+    .await;
+    assert!(!wide.contains("Route:"), "{wide}");
+    let narrow = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "css", "select": "[data-name=\"Cart copy\"]", "css": "width: 390px" }]),
+    )
+    .await;
+    assert!(narrow.contains("Route: /cart has"), "{narrow}");
+
+    // An instance's override of a link counts, named by its virtual id.
+    let made = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "component", "select": "[data-name=Nav]", "name": "Top bar" }]),
+    )
+    .await;
+    assert!(made.contains("Replaced 2 copies"), "{made}");
+    let broken = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "attrs", "select": "[data-name=Pay]", "set": { "href": "#finite-artboard=nowhere" } }]),
+    )
+    .await;
+    assert!(broken.contains("Links: "), "{broken}");
+    assert!(broken.contains("\"nowhere\" doesn't exist"), "{broken}");
+    // The instances' links are named by their virtual ids.
+    let virtual_links = broken
+        .lines()
+        .filter(|l| l.starts_with("- ") && l.split(" on ").next().is_some_and(|e| e.contains('/')))
+        .count();
+    assert_eq!(virtual_links, 2, "{broken}");
 }

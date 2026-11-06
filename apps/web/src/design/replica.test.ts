@@ -202,6 +202,109 @@ describe("Replica", () => {
     expect(r.tokenStyle("a", true)).toBe("");
   });
 
+  it("reads the flow and opens each link at the closest width", () => {
+    const r = new Replica();
+    const board = (id: string, width: number, route: string, index: string): Node => ({
+      ...node(id, null, index),
+      name: id,
+      styles: { width: `${width}px` },
+      attrs: { "data-route": route },
+    });
+    r.load({
+      meta: { id: "d", name: "D", createdAt: 0, updatedAt: 0 },
+      seq: 0,
+      nodes: [
+        board("home", 1440, "/", "a"),
+        board("cart", 1440, "/cart", "b"),
+        board("cart-m", 390, "/cart", "c"),
+        { ...node("buy", "home"), tag: "a", attrs: { href: "#finite-artboard=cart" } },
+        { ...node("gone", "home", "k"), tag: "a", attrs: { href: "#finite-artboard=deleted" } },
+        // Only a link's href counts.
+        { ...node("button", "home", "s"), tag: "button", attrs: { href: "#finite-artboard=cart" } },
+      ],
+      comments: [],
+    });
+    const flow = r.flow();
+    expect(flow.routes.map((route) => route.path)).toEqual(["/", "/cart"]);
+    expect(flow.links).toEqual([{ element: "buy", from: "home", to: "cart", route: "/cart" }]);
+    expect(flow.broken).toEqual([
+      { element: "gone", from: "home", to: "deleted", notArtboard: false },
+    ]);
+    expect(r.flowTarget("cart", 390)).toBe("cart-m");
+    expect(r.flowTarget("cart", 1440)).toBe("cart");
+    expect(r.flowTarget("cart", null)).toBe("cart");
+    expect(r.flowTarget("deleted", 390)).toBeUndefined();
+  });
+
+  it("reads links inside instances, with their overridden hrefs", () => {
+    const r = new Replica();
+    r.load({
+      meta: { id: "d", name: "D", createdAt: 0, updatedAt: 0 },
+      seq: 0,
+      nodes: [
+        { ...node("lib", null, "a"), name: "Lib" },
+        { ...node("home", null, "b"), name: "Home" },
+        { ...node("cart", null, "c"), name: "Cart" },
+        { ...node("card", "lib"), component: true },
+        { ...node("pay", "card"), tag: "a", attrs: { href: "#finite-artboard=cart" } },
+        { ...node("i", "home"), instanceOf: "card" },
+      ],
+      comments: [],
+    });
+    expect(r.flow().links.map((l) => [l.element, l.from, l.to])).toEqual([
+      ["pay", "lib", "cart"],
+      ["i/pay", "home", "cart"],
+    ]);
+    expect(r.flow().sharedWidths).toEqual([]);
+    r.apply({ op: "set", id: "i", key: "override:pay/attr:href", value: "#finite-artboard=gone" });
+    expect(r.flow().broken).toEqual([
+      { element: "i/pay", from: "home", to: "gone", notArtboard: false },
+    ]);
+    expect(r.flow().links.map((l) => l.element)).toEqual(["pay"]);
+  });
+
+  it("reads the flow once until the document changes", () => {
+    const r = new Replica();
+    const link = { ...node("go", "home"), tag: "a", attrs: { href: "#finite-artboard=cart" } };
+    const nodes = [{ ...node("home", null, "a"), name: "Home" }, link];
+    const load = (more: Node[]) =>
+      r.load({
+        meta: { id: "d", name: "D", createdAt: 0, updatedAt: 0 },
+        seq: 0,
+        nodes: [...nodes, ...more],
+        comments: [],
+      });
+    load([]);
+    expect(r.flow().broken).toHaveLength(1);
+    expect(r.flow()).toBe(r.flow());
+
+    // A snapshot.
+    load([{ ...node("cart", null, "b"), name: "Cart" }]);
+    expect(r.flow().broken).toHaveLength(0);
+
+    // A server change, applied directly or on top of the tab's own edits.
+    const first = r.flow();
+    r.apply({ op: "delete", id: "cart" });
+    expect(r.flow()).not.toBe(first);
+    expect(r.flow().broken).toHaveLength(1);
+    r.apply({ op: "create", node: { ...node("cart", null, "b"), name: "Cart" } });
+    expect(r.flow().broken).toHaveLength(0);
+
+    // A gesture's draft, its proposal, and taking it back.
+    const unlink = [{ kind: "setLink" as const, ids: ["go"], to: null }];
+    r.flow();
+    r.draft(1, unlink);
+    expect(r.flow().links).toHaveLength(0);
+    r.draft(1, null);
+    expect(r.flow().links).toHaveLength(1);
+    r.propose(2, unlink);
+    expect(r.flow().links).toHaveLength(0);
+    r.receive([{ op: "delete", id: "cart" }], null);
+    expect(r.flow().broken).toHaveLength(0);
+    r.settle(2);
+    expect(r.flow().broken).toHaveLength(1);
+  });
+
   it("lists pages and which page each artboard is on", () => {
     const r = new Replica();
     const snapshot = {

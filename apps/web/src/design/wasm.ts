@@ -27,6 +27,8 @@ interface Exports {
   replica_component_info(handle: number, len: number): number;
   replica_tokens(handle: number): number;
   replica_token_style(handle: number, len: number, shadow: number): number;
+  replica_flow(handle: number): number;
+  replica_flow_target(handle: number, len: number, width: number): number;
   replica_set_client(handle: number, len: number): number;
   replica_draft(handle: number, seed: number, len: number): number;
   replica_propose(handle: number, mid: number, len: number): number;
@@ -211,6 +213,21 @@ export class WasmDocument {
   tokenStyle(id: string, shadow: boolean): string {
     return this.model.callWith(id, (e, len) =>
       e.replica_token_style(this.handle, len, shadow ? 1 : 0),
+    );
+  }
+
+  /** JSON: the design's routes, links and broken links (`flow::Flow`). */
+  flow(): string {
+    return this.model.callNoArgs((e) => e.replica_flow(this.handle));
+  }
+
+  /**
+   * `Flow::target`: the artboard a link to `to` opens from a screen `width`
+   * pixels wide (any width when `null`), or `""` when `to` isn't an artboard.
+   */
+  flowTarget(to: string, width: number | null): string {
+    return this.model.callWith(to, (e, len) =>
+      e.replica_flow_target(this.handle, len, width ?? Number.NaN),
     );
   }
 

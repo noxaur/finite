@@ -9,6 +9,7 @@ mode: append, prepend, before, after, inner or replace.
 {"op": "css", "select": ".btn", "css": "border-radius: 999px"}
 Sets inline styles; an artboard's width and height resize it. to: "style" writes rules to the artboard's <style>, for classes, :hover, @media and @keyframes.
 {"op": "attrs", "select": ".cta", "set": {"href": "/start"}}
+href: "#finite-artboard=k3x9a2bq" links to that artboard; data-route: "/cart" on artboards makes them one page at several widths. Results name broken links.
 {"op": "move", "select": "#a1b2c3d4", "to": "#list", "position": "prepend"}
 copy: true duplicates. Artboards also take x, y, page and mode.
 {"op": "remove", "select": "[data-name=Banner]"}

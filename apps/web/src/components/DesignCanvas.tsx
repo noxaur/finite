@@ -8,6 +8,7 @@ import { Api, Refused } from "@/api/Api";
 import { Camera, union, type View } from "@/design/camera";
 import { Editor } from "@/design/editing/editor";
 import { LayerModel } from "@/design/editing/layers";
+import { pixelSize } from "@/design/html";
 import { Presenter, type PresenterState } from "@/design/presenter";
 import { type FrameKey, type Hit, Renderer } from "@/design/renderer";
 import { Replica } from "@/design/replica";
@@ -165,7 +166,8 @@ export function DesignCanvas({ id }: { id: string }) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const worldRef = useRef<HTMLDivElement>(null);
   const framesRef = useRef<HTMLDivElement>(null);
-  const pressRef = useRef<{ x: number; y: number } | null>(null);
+  /** Where the last press started, and the artboard interactive mode showed then. */
+  const pressRef = useRef<{ x: number; y: number; shown: string | null } | null>(null);
   const hoverFrame = useRef(0);
   const pointerRef = useRef<{ x: number; y: number; shift: boolean } | null>(null);
   const refreshHover = useRef(() => {});
@@ -264,7 +266,11 @@ export function DesignCanvas({ id }: { id: string }) {
       // A page's own wheel never moves a locked camera.
       onWheel: (event) => !camera.locked && camera.wheel(event),
       storage: pageStorage(id),
-      onGoto: (from, target) => {
+      onGoto: (from, link) => {
+        // A route's artboard at the width closest to this one's: a link
+        // drawn on the desktop cart opens the mobile cart from mobile.
+        const board = replica.get(from);
+        const target = (board && replica.flowTarget(link, pixelSize(board).width)) ?? link;
         const presenter = presenterRef.current;
         if (presenter && live.current.presenting === from) {
           if (!presenter.goto(target)) setNotice("That link goes to an artboard that isn’t there.");
@@ -469,7 +475,7 @@ export function DesignCanvas({ id }: { id: string }) {
     /**
      * Keys pressed in the app or forwarded from inside a page. Returns
      * whether one was used. In interactive mode Escape leaves, the arrows
-     * step, ⌘[ goes back, P leaves, and holding C comments.
+     * step, ⌘[ goes back, R restarts, P leaves, and holding C comments.
      */
     actions.current.key = ({ key, phase, meta, repeat }, typing) => {
       const { presenting: shown } = live.current;
@@ -496,6 +502,7 @@ export function DesignCanvas({ id }: { id: string }) {
         else if (key === "c" || key === "C") {
           if (!repeat) setCommentHold(true);
         } else if (key === "p" || key === "P") void presenter.exit();
+        else if (key === "r" || key === "R") presenter.restart();
         else return false;
         return true;
       }
@@ -670,9 +677,12 @@ export function DesignCanvas({ id }: { id: string }) {
     pressRef.current = null;
     const moved = press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > CLICK_SLOP;
     if (moved || (e.target instanceof Element && e.target.closest("[data-camera-ignore]"))) return;
-    // A click on the canvas around the page leaves interactive mode.
+    // A click on the canvas around the page leaves interactive mode. A link
+    // in the page has already flown to another artboard by now, so compare
+    // with the one shown when the press started. Enter on a link clicks it
+    // with no press at all.
     if (presenting && tool !== "comment" && !draft && !openId) {
-      if (rendererRef.current?.boardOf(e.nativeEvent) !== presenting) {
+      if (press && rendererRef.current?.boardOf(e.nativeEvent) !== press.shown) {
         void presenterRef.current?.exit();
       }
       return;
@@ -1107,7 +1117,7 @@ export function DesignCanvas({ id }: { id: string }) {
         <div
           ref={viewportRef}
           onPointerDown={(e) => {
-            pressRef.current = { x: e.clientX, y: e.clientY };
+            pressRef.current = { x: e.clientX, y: e.clientY, shown: presenting };
           }}
           // Keeps the draft's text box focused through a shift-click.
           onMouseDown={(e) => {
@@ -1240,12 +1250,15 @@ export function DesignCanvas({ id }: { id: string }) {
             index={presented.boards.indexOf(presenting)}
             total={presented.boards.length}
             canGoBack={presented.history.length > 0}
+            canRestart={presented.start !== presenting || presented.history.length > 0}
+            broken={replica.flow().broken.filter((b) => b.from === presenting).length}
             held={rendererRef.current?.isHeld(presenting) ?? false}
             note={notice ?? (updated?.board === presenting ? updated.text : null)}
             hosts={rendererRef.current?.hostsOf(presenting) ?? []}
             presence={presence}
             onStep={(by) => presenterRef.current?.step(by)}
             onBack={() => presenterRef.current?.back()}
+            onRestart={() => presenterRef.current?.restart()}
             onReload={() => rendererRef.current?.reload(presenting)}
             onHold={() => {
               const renderer = rendererRef.current;

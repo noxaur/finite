@@ -11,6 +11,10 @@ interface InteractivePillProps {
   readonly index: number;
   readonly total: number;
   readonly canGoBack: boolean;
+  /** Whether it has moved on from the artboard it opened on. */
+  readonly canRestart: boolean;
+  /** Links on this artboard that go to no artboard. */
+  readonly broken: number;
   /** Reloads wait while held. */
   readonly held: boolean;
   /** "Updated by …", while it shows. */
@@ -20,6 +24,7 @@ interface InteractivePillProps {
   readonly presence: ReadonlyArray<Presence>;
   readonly onStep: (by: 1 | -1) => void;
   readonly onBack: () => void;
+  readonly onRestart: () => void;
   readonly onReload: () => void;
   readonly onHold: () => void;
   readonly onExit: () => void;
@@ -27,11 +32,11 @@ interface InteractivePillProps {
 
 /**
  * Interactive mode's one piece of chrome, at the top center: the artboard,
- * the stepper, Back, reload, holding off reloads, the network it used, who
+ * the stepper, Back and Restart, broken links, reload, holding off reloads, the network it used, who
  * is editing, and the way out.
  */
 export function InteractivePill(props: InteractivePillProps) {
-  const { name, index, total, canGoBack, held, note, hosts, presence } = props;
+  const { name, index, total, canGoBack, canRestart, broken, held, note, hosts, presence } = props;
   return (
     <div
       role="toolbar"
@@ -74,6 +79,24 @@ export function InteractivePill(props: InteractivePillProps) {
         >
           Back
         </button>
+      )}
+      {canRestart && (
+        <button
+          type="button"
+          onClick={props.onRestart}
+          {...stylex.props(styles.tool)}
+          title="Back to the artboard you started on (R)"
+        >
+          Restart
+        </button>
+      )}
+      {broken > 0 && (
+        <span
+          {...stylex.props(styles.broken)}
+          title="Links here go to artboards that are gone. Undo the delete, or pick another target."
+        >
+          {broken} broken link{broken === 1 ? "" : "s"}
+        </span>
       )}
       <span {...stylex.props(styles.divider)} />
       {note && <span {...stylex.props(styles.note)}>{note}</span>}
@@ -144,6 +167,7 @@ const styles = stylex.create({
   muted: { color: colors.muted, fontVariantNumeric: "tabular-nums" },
   divider: { width: 1, alignSelf: "stretch", backgroundColor: colors.border },
   note: { color: colors.muted },
+  broken: { color: colors.danger, whiteSpace: "nowrap" },
   tool: {
     display: "inline-grid",
     placeItems: "center",

@@ -449,6 +449,108 @@ fn shown_id(op: &Op) -> String {
     op.id().to_owned()
 }
 
+/// Broken links, bad routes and screens that share a route and a width (see
+/// [`finite_design::flow`]), for the end of the result of a change that could
+/// have made them: one that deletes or moves nodes, sets an `href` (an
+/// instance's override of one too) or a `data-route`, or sets an artboard's
+/// width. A deleted artboard keeps its id, so undo mends the links to it.
+fn flow_note(handle: &DesignHandle, change: &Change) -> Option<String> {
+    use finite_design::flow::{self, ROUTE_ATTR};
+    let linked = |attrs: &std::collections::BTreeMap<String, String>| {
+        attrs.contains_key("href") || attrs.contains_key(ROUTE_ATTR)
+    };
+    let relevant = change.ops.iter().any(|op| match op {
+        Op::Delete { .. } | Op::Move { .. } => true,
+        Op::Create { node } => {
+            linked(&node.attrs) || node.overrides.keys().any(|k| k.ends_with("attr:href"))
+        }
+        Op::Set {
+            key: PropKey::Attr(name),
+            ..
+        } => name == "href" || name == ROUTE_ATTR,
+        Op::Set {
+            key: PropKey::Override(key),
+            ..
+        } => key.ends_with("attr:href"),
+        _ => false,
+    });
+    let sets_width =
+        |op: &Op| matches!(op, Op::Set { key: PropKey::Style(name), .. } if name == "width");
+    if !relevant && !change.ops.iter().any(sets_width) {
+        return None;
+    }
+    handle.read(|d| {
+        // The design as it renders, so links inside instances count.
+        let doc = d.view();
+        // A width only matters on an artboard.
+        if !relevant
+            && !change
+                .ops
+                .iter()
+                .any(|op| sets_width(op) && doc.get(op.id()).is_some_and(|n| n.is_artboard()))
+        {
+            return None;
+        }
+        let flow = flow::flow(doc);
+        if flow.broken.is_empty() && flow.bad_routes.is_empty() && flow.shared_widths.is_empty() {
+            return None;
+        }
+        let name = |id: &str| {
+            doc.get(id)
+                .map(|n| format!("{:?} #{id}", n.display_name()))
+                .unwrap_or_else(|| format!("#{id}"))
+        };
+        const SHOWN: usize = 5;
+        let mut lines = Vec::new();
+        if !flow.broken.is_empty() {
+            let n = flow.broken.len();
+            lines.push(format!(
+                "Links: {n} {} to no artboard. Set href to #finite-artboard=<an artboard's id>, or remove the link; if you deleted the artboard, undo brings it back.",
+                if n == 1 { "link goes" } else { "links go" }
+            ));
+            for b in flow.broken.iter().take(SHOWN) {
+                let why = if b.not_artboard {
+                    "isn't an artboard"
+                } else {
+                    "doesn't exist"
+                };
+                lines.push(format!(
+                    "- {} on {}: {:?} {why}",
+                    name(&b.element),
+                    name(&b.from),
+                    b.to
+                ));
+            }
+            if n > SHOWN {
+                lines.push(format!("- and {} more", n - SHOWN));
+            }
+        }
+        for bad in flow.bad_routes.iter().take(SHOWN) {
+            lines.push(format!(
+                "Route: data-route={:?} on {} isn't a path like /checkout, so it's ignored.",
+                bad.route,
+                name(&bad.artboard)
+            ));
+        }
+        if let Some(shared) = flow.shared_widths.first() {
+            let n = flow.shared_widths.len();
+            let boards: Vec<String> = shared.artboards.iter().map(|id| name(id)).collect();
+            let more = if n > 1 {
+                format!(" ({} more routes have this too)", n - 1)
+            } else {
+                String::new()
+            };
+            lines.push(format!(
+                "Route: {} has {} at {}px wide, so a link can't tell them apart. Give one of them its own data-route{more}.",
+                shared.route,
+                boards.join(" and "),
+                shared.width,
+            ));
+        }
+        Some(lines.join("\n"))
+    })
+}
+
 /// What a change did to components, for the end of an edit's result:
 /// agents can't tell from the HTML whether an edit inside an instance
 /// changed only that instance or the component every instance shows.
@@ -836,7 +938,10 @@ impl FiniteMcp {
                 let mut text = report(&handle, output, change.as_ref());
                 if let Some(change) = &change {
                     show_working(&handle, &actor, change);
-                    if let Some(note) = component_note(&handle, change) {
+                    for note in [component_note(&handle, change), flow_note(&handle, change)]
+                        .into_iter()
+                        .flatten()
+                    {
                         text.push('\n');
                         text.push_str(&note);
                     }
@@ -1752,7 +1857,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Set or remove HTML attributes on elements, such as an image's src and alt, an SVG path's d, or class and id. data-name sets the layer name (null clears it); data-id can't be changed. A null value removes the attribute. People hide layers with hidden and lock them with data-locked; leave both unless asked."
+        description = "Set or remove HTML attributes on elements, such as an image's src and alt, an SVG path's d, or class and id. data-name sets the layer name (null clears it); data-id can't be changed. A null value removes the attribute. People hide layers with hidden and lock them with data-locked; leave both unless asked. Artboards sharing data-route=\"/cart\" are one page at several widths."
     )]
     async fn set_attributes(
         &self,
@@ -1985,13 +2090,20 @@ impl FiniteMcp {
     ) -> ToolResult {
         let handle = design!(self, &p.design_id);
         let actor = self.actor(&ctx);
-        let undone: Vec<String> = (0..p.steps.unwrap_or(1).max(1))
-            .map_while(|_| handle.undo(&actor, None).map(|c| c.label))
+        let undone: Vec<Change> = (0..p.steps.unwrap_or(1).max(1))
+            .map_while(|_| handle.undo(&actor, None))
             .collect();
         if undone.is_empty() {
             return ok("Nothing to undo.");
         }
-        ok(format!("Undid: {}", undone.join(", ")))
+        let labels: Vec<&str> = undone.iter().map(|c| c.label.as_str()).collect();
+        let mut text = format!("Undid: {}", labels.join(", "));
+        // Undoing an artboard's creation can break the links to it.
+        if let Some(note) = undone.iter().find_map(|c| flow_note(&handle, c)) {
+            text.push('\n');
+            text.push_str(&note);
+        }
+        ok(text)
     }
 
     #[tool(description = "Redo changes you undid on a design.")]
@@ -2002,13 +2114,20 @@ impl FiniteMcp {
     ) -> ToolResult {
         let handle = design!(self, &p.design_id);
         let actor = self.actor(&ctx);
-        let redone: Vec<String> = (0..p.steps.unwrap_or(1).max(1))
-            .map_while(|_| handle.redo(&actor, None).map(|c| c.label))
+        let redone: Vec<Change> = (0..p.steps.unwrap_or(1).max(1))
+            .map_while(|_| handle.redo(&actor, None))
             .collect();
         if redone.is_empty() {
             return ok("Nothing to redo.");
         }
-        ok(format!("Redid: {}", redone.join(", ")))
+        let labels: Vec<&str> = redone.iter().map(|c| c.label.as_str()).collect();
+        let mut text = format!("Redid: {}", labels.join(", "));
+        // Redoing a delete can break the links to what it removed.
+        if let Some(note) = redone.iter().find_map(|c| flow_note(&handle, c)) {
+            text.push('\n');
+            text.push_str(&note);
+        }
+        ok(text)
     }
 
     #[tool(

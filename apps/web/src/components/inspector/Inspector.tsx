@@ -21,6 +21,7 @@ import { FillSection } from "./FillSection";
 import { geometryOf } from "./geometry";
 import { LayoutSection } from "./LayoutSection";
 import { PositionSection } from "./PositionSection";
+import { PrototypeSection } from "./PrototypeSection";
 import { RadiusSection } from "./RadiusSection";
 import type { Changes, Scope } from "./scope";
 import { SizeSection } from "./SizeSection";
@@ -155,6 +156,7 @@ export function Inspector({
       <TransformSection scope={scope} />
       <TransitionsSection scope={scope} />
       <AdvancedSection scope={scope} />
+      <PrototypeSection node={one} editor={editor} replica={replica} />
     </div>
   );
 }

@@ -5,10 +5,10 @@
 //! op touched, which is all the viewer needs to keep its own read cache of
 //! nodes and sibling order in step without knowing the rules.
 
-use std::collections::BTreeSet;
+use std::{cell::OnceCell, collections::BTreeSet};
 
 use finite_design::{
-    Document, Node, NodeId, Op, Page, PropKey, components, html,
+    Document, Node, NodeId, Op, Page, PropKey, components, flow, html,
     tokens::{self, Mode, Values},
     user_edit::{self, UserEdit},
 };
@@ -76,6 +76,11 @@ pub struct Replica {
     /// plans against every frame. Expanding a big design with instances
     /// takes tens of milliseconds, and the draft doesn't change it.
     base_view: Option<Document>,
+    /// The flow of `doc`, read once for as long as `doc` stays as it is.
+    /// Reading it expands the design and walks every node, which the viewer
+    /// asks for on every render. Only [`Replica::load`] and
+    /// [`Replica::step`] change `doc`, and both clear it.
+    flow: OnceCell<flow::Flow>,
     /// The tab's id in its stamps. New nodes' ids are made from it, as the
     /// server makes them (`user_edit::new_ids`).
     client: String,
@@ -127,6 +132,7 @@ impl Replica {
     pub fn load(&mut self, nodes: &str) -> Result<String, String> {
         let nodes: Vec<Node> = serde_json::from_str(nodes).map_err(|e| e.to_string())?;
         self.doc = Document::from_nodes(nodes);
+        self.flow.take();
         self.dirty.clear();
         self.pending.clear();
         self.draft = None;
@@ -169,6 +175,7 @@ impl Replica {
     fn step(&mut self, op: &Op, each: impl FnOnce(&Applied)) -> Option<Vec<Op>> {
         let before = self.shown_by(op, true);
         let inverse = self.doc.apply(op)?;
+        self.flow.take();
         self.dirty.extend(before);
         let after = self.shown_by(op, false);
         self.dirty.extend(after);
@@ -385,6 +392,33 @@ impl Replica {
             tokens: self.doc.tokens(),
         })
         .expect("tokens serialize")
+    }
+
+    /// The design's routes, links and broken links, as JSON (see
+    /// [`flow::flow`]), with the links inside instances.
+    pub fn flow(&self) -> String {
+        serde_json::to_string(self.flow_view()).expect("a flow serializes")
+    }
+
+    /// Where a link to artboard `to` goes from a screen `width` pixels wide
+    /// ([`flow::Flow::target`]), or an empty string when `to` isn't an artboard.
+    pub fn flow_target(&self, to: &str, width: Option<f64>) -> String {
+        self.flow_view()
+            .target(to, width)
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// The flow of the design as it renders; instances are expanded only
+    /// when there are any, as [`Self::export`] does.
+    fn flow_view(&self) -> &flow::Flow {
+        self.flow.get_or_init(|| {
+            if self.doc.has_instances() {
+                flow::flow(&components::expand(&self.doc))
+            } else {
+                flow::flow(&self.doc)
+            }
+        })
     }
 
     /// The tokens for artboard `id` in its mode, as a `<style>` element's
@@ -729,6 +763,59 @@ mod tests {
         // Deleting the component marks it too: it has nothing to show now.
         apply(&mut r, json!([{ "op": "delete", "id": "b" }]));
         assert_eq!(r.take_dirty(), r#"["i"]"#);
+    }
+
+    /// How many links of the design resolve, and how many are broken.
+    fn link_counts(r: &Replica) -> (usize, usize) {
+        let flow: Value = serde_json::from_str(&r.flow()).unwrap();
+        (
+            flow["links"].as_array().unwrap().len(),
+            flow["broken"].as_array().unwrap().len(),
+        )
+    }
+
+    #[test]
+    fn every_change_to_the_document_drops_the_cached_flow() {
+        let mut r = Replica::default();
+        let link = json!({
+            "id": "go", "parent": "home", "index": "V", "type": "element", "tag": "a",
+            "attrs": { "href": "#finite-artboard=cart" }
+        });
+        let nodes = json!([node("home", None, "V"), node("cart", None, "k"), link]);
+        r.load(&nodes.to_string()).unwrap();
+        assert_eq!(link_counts(&r), (1, 0));
+        assert_eq!(r.flow_target("cart", None), "cart");
+
+        // A snapshot.
+        let nodes = json!([node("home", None, "V")]);
+        r.load(&nodes.to_string()).unwrap();
+        assert_eq!(r.flow_target("cart", None), "");
+        assert_eq!(link_counts(&r), (0, 0));
+        r.load(&json!([node("home", None, "V"), node("cart", None, "k"), link]).to_string())
+            .unwrap();
+        assert_eq!(link_counts(&r), (1, 0));
+
+        // A change from the server.
+        let ops = json!([{ "op": "delete", "id": "cart" }]);
+        r.receive(&ops.to_string(), None).unwrap();
+        assert_eq!(link_counts(&r), (0, 1));
+        assert_eq!(r.flow_target("cart", None), "");
+        let ops = json!([{ "op": "set", "id": "go", "key": "attr:href", "value": "#finite-artboard=home" }]);
+        apply(&mut r, ops);
+        assert_eq!(link_counts(&r), (1, 0));
+
+        // A gesture's draft, which the next draft or none takes back.
+        let unlink = json!([{ "kind": "setLink", "ids": ["go"], "to": null }]).to_string();
+        r.draft(1, &unlink).unwrap();
+        assert_eq!(link_counts(&r), (0, 0));
+        r.draft(1, "null").unwrap();
+        assert_eq!(link_counts(&r), (1, 0));
+
+        // Sending it, and the server's answer without a change.
+        r.propose(2, &unlink).unwrap();
+        assert_eq!(link_counts(&r), (0, 0));
+        r.settle(2);
+        assert_eq!(link_counts(&r), (1, 0));
     }
 
     #[test]

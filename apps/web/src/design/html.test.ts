@@ -1,7 +1,7 @@
 import "./wasm.node";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vite-plus/test";
-import { artboardDocument, pixelSize } from "./html";
+import { artboardDocument, artboardLinkTarget, pixelSize } from "./html";
 import { Replica } from "./replica";
 import type { Node } from "./schema";
 import { designModel } from "./wasm";
@@ -102,5 +102,20 @@ describe("the viewer exports artboards with the screenshot code", () => {
 
   it("returns nothing for a node that isn't there", () => {
     expect(replica([]).exportHtml("missing")).toBe("");
+  });
+});
+
+describe("artboardLinkTarget", () => {
+  it("reads an href as a click does: exact prefix, decoded, never trimmed", () => {
+    expect(artboardLinkTarget("#finite-artboard=cart")).toBe("cart");
+    expect(artboardLinkTarget("#finite-artboard=a%62c")).toBe("abc");
+    expect(artboardLinkTarget(" #finite-artboard=cart")).toBeNull();
+    expect(artboardLinkTarget("#finite-artboard=cart ")).toBe("cart ");
+    expect(artboardLinkTarget("#section")).toBeNull();
+  });
+
+  it("keeps a malformed escape as written instead of throwing", () => {
+    expect(artboardLinkTarget("#finite-artboard=a%zzc")).toBe("a%zzc");
+    expect(artboardLinkTarget("#finite-artboard=%ff")).toBe("%ff");
   });
 });

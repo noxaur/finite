@@ -433,10 +433,10 @@ try {
   });
   await clickOn(tab("Dark"));
   await page.until(`${field("--ok in Dark")}?.value === "rgb(0, 0, 255)"`);
-  // The select of the artboard named "Page".
-  const select = `[...${panel}.querySelectorAll("label")].find((l) => l.textContent.startsWith("Page")).querySelector("select")`;
-  await page.eval(
-    `(() => { const s = ${select}; s.value = [...s.options].find((o) => o.textContent === "Dark").value; s.dispatchEvent(new Event("change", { bubbles: true })); })()`,
+  // The mode menu of the artboard named "Page", and its Dark item.
+  await clickOn(`${panel}.querySelector('button[aria-label="Mode for Page"]')`);
+  await clickOn(
+    `[...document.querySelectorAll('[role="menu"] [role="menuitemradio"]')].find((i) => i.textContent.includes("Dark"))`,
   );
   check(
     "an artboard in the Dark mode takes its values",

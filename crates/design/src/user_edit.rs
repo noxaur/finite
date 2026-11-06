@@ -72,6 +72,17 @@ pub enum UserEdit {
     Detach {
         ids: Vec<NodeId>,
     },
+    /// Points links (`<a>`) at the artboard `to`, or takes their `href`
+    /// away when it's `None`.
+    SetLink {
+        ids: Vec<NodeId>,
+        to: Option<NodeId>,
+    },
+    /// Puts an artboard on a route, or on one made from its name when `None`.
+    SetRoute {
+        id: NodeId,
+        route: Option<String>,
+    },
     /// Sets attributes on elements, or removes one when its value is
     /// `None`. A person renames a layer with `data-name`, hides it with
     /// `hidden` and locks it with `data-locked`.
@@ -200,6 +211,8 @@ pub fn plan(
                 edit::create_component(view, id, name.as_deref(), &[])?
             }
             UserEdit::Detach { ids } => edit::detach_instances(view, ids, new_id)?,
+            UserEdit::SetLink { ids, to } => edit::set_link(view, ids, to.as_deref())?,
+            UserEdit::SetRoute { id, route } => edit::set_route(view, id, route.as_deref())?,
             UserEdit::SetAttributes { ids, attrs } => {
                 if attrs.values().flatten().any(|v| v.len() > MAX_TEXT) {
                     return Err(EditError(format!(
@@ -237,6 +250,8 @@ pub fn label(edits: &[UserEdit]) -> &'static str {
         UserEdit::SetText { .. } => "Edit text",
         UserEdit::MakeComponent { .. } => "Make component",
         UserEdit::Detach { .. } => "Detach instance",
+        UserEdit::SetLink { .. } => "Link",
+        UserEdit::SetRoute { .. } => "Set route",
         UserEdit::SetAttributes { attrs, .. } => attributes_label(attrs),
         UserEdit::CreatePage { .. } => "Add page",
         UserEdit::RenamePage { .. } => "Rename page",
@@ -279,14 +294,15 @@ impl UserEdit {
             | Self::Group { ids }
             | Self::Ungroup { ids }
             | Self::Detach { ids }
+            | Self::SetLink { ids, .. }
             | Self::SetAttributes { ids, .. }
             | Self::MoveToPage { ids, .. } => Box::new(ids.iter()),
             Self::CreatePage { .. } | Self::RenamePage { .. } | Self::DeletePage { .. } => {
                 Box::new(std::iter::empty())
             }
-            Self::SetText { id, .. } | Self::MakeComponent { id, .. } => {
-                Box::new(std::iter::once(id))
-            }
+            Self::SetText { id, .. }
+            | Self::MakeComponent { id, .. }
+            | Self::SetRoute { id, .. } => Box::new(std::iter::once(id)),
         }
     }
 
@@ -340,6 +356,22 @@ impl UserEdit {
             },
             Self::Detach {
                 ids: vec!["instance".into()],
+            },
+            Self::SetLink {
+                ids: vec!["button".into()],
+                to: Some("board".into()),
+            },
+            Self::SetLink {
+                ids: vec!["button".into()],
+                to: None,
+            },
+            Self::SetRoute {
+                id: "board".into(),
+                route: Some("/checkout".into()),
+            },
+            Self::SetRoute {
+                id: "board".into(),
+                route: None,
             },
             Self::SetAttributes {
                 ids: vec!["card".into()],

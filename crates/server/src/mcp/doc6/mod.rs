@@ -709,7 +709,13 @@ impl FiniteMcp {
         };
         let mut text = edit::result(head, sections);
         if let Some(change) = &change {
-            if let Some(note) = super::component_note(&handle, change) {
+            for note in [
+                super::component_note(&handle, change),
+                super::flow_note(&handle, change),
+            ]
+            .into_iter()
+            .flatten()
+            {
                 text.push('\n');
                 text.push_str(&note);
             }
@@ -1043,29 +1049,32 @@ impl FiniteMcp {
     ) -> ToolResult {
         let handle = design!(self, &p.design_id);
         let actor = self.actor(&ctx);
-        let labels: Vec<String> = (0..p.steps.unwrap_or(1).max(1))
+        let changes: Vec<_> = (0..p.steps.unwrap_or(1).max(1))
             .map_while(|_| {
                 if p.redo {
                     handle.redo(&actor, None)
                 } else {
                     handle.undo(&actor, None)
                 }
-                .map(|c| c.label)
             })
             .collect();
+        let labels: Vec<&str> = changes.iter().map(|c| c.label.as_str()).collect();
         let (verb, nothing) = if p.redo {
             ("Redid", "Nothing to redo.")
         } else {
             ("Undid", "Nothing to undo.")
         };
-        match labels.len() {
-            0 => ok(nothing),
-            1 => ok(format!("{verb} your last edit ({}).", labels[0])),
-            n => ok(format!(
-                "{verb} your last {n} edits ({}).",
-                labels.join(", ")
-            )),
+        let mut text = match labels.len() {
+            0 => return ok(nothing),
+            1 => format!("{verb} your last edit ({}).", labels[0]),
+            n => format!("{verb} your last {n} edits ({}).", labels.join(", ")),
+        };
+        // Undoing an artboard's creation can break the links to it.
+        if let Some(note) = changes.iter().find_map(|c| super::flow_note(&handle, c)) {
+            text.push('\n');
+            text.push_str(&note);
         }
+        ok(text)
     }
 }
 

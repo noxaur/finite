@@ -2,7 +2,7 @@ import * as stylex from "@stylexjs/stylex";
 import { iconMarkup } from "@/components/Icons";
 import { colors } from "@/styles/tokens.stylex";
 import { Culler, pageBox } from "./culling";
-import { artboardDocument, BASE_LAYER, pixelSize } from "./html";
+import { artboardDocument, artboardLinkTarget, BASE_LAYER, pixelSize } from "./html";
 import { type Outset, strokeOutset } from "./outset";
 import type { Applied, Replica } from "./replica";
 import type { Node } from "./schema";
@@ -41,9 +41,6 @@ export interface PageStorage {
   /** Applies a change. Returns false if it doesn't fit. */
   write(change: StorageChange): boolean;
 }
-
-/** The link that sends a page to another artboard: `#finite-artboard=<id>`. */
-export const ARTBOARD_LINK = "#finite-artboard=";
 
 /** How many pages people used with the Interact tool keep running while out of view. */
 const KEEP_USED = 4;
@@ -998,6 +995,13 @@ export class Renderer {
       frame.commentStyle.textContent = this.tool === "comment" ? COMMENTING_CSS : "";
     }
     frame.pin.hidden = !this.used.has(id) && id !== this.presenting;
+    // In interactive mode Tab walks the shown page and the pill, nothing else
+    // on the canvas. The label buttons stay clickable, only out of the Tab
+    // order. Other pages go inert, which also drops them from hit testing, so
+    // comment mode (hold C) keeps them live to pin elements in them.
+    const presenting = this.presenting !== null;
+    frame.play.tabIndex = frame.pin.tabIndex = presenting ? -1 : 0;
+    frame.content.inert = presenting && id !== this.presenting && this.tool !== "comment";
     this.sendState(id, frame);
   }
 
@@ -1089,8 +1093,9 @@ export class Renderer {
     if (!link) return;
     e.preventDefault();
     const href = link.getAttribute("href") ?? "";
-    if (href.startsWith(ARTBOARD_LINK)) {
-      this.options.onGoto?.(id, decodeURIComponent(href.slice(ARTBOARD_LINK.length)));
+    const to = artboardLinkTarget(href);
+    if (to !== null) {
+      this.options.onGoto?.(id, to);
     } else if (href.startsWith("#")) {
       const root = link.getRootNode();
       const target =

@@ -53,6 +53,8 @@ export interface PresenterState {
   readonly board: string | null;
   /** Where Back goes, most recent last. */
   readonly history: ReadonlyArray<string>;
+  /** The artboard it opened on, where Restart goes. */
+  readonly start: string | null;
   /** The artboards ←/→ step through, in order. */
   readonly boards: ReadonlyArray<string>;
 }
@@ -76,7 +78,7 @@ export interface PresenterHost {
   showPage(id: string): boolean;
 }
 
-const idle: PresenterState = { phase: "idle", board: null, history: [], boards: [] };
+const idle: PresenterState = { phase: "idle", board: null, history: [], start: null, boards: [] };
 
 /**
  * Interactive mode: one artboard, zoomed onto on the canvas itself, running
@@ -151,6 +153,17 @@ export class Presenter {
     if (previous !== undefined && this.current.board) void this.show(previous, STEP_MS, history);
   }
 
+  /** Flies to the artboard it opened on, and forgets the way there. */
+  restart() {
+    const { board, start } = this.current;
+    if (!board || !start || this.current.phase === "exiting") return;
+    if (start === board) {
+      if (this.current.history.length > 0) this.update({ history: [] });
+      return;
+    }
+    if (this.host.reveal(start)) void this.show(start, STEP_MS, []);
+  }
+
   /** Goes back to the canvas, to the view it started from. */
   async exit() {
     const { board, phase } = this.current;
@@ -213,7 +226,7 @@ export class Presenter {
     if (before && before !== board) renderer.setWindow(before, null);
     // Starting hides the chrome around the canvas, which resizes it: fit what it leaves.
     if (starting) {
-      this.update({ phase: "entering", board, history, boards: this.boards() });
+      this.update({ phase: "entering", board, history, start: board, boards: this.boards() });
       await this.host.layout();
       if (turn !== this.turn) return;
     }

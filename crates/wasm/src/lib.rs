@@ -227,6 +227,23 @@ pub extern "C" fn replica_token_style(handle: u32, len: usize, shadow: u32) -> i
     })
 }
 
+/// [`Replica::flow`].
+#[unsafe(no_mangle)]
+pub extern "C" fn replica_flow(handle: u32) -> i32 {
+    with_replica(handle, |replica| Ok(replica.flow()))
+}
+
+/// [`Replica::flow_target`] for the artboard id in the first `len` input
+/// bytes, from a screen `width` pixels wide, or of any width when it's NaN.
+#[unsafe(no_mangle)]
+pub extern "C" fn replica_flow_target(handle: u32, len: usize, width: f64) -> i32 {
+    with_replica(handle, |replica| {
+        with_input(|input| {
+            Ok(replica.flow_target(text(input, 0, len)?, (!width.is_nan()).then_some(width)))
+        })
+    })
+}
+
 /// [`html::BASE_CSS`], the styles every artboard renders with.
 #[unsafe(no_mangle)]
 pub extern "C" fn base_css() -> i32 {

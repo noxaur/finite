@@ -46,6 +46,38 @@ export interface PageEntry {
   readonly name: string;
 }
 
+/**
+ * A prototype's routes and links (`flow::Flow` in Rust). A link is an
+ * `<a href="#finite-artboard=<id>">`; a route groups the artboards whose
+ * `data-route` match, one per width.
+ */
+export interface Flow {
+  readonly routes: ReadonlyArray<{
+    readonly path: string;
+    readonly explicit: boolean;
+    readonly screens: ReadonlyArray<{ readonly artboard: string; readonly width: number | null }>;
+  }>;
+  readonly links: ReadonlyArray<{
+    readonly element: string;
+    readonly from: string;
+    readonly to: string;
+    readonly route: string;
+  }>;
+  readonly broken: ReadonlyArray<{
+    readonly element: string;
+    readonly from: string;
+    readonly to: string;
+    readonly notArtboard: boolean;
+  }>;
+  readonly badRoutes: ReadonlyArray<{ readonly artboard: string; readonly route: string }>;
+  /** Routes with two or more screens of the same pixel width. */
+  readonly sharedWidths: ReadonlyArray<{
+    readonly route: string;
+    readonly width: number;
+    readonly artboards: ReadonlyArray<string>;
+  }>;
+}
+
 /** What a call on the tab's own edits did, besides patching the document. */
 export interface LocalOutcome {
   /** Why the edits asked for couldn't be planned, like a move inside an instance. */
@@ -109,6 +141,7 @@ export class Replica {
   /** Where `find` last found an id, so a run of nearby edits doesn't rescan the list. */
   private lastFound = 0;
   private readonly doc: WasmDocument = designModel().newDocument();
+  private flowCache: Flow | undefined;
   seq = 0;
   /** The design's tokens and modes, which every artboard renders with. */
   tokens: TokenTable = { modes: [], tokens: {} };
@@ -116,6 +149,7 @@ export class Replica {
   pages: ReadonlyArray<PageEntry> = [];
 
   load(snapshot: Snapshot) {
+    this.flowCache = undefined;
     const order = JSON.parse(this.doc.load(JSON.stringify(snapshot.nodes))) as ReadonlyArray<
       [string | null, string[]]
     >;
@@ -165,6 +199,23 @@ export class Replica {
   /** Artboard `id`'s tokens in its mode, as a `<style>`'s text; empty without tokens. */
   tokenStyle(id: string, shadow: boolean): string {
     return this.doc.tokenStyle(id, shadow);
+  }
+
+  /**
+   * The design's routes, links and broken links. Reading them expands the
+   * design and walks every node, so the parsed flow stays until an op
+   * applies (`load` and `follow`), however often the canvas renders.
+   */
+  flow(): Flow {
+    return (this.flowCache ??= JSON.parse(this.doc.flow()) as Flow);
+  }
+
+  /**
+   * The artboard a link to `to` opens from a screen `width` pixels wide: the
+   * one on `to`'s route closest to that width. `undefined` when `to` isn't an artboard.
+   */
+  flowTarget(to: string, width: number | null): string | undefined {
+    return this.doc.flowTarget(to, width) || undefined;
   }
 
   /** Frees the WebAssembly side. The replica can't be used afterwards. */
@@ -332,6 +383,7 @@ export class Replica {
   /** Updates the cache for one op the Rust side applied. */
   private follow(op: Op, touched: Touched): Applied | null {
     if (touched === null) return null;
+    this.flowCache = undefined;
     if (touched.op !== op.op) throw new Error(`finite.wasm answered ${touched.op} for ${op.op}`);
     switch (touched.op) {
       case "create": {

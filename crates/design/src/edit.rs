@@ -12,7 +12,7 @@ use serde_json::Value;
 use crate::{
     components::{self, Overrides},
     document::{Document, FIRST_PAGE, MAX_DEPTH, MAX_NODES, MAX_PAGES, Op, Page},
-    fractional,
+    flow, fractional,
     html::{self, Fragment},
     label,
     node::{Node, NodeId, NodeKind, PropKey},
@@ -1142,6 +1142,53 @@ pub fn update_attributes(
     Ok(ops)
 }
 
+/// Points links (`<a>` or `<area>`) at artboard `to` (see [`flow`]), or
+/// takes their `href` away when `to` is `None`.
+pub fn set_link(doc: &Document, ids: &[NodeId], to: Option<&str>) -> Result<Vec<Op>> {
+    if let Some(to) = to
+        && !doc.get(to).is_some_and(Node::is_artboard)
+    {
+        return err(format!(
+            "{to:?} isn't an artboard; a link goes to an artboard"
+        ));
+    }
+    let mut ops = Vec::with_capacity(ids.len());
+    for id in ids {
+        if !matches!(element(doc, id)?.tag(), Some("a" | "area")) {
+            return err("only a link (<a>) can go to an artboard; put the element inside one");
+        }
+        ops.push(Op::Set {
+            id: id.clone(),
+            key: PropKey::Attr("href".to_owned()),
+            value: to.map(|to| Value::from(flow::link_href(to))),
+        });
+    }
+    Ok(ops)
+}
+
+/// Puts artboard `id` on `route` (see [`flow`]), or on a route made from its
+/// name when `route` is `None`.
+pub fn set_route(doc: &Document, id: &str, route: Option<&str>) -> Result<Vec<Op>> {
+    if !node(doc, id)?.is_artboard() {
+        return err(format!(
+            "node {id:?} isn't an artboard; routes are set on artboards"
+        ));
+    }
+    let route = route.map(str::trim).filter(|r| !r.is_empty());
+    if let Some(route) = route
+        && !flow::is_route(route)
+    {
+        return err(format!(
+            "{route:?} isn't a route: start with / and use letters, digits and - . _ ~, like /checkout/done"
+        ));
+    }
+    Ok(vec![Op::Set {
+        id: id.to_owned(),
+        key: PropKey::Attr(flow::ROUTE_ATTR.to_owned()),
+        value: route.map(Value::from),
+    }])
+}
+
 /// Replaces the text of a node. On a text node this sets its text; on an
 /// element it reuses a lone text child, or replaces all children with one.
 pub fn set_text(
@@ -1848,6 +1895,8 @@ pub fn duplicate(
     let mut ops = Vec::new();
     let mut roots = Vec::new();
     let mut placer = Placer::new(doc);
+    // Each copied instance, with the instance it copies.
+    let mut instances: HashMap<NodeId, &str> = HashMap::new();
     for id in top_level(doc, ids) {
         let original = node(doc, id)?;
         let fragment = Fragment::from_document(doc, id).expect("node exists");
@@ -1858,11 +1907,88 @@ pub fn duplicate(
         let parent = original.parent.clone();
         let first = ops.len();
         roots.push(fragment.create_ops(parent.as_deref(), index, position, new_id, &mut ops));
+        // The nodes `Fragment::from_document` copied, in the order it made
+        // them. It copies an instance, and a component's definition, as an
+        // instance with no children of its own.
+        let mut copied = Vec::new();
+        let mut stack = vec![id.as_str()];
+        while let Some(at) = stack.pop() {
+            copied.push(at);
+            if doc
+                .get(at)
+                .is_some_and(|n| !n.is_instance() && !n.component)
+            {
+                stack.extend(doc.children(Some(at)).iter().rev().map(|c| c.id.as_str()));
+            }
+        }
+        for (original, op) in copied.into_iter().zip(&ops[first..]) {
+            if let Op::Create { node } = op
+                && doc
+                    .get(original)
+                    .is_some_and(|n| n.is_instance() || n.component)
+            {
+                instances.insert(node.id.clone(), original);
+            }
+        }
         // A copied artboard goes on its original's page.
         if let Some(Op::Create { node }) = ops.get_mut(first)
             && original.is_artboard()
         {
             node.page = original.page.clone();
+        }
+    }
+    // Links between the artboards copied together go to the copies, so a
+    // copied flow runs on its own.
+    let copies: BTreeMap<&str, &str> = top_level(doc, ids)
+        .into_iter()
+        .zip(&roots)
+        .filter(|(id, _)| doc.get(id).is_some_and(Node::is_artboard))
+        .map(|(id, copy)| (id.as_str(), copy.as_str()))
+        .collect();
+    if !copies.is_empty() {
+        // Copies of a flow drop their route, so they fall back to routes
+        // made from their names instead of sharing the originals' at the
+        // same widths. One copied artboard keeps it: that's how a mobile
+        // version starts.
+        let own_routes = copies.len() > 1;
+        let copied: HashSet<&str> = copies.values().copied().collect();
+        for op in &mut ops {
+            if let Op::Create { node } = op {
+                if let Some(copy) = flow::link_target(node).and_then(|to| copies.get(&*to)) {
+                    let href = flow::link_href(copy);
+                    node.attrs.insert("href".to_owned(), href);
+                }
+                if own_routes && copied.contains(node.id.as_str()) {
+                    node.attrs.remove(flow::ROUTE_ATTR);
+                }
+                // An instance shows its component's links, which aren't
+                // among the copied nodes. Override the ones that go to a
+                // copied artboard, whether the component or an override set them.
+                if let Some(&original) = instances.get(&node.id) {
+                    for link in doc.subtree(original) {
+                        let Some(copy) = flow::link_target(link).and_then(|to| copies.get(&*to))
+                        else {
+                            continue;
+                        };
+                        // Inside an instance a node's id is `instance/path`;
+                        // in a definition it's the path itself.
+                        let path = if link.id == original {
+                            None
+                        } else {
+                            Some(
+                                (link.id.strip_prefix(original))
+                                    .and_then(|p| p.strip_prefix(components::SEPARATOR))
+                                    .unwrap_or(&link.id),
+                            )
+                        };
+                        let key = match path {
+                            Some(path) => format!("{path}/attr:href"),
+                            None => "attr:href".to_owned(),
+                        };
+                        node.overrides.insert(key, Some(flow::link_href(copy)));
+                    }
+                }
+            }
         }
     }
     room_for(doc, 0, ops.len())?;
