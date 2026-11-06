@@ -779,7 +779,6 @@ fn css_view(doc: &Document, ids: Option<&[NodeId]>) -> String {
             "  inline: {}",
             if inline.is_empty() { "(none)" } else { &inline }
         ));
-        // A <style> element shows the rules it holds.
         if node.tag().is_some_and(|t| t.eq_ignore_ascii_case("style")) {
             let css: String = doc
                 .children(Some(id))

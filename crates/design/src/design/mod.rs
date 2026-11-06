@@ -782,7 +782,6 @@ mod tests {
         instance.instance_of = Some("bar".into());
         ops.push(Op::Create { node: instance });
         d.commit("alice", "setup", &ops, 1);
-        // Reading the expanded view caches it.
         assert!(d.view().get("b").is_none());
 
         let record = crate::import::ImportRecord {

@@ -393,7 +393,6 @@ mod tests {
         replica_free(h);
         let gone = result(replica_export(h, put(&["a"])[0], 0));
         assert_eq!(gone, Err(format!("no replica {h}")));
-        // The freed slot is reused.
         assert_eq!(replica_new(), h);
     }
 

@@ -431,7 +431,6 @@ mod tests {
         let took = started.elapsed();
         doc.apply_all(&ops);
         assert_eq!(copies.len(), 10_000);
-        // Each copy sits right after its original.
         let order: Vec<String> = doc
             .children(Some(&board))
             .iter()
