@@ -160,22 +160,30 @@ impl FiniteMcp {
             Ok(format) => format,
             Err(error) => return fail(error.to_string()),
         };
+        let router = match p.router.as_deref().map(transfer::router_named).transpose() {
+            Ok(router) => router,
+            Err(error) => return fail(error.to_string()),
+        };
         let _ = design!(self, &p.design_id);
+        let router_query = router.map_or_else(String::new, |router| {
+            format!("&router={}", router.router().name())
+        });
         let route = match &p.artboard_id {
             Some(board) => format!(
-                "GET /api/designs/{}/export?format={}&artboard={board}",
+                "GET /api/designs/{}/export?format={}&artboard={board}{router_query}",
                 p.design_id, p.format
             ),
             None => format!(
-                "GET /api/designs/{}/export?format={}",
+                "GET /api/designs/{}/export?format={}{router_query}",
                 p.design_id, p.format
             ),
         };
         let scope = p.artboard_id.map_or(Scope::Design, Scope::Artboard);
-        let exported = match transfer::export(&self.hub, &p.design_id, format, scope).await {
-            Ok(exported) => exported,
-            Err(error) => return fail(error.to_string()),
-        };
+        let exported =
+            match transfer::export_with(&self.hub, &p.design_id, format, scope, router).await {
+                Ok(exported) => exported,
+                Err(error) => return fail(error.to_string()),
+            };
         let mut text = String::new();
         diagnostics(&mut text, &exported.diagnostics, None);
         // A tar archive is padded with NULs, which are valid UTF-8 but not text to read.

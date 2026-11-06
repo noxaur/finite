@@ -769,6 +769,9 @@ pub struct ExportParams {
     /// One artboard to export. Omit for the whole design.
     #[serde(default)]
     pub(super) artboard_id: Option<String>,
+    /// "react-router" (default) or "tanstack-router".
+    #[serde(default)]
+    pub(super) router: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]

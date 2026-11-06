@@ -100,6 +100,9 @@ pub struct ReadParams {
     /// Return the design, or select's artboard, as a file in this format: html, finite, repo, figma, jsx or app (the whole design as a Vite + React project of the prototype flow, one route per data-route).
     #[serde(default)]
     export: Option<String>,
+    /// "react-router" (default) or "tanstack-router".
+    #[serde(default)]
+    router: Option<String>,
     /// Search for this text or value, like "#3b82f6" or "Sign in".
     #[serde(default)]
     contains: Option<String>,

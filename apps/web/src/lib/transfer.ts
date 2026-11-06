@@ -33,9 +33,13 @@ export function repoHref(designId: string): string {
   return `${designPath(designId)}/export?format=repo`;
 }
 
+/** The routers the app export can use. React Router is the default. */
+export type AppRouter = "react-router" | "tanstack-router";
+
 /** The link that downloads the whole design as a Vite + React project of its prototype flow, one route per `data-route`. */
-export function appHref(designId: string): string {
-  return `${designPath(designId)}/export?format=app`;
+export function appHref(designId: string, router: AppRouter = "react-router"): string {
+  const chosen = router === "react-router" ? "" : `&router=${router}`;
+  return `${designPath(designId)}/export?format=app${chosen}`;
 }
 
 /** The link that downloads one artboard as a `.figma.json` file for the Finite Figma plugin to open. */

@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use finite_design::import::{BlobHash, ImportRecord};
 use finite_transfer::{
-    Axis, Blobs, Diagnostic, Exported, Format, Input, Receipt, Revision, Scope, violations,
+    Axis, Blobs, Diagnostic, Exported, Format, Input, Receipt, Revision, Scope, app::RouterKind,
+    violations,
 };
 
 use crate::{
@@ -83,6 +84,18 @@ pub fn format_named(name: &str) -> Result<Format, TransferError> {
         let known: Vec<&str> = Format::ALL.iter().map(|f| f.codec().name()).collect();
         TransferError::Invalid(format!(
             "no format {name:?}; use one of {}",
+            known.join(", ")
+        ))
+    })
+}
+
+/// The router named `name`, as a route or tool names it.
+pub fn router_named(name: &str) -> Result<RouterKind, TransferError> {
+    let canonical = name.trim().to_ascii_lowercase();
+    RouterKind::named(&canonical).ok_or_else(|| {
+        let known: Vec<&str> = RouterKind::ALL.iter().map(|r| r.router().name()).collect();
+        TransferError::Invalid(format!(
+            "no router {name:?}; use one of {}",
             known.join(", ")
         ))
     })
@@ -265,14 +278,26 @@ pub async fn import(
     Ok(result)
 }
 
-/// Writes `scope` of design `id` as `format`. The design is copied under
-/// its lock, so the export reads one revision, and written without it. A
-/// codec that measures layout, like Figma's, does it in headless Chrome.
+/// Writes `scope` of design `id` as `format`, with the default router.
 pub async fn export(
     hub: &Arc<Hub>,
     id: &str,
     format: Format,
     scope: Scope,
+) -> Result<Exported, TransferError> {
+    export_with(hub, id, format, scope, None).await
+}
+
+/// Writes `scope` of design `id` as `format`, routing an app export with
+/// `router`. The design is copied under its lock, so the export reads one
+/// revision, and written without it. A codec that measures layout, like
+/// Figma's, does it in headless Chrome.
+pub async fn export_with(
+    hub: &Arc<Hub>,
+    id: &str,
+    format: Format,
+    scope: Scope,
+    router: Option<RouterKind>,
 ) -> Result<Exported, TransferError> {
     let handle = hub.open(id).await?;
     let (name, doc, imports) = handle.read(|design| {
@@ -293,7 +318,7 @@ pub async fn export(
                 blobs: &blobs,
                 measure: &measure,
             };
-            finite_transfer::export(format, &revision, &scope)
+            finite_transfer::export_with(format, &revision, &scope, router)
         })
         .await,
     )?

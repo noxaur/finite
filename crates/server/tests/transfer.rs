@@ -236,6 +236,41 @@ async fn http_exports_the_whole_design_as_an_app() {
         "attachment; filename=\"home-app.tar\""
     );
     assert!(body.windows(12).any(|w| w == b"package.json"));
+    let entries = finite_transfer::tar::read(&body).unwrap();
+    let package = entries
+        .iter()
+        .find(|e| e.path == "package.json")
+        .expect("the tar holds package.json");
+    let text = String::from_utf8(package.bytes.clone()).unwrap();
+    assert!(text.contains("\"react-router\""), "{text}");
+}
+
+#[tokio::test]
+async fn http_exports_the_whole_design_as_a_tanstack_router_app() {
+    let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
+    let id = hub.create("Home").meta.id;
+    transfer::import(&hub, &id, &agent(), request(Vec::new()))
+        .await
+        .unwrap();
+    let app = app(hub.clone(), None);
+
+    let (status, headers, body) = send(
+        &app,
+        get(&format!(
+            "/api/designs/{id}/export?format=app&router=tanstack-router"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(header(&headers, "content-type"), "application/x-tar");
+    let entries = finite_transfer::tar::read(&body).unwrap();
+    let package = entries
+        .iter()
+        .find(|e| e.path == "package.json")
+        .expect("the tar holds package.json");
+    let text = String::from_utf8(package.bytes.clone()).unwrap();
+    assert!(text.contains("@tanstack/react-router"), "{text}");
+    assert!(!text.contains("\"react-router\""), "{text}");
 }
 
 #[tokio::test]
@@ -259,6 +294,35 @@ async fn http_refuses_unknown_names_and_strict_failures_with_422() {
     }
     let (status, _, _) = send(&app, get(&format!("/api/designs/{id}/export?format=docx"))).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // An unknown router lists every one that exists.
+    let (status, _, body) = send(
+        &app,
+        get(&format!("/api/designs/{id}/export?format=app&router=nope")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let message = String::from_utf8(body).unwrap();
+    assert!(
+        message.contains("react-router") && message.contains("tanstack-router"),
+        "{message}"
+    );
+
+    // A router belongs to the app format.
+    let (status, _, body) = send(
+        &app,
+        get(&format!(
+            "/api/designs/{id}/export?format=html&router=tanstack-router"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        String::from_utf8(body)
+            .unwrap()
+            .contains("only applies to the app format"),
+        "router with html"
+    );
 
     // Nothing was imported.
     let handle = hub.open(&id).await.unwrap();

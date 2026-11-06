@@ -54,8 +54,9 @@ export function ImportButton({ busy, onFile }: { busy: boolean; onFile: (file: F
 
 /**
  * What the Export button opens: a link per artboard as HTML, as JSX and for
- * Figma, the whole design as `.finite`, text files or a React app, and where
- * to get the Figma plugin that opens the Figma files.
+ * Figma, the whole design as `.finite`, text files or a React Router or
+ * TanStack Router app, and where to get the Figma plugin that opens the
+ * Figma files.
  */
 export function ExportMenu({
   designId,
@@ -137,7 +138,16 @@ export function ExportMenu({
         onClick={onClose}
         {...stylex.props(styles.item)}
       >
-        Whole design as a React app (.tar)
+        Whole design as a React Router app (.tar)
+      </a>
+      <a
+        role="menuitem"
+        href={appHref(designId, "tanstack-router")}
+        download
+        onClick={onClose}
+        {...stylex.props(styles.item)}
+      >
+        Whole design as a TanStack Router app (.tar)
       </a>
       <p {...stylex.props(styles.note)}>
         Files for Figma open in the Finite Figma plugin.{" "}

@@ -59,7 +59,15 @@ pub(super) async fn read(
         Err(error) => return fail(error),
     };
     if let Some(format) = &p.export {
-        return export(mcp, handle, &p.design_id, format, ids.as_deref()).await;
+        return export(
+            mcp,
+            handle,
+            &p.design_id,
+            format,
+            ids.as_deref(),
+            p.router.as_deref(),
+        )
+        .await;
     }
     if view.as_deref() == Some("jsx") {
         let Some(ids) = ids else {
@@ -910,6 +918,7 @@ async fn export(
     design: &str,
     format: &str,
     ids: Option<&[NodeId]>,
+    router: Option<&str>,
 ) -> ToolResult {
     let boards: Vec<NodeId> = handle.read(|d| {
         let doc = d.view();
@@ -937,6 +946,7 @@ async fn export(
         design_id: design.to_owned(),
         format: format.to_owned(),
         artboard_id: boards.first().cloned(),
+        router: router.map(str::to_owned),
     }))
     .await
 }
