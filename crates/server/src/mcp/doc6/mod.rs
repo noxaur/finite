@@ -566,7 +566,7 @@ const READ_DESCRIPTION: &str = include_str!("read.md");
 impl FiniteMcp {
     #[tool(
         name = "designs",
-        description = "List, create, rename or delete designs (canvases).\n\n- {} or {\"query\": \"Acme\"}: designs whose name contains query (or whose id starts with it), most recently edited first, with id, name, artboard count and last edit. limit (default 50, at most 200).\n- {\"create\": \"Checkout flow\"}: a new, empty design. Returns its designId.\n- {\"designId\": \"…\", \"rename\": \"New name\"}: renames it.\n- {\"delete\": \"…\"}: deletes that design (its id or exact name) for good, with its pages, artboards, comments and history. It can't be undone. To delete only an artboard, use edit's remove op.",
+        description = "List, create, rename or delete designs, latest edit first. delete is permanent; to remove an artboard, use edit's remove op.",
         annotations(read_only_hint = false)
     )]
     async fn designs(&self, Parameters(p): Parameters<DesignsParams>) -> ToolResult {
@@ -733,7 +733,7 @@ impl FiniteMcp {
 
     #[tool(
         name = "render",
-        description = "Render what select matches to check how it looks. Each image is cropped to its element's box; with no select, every artboard (up to 10). A whole artboard's image comes with a layout check naming anything cut off by its edge and text that overflows its box, with the edit that fixes the artboard's height.\n\noutput: \"layout\" returns text instead of an image: each element's box in px from its artboard's top-left corner (x,y width×height), where its text sits when that's much smaller than its box, then the layout check (cut-off, overflowing and overlapping text). Use it to place things over content, like pins or badges, and to check a layout cheaply.\n\nselect: a CSS selector (#k3x9a2bq, [data-name=Hero], :root for every artboard), at most 10 matches. padding adds CSS pixels around each image; scale (0.25 to 3) helps read small text; revealOverflow shows content past the artboard's edge; settleMs (default 3000, at most 10000) waits longer for animations. depth (layout only, default 4).\n\nExamples: {\"designId\": \"…\", \"select\": \"#m0b1l3aa\"} · {\"designId\": \"…\", \"select\": \".card\", \"padding\": 16} · {\"designId\": \"…\", \"output\": \"layout\"}",
+        description = "An image of what select matches (default: every artboard), with a layout check. output: \"layout\" returns each element's box as text instead, more cheaply. Render after building a section to see it; scale: 2 helps read small text.",
         annotations(read_only_hint = true)
     )]
     async fn render(&self, Parameters(p): Parameters<RenderParams>) -> ToolResult {
@@ -814,7 +814,7 @@ impl FiniteMcp {
 
     #[tool(
         name = "comments",
-        description = "The comments people pinned to a design, and your replies to them. Each waiting comment goes to one agent: the one already on it, the one a person picked, or the one that last edited its artboard, while it's listening; otherwise the first to ask. Calling this takes the comments waiting for you, so other agents leave them to you.\n\n- {\"designId\": \"…\"}: open comments, oldest first: what was asked, the artboard, the element (its select and HTML), and the thread so far. includeResolved: true adds resolved ones; offset pages through a long list.\n- {\"designId\": \"…\", \"wait\": 55}: blocks until a comment or reply is waiting for you (open, a person's message last, and not another agent's), then returns those. Returns at once if some already are, or says none arrived after wait seconds (at most 55; a longer value waits 55, and the message says to call again). Loop on it to keep taking feedback.\n- {\"designId\": \"…\", \"reply\": [{\"commentId\": \"…\", \"message\": \"Made it an underlined link.\", \"resolve\": true}]}: replies, one or several at once. Say what you changed, with resolve: true, or ask a question and leave it open. A reply links your edits on that artboard since the thread's last message. An edit an earlier reply already linked stays on that reply.\n\npin: [{\"commentId\": \"…\", \"select\": \"#newNode\"}] moves a pin to another element, for a comment whose artboard or element was removed and rebuilt (the list shows \"artboardDeleted\": true); it keeps its offset in the artboard. Run before reply.\n\npass: [\"commentId\"] leaves comments to another agent: they stop waking you until a person writes in them again. forPeople: [\"commentId\"] marks notes between people (\"ask the client about blue\"), so no agent gets them. Both run before wait, so {\"pass\": [\"…\"], \"wait\": 55} works.\n\nEach comment's \"for\" says who it goes to when that's settled: \"you\", another agent (leave it), or \"people\" (don't act on it). passedBy lists agents that passed.\n\nOptional filters narrow both the list and wait: page (name or id), select (comments pinned to matching elements or inside them), mentions: true (only comments a person picked you for). Example: {\"designId\": \"…\", \"page\": \"Mobile\", \"wait\": 55}",
+        description = "Comments people pinned to a design. The server sends each to one agent.\n\n- {\"designId\": \"…\"}: open comments. Act only on those whose \"for\" is \"you\".\n- {\"designId\": \"…\", \"wait\": 55}: blocks until one is waiting for you; loop on it to keep taking feedback.\n- {\"designId\": \"…\", \"reply\": [{\"commentId\": \"…\", \"message\": \"Made it a link.\", \"resolve\": true}]}: say what you changed, or ask and leave it open.\n\npass hands a comment you can't take to another agent; forPeople marks a note between people, so no agent acts on it.",
         annotations(read_only_hint = false)
     )]
     async fn doc6_comments(
@@ -1033,7 +1033,7 @@ impl FiniteMcp {
 
     #[tool(
         name = "undo",
-        description = "Undo your own most recent edit calls on a design: each edit call is one step, whatever it contained. Other agents' changes are never undone, and steps whose nodes someone else deleted are skipped. redo: true redoes edits you undid instead. steps: how many (default 1).\n\nExamples: {\"designId\": \"…\"} · {\"designId\": \"…\", \"steps\": 2} · {\"designId\": \"…\", \"redo\": true}",
+        description = "Undo your last edit calls, one call per step; never other agents' changes. redo: true redoes.",
         annotations(read_only_hint = false)
     )]
     async fn doc6_undo(
