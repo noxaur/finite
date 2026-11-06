@@ -15,19 +15,29 @@ import path from "node:path";
 import { launch } from "../cdp.mjs";
 
 /**
- * The design's tokens as CSS, in the first mode: a function from an
- * artboard's id to a `:root` rule.
+ * The design's tokens as CSS: a function from an artboard's id to a `:root`
+ * rule in that artboard's mode (`read` lists the artboards not in the first
+ * mode as `artboardModes`).
  */
 async function tokenCss(mcp, design) {
   const text = await mcp.call("read", { designId: design, as: "css" }).catch(() => "");
   const json = text.match(/^\{[\s\S]*?^\}/m)?.[0];
   if (!json) return () => "";
-  const { modes, tokens } = JSON.parse(json);
-  const rules = Object.entries(tokens).map(([name, value]) => {
-    const v = typeof value === "string" ? value : (value[modes[0]] ?? Object.values(value)[0]);
-    return v === undefined ? "" : `${name}: ${v};`;
-  });
-  return () => `:root { ${rules.join(" ")} }`;
+  const { modes, tokens, artboardModes = {} } = JSON.parse(json);
+  const modeOf = new Map(
+    Object.entries(artboardModes).flatMap(([mode, ids]) => ids.map((id) => [id, mode])),
+  );
+  return (board) => {
+    const mode = modeOf.get(board) ?? modes[0];
+    const rules = Object.entries(tokens).map(([name, value]) => {
+      const v =
+        typeof value === "string"
+          ? value
+          : (value[mode] ?? value[modes[0]] ?? Object.values(value)[0]);
+      return v === undefined ? "" : `${name}: ${v};`;
+    });
+    return `:root { ${rules.join(" ")} }`;
+  };
 }
 
 /**
@@ -150,8 +160,9 @@ async function seedLanding(mcp, name) {
 /** The design's artboards and node count, and every artboard's HTML. */
 async function allHtml(mcp, design) {
   const { artboards, nodes } = await mcp.overview(design);
-  const html = artboards.length ? await mcp.readHtml(design, ":root") : "";
-  return { info: { artboards, nodeCount: nodes }, html };
+  const parts = [];
+  for (const a of artboards) parts.push(await mcp.readFullHtml(design, `#${a.id}`));
+  return { info: { artboards, nodeCount: nodes }, html: parts.join("\n") };
 }
 
 /**
@@ -574,7 +585,7 @@ setInterval(next, 3000);
       const tokens = await tokenCss(mcp, ctx.design);
       let green = 0;
       for (const a of info.artboards) {
-        const html = await mcp.readHtml(ctx.design, `#${a.id}`);
+        const html = await mcp.readFullHtml(ctx.design, `#${a.id}`);
         const els = await rendered(html, a.width, a.height ?? 900, tokens(a.id));
         const bar = els.find(
           (e) => e.background === "rgb(20, 83, 45)" && e.y < 160 && e.width >= a.width * 0.8,
@@ -608,7 +619,7 @@ setInterval(next, 3000);
       let done = 0;
       const notes = [];
       for (const a of info.artboards) {
-        const html = await mcp.readHtml(ctx.design, `#${a.id}`);
+        const html = await mcp.readFullHtml(ctx.design, `#${a.id}`);
         const top = (await rendered(html, a.width, a.height ?? 900, tokens(a.id))).filter(
           (e) => e.visible && e.y < 140,
         );

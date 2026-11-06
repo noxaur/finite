@@ -367,6 +367,8 @@ async function daemon(dir, options) {
     server = await startServer({
       bin,
       staticDir,
+      // verify.sh's doctor looks for this prefix to tell a private server.
+      dataPrefix: "finite-headless-data-",
       wait: false,
       stdio: ["ignore", out, out],
       env: {
