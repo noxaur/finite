@@ -1,0 +1,5 @@
+const identity = <T,>(value: T) => value;
+
+export default function List<T>({ rows }: { rows: T[] }) {
+  return <ul data-finite-loc="src/generic.tsx:4:9" data-finite-rev="a3da6f29">{rows.map((row) => <li data-finite-loc="src/generic.tsx:4:32" data-finite-rev="a3da6f29">{String(identity(row))}</li>)}</ul>;
+}

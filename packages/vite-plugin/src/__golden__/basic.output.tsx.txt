@@ -1,0 +1,24 @@
+import { Card } from "./Card";
+import * as UI from "./ui";
+
+export function Page({ items }: { items: string[] }) {
+  return (
+    <>
+      <main data-finite-loc="src/basic.tsx:7:6" data-finite-rev="c9a417d4" className="flex flex-col" data-name="Page">
+        <h1 data-finite-loc="src/basic.tsx:8:8" data-finite-rev="c9a417d4">Title</h1>
+        <Card title="x" />
+        <UI.Button>Go</UI.Button>
+        {items.map((item) => (
+          <li data-finite-loc="src/basic.tsx:12:10" data-finite-rev="c9a417d4" key={item} {...{ title: item }}>
+            {item}
+          </li>
+        ))}
+        <svg data-finite-loc="src/basic.tsx:16:8" data-finite-rev="c9a417d4" viewBox="0 0 10 10">
+          <path data-finite-loc="src/basic.tsx:17:10" data-finite-rev="c9a417d4" d="M0 0h10" />
+        </svg>
+        <my-element data-finite-loc="src/basic.tsx:19:8" data-finite-rev="c9a417d4" />
+        <input data-finite-loc="kept:1:1" />
+      </main>
+    </>
+  );
+}
