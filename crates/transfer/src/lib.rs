@@ -22,7 +22,9 @@
 //!
 //! [`Design::import`]: finite_design::Design::import
 
+pub mod app;
 pub mod assets;
+mod css_scope;
 mod feature;
 pub mod figma;
 pub mod finite;
@@ -31,6 +33,7 @@ pub mod jsx;
 mod repo;
 mod report;
 pub mod scene;
+pub mod tar;
 
 use std::collections::BTreeMap;
 
@@ -58,15 +61,19 @@ pub enum Format {
     Jsx,
     /// A design as a folder of text files, packed as a tar archive.
     Repo,
+    /// A prototype as a Vite + React project, packed as a tar archive.
+    /// Export only.
+    App,
 }
 
 impl Format {
-    pub const ALL: [Format; 5] = [
+    pub const ALL: [Format; 6] = [
         Format::Html,
         Format::Finite,
         Format::Figma,
         Format::Jsx,
         Format::Repo,
+        Format::App,
     ];
 
     pub fn codec(self) -> &'static dyn Codec {
@@ -76,6 +83,7 @@ impl Format {
             Format::Figma => &figma::Figma,
             Format::Jsx => &jsx::Jsx,
             Format::Repo => &repo::Repo,
+            Format::App => &app::App,
         }
     }
 
@@ -782,11 +790,14 @@ mod tests {
                 blobs: &NoBlobs,
                 measure: &scene::NoMeasure,
             };
+            // An app only holds the whole design.
+            let scope = match format {
+                Format::App => Scope::Design,
+                _ => Scope::Artboard("b".into()),
+            };
             // The raw document has nothing to write for the instance.
-            let raw = format
-                .codec()
-                .write(&revision, &Scope::Artboard("b".into()));
-            let exported = export(format, &revision, &Scope::Artboard("b".into()));
+            let raw = format.codec().write(&revision, &scope);
+            let exported = export(format, &revision, &scope);
             let name = format.codec().name();
             let Ok(exported) = exported else {
                 // Figma measures layout, which this test can't.

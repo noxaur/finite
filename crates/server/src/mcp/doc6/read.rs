@@ -781,7 +781,10 @@ fn css_view(doc: &Document, ids: Option<&[NodeId]>) -> String {
 
 fn jsx_view(doc: &Document, ids: &[NodeId], tailwind: bool) -> String {
     const JSX_SHOWN: usize = 10;
-    let options = jsx::Options { tailwind };
+    let options = jsx::Options {
+        tailwind,
+        ..Default::default()
+    };
     let mut parts = Vec::new();
     for id in ids.iter().take(JSX_SHOWN) {
         let Some(converted) = jsx::convert(doc, id, &options, 0) else {

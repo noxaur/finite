@@ -6,6 +6,8 @@
 //! into `finite-asset:<sha256>`, and on the way in, [`crate::Imported::place`]
 //! turns that back into a URL for the design it lands in.
 
+use std::collections::BTreeMap;
+
 use base64::{Engine, engine::general_purpose::STANDARD};
 use finite_design::{html::Fragment, import::BlobHash};
 
@@ -87,17 +89,7 @@ pub fn inline(text: &str, blobs: &dyn Blobs) -> Result<(String, Vec<Diagnostic>)
             STANDARD.encode(&bytes)
         )),
         Ok(None) => {
-            diagnostics.push(Diagnostic {
-                node: None,
-                path: url("…", hash),
-                what: "an image".into(),
-                feature: Feature::Image,
-                reason: "the design points at a file its store doesn't have".into(),
-                preserved: Score::No,
-                visual: Score::No,
-                editable: Score::No,
-                quarantined: false,
-            });
+            diagnostics.push(missing(hash));
             None
         }
         Err(error) => {
@@ -108,6 +100,67 @@ pub fn inline(text: &str, blobs: &dyn Blobs) -> Result<(String, Vec<Diagnostic>)
     match failed {
         Some(error) => Err(error),
         None => Ok((text, diagnostics)),
+    }
+}
+
+/// `text` with each stored file its URLs point to moved out to `dir`: the
+/// URL becomes `<dir>/<hash><extension>`, and the file goes into `files`
+/// under `<hash><extension>`. A file the store doesn't have stays a URL
+/// and gets a diagnostic.
+pub fn extract(
+    text: &str,
+    blobs: &dyn Blobs,
+    dir: &str,
+    files: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(String, Vec<Diagnostic>), Error> {
+    let mut diagnostics = Vec::new();
+    let mut failed = None;
+    let text = rewrite_urls(text, |hash| match blobs.get(hash) {
+        Ok(Some(bytes)) => {
+            let name = format!("{hash}{}", extension(&bytes));
+            let url = format!("{dir}/{name}");
+            files.insert(name, bytes);
+            Some(url)
+        }
+        Ok(None) => {
+            diagnostics.push(missing(hash));
+            None
+        }
+        Err(error) => {
+            failed.get_or_insert(error);
+            None
+        }
+    });
+    match failed {
+        Some(error) => Err(error),
+        None => Ok((text, diagnostics)),
+    }
+}
+
+/// The diagnostic for a file the design points at and its store lacks.
+fn missing(hash: &BlobHash) -> Diagnostic {
+    Diagnostic {
+        node: None,
+        path: url("…", hash),
+        what: "an image".into(),
+        feature: Feature::Image,
+        reason: "the design points at a file its store doesn't have".into(),
+        preserved: Score::No,
+        visual: Score::No,
+        editable: Score::No,
+        quarantined: false,
+    }
+}
+
+/// The extension that lets a file manager open a blob, from its first bytes.
+pub fn extension(bytes: &[u8]) -> &'static str {
+    match media_type(bytes) {
+        "image/png" => ".png",
+        "image/jpeg" => ".jpg",
+        "image/gif" => ".gif",
+        "image/webp" => ".webp",
+        "image/svg+xml" => ".svg",
+        _ => "",
     }
 }
 

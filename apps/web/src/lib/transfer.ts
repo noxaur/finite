@@ -33,6 +33,11 @@ export function repoHref(designId: string): string {
   return `${designPath(designId)}/export?format=repo`;
 }
 
+/** The link that downloads the whole design as a Vite + React project of its prototype flow, one route per `data-route`. */
+export function appHref(designId: string): string {
+  return `${designPath(designId)}/export?format=app`;
+}
+
 /** The link that downloads one artboard as a `.figma.json` file for the Finite Figma plugin to open. */
 export function figmaHref(designId: string, artboardId: string): string {
   return `${designPath(designId)}/export?format=figma&artboard=${encodeURIComponent(artboardId)}`;

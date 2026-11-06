@@ -8,12 +8,13 @@
 
 use finite_design::{
     Document, Node, NodeKind,
+    flow::link_target,
     html::{self, NAME_ATTR},
 };
 
 use crate::{
     Codec, Diagnostic, Direction, Error, Exported, Feature, Imported, Input, Revision, Scope,
-    Score, Support, assets, file_stem,
+    Score, Support, assets, css_scope, file_stem,
 };
 
 pub struct Jsx;
@@ -72,9 +73,13 @@ impl Codec for Jsx {
 
 /// What [`convert`] writes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Options {
+pub struct Options<'a> {
     /// Styles as Tailwind classes instead of `style` objects.
     pub tailwind: bool,
+    /// A class of the element the JSX goes in. Each `<style>` is limited to
+    /// elements inside it, so the CSS of one screen can't restyle another
+    /// on the same page.
+    pub scope: Option<&'a str>,
 }
 
 /// JSX from [`convert`], and what it left out.
@@ -85,11 +90,43 @@ pub struct Converted {
 }
 
 /// The subtree at `id` as JSX, indented `level` steps of two spaces.
-pub fn convert(doc: &Document, id: &str, options: &Options, level: usize) -> Option<Converted> {
+pub fn convert(doc: &Document, id: &str, options: &Options<'_>, level: usize) -> Option<Converted> {
+    convert_with(doc, id, options, None, level)
+}
+
+/// How [`convert_with`] writes the links that go to an artboard
+/// (`<a href="#finite-artboard=…">`, see [`link_target`]).
+pub struct Links<'a> {
+    /// The component a link becomes, like `Link`.
+    pub component: &'a str,
+    /// The component's prop for where to go, like `to`.
+    pub prop: &'a str,
+    /// What to write for the link element it's given.
+    pub resolve: &'a dyn Fn(&Node) -> Link,
+}
+
+/// What [`Links::resolve`] answers.
+pub enum Link {
+    /// The component, going to this path.
+    To(String),
+    /// The element as it is, without its `href`, since nothing it could go
+    /// to exists. The reason goes in the diagnostic.
+    Plain(String),
+}
+
+/// [`convert`], with the links to artboards written as `links` says.
+pub fn convert_with(
+    doc: &Document,
+    id: &str,
+    options: &Options<'_>,
+    links: Option<&Links<'_>>,
+    level: usize,
+) -> Option<Converted> {
     let node = doc.get(id)?;
     let mut writer = Writer {
         doc,
         options,
+        links,
         out: String::new(),
         diagnostics: Vec::new(),
     };
@@ -104,7 +141,7 @@ pub fn convert(doc: &Document, id: &str, options: &Options, level: usize) -> Opt
 
 /// A component name from an artboard's name: `Home — Desktop` is
 /// `HomeDesktop`.
-fn component_name(name: &str) -> String {
+pub(crate) fn component_name(name: &str) -> String {
     let mut out = String::new();
     for word in name.split(|c: char| !c.is_ascii_alphanumeric()) {
         let mut chars = word.chars();
@@ -121,7 +158,8 @@ fn component_name(name: &str) -> String {
 
 struct Writer<'a> {
     doc: &'a Document,
-    options: &'a Options,
+    options: &'a Options<'a>,
+    links: Option<&'a Links<'a>>,
     out: String,
     diagnostics: Vec<Diagnostic>,
 }
@@ -155,9 +193,48 @@ impl Writer<'_> {
             });
             return;
         }
+        if !is_element_name(tag) {
+            self.unwritable(
+                node,
+                format!("the element <{tag}>"),
+                "its children are kept",
+            );
+            for child in self.doc.children(Some(&node.id)) {
+                self.node(child, level);
+            }
+            return;
+        }
+        let mut shown = tag.as_str();
+        let mut to = None;
+        let mut linked = false;
+        if let Some(links) = self.links
+            && let Some(target) = link_target(node)
+        {
+            linked = true;
+            match (links.resolve)(node) {
+                Link::To(path) => {
+                    shown = links.component;
+                    to = Some((links.prop, path));
+                }
+                Link::Plain(reason) => self.diagnostics.push(Diagnostic {
+                    node: Some(node.id.clone()),
+                    path: format!("#{}", node.id),
+                    what: format!("a link to {target:?}"),
+                    feature: Feature::Frame,
+                    reason,
+                    preserved: Score::No,
+                    visual: Score::Yes,
+                    editable: Score::Yes,
+                    quarantined: false,
+                }),
+            }
+        }
         self.pad(level);
         self.out.push('<');
-        self.out.push_str(tag);
+        self.out.push_str(shown);
+        if let Some((prop, path)) = to {
+            self.attr(prop, &path);
+        }
         if let Some(name) = &node.name {
             self.attr(NAME_ATTR, name);
         }
@@ -192,23 +269,17 @@ impl Writer<'_> {
             let lower = name.to_ascii_lowercase();
             if lower == "class" && self.options.tailwind {
                 classes.insert(0, value.clone());
-            } else if lower == "style" {
+            } else if lower == "style" || (linked && lower == "href") {
                 // The model keeps styles in `styles`; a stray attribute
-                // would be a string, which React rejects.
+                // would be a string, which React rejects. A link to an
+                // artboard has no `href` of its own to keep.
             } else {
-                self.react_attr(tag, name, value);
+                self.react_attr(node, tag, name, value);
             }
         }
         if !classes.is_empty() {
-            let classes = classes.join(" ");
-            if classes.contains(['"', '\\']) {
-                self.out.push_str(&format!(
-                    " className={{{}}}",
-                    serde_json::to_string(&classes).expect("strings serialize")
-                ));
-            } else {
-                self.out.push_str(&format!(" className=\"{classes}\""));
-            }
+            self.out
+                .push_str(&format!(" className={}", string_attr(&classes.join(" "))));
         }
         if !leftover.is_empty() {
             let object: Vec<String> = leftover
@@ -240,7 +311,10 @@ impl Writer<'_> {
             return;
         }
         if tag.eq_ignore_ascii_case("style") {
-            let css: String = children.iter().filter_map(|c| c.text.as_deref()).collect();
+            let mut css: String = children.iter().filter_map(|c| c.text.as_deref()).collect();
+            if let Some(class) = self.options.scope {
+                css = css_scope::scope(&css, class);
+            }
             let css = css
                 .replace('\\', "\\\\")
                 .replace('`', "\\`")
@@ -249,10 +323,10 @@ impl Writer<'_> {
             return;
         }
         match children.as_slice() {
-            [] => self.out.push_str(&format!("></{tag}>\n")),
+            [] => self.out.push_str(&format!("></{shown}>\n")),
             [only] if only.kind == NodeKind::Text && is_plain(only.text.as_deref()) => {
                 self.out.push_str(&format!(
-                    ">{}</{tag}>\n",
+                    ">{}</{shown}>\n",
                     only.text.as_deref().unwrap_or_default()
                 ));
             }
@@ -262,7 +336,7 @@ impl Writer<'_> {
                     self.node(child, level + 1);
                 }
                 self.pad(level);
-                self.out.push_str(&format!("</{tag}>\n"));
+                self.out.push_str(&format!("</{shown}>\n"));
             }
         }
     }
@@ -275,7 +349,7 @@ impl Writer<'_> {
     /// An HTML attribute under the name and form React wants. `name` is as
     /// the parser stored it: HTML's names are lowercase, and SVG's keep their
     /// camel case (`gradientUnits`, `stdDeviation`), which React uses too.
-    fn react_attr(&mut self, tag: &str, name: &str, value: &str) {
+    fn react_attr(&mut self, node: &Node, tag: &str, name: &str, value: &str) {
         let lower = name.to_ascii_lowercase();
         if BOOLEAN_ATTRS.contains(&lower.as_str()) {
             // React reads `disabled=""` as false.
@@ -294,8 +368,44 @@ impl Writer<'_> {
             "value" if matches!(tag, "input" | "textarea") => "defaultValue".to_owned(),
             _ => react_name(name),
         };
-        self.attr(&name, value);
+        if is_attribute_name(&name) {
+            self.attr(&name, value);
+        } else {
+            self.unwritable(node, format!("the attribute {name:?}"), "the rest is kept");
+        }
     }
+
+    /// Reports that `what` has a name JSX can't write, so `node` lost it.
+    fn unwritable(&mut self, node: &Node, what: String, kept: &str) {
+        self.diagnostics.push(Diagnostic {
+            node: Some(node.id.clone()),
+            path: format!("#{}", node.id),
+            what,
+            feature: Feature::Frame,
+            reason: format!("JSX can't write that name, so it was left out and {kept}"),
+            preserved: Score::No,
+            visual: Score::Unknown,
+            editable: Score::Yes,
+            quarantined: false,
+        });
+    }
+}
+
+/// Whether JSX reads `name` as an intrinsic element: a lowercase letter,
+/// then letters, digits and `-`. A parser keeps others, like `svg:rect`.
+fn is_element_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// Whether JSX can write `name` as an attribute that React keeps: a letter
+/// or `_`, then those, digits and `-`. A parser keeps others, like `@click`
+/// and `data-a.b`.
+fn is_attribute_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
 }
 
 /// Attributes that are on when present, whatever their value.
@@ -420,6 +530,20 @@ fn style_key(property: &str) -> String {
                 .unwrap_or_default()
         }
         None => camel(&property, ['-', '-']),
+    }
+}
+
+/// A JSX attribute's value for `value`: a quoted string when it has no
+/// character JSX reads differently, and a JSON string in braces otherwise,
+/// since a quoted JSX string has no escapes and reads `&` as an entity.
+pub fn string_attr(value: &str) -> String {
+    if value.contains(['"', '\\', '&', '\n', '\r']) {
+        format!(
+            "{{{}}}",
+            serde_json::to_string(value).expect("strings serialize")
+        )
+    } else {
+        format!("\"{value}\"")
     }
 }
 
@@ -571,7 +695,16 @@ mod tests {
     fn jsx(source: &str, tailwind: bool) -> Converted {
         let (design, id) = board(source);
         let content = design.doc().children(Some(&id))[0].id.clone();
-        convert(design.doc(), &content, &Options { tailwind }, 0).unwrap()
+        convert(
+            design.doc(),
+            &content,
+            &Options {
+                tailwind,
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap()
     }
 
     #[test]

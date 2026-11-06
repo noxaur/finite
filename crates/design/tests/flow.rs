@@ -579,6 +579,52 @@ fn routes_must_be_paths() {
 }
 
 #[test]
+fn a_dot_segment_is_not_a_route_because_browsers_remove_it() {
+    for bad in ["/.", "/..", "/a/./b", "/a/../b", "/a/..", "/./a"] {
+        assert!(!flow::is_route(bad), "{bad}");
+    }
+    // Dots inside a segment are ordinary.
+    for good in ["/...", "/.a", "/a.", "/a..b", "/..a", "/a/.b/c."] {
+        assert!(flow::is_route(good), "{good}");
+    }
+    let mut d = design();
+    screen(&mut d, "a", "Detail", 390.0, "");
+    let refused = edit::set_route(d.doc(), "a", Some("/a/../b"))
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("isn't a route"), "{refused}");
+    assert!(
+        refused.contains("`.`") && refused.contains("`..`"),
+        "{refused}"
+    );
+    commit(&mut d, |doc| {
+        edit::update_attributes(
+            doc,
+            &["a".into()],
+            &BTreeMap::from([("data-route".into(), Some("/a/../b".into()))]),
+        )
+    });
+    let flow = flow::flow(d.doc());
+    assert_eq!(paths(&flow), [("/detail", vec!["a"])]);
+    assert_eq!(flow.bad_routes[0].route, "/a/../b");
+}
+
+#[test]
+fn a_route_made_from_an_id_is_a_safe_path() {
+    let mut d = design();
+    for id in ["a\"b", "..", "✨", "A b/c", "ok"] {
+        screen(&mut d, id, "✨", 390.0, "");
+    }
+    let flow = flow::flow(d.doc());
+    let routes: Vec<&str> = flow.routes.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(
+        routes,
+        ["/a-b", "/artboard", "/artboard-2", "/a-b-c", "/ok"]
+    );
+    assert!(routes.iter().all(|r| flow::is_route(r)), "{routes:?}");
+}
+
+#[test]
 fn people_link_and_set_routes_with_their_own_edits() {
     let d = shop();
     let doc = d.doc();

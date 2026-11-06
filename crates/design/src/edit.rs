@@ -1179,7 +1179,7 @@ pub fn set_route(doc: &Document, id: &str, route: Option<&str>) -> Result<Vec<Op
         && !flow::is_route(route)
     {
         return err(format!(
-            "{route:?} isn't a route: start with / and use letters, digits and - . _ ~, like /checkout/done"
+            "{route:?} isn't a route: start with / and use letters, digits and - . _ ~, like /checkout/done; a segment can't be just `.` or `..`"
         ));
     }
     Ok(vec![Op::Set {

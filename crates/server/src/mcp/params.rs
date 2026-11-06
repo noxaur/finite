@@ -764,7 +764,7 @@ pub struct CreatePageParams {
 #[serde(rename_all = "camelCase")]
 pub struct ExportParams {
     pub(super) design_id: String,
-    /// "html", "finite" (a Finite bundle), "repo" (a tar of text files: one HTML file per artboard and a manifest with the tokens) or "figma" (a .figma.json file for the Finite Figma plugin).
+    /// "html", "finite" (a Finite bundle), "repo" (a tar of text files: one HTML file per artboard and a manifest with the tokens), "figma" (a .figma.json file for the Finite Figma plugin) or "app" (a Vite + React project of the prototype flow, one route per data-route).
     pub(super) format: String,
     /// One artboard to export. Omit for the whole design.
     #[serde(default)]

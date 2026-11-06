@@ -4,6 +4,7 @@ import * as stylex from "@stylexjs/stylex";
 import { useRef } from "react";
 import type { ImportResult } from "@/api/Api";
 import {
+  appHref,
   exportHref,
   FIGMA_PLUGIN_URL,
   figmaHref,
@@ -53,8 +54,8 @@ export function ImportButton({ busy, onFile }: { busy: boolean; onFile: (file: F
 
 /**
  * What the Export button opens: a link per artboard as HTML, as JSX and for
- * Figma, the whole design as `.finite` or text files, and where to get the
- * Figma plugin that opens the Figma files.
+ * Figma, the whole design as `.finite`, text files or a React app, and where
+ * to get the Figma plugin that opens the Figma files.
  */
 export function ExportMenu({
   designId,
@@ -128,6 +129,15 @@ export function ExportMenu({
         {...stylex.props(styles.item)}
       >
         Whole design as text files (.tar)
+      </a>
+      <a
+        role="menuitem"
+        href={appHref(designId)}
+        download
+        onClick={onClose}
+        {...stylex.props(styles.item)}
+      >
+        Whole design as a React app (.tar)
       </a>
       <p {...stylex.props(styles.note)}>
         Files for Figma open in the Finite Figma plugin.{" "}

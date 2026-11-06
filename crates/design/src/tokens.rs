@@ -145,11 +145,18 @@ pub fn value<'a>(doc: &Document, values: &'a Values, mode: &str) -> Option<&'a s
 /// element. In a shadow root they go on `:host`, elsewhere on `:root`.
 /// Empty when the design has no tokens.
 pub fn style(doc: &Document, mode: &str, shadow: bool) -> String {
+    style_at(doc, mode, if shadow { ":host" } else { ":root" })
+}
+
+/// The tokens in `mode` as one rule for `selector`, for a page that shows
+/// artboards in several modes: `:root` takes the first mode's and an
+/// attribute selector the others'. `selector` is CSS the caller wrote,
+/// so it isn't checked.
+pub fn style_at(doc: &Document, mode: &str, selector: &str) -> String {
     if doc.tokens().is_empty() {
         return String::new();
     }
-    let root = if shadow { ":host" } else { ":root" };
-    let mut css = format!("@layer {LAYER} {{ {root} {{");
+    let mut css = format!("@layer {LAYER} {{ {selector} {{");
     for (name, values) in doc.tokens() {
         if let Some(value) = value(doc, values, mode) {
             css.push_str(&format!(" {name}: {value};"));

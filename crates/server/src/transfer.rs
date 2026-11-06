@@ -347,6 +347,8 @@ mod tests {
             assert_eq!(format_named(name).unwrap(), Format::Html, "{name}");
         }
         assert_eq!(format_named("repo").unwrap(), Format::Repo);
+        assert_eq!(format_named("app").unwrap(), Format::App);
+        assert_eq!(format_named("APP").unwrap(), Format::App);
         assert!(format_named("docx").is_err());
     }
 }

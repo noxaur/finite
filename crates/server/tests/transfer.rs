@@ -219,6 +219,26 @@ async fn http_imports_exports_and_serves_the_original() {
 }
 
 #[tokio::test]
+async fn http_exports_the_whole_design_as_an_app() {
+    let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
+    let id = hub.create("Home").meta.id;
+    transfer::import(&hub, &id, &agent(), request(Vec::new()))
+        .await
+        .unwrap();
+    let app = app(hub.clone(), None);
+
+    let (status, headers, body) =
+        send(&app, get(&format!("/api/designs/{id}/export?format=app"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(header(&headers, "content-type"), "application/x-tar");
+    assert_eq!(
+        header(&headers, "content-disposition"),
+        "attachment; filename=\"home-app.tar\""
+    );
+    assert!(body.windows(12).any(|w| w == b"package.json"));
+}
+
+#[tokio::test]
 async fn http_refuses_unknown_names_and_strict_failures_with_422() {
     let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
     let id = hub.create("Refusals").meta.id;

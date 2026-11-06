@@ -1,6 +1,8 @@
 //! A page's `<html>` and `<body>` become one artboard, so the page's rules
 //! for `html`, `body` and `:root` would match nothing. These functions write
 //! those selectors as selectors for the artboard, which carries [`CLASS`].
+//! The app export writes them for a screen's wrapper instead, through
+//! [`map_selector`], along with the scanning helpers it shares.
 
 /// The class an imported page's artboard carries.
 pub(super) const CLASS: &str = "finite-root";
@@ -11,7 +13,7 @@ pub(super) const LAYER: &str = "finite-artboard";
 
 /// At-rules whose block holds rules, so their selectors are rewritten too.
 /// Any other at-rule's block, like `@keyframes` or `@font-face`, is copied.
-const GROUPING: [&str; 8] = [
+pub(crate) const GROUPING: [&str; 8] = [
     "media",
     "supports",
     "layer",
@@ -64,12 +66,12 @@ pub(super) fn rewrite(css: &str) -> Rewritten {
                         out.css.push_str(&css[i..=end]);
                         i = end + 1;
                     } else {
-                        let close = block_end(css, end);
+                        let close = block_end(css, end).map_or(css.len(), |brace| brace + 1);
                         out.css.push_str(&css[i..close]);
                         i = close;
                     }
                 } else {
-                    let selectors = selector_list(prelude, &mut out);
+                    let selectors = selector_list(prelude, CLASS, &mut out);
                     out.css.push_str(&selectors);
                     out.css.push('{');
                     i = end + 1;
@@ -91,7 +93,7 @@ pub(super) fn rewrite(css: &str) -> Rewritten {
 
 /// Where the prelude that starts at `from` ends: at the first `{`, `;` or
 /// `}` outside strings, comments and brackets, or at the end.
-fn prelude_end(css: &str, from: usize) -> usize {
+pub(crate) fn prelude_end(css: &str, from: usize) -> usize {
     let mut end = css.len();
     scan(&css[from..], |at, byte, depth| {
         if depth == 0 && matches!(byte, b'{' | b';' | b'}') {
@@ -103,17 +105,17 @@ fn prelude_end(css: &str, from: usize) -> usize {
     end
 }
 
-/// Past the `}` that closes the block opening at `open`.
-fn block_end(css: &str, open: usize) -> usize {
+/// The offset of the `}` that closes the block opening at `open`, if there is one.
+pub(crate) fn block_end(css: &str, open: usize) -> Option<usize> {
     let mut level = 0usize;
-    let mut end = css.len();
+    let mut end = None;
     scan(&css[open..], |at, byte, _| {
         match byte {
             b'{' => level += 1,
             b'}' => {
                 level -= 1;
                 if level == 0 {
-                    end = open + at + 1;
+                    end = Some(open + at);
                     return false;
                 }
             }
@@ -126,7 +128,7 @@ fn block_end(css: &str, open: usize) -> usize {
 
 /// Calls `f` with each byte outside strings and comments, its offset and
 /// how deep it is in `()` and `[]`, until `f` returns false.
-fn scan(s: &str, mut f: impl FnMut(usize, u8, usize) -> bool) {
+pub(crate) fn scan(s: &str, mut f: impl FnMut(usize, u8, usize) -> bool) {
     let bytes = s.as_bytes();
     let (mut i, mut depth) = (0, 0usize);
     while i < bytes.len() {
@@ -164,7 +166,7 @@ fn scan(s: &str, mut f: impl FnMut(usize, u8, usize) -> bool) {
 }
 
 /// `s` split at each top-level byte that `split` accepts.
-fn split_top(s: &str, split: impl Fn(u8) -> bool) -> Vec<&str> {
+pub(crate) fn split_top(s: &str, split: impl Fn(u8) -> bool) -> Vec<&str> {
     let mut pieces = Vec::new();
     let mut start = 0;
     scan(s, |at, byte, depth| {
@@ -184,7 +186,7 @@ fn mentions_page(s: &str) -> bool {
 }
 
 /// A comma-separated selector list, rewritten.
-fn selector_list(list: &str, out: &mut Rewritten) -> String {
+fn selector_list(list: &str, class: &str, out: &mut Rewritten) -> String {
     if !mentions_page(list) {
         return list.to_owned();
     }
@@ -192,11 +194,14 @@ fn selector_list(list: &str, out: &mut Rewritten) -> String {
     split_top(&list, |b| b == b',')
         .into_iter()
         .map(|selector| {
+            if selector.trim().is_empty() {
+                return selector.to_owned();
+            }
             let lead = selector.len() - selector.trim_start().len();
             let trail = selector.trim_end().len();
             let core = &selector[lead..trail];
-            let rewritten = match complex(core, out) {
-                Some(rewritten) => rewritten,
+            let rewritten = match complex(core, class, out) {
+                Some((rewritten, _)) => rewritten,
                 None => {
                     out.unmapped += 1;
                     core.to_owned()
@@ -208,22 +213,38 @@ fn selector_list(list: &str, out: &mut Rewritten) -> String {
         .join(",")
 }
 
-fn strip_comments(s: &str) -> String {
+/// `s` without its comments. A `/*` inside a string or after a backslash
+/// isn't one.
+pub(crate) fn strip_comments(s: &str) -> String {
+    let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(start) = rest.find("/*") {
-        out.push_str(&rest[..start]);
-        rest = rest[start + 2..]
-            .find("*/")
-            .map_or("", |end| &rest[start + 2 + end + 2..]);
+    let (mut copied, mut i) = (0, 0);
+    while i < bytes.len() {
+        match bytes[i] {
+            quote @ (b'"' | b'\'') => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b'\\' => i += 2,
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                out.push_str(&s[copied..i]);
+                i = s[i + 2..].find("*/").map_or(s.len(), |end| i + 2 + end + 2);
+                copied = i;
+            }
+            _ => i += 1,
+        }
     }
-    out.push_str(rest);
+    out.push_str(&s[copied.min(s.len())..]);
     out
 }
 
 /// One complex selector, like `html.dark body > main`, rewritten, or `None`
-/// if it names the page in a way that doesn't map onto the artboard.
-fn complex(selector: &str, out: &mut Rewritten) -> Option<String> {
+/// if it names the page in a way that doesn't map onto the artboard. The
+/// flag says whether it starts with the artboard, because it named the page.
+fn complex(selector: &str, class: &str, out: &mut Rewritten) -> Option<(String, bool)> {
     // Compounds, each with the combinator before it ("" for the first).
     let mut separators = vec![false; selector.len()];
     scan(selector, |at, byte, depth| {
@@ -249,12 +270,12 @@ fn complex(selector: &str, out: &mut Rewritten) -> Option<String> {
         .map(|(combinator, text)| {
             (
                 combinator.to_owned(),
-                Compound::parse(&arguments(text, out)),
+                Compound::parse(&arguments(text, class, out)),
             )
         })
         .collect();
     let Some(last_page) = parts.iter().rposition(|(_, c)| c.is_page()) else {
-        return Some(join(&parts));
+        return Some((join(&parts), false));
     };
     // Everything up to the last `html` or `body` must be them too, joined by
     // descendant or child combinators, since both are now one element.
@@ -273,16 +294,89 @@ fn complex(selector: &str, out: &mut Rewritten) -> Option<String> {
     }
     let root = parts[..=last_page].iter().any(|(_, c)| c.root);
     let mut head = if root {
-        format!(".{CLASS}")
+        format!(".{class}")
     } else {
-        format!(":where(.{CLASS})")
+        format!(":where(.{class})")
     };
     for (_, c) in &parts[..=last_page] {
         head.push_str(&c.rest);
     }
     out.mapped += 1;
     let tail = parts.split_off(last_page + 1);
-    Some(format!("{head}{}", join(&tail)))
+    Some((format!("{head}{}", join(&tail)), true))
+}
+
+/// `selector` with its `html`, `body` and `:root` written for the element
+/// with `class`, if it starts with one of them: `html.dark body > main` is
+/// `:where(.screen).dark > main`. `None` if it doesn't, or names them in a
+/// way that doesn't map onto one element, like `html + p`.
+///
+/// A selector that starts with `:is()` or `:where()` can name the page in one
+/// of its alternatives, and then matches the element itself or what is inside
+/// it: `:is(body, .x) .title` is `:is(:where(.screen), :where(.screen) .x)
+/// .title`. Page names anywhere else in a pseudo-class, like `:not(body)` or
+/// `.a:is(body, .b)`, map when the selector starts with the page and
+/// otherwise stay as they were, which is how a page name that can't be
+/// inside the element already behaves.
+pub(crate) fn map_selector(selector: &str, class: &str) -> Option<String> {
+    match complex(selector, class, &mut Rewritten::default()) {
+        Some((mapped, true)) => Some(mapped),
+        Some((_, false)) => anchored_alternatives(selector, class),
+        None => None,
+    }
+}
+
+/// `selector` when its first compound is `:is(…)` or `:where(…)` and one
+/// of the alternatives names the page: each alternative is written for the
+/// element, or limited to inside it, so the compound still matches only the
+/// element and what is in it.
+fn anchored_alternatives(selector: &str, class: &str) -> Option<String> {
+    let (mut open, mut close, mut end) = (None, None, selector.len());
+    scan(selector, |at, byte, depth| {
+        match byte {
+            b'(' if depth == 0 && open.is_none() => open = Some(at),
+            b')' if depth == 0 && close.is_none() && open.is_some() => close = Some(at),
+            b if depth == 0 && (b.is_ascii_whitespace() || matches!(b, b'>' | b'+' | b'~')) => {
+                end = at;
+                return false;
+            }
+            _ => {}
+        }
+        true
+    });
+    let (open, close) = (open?, close.filter(|&close| close < end)?);
+    let name = selector.strip_prefix(':')?.get(..open - 1)?;
+    if !["is", "where", "matches"]
+        .iter()
+        .any(|pseudo| name.eq_ignore_ascii_case(pseudo))
+    {
+        return None;
+    }
+    let mut names_page = false;
+    let alternatives: Vec<String> = split_top(&selector[open + 1..close], |b| b == b',')
+        .into_iter()
+        .map(|alternative| {
+            // A forgiving list drops an empty alternative, so it stays empty.
+            if alternative.trim().is_empty() {
+                return alternative.to_owned();
+            }
+            let lead = alternative.len() - alternative.trim_start().len();
+            let trail = alternative.trim_end().len();
+            let core = &alternative[lead..trail];
+            let mapped = map_selector(core, class);
+            names_page |= mapped.is_some();
+            let mapped = mapped.unwrap_or_else(|| format!(":where(.{class}) {core}"));
+            format!("{}{mapped}{}", &alternative[..lead], &alternative[trail..])
+        })
+        .collect();
+    names_page.then(|| {
+        format!(
+            "{}{}{}",
+            &selector[..=open],
+            alternatives.join(","),
+            &selector[close..]
+        )
+    })
 }
 
 fn join(parts: &[(String, Compound)]) -> String {
@@ -354,7 +448,7 @@ impl Compound {
 }
 
 /// `compound` with the selectors inside `:is()`, `:not()` and the like rewritten.
-fn arguments(compound: &str, out: &mut Rewritten) -> String {
+fn arguments(compound: &str, class: &str, out: &mut Rewritten) -> String {
     if !compound.contains('(') || !mentions_page(compound) {
         return compound.to_owned();
     }
@@ -377,7 +471,7 @@ fn arguments(compound: &str, out: &mut Rewritten) -> String {
             (b')', 0) => {
                 if let Some(start) = open.take() {
                     result.push_str(&compound[copied..start]);
-                    result.push_str(&selector_list(&compound[start..at], out));
+                    result.push_str(&selector_list(&compound[start..at], class, out));
                     copied = at;
                 }
             }
@@ -465,6 +559,20 @@ mod tests {
             css(".a { content: 'body' } body {}"),
             ".a { content: 'body' } :where(.finite-root) {}"
         );
+    }
+
+    #[test]
+    fn comment_marks_in_strings_stay() {
+        assert_eq!(
+            css("[data-x=\"/*\"] body, /* body */ [a='\\'/*'] {}"),
+            ":where(.finite-root)[data-x=\"/*\"],  [a='\\'/*'] {}"
+        );
+        assert_eq!(css(":root{--a:\"/*\"}"), ".finite-root{--a:\"/*\"}");
+    }
+
+    #[test]
+    fn an_empty_selector_stays_empty() {
+        assert_eq!(css("body, {a:b}"), ":where(.finite-root), {a:b}");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 import { describe as suite, expect, it } from "vite-plus/test";
 import type { ImportDiagnostic, ImportResult } from "@/api/Api";
 import {
+  appHref,
   describe,
   exportHref,
   figmaHref,
@@ -41,6 +42,8 @@ suite("formatOf", () => {
     expect(formatOf("Landing.HTM")).toBe("html");
     expect(formatOf("my.design.finite")).toBe("finite");
     expect(formatOf("home.finite-repo.tar")).toBe("repo");
+    // The app archive is export only: importing a `.tar` still means a repo.
+    expect(formatOf("home-app.tar")).toBe("repo");
   });
 
   it("reads a .figma.json file as a Figma payload, and a plain .json as nothing", () => {
@@ -70,6 +73,10 @@ suite("links", () => {
   it("export one artboard for the Figma plugin", () => {
     expect(figmaHref("d 1", "a/1")).toBe("/api/designs/d%201/export?format=figma&artboard=a%2F1");
     expect(jsxHref("d 1", "a/1")).toBe("/api/designs/d%201/export?format=jsx&artboard=a%2F1");
+  });
+
+  it("exports the whole design as a React app", () => {
+    expect(appHref("d 1")).toBe("/api/designs/d%201/export?format=app");
   });
 
   it("point at an import's original bytes", () => {

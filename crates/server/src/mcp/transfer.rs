@@ -149,7 +149,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Export the design, or one artboard, as a file: html, finite (a bundle that imports back exactly), repo (a tar of text files for keeping in git: one HTML file per artboard and a manifest with the tokens; it imports back, but scripts are left out on import), figma (for the Finite Figma plugin) or jsx (one artboard as a React component). Returns a diagnostic for anything that didn't convert exactly, and the file's text, cut off past 60,000 characters.",
+        description = "Export the design, or one artboard, as a file: html, finite (a bundle that imports back exactly), repo (a tar of text files for keeping in git: one HTML file per artboard and a manifest with the tokens; it imports back, but scripts are left out on import), figma (for the Finite Figma plugin), jsx (one artboard as a React component) or app (a Vite + React project of the whole prototype flow, one route per data-route). Returns a diagnostic for anything that didn't convert exactly, and the file's text, cut off past 60,000 characters.",
         annotations(read_only_hint = true)
     )]
     pub(super) async fn export_design(

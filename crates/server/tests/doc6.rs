@@ -1191,6 +1191,22 @@ async fn jsx_and_export_are_read_views() {
         .call("read", json!({ "designId": id, "export": "jsx" }))
         .await;
     assert!(failed && error.contains("takes one artboard"), "{error}");
+    // `app` is a tar of the whole design, so the result says where to
+    // download it, and one artboard is refused.
+    let text = agent
+        .ok("read", json!({ "designId": id, "export": "app" }))
+        .await;
+    assert!(
+        text.contains("-app.tar") && text.contains("not text"),
+        "{text}"
+    );
+    let (error, failed) = agent
+        .call(
+            "read",
+            json!({ "designId": id, "select": format!("#{board}"), "export": "app" }),
+        )
+        .await;
+    assert!(failed && error.contains("whole prototype"), "{error}");
 }
 
 #[tokio::test]
