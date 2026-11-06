@@ -4,7 +4,8 @@ import * as stylex from "@stylexjs/stylex";
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
-import { Icon, type IconName } from "./Icons";
+import { type IconName } from "@/lib/icons";
+import { Icon } from "./Icons";
 
 export interface MenuItem {
   readonly key: string;

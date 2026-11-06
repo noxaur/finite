@@ -1,4 +1,4 @@
-import type { Hit, Measured } from "../renderer";
+import type { Hit, Measured } from "../types";
 import type { Replica } from "../replica";
 import type { UserEdit } from "../schema";
 import type { Box, Guide, Handle, Point } from "./geometry";

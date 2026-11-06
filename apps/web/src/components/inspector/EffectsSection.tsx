@@ -19,7 +19,7 @@ import { bare, customOf, parseInput, type Reading, tokenOf } from "@/design/edit
 import { type ListEntry, moveEntry, readList, splitList, writeList } from "@/design/editing/lists";
 import type { Node } from "@/design/schema";
 import { numberOf } from "../DraftField";
-import type { IconName } from "../Icons";
+import type { IconName } from "@/lib/icons";
 import {
   AddMenu,
   Block,

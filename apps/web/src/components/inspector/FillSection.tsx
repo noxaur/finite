@@ -34,7 +34,7 @@ import { tokenOf } from "@/design/editing/inspect";
 import { moveEntry, stashOf } from "@/design/editing/lists";
 import type { Node } from "@/design/schema";
 import { colors, radii, shadows, size, space } from "@/styles/tokens.stylex";
-import type { IconName } from "../Icons";
+import type { IconName } from "@/lib/icons";
 import {
   AlphaChip,
   CellGrid,

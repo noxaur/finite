@@ -17,7 +17,8 @@ import {
 import { isColor } from "@/lib/tokens";
 import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import { numberOf, ScrubLabel, useDraftField } from "../DraftField";
-import { Icon, type IconName } from "../Icons";
+import type { IconName } from "@/lib/icons";
+import { Icon } from "../Icons";
 import { Dropdown, Menu, type MenuItem } from "../Menu";
 import type { Geometry, GeometryFacts } from "./geometry";
 import {

@@ -16,7 +16,10 @@ import {
   draggedLayers,
   dropAt,
   dropEdit,
+  type FlagAttr,
+  HIDDEN_ATTR,
   type LayerModel,
+  LOCKED_ATTR,
   type Row,
   type RowFacts,
   toggleFlag,
@@ -292,7 +295,7 @@ export function LayersTree({
     e.stopPropagation();
   };
 
-  const flag = (row: Row, attr: "hidden" | "data-locked") => {
+  const flag = (row: Row, attr: FlagAttr) => {
     const ids = picked.has(row.facts.id) ? selection : [row.facts.id];
     void editor.commit([toggleFlag((id) => model.node(id), ids, attr)]);
   };
@@ -382,7 +385,7 @@ interface RowActions {
   readonly toggle: (id: string) => void;
   readonly reveal: (id: string) => void;
   readonly rename: (row: Row) => void;
-  readonly flag: (row: Row, attr: "hidden" | "data-locked") => void;
+  readonly flag: (row: Row, attr: FlagAttr) => void;
   readonly renamed: () => void;
 }
 
@@ -486,7 +489,7 @@ const LayerRow = memo(function LayerRow({
             aria-label={facts.locked ? "Unlock" : "Lock"}
             aria-pressed={facts.locked}
             title={facts.locked ? "Unlock (⇧⌘L)" : "Lock (⇧⌘L)"}
-            onClick={() => actions.flag(row, "data-locked")}
+            onClick={() => actions.flag(row, LOCKED_ATTR)}
             {...stylex.props(
               styles.flag,
               facts.locked ? styles.flagOn : !hovered && styles.invisible,
@@ -501,7 +504,7 @@ const LayerRow = memo(function LayerRow({
             aria-label={facts.hidden ? "Show" : "Hide"}
             aria-pressed={facts.hidden}
             title={facts.hidden ? "Show (⇧⌘H)" : "Hide (⇧⌘H)"}
-            onClick={() => actions.flag(row, "hidden")}
+            onClick={() => actions.flag(row, HIDDEN_ATTR)}
             {...stylex.props(
               styles.flag,
               facts.hidden ? styles.flagOn : !hovered && styles.invisible,

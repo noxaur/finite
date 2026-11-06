@@ -6,11 +6,12 @@ import Link from "next/link";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Api, Refused } from "@/api/Api";
 import { Camera, union, type View } from "@/design/camera";
-import { Editor } from "@/design/editing/editor";
+import { Editor, isTyping } from "@/design/editing/editor";
 import { LayerModel } from "@/design/editing/layers";
 import { pixelSize } from "@/design/html";
 import { Presenter, type PresenterState } from "@/design/presenter";
-import { type FrameKey, type Hit, Renderer } from "@/design/renderer";
+import { type FrameKey, Renderer } from "@/design/renderer";
+import type { Hit } from "@/design/types";
 import { Replica } from "@/design/replica";
 import type { Audience } from "@/design/schema";
 import { knownAgents } from "@/lib/audience";
@@ -77,17 +78,6 @@ const CLICK_SLOP = 4;
 const UPDATED_MS = 1800;
 /** How long a notice, like a link to a missing artboard, stays up. */
 const NOTICE_MS = 2400;
-
-/** Whether a key event is typing into a field, in a shadow-root artboard too. */
-const isTyping = (e: Event) => {
-  const target = e.composedPath()[0] ?? e.target;
-  return (
-    target instanceof HTMLInputElement ||
-    target instanceof HTMLTextAreaElement ||
-    target instanceof HTMLSelectElement ||
-    (target instanceof HTMLElement && target.isContentEditable)
-  );
-};
 
 /** The artboards a selection is in, once each, in selection order. */
 function boardsOf(replica: Replica, selection: ReadonlyArray<string>): string[] {

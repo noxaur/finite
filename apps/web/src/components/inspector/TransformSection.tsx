@@ -15,7 +15,7 @@ import {
 import type { Node } from "@/design/schema";
 import { colors, space } from "@/styles/tokens.stylex";
 import { numberOf } from "../DraftField";
-import type { IconName } from "../Icons";
+import type { IconName } from "@/lib/icons";
 import {
   CustomChip,
   Field,
