@@ -3,8 +3,8 @@
 import * as stylex from "@stylexjs/stylex";
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { Draft, Editor } from "@/design/editing/editor";
-import type { UserEdit } from "@/design/schema";
+import type { Draft, StyleEditor as Editor } from "./inspector/styleEditor";
+import type { StyleEdit as UserEdit } from "./inspector/styleEditor";
 import { colors, cursors, motion } from "@/styles/tokens.stylex";
 import { clampedText, numberOf, scrubber, steppedText, tidy } from "./scrub";
 

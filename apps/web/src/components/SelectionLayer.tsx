@@ -1,13 +1,11 @@
 "use client";
 
 import * as stylex from "@stylexjs/stylex";
-import { useEffect, useState } from "react";
-import type { Camera } from "@/design/camera";
-import type { Editor } from "@/design/editing/editor";
-import { HANDLES, type Handle } from "@/design/editing/geometry";
-import type { Renderer } from "@/design/renderer";
-import type { DesignSession } from "@/design/session";
-import { colors, radii, shadows, space } from "@/styles/tokens.stylex";
+import type { Rect } from "@finite/protocol";
+import type { CanvasEditor, EditorState } from "@/canvas/editor";
+import { CORNERS, HANDLES, type Handle } from "@/canvas/gestures";
+import { keyOf, type SelectionItem } from "@/canvas/selection";
+import { colors, fonts, radii, shadows, space } from "@/styles/tokens.stylex";
 
 /** The cursor over each resize handle. */
 const CURSORS: Record<Handle, string> = {
@@ -21,123 +19,74 @@ const CURSORS: Record<Handle, string> = {
   se: "nwse-resize",
 };
 
-/** Draws the caller again once per frame in which the design changed. */
-export function useRedrawOnChange(session: DesignSession) {
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    let frame = 0;
-    const off = session.subscribeDoc(() => {
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => setTick((t) => t + 1));
-    });
-    return () => {
-      off();
-      cancelAnimationFrame(frame);
-    };
-  }, [session]);
-}
-
 /**
- * Draws what the editor shows on the canvas: the selection with its resize
- * handles, the node under the pointer, and the container a move drops
- * into. It sits in the camera's world, so it pans and zooms with the design,
- * and it draws again after every change to the design, drafts included, so
- * outlines follow what a panel previews.
+ * Draws what the editor shows over the frames: the selection with its resize handles and
+ * corner marks, the thing under the pointer, where a reorder drops, and the label that says
+ * which file an edit changes. It sits in the camera's world, so it pans and zooms with the
+ * frames; lines and handles keep their screen size through `--inv-zoom`.
  */
 export function SelectionLayer({
   editor,
-  session,
-  renderer,
-  camera,
+  state,
+  selection,
 }: {
-  editor: Editor;
-  session: DesignSession;
-  renderer: Renderer;
-  camera: Camera;
+  editor: CanvasEditor;
+  state: EditorState;
+  selection: readonly SelectionItem[];
 }) {
-  const [state, setState] = useState(editor.state);
-  useEffect(() => {
-    setState(editor.state);
-    return editor.subscribe(() => setState(editor.state));
-  }, [editor]);
-  useRedrawOnChange(session);
-
-  const rectOf = (id: string, outer = false) => {
-    const rect = outer ? renderer.outerRect(id) : renderer.nodeRect(id);
-    if (!rect) return null;
-    const a = camera.toWorld(rect.left, rect.top);
-    const b = camera.toWorld(rect.right, rect.bottom);
-    return { x: a.x, y: a.y, width: b.x - a.x, height: b.y - a.y };
+  const world = (frameId: string, r: Rect): Rect | null => {
+    const frame = editor.frame(frameId);
+    if (!frame) return null;
+    const b = editor.boxOf(frame);
+    return { x: b.x + r.x, y: b.y + r.y, width: r.width, height: r.height };
   };
-  const [only] = state.selection;
-  // Only what the browser can measure can be resized: not inside a sandboxed artboard.
-  const resizable =
-    state.selection.length === 1 && only !== undefined && renderer.measure(only) !== null;
-  const hover =
-    state.hover !== null && !state.selection.includes(state.hover)
-      ? rectOf(state.hover, true)
-      : null;
-  const target = state.target === null ? null : rectOf(state.target);
-  // Guides and the selection box come in page pixels.
-  const world = (left: number, top: number, right: number, bottom: number) => {
-    const a = camera.toWorld(left, top);
-    const b = camera.toWorld(right, bottom);
-    return { x: a.x, y: a.y, width: b.x - a.x, height: b.y - a.y };
-  };
-  const area =
-    state.area && world(state.area.left, state.area.top, state.area.right, state.area.bottom);
+  const hover = state.hover && world(state.hover.frameId, state.hover.rect);
+  const drop = state.dropLine && world(state.dropLine.frameId, state.dropLine.rect);
+  const resizable = selection.length === 1 && !state.dragging && !state.interact;
+  const [first] = selection;
+  const firstRect = first && state.rects[keyOf(first)];
+  const labelAt = first && firstRect ? world(first.frameId, firstRect) : null;
 
   return (
     <>
-      {hover && <div {...stylex.props(styles.box(hover), styles.hover)} />}
-      {target && <div {...stylex.props(styles.box(target), styles.target)} />}
-      {area && <div data-area {...stylex.props(styles.box(area), styles.area)} />}
-      {state.guides.map((g, i) => (
-        <div
-          key={i}
-          data-guide
-          {...stylex.props(
-            "x" in g
-              ? styles.box(world(g.x, g.from, g.x, g.to))
-              : styles.box(world(g.from, g.y, g.to, g.y)),
-            "x" in g ? styles.vertical : styles.horizontal,
-          )}
-        />
-      ))}
-      {state.selection.map((id) => {
-        const rect = rectOf(id, true);
+      {hover && !state.dragging && <div {...stylex.props(styles.box(hover), styles.hover)} />}
+      {drop && <div data-drop {...stylex.props(styles.box(drop), styles.drop)} />}
+      {selection.map((item) => {
+        const key = keyOf(item);
+        const local = state.rects[key];
+        const rect = local && world(item.frameId, local);
         if (!rect) return null;
-        const handles = resizable && !state.dragging;
         return (
-          <div
-            key={id}
-            data-selected={id}
-            {...stylex.props(styles.box(rect), styles.selected, id === state.hover && styles.hover)}
-          >
-            {handles &&
-              HANDLES.map((handle) => (
-                <div
-                  key={handle}
-                  data-handle={handle}
-                  data-camera-ignore
-                  {...stylex.props(
-                    styles.handle(handle),
-                    (handle === "n" || handle === "s") && styles.across,
-                    (handle === "e" || handle === "w") && styles.along,
-                  )}
-                >
-                  {CORNERS.includes(handle) && <Mark />}
-                </div>
-              ))}
-            {!handles &&
-              CORNERS.map((corner) => (
-                <div key={corner} {...stylex.props(styles.corner(corner))}>
-                  <Mark />
-                </div>
-              ))}
+          <div key={key} data-selected={key} {...stylex.props(styles.box(rect), styles.selected)}>
+            {resizable
+              ? HANDLES.map((handle) => (
+                  <div
+                    key={handle}
+                    data-handle={handle}
+                    data-key={key}
+                    data-camera-ignore
+                    {...stylex.props(
+                      styles.handle(handle),
+                      (handle === "n" || handle === "s") && styles.across,
+                      (handle === "e" || handle === "w") && styles.along,
+                    )}
+                  >
+                    {CORNERS.includes(handle) && <Mark />}
+                  </div>
+                ))
+              : CORNERS.map((corner) => (
+                  <div key={corner} {...stylex.props(styles.corner(corner))}>
+                    <Mark />
+                  </div>
+                ))}
           </div>
         );
       })}
+      {state.label && labelAt && (
+        <div {...stylex.props(styles.labelSpot(labelAt))}>
+          <span {...stylex.props(styles.label)}>{state.label}</span>
+        </div>
+      )}
     </>
   );
 }
@@ -162,21 +111,6 @@ function Mark() {
   );
 }
 
-/** Says why a person's last edit didn't happen, above the tools. */
-export function EditorNotice({ editor }: { editor: Editor }) {
-  const [notice, setNotice] = useState(editor.state.notice);
-  useEffect(() => editor.subscribe(() => setNotice(editor.state.notice)), [editor]);
-  if (notice === null) return null;
-  return (
-    <div role="status" {...stylex.props(styles.notice)}>
-      {notice}
-    </div>
-  );
-}
-
-/** The selection's corners, which carry a mark each. */
-const CORNERS: readonly Handle[] = ["nw", "ne", "sw", "se"];
-
 /** Where a handle sits on its box, as fractions of the width and height. */
 const spot = (handle: Handle) => ({
   x: handle.includes("w") ? 0 : handle.includes("e") ? 1 : 0.5,
@@ -184,26 +118,7 @@ const spot = (handle: Handle) => ({
 });
 
 const styles = stylex.create({
-  notice: {
-    position: "absolute",
-    left: "50%",
-    bottom: 75,
-    transform: "translateX(-50%)",
-    maxWidth: "min(480px, calc(100% - 30px))",
-    paddingBlock: space.xs,
-    paddingInline: space.sm,
-    borderRadius: radii.sm,
-    borderWidth: 1,
-    borderStyle: "solid",
-    borderColor: colors.border,
-    backgroundColor: colors.accent,
-    color: colors.onAccent,
-    boxShadow: shadows.raised,
-    fontSize: 13,
-    lineHeight: 1.4,
-    pointerEvents: "none",
-  },
-  box: (r: { x: number; y: number; width: number; height: number }) => ({
+  box: (r: Rect) => ({
     position: "absolute",
     left: r.x,
     top: r.y,
@@ -211,23 +126,16 @@ const styles = stylex.create({
     height: r.height,
     pointerEvents: "none",
   }),
-  /** Selected and not under the pointer: the thin line. */
   selected: {
     outline: `calc(1.5px * var(--inv-zoom, 1)) solid ${colors.hover}`,
   },
-  area: {
-    outline: `calc(1px * var(--inv-zoom, 1)) solid ${colors.ink}`,
-    backgroundColor: `color-mix(in srgb, ${colors.ink} 6%, transparent)`,
-  },
-  vertical: {
-    borderLeft: `calc(1px * var(--inv-zoom, 1)) solid ${colors.danger}`,
-  },
-  horizontal: {
-    borderTop: `calc(1px * var(--inv-zoom, 1)) solid ${colors.danger}`,
-  },
-  /** Under the pointer, selected or not: the heavy line. */
   hover: {
-    outline: `calc(3px * var(--inv-zoom, 1)) solid ${colors.hover}`,
+    outline: `calc(1.5px * var(--inv-zoom, 1)) solid ${colors.hover}`,
+    outlineOffset: 0,
+  },
+  drop: {
+    outline: `calc(2px * var(--inv-zoom, 1)) solid ${colors.hover}`,
+    boxShadow: `0 0 0 calc(3px * var(--inv-zoom, 1)) ${colors.halo}`,
   },
   fill: {
     display: "block",
@@ -245,10 +153,6 @@ const styles = stylex.create({
   mark: {
     fill: colors.halo,
     stroke: colors.hover,
-  },
-  target: {
-    outline: `calc(1.5px * var(--inv-zoom, 1)) dashed ${colors.ink}`,
-    boxShadow: `0 0 0 calc(3px * var(--inv-zoom, 1)) ${colors.halo}`,
   },
   // Corner handles draw a mark, over the sides.
   handle: (handle: Handle) => ({
@@ -274,5 +178,27 @@ const styles = stylex.create({
     height: "100%",
     transform: "translateX(-50%)",
     zIndex: 0,
+  },
+  labelSpot: (r: Rect) => ({
+    position: "absolute",
+    left: r.x,
+    top: r.y + r.height,
+    pointerEvents: "none",
+  }),
+  label: {
+    display: "inline-block",
+    transform: "scale(var(--inv-zoom, 1))",
+    transformOrigin: "0 0",
+    marginTop: space.sm,
+    paddingBlock: 2,
+    paddingInline: space.sm,
+    borderRadius: radii.sm,
+    backgroundColor: colors.hover,
+    color: colors.halo,
+    boxShadow: shadows.raised,
+    fontFamily: fonts.sans,
+    fontSize: 12,
+    lineHeight: "16px",
+    whiteSpace: "nowrap",
   },
 });

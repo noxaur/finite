@@ -5,7 +5,7 @@ import { Children, type ReactNode, useEffect, useId, useRef, useState } from "re
 import { createPortal } from "react-dom";
 import { alphaOf, hexOf, opaque, paintedHex, resolveVars, setAlpha } from "@/design/editing/colors";
 import { isHexLike, typedHex } from "@/design/editing/hsv";
-import type { Editor } from "@/design/editing/editor";
+import type { StyleEditor as Editor } from "./styleEditor";
 import {
   bare,
   customOf,

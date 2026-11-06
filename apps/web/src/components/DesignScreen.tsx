@@ -1,0 +1,420 @@
+"use client";
+
+import * as stylex from "@stylexjs/stylex";
+import type { Canvas as CanvasDoc, ThreadMeta } from "@finite/protocol";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
+import { finite, findThread, useDesignState, useSettings } from "@/client/finite";
+import { UNTIL_OPENED } from "@/lib/threads";
+import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
+import { IconButton } from "./Button";
+import {
+  Canvas,
+  Inspector,
+  LayersTree,
+  selectionStore,
+  TokensSection,
+  useSelection,
+} from "@/canvas";
+import { selectionFor } from "@/lib/composer";
+import { ChatPanel } from "./ChatPanel";
+import { Composer, focusComposer, type Outgoing } from "./Composer";
+import { type LeftMode, LeftSidebar } from "./LeftSidebar";
+import { Settings } from "./Settings";
+import { StarMenu } from "./StarMenu";
+import { TabBar } from "./TabBar";
+import { ThreadList } from "./ThreadList";
+import { toast } from "./Toast";
+
+/** Where the screen is: `/design/?id=…&tab=prototypes&thread=…&canvas=…`. */
+interface Place {
+  readonly tab: LeftMode;
+  readonly thread: string | null;
+  readonly canvas: string | null;
+}
+
+function href(id: string, place: Place): string {
+  const q = new URLSearchParams({ id });
+  if (place.tab === "prototypes") q.set("tab", "prototypes");
+  if (place.thread) q.set("thread", place.thread);
+  if (place.canvas) q.set("canvas", place.canvas);
+  return `/design/?${q.toString()}`;
+}
+
+/** The page a design opens on: Routes first, then whatever page comes first. */
+function defaultPage(pages: ReadonlyArray<CanvasDoc>): CanvasDoc | undefined {
+  return pages.find((p) => p.name === "Routes") ?? pages[0];
+}
+
+/**
+ * One open design: the tab bar, the left sidebar (Design | Prototypes), the canvas with the
+ * ✱ menu and the floating composer, and on the right the inspector (collapsed by default) and
+ * a thread's messages.
+ */
+export function DesignScreen({ id }: { id: string }) {
+  const router = useRouter();
+  const params = useSearchParams();
+  const view = useDesignState(id);
+  const settings = useSettings();
+  const selection = useSelection();
+  const [inspector, setInspector] = useState(false);
+  const [history, setHistory] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  const place: Place = {
+    tab: params.get("tab") === "prototypes" ? "prototypes" : "design",
+    thread: params.get("thread"),
+    canvas: params.get("canvas"),
+  };
+  const go = (next: Place, push = true) => {
+    const url = href(id, next);
+    if (push) router.push(url);
+    else router.replace(url);
+  };
+
+  const state = view.state;
+  const canvases = state?.canvases ?? [];
+  const threads = state?.threads ?? [];
+  const pages = canvases.filter((c) => c.kind === "page" && c.removedAt === undefined);
+  const thread = findThread(view, place.thread) ?? null;
+
+  const canvas: CanvasDoc | null =
+    place.tab === "design"
+      ? (pages.find((p) => p.id === place.canvas) ?? defaultPage(pages) ?? null)
+      : (canvases.find((c) => c.id === place.canvas) ?? null);
+  const pageId = place.tab === "design" ? (canvas?.id ?? null) : null;
+
+  // A new canvas on screen starts with nothing picked.
+  const canvasId = canvas?.id ?? null;
+  useEffect(() => selectionStore.set([]), [canvasId]);
+
+  // When a thread opens its first prototype, the screen follows it there.
+  const seenCanvases = useRef<{ thread: string | null; count: number }>({ thread: null, count: 0 });
+  useEffect(() => {
+    if (!thread) return;
+    const seen = seenCanvases.current;
+    const count = thread.canvasIds.length;
+    if (seen.thread === thread.id && seen.count === 0 && count > 0) {
+      go({ tab: "prototypes", thread: thread.id, canvas: thread.canvasIds[count - 1]! }, false);
+    }
+    seenCanvases.current = { thread: thread.id, count };
+  });
+
+  // Opening a thread snoozed "until I open it" wakes it.
+  const threadId = thread?.id;
+  const wake = thread?.snoozedUntil !== undefined && thread.snoozedUntil >= UNTIL_OPENED;
+  useEffect(() => {
+    if (threadId && wake) {
+      void finite.request("thread.snooze", { designId: id, threadId, until: null }).catch(() => {});
+    }
+  }, [id, threadId, wake]);
+
+  const sendTo = async (
+    message: Outgoing,
+    target: { threadId: string } | { new: { canvasId?: string; parentId?: string } },
+  ) => {
+    const { threadId: sent } = await finite.request("thread.send", {
+      designId: id,
+      ...target,
+      text: message.text,
+      attachments: message.attachments,
+      ...(message.selection ? { selection: message.selection } : {}),
+      model: message.model,
+      ...(message.effort ? { effort: message.effort } : {}),
+      fast: message.fast,
+      mode: message.mode,
+    });
+    return sent;
+  };
+
+  /** A new prototype: its canvas first, then the thread on it, then the screen goes there. */
+  const startPrototype = async (message: Outgoing, parentId?: string) => {
+    const created = await finite.request("canvas.create", {
+      designId: id,
+      kind: "prototype",
+      name: "New prototype",
+    });
+    const sent = await sendTo(message, {
+      new: { canvasId: created.id, ...(parentId ? { parentId } : {}) },
+    });
+    go({ tab: "prototypes", thread: sent, canvas: created.id }, place.thread !== null);
+  };
+
+  const send = async (message: Outgoing) => {
+    if (thread) {
+      await sendTo(message, { threadId: thread.id });
+      return;
+    }
+    if (place.tab === "prototypes") return startPrototype(message);
+    // From the Design tab: a thread without a canvas, until the agent opens one.
+    const sent = await sendTo(message, { new: {} });
+    go({ tab: "design", thread: sent, canvas: place.canvas }, false);
+  };
+
+  const composerChoice = (text: string): Outgoing => {
+    const picked = selectionFor(selection);
+    return {
+      text: text + picked.note,
+      attachments: [],
+      selection: picked.selection,
+      model: thread?.model ?? settings?.model ?? "",
+      effort: thread?.effort ?? settings?.effort,
+      fast: thread?.fast ?? settings?.fast ?? false,
+      mode: settings?.sendMode ?? "steer",
+    };
+  };
+
+  const explore = (prompt: string) => {
+    const message = composerChoice(prompt);
+    const run =
+      place.tab === "prototypes" && thread
+        ? sendTo(message, { threadId: thread.id })
+        : startPrototype(message, place.tab === "prototypes" ? undefined : thread?.id);
+    void run.catch((e: unknown) => toast(e instanceof Error ? e.message : String(e)));
+  };
+
+  const exportSelection = () => {
+    if (!canvas) return;
+    const frameIds = [...new Set(selection.map((s) => s.frameId))].join(",");
+    const a = document.createElement("a");
+    a.href = `/api/designs/${encodeURIComponent(id)}/export?canvasId=${encodeURIComponent(canvas.id)}${frameIds ? `&frameIds=${encodeURIComponent(frameIds)}` : ""}`;
+    a.download = "";
+    a.click();
+  };
+
+  // A thread without a canvas talks in the side panel; a canvas thread does when History is on.
+  const chat: ThreadMeta | null =
+    thread && (thread.canvasIds.length === 0 || history) ? thread : null;
+  const running = threads.filter((t) => t.running);
+
+  if (view.error && !state) {
+    return (
+      <div {...stylex.props(styles.screen)}>
+        <TabBar current={id} />
+        <div {...stylex.props(styles.message)}>
+          <p>Couldn’t open this design: {view.error}</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div {...stylex.props(styles.screen)}>
+      <TabBar
+        current={id}
+        currentName={state?.design.name ?? null}
+        working={running.map((t) => ({ name: t.title || "Agent", status: null }))}
+      >
+        {thread && thread.canvasIds.length > 0 && (
+          <IconButton
+            icon="history"
+            label={history ? "Hide messages" : "Show messages"}
+            title="History"
+            variant="ghost"
+            size="small"
+            pressed={history}
+            onClick={() => setHistory((h) => !h)}
+          />
+        )}
+        <IconButton
+          icon="sidebar"
+          label={inspector ? "Hide inspector" : "Show inspector"}
+          variant="ghost"
+          size="small"
+          pressed={inspector}
+          onClick={() => setInspector((o) => !o)}
+          style={styles.mirror}
+        />
+      </TabBar>
+
+      <div {...stylex.props(styles.body)}>
+        <LeftSidebar
+          designId={id}
+          name={state?.design.name ?? ""}
+          mode={place.tab}
+          onMode={(tab) => {
+            if (tab === place.tab) return;
+            go(
+              tab === "design"
+                ? { tab, thread: null, canvas: pageId }
+                : { tab, thread: null, canvas: null },
+            );
+          }}
+          canvases={canvases}
+          page={pageId}
+          onPage={(canvasId) => go({ tab: "design", thread: place.thread, canvas: canvasId })}
+          layers={<LayersTree canvas={canvas} />}
+          tokens={<TokensSection designId={id} />}
+          prototypes={
+            <ThreadList
+              designId={id}
+              threads={threads}
+              canvases={canvases}
+              current={place.thread ? { threadId: place.thread, canvasId: place.canvas } : null}
+              showWorkingSeparately={settings?.showWorkingSeparately ?? false}
+              onOpen={({ threadId: t, canvasId: c }) =>
+                go({ tab: "prototypes", thread: t, canvas: c })
+              }
+              onNew={() => {
+                go({ tab: "prototypes", thread: null, canvas: null });
+                focusComposer();
+              }}
+            />
+          }
+          onSettings={() => setSettingsOpen(true)}
+        />
+
+        <main {...stylex.props(styles.main)}>
+          <Canvas
+            key={canvas?.id ?? "new"}
+            designId={id}
+            canvas={canvas}
+            mode={place.tab === "design" ? "design" : "prototypes"}
+          />
+          <Preview state={state?.preview} />
+          {place.tab === "prototypes" && !thread && (
+            <div {...stylex.props(styles.hello)}>
+              <p {...stylex.props(styles.helloTitle)}>New prototype</p>
+              <p {...stylex.props(styles.helloText)}>
+                Say what to make. The agent builds it here and names it.
+              </p>
+            </div>
+          )}
+          <StarMenu
+            mode={place.tab === "design" ? "design" : "prototypes"}
+            onExplore={explore}
+            onMoveToProd={(target) =>
+              void (
+                thread
+                  ? sendTo(composerChoice(`Move ${target} to production.`), { threadId: thread.id })
+                  : Promise.resolve()
+              ).catch((e: unknown) => toast(e instanceof Error ? e.message : String(e)))
+            }
+            onAsk={focusComposer}
+            onExport={exportSelection}
+          />
+          <div {...stylex.props(styles.dock)}>
+            <Composer
+              designId={id}
+              thread={thread}
+              pill={place.tab === "design" && !thread}
+              onSend={send}
+            />
+          </div>
+        </main>
+
+        {(chat || inspector) && (
+          <div {...stylex.props(styles.right)}>
+            {chat && (
+              <ChatPanel
+                designId={id}
+                thread={chat}
+                onClose={
+                  chat.canvasIds.length > 0
+                    ? () => setHistory(false)
+                    : () => go({ ...place, thread: null }, false)
+                }
+              />
+            )}
+            {inspector && <Inspector open onOpenChange={setInspector} />}
+          </div>
+        )}
+      </div>
+
+      {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}
+    </div>
+  );
+}
+
+/** While the design's dev server starts (installing packages for a new project) or fails. */
+function Preview({ state }: { state: { status: string; log?: string | undefined } | undefined }) {
+  if (!state || state.status === "ready" || state.status === "stopped") return null;
+  const failed = state.status === "error";
+  const tail = state.log?.trim().split("\n").slice(-6).join("\n");
+  return (
+    <div role="status" {...stylex.props(styles.preview)}>
+      <p {...stylex.props(styles.previewTitle)}>
+        {failed ? "The dev server stopped" : "Starting the dev server…"}
+      </p>
+      {tail && <pre {...stylex.props(styles.log)}>{tail}</pre>}
+    </div>
+  );
+}
+
+const styles = stylex.create({
+  screen: {
+    display: "flex",
+    flexDirection: "column",
+    height: "100vh",
+    overflow: "hidden",
+    backgroundColor: colors.bg,
+    color: colors.text,
+    fontFamily: fonts.sans,
+  },
+  body: {
+    display: "grid",
+    gridTemplateColumns: `${size.left} minmax(0, 1fr) auto`,
+    gridTemplateAreas: '"left main right"',
+    flexGrow: 1,
+    minHeight: 0,
+  },
+  main: {
+    gridArea: "main",
+    position: "relative",
+    minWidth: 0,
+    minHeight: 0,
+    overflow: "hidden",
+    backgroundColor: colors.canvas,
+  },
+  dock: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: space.lg,
+    zIndex: 10,
+    display: "flex",
+    justifyContent: "center",
+    pointerEvents: "none",
+  },
+  right: { gridArea: "right", display: "flex", minHeight: 0 },
+  mirror: { transform: "scaleX(-1)" },
+  hello: {
+    position: "absolute",
+    left: "50%",
+    top: "38%",
+    transform: "translate(-50%, -50%)",
+    textAlign: "center",
+    pointerEvents: "none",
+  },
+  helloTitle: { margin: 0, fontSize: 20, fontWeight: 500, color: colors.text },
+  helloText: { marginTop: space.sm, marginBottom: 0, fontSize: 13, color: colors.muted },
+  preview: {
+    position: "absolute",
+    top: space.lg,
+    left: "50%",
+    transform: "translateX(-50%)",
+    zIndex: 5,
+    maxWidth: 520,
+    paddingBlock: space.ms,
+    paddingInline: space.md,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    borderStyle: "solid",
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    boxShadow: shadows.raised,
+  },
+  previewTitle: { margin: 0, fontSize: 13, fontWeight: 500 },
+  log: {
+    marginTop: space.sm,
+    marginBottom: 0,
+    maxHeight: 120,
+    overflow: "hidden",
+    color: colors.faint,
+    fontFamily: fonts.mono,
+    fontSize: 11,
+    lineHeight: "15px",
+    whiteSpace: "pre-wrap",
+  },
+  message: { padding: space.xl, color: colors.muted, fontSize: 13 },
+});

@@ -1,5 +1,10 @@
-import type { Node, UserEdit } from "../schema";
 import { layoutOf } from "./layout";
+
+/** An element as these read it: its id and the styles it sets itself. */
+export interface Node {
+  readonly id: string;
+  readonly styles: Readonly<Record<string, string>>;
+}
 
 /**
  * How a person's drag becomes CSS. Only the browser can lay a design out,
@@ -9,8 +14,12 @@ import { layoutOf } from "./layout";
  * shorthand clearing its longhands, stay in Rust (`user_edit::plan`).
  */
 
-/** An edit that sets inline styles. */
-export type SetStyles = Extract<UserEdit, { kind: "setStyles" }>;
+/** An edit that sets styles on some elements (`null` removes one). */
+export interface SetStyles {
+  readonly kind: "setStyles";
+  readonly ids: ReadonlyArray<string>;
+  readonly styles: Readonly<Record<string, string | null>>;
+}
 
 /** A point or a distance, in CSS pixels unless it says otherwise. */
 export interface Point {
@@ -44,21 +53,6 @@ export const isPositioned = (facts: Pick<Facts, "position">) =>
   facts.position === "absolute" || facts.position === "fixed";
 
 const px = (n: number) => `${Math.round(n)}px`;
-
-/** Moves artboards from where they started by `delta`, in canvas units. */
-export function moveArtboards(
-  starts: ReadonlyArray<{ readonly id: string; readonly x: number; readonly y: number }>,
-  delta: Point,
-): UserEdit {
-  return {
-    kind: "setPosition",
-    moves: starts.map((s) => ({
-      id: s.id,
-      x: Math.round(s.x + delta.x),
-      y: Math.round(s.y + delta.y),
-    })),
-  };
-}
 
 /**
  * Which insets pin a positioned element on one axis, read from its inline

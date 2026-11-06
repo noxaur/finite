@@ -16,6 +16,7 @@ const FILLED = new Set([
   "maxLines",
   "grip",
   "origin",
+  "stop",
 ]);
 
 describe("iconMarkup", () => {

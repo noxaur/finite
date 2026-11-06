@@ -1,223 +1,256 @@
 "use client";
 
 import * as stylex from "@stylexjs/stylex";
-import { type ReactNode, useRef, useState } from "react";
-import { colors, motion, radii, shadows, size, space } from "@/styles/tokens.stylex";
+import type { Canvas } from "@finite/protocol";
+import { type ReactNode, useState } from "react";
+import { finite } from "@/client/finite";
+import { colors, fonts, motion, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import { IconButton, Strip, StripItem } from "./Button";
 import { Icon } from "./Icons";
 import { NameInput } from "./NameInput";
+import { toast, ToastSlot } from "./Toast";
 
-export type LeftMode = "design" | "tokens";
-
-interface PageRow {
-  readonly id: string;
-  readonly name: string;
-  readonly artboardCount: number;
-}
+export type LeftMode = "design" | "prototypes";
 
 /**
- * The left side of the canvas: the design's name, then either its pages
- * and layers or its tokens. The canvas
- * shows one page at a time, so picking one swaps which artboards are
- * drawn. People and agents add, rename and delete pages; artboards dragged
- * from Layers onto a page move there.
+ * The left side of the design screen. Design: the pages (Routes, Brand, Components and the
+ * design's own), the shown page's layers, and the tokens at the bottom, all in one scroll.
+ * Prototypes: the thread list. Settings and the last toast sit at the foot.
  */
 export function LeftSidebar({
+  designId,
   name,
-  onRename,
   mode,
   onMode,
-  pages,
+  canvases,
   page,
   onPage,
-  pageActions,
   layers,
   tokens,
-  inert,
-  style,
+  prototypes,
+  onSettings,
 }: {
-  name: string | null;
-  onRename: (name: string) => void;
+  designId: string;
+  name: string;
   mode: LeftMode;
   onMode: (mode: LeftMode) => void;
-  pages: ReadonlyArray<PageRow>;
+  canvases: ReadonlyArray<Canvas>;
+  /** The page on the canvas in Design mode. */
   page: string | null;
-  onPage: (id: string) => void;
-  pageActions: {
-    add(): void;
-    rename(id: string, name: string): void;
-    remove(id: string): void;
-  };
-  /** The layers of the shown page, matching the search typed. A drag over a page calls `onDropPage`. */
-  layers: (query: string, onDropPage: (page: string | null) => void) => ReactNode;
+  onPage: (canvasId: string) => void;
+  layers: ReactNode;
   tokens: ReactNode;
-  /** Out of reach of the pointer, focus and screen readers, as while it's hidden. */
-  inert?: boolean;
-  /** The canvas's own placement for the panel, applied last: how it hides and comes back. */
-  style?: stylex.StyleXStyles;
+  prototypes: ReactNode;
+  onSettings: () => void;
 }) {
-  const [query, setQuery] = useState<string | null>(null);
   const [pagesOpen, setPagesOpen] = useState(true);
+  const [removedOpen, setRemovedOpen] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
-  const [dropPage, setDropPage] = useState<string | null>(null);
-  const searchRef = useRef<HTMLInputElement>(null);
+  const pages = canvases.filter((c) => c.kind === "page" && c.removedAt === undefined);
+  const removed = canvases.filter((c) => c.kind === "page" && c.removedAt !== undefined);
+
+  const fail = (e: unknown) => toast(e instanceof Error ? e.message : String(e));
+  const add = async () => {
+    setPagesOpen(true);
+    const taken = new Set(pages.map((p) => p.name));
+    let n = pages.length + 1;
+    while (taken.has(`Page ${n}`)) n++;
+    try {
+      const canvas = await finite.request("canvas.create", {
+        designId,
+        kind: "page",
+        name: `Page ${n}`,
+      });
+      onPage(canvas.id);
+      setRenaming(canvas.id);
+    } catch (e) {
+      fail(e);
+    }
+  };
+  const rename = (canvasId: string, next: string) =>
+    void finite.request("canvas.rename", { designId, canvasId, name: next }).catch(fail);
+  const restore = (canvasId: string) =>
+    finite.request("canvas.restore", { designId, canvasId }).catch(fail);
+  const remove = async (p: Canvas) => {
+    try {
+      await finite.request("canvas.remove", { designId, canvasId: p.id });
+      if (p.id === page) {
+        const next = pages.find((x) => x.id !== p.id);
+        if (next) onPage(next.id);
+      }
+      toast(`Removed ${p.name},`, () => void restore(p.id));
+    } catch (e) {
+      fail(e);
+    }
+  };
 
   return (
-    <aside
-      data-camera-ignore
-      aria-label="Design"
-      inert={inert}
-      {...stylex.props(styles.panel, style)}
-    >
+    <aside data-camera-ignore aria-label="Design" {...stylex.props(styles.panel)}>
       <header {...stylex.props(styles.head)}>
-        <NameInput
-          key={name ?? ""}
-          label="Design name"
-          value={name ?? ""}
-          placeholder="…"
-          onRename={onRename}
-          style={styles.name}
-        />
-        <IconButton
-          icon="search"
-          label="Search layers"
-          size="small"
-          expanded={query !== null}
-          onClick={() => {
-            onMode("design");
-            if (query === null) {
-              setQuery("");
-              requestAnimationFrame(() => searchRef.current?.focus());
-            } else setQuery(null);
-          }}
-        />
+        <span title={name} {...stylex.props(styles.name)}>
+          {name || "Untitled"}
+        </span>
       </header>
 
       <Strip role="tablist" aria-label="Sidebar" style={styles.switch}>
-        {(["design", "tokens"] as const).map((m) => (
-          <StripItem key={m} picked={mode === m} onClick={() => onMode(m)}>
-            {m === "design" ? "Design" : "Tokens"}
-          </StripItem>
-        ))}
+        <StripItem picked={mode === "design"} onClick={() => onMode("design")}>
+          Design
+        </StripItem>
+        <StripItem picked={mode === "prototypes"} onClick={() => onMode("prototypes")}>
+          Prototypes
+        </StripItem>
       </Strip>
 
-      {mode === "tokens" ? (
-        tokens
+      {mode === "prototypes" ? (
+        prototypes
       ) : (
-        <>
-          {query === null && pages.length > 0 && (
-            <section aria-label="Pages" {...stylex.props(styles.section)}>
-              <div {...stylex.props(stylex.defaultMarker(), styles.labelRow)}>
-                <button
-                  type="button"
-                  aria-expanded={pagesOpen}
-                  onClick={() => setPagesOpen(!pagesOpen)}
-                  {...stylex.props(styles.label, styles.toggle)}
-                >
-                  Pages
-                  <span {...stylex.props(styles.chevron, pagesOpen && styles.chevronOpen)}>
-                    <Icon name="next" size={12} />
-                  </span>
-                </button>
-                <IconButton
-                  icon="plus"
-                  label="Add page"
-                  size="small"
-                  onClick={() => {
-                    setPagesOpen(true);
-                    pageActions.add();
-                  }}
-                  style={styles.onHover}
-                />
-              </div>
-              {pagesOpen && (
-                <ol {...stylex.props(styles.pages)}>
-                  {pages.map((p) => (
-                    <li
-                      key={p.id}
-                      data-page-id={p.id}
-                      {...stylex.props(stylex.defaultMarker(), styles.pageItem)}
-                    >
-                      {renaming === p.id ? (
-                        <div {...stylex.props(styles.row, styles.rowOn)}>
-                          <span {...stylex.props(styles.rowIcon, styles.rowIconOn)}>
-                            <Icon name="page" size={15} />
-                          </span>
-                          <NameInput
-                            label="Page name"
-                            value={p.name}
-                            autoFocus
-                            onRename={(next) => pageActions.rename(p.id, next)}
-                            onDone={() => setRenaming(null)}
-                            style={styles.pageInput}
-                          />
-                        </div>
-                      ) : (
-                        <button
-                          type="button"
-                          aria-current={p.id === page ? "page" : undefined}
-                          onClick={() => onPage(p.id)}
-                          onDoubleClick={() => setRenaming(p.id)}
-                          title={`${p.name}, ${p.artboardCount} ${p.artboardCount === 1 ? "artboard" : "artboards"} (double-click to rename)`}
-                          {...stylex.props(
-                            styles.row,
-                            p.id === page && styles.rowOn,
-                            dropPage === p.id && styles.rowDrop,
-                          )}
-                        >
-                          <span
-                            {...stylex.props(styles.rowIcon, p.id === page && styles.rowIconOn)}
-                          >
-                            <Icon name="page" size={15} />
-                          </span>
-                          <span {...stylex.props(styles.rowName)}>{p.name}</span>
-                        </button>
-                      )}
-                      {pages.length > 1 && p.id === page && renaming !== p.id && (
-                        <IconButton
-                          icon="close"
-                          label={`Delete ${p.name}`}
-                          title="Delete page and its artboards (⌘Z brings it back)"
-                          size="small"
-                          onClick={() => pageActions.remove(p.id)}
-                          style={[styles.pageDelete, styles.onHover]}
-                        />
-                      )}
-                    </li>
-                  ))}
-                </ol>
-              )}
-            </section>
-          )}
-          <section
-            aria-label="Layers"
-            {...stylex.props(
-              styles.section,
-              styles.grow,
-              query === null && pages.length > 0 && styles.rule,
-            )}
-          >
-            {query === null ? (
-              <p {...stylex.props(styles.label)}>Layers</p>
-            ) : (
-              <input
-                ref={searchRef}
-                type="search"
-                aria-label="Find a layer"
-                placeholder="Find a layer"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") setQuery(null);
-                }}
-                {...stylex.props(styles.search)}
+        <div {...stylex.props(styles.scroll)}>
+          <section aria-label="Pages" {...stylex.props(styles.section)}>
+            <div {...stylex.props(stylex.defaultMarker(), styles.labelRow)}>
+              <SectionToggle
+                label="Pages"
+                open={pagesOpen}
+                onToggle={() => setPagesOpen((o) => !o)}
               />
+              <IconButton
+                icon="plus"
+                label="Add page"
+                size="small"
+                variant="ghost"
+                onClick={() => void add()}
+                style={styles.onHover}
+              />
+            </div>
+            {pagesOpen && (
+              <ol {...stylex.props(styles.rows)}>
+                {pages.map((p) => (
+                  <li key={p.id} {...stylex.props(stylex.defaultMarker(), styles.pageItem)}>
+                    {renaming === p.id ? (
+                      <div {...stylex.props(styles.row, styles.rowOn)}>
+                        <span {...stylex.props(styles.rowIcon)}>
+                          <Icon name="page" size={15} />
+                        </span>
+                        <NameInput
+                          label="Page name"
+                          value={p.name}
+                          autoFocus
+                          onRename={(next) => rename(p.id, next)}
+                          onDone={() => setRenaming(null)}
+                          style={styles.pageInput}
+                        />
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        aria-current={p.id === page ? "page" : undefined}
+                        onClick={() => onPage(p.id)}
+                        onDoubleClick={() => setRenaming(p.id)}
+                        title={`${p.name} (double-click to rename)`}
+                        {...stylex.props(styles.row, p.id === page && styles.rowOn)}
+                      >
+                        <span {...stylex.props(styles.rowIcon, p.id === page && styles.rowIconOn)}>
+                          <Icon name="page" size={15} />
+                        </span>
+                        <span {...stylex.props(styles.rowName)}>{p.name}</span>
+                      </button>
+                    )}
+                    {renaming !== p.id && pages.length > 1 && (
+                      <IconButton
+                        icon="close"
+                        label={`Remove ${p.name}`}
+                        title="Remove page (restore it for 30 days)"
+                        size="small"
+                        variant="ghost"
+                        onClick={() => void remove(p)}
+                        style={[styles.pageAction, styles.onHover]}
+                      />
+                    )}
+                  </li>
+                ))}
+                {removed.length > 0 && (
+                  <li>
+                    <button
+                      type="button"
+                      aria-expanded={removedOpen}
+                      onClick={() => setRemovedOpen((o) => !o)}
+                      {...stylex.props(styles.row, styles.removedToggle)}
+                    >
+                      <span {...stylex.props(styles.rowIcon)}>
+                        <Icon name="trash" size={15} />
+                      </span>
+                      <span {...stylex.props(styles.rowName)}>Removed ({removed.length})</span>
+                    </button>
+                    {removedOpen && (
+                      <ol {...stylex.props(styles.rows)}>
+                        {removed.map((p) => (
+                          <li key={p.id} {...stylex.props(styles.pageItem)}>
+                            <span {...stylex.props(styles.row, styles.removedRow)}>
+                              <span {...stylex.props(styles.rowName)}>{p.name}</span>
+                            </span>
+                            <IconButton
+                              icon="rotate"
+                              label={`Restore ${p.name}`}
+                              size="small"
+                              variant="ghost"
+                              onClick={() => void restore(p.id)}
+                              style={styles.pageAction}
+                            />
+                          </li>
+                        ))}
+                      </ol>
+                    )}
+                  </li>
+                )}
+              </ol>
             )}
-            {layers(query ?? "", setDropPage)}
           </section>
-        </>
+
+          <section aria-label="Layers" {...stylex.props(styles.section, styles.rule)}>
+            <p {...stylex.props(styles.label)}>Layers</p>
+            {layers}
+          </section>
+
+          <section aria-label="Tokens" {...stylex.props(styles.rule)}>
+            {tokens}
+          </section>
+        </div>
       )}
+
+      <footer {...stylex.props(styles.foot)}>
+        <IconButton
+          icon="gear"
+          label="Settings"
+          variant="ghost"
+          size="small"
+          onClick={onSettings}
+        />
+        <ToastSlot style={styles.toast} />
+      </footer>
     </aside>
+  );
+}
+
+function SectionToggle({
+  label,
+  open,
+  onToggle,
+}: {
+  label: string;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-expanded={open}
+      onClick={onToggle}
+      {...stylex.props(styles.label, styles.toggle)}
+    >
+      {label}
+      <span {...stylex.props(styles.chevron, open && styles.chevronOpen)}>
+        <Icon name="next" size={12} />
+      </span>
+    </button>
   );
 }
 
@@ -231,6 +264,8 @@ const styles = stylex.create({
     borderRightWidth: 1,
     borderRightStyle: "solid",
     borderRightColor: colors.border,
+    color: colors.text,
+    fontFamily: fonts.sans,
   },
   head: {
     display: "flex",
@@ -243,56 +278,25 @@ const styles = stylex.create({
     borderBottomStyle: "solid",
     borderBottomColor: colors.border,
   },
-  /** The design's name: plain text until it's edited, then a sunk field. */
   name: {
     flexGrow: 1,
     minWidth: 0,
-    height: size.xs,
-    marginLeft: `calc(-1 * ${space.xs})`,
-    paddingInline: space.xs,
-    borderWidth: 0,
-    borderRadius: radii.sm,
-    backgroundColor: {
-      default: "transparent",
-      ":hover": colors.hoverFill,
-      ":focus": colors.sunk,
-    },
-    boxShadow: { default: "none", ":focus": shadows.field },
-    color: colors.text,
-    font: "inherit",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
     fontSize: 14,
     fontWeight: 500,
-    textOverflow: "ellipsis",
-    outline: { default: "none", ":focus": `1px solid ${colors.brand}` },
   },
-
-  /** The Design and Tokens tabs, as one strip; the open one is pressed in. */
-  switch: {
-    marginInline: space.ms,
-    marginTop: space.ms,
-    marginBottom: space.xs,
-  },
-
+  switch: { flexShrink: 0, marginInline: space.ms, marginTop: space.ms, marginBottom: space.xs },
+  scroll: { flexGrow: 1, minHeight: 0, overflowY: "auto" },
   section: {
     display: "flex",
     flexDirection: "column",
     gap: space.px,
-    flexShrink: 0,
     paddingBlock: space.ms,
   },
-  rule: {
-    borderTopWidth: 1,
-    borderTopStyle: "solid",
-    borderTopColor: colors.borderSoft,
-  },
-  /** Layers runs to the bottom edge: the list scrolls there, with its own room after the last row. */
-  grow: { flexGrow: 1, flexShrink: 1, minHeight: 0, paddingBottom: 0 },
-  labelRow: {
-    display: "flex",
-    alignItems: "center",
-    paddingRight: space.ms,
-  },
-  /** Shown while the pointer is over its row, or the control has focus. */
+  rule: { borderTopWidth: 1, borderTopStyle: "solid", borderTopColor: colors.borderSoft },
+  labelRow: { display: "flex", alignItems: "center", paddingRight: space.ms },
   onHover: {
     opacity: {
       default: 0,
@@ -300,36 +304,6 @@ const styles = stylex.create({
       ":focus-visible": 1,
     },
   },
-  pageItem: {
-    position: "relative",
-    display: "flex",
-    alignItems: "center",
-  },
-  /** On the current page's row, as far in from the side as the + above it. */
-  pageDelete: {
-    position: "absolute",
-    right: space.ms,
-  },
-
-  /** Over the name, as in Layers: a sunk field ringed in the brand while it's typed in. */
-  pageInput: {
-    flexGrow: 1,
-    minWidth: 0,
-    height: size.xs,
-    marginLeft: `calc(-1 * ${space.xs})`,
-    paddingInline: space.xs,
-    borderWidth: 0,
-    borderRadius: radii.sm,
-    backgroundColor: colors.sunk,
-    boxShadow: shadows.field,
-    color: colors.text,
-    font: "inherit",
-    fontSize: 14,
-    outline: `1px solid ${colors.brand}`,
-  },
-
-  /** Where artboards dragged from Layers would move, ringed in the brand. */
-  rowDrop: { boxShadow: shadows.target },
   label: {
     display: "flex",
     alignItems: "center",
@@ -344,14 +318,12 @@ const styles = stylex.create({
   },
   toggle: {
     flexGrow: 1,
-    width: "100%",
     borderWidth: 0,
     backgroundColor: "transparent",
     color: { default: colors.muted, ":hover": colors.text },
     font: "inherit",
     fontSize: 12,
     fontWeight: 500,
-    lineHeight: "15px",
     cursor: "var(--cursor-pointer, pointer)",
   },
   chevron: {
@@ -360,17 +332,17 @@ const styles = stylex.create({
     transition: `transform ${motion.base} ${motion.out}`,
   },
   chevronOpen: { transform: "rotate(90deg)" },
-  pages: {
+  rows: {
     display: "flex",
     flexDirection: "column",
     gap: space.px,
-    maxHeight: 180,
     margin: 0,
     paddingBlock: 0,
     paddingInline: space.sm,
-    overflowY: "auto",
     listStyle: "none",
   },
+  pageItem: { position: "relative", display: "flex", alignItems: "center" },
+  pageAction: { position: "absolute", right: space.xs },
   row: {
     display: "flex",
     alignItems: "center",
@@ -388,12 +360,9 @@ const styles = stylex.create({
     lineHeight: "20px",
     textAlign: "left",
     cursor: "var(--cursor-pointer, pointer)",
+    outline: { default: "none", ":focus-visible": `1px solid ${colors.brand}` },
   },
-  /** The page on the canvas. */
-  rowOn: {
-    backgroundColor: { default: colors.activeFill, ":hover": colors.activeFill },
-  },
-
+  rowOn: { backgroundColor: { default: colors.activeFill, ":hover": colors.activeFill } },
   rowIcon: { display: "flex", flexShrink: 0, color: colors.faint },
   rowIconOn: { color: colors.text },
   rowName: {
@@ -402,21 +371,34 @@ const styles = stylex.create({
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
-    textAlign: "left",
   },
-  search: {
+  removedToggle: { color: colors.muted, fontSize: 13 },
+  removedRow: { color: colors.faint, fontSize: 13, cursor: "default", paddingLeft: 27 },
+  pageInput: {
+    flexGrow: 1,
+    minWidth: 0,
     height: size.xs,
-    marginInline: space.ms,
-    marginBottom: space.xs,
-    paddingInline: space.sm,
+    marginLeft: `calc(-1 * ${space.xs})`,
+    paddingInline: space.xs,
     borderWidth: 0,
     borderRadius: radii.sm,
     backgroundColor: colors.sunk,
     boxShadow: shadows.field,
     color: colors.text,
     font: "inherit",
-    fontSize: 12,
-    outline: { default: "none", ":focus": `1px solid ${colors.brand}` },
-    "::placeholder": { color: colors.faint },
+    fontSize: 14,
+    outline: `1px solid ${colors.brand}`,
   },
+  foot: {
+    display: "flex",
+    alignItems: "center",
+    gap: space.sm,
+    flexShrink: 0,
+    height: size.lg,
+    paddingInline: space.sm,
+    borderTopWidth: 1,
+    borderTopStyle: "solid",
+    borderTopColor: colors.borderSoft,
+  },
+  toast: { flexGrow: 1, justifyContent: "flex-end", paddingRight: space.xs, overflow: "hidden" },
 });

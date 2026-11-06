@@ -2,7 +2,7 @@
 
 import * as stylex from "@stylexjs/stylex";
 import { useState } from "react";
-import type { Editor } from "@/design/editing/editor";
+import type { StyleEditor as Editor } from "./styleEditor";
 import { alignCell, alignStyles, bare } from "@/design/editing/inspect";
 import { type LayoutKind, layoutOf, layoutStyles } from "@/design/editing/layout";
 import { parseTrack, trackLabel, tracksOf, tracksValue } from "@/design/editing/tracks";

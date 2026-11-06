@@ -17,7 +17,7 @@ import {
   wrapStyles,
 } from "@/design/editing/typography";
 import { roundTo } from "@/design/editing/units";
-import type { Node } from "@/design/schema";
+import type { Target as Node } from "./styleEditor";
 import { numberOf } from "../DraftField";
 import {
   Block,

@@ -17,7 +17,7 @@ import {
 import { opaque } from "@/design/editing/colors";
 import { bare, customOf, parseInput, type Reading, tokenOf } from "@/design/editing/inspect";
 import { type ListEntry, moveEntry, readList, splitList, writeList } from "@/design/editing/lists";
-import type { Node } from "@/design/schema";
+import type { Target as Node } from "./styleEditor";
 import { numberOf, whenNumber } from "../DraftField";
 import type { IconName } from "@/lib/icons";
 import {
