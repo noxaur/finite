@@ -1,18 +1,16 @@
 //! The layout note measures an artboard as people see it, with its
 //! instances expanded, and an edit that lands on an instance as an override
-//! still gets one. Its own process, since the environment is read once.
+//! still gets one.
 
-mod agent;
-mod layout_common;
-
-use agent::{Agent, test_app};
-use layout_common::{board, note_after, set_wait};
+use super::{
+    agent::Agent,
+    common::{board, note_after, waiting_app},
+};
 use serde_json::json;
 
 #[tokio::test]
 async fn an_edit_redirected_to_an_instance_gets_a_note_about_what_it_shows() {
-    set_wait(5_000);
-    let app = test_app();
+    let app = waiting_app(15_000);
     let mut agent = Agent::connect(&app, "Instancer").await;
     let Some(b) = board(&mut agent).await else {
         return;

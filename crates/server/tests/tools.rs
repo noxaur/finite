@@ -8,7 +8,7 @@ use std::{sync::Arc, time::Duration};
 use agent::{Agent, id_after};
 use axum::Router;
 use finite_design::comment::{Anchor, Audience, Author, AuthorKind};
-use finite_server::{Hub, app, store::MemoryStore};
+use finite_server::{Hub, app, store::MemoryStore, testing::require_browser};
 use serde_json::{Value, json};
 
 /// A server.
@@ -1357,12 +1357,7 @@ async fn layout_of(agent: &mut Agent, design: &str) -> Option<String> {
             json!({ "designId": design, "output": "layout", "settleMs": 200 }),
         )
         .await;
-    if text.contains("no Chrome") {
-        assert!(
-            std::env::var_os("FINITE_REQUIRE_BROWSER").is_none(),
-            "FINITE_REQUIRE_BROWSER is set but there is no browser: {text}"
-        );
-        eprintln!("SKIPPED, NOTHING WAS TESTED: no Chrome, Chromium or Edge found");
+    if !require_browser(&text) {
         return None;
     }
     Some(text)
@@ -1781,12 +1776,7 @@ async fn computed_values_follow_the_artboards_mode() {
     let (probe, _) = agent
         .call("render", json!({ "designId": id, "output": "layout" }))
         .await;
-    if probe.contains("no Chrome") {
-        assert!(
-            std::env::var_os("FINITE_REQUIRE_BROWSER").is_none(),
-            "FINITE_REQUIRE_BROWSER is set but there is no browser: {probe}"
-        );
-        eprintln!("SKIPPED, NOTHING WAS TESTED: no Chrome, Chromium or Edge found");
+    if !require_browser(&probe) {
         return;
     }
     let read = agent
@@ -1873,12 +1863,7 @@ async fn computed_values_say_when_the_design_changed_meanwhile() {
     let (probe, _) = agent
         .call("render", json!({ "designId": id, "output": "layout" }))
         .await;
-    if probe.contains("no Chrome") {
-        assert!(
-            std::env::var_os("FINITE_REQUIRE_BROWSER").is_none(),
-            "FINITE_REQUIRE_BROWSER is set but there is no browser: {probe}"
-        );
-        eprintln!("SKIPPED, NOTHING WAS TESTED: no Chrome, Chromium or Edge found");
+    if !require_browser(&probe) {
         return;
     }
     let read = json!({ "designId": id, "select": ".btn", "as": "computed", "properties": ["background-color"] });

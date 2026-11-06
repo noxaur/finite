@@ -1,10 +1,7 @@
 use std::{
-    collections::HashMap,
     fs,
     io::{self, BufRead, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
 };
 
 use finite_design::{
@@ -14,7 +11,7 @@ use finite_design::{
 
 use crate::{
     blob::{self, BlobHash},
-    hub::is_design_id,
+    id::is_stored_id,
 };
 
 /// A design as stored: its last snapshot, plus the journal of records since.
@@ -42,26 +39,51 @@ pub enum Claim {
     Missing,
 }
 
-/// The error a write gets when its token is out of date: another server
-/// took the design's lease since this one got it.
-#[derive(Debug)]
-pub struct Fenced;
+/// Why a store call, or a load that needs one, was refused rather than
+/// failed. It travels as the payload of an [`io::Error`] ([`Refusal::error`]),
+/// so the [`Store`] methods keep one error type; [`Refusal::of`] reads it back.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// A write's token is out of date: another server took the design's
+    /// lease since this one got it.
+    Fenced,
+    /// Another live server holds the design's lease. This is its base URL,
+    /// empty when the design is only closing here.
+    Held(String),
+}
 
-impl std::fmt::Display for Fenced {
+impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("another server took over this design")
+        match self {
+            Self::Fenced => f.write_str("another server took over this design"),
+            Self::Held(holder) if holder.is_empty() => {
+                f.write_str("the design is moving between servers")
+            }
+            Self::Held(holder) => write!(f, "{holder} still holds the design"),
+        }
     }
 }
 
-impl std::error::Error for Fenced {}
+impl std::error::Error for Refusal {}
 
-pub fn fenced() -> io::Error {
-    io::Error::new(io::ErrorKind::PermissionDenied, Fenced)
+impl Refusal {
+    pub fn error(self) -> io::Error {
+        let kind = match self {
+            Self::Fenced => io::ErrorKind::PermissionDenied,
+            Self::Held(_) => io::ErrorKind::WouldBlock,
+        };
+        io::Error::new(kind, self)
+    }
+
+    /// The refusal `error` carries, if it is one.
+    pub fn of(error: &io::Error) -> Option<&Self> {
+        error.get_ref()?.downcast_ref()
+    }
 }
 
-/// Whether a write failed because its fencing token is out of date.
-pub fn is_fenced(error: &io::Error) -> bool {
-    error.get_ref().is_some_and(|e| e.is::<Fenced>())
+/// A write to a design that no store call has saved yet.
+pub fn not_saved() -> io::Error {
+    io::Error::new(io::ErrorKind::NotFound, "design was never saved")
 }
 
 /// A snapshot as stored, with its version first (see [`finite_design::version`]).
@@ -74,28 +96,46 @@ pub fn encode_record(record: &Record) -> io::Result<String> {
     Ok(version::RECORD.encode(record)?)
 }
 
-/// Reads a stored snapshot. `Ok(None)` when it isn't JSON a snapshot could
-/// be, which the store skips as before. A snapshot from a newer server, or
-/// one an upgrade refused, is an error instead: skipping it would let this
-/// server treat the design as missing and write over it.
-pub fn decode_snapshot(json: &str) -> io::Result<Option<Snapshot>> {
+/// Reads the stored snapshot of design `id`. `Ok(None)` when it isn't JSON a
+/// snapshot could be: the design is skipped, as if it weren't stored. A
+/// snapshot from a newer server, or one an upgrade refused, is an error
+/// instead: skipping it would let this server treat the design as missing and
+/// write over it.
+pub fn decode_snapshot(id: &str, json: &str) -> io::Result<Option<Snapshot>> {
     match version::SNAPSHOT.decode(json) {
         Ok(snapshot) => Ok(Some(snapshot)),
-        Err(VersionError::Json(_)) => Ok(None),
+        Err(VersionError::Json(_)) => {
+            tracing::warn!(id, "skipping unreadable design");
+            Ok(None)
+        }
         Err(error) => Err(io::Error::other(error)),
     }
 }
 
-/// Reads a stored journal record. `Ok(None)` for a torn or garbled record,
-/// where reading stops. A record from a newer server is an error, for the
-/// same reason as in [`decode_snapshot`]: stopping there would lose it at
-/// the next compaction.
-pub fn decode_record(json: &str) -> io::Result<Option<Record>> {
-    match version::RECORD.decode(json) {
-        Ok(record) => Ok(Some(record)),
-        Err(VersionError::Json(_)) => Ok(None),
-        Err(error) => Err(io::Error::other(error)),
+/// Reads design `id`'s stored journal records in order, up to a torn or
+/// garbled one: a crash mid-append leaves one, and what follows it can't be
+/// trusted. A record from a newer server is an error instead, for the same
+/// reason as in [`decode_snapshot`]: stopping there would lose it at the next
+/// compaction.
+pub fn decode_journal(
+    id: &str,
+    records: impl IntoIterator<Item = io::Result<String>>,
+) -> io::Result<Vec<Record>> {
+    let mut journal = Vec::new();
+    for json in records {
+        match version::RECORD.decode(&json?) {
+            Ok(record) => journal.push(record),
+            Err(VersionError::Json(_)) => {
+                tracing::warn!(
+                    id,
+                    "journal ends in an unreadable record; ignoring the rest"
+                );
+                break;
+            }
+            Err(error) => return Err(io::Error::other(error)),
+        }
     }
+    Ok(journal)
 }
 
 /// Where designs persist. The hub only ever calls these methods.
@@ -117,17 +157,15 @@ pub trait Store: Send + Sync + 'static {
     /// One design, or `None` if it isn't stored.
     fn load(&self, id: &str) -> io::Result<Option<Stored>>;
     /// Writes a full snapshot and clears the design's journal. Fails with
-    /// [`Fenced`] if `token` is out of date.
+    /// [`Refusal::Fenced`] if `token` is out of date.
     fn save(&self, snapshot: &Snapshot, token: Token) -> io::Result<()>;
     /// Adds records to the design's journal. The design must have been saved
-    /// once. Fails with [`Fenced`] if `token` is out of date.
+    /// once. Fails with [`Refusal::Fenced`] if `token` is out of date.
     fn append(&self, id: &str, records: &[Record], token: Token) -> io::Result<()>;
-    /// Deletes a design's snapshot and journal, after it moved to another server.
-    fn remove(&self, id: &str) -> io::Result<()>;
-    /// Deletes a design held with `token`. Shared stores must check the token.
-    fn delete(&self, id: &str, _token: Token) -> io::Result<()> {
-        self.remove(id)
-    }
+    /// Deletes a design's snapshot and journal. Fails with
+    /// [`Refusal::Fenced`] if `token` is out of date, in a store that
+    /// checks it.
+    fn delete(&self, id: &str, token: Token) -> io::Result<()>;
 
     /// Stores a blob and returns its hash. Putting bytes that are already
     /// stored changes nothing. The blob is durable when this returns. Fails
@@ -194,7 +232,10 @@ pub struct FileStore {
     _lock: fs::File,
 }
 
-/// [`FileStore::sync_dir`] for any directory.
+/// Makes the directory's entries (new, renamed and deleted files) durable.
+/// Without it, a rename can reach the disk before the file it points to, or
+/// not at all. Windows can't open a directory as a file and doesn't need
+/// this, so it's a no-op there.
 fn sync_dir(dir: &Path) -> io::Result<()> {
     #[cfg(unix)]
     fs::File::open(dir)?.sync_all()?;
@@ -254,14 +295,6 @@ impl FileStore {
         Ok(())
     }
 
-    /// Makes the directory's entries (new, renamed and deleted files)
-    /// durable. Without it, a rename can reach the disk before the file it
-    /// points to, or not at all. Windows can't open a directory as a file and
-    /// doesn't need this, so it's a no-op there.
-    fn sync_dir(&self) -> io::Result<()> {
-        sync_dir(&self.dir)
-    }
-
     /// The file a blob is kept in. A hash is only hex digits, so it can't
     /// name a file outside the store.
     fn blob_path(&self, hash: &BlobHash) -> PathBuf {
@@ -272,7 +305,7 @@ impl FileStore {
     /// one that isn't a design id is refused here: `../x` would name a file
     /// outside the store.
     fn path(&self, id: &str, extension: &str) -> io::Result<PathBuf> {
-        if !is_design_id(id) {
+        if !is_stored_id(id) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("{id:?} isn't a design id"),
@@ -291,17 +324,7 @@ impl FileStore {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error),
         };
-        let mut records = Vec::new();
-        for line in io::BufReader::new(file).lines() {
-            match decode_record(&line?)? {
-                Some(record) => records.push(record),
-                None => {
-                    tracing::warn!(id, "journal ends in a torn record; ignoring the rest");
-                    break;
-                }
-            }
-        }
-        Ok(records)
+        decode_journal(id, io::BufReader::new(file).lines())
     }
 }
 
@@ -328,11 +351,11 @@ impl Store for FileStore {
         };
         let Some(snapshot) = std::str::from_utf8(&bytes)
             .ok()
-            .map(decode_snapshot)
+            .map(|json| decode_snapshot(id, json))
             .transpose()?
             .flatten()
         else {
-            tracing::warn!(?path, "skipping unreadable design");
+            tracing::warn!(id, "skipping unreadable design");
             return Ok(None);
         };
         let journal = self.read_journal(id)?;
@@ -350,7 +373,7 @@ impl Store for FileStore {
         file.write_all(encode_snapshot(snapshot)?.as_bytes())?;
         file.sync_all()?;
         fs::rename(tmp, path)?;
-        self.sync_dir()?;
+        sync_dir(&self.dir)?;
         // If this fails or we crash first, the old journal replays harmlessly:
         // see `Record`.
         match fs::remove_file(self.journal_path(&snapshot.meta.id)?) {
@@ -366,10 +389,7 @@ impl Store for FileStore {
             out.push(b'\n');
         }
         if !self.path(id, "json")?.exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "design was never saved",
-            ));
+            return Err(not_saved());
         }
         let path = self.journal_path(id)?;
         let new = !path.exists();
@@ -381,12 +401,12 @@ impl Store for FileStore {
         file.sync_data()?;
         // A new file's name is in the directory, which needs its own sync.
         if new {
-            self.sync_dir()?;
+            sync_dir(&self.dir)?;
         }
         Ok(())
     }
 
-    fn remove(&self, id: &str) -> io::Result<()> {
+    fn delete(&self, id: &str, _token: Token) -> io::Result<()> {
         for path in [
             self.path(id, "json")?,
             self.journal_path(id)?,
@@ -397,7 +417,7 @@ impl Store for FileStore {
                 _ => {}
             }
         }
-        self.sync_dir()
+        sync_dir(&self.dir)
     }
 
     /// Written like a snapshot: to a temporary file, synced, renamed into
@@ -434,246 +454,10 @@ impl Store for FileStore {
     }
 }
 
-/// Keeps designs in memory. Used by tests.
-///
-/// A `MemoryStore` stands for one server's connection to a store.
-/// [`MemoryStore::node`] opens another connection to the same designs, the
-/// way a second server opens the same database. So tests can run several
-/// servers in one process, and this store fences writes and keeps heartbeats
-/// the way a shared store must.
-pub struct MemoryStore {
-    shared: Arc<Mutex<Shared>>,
-    /// This server's base URL. Empty for a store with one server.
-    me: String,
-}
-
-struct Shared {
-    designs: HashMap<String, Entry>,
-    blobs: HashMap<BlobHash, Vec<u8>>,
-    heartbeats: HashMap<String, Instant>,
-    /// How long a heartbeat counts.
-    lease: Duration,
-}
-
-struct Entry {
-    snapshot: Snapshot,
-    journal: Vec<Record>,
-    holder: Option<String>,
-    epoch: Token,
-}
-
-impl Default for MemoryStore {
-    fn default() -> Self {
-        Self::with_lease(Duration::from_secs(10))
-    }
-}
-
-impl MemoryStore {
-    /// An empty store whose servers count as gone `lease` after their last heartbeat.
-    pub fn with_lease(lease: Duration) -> Self {
-        let shared = Shared {
-            designs: HashMap::new(),
-            blobs: HashMap::new(),
-            heartbeats: HashMap::new(),
-            lease,
-        };
-        Self {
-            shared: Arc::new(Mutex::new(shared)),
-            me: String::new(),
-        }
-    }
-
-    /// Another connection to the same designs, for the server at `url`.
-    pub fn node(&self, url: &str) -> Self {
-        Self {
-            shared: self.shared.clone(),
-            me: url.to_owned(),
-        }
-    }
-
-    /// How many records the design's journal holds.
-    pub fn journal_len(&self, id: &str) -> usize {
-        self.shared
-            .lock()
-            .unwrap()
-            .designs
-            .get(id)
-            .map_or(0, |d| d.journal.len())
-    }
-
-    fn lock(&self) -> io::Result<std::sync::MutexGuard<'_, Shared>> {
-        Ok(self.shared.lock().unwrap())
-    }
-}
-
-impl Shared {
-    fn alive(&self, url: &str) -> bool {
-        self.heartbeats
-            .get(url)
-            .is_some_and(|at| at.elapsed() < self.lease)
-    }
-
-    /// The design, if `token` is its latest.
-    fn fenced(&mut self, id: &str, token: Token) -> io::Result<&mut Entry> {
-        let entry = self
-            .designs
-            .get_mut(id)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "design was never saved"))?;
-        if entry.epoch != token {
-            return Err(fenced());
-        }
-        Ok(entry)
-    }
-}
-
-impl Store for MemoryStore {
-    fn ids(&self) -> io::Result<Vec<String>> {
-        Ok(self.lock()?.designs.keys().cloned().collect())
-    }
-
-    fn load(&self, id: &str) -> io::Result<Option<Stored>> {
-        Ok(self.lock()?.designs.get(id).map(|entry| Stored {
-            snapshot: entry.snapshot.clone(),
-            journal: entry.journal.clone(),
-        }))
-    }
-
-    fn save(&self, snapshot: &Snapshot, token: Token) -> io::Result<()> {
-        let mut shared = self.lock()?;
-        let id = &snapshot.meta.id;
-        if !shared.designs.contains_key(id) {
-            if token != 0 {
-                return Err(fenced());
-            }
-            let entry = Entry {
-                snapshot: snapshot.clone(),
-                journal: Vec::new(),
-                holder: None,
-                epoch: token,
-            };
-            shared.designs.insert(id.clone(), entry);
-            return Ok(());
-        }
-        let entry = shared.fenced(id, token)?;
-        entry.snapshot = snapshot.clone();
-        entry.journal.clear();
-        Ok(())
-    }
-
-    fn append(&self, id: &str, records: &[Record], token: Token) -> io::Result<()> {
-        self.lock()?
-            .fenced(id, token)?
-            .journal
-            .extend_from_slice(records);
-        Ok(())
-    }
-
-    fn remove(&self, id: &str) -> io::Result<()> {
-        self.lock()?.designs.remove(id);
-        Ok(())
-    }
-
-    fn delete(&self, id: &str, token: Token) -> io::Result<()> {
-        let mut state = self.lock()?;
-        state.fenced(id, token)?;
-        state.designs.remove(id);
-        Ok(())
-    }
-
-    fn put_blob(&self, bytes: &[u8]) -> io::Result<BlobHash> {
-        let hash = blob::accept(bytes)?;
-        self.lock()?
-            .blobs
-            .entry(hash.clone())
-            .or_insert_with(|| bytes.to_vec());
-        Ok(hash)
-    }
-
-    fn get_blob(&self, hash: &BlobHash) -> io::Result<Option<Vec<u8>>> {
-        Ok(self.lock()?.blobs.get(hash).cloned())
-    }
-
-    fn has_blob(&self, hash: &BlobHash) -> io::Result<bool> {
-        Ok(self.lock()?.blobs.contains_key(hash))
-    }
-
-    fn create(&self, snapshot: &Snapshot) -> io::Result<Option<Token>> {
-        let mut shared = self.lock()?;
-        if shared.designs.contains_key(&snapshot.meta.id) {
-            return Ok(None);
-        }
-        let entry = Entry {
-            snapshot: snapshot.clone(),
-            journal: Vec::new(),
-            holder: Some(self.me.clone()),
-            epoch: 1,
-        };
-        shared.designs.insert(snapshot.meta.id.clone(), entry);
-        Ok(Some(1))
-    }
-
-    fn claim(&self, id: &str) -> io::Result<Claim> {
-        let mut shared = self.lock()?;
-        let holder = match shared.designs.get(id) {
-            None => return Ok(Claim::Missing),
-            Some(entry) => entry.holder.clone(),
-        };
-        if let Some(holder) = holder.filter(|h| *h != self.me && shared.alive(h)) {
-            return Ok(Claim::Held(holder));
-        }
-        let entry = shared.designs.get_mut(id).expect("checked above");
-        entry.epoch += 1;
-        entry.holder = Some(self.me.clone());
-        Ok(Claim::Granted(entry.epoch))
-    }
-
-    fn release(&self, id: &str, token: Token) -> io::Result<()> {
-        let mut shared = self.lock()?;
-        if let Some(entry) = shared.designs.get_mut(id)
-            && entry.epoch == token
-            && entry.holder.as_deref() == Some(&self.me)
-        {
-            entry.holder = None;
-            entry.epoch += 1;
-        }
-        Ok(())
-    }
-
-    fn held(&self) -> io::Result<Vec<(String, Token)>> {
-        Ok(self
-            .lock()?
-            .designs
-            .iter()
-            .filter(|(_, e)| e.holder.as_deref() == Some(&self.me))
-            .map(|(id, e)| (id.clone(), e.epoch))
-            .collect())
-    }
-}
-
-impl Registry for MemoryStore {
-    fn heartbeat(&self) -> io::Result<()> {
-        let mut shared = self.lock()?;
-        shared.heartbeats.insert(self.me.clone(), Instant::now());
-        Ok(())
-    }
-
-    fn live(&self) -> io::Result<Vec<String>> {
-        let shared = self.lock()?;
-        let mut live: Vec<String> = shared
-            .heartbeats
-            .keys()
-            .filter(|url| shared.alive(url))
-            .cloned()
-            .collect();
-        live.sort();
-        Ok(live)
-    }
-
-    fn leave(&self) -> io::Result<()> {
-        self.lock()?.heartbeats.remove(&self.me);
-        Ok(())
-    }
-}
+#[cfg(any(test, feature = "testing"))]
+mod memory;
+#[cfg(any(test, feature = "testing"))]
+pub use memory::MemoryStore;
 
 /// The behavior every [`Store`] must have. Run [`contract::check`] against a
 /// new implementation, such as a database store, before the hub uses it. A
@@ -681,7 +465,7 @@ impl Registry for MemoryStore {
 pub mod contract {
     use finite_design::{DesignMeta, Record, Snapshot};
 
-    use super::{Claim, Registry, Store, is_fenced};
+    use super::{Claim, Refusal, Registry, Store};
     use crate::blob::{BlobHash, MAX_BLOB};
 
     fn snapshot(id: &str, seq: u64) -> Snapshot {
@@ -770,13 +554,12 @@ pub mod contract {
             panic!("the only server can always claim a design");
         };
         store.append("a", &[rename("a", "Four")], a).unwrap();
-        store.remove("a").unwrap();
+        store.delete("a", a).unwrap();
         assert!(
             store.load("a").unwrap().is_none(),
-            "a removed design is gone"
+            "a deleted design is gone"
         );
         assert_eq!(store.ids().unwrap(), ["b"], "and no longer listed");
-        store.remove("a").unwrap();
 
         check_blobs(store);
     }
@@ -855,11 +638,20 @@ pub mod contract {
         };
         assert!(t2 > t1, "each claim raises the token");
         let refused = a.append("d", &[rename("d", "Stale")], t1).unwrap_err();
-        assert!(is_fenced(&refused), "an append with an old token is fenced");
+        assert!(
+            Refusal::of(&refused) == Some(&Refusal::Fenced),
+            "an append with an old token is fenced"
+        );
         let refused = a.save(&snapshot("d", 7), t1).unwrap_err();
-        assert!(is_fenced(&refused), "a save with an old token is fenced");
+        assert!(
+            Refusal::of(&refused) == Some(&Refusal::Fenced),
+            "a save with an old token is fenced"
+        );
         let refused = a.delete("d", t1).unwrap_err();
-        assert!(is_fenced(&refused), "a delete with an old token is fenced");
+        assert!(
+            Refusal::of(&refused) == Some(&Refusal::Fenced),
+            "a delete with an old token is fenced"
+        );
         b.append("d", &[rename("d", "Fresh")], t2).unwrap();
         let stored = a.load("d").unwrap().unwrap();
         assert_eq!(stored.snapshot.seq, 1, "the fenced save changed nothing");
@@ -872,7 +664,10 @@ pub mod contract {
         };
         assert!(t3 > t2);
         let refused = b.save(&snapshot("d", 8), t2).unwrap_err();
-        assert!(is_fenced(&refused), "the old holder's writes are fenced");
+        assert!(
+            Refusal::of(&refused) == Some(&Refusal::Fenced),
+            "the old holder's writes are fenced"
+        );
         a.release("d", t2).unwrap();
         assert_eq!(
             a.held().unwrap(),
@@ -888,12 +683,12 @@ pub mod contract {
         assert!(b.load("d").unwrap().is_none());
         let refused = b.save(&snapshot("d", 9), t2).unwrap_err();
         assert!(
-            is_fenced(&refused),
+            Refusal::of(&refused) == Some(&Refusal::Fenced),
             "a stale save cannot recreate a deleted design"
         );
         let refused = a.save(&snapshot("d", 9), t4).unwrap_err();
         assert!(
-            is_fenced(&refused),
+            Refusal::of(&refused) == Some(&Refusal::Fenced),
             "a queued save cannot recreate a deleted design"
         );
         a.leave().unwrap();
@@ -976,7 +771,7 @@ mod tests {
         for result in [
             store.load("../x").map(|_| ()),
             store.append("../x", &[meta("x")], 0),
-            store.remove("../x"),
+            store.delete("../x", 0),
         ] {
             assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
         }

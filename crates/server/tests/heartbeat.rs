@@ -11,30 +11,23 @@ use std::sync::Arc;
 use finite_server::{
     Hub, app,
     heartbeat::{PING, PING_EVERY, PONG, SILENT_FOR},
-    router,
     store::MemoryStore,
+    testing::{front_for, listen, serve},
 };
 use futures::{SinkExt, StreamExt};
-use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
-
-async fn listen() -> (TcpListener, String) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("ws://{}", listener.local_addr().unwrap());
-    (listener, url)
-}
 
 #[tokio::test]
 async fn quiet_sockets_close_and_answering_ones_stay_open() {
     let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
     let id = hub.create("Pinged").meta.id;
     let (server, server_url) = listen().await;
-    tokio::spawn(async move { axum::serve(server, app(hub, None)).await });
+    serve(server, app(hub, None));
     let (front, front_url) = listen().await;
-    let routes = router::app(vec![server_url.replacen("ws://", "http://", 1)], None);
-    tokio::spawn(async move { axum::serve(front, routes).await });
+    let routes = front_for(vec![server_url.clone()]);
+    serve(front, routes);
 
-    for base in [&server_url, &front_url] {
+    for base in [&server_url, &front_url].map(|url| url.replacen("http://", "ws://", 1)) {
         for path in [
             format!("/api/designs/{id}/ws"),
             "/api/designs/ws".to_owned(),
@@ -100,15 +93,18 @@ async fn the_router_closes_a_design_list_whose_server_went_silent() {
             })
         }),
     );
-    tokio::spawn(async move { axum::serve(server, silent).await });
+    serve(server, silent);
     let (front, front_url) = listen().await;
-    let routes = router::app(vec![server_url.replacen("ws://", "http://", 1)], None);
-    tokio::spawn(async move { axum::serve(front, routes).await });
+    let routes = front_for(vec![server_url.clone()]);
+    serve(front, routes);
 
     // The browser keeps reading, so it answers the router's pings.
-    let (mut browser, _) = tokio_tungstenite::connect_async(format!("{front_url}/api/designs/ws"))
-        .await
-        .unwrap();
+    let (mut browser, _) = tokio_tungstenite::connect_async(format!(
+        "{}/api/designs/ws",
+        front_url.replacen("http://", "ws://", 1)
+    ))
+    .await
+    .unwrap();
     browser.next().await.unwrap().unwrap();
     tokio::time::pause();
     let closed = tokio::time::timeout(SILENT_FOR + PING_EVERY * 2, async {

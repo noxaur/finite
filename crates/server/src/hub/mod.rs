@@ -13,7 +13,7 @@ mod messages;
 use std::{
     collections::{BTreeSet, HashMap},
     io,
-    sync::{Arc, RwLock, Weak},
+    sync::{Arc, OnceLock, RwLock, Weak},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -23,9 +23,11 @@ use tokio::sync::{broadcast, watch};
 use crate::{
     blob::BlobHash,
     cluster::{Cluster, Lease, Members, Place},
-    store::{Claim, Registry, Store, Token, is_fenced},
+    config::Settings,
+    id::{is_stored_id, random_id},
+    store::{Claim, Refusal, Registry, Store, Token},
 };
-pub use design::{Busy, DesignHandle, Edited, Since};
+pub use design::{DesignHandle, Edited, Since};
 use design::{DesignState, Life, Save};
 pub use messages::{
     Actor, ClientMessage, DesignMessage, DesignSummary, Listener, LobbyMessage, Missed, Outgoing,
@@ -71,37 +73,6 @@ pub fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
-/// Whether `id` could be a design's id: 1 to 64 ASCII letters, digits, `-`
-/// or `_`. New designs get [`random_id`]s, which always are. Ids arrive in
-/// URLs and become file names, so anything else is refused.
-pub fn is_design_id(id: &str) -> bool {
-    (1..=64).contains(&id.len())
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-}
-
-/// A short random id: lowercase letters and digits.
-pub fn random_id(len: usize) -> String {
-    const ALPHABET: &[u8] = finite_design::id::ALPHABET;
-    let mut out = String::with_capacity(len);
-    while out.len() < len {
-        for byte in uuid::Uuid::new_v4().into_bytes() {
-            if out.len() == len {
-                break;
-            }
-            out.push(ALPHABET[byte as usize % ALPHABET.len()] as char);
-        }
-    }
-    out
-}
-
-/// A random id of the shape nodes, pages and modes have
-/// ([`finite_design::id`]). Pass it to `id::fresh` with a check for ids in use.
-pub fn node_id() -> String {
-    random_id(finite_design::id::LEN)
-}
-
 /// Every design, plus the design list's subscribers.
 ///
 /// Designs work like rooms in a multiplayer server: a design's state is
@@ -116,6 +87,8 @@ pub struct Hub {
     members: Arc<Members>,
     /// Set when this server shares its store with others.
     shared: Option<Shared>,
+    /// What the operator configured, set once by [`Hub::configure`].
+    settings: OnceLock<Settings>,
 }
 
 /// What a server sharing its store needs: where it records its heartbeat,
@@ -255,6 +228,7 @@ impl Hub {
             lobby: broadcast::channel(256).0,
             members: Arc::new(members),
             shared,
+            settings: OnceLock::new(),
         });
         let weak = Arc::downgrade(&hub);
         tokio::spawn(async move {
@@ -295,7 +269,7 @@ impl Hub {
         if let Some(handle) = self.designs.read().unwrap().get(id).cloned() {
             return Some(handle);
         }
-        if self.shared.is_none() || !self.cluster().owns(id) || !is_design_id(id) {
+        if self.shared.is_none() || !self.cluster().owns(id) || !is_stored_id(id) {
             return None;
         }
         let hub = self.clone();
@@ -329,11 +303,12 @@ impl Hub {
             };
             match result {
                 Ok(()) => return Ok(handle),
-                Err(error) if design::is_busy(&error) => {
+                Err(error) if matches!(Refusal::of(&error), Some(Refusal::Held(_))) => {
                     if tokio::time::Instant::now() >= deadline {
-                        return Err(OpenError::Busy(
-                            error.get_ref().map(ToString::to_string).unwrap_or_default(),
-                        ));
+                        let Some(Refusal::Held(holder)) = Refusal::of(&error) else {
+                            unreachable!("matched above")
+                        };
+                        return Err(OpenError::Busy(holder.clone()));
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
@@ -360,7 +335,7 @@ impl Hub {
             return Some(snapshot);
         }
         let shared_and_mine = self.shared.is_some() && self.cluster().owns(id);
-        if handle.is_none() && !(shared_and_mine && is_design_id(id)) {
+        if handle.is_none() && !(shared_and_mine && is_stored_id(id)) {
             return None;
         }
         let (store, key) = (self.store.clone(), id.to_owned());
@@ -410,6 +385,24 @@ impl Hub {
         self.members.now()
     }
 
+    /// Applies the operator's settings. Call once, before serving; a hub
+    /// without them uses the defaults.
+    pub fn configure(&self, settings: Settings) {
+        assert!(
+            self.settings.set(settings).is_ok(),
+            "the hub was configured twice"
+        );
+    }
+
+    fn settings(&self) -> &Settings {
+        self.settings.get_or_init(Settings::default)
+    }
+
+    /// How long an edit waits for its layout check before it answers without one.
+    pub fn layout_wait(&self) -> Duration {
+        self.settings().layout_wait
+    }
+
     /// The `Host` values this server accepts (see [`Cluster::allowed_hosts`]),
     /// including its own URL when it shares a store.
     pub fn allowed_hosts(&self) -> Vec<String> {
@@ -417,7 +410,7 @@ impl Hub {
         if let Some(shared) = &self.shared {
             nodes.push(shared.me.clone());
         }
-        Cluster::observer(nodes).allowed_hosts()
+        Cluster::observer(nodes).allowed_hosts(&self.settings().allowed_hosts)
     }
 
     /// Where `id` is served, as this server sees it now.
@@ -604,7 +597,14 @@ impl Hub {
             .map_err(|e| e.to_string())?;
         match res.status().as_u16() {
             201 => {
-                self.store.remove(id).map_err(|e| e.to_string())?;
+                // Deleting takes the lease first, like any other write.
+                match self.store.claim(id).map_err(|e| e.to_string())? {
+                    Claim::Granted(token) => {
+                        self.store.delete(id, token).map_err(|e| e.to_string())?;
+                    }
+                    Claim::Held(holder) => return Err(format!("{holder} holds the design")),
+                    Claim::Missing => {}
+                }
                 tracing::info!(id, owner, "handed off design");
                 Ok(())
             }
@@ -971,7 +971,7 @@ async fn persist(hub: Weak<Hub>, design: Weak<DesignHandle>, mut dirty: watch::R
                     }
                     None
                 }
-                Ok(Err(error)) if is_fenced(&error) => {
+                Ok(Err(error)) if Refusal::of(&error) == Some(&Refusal::Fenced) => {
                     // The edits since the last save are lost: another
                     // server holds the design now, and its copy wins.
                     tracing::warn!(
@@ -1266,8 +1266,8 @@ mod tests {
             self.write()?;
             self.inner.append(id, records, token)
         }
-        fn remove(&self, id: &str) -> io::Result<()> {
-            self.inner.remove(id)
+        fn delete(&self, id: &str, token: Token) -> io::Result<()> {
+            self.inner.delete(id, token)
         }
         fn create(&self, snapshot: &Snapshot) -> io::Result<Option<Token>> {
             self.inner.create(snapshot)

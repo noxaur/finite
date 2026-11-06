@@ -13,6 +13,7 @@ use finite_server::{
     Hub, app,
     hub::Actor,
     store::{FileStore, MemoryStore, Store},
+    testing::require_browser,
     transfer::{self, ImportRequest, TransferError},
 };
 use finite_transfer::{Axis, Format, Scope};
@@ -352,10 +353,7 @@ async fn a_figma_export_is_measured_in_a_browser() {
     .unwrap();
     let exported = match transfer::export(&hub, &id, Format::Figma, Scope::Design).await {
         Ok(exported) => exported,
-        Err(TransferError::Invalid(error)) if error.contains("no Chrome") => {
-            eprintln!("skipped: {error}");
-            return;
-        }
+        Err(TransferError::Invalid(error)) if !require_browser(&error) => return,
         Err(error) => panic!("{error}"),
     };
     assert_eq!(exported.file_name, "figma.figma.json");

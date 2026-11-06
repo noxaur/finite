@@ -22,9 +22,10 @@ use tokio::sync::{broadcast, watch};
 use super::{
     Actor, COMPACT_AFTER, COMPACT_BYTES, DesignMessage, DesignSummary, EVENT_BUFFER, HISTORY_TTL,
     Listener, Missed, Outgoing, PRESENCE_TTL, Presence, RESUME_BYTES, RESUME_LIMIT, SESSION_ACTOR,
-    Stamp, UNLOAD_AFTER, node_id, now_ms, random_id,
+    Stamp, UNLOAD_AFTER, now_ms,
 };
-use crate::store::{Claim, Store, Stored, Token};
+use crate::id::{node_id, random_id};
+use crate::store::{Claim, Refusal, Store, Stored, Token};
 
 pub(super) struct DesignState {
     pub(super) design: Design,
@@ -77,30 +78,6 @@ pub(super) enum Save {
     /// The last snapshot before this server lets the design go. The lease
     /// is released once it's saved.
     Last(Snapshot, Token),
-}
-
-/// The error a load gets while another server still holds the design's lease.
-#[derive(Debug)]
-pub struct Busy(pub String);
-
-impl std::fmt::Display for Busy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.0.is_empty() {
-            f.write_str("the design is moving between servers")
-        } else {
-            write!(f, "{} still holds the design", self.0)
-        }
-    }
-}
-
-impl std::error::Error for Busy {}
-
-pub(super) fn is_busy(error: &io::Error) -> bool {
-    error.get_ref().is_some_and(|e| e.is::<Busy>())
-}
-
-fn busy(holder: String) -> io::Error {
-    io::Error::new(io::ErrorKind::WouldBlock, Busy(holder))
 }
 
 impl DesignState {
@@ -384,18 +361,18 @@ impl DesignHandle {
     /// Loading takes the design's lease first, and only then reads it. From
     /// the claim on, no other server's write can land, so what's read is the
     /// latest. While another live server holds the lease, this fails with
-    /// [`Busy`].
+    /// [`Refusal::Held`].
     pub(super) fn load(&self) -> io::Result<()> {
         let mut state = self.raw();
         if state.as_ref().is_some_and(|s| s.life != Life::Live) {
-            return Err(busy(String::new()));
+            return Err(Refusal::Held(String::new()).error());
         }
         if state.is_none() {
             let missing =
                 || io::Error::new(io::ErrorKind::NotFound, "design missing from the store");
             let token = match self.store.claim(&self.id)? {
                 Claim::Granted(token) => token,
-                Claim::Held(holder) => return Err(busy(holder)),
+                Claim::Held(holder) => return Err(Refusal::Held(holder).error()),
                 Claim::Missing => return Err(missing()),
             };
             let stored = match self.store.load(&self.id) {

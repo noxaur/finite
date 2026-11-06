@@ -115,9 +115,10 @@ impl Gathered<'_> {
 pub fn service(
     members: Arc<Members>,
     sessions: Option<Arc<dyn SessionStore>>,
+    allowed_hosts: &[String],
 ) -> StreamableHttpService<Relay, LocalSessionManager> {
-    let mut config =
-        StreamableHttpServerConfig::default().with_allowed_hosts(members.now().allowed_hosts());
+    let mut config = StreamableHttpServerConfig::default()
+        .with_allowed_hosts(members.now().allowed_hosts(allowed_hosts));
     config.session_store = sessions;
     let next = Arc::new(AtomicUsize::new(0));
     StreamableHttpService::new(
@@ -595,7 +596,7 @@ impl SessionStore for DirSessionStore {
     /// same session would write into the same file.
     async fn store(&self, session_id: &str, state: &SessionState) -> Result<(), SessionStoreError> {
         let path = self.path(session_id);
-        let tmp = path.with_extension(format!("{}.tmp", crate::hub::random_id(8)));
+        let tmp = path.with_extension(format!("{}.tmp", crate::id::random_id(8)));
         let bytes = serde_json::to_vec(state)?;
         let written = tmp.clone();
         tokio::task::spawn_blocking(move || -> std::io::Result<()> {
@@ -624,8 +625,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unreadable_session_file_counts_as_no_session() {
-        let dir =
-            std::env::temp_dir().join(format!("finite-sessions-{}", crate::hub::random_id(8)));
+        let dir = std::env::temp_dir().join(format!("finite-sessions-{}", crate::id::random_id(8)));
         let store = DirSessionStore::new(&dir).unwrap();
         std::fs::write(dir.join("abc.json"), b"{\"cut sh").unwrap();
         assert!(store.load("abc").await.unwrap().is_none());

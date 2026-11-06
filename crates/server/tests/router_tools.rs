@@ -4,7 +4,12 @@
 
 use std::sync::Arc;
 
-use finite_server::{Hub, app, cluster::Cluster, router, store::MemoryStore};
+use finite_server::{
+    Hub, app,
+    cluster::Cluster,
+    store::MemoryStore,
+    testing::{front_for, listen, serve},
+};
 use rmcp::{
     ServiceExt,
     model::CallToolRequestParams,
@@ -13,15 +18,8 @@ use rmcp::{
     },
 };
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
 
 type Client = rmcp::service::RunningService<rmcp::RoleClient, ()>;
-
-async fn listen() -> (TcpListener, String) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    (listener, url)
-}
 
 /// Two servers and a router in front of them, and an agent connected to the
 /// router. Returns the agent, the servers' hubs and the cluster.
@@ -34,11 +32,11 @@ async fn deployment() -> (Client, Vec<Arc<Hub>>, Cluster) {
         let cluster = Cluster::new(nodes.clone(), me).unwrap();
         let hub = Hub::with_cluster(Arc::new(MemoryStore::default()), cluster).unwrap();
         hubs.push(hub.clone());
-        tokio::spawn(async move { axum::serve(listener, app(hub, None)).await });
+        serve(listener, app(hub, None));
     }
     let (front, front_url) = listen().await;
-    let routes = router::app(nodes.clone(), None);
-    tokio::spawn(async move { axum::serve(front, routes).await });
+    let routes = front_for(nodes.clone());
+    serve(front, routes);
     let mut headers = std::collections::HashMap::new();
     headers.insert(
         http::HeaderName::from_static("x-finite-agent"),

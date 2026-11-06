@@ -4,17 +4,17 @@
 
 use std::sync::Arc;
 
-use finite_server::{Hub, app, cluster::Cluster, router, store::MemoryStore};
+use finite_server::{
+    Hub, app,
+    cluster::{Cluster, Members},
+    router,
+    store::MemoryStore,
+    testing::{front_for, listen, serve},
+};
 use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
-
-async fn listen() -> (TcpListener, String) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    (listener, url)
-}
 
 /// Starts two servers and a router in front of them. Returns the router's URL
 /// and the servers' URLs.
@@ -25,11 +25,11 @@ async fn deployment() -> (String, Vec<String>) {
     for (me, listener) in [a, b].into_iter().enumerate() {
         let cluster = Cluster::new(nodes.clone(), me).unwrap();
         let hub = Hub::with_cluster(Arc::new(MemoryStore::default()), cluster).unwrap();
-        tokio::spawn(async move { axum::serve(listener, app(hub, None)).await });
+        serve(listener, app(hub, None));
     }
     let (front, front_url) = listen().await;
-    let routes = router::app(nodes.clone(), None);
-    tokio::spawn(async move { axum::serve(front, routes).await });
+    let routes = front_for(nodes.clone());
+    serve(front, routes);
     (front_url, nodes)
 }
 
@@ -181,11 +181,11 @@ async fn lagging_router() -> (String, String) {
     )
     .unwrap();
     let id = hub_b.create("On B").meta.id;
-    tokio::spawn(async move { axum::serve(a, app(hub_a, None)).await });
-    tokio::spawn(async move { axum::serve(b, app(hub_b, None)).await });
+    serve(a, app(hub_a, None));
+    serve(b, app(hub_b, None));
     let (front, front_url) = listen().await;
-    let routes = router::app(vec![a_url], None);
-    tokio::spawn(async move { axum::serve(front, routes).await });
+    let routes = front_for(vec![a_url]);
+    serve(front, routes);
     (front_url, id)
 }
 
@@ -215,10 +215,10 @@ async fn the_design_list_survives_a_server_being_down() {
     )
     .unwrap();
     let id = hub.create("Still here").meta.id;
-    tokio::spawn(async move { axum::serve(a, app(hub, None)).await });
+    serve(a, app(hub, None));
     let (front, front_url) = listen().await;
-    let routes = router::app(nodes, None);
-    tokio::spawn(async move { axum::serve(front, routes).await });
+    let routes = front_for(nodes);
+    serve(front, routes);
 
     let listed: Vec<Value> = reqwest::get(format!("{front_url}/api/designs"))
         .await
@@ -269,10 +269,10 @@ async fn other_sites_cant_read_the_api() {
 
     let (server, server_url) = listen().await;
     let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
-    tokio::spawn(async move { axum::serve(server, app(hub, None)).await });
+    serve(server, app(hub, None));
     let (front, front_url) = listen().await;
-    let routes = router::app(vec![server_url.clone()], None);
-    tokio::spawn(async move { axum::serve(front, routes).await });
+    let routes = front_for(vec![server_url.clone()]);
+    serve(front, routes);
 
     for base in [&server_url, &front_url] {
         let ws = format!("{base}/api/designs/ws").replacen("http://", "ws://", 1);
@@ -513,8 +513,8 @@ mod relay {
         let b_store = Arc::new(MemoryStore::default());
         let b_node = Node::start(b, cluster(1), b_store.clone());
         let (front, front_url) = listen().await;
-        let routes = router::app(nodes.clone(), None);
-        tokio::spawn(async move { axum::serve(front, routes).await });
+        let routes = front_for(nodes.clone());
+        serve(front, routes);
 
         let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp"));
         let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
@@ -630,8 +630,12 @@ mod failover {
                     >
             });
             let (listener, url) = listen().await;
-            let routes = router::app_with_sessions(nodes.clone(), None, store);
-            tokio::spawn(async move { axum::serve(listener, routes).await });
+            let members = Arc::new(Members::fixed(Cluster::observer(nodes.clone())));
+            let options = router::Options {
+                sessions: store,
+                ..Default::default()
+            };
+            serve(listener, router::app(members, options));
             urls.push(url);
         }
         (urls[0].clone(), urls[1].clone())
@@ -748,10 +752,10 @@ async fn the_router_relays_large_designs() {
             })
             .unwrap();
     }
-    tokio::spawn(async move { axum::serve(server, app(hub, None)).await });
+    serve(server, app(hub, None));
     let (front, front_url) = listen().await;
-    let routes = router::app(vec![server_url], None);
-    tokio::spawn(async move { axum::serve(front, routes).await });
+    let routes = front_for(vec![server_url]);
+    serve(front, routes);
 
     // Like a browser, the test's client takes a frame of any size.
     let url = format!("{front_url}/api/designs/{id}/ws").replacen("http://", "ws://", 1);
@@ -790,7 +794,7 @@ async fn scripted_lobby(messages: Vec<Value>) -> String {
             }
         }),
     );
-    tokio::spawn(async move { axum::serve(listener, app).await });
+    serve(listener, app);
     url
 }
 
@@ -808,8 +812,8 @@ async fn a_server_resending_its_list_keeps_the_others() {
     .await;
     let b = scripted_lobby(vec![list(vec![design("b1", 2)])]).await;
     let (front, front_url) = listen().await;
-    let routes = router::app(vec![a, b], None);
-    tokio::spawn(async move { axum::serve(front, routes).await });
+    let routes = front_for(vec![a, b]);
+    serve(front, routes);
 
     let url = format!("{front_url}/api/designs/ws").replacen("http://", "ws://", 1);
     let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
@@ -850,10 +854,10 @@ async fn tools_are_listed_while_the_first_server_is_down() {
     let nodes = vec!["http://127.0.0.1:9".to_owned(), up_url];
     let cluster = Cluster::new(nodes.clone(), 1).unwrap();
     let hub = Hub::with_cluster(Arc::new(MemoryStore::default()), cluster).unwrap();
-    tokio::spawn(async move { axum::serve(up, app(hub, None)).await });
+    serve(up, app(hub, None));
     let (front, front_url) = listen().await;
-    let routes = router::app(nodes, None);
-    tokio::spawn(async move { axum::serve(front, routes).await });
+    let routes = front_for(nodes);
+    serve(front, routes);
 
     let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp"));
     let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
@@ -867,8 +871,8 @@ async fn tools_are_listed_while_the_first_server_is_down() {
 #[tokio::test]
 async fn the_design_list_fails_when_no_server_answers() {
     let (front, front_url) = listen().await;
-    let routes = router::app(vec!["http://127.0.0.1:9".to_owned()], None);
-    tokio::spawn(async move { axum::serve(front, routes).await });
+    let routes = front_for(vec!["http://127.0.0.1:9".to_owned()]);
+    serve(front, routes);
     let res = reqwest::get(format!("{front_url}/api/designs?q=x"))
         .await
         .unwrap();
@@ -887,8 +891,8 @@ async fn an_agents_design_list_fails_when_no_server_answers() {
         },
     };
     let (front, front_url) = listen().await;
-    let routes = router::app(vec!["http://127.0.0.1:9".to_owned()], None);
-    tokio::spawn(async move { axum::serve(front, routes).await });
+    let routes = front_for(vec!["http://127.0.0.1:9".to_owned()]);
+    serve(front, routes);
     let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp"));
     let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
     let result = client
@@ -915,10 +919,10 @@ async fn the_router_gets_past_a_stuck_server() {
     )
     .unwrap();
     let id = hub.create("Still here").meta.id;
-    tokio::spawn(async move { axum::serve(a, app(hub, None)).await });
+    serve(a, app(hub, None));
     let (front, front_url) = listen().await;
-    let routes = router::app(nodes, None);
-    tokio::spawn(async move { axum::serve(front, routes).await });
+    let routes = front_for(nodes);
+    serve(front, routes);
 
     let lobby_url = format!("{front_url}/api/designs/ws");
     let http = reqwest::Client::new();
@@ -977,10 +981,10 @@ async fn agents_get_past_a_stuck_server() {
     )
     .unwrap();
     let id = hub.create("Still here").meta.id;
-    tokio::spawn(async move { axum::serve(up, app(hub, None)).await });
+    serve(up, app(hub, None));
     let (front, front_url) = listen().await;
-    let routes = router::app(nodes, None);
-    tokio::spawn(async move { axum::serve(front, routes).await });
+    let routes = front_for(nodes);
+    serve(front, routes);
 
     let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp"));
     let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
@@ -1020,8 +1024,15 @@ async fn a_request_to_a_stuck_server_fails_in_the_end() {
     let (stuck, stuck_url) = listen().await;
     let nodes = vec![stuck_url];
     let (front, front_url) = listen().await;
-    let routes = router::app_with_silence(nodes, silence);
-    tokio::spawn(async move { axum::serve(front, routes).await });
+    let members = Arc::new(Members::fixed(Cluster::observer(nodes)));
+    let routes = router::app(
+        members,
+        router::Options {
+            silence,
+            ..Default::default()
+        },
+    );
+    serve(front, routes);
 
     let started = std::time::Instant::now();
     let comment = reqwest::Client::new()
@@ -1120,7 +1131,7 @@ async fn deleting_a_design_keeps_other_servers_live_updates() {
     ])
     .await;
     let (front, front_url) = listen().await;
-    tokio::spawn(async move { axum::serve(front, router::app(vec![a, b], None)).await });
+    serve(front, front_for(vec![a, b]));
     let url = format!("{front_url}/api/designs/ws").replacen("http://", "ws://", 1);
     let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
     loop {

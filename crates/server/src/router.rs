@@ -65,51 +65,42 @@ impl Front {
     }
 }
 
-/// Builds the router for the servers in `nodes`. With `static_dir`, it also
-/// serves the built frontend.
-pub fn app(nodes: Vec<String>, static_dir: Option<&str>) -> Router {
-    app_with_sessions(nodes, static_dir, None)
+/// What a router is built with, besides its servers.
+pub struct Options {
+    /// The built frontend to serve.
+    pub static_dir: Option<String>,
+    /// MCP sessions kept here, so routers that share the store can each serve
+    /// any agent's session and a load balancer needn't pin them.
+    pub sessions: Option<Arc<dyn SessionStore>>,
+    /// A request fails after this long without a byte from its server. Tests
+    /// shorten it, so a stuck server doesn't hold one up for 30 seconds.
+    pub silence: std::time::Duration,
+    /// `Host` names accepted besides localhost and the servers.
+    pub allowed_hosts: Vec<String>,
 }
 
-/// Like [`app`], with MCP sessions kept in `sessions`. Routers that share it
-/// can each serve any agent's session, so a load balancer needn't pin them.
-pub fn app_with_sessions(
-    nodes: Vec<String>,
-    static_dir: Option<&str>,
-    sessions: Option<Arc<dyn SessionStore>>,
-) -> Router {
-    assert!(!nodes.is_empty(), "the router needs at least one server");
-    let members = Arc::new(Members::fixed(Cluster::observer(nodes)));
-    app_with_members(members, static_dir, sessions)
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            static_dir: None,
+            sessions: None,
+            silence: SILENT_SERVER,
+            allowed_hosts: Vec::new(),
+        }
+    }
 }
 
-/// Like [`app_with_sessions`], for servers that come and go: `members` is
-/// kept current, say by [`crate::cluster::follow`], and each request goes by
-/// the list as it is then.
-pub fn app_with_members(
-    members: Arc<Members>,
-    static_dir: Option<&str>,
-    sessions: Option<Arc<dyn SessionStore>>,
-) -> Router {
-    build(members, static_dir, sessions, SILENT_SERVER)
-}
-
-/// Like [`app`], with a request failing after `silence` without a byte from
-/// its server, instead of [`SILENT_SERVER`]. For tests, so a stuck server
-/// doesn't hold one up for 30 seconds.
-pub fn app_with_silence(nodes: Vec<String>, silence: std::time::Duration) -> Router {
-    assert!(!nodes.is_empty(), "the router needs at least one server");
-    let members = Arc::new(Members::fixed(Cluster::observer(nodes)));
-    build(members, None, None, silence)
-}
-
-fn build(
-    members: Arc<Members>,
-    static_dir: Option<&str>,
-    sessions: Option<Arc<dyn SessionStore>>,
-    silence: std::time::Duration,
-) -> Router {
-    let allowed: Arc<[String]> = members.now().allowed_hosts().into();
+/// Builds the router for `members`, which is kept current if the servers come
+/// and go (say by [`crate::cluster::follow`]); each request goes by the list
+/// as it is then. [`Members::fixed`] with [`Cluster::observer`] is a fixed list.
+pub fn app(members: Arc<Members>, options: Options) -> Router {
+    let Options {
+        static_dir,
+        sessions,
+        silence,
+        allowed_hosts,
+    } = options;
+    let allowed: Arc<[String]> = members.now().allowed_hosts(&allowed_hosts).into();
     let front = Arc::new(Front {
         members: members.clone(),
         http: reqwest::Client::builder()
@@ -137,14 +128,17 @@ fn build(
         ))
         .merge(
             Router::new()
-                .nest_service("/mcp", crate::relay::service(members, sessions))
+                .nest_service(
+                    "/mcp",
+                    crate::relay::service(members, sessions, &allowed_hosts),
+                )
                 .layer(axum::middleware::from_fn_with_state(
                     allowed,
                     crate::guard::known_hosts,
                 )),
         );
     let router = match static_dir {
-        Some(dir) => crate::frontend::serve(router, dir),
+        Some(dir) => crate::frontend::serve(router, &dir),
         None => router,
     };
     router.layer(TraceLayer::new_for_http())

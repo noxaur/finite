@@ -7,10 +7,12 @@ use tower_http::trace::TraceLayer;
 pub mod api;
 pub mod blob;
 pub mod cluster;
+pub mod config;
 pub mod frontend;
 pub mod guard;
 pub mod heartbeat;
 pub mod hub;
+pub mod id;
 pub mod mcp;
 #[cfg(feature = "postgres")]
 pub mod postgres;
@@ -18,6 +20,8 @@ pub mod relay;
 pub mod router;
 pub mod screenshot;
 pub mod store;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 pub mod transfer;
 
 pub use hub::Hub;

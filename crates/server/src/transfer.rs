@@ -16,7 +16,8 @@ use finite_transfer::{
 };
 
 use crate::{
-    hub::{Actor, Hub, OpenError, node_id, now_ms, random_id},
+    hub::{Actor, Hub, OpenError, now_ms},
+    id::{node_id, random_id},
     screenshot,
     store::Store,
 };

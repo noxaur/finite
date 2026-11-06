@@ -28,8 +28,9 @@ use crate::cluster::Place;
 use crate::heartbeat::{self, Heartbeat};
 use crate::hub::{
     Actor, AdoptError, ClientMessage, DesignHandle, DesignSummary, Hub, LOBBY_LIMIT, OpenError,
-    Outgoing, Since, UserAuthor, is_design_id, node_id,
+    Outgoing, Since, UserAuthor,
 };
+use crate::id::{is_stored_id, node_id};
 use crate::transfer::{self, ImportRequest, ImportResult, TransferError};
 
 /// The largest design another server can hand off. axum's default of 2 MB
@@ -255,7 +256,7 @@ async fn adopt(State(hub): State<Arc<Hub>>, Path(id): Path<String>, body: String
         return ApiError::Unprocessable("the snapshot is for another design".into())
             .into_response();
     }
-    if !is_design_id(&id) {
+    if !is_stored_id(&id) {
         return ApiError::Unprocessable("that isn't a design id".into()).into_response();
     }
     let adopted = match tokio::task::spawn_blocking(move || hub.adopt(snapshot)).await {

@@ -29,7 +29,7 @@ use finite_transfer::scene::{COMPUTED, Measure, Resolved, Scene};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::hub::random_id;
+use crate::id::random_id;
 
 mod cdp;
 mod egress;

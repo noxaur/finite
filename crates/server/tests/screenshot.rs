@@ -8,6 +8,7 @@ use finite_server::screenshot::{
     Format, Image, MAX_OUTPUT_SIDE, Options, Rect, Shot, capture, layout, plan, plan_measurement,
     scene,
 };
+use finite_server::testing::require_browser;
 
 /// A PNG's width, height and RGBA pixels.
 fn decode(png: &[u8]) -> (u32, u32, Vec<[u8; 4]>) {
@@ -104,10 +105,7 @@ async fn shoot(
     let plan = plan(doc, shots, options).unwrap();
     match capture(plan).await {
         Ok(images) => Some(images),
-        Err(error) if error.contains("no Chrome") => {
-            eprintln!("skipped: {error}");
-            None
-        }
+        Err(error) if !require_browser(&error) => None,
         Err(error) => panic!("{error}"),
     }
 }
@@ -460,7 +458,7 @@ async fn a_script_cannot_change_what_measuring_reads() {
     let m = plan_measurement(&doc, &names["Board"], Options::default()).unwrap();
     let boxes = match layout(m).await {
         Ok(boxes) => boxes,
-        Err(error) if error.contains("no Chrome") => return,
+        Err(error) if !require_browser(&error) => return,
         Err(error) => panic!("{error}"),
     };
     let found = boxes.iter().find(|b| b.id == names["Box"]).unwrap();
@@ -483,7 +481,7 @@ async fn a_scripted_artboard_measures_like_one_without_scripts() {
         layout(measure(&scripted, &scripted_names)).await,
     ) {
         (Ok(a), Ok(b)) => (a, b),
-        (Err(error), _) | (_, Err(error)) if error.contains("no Chrome") => return,
+        (Err(error), _) | (_, Err(error)) if !require_browser(&error) => return,
         (Err(error), _) | (_, Err(error)) => panic!("{error}"),
     };
     // The ids line up: the script is the only node more.
@@ -661,10 +659,7 @@ async fn a_scene_has_every_box_and_its_computed_styles() {
     let m = plan_measurement(&doc, &names["Board"], Options::default()).unwrap();
     let scene = match scene(m).await {
         Ok(scene) => scene,
-        Err(error) if error.contains("no Chrome") => {
-            eprintln!("skipped: {error}");
-            return;
-        }
+        Err(error) if !require_browser(&error) => return,
         Err(error) => panic!("{error}"),
     };
     let at = |id: &str| &scene.nodes[id];

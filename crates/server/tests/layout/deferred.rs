@@ -1,14 +1,13 @@
 //! What happens to a layout note that isn't ready when its edit answers.
-//! `FINITE_LAYOUT_WAIT_MS=0` makes every note come that way, so each case
+//! A wait of 0 makes every note come that way, so each case
 //! knows a note is waiting before it acts. The first case is the control:
 //! the same steps with a plain read show the note really was waiting, so the
 //! cases that expect none aren't passing for lack of one.
 
-mod agent;
-mod layout_common;
-
-use agent::{Agent, test_app};
-use layout_common::{Board, board, clip, read, set_wait};
+use super::{
+    agent::Agent,
+    common::{Board, board, clip, read, waiting_app},
+};
 use serde_json::json;
 use std::time::Duration;
 
@@ -25,8 +24,7 @@ async fn clipped_and_checked(agent: &mut Agent, b: &Board) {
 
 #[tokio::test]
 async fn a_deferred_note_is_given_once_and_dropped_when_it_goes_stale() {
-    set_wait(0);
-    let app = test_app();
+    let app = waiting_app(0);
     let mut agent = Agent::connect(&app, "Checker").await;
     let Some(b) = board(&mut agent).await else {
         return;
