@@ -52,7 +52,7 @@ pub(super) struct DesignState {
     /// on the handle, because its buffer is allocated up front (about 30 KB),
     /// and a design that isn't loaded has no sockets to send to.
     events: broadcast::Sender<Outgoing>,
-    /// When the design was last opened through [`super::Hub::get`].
+    /// When the design was last opened through [`super::Hub::open`].
     last_used: u64,
     /// The fencing token from this server's claim on the design. Every write carries it.
     pub(super) token: Token,
@@ -246,9 +246,9 @@ fn listening_for(state: &DesignState, now: u64) -> impl Fn(&str, &Comment) -> bo
 
 /// One design. The hub keeps a handle for every design, but the state (the
 /// document, comments and histories) is only in memory while the design is in
-/// use: [`super::Hub::get`] loads it, and the hub's sweep unloads it once it's idle.
+/// use: [`super::Hub::open`] loads it, and the hub's sweep unloads it once it's idle.
 /// Every public method expects the state to be loaded, which holds for any
-/// handle obtained from [`super::Hub::get`].
+/// handle obtained from [`super::Hub::open`].
 pub struct DesignHandle {
     id: String,
     store: Arc<dyn Store>,
@@ -309,7 +309,7 @@ impl Deref for Loaded<'_> {
     fn deref(&self) -> &DesignState {
         self.0
             .as_ref()
-            .expect("design handles are only used after Hub::get loads them")
+            .expect("design handles are only used after Hub::open loads them")
     }
 }
 
@@ -317,7 +317,7 @@ impl DerefMut for Loaded<'_> {
     fn deref_mut(&mut self) -> &mut DesignState {
         self.0
             .as_mut()
-            .expect("design handles are only used after Hub::get loads them")
+            .expect("design handles are only used after Hub::open loads them")
     }
 }
 
@@ -379,7 +379,7 @@ impl DesignHandle {
                 Ok(Some(stored)) => stored,
                 failed => {
                     // Don't sit on a lease without serving the design.
-                    let _ = self.store.release(&self.id, token);
+                    super::release_lease(&*self.store, &self.id, token);
                     return Err(failed.err().unwrap_or_else(missing));
                 }
             };
@@ -687,18 +687,33 @@ impl DesignHandle {
         label: &str,
         build: impl FnOnce(&Design) -> Result<(Vec<Op>, T), EditError>,
     ) -> Result<Edited<T>, EditError> {
+        self.change(actor, None, |state, now| {
+            let (ops, output) = build(&state.design)?;
+            let doc = state.design.doc();
+            let mut new_id = || id::fresh(&mut node_id, |id| doc.contains(id));
+            let ops = components::redirect(doc, ops, &mut new_id)?;
+            Ok((state.design.commit(&actor.id, label, &ops, now), output))
+        })
+        .map(|(change, output)| (output, change))
+    }
+
+    /// The step every edit shares: under the lock, marks `actor` as having
+    /// touched the design, runs `apply` to make a change, then sends and
+    /// journals it with the comments it moved.
+    fn change<T, E>(
+        &self,
+        actor: &Actor,
+        mutation: Option<&Stamp>,
+        apply: impl FnOnce(&mut DesignState, u64) -> Result<(Option<Change>, T), E>,
+    ) -> Result<(Option<Change>, T), E> {
         let now = now_ms();
         let mut state = self.lock();
         state.touch(actor, now);
-        let (ops, output) = build(&state.design)?;
-        let doc = state.design.doc();
-        let mut new_id = || id::fresh(&mut node_id, |id| doc.contains(id));
-        let ops = components::redirect(doc, ops, &mut new_id)?;
-        let change = state.design.commit(&actor.id, label, &ops, now);
+        let (change, output) = apply(&mut state, now)?;
         if let Some(change) = &change {
-            self.publish_with_comments(&mut state, actor, change, None);
+            self.publish_with_comments(&mut state, actor, change, mutation);
         }
-        Ok((output, change))
+        Ok((change, output))
     }
 
     /// Runs `build` with [`Design::transact`] under one lock: everything it
@@ -760,24 +775,19 @@ impl DesignHandle {
         stamp: &Stamp,
         edits: &[UserEdit],
     ) -> Result<Option<Change>, EditError> {
-        let now = now_ms();
-        let mut state = self.lock();
-        state.touch(actor, now);
-        let doc = state.design.doc();
-        // The ids the tab made for its own copy of this edit.
-        let ops = user_edit::plan(
-            doc,
-            state.design.view(),
-            edits,
-            &mut user_edit::new_ids(doc, &stamp.client, stamp.mid),
-        )?;
-        let change = state
-            .design
-            .commit(&actor.id, user_edit::label(edits), &ops, now);
-        if let Some(change) = &change {
-            self.publish_with_comments(&mut state, actor, change, Some(stamp));
-        }
-        Ok(change)
+        self.change(actor, Some(stamp), |state, now| {
+            let doc = state.design.doc();
+            // The ids the tab made for its own copy of this edit.
+            let ops = user_edit::plan(
+                doc,
+                state.design.view(),
+                edits,
+                &mut user_edit::new_ids(doc, &stamp.client, stamp.mid),
+            )?;
+            let label = user_edit::label(edits);
+            Ok((state.design.commit(&actor.id, label, &ops, now), ()))
+        })
+        .map(|(change, ())| change)
     }
 
     /// The `settled` message for a tab's mutation `mid` that changed nothing,
@@ -801,12 +811,12 @@ impl DesignHandle {
         f: fn(&mut Design, &str, u64) -> Option<Change>,
         mutation: Option<&Stamp>,
     ) -> Option<Change> {
-        let now = now_ms();
-        let mut state = self.lock();
-        state.touch(actor, now);
-        let change = f(&mut state.design, &actor.id, now)?;
-        self.publish_with_comments(&mut state, actor, &change, mutation);
-        Some(change)
+        let (change, ()) = self
+            .change(actor, mutation, |state, now| {
+                Ok::<_, std::convert::Infallible>((f(&mut state.design, &actor.id, now), ()))
+            })
+            .ok()?;
+        change
     }
 
     /// `(undo labels, redo labels)`, most recent first.

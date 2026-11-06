@@ -111,6 +111,13 @@ const RESCAN_EVERY: Duration = Duration::from_secs(30);
 #[derive(Debug)]
 pub enum OpenError {
     NotFound,
+    /// Another server owns the design. Its base URL is `owner`.
+    Elsewhere {
+        id: String,
+        owner: String,
+    },
+    /// No server is serving designs right now.
+    Nowhere,
     /// Another server still holds it, while it moves here. Try again shortly.
     Busy(String),
     Failed(io::Error),
@@ -120,6 +127,10 @@ impl std::fmt::Display for OpenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotFound => f.write_str("design not found"),
+            Self::Elsewhere { id, owner } => {
+                write!(f, "design {id:?} lives on another Finite server: {owner}")
+            }
+            Self::Nowhere => f.write_str("no Finite server is serving designs right now"),
             Self::Busy(holder) if holder.is_empty() => {
                 f.write_str("the design is moving between servers; try again in a few seconds")
             }
@@ -129,6 +140,13 @@ impl std::fmt::Display for OpenError {
             ),
             Self::Failed(error) => write!(f, "couldn't load the design: {error}"),
         }
+    }
+}
+
+/// Gives up a lease. A failure is only logged: the lease lapses by itself.
+pub(super) fn release_lease(store: &dyn Store, id: &str, token: Token) {
+    if let Err(error) = store.release(id, token) {
+        tracing::warn!(id, %error, "couldn't release a lease");
     }
 }
 
@@ -287,7 +305,11 @@ impl Hub {
     /// With a shared store, a design that's moving here may still be held by
     /// its last owner for a moment, while it saves its last snapshot. Then
     /// this waits, up to one lease, for the lease to be released.
+    ///
+    /// A design another server owns is refused with [`OpenError::Elsewhere`],
+    /// so a route can't serve one by forgetting to check.
     pub async fn open(self: &Arc<Self>, id: &str) -> Result<Arc<DesignHandle>, OpenError> {
+        self.require_here(id)?;
         let wait = self.shared.as_ref().map_or(Duration::ZERO, |s| s.lease.0);
         let deadline = tokio::time::Instant::now() + wait;
         loop {
@@ -326,7 +348,12 @@ impl Hub {
     /// A design's snapshot, for a one-off read like a thumbnail. A design in
     /// memory is read from there. A cold one is read from the store and not
     /// kept, so browsing the design list doesn't load every design.
-    pub async fn peek(&self, id: &str) -> Option<Snapshot> {
+    pub async fn peek(&self, id: &str) -> Result<Snapshot, OpenError> {
+        self.require_here(id)?;
+        self.peek_here(id).await.ok_or(OpenError::NotFound)
+    }
+
+    async fn peek_here(&self, id: &str) -> Option<Snapshot> {
         let handle = self.designs.read().unwrap().get(id).cloned();
         if let Some(snapshot) = handle
             .as_ref()
@@ -350,8 +377,8 @@ impl Hub {
         }
     }
 
-    /// Like [`Hub::open`], but reads a cold design on the calling thread.
-    /// For tests and code that isn't async.
+    /// Like [`Hub::open`] without the ownership check, but reads a cold design
+    /// on the calling thread. For tests and code that isn't async.
     pub fn get(&self, id: &str) -> Option<Arc<DesignHandle>> {
         let handle = self.designs.read().unwrap().get(id).cloned()?;
         match handle.load() {
@@ -413,9 +440,16 @@ impl Hub {
         Cluster::observer(nodes).allowed_hosts(&self.settings().allowed_hosts)
     }
 
-    /// Where `id` is served, as this server sees it now.
-    pub fn place(&self, id: &str) -> Place {
-        self.cluster().place(id)
+    /// Refuses a design another server owns, or that no server can serve now.
+    pub fn require_here(&self, id: &str) -> Result<(), OpenError> {
+        match self.cluster().place(id) {
+            Place::Here => Ok(()),
+            Place::Elsewhere(owner) => Err(OpenError::Elsewhere {
+                id: id.into(),
+                owner,
+            }),
+            Place::Nowhere => Err(OpenError::Nowhere),
+        }
     }
 
     /// The base URL of the server that owns `id`, if it isn't this one.
@@ -423,8 +457,8 @@ impl Hub {
         self.cluster().elsewhere(id).map(String::from)
     }
 
-    /// Creates an empty design. Panics where [`Hub::try_create`] would fail,
-    /// which a server with its own store never does.
+    /// [`Hub::try_create`] for tests and code that has no way to fail: it
+    /// panics where that would return an error. Routes use `try_create`.
     pub fn create(self: &Arc<Self>, name: &str) -> DesignSummary {
         self.try_create(name).expect("the design was created")
     }
@@ -682,11 +716,8 @@ impl Hub {
             Ok(held) => {
                 let held: HashMap<String, Token> = held.into_iter().collect();
                 for (id, token) in &held {
-                    if !cluster.owns(id)
-                        && !loaded.contains_key(id.as_str())
-                        && let Err(error) = self.store.release(id, *token)
-                    {
-                        tracing::warn!(id, %error, "couldn't release a lease");
+                    if !cluster.owns(id) && !loaded.contains_key(id.as_str()) {
+                        release_lease(&*self.store, id, *token);
                     }
                 }
                 for (id, handle) in &handles {
@@ -813,16 +844,14 @@ impl Hub {
             let id = snapshot.meta.id.clone();
             if let Err(error) = self.store.save(&snapshot, token) {
                 tracing::error!(id, %error, "failed to save design");
-            } else if self.shared.is_some()
-                && let Err(error) = self.store.release(&id, token)
-            {
-                tracing::warn!(id, %error, "couldn't release a lease");
+            } else if self.shared.is_some() {
+                release_lease(&*self.store, &id, token);
             }
         }
         if let Some(shared) = &self.shared {
             if let Ok(held) = self.store.held() {
                 for (id, token) in held {
-                    let _ = self.store.release(&id, token);
+                    release_lease(&*self.store, &id, token);
                 }
             }
             if let Err(error) = shared.registry.leave() {

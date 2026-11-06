@@ -50,6 +50,9 @@ pub enum TransferError {
     Invalid(String),
     /// Storage failed. Nothing changed.
     Io(std::io::Error),
+    /// The design couldn't be opened here: it lives on another server, or is
+    /// moving. Nothing changed.
+    Unopened(OpenError),
 }
 
 impl std::fmt::Display for TransferError {
@@ -57,6 +60,7 @@ impl std::fmt::Display for TransferError {
         match self {
             Self::NotFound(what) | Self::Invalid(what) => f.write_str(what),
             Self::Io(e) => write!(f, "storage failed: {e}"),
+            Self::Unopened(e) => e.fmt(f),
         }
     }
 }
@@ -66,7 +70,7 @@ impl From<OpenError> for TransferError {
         match e {
             OpenError::NotFound => Self::NotFound("no such design".into()),
             OpenError::Failed(e) => Self::Io(e),
-            busy @ OpenError::Busy(_) => Self::Io(std::io::Error::other(busy.to_string())),
+            other => Self::Unopened(other),
         }
     }
 }

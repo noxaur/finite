@@ -174,21 +174,20 @@ impl FiniteMcp {
     }
 
     async fn design(&self, id: &str) -> Result<Arc<DesignHandle>, CallToolResult> {
-        if let Some(owner) = self.hub.elsewhere(id) {
-            let mut meta = MetaObject::new();
-            meta.0.insert(OWNER_META.into(), owner.clone().into());
-            return Err(CallToolResult::error(vec![ContentBlock::text(format!(
-                "design {id:?} lives on another Finite server. Connect to {owner}/mcp to work on it."
-            ))])
-            .with_meta(Some(meta)));
-        }
-        if self.hub.cluster().owner(id).is_none() {
-            return Err(CallToolResult::error(vec![ContentBlock::text(
-                "No Finite server is serving designs right now. Try again in a few seconds.",
-            )]));
-        }
         self.hub.open(id).await.map_err(|error| {
+            if let OpenError::Elsewhere { owner, .. } = &error {
+                let mut meta = MetaObject::new();
+                meta.0.insert(OWNER_META.into(), owner.clone().into());
+                return CallToolResult::error(vec![ContentBlock::text(format!(
+                    "design {id:?} lives on another Finite server. Connect to {owner}/mcp to work on it."
+                ))])
+                .with_meta(Some(meta));
+            }
             let text = match error {
+                OpenError::Nowhere => {
+                    "No Finite server is serving designs right now. Try again in a few seconds."
+                        .to_string()
+                }
                 OpenError::Busy(_) => format!("design {id:?}: {error}."),
                 _ => format!("design {id:?} not found. Call designs to see the available ids."),
             };
