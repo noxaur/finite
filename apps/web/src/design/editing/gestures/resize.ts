@@ -10,7 +10,6 @@ import { snapTargets } from "./snapping";
  * size it freely). An artboard's left or top edge moves it too.
  */
 export const resizeNode: Gesture = {
-  name: "resize",
   begin(press, ctx) {
     const [id] = ctx.selection;
     if (!press.handle || id === undefined || ctx.selection.length !== 1) return null;

@@ -131,11 +131,6 @@ export function hexOf(color: string | undefined): string | null {
     .join("")}`;
 }
 
-/** Whether a color mixes more than its own opacity, which the controls can't show. */
-export function isOtherMix(value: string): boolean {
-  return /^\s*color-mix\(/i.test(value) && parse(value).kind === "other";
-}
-
 /** `text` with each `var(--name)` in it replaced by what `lookup` says the token is. */
 export function resolveVars(text: string, lookup: (name: string) => string | undefined): string {
   return text.replace(/var\(\s*(--[\w-]+)\s*(?:,[^()]*)?\)/g, (m, name: string) => {

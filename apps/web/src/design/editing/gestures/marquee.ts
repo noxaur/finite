@@ -6,7 +6,6 @@ import type { Gesture } from "../gesture";
  * touches, added to what's selected with Shift. Hold Space to pan instead.
  */
 export const selectBox: Gesture = {
-  name: "select box",
   begin(press, ctx) {
     if (press.hit || press.label || press.handle) return null;
     const kept = press.shift ? ctx.selection : [];

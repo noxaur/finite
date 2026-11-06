@@ -1689,7 +1689,6 @@ function forgetLayout(frame: Frame) {
   frame.pendingRects.clear();
 }
 
-/** Where an iframe's content sits on the page, and how much the canvas zoom scales it. */
 /** `rect` grown by `outset`, which is in pixels `scale` times smaller than the page's. */
 function grow(rect: DOMRect, outset: Outset, scale: number) {
   return new DOMRect(
@@ -1700,6 +1699,7 @@ function grow(rect: DOMRect, outset: Outset, scale: number) {
   );
 }
 
+/** Where an iframe's content sits on the page, and how much the canvas zoom scales it. */
 function iframeBox(iframe: HTMLIFrameElement) {
   const rect = iframe.getBoundingClientRect();
   const scale = iframe.offsetWidth > 0 ? rect.width / iframe.offsetWidth : 1;

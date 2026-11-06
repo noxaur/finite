@@ -6,8 +6,6 @@ export interface Outset {
   readonly left: number;
 }
 
-export const NO_OUTSET: Outset = { top: 0, right: 0, bottom: 0, left: 0 };
-
 /**
  * How far an element's strokes reach outside its border box: its `outline`,
  * and each outer `box-shadow` with no blur, which is how a stroke is written

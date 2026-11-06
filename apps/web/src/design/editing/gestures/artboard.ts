@@ -8,7 +8,6 @@ import { around, shifted, snapTargets } from "./snapping";
  * artboards; hold ⌘ or Ctrl to place them freely.
  */
 export const moveArtboard: Gesture = {
-  name: "move artboard",
   begin(press, ctx) {
     const pressed =
       press.label ?? (press.hit?.nodeId === press.hit?.artboardId ? press.hit?.artboardId : null);

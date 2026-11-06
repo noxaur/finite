@@ -14,7 +14,6 @@ import type { Box, Guide, Handle, Point } from "./geometry";
  * them as one undo step when the pointer comes up.
  */
 export interface Gesture {
-  readonly name: string;
   /** Takes the press, or returns `null` to leave it to the next gesture. Read what the run needs now. */
   begin(press: Press, ctx: EditContext): Run | null;
 }

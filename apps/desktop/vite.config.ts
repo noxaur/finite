@@ -2,8 +2,8 @@ import { defineConfig } from "vite-plus";
 
 export default defineConfig({
   pack: {
-    // Electron loads the main process as CommonJS, and sandboxed preloads must be CommonJS.
-    entry: ["src/main.ts", "src/preload.ts"],
+    // Electron loads the main process as CommonJS.
+    entry: ["src/main.ts"],
     format: "cjs",
     platform: "node",
     target: "node22",

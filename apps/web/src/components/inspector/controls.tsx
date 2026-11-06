@@ -541,32 +541,6 @@ export function Actions({ children }: { children: ReactNode }) {
   return <span {...stylex.props(styles.actions)}>{children}</span>;
 }
 
-/** A small icon button at the end of a field, for what acts on that field. */
-export function FieldToggle({
-  icon,
-  title,
-  pressed,
-  onClick,
-}: {
-  icon: IconName;
-  title: string;
-  pressed: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      title={title}
-      aria-label={title}
-      aria-pressed={pressed}
-      onClick={onClick}
-      {...stylex.props(styles.fieldButton, pressed && styles.iconButtonOn)}
-    >
-      <Icon name={icon} size={14} />
-    </button>
-  );
-}
-
 /**
  * The shell every field shares: a lead that scrubs `scrub`'s number, a text
  * input that previews `toChanges` as it's typed, and whatever comes `after`.
@@ -844,26 +818,6 @@ export function TokenButton({
       icon={menu ? "chevronDown" : "token"}
       items={items}
       empty={`This design has no ${KIND_NAMES[kind]} tokens yet. Add them under Tokens.`}
-    />
-  );
-}
-
-/** A ▾ button that sets one of `items`' styles. */
-export function ListButton({
-  scope,
-  title,
-  items,
-}: {
-  scope: Scope;
-  title: string;
-  items: ReadonlyArray<{ key: string; label: string; pick: Changes }>;
-}) {
-  return (
-    <Popup
-      title={title}
-      icon="chevronDown"
-      items={items.map((i) => ({ key: i.key, label: i.label, run: () => scope.commit(i.pick) }))}
-      empty=""
     />
   );
 }
@@ -1244,15 +1198,6 @@ export function DragList({
   );
 }
 
-/** The handle on a list's row that can be dragged to reorder; only where reordering works. */
-export function DragGrip() {
-  return (
-    <span title="Drag to reorder" aria-hidden="true" {...stylex.props(styles.grip)}>
-      <Icon name="grip" size={12} />
-    </span>
-  );
-}
-
 /** The chevron that opens a row's details beneath it, and closes them. */
 export function ExpandButton({
   open,
@@ -1371,34 +1316,6 @@ export function Block({
     align: [styles.alignRow, styles.inset],
   }[kind];
   return <div {...stylex.props(...layout)}>{children}</div>;
-}
-
-/** A swatch that draws `shadow` and acts as a button. */
-export function SwatchButton({
-  title,
-  pressed,
-  disabled,
-  onClick,
-  shadow,
-}: {
-  title: string;
-  pressed: boolean;
-  disabled: boolean;
-  onClick: () => void;
-  shadow: string | undefined;
-}) {
-  return (
-    <button
-      type="button"
-      title={title}
-      aria-label={title}
-      aria-pressed={pressed}
-      disabled={disabled}
-      onClick={onClick}
-      {...stylex.props(styles.swatch, styles.shadowSwatch)}
-      style={{ boxShadow: shadow }}
-    />
-  );
 }
 
 /** A color as a small square, for a row that shows it without a picker. */
@@ -1702,11 +1619,6 @@ const styles = stylex.create({
     borderRadius: radii.xs,
     boxShadow: `inset 0 0 0 1px ${colors.borderStrong}`,
   },
-  shadowSwatch: {
-    overflow: "visible",
-    backgroundColor: colors.surface,
-    cursor: "var(--cursor-pointer, pointer)",
-  },
   picker: {
     position: "absolute",
     inset: 0,
@@ -1907,14 +1819,6 @@ const styles = stylex.create({
     cursor: "var(--cursor-pointer, pointer)",
   },
   eyeOff: { color: colors.muted },
-  grip: {
-    display: "flex",
-    flexShrink: 0,
-    marginLeft: -3,
-    marginRight: -6,
-    color: colors.faint,
-    cursor: "grab",
-  },
   expandOpen: { rotate: "180deg", color: colors.text },
   rowBody: { cursor: "default", userSelect: "none" },
   rowBodyOpen: { boxShadow: `inset 0 0 0 1px ${colors.border}` },

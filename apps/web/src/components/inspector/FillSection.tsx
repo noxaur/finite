@@ -533,7 +533,6 @@ function GradientControls({
         {fill.stops.map((s, i) => (
           <button
             // Stops can share a color and a place, so their order names them.
-            // biome-ignore lint/suspicious/noArrayIndexKey: see above
             key={i}
             type="button"
             title={`Stop at ${Math.round(s.at)}%`}
@@ -591,7 +590,7 @@ function GradientControls({
       <div {...stylex.props(styles.label)}>Stops</div>
       {fill.stops.map((s, i) => (
         <div
-          // biome-ignore lint/suspicious/noArrayIndexKey: stops are named by their order
+          // Stops can share a color and a place, so their order names them.
           key={i}
           onFocus={() => setSelected(i)}
           {...stylex.props(styles.line)}

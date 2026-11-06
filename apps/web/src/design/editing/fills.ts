@@ -1,5 +1,4 @@
 import { alphaOf, setAlpha } from "./colors";
-import { urlOf } from "./inspect";
 import { commas, parts, readList, writeList } from "./lists";
 
 /**
@@ -600,4 +599,9 @@ export function writeFills(
     if (v !== null || had) out[k] = v;
   }
   return out;
+}
+
+/** `url("a.png")` → `a.png`. */
+function urlOf(image: string): string {
+  return image.match(/^\s*url\(\s*(["']?)(.*?)\1\s*\)\s*$/)?.[2] ?? "";
 }

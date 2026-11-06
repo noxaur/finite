@@ -113,7 +113,6 @@ export function Menu({
       window.removeEventListener("resize", leave);
     };
     // The trigger and what's listed are fixed while it's open.
-    // biome-ignore lint/correctness/useExhaustiveDependencies: see above
   }, []);
 
   const move = (e: React.KeyboardEvent) => {

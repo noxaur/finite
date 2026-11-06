@@ -1,4 +1,4 @@
-import { commas, parts } from "./lists";
+import { parts } from "./lists";
 import { FLEX_PARTS, flexParts } from "./sizing";
 import { outlinePart } from "./stroke";
 import type { Node } from "../schema";
@@ -125,14 +125,6 @@ export function customOf(raw: string): string | null {
   return CUSTOM.find(([re]) => re.test(v))?.[1] ?? "Custom value";
 }
 
-/** `repeat(3, 1fr)` → `3`: a grid's column count, when its columns are equal. */
-export function trackCount(raw: string): string | null {
-  return (
-    raw.trim().match(/^repeat\(\s*(\d+)\s*,\s*(1fr|minmax\(\s*0(px)?\s*,\s*1fr\s*\))\s*\)$/)?.[1] ??
-    null
-  );
-}
-
 /** A length as a field shows it: `12px` as `12`, `8px 16px` as `8 16`; other units stay. */
 export function bare(raw: string): string {
   return raw.replace(/(\d)px\b/g, "$1");
@@ -206,71 +198,6 @@ export function alignCell(
 export function alignStyles(kind: "row" | "column", x: number, y: number): Record<string, string> {
   const [main, cross] = kind === "row" ? [x, y] : [y, x];
   return { "justify-content": ALIGN[main]!, "align-items": ALIGN[cross]! };
-}
-
-/**
- * Inline styles as CSS declarations, one per line, and back. Reading the
- * text returns every change to make: new or changed values, and `null` for
- * properties that were taken out.
- */
-export function declarations(styles: Readonly<Record<string, string>>): string {
-  return Object.entries(styles)
-    .map(([prop, value]) => `${prop}: ${value};`)
-    .join("\n");
-}
-
-export function parseDeclarations(
-  text: string,
-  before: Readonly<Record<string, string>>,
-): Record<string, string | null> {
-  const after: Record<string, string> = {};
-  for (const line of splitDeclarations(text)) {
-    const colon = line.indexOf(":");
-    if (colon === -1) continue;
-    const name = line
-      .slice(0, colon)
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .trim();
-    // Custom properties are case-sensitive; the rest aren't.
-    const prop = name.startsWith("--") ? name : name.toLowerCase();
-    const value = line.slice(colon + 1).trim();
-    if (/^(--[\w-]+|-?[a-z][\w-]*)$/i.test(prop) && value !== "") after[prop] = value;
-  }
-  const changes: Record<string, string | null> = {};
-  for (const [prop, value] of Object.entries(after)) {
-    if (before[prop] !== value) changes[prop] = value;
-  }
-  for (const prop of Object.keys(before)) if (!(prop in after)) changes[prop] = null;
-  return changes;
-}
-
-/**
- * Splits at `;` and line breaks outside quotes, comments and brackets, so
- * `url("data:…;base64,…")` and a comment holding `;` stay whole.
- */
-function splitDeclarations(text: string): string[] {
-  const parts: string[] = [];
-  let depth = 0;
-  let quote: string | null = null;
-  let start = 0;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i]!;
-    if (quote) {
-      if (c === "\\") i++;
-      else if (c === quote) quote = null;
-    } else if (c === "/" && text[i + 1] === "*") {
-      const end = text.indexOf("*/", i + 2);
-      i = end === -1 ? text.length : end + 1;
-    } else if (c === '"' || c === "'") quote = c;
-    else if (c === "(" || c === "[" || c === "{") depth++;
-    else if ((c === ")" || c === "]" || c === "}") && depth > 0) depth--;
-    else if ((c === ";" || c === "\n") && depth === 0) {
-      parts.push(text.slice(start, i));
-      start = i + 1;
-    }
-  }
-  parts.push(text.slice(start));
-  return parts;
 }
 
 const BORDER_STYLES = new Set([
@@ -481,59 +408,4 @@ function tidyBox([t, r, b, l]: readonly string[]): string {
     return `${t} ${r} ${b}`;
   }
   return `${t} ${r} ${b} ${l}`;
-}
-
-/** A `font` shorthand's size and line height, as `16 / 24`; `null` when it has none. */
-export function fontMetrics(font: string): string | null {
-  const m = font.match(/(\d*\.?\d+)(px|r?em|%)?\s*\/\s*(\d*\.?\d+)(px|r?em|%)?/);
-  if (m)
-    return `${m[1]}${m[2] === "px" ? "" : (m[2] ?? "")} / ${m[3]}${m[4] === "px" ? "" : (m[4] ?? "")}`;
-  const size = font.match(/(\d*\.?\d+)(px|r?em)\b/);
-  return size ? bare(`${size[1]}${size[2]}`) : null;
-}
-
-export type FillKind = "solid" | "linear" | "radial" | "image";
-
-/** What a `background-image` paints: nothing (a solid color), a gradient or an image. */
-export function fillKindOf(image: string): FillKind {
-  const v = image.trim();
-  if (/^(repeating-)?linear-gradient\(/.test(v)) return "linear";
-  if (/^(repeating-)?(radial|conic)-gradient\(/.test(v)) return "radial";
-  if (/^(url|image-set)\(/.test(v)) return "image";
-  return "solid";
-}
-
-/** `url("a.png")` → `a.png`. */
-export function urlOf(image: string): string {
-  return image.match(/^\s*url\(\s*(["']?)(.*?)\1\s*\)\s*$/)?.[2] ?? "";
-}
-
-/**
- * A gradient's first color stop, and the gradient with that color
- * changed; `null` when `value` isn't one gradient.
- */
-export function firstStop(
-  value: string,
-): { color: string; with: (color: string) => string } | null {
-  const m = value.trim().match(/^((?:repeating-)?(?:linear|radial|conic)-gradient)\((.*)\)$/s);
-  if (!m) return null;
-  const args = commas(m[2]!);
-  // The first argument is a direction or shape unless it starts with a color.
-  const at =
-    /^(to\s|from\s|at\s|-?[\d.]+(deg|turn|rad|grad)\b|circle|ellipse|closest|farthest)/.test(
-      args[0] ?? "",
-    )
-      ? 1
-      : 0;
-  const stop = args[at];
-  const [color, ...rest] = stop ? parts(stop) : [];
-  if (!color) return null;
-  return {
-    color,
-    with: (next) => {
-      const all = [...args];
-      all[at] = [next, ...rest].join(" ");
-      return `${m[1]}(${all.join(", ")})`;
-    },
-  };
 }

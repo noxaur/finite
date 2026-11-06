@@ -4,20 +4,13 @@ import {
   alignStyles,
   bare,
   customOf,
-  declarations,
-  fillKindOf,
-  firstStop,
-  fontMetrics,
   layoutOf,
   layoutStyles,
   ownStyle,
-  parseDeclarations,
   parseInput,
   readStyle,
   routeStyles,
   shown,
-  trackCount,
-  urlOf,
 } from "./inspect";
 
 const node = (styles: Record<string, string>) => ({ styles });
@@ -84,46 +77,6 @@ describe("layout", () => {
   });
 });
 
-describe("declarations", () => {
-  it("returns what changed, and what was taken out", () => {
-    const before = { color: "red", gap: "4px" };
-    expect(declarations(before)).toBe("color: red;\ngap: 4px;");
-    expect(parseDeclarations("color: blue;\npadding: 8px", before)).toEqual({
-      color: "blue",
-      padding: "8px",
-      gap: null,
-    });
-  });
-
-  it("keeps semicolons inside quotes and url(), and custom properties' case", () => {
-    const before = {
-      "background-image": 'url("data:image/svg+xml;base64,PHN2Zy8+")',
-      "--Brand": "blue",
-      color: "red",
-    };
-    expect(parseDeclarations(`${declarations(before)}\nCOLOR: green`, before)).toEqual({
-      color: "green",
-    });
-  });
-
-  it("reads a declaration after a comment", () => {
-    expect(
-      parseDeclarations("color: red; /* spacing */ gap: 8px;", { color: "red", gap: "4px" }),
-    ).toEqual({ gap: "8px" });
-  });
-
-  it("keeps comments and braces in a value whole", () => {
-    const before = {
-      color: "red /* ; blue */",
-      "--theme": "{ color: red; padding: 4px; }",
-      gap: "1px",
-    };
-    expect(parseDeclarations(declarations(before).replace("1px", "2px"), before)).toEqual({
-      gap: "2px",
-    });
-  });
-});
-
 describe("shorthands", () => {
   const card = { border: "1px solid var(--line)", background: "var(--surface)" };
 
@@ -167,31 +120,6 @@ describe("values", () => {
     expect(bare("1.5rem")).toBe("1.5rem");
     expect(parseInput("padding", "8 16")).toBe("8px 16px");
   });
-
-  it("reads a font's size and line height", () => {
-    expect(fontMetrics("16px/24px Helvetica Neue, sans-serif")).toBe("16 / 24");
-    expect(fontMetrics("500 14px Inter")).toBe("14");
-    expect(fontMetrics("caption")).toBeNull();
-  });
-});
-
-describe("fills", () => {
-  it("tells a color, gradients and an image apart", () => {
-    expect(fillKindOf("none")).toBe("solid");
-    expect(fillKindOf("linear-gradient(red, blue)")).toBe("linear");
-    expect(fillKindOf("radial-gradient(circle, red, blue)")).toBe("radial");
-    expect(fillKindOf('url("a.png")')).toBe("image");
-    expect(urlOf('url("https://x.test/a.png")')).toBe("https://x.test/a.png");
-    expect(urlOf("url(a.png)")).toBe("a.png");
-  });
-
-  it("edits a gradient's first stop, past its direction", () => {
-    const stop = firstStop("linear-gradient(to right, var(--brand) 10%, transparent)");
-    expect(stop?.color).toBe("var(--brand)");
-    expect(stop?.with("#000")).toBe("linear-gradient(to right, #000 10%, transparent)");
-    expect(firstStop("radial-gradient(rgb(0, 0, 0), red)")?.color).toBe("rgb(0, 0, 0)");
-    expect(firstStop("none")).toBeNull();
-  });
 });
 
 describe("custom values", () => {
@@ -202,12 +130,6 @@ describe("custom values", () => {
     expect(customOf("var(--gap)")).toBeNull();
     expect(customOf("8px 16px")).toBeNull();
     expect(customOf("fit-content")).toBeNull();
-  });
-
-  it("reads and writes a grid's column count", () => {
-    expect(trackCount("repeat(3, 1fr)")).toBe("3");
-    expect(trackCount(parseInput("grid-template-columns", "4")!)).toBe("4");
-    expect(trackCount("200px 1fr")).toBeNull();
   });
 });
 
