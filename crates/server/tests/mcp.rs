@@ -1945,15 +1945,17 @@ async fn jsx_results_are_cut_and_the_format_only_exports() {
         failed && error.contains("html, finite, figma, jsx, repo, app"),
         "{error}"
     );
-    // `app` is one of them. It is a stub today, so its error comes back;
-    // once it writes, this is a download note for a tar.
-    let (error, failed) = agent
+    // `app` is a tar, so the result says where to download it.
+    let (text, failed) = agent
         .call(
             "export_design",
             json!({ "designId": design, "format": "app" }),
         )
         .await;
-    assert!(failed && error.contains("isn't written yet"), "{error}");
+    assert!(
+        !failed && text.contains("-app.tar") && text.contains("not text"),
+        "{text}"
+    );
 }
 
 /// A person posts a note for people over HTTP, then turns it back into a

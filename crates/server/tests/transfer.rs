@@ -218,9 +218,6 @@ async fn http_imports_exports_and_serves_the_original() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-/// The `app` codec is a stub today: `format=app` reaches it and its error
-/// comes back as a 422, not "no format". Once the codec writes a tar, this
-/// test flips to a 200 with `application/x-tar` and `home-app.tar`.
 #[tokio::test]
 async fn http_exports_the_whole_design_as_an_app() {
     let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
@@ -230,14 +227,15 @@ async fn http_exports_the_whole_design_as_an_app() {
         .unwrap();
     let app = app(hub.clone(), None);
 
-    let (status, _, body) = send(&app, get(&format!("/api/designs/{id}/export?format=app"))).await;
-    // TODO(app codec): expect StatusCode::OK, `application/x-tar`, and
-    // `attachment; filename="home-app.tar"` here once write succeeds.
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, headers, body) =
+        send(&app, get(&format!("/api/designs/{id}/export?format=app"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(header(&headers, "content-type"), "application/x-tar");
     assert_eq!(
-        String::from_utf8(body).unwrap(),
-        "the app export isn't written yet"
+        header(&headers, "content-disposition"),
+        "attachment; filename=\"home-app.tar\""
     );
+    assert!(body.windows(12).any(|w| w == b"package.json"));
 }
 
 #[tokio::test]
