@@ -2,16 +2,17 @@
 
 import * as stylex from "@stylexjs/stylex";
 import { useEffect, useRef, useState } from "react";
+import { cellOf } from "@/design/editing/cells";
 import { alphaOf, opaque, resolveVars, setAlpha } from "@/design/editing/colors";
 import {
   backgroundOf,
   barText,
   COLOR_STASH,
-  cellOf,
   cellPosition,
   colorAt,
   type Empties,
   FILL_NAMES,
+  FILL_PROPS,
   FITS,
   type Fill,
   type FillLayer,
@@ -30,7 +31,7 @@ import {
   writeFills,
 } from "@/design/editing/fills";
 import { tokenOf } from "@/design/editing/inspect";
-import { moveEntry } from "@/design/editing/lists";
+import { moveEntry, stashOf } from "@/design/editing/lists";
 import type { Node } from "@/design/schema";
 import { colors, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import type { IconName } from "../Icons";
@@ -52,14 +53,6 @@ import {
 } from "./controls";
 import { type Changes, isPainted, resolve, type Scope, swatchOf } from "./scope";
 
-const PROPS = [
-  "background-image",
-  "background-color",
-  "background-size",
-  "background-position",
-  "background-repeat",
-] as const;
-
 /** The mockup's row of fill types. Conic is one level down, in a gradient's editor. */
 const TYPES: ReadonlyArray<readonly [FillType, IconName, string]> = [
   ["solid", "fillSolid", FILL_NAMES.solid],
@@ -79,7 +72,7 @@ const GRADIENTS: ReadonlyArray<readonly [FillType, null, string]> = [
 function ownOf(target: Node): Record<string, string> {
   const own = ownBackground(target.styles);
   const out: Record<string, string> = {};
-  for (const prop of [...PROPS, COLOR_STASH, "--finite-off-background-image"]) {
+  for (const prop of [...FILL_PROPS, COLOR_STASH, stashOf("background-image")]) {
     const v = own[prop] ?? target.styles[prop];
     if (v !== undefined) out[prop] = v;
   }
@@ -110,7 +103,7 @@ function targetFills(scope: Scope, target: Node) {
     target.styles,
     backgroundOf((p) => own[p] ?? computed(p)),
   );
-  return { layers, empties, drawn: !PROPS.some((p) => own[p] !== undefined) };
+  return { layers, empties, drawn: !FILL_PROPS.some((p) => own[p] !== undefined) };
 }
 
 /**

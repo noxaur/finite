@@ -4,8 +4,6 @@ import {
   alignStyles,
   bare,
   customOf,
-  layoutOf,
-  layoutStyles,
   ownStyle,
   parseInput,
   readStyle,
@@ -60,13 +58,6 @@ describe("parseInput", () => {
 });
 
 describe("layout", () => {
-  it("round-trips the layout kind", () => {
-    for (const kind of ["block", "column", "row", "grid"] as const) {
-      const styles = layoutStyles(kind);
-      expect(layoutOf(styles.display ?? "block", styles["flex-direction"] ?? "row")).toBe(kind);
-    }
-  });
-
   it("maps the align grid by direction", () => {
     expect(alignStyles("row", 2, 1)).toEqual({
       "justify-content": "flex-end",

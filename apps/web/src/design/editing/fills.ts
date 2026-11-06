@@ -1,5 +1,6 @@
 import { alphaOf, setAlpha } from "./colors";
-import { commas, parts, readList, writeList } from "./lists";
+import { CELL_X, CELL_Y } from "./cells";
+import { commas, parts, readList, stashOf, writeList } from "./lists";
 
 /**
  * A layer's fill as the Fill section shows it. Gradient stops sit at a
@@ -338,34 +339,12 @@ export function fitOf(size: string, repeat: string): Fit | null {
   return s === "auto" && /^repeat( repeat)?$/.test(repeat.trim()) ? "tile" : null;
 }
 
-const XS = ["left", "center", "right"] as const;
-const YS = ["top", "center", "bottom"] as const;
-
-/** Which cell of a 3×3 grid a CSS position names; `null` when it's between cells. */
-export function cellOf(position: string): { x: number; y: number } | null {
-  const words = parts(position.toLowerCase());
-  const cell = (w: string): { axis: "x" | "y" | null; at: number } | null => {
-    if (w === "left" || w === "right") return { axis: "x", at: w === "left" ? 0 : 2 };
-    if (w === "top" || w === "bottom") return { axis: "y", at: w === "top" ? 0 : 2 };
-    if (w === "center") return { axis: null, at: 1 };
-    const n = { "0": 0, "0%": 0, "50%": 1, "100%": 2 }[w];
-    return n === undefined ? null : { axis: null, at: n };
-  };
-  const read = words.map(cell);
-  if (read.length === 0 || read.length > 2 || read.some((r) => r === null)) return null;
-  const [a, b = { axis: null, at: 1 }] = read as Array<{ axis: "x" | "y" | null; at: number }>;
-  const swap = a!.axis === "y" || b.axis === "x";
-  const [x, y] = swap ? [b, a!] : [a!, b];
-  if (x.axis === "y" || y.axis === "x") return null;
-  return { x: x.at, y: y.at };
-}
-
 /** Cell (`x`, `y`) of a 3×3 grid as a CSS position, in the fewest words. */
 export function cellPosition(x: number, y: number): string {
   if (x === 1 && y === 1) return "center";
-  if (y === 1) return XS[x]!;
-  if (x === 1) return YS[y]!;
-  return `${XS[x]} ${YS[y]}`;
+  if (y === 1) return CELL_X[x]!;
+  if (x === 1) return CELL_Y[y]!;
+  return `${CELL_X[x]} ${CELL_Y[y]}`;
 }
 
 /** One row of the Fill list: its fill, whether the eye hides it, and how an image sits. */
@@ -393,8 +372,17 @@ const LAYER_PROPS = {
   repeat: "background-repeat",
 } as const;
 
+/** Inline properties the Fill section reads and writes, apart from the `background` shorthand. */
+export const FILL_PROPS = [
+  "background-image",
+  "background-color",
+  "background-size",
+  "background-position",
+  "background-repeat",
+] as const;
+
 /** The stash that keeps a hidden bottom color, as the lists' stashes do. */
-export const COLOR_STASH = "--finite-off-background-color";
+export const COLOR_STASH = stashOf("background-color");
 
 const painted = (color: string) =>
   color !== "" && !/^(transparent|rgba\(0, 0, 0, 0\)|none)$/i.test(color.trim());

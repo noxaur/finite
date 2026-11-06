@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
   backgroundOf,
-  cellOf,
   cellPosition,
   expandBackground,
   fillText,
@@ -174,11 +173,6 @@ describe("fills", () => {
     expect(fitOf("cover", "no-repeat")).toBe("fill");
     expect(fitOf("auto", "repeat")).toBe("tile");
     expect(fitOf("40px", "repeat")).toBeNull();
-    expect(cellOf("top left")).toEqual({ x: 0, y: 0 });
-    expect(cellOf("left top")).toEqual({ x: 0, y: 0 });
-    expect(cellOf("bottom")).toEqual({ x: 1, y: 2 });
-    expect(cellOf("100% 50%")).toEqual({ x: 2, y: 1 });
-    expect(cellOf("10px 20px")).toBeNull();
     expect(cellPosition(2, 0)).toBe("right top");
     expect(cellPosition(1, 1)).toBe("center");
   });

@@ -1,3 +1,4 @@
+import { CELL_X, CELL_Y, cellOf } from "./cells";
 import { tokenOf } from "./inspect";
 import { commas, parts } from "./lists";
 
@@ -34,6 +35,15 @@ export const NO_TRANSFORM: Transform = {
 export type TransformStyles = Readonly<
   Partial<Record<"translate" | "rotate" | "scale" | "transform", string>>
 >;
+
+/** Inline properties the Transform section reads and writes. */
+export const TRANSFORM_PROPS = [
+  "translate",
+  "rotate",
+  "scale",
+  "transform",
+  "transform-origin",
+] as const;
 
 const round = (n: number) => Math.round(n * 1e4) / 1e4;
 
@@ -320,39 +330,17 @@ export function withRotation(
   return transformStyles(styles, { ...value, rotate: degrees }, sheet);
 }
 
-const X = ["left", "center", "right"] as const;
-const Y = ["top", "center", "bottom"] as const;
-
-/** Where one `transform-origin` part sits along its axis, and which axis it must be: `left` is x. */
-function originPart(p: string): { at: number; axis: "x" | "y" | null } | null {
-  const i = { "0%": 0, "50%": 1, "100%": 2, center: 1 }[p];
-  if (i !== undefined) return { at: i, axis: null };
-  if ((X as readonly string[]).includes(p))
-    return { at: X.indexOf(p as (typeof X)[number]), axis: "x" };
-  if ((Y as readonly string[]).includes(p))
-    return { at: Y.indexOf(p as (typeof Y)[number]), axis: "y" };
-  return null;
-}
-
 /** Which cell of a 3×3 grid `transform-origin` names, or `null` when it's off the grid. */
 export function originCell(v: string | undefined): { x: number; y: number } | null {
   const all = parts(v ?? "");
   // A third part is the depth, which the grid leaves at 0.
   if (all.length === 3 && /^0(px)?$/.test(all[2]!)) all.pop();
-  if (all.length === 0) return { x: 1, y: 1 };
-  if (all.length > 2) return null;
-  const [a, b] = all.map(originPart);
-  if (!a || b === null) return null;
-  if (b === undefined) return a.axis === "y" ? { x: 1, y: a.at } : { x: a.at, y: 1 };
-  // Keywords may come either way round, `top left`; numbers are x then y.
-  const [x, y] = a.axis === "y" || b.axis === "x" ? [b, a] : [a, b];
-  if (x.axis === "y" || y.axis === "x") return null;
-  return { x: x.at, y: y.at };
+  return all.length === 0 ? { x: 1, y: 1 } : cellOf(all.join(" "));
 }
 
 /** `transform-origin` for cell (`x`, `y`): `left top`, `center`, `right bottom`. */
 export function originValue(x: number, y: number): string {
-  return x === 1 && y === 1 ? "center" : `${X[x]} ${Y[y]}`;
+  return x === 1 && y === 1 ? "center" : `${CELL_X[x]} ${CELL_Y[y]}`;
 }
 
 /**

@@ -149,32 +149,6 @@ export function shown(reading: Reading): { text: string; placeholder: string } {
   }
 }
 
-export type LayoutKind = "block" | "column" | "row" | "grid";
-
-/** Which layout `display` and `flex-direction` make. */
-export function layoutOf(display: string, direction: string): LayoutKind {
-  if (display === "grid" || display === "inline-grid") return "grid";
-  if (display === "flex" || display === "inline-flex") {
-    return direction.startsWith("column") ? "column" : "row";
-  }
-  return "block";
-}
-
-/** The styles that make an element lay its children out as `kind`. */
-export function layoutStyles(kind: LayoutKind): Record<string, string | null> {
-  switch (kind) {
-    // Explicit, so it wins over a class that makes it flex or grid.
-    case "block":
-      return { display: "block", "flex-direction": null };
-    case "column":
-      return { display: "flex", "flex-direction": "column" };
-    case "row":
-      return { display: "flex", "flex-direction": "row" };
-    case "grid":
-      return { display: "grid", "flex-direction": null };
-  }
-}
-
 const ALIGN = ["flex-start", "center", "flex-end"] as const;
 
 /** Where `justify-content` and `align-items` put the children, as a column and row of a 3×3 grid. */

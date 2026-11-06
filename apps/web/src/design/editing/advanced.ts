@@ -1,85 +1,39 @@
+import { APPEARANCE_PROPS } from "./appearance";
+import { EFFECT_PROPS } from "./effects";
+import { FILL_PROPS } from "./fills";
 import { tokenOf } from "./inspect";
-import { commas } from "./lists";
+import { LAYOUT_PROPS } from "./layout";
+import { commas, parts, STASH_PREFIX } from "./lists";
+import { POSITION_PROPS } from "./position";
+import { SIZE_PROPS } from "./sizing";
+import { TRANSFORM_PROPS } from "./transform";
+import { TEXT_PROPS } from "./typography";
 
-/** Inline properties a control in the inspector reads and writes, shorthands included. */
-const CLAIMED = new Set([
-  "display",
-  "flex-direction",
-  "flex-wrap",
-  "justify-content",
-  "align-items",
-  "gap",
-  "row-gap",
-  "column-gap",
-  "grid-template-columns",
-  "width",
-  "height",
-  "left",
-  "top",
-  "right",
-  "bottom",
-  "inset",
-  "position",
-  "z-index",
-  "rotate",
-  "grid-template-rows",
-  "flex",
-  "flex-grow",
-  "flex-shrink",
-  "flex-basis",
-  "align-self",
-  "min-width",
-  "max-width",
-  "min-height",
-  "max-height",
-  "aspect-ratio",
-  "overflow-x",
-  "overflow-y",
-  "overflow",
-  "background",
-  "background-color",
-  "background-image",
-  "background-size",
-  "background-position",
-  "background-repeat",
-  "mix-blend-mode",
-  "cursor",
-  "box-shadow",
-  "text-shadow",
-  "filter",
-  "backdrop-filter",
-  "opacity",
-  "font",
-  "font-family",
-  "font-size",
-  "font-weight",
-  "line-height",
-  "letter-spacing",
-  "text-align",
-  "color",
-  "font-style",
-  "text-transform",
-  "text-decoration",
-  "text-decoration-line",
-  "white-space",
-  "text-overflow",
-  "text-wrap",
-  "line-clamp",
-  "-webkit-line-clamp",
-  "-webkit-box-orient",
-  "translate",
-  "scale",
-  "rotate",
-  "transform",
-  "transform-origin",
+/**
+ * Inline properties a control in the inspector reads and writes, shorthands
+ * included. Each section's module lists its own, so a new control is
+ * claimed where it's written.
+ */
+const CLAIMED: ReadonlySet<string> = new Set([
+  ...LAYOUT_PROPS,
+  ...SIZE_PROPS,
+  ...POSITION_PROPS,
+  ...TRANSFORM_PROPS,
   "transition",
+  "background",
+  ...FILL_PROPS,
+  ...APPEARANCE_PROPS,
+  ...EFFECT_PROPS,
+  ...TEXT_PROPS,
+  "color",
+  "-webkit-box-orient",
 ]);
 
 /** Whether a control shows `prop`, so Advanced leaves it out. */
 export function isClaimed(prop: string): boolean {
   return (
     CLAIMED.has(prop) ||
-    prop.startsWith("--finite-off-") ||
+    prop.startsWith(STASH_PREFIX) ||
     /^(padding|margin)(-(top|right|bottom|left))?$/.test(prop) ||
     /^border(-(top|right|bottom|left))?(-(width|style|color))?$/.test(prop) ||
     /^border(-(top|bottom)-(left|right))?-radius$/.test(prop) ||
@@ -97,7 +51,7 @@ const SUMMARIES: Readonly<Record<string, (value: string) => string>> = {
   transition: (v) => count(commas(v).length, "transition"),
   animation: (v) => count(commas(v).length, "animation"),
   "grid-template-areas": () => "Named areas",
-  "grid-template-rows": (v) => count(v.split(/\s+(?![^(]*\))/).length, "row"),
+  "grid-template-rows": (v) => count(parts(v).length, "row"),
   columns: (v) => `${v}`,
 };
 

@@ -9,6 +9,9 @@ export function opacityPercent(raw: string): number | null {
   return Math.round((m[2] ? n : n * 100) * 10) / 10;
 }
 
+/** Inline properties the Appearance section reads and writes. */
+export const APPEARANCE_PROPS = ["opacity", "mix-blend-mode", "cursor"] as const;
+
 /** A percentage as `opacity` writes it, from 0 to 1. */
 export function opacityValue(percent: number): string {
   return String(Math.round(Math.min(100, Math.max(0, percent)) * 10) / 1000);

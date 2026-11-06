@@ -1,4 +1,5 @@
 import type { TokenTable } from "@/design/replica";
+import { tokenOf } from "../design/editing/inspect";
 
 /** A token's value in `mode`, following whole-value `var(--x)` aliases, as the browser would. */
 export function resolveToken(
@@ -16,7 +17,7 @@ export function resolveToken(
 
 /** The token a whole-value `var(--x)` points at, like `--x`, or `undefined` for any other value. */
 export function aliasOf(value: string | undefined): string | undefined {
-  return value?.match(/^\s*var\(\s*(--[\w-]+)\s*\)\s*$/)?.[1];
+  return value === undefined ? undefined : (tokenOf(value) ?? undefined);
 }
 
 /** A token's name as people read it, without the leading `--`. */

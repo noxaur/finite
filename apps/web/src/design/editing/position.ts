@@ -1,3 +1,5 @@
+import { angle } from "./transform";
+
 /** How an element is positioned: in the flow, or moved by its insets. */
 export type PositionKind = "static" | "relative" | "absolute" | "fixed" | "sticky";
 
@@ -10,6 +12,9 @@ export const POSITIONS: ReadonlyArray<readonly [PositionKind, string]> = [
 ];
 
 const INSETS = ["inset", "top", "right", "bottom", "left"] as const;
+
+/** Inline properties the Position section reads and writes. */
+export const POSITION_PROPS = [...INSETS, "position", "z-index", "rotate"] as const;
 
 /** A computed or inline `position` as one of the kinds; `null` for anything else. */
 export function positionKindOf(raw: string | undefined): PositionKind | null {
@@ -44,13 +49,6 @@ export function positionStyles(
   return out;
 }
 
-const TURN: Readonly<Record<string, number>> = {
-  deg: 1,
-  turn: 360,
-  rad: 180 / Math.PI,
-  grad: 0.9,
-};
-
 /**
  * A `rotate` in degrees: `45deg` is 45, `0.25turn` is 90, `none` is 0.
  * `null` for a rotation about another axis, like `x 45deg`, which the
@@ -58,8 +56,5 @@ const TURN: Readonly<Record<string, number>> = {
  */
 export function degreesOf(raw: string): number | null {
   const v = raw.trim();
-  if (v === "none" || v === "0") return 0;
-  const m = v.match(/^(?:z\s+)?(-?\d*\.?\d+)(deg|turn|rad|grad)$/);
-  if (!m) return null;
-  return Math.round(parseFloat(m[1]!) * TURN[m[2]!]! * 100) / 100;
+  return v === "none" ? 0 : angle(v.replace(/^z\s+/i, ""));
 }

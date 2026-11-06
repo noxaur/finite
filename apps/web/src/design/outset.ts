@@ -1,3 +1,5 @@
+import { commas } from "./editing/lists";
+
 /** How far an element's strokes reach past its border box on each side, in CSS pixels. */
 export interface Outset {
   readonly top: number;
@@ -24,8 +26,7 @@ export function strokeOutset(
     const reach = (parseFloat(css.outlineWidth) || 0) + (parseFloat(css.outlineOffset) || 0);
     top = right = bottom = left = Math.max(0, reach);
   }
-  // Split the list on commas outside of color functions like rgb(…).
-  for (const shadow of css.boxShadow.split(/,(?![^(]*\))/)) {
+  for (const shadow of commas(css.boxShadow)) {
     if (/\binset\b/.test(shadow)) continue;
     const [x = 0, y = 0, blur = 0, spread = 0] = (shadow.match(/-?[\d.]+px/g) ?? []).map(
       parseFloat,
