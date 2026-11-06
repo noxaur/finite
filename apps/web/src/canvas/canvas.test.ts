@@ -212,8 +212,8 @@ describe("which frame a label sits over", () => {
   ];
 
   it("anchors the label place_frames writes above a frame to that frame's top", () => {
-    expect(labelAnchor({ x: 500, y: -120, width: 400 }, frames)).toBe(0);
-    expect(labelAnchor({ x: 0, y: 880, width: 400 }, frames)).toBe(1000);
+    expect(labelAnchor({ x: 500, y: -120, width: 400 }, frames)).toBe(frames[1]);
+    expect(labelAnchor({ x: 0, y: 880, width: 400 }, frames)).toBe(frames[2]);
   });
 
   it("leaves labels free when they're far above, below, or beside every frame", () => {

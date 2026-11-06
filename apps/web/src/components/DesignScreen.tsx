@@ -4,7 +4,7 @@ import * as stylex from "@stylexjs/stylex";
 import type { Canvas as CanvasDoc, InstallState, PreviewState, ThreadMeta } from "@finite/protocol";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { finite, findThread, useDesignState, useSettings } from "@/client/finite";
+import { finite, findThread, useClaudeStatus, useDesignState, useSettings } from "@/client/finite";
 import { UNTIL_OPENED } from "@/lib/threads";
 import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import { Button, IconButton } from "./Button";
@@ -16,7 +16,7 @@ import {
   TokensSection,
   useSelection,
 } from "@/canvas";
-import { selectionFor } from "@/lib/composer";
+import { runWith, selectionFor } from "@/lib/composer";
 import { ChatPanel } from "./ChatPanel";
 import { Composer, focusComposer, type Outgoing } from "./Composer";
 import { type LeftMode, LeftSidebar } from "./LeftSidebar";
@@ -56,6 +56,7 @@ export function DesignScreen({ id }: { id: string }) {
   const params = useSearchParams();
   const view = useDesignState(id);
   const settings = useSettings();
+  const claude = useClaudeStatus();
   const selection = useSelection();
   const [inspector, setInspector] = useState(false);
   const [history, setHistory] = useState(false);
@@ -154,9 +155,7 @@ export function DesignScreen({ id }: { id: string }) {
       text,
       attachments: [],
       selection: selectionFor(selection),
-      model: thread?.model ?? settings?.model ?? "",
-      effort: thread?.effort ?? settings?.effort,
-      fast: thread?.fast ?? settings?.fast ?? false,
+      ...runWith(claude?.models ?? [], settings ?? null, thread, null),
       mode: settings?.sendMode ?? "steer",
     };
   };

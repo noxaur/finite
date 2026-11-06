@@ -11,7 +11,9 @@ import { labelAnchor } from "./labelAnchor";
 /**
  * The agent's notes above the frames it made: a direction's title and why. People move them
  * (drag), edit them (double-click), and delete them (select, then Delete). A label that belongs
- * to a frame (see `labelAnchor`) sits by its bottom edge just over the frame's title.
+ * to a frame (see `labelAnchor`) keeps its screen size like the frame's title and sits by its
+ * bottom edge just over it, as wide as the frame looks; over a frame too narrow for it, only the
+ * title shows. A free label scales with the canvas.
  */
 export function TextLabels({ editor, state }: { editor: CanvasEditor; state: EditorState }) {
   const frames = editor.frames.map((f) => editor.boxOf(f));
@@ -21,21 +23,25 @@ export function TextLabels({ editor, state }: { editor: CanvasEditor; state: Edi
         const at = state.textOverrides[text.id] ?? text;
         const selected = state.selectedText === text.id;
         const editing = state.editingLabel === text.id;
-        const above = labelAnchor(text, frames);
+        const frame = labelAnchor(text, frames);
         // While dragged, an attached label moves by the drag from where it's drawn.
         const placed =
-          above === null
+          frame === null
             ? styles.label(at.x, at.y, text.width)
-            : styles.attached(at.x, above + at.y - text.y, text.width);
+            : styles.attached(at.x, frame.y + at.y - text.y, frame.width);
         return (
           <div
             key={text.id}
             data-text-id={editing ? undefined : text.id}
-            {...stylex.props(placed, selected && styles.selected)}
+            {...stylex.props(
+              placed,
+              selected && (frame === null ? styles.selected : styles.selectedAttached),
+            )}
           >
             {editing ? (
               <LabelEditor
                 text={text}
+                attached={frame !== null}
                 onDone={(next) => {
                   editor.editLabel(null);
                   if (next && (next.title !== text.title || next.body !== text.body)) {
@@ -45,8 +51,14 @@ export function TextLabels({ editor, state }: { editor: CanvasEditor; state: Edi
               />
             ) : (
               <>
-                <div {...stylex.props(styles.title)}>{text.title}</div>
-                {text.body && <div {...stylex.props(styles.body)}>{text.body}</div>}
+                <div {...stylex.props(styles.title, frame && styles.attachedTitle)}>
+                  {text.title}
+                </div>
+                {text.body && (
+                  <div {...stylex.props(styles.body, frame && styles.attachedBody)}>
+                    {text.body}
+                  </div>
+                )}
               </>
             )}
           </div>
@@ -58,9 +70,12 @@ export function TextLabels({ editor, state }: { editor: CanvasEditor; state: Edi
 
 function LabelEditor({
   text,
+  attached,
   onDone,
 }: {
   text: TextLabel;
+  /** Drawn at screen size, so its outline and type aren't scaled by the zoom. */
+  attached: boolean;
   onDone: (next: { title: string; body: string } | null) => void;
 }) {
   const [title, setTitle] = useState(text.title);
@@ -93,7 +108,12 @@ function LabelEditor({
         aria-label="Title"
         onChange={(e) => setTitle(e.target.value)}
         onKeyDown={keys}
-        {...stylex.props(styles.field, styles.title)}
+        {...stylex.props(
+          styles.field,
+          styles.title,
+          attached && styles.attachedField,
+          attached && styles.attachedTitle,
+        )}
       />
       <textarea
         value={body}
@@ -101,7 +121,12 @@ function LabelEditor({
         rows={3}
         onChange={(e) => setBody(e.target.value)}
         onKeyDown={keys}
-        {...stylex.props(styles.field, styles.body)}
+        {...stylex.props(
+          styles.field,
+          styles.body,
+          attached && styles.attachedField,
+          attached && styles.attachedFieldBody,
+        )}
       />
     </div>
   );
@@ -189,13 +214,18 @@ const styles = stylex.create({
     fontFamily: fonts.sans,
     cursor: "default",
   }),
-  /** `bottom` is the frame's top: the label ends a gap above the frame's title (15px + 6px). */
-  attached: (x: number, bottom: number, width: number) => ({
+  /**
+   * `top` is the frame's top. Scaled back to screen size from there, the label ends a gap above
+   * the frame's title (15px + 6px), as wide as the frame is on screen, within limits.
+   */
+  attached: (x: number, top: number, frameWidth: number) => ({
     position: "absolute",
     left: x,
-    top: bottom,
-    width,
-    transform: "translateY(calc(-100% - 27px * var(--inv-zoom, 1)))",
+    top,
+    width: `clamp(96px, calc(${frameWidth}px / var(--inv-zoom, 1)), 560px)`,
+    transform: "scale(var(--inv-zoom, 1)) translateY(calc(-100% - 27px))",
+    transformOrigin: "0 0",
+    containerType: "inline-size",
     padding: space.xs,
     borderRadius: radii.sm,
     color: colors.text,
@@ -205,8 +235,17 @@ const styles = stylex.create({
   selected: {
     outline: `calc(1.5px * var(--inv-zoom, 1)) solid ${colors.hover}`,
   },
+  selectedAttached: { outline: `1.5px solid ${colors.hover}` },
   title: { fontSize: 20, lineHeight: "26px", fontWeight: 600 },
   body: { marginTop: space.xs, fontSize: 14, lineHeight: "20px", color: colors.muted },
+  attachedTitle: { fontSize: 13, lineHeight: "17px" },
+  /** Over a frame narrower than 140px on screen (less the padding), the body would wrap a word a line. */
+  attachedBody: {
+    marginTop: space.px,
+    fontSize: 12,
+    lineHeight: "16px",
+    display: { default: "block", "@container (max-width: 133px)": "none" },
+  },
   editor: { display: "flex", flexDirection: "column", gap: space.xs },
   field: {
     width: "100%",
@@ -218,6 +257,8 @@ const styles = stylex.create({
     resize: "none",
     outline: `calc(1.5px * var(--inv-zoom, 1)) solid ${colors.hover}`,
   },
+  attachedField: { outline: `1.5px solid ${colors.hover}` },
+  attachedFieldBody: { fontSize: 12, lineHeight: "16px" },
   inline: {
     position: "absolute",
     boxSizing: "border-box",

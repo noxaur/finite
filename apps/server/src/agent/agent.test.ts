@@ -19,7 +19,7 @@ import type {
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
-import { createLocks } from "../source/files.ts";
+import { createFileLocks } from "../source/files.ts";
 import { openDesign, type OpenedDesign } from "../store/open.ts";
 import { createEventMapper } from "./events.ts";
 import { BRAND_BOARD } from "../store/brand.ts";
@@ -420,6 +420,23 @@ describe("agents", () => {
     expect(m.running).toBe(true);
   });
 
+  it("runs the queue's next turn with the model the queued message was sent with", async () => {
+    const thread = await newThread("first");
+    const q = sdk.queries[0]!;
+    await agents.send(
+      open,
+      thread.id,
+      turn("second", { model: "sonnet", effort: "high" }),
+      "queue",
+    );
+    expect(await meta(thread.id)).toMatchObject({ model: "sonnet", effort: "high" });
+    expect(q.setModel).not.toHaveBeenCalled();
+    q.emit(result());
+    await vi.waitFor(() => expect(q.sent).toHaveLength(2));
+    expect(q.setModel).toHaveBeenCalledWith("sonnet");
+    expect(q.applyFlagSettings).toHaveBeenCalledWith({ effortLevel: "high", fastMode: false });
+  });
+
   it("steers into the running turn right away", async () => {
     const thread = await newThread("first");
     const q = sdk.queries[0]!;
@@ -568,7 +585,7 @@ describe("agents", () => {
 
   it("holds a file's lock from a write's PreToolUse hook to its PostToolUse hook", async () => {
     await agents.close();
-    const locks = createLocks();
+    const locks = createFileLocks();
     agents = createAgents({
       store: {} as Store,
       previews,
@@ -632,6 +649,147 @@ describe("agents", () => {
     expect(sdk.queries).toHaveLength(2);
     await agents.stopDesign("other");
     expect(sdk.queries[1]!.closed).toBe(false);
+  });
+
+  it("stops a design while its session is recording a result, without deadlocking", async () => {
+    // The session's result pauses in appendEvent; its turn then needs the thread's mutex.
+    let gate!: () => void;
+    let appending!: () => void;
+    const paused = new Promise<void>((r) => (appending = r));
+    const slow: OpenDesign = {
+      ...open,
+      async appendEvent(threadId, event) {
+        if (event.type === "result") {
+          appending();
+          await new Promise<void>((r) => (gate = r));
+        }
+        return open.appendEvent(threadId, event);
+      },
+    };
+    const t = turn("first");
+    const thread = await startThread(open, {}, t);
+    await agents.send(slow, thread.id, t, "steer");
+    const q = sdk.queries[0]!;
+    q.emit(result());
+    await paused;
+    let stopped = false;
+    const stopping = agents.stopDesign("d1").then(() => (stopped = true));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(q.closed).toBe(true);
+    gate();
+    await vi.waitFor(() => expect(stopped).toBe(true), { timeout: 500 });
+    await stopping;
+  });
+
+  it("stops a session that was starting when the design's removal began", async () => {
+    await agents.close();
+    let found!: (bin: string) => void;
+    agents = createAgents({
+      store: {} as Store,
+      previews,
+      source,
+      query: sdk.query,
+      claudePath: () => new Promise((r) => (found = r)),
+      idleMs: 50,
+    });
+    const thread = await startThread(open, {}, turn("first"));
+    const sending = agents.send(open, thread.id, turn("first"), "steer");
+    await vi.waitFor(() => expect(found).toBeDefined());
+    let stopped = false;
+    const stopping = agents.stopDesign("d1").then(() => (stopped = true));
+    // A message sent while the design is going is refused.
+    const other = await startThread(open, {}, turn("late"));
+    await expect(agents.send(open, other.id, turn("late"), "steer")).rejects.toThrow(
+      /being removed/,
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    expect(stopped).toBe(false);
+    found("/bin/claude");
+    await sending;
+    await stopping;
+    expect(sdk.queries).toHaveLength(1);
+    expect(sdk.queries[0]!.closed).toBe(true);
+    // Once it's over, the design takes messages again (a reconnected folder keeps its id).
+    const first = found;
+    const again = agents.send(open, thread.id, turn("again"), "steer");
+    await vi.waitFor(() => expect(found).not.toBe(first));
+    found("/bin/claude");
+    await again;
+    expect(sdk.queries).toHaveLength(2);
+  });
+
+  it("locks a write through a symlink under the real file's lock", async () => {
+    await agents.close();
+    const locks = createFileLocks();
+    agents = createAgents({
+      store: {} as Store,
+      previews,
+      source,
+      query: sdk.query,
+      claudePath: async () => "/bin/claude",
+      locks,
+    });
+    await mkdir(path.join(root, ".finite/real"), { recursive: true });
+    await writeFile(path.join(root, ".finite/real/A.tsx"), "x");
+    await symlink(path.join(root, ".finite/real"), path.join(root, ".finite/alias"));
+    await newThread("write");
+    const pre = sdk.queries[0]!.options.hooks!.PreToolUse![0]!.hooks[0]!;
+    await pre(
+      {
+        hook_event_name: "PreToolUse",
+        tool_name: "Write",
+        tool_input: { file_path: ".finite/alias/A.tsx" },
+        tool_use_id: "t1",
+      } as never,
+      "t1",
+      { signal: new AbortController().signal },
+    );
+    let got = false;
+    void locks.acquire([path.join(root, ".finite/real/A.tsx")]).then((release) => {
+      got = true;
+      release();
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(got).toBe(false);
+    await agents.close();
+    await vi.waitFor(() => expect(got).toBe(true));
+  });
+
+  it("lets go of a lock a write's hook was still waiting for when the session shut", async () => {
+    await agents.close();
+    const locks = createFileLocks();
+    agents = createAgents({
+      store: {} as Store,
+      previews,
+      source,
+      query: sdk.query,
+      claudePath: async () => "/bin/claude",
+      locks,
+      writeLockMs: 60_000,
+    });
+    await newThread("write");
+    const file = path.join(root, ".finite/boards/c1/A.tsx");
+    const editor = await locks.acquire([file]);
+    const pre = sdk.queries[0]!.options.hooks!.PreToolUse![0]!.hooks[0]!;
+    const waiting = pre(
+      {
+        hook_event_name: "PreToolUse",
+        tool_name: "Write",
+        tool_input: { file_path: file },
+        tool_use_id: "t1",
+      } as never,
+      "t1",
+      { signal: new AbortController().signal },
+    );
+    await agents.stopDesign("d1");
+    editor();
+    await waiting;
+    let got = false;
+    void locks.acquire([file]).then((release) => {
+      got = true;
+      release();
+    });
+    await vi.waitFor(() => expect(got).toBe(true), { timeout: 200 });
   });
 
   it("revives a snoozed or settled thread when messaged", async () => {

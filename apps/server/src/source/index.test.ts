@@ -1,9 +1,9 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Actor, Canvas, Design, OpenDesign, SourceEdit, Styling } from "@finite/protocol";
 import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
-import { createLocks, rev } from "./files.ts";
+import { createFileLocks, lockKey, rev } from "./files.ts";
 import { createSourceEditor } from "./index.ts";
 
 const ana: Actor = { kind: "person", id: "ana", name: "Ana" };
@@ -131,7 +131,7 @@ describe("SourceEditor.apply", () => {
 
   it("waits for a writer holding the file's lock, then refuses the edit as stale", async () => {
     await put("src/App.tsx", APP);
-    const locks = createLocks();
+    const locks = createFileLocks();
     const source = createSourceEditor({ locks });
     const e = await edit("src/App.tsx", {
       kind: "text",
@@ -151,6 +151,38 @@ describe("SourceEditor.apply", () => {
     release();
     await expect(applying).rejects.toMatchObject({ code: "stale" });
     expect(await get("src/App.tsx")).toBe(agentSave);
+  });
+
+  it("locks a file under one key however it's spelled: through a symlink, or not made yet", async () => {
+    await put(".finite/real/A.tsx", APP);
+    await symlink(path.join(root, ".finite/real"), path.join(root, ".finite/alias"));
+    const real = lockKey(path.join(root, ".finite/real/A.tsx"));
+    expect(lockKey(path.join(root, ".finite/alias/A.tsx"))).toBe(real);
+    expect(lockKey(path.join(root, ".finite/alias/new/B.tsx"))).toBe(
+      lockKey(path.join(root, ".finite/real/new/B.tsx")),
+    );
+    expect(lockKey(`${path.join(root, ".finite/alias")}${path.sep}`)).toBe(
+      `${lockKey(path.join(root, ".finite/real"))}${path.sep}`,
+    );
+
+    // An agent's Write through the link holds the lock a SourceEditor edit of the real path takes.
+    const locks = createFileLocks();
+    const source = createSourceEditor({ locks });
+    const e = await edit(".finite/real/A.tsx", {
+      kind: "text",
+      loc: ".finite/real/A.tsx:7:6",
+      tag: "p",
+      text: "Human",
+    });
+    const release = await locks.acquire([path.join(root, ".finite/alias/A.tsx")]);
+    let settled = false;
+    const applying = source.apply(open(design()), [e], ana, proto).finally(() => (settled = true));
+    applying.catch(() => {});
+    await new Promise((r) => setTimeout(r, 30));
+    expect(settled).toBe(false);
+    release();
+    await applying;
+    expect(await get(".finite/real/A.tsx")).toContain("<p>Human</p>");
   });
 
   it("refuses production files on a prototype canvas and edits board files", async () => {

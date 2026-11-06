@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { access, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Refused } from "@finite/protocol";
@@ -51,10 +52,33 @@ export async function writeAtomic(abs: string, contents: string): Promise<void> 
 }
 
 /**
- * A mutex per absolute path. `locked` takes every lock in sorted order, so two callers can't
- * deadlock; `acquire` takes them and hands back the release, for a lock held across callbacks.
+ * The one spelling of a path every writer locks under: the realpath of the file, or for a file
+ * that doesn't exist yet, the realpath of its nearest existing folder plus the rest. A trailing
+ * separator (a folder's lock) is kept.
  */
-export function createLocks() {
+export function lockKey(abs: string): string {
+  const trailing = abs.length > 1 && abs.endsWith(path.sep) ? path.sep : "";
+  const rest: string[] = [];
+  let dir = path.resolve(abs);
+  while (true) {
+    try {
+      const real = path.join(realpathSync(dir), ...rest);
+      return real === path.sep ? real : real + trailing;
+    } catch {
+      const parent = path.dirname(dir);
+      if (parent === dir) return abs;
+      rest.unshift(path.basename(dir));
+      dir = parent;
+    }
+  }
+}
+
+/**
+ * A mutex per key. `locked` takes every lock in sorted order, so two callers can't deadlock;
+ * `acquire` takes them and hands back the release, for a lock held across callbacks. `canon`
+ * maps each key to the one it's locked under.
+ */
+export function createLocks(canon: (key: string) => string = (key) => key) {
   const tails = new Map<string, Promise<void>>();
 
   async function lockOne(key: string): Promise<() => void> {
@@ -72,7 +96,7 @@ export function createLocks() {
 
   async function acquire(paths: string[]): Promise<() => void> {
     const releases: (() => void)[] = [];
-    for (const key of [...new Set(paths)].sort()) releases.push(await lockOne(key));
+    for (const key of [...new Set(paths.map(canon))].sort()) releases.push(await lockOne(key));
     let released = false;
     return () => {
       if (released) return;
@@ -95,11 +119,16 @@ export function createLocks() {
 
 export type Locked = ReturnType<typeof createLocks>;
 
+/** Locks keyed by absolute path, so a file reached through a symlink takes the same lock. */
+export function createFileLocks(): Locked {
+  return createLocks(lockKey);
+}
+
 /**
  * The process's file locks, shared by every writer of a design's source: the SourceEditor and the
- * agents' Write/Edit tools. Keys are absolute paths spelled under `Design.root`.
+ * agents' Write/Edit tools.
  */
-export const fileLocks: Locked = createLocks();
+export const fileLocks: Locked = createFileLocks();
 
 /** Picks `dir/name.ext`, or `dir/name-2.ext`, … if that's taken. */
 export async function freeName(abs: string): Promise<string> {

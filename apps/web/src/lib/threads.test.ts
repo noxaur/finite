@@ -1,6 +1,6 @@
 import type { ThreadMeta } from "@finite/protocol";
 import { describe, expect, it } from "vite-plus/test";
-import { effortFor, explorePrompt, sendModeFor } from "./composer";
+import { effortFor, explorePrompt, runWith, sendModeFor } from "./composer";
 import { groupThreads, shortAgo, snoozeLeft, snoozeUntil, UNTIL_OPENED } from "./threads";
 
 const NOW = new Date(2026, 10, 6, 15, 0).getTime(); // a Friday
@@ -111,5 +111,49 @@ describe("composer send mode", () => {
     expect(effortFor(models, "a", "max")).toBe("medium");
     expect(effortFor(models, "a", "low")).toBe("low");
     expect(effortFor(models, "b", "high")).toBe("high");
+  });
+});
+
+describe("what the composer runs with", () => {
+  const models = [
+    {
+      value: "opus",
+      displayName: "Opus 5.5",
+      description: "",
+      supportedEffortLevels: ["low" as const, "medium" as const, "high" as const],
+      supportsFastMode: true,
+    },
+    {
+      value: "haiku",
+      displayName: "Haiku 5.5",
+      description: "",
+      supportedEffortLevels: ["low" as const, "medium" as const],
+    },
+  ];
+  const settings = { model: "opus", effort: "medium" as const, fast: true };
+  const haiku = { id: "t1", model: "haiku", effort: "low" as const, fast: false };
+
+  it("shows an open thread's own settings, not the defaults", () => {
+    expect(runWith(models, settings, haiku, null)).toEqual({
+      model: "haiku",
+      effort: "low",
+      fast: false,
+    });
+  });
+
+  it("uses the defaults from Settings for a new thread", () => {
+    expect(runWith(models, settings, null, null)).toEqual(settings);
+  });
+
+  it("keeps a pick to the thread it was made on", () => {
+    const pick = { threadId: "t1", model: "opus", effort: "high" as const, fast: false };
+    expect(runWith(models, settings, haiku, pick)).toEqual({
+      model: "opus",
+      effort: "high",
+      fast: false,
+    });
+    expect(runWith(models, settings, { ...haiku, id: "t2" }, pick).model).toBe("haiku");
+    expect(runWith(models, settings, null, pick)).toEqual(settings);
+    expect(runWith(models, settings, null, { ...pick, threadId: null }).effort).toBe("high");
   });
 });

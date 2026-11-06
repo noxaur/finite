@@ -11,17 +11,17 @@ interface Box {
 export const ATTACH_RANGE = 180;
 
 /**
- * The top of the frame a label belongs to, or null for a free label. A label belongs to the
- * nearest frame under it that it overlaps sideways, when its top is within `ATTACH_RANGE` above
- * that frame. Such a label is drawn by its bottom edge just over the frame's title, so a long body
- * grows upward and never covers the frame or its title.
+ * The frame a label belongs to, or null for a free label. A label belongs to the nearest frame
+ * under it that it overlaps sideways, when its top is within `ATTACH_RANGE` above that frame.
+ * Such a label is drawn at a constant screen size like the frame's title, by its bottom edge just
+ * over that title, so a long body grows upward and never covers the frame or its title.
  */
-export function labelAnchor(label: Box, frames: ReadonlyArray<Box>): number | null {
-  let best: number | null = null;
+export function labelAnchor<B extends Box>(label: Box, frames: ReadonlyArray<B>): B | null {
+  let best: B | null = null;
   for (const f of frames) {
     const overlaps = label.x < f.x + f.width && f.x < label.x + label.width;
     const gap = f.y - label.y;
-    if (overlaps && gap > 0 && gap <= ATTACH_RANGE && (best === null || f.y < best)) best = f.y;
+    if (overlaps && gap > 0 && gap <= ATTACH_RANGE && (best === null || f.y < best.y)) best = f;
   }
   return best;
 }

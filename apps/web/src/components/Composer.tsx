@@ -9,8 +9,10 @@ import {
   effortName,
   effortShort,
   findModel,
+  type ModelChoice,
   pickableModels,
   modelName,
+  runWith,
   sendLabel,
   sendModeFor,
 } from "@/lib/composer";
@@ -74,28 +76,16 @@ export function Composer({
   const [open, setOpen] = useState(!pill);
   const [sending, setSending] = useState(false);
   const [picker, setPicker] = useState(false);
-  const [choice, setChoice] = useState<{
-    model: string;
-    effort: EffortLevel | undefined;
-    fast: boolean;
-  } | null>(null);
+  const [choice, setChoice] = useState<ModelChoice | null>(null);
   const box = useRef<HTMLTextAreaElement>(null);
   const card = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => setOpen(!pill), [pill]);
 
-  // The thread's model, or the default, until the person picks one.
+  // The open thread's settings (a new thread's: the defaults), until the person picks others.
   const models = claude?.models ?? [];
-  const model = choice?.model ?? thread?.model ?? settings?.model ?? models[0]?.value ?? "";
-  const effort = effortFor(
-    models,
-    model,
-    choice ? choice.effort : (thread?.effort ?? settings?.effort),
-  );
-  const info = findModel(models, model);
-  const fast =
-    (choice?.fast ?? thread?.fast ?? settings?.fast ?? false) && !!info?.supportsFastMode;
+  const { model, effort, fast } = runWith(models, settings, thread, choice);
   const running = !!thread?.running;
   const defaultMode = settings?.sendMode ?? "steer";
   const blocked = claude !== null && (!claude.installed || !claude.loggedIn);
@@ -175,6 +165,8 @@ export function Composer({
       setText("");
       setFiles([]);
       selectionStore.set([]);
+      // The thread now runs with what was sent; a new thread starts from the defaults again.
+      setChoice(null);
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e));
     } finally {
@@ -326,7 +318,7 @@ export function Composer({
                 model={model}
                 effort={effort}
                 fast={fast}
-                onPick={(next) => setChoice(next)}
+                onPick={(next) => setChoice({ ...next, threadId: thread?.id ?? null })}
                 onClose={() => setPicker(false)}
               />
             )}

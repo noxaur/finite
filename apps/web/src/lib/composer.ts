@@ -1,4 +1,4 @@
-import type { Loc, ModelInfo, Selection, SendMode, Settings } from "@finite/protocol";
+import type { Loc, ModelInfo, Selection, SendMode, Settings, ThreadMeta } from "@finite/protocol";
 
 /**
  * What Enter does in the composer. An idle thread just starts a turn ("steer" and "queue" are the
@@ -83,6 +83,44 @@ export function effortFor(
   const levels = findModel(models, value)?.supportedEffortLevels;
   if (!levels || effort === undefined) return levels ? undefined : effort;
   return levels.includes(effort) ? effort : levels.includes("medium") ? "medium" : levels[0];
+}
+
+/** What a message runs with: Claude's model, its reasoning effort and fast mode. */
+export interface RunWith {
+  readonly model: string;
+  readonly effort: Settings["effort"] | undefined;
+  readonly fast: boolean;
+}
+
+/** A pick in the composer's model menu, for the thread open when it was made (null: a new one). */
+export interface ModelChoice extends RunWith {
+  readonly threadId: string | null;
+}
+
+/**
+ * What the composer shows and sends: the person's pick for this thread, else the open thread's own
+ * settings, else the defaults from Settings for a new thread. A pick made on another thread
+ * doesn't carry over.
+ */
+export function runWith(
+  models: ReadonlyArray<ModelInfo>,
+  settings: Pick<Settings, "model" | "effort" | "fast"> | null,
+  thread: Pick<ThreadMeta, "id" | "model" | "effort" | "fast"> | null,
+  choice: ModelChoice | null,
+): RunWith {
+  const picked = choice && choice.threadId === (thread?.id ?? null) ? choice : null;
+  const base: RunWith = picked ??
+    (thread && { model: thread.model, effort: thread.effort, fast: thread.fast }) ?? {
+      model: settings?.model ?? models[0]?.value ?? "",
+      effort: settings?.effort,
+      fast: settings?.fast ?? false,
+    };
+  const model = base.model || settings?.model || models[0]?.value || "";
+  return {
+    model,
+    effort: effortFor(models, model, base.effort),
+    fast: base.fast && !!findModel(models, model)?.supportsFastMode,
+  };
 }
 
 /** A picked frame or element, as the canvas's selection store holds it. */

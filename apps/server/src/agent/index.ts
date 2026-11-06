@@ -17,6 +17,7 @@ import {
   type Previews,
   Refused,
   type Selection,
+  type SendMode,
   type SourceEditor,
   type Store,
   type ThreadMeta,
@@ -26,7 +27,7 @@ import { createLocks, fileLocks, type Locked } from "../source/files.ts";
 import { createEventMapper } from "./events.ts";
 import { FINITE_INSTRUCTIONS } from "./instructions.ts";
 import { userMessage } from "./message.ts";
-import { policy, underRoot } from "./policy.ts";
+import { policy } from "./policy.ts";
 import { createScreenshots, type Screenshots } from "./screenshot.ts";
 import { createStatus, findClaude, NOT_INSTALLED } from "./status.ts";
 import { boardDir, canvasServer, LABEL_OFFSET, layoutRow } from "./tools.ts";
@@ -239,6 +240,15 @@ export function createAgents(options: AgentsOptions): Agents {
    */
   const serial = createLocks();
   const inThread = <T>(threadId: string, fn: () => Promise<T>) => serial([threadId], fn);
+  /** Sends not yet finished, by thread: their design and how many. A send may be starting a session. */
+  const sending = new Map<string, { designId: string; count: number }>();
+  /** Designs whose sessions `stopDesign` is ending; they take no new messages meanwhile. */
+  const removing = new Map<string, number>();
+  const refuseRemoving = (designId: string) => {
+    if (removing.has(designId)) {
+      throw new Refused("This design is being removed, so it takes no new messages.", "invalid");
+    }
+  };
 
   async function meta(open: OpenDesign, threadId: string): Promise<ThreadMeta> {
     const found = (await open.threads()).find((t) => t.id === threadId);
@@ -281,13 +291,13 @@ export function createAgents(options: AgentsOptions): Agents {
     const writeFence: HookCallbackMatcher = {
       matcher: WRITE_TOOLS,
       hooks: [
-        async (hook) => {
+        async (hook, _id, { signal }) => {
           if (hook.hook_event_name !== "PreToolUse") return {};
           const toolInput = (hook.tool_input ?? {}) as Record<string, unknown>;
           const decision = fence(hook.tool_name, toolInput);
           if (decision.behavior === "allow") {
             const file = toolInput.file_path ?? toolInput.notebook_path;
-            if (typeof file === "string") await holdLock(live, hook.tool_use_id, file);
+            if (typeof file === "string") await holdLock(live, hook.tool_use_id, file, signal);
             return {};
           }
           return {
@@ -309,9 +319,15 @@ export function createAgents(options: AgentsOptions): Agents {
         },
       ],
     };
-    async function holdLock(live: Live, toolUseId: string, file: string): Promise<void> {
-      const abs = underRoot({ root, realRoot }, path.resolve(root, file));
-      const release = await locks.acquire([abs]);
+    async function holdLock(
+      live: Live,
+      toolUseId: string,
+      file: string,
+      signal: AbortSignal,
+    ): Promise<void> {
+      const release = await locks.acquire([path.resolve(root, file)]);
+      // The session shut (or the hook was cancelled) while this waited: nothing will report it done.
+      if (live.closing || signal.aborted) return release();
       const timer = setTimeout(() => done(), writeLockMs);
       timer.unref?.();
       const done = () => {
@@ -397,6 +413,7 @@ export function createAgents(options: AgentsOptions): Agents {
           const queuedTurns = message.queued_turn_count ?? 0;
           const more = queuedTurns > 0;
           await inThread(threadId, async () => {
+            if (live.closing) return;
             // Claude Code counted those steers itself.
             live.steers = Math.max(0, live.steers - queuedTurns);
             if (live.steers > 0 && !live.interrupted && !more) return holdForSteer(live, ok);
@@ -465,8 +482,9 @@ export function createAgents(options: AgentsOptions): Agents {
     live.prodWrite = false;
     live.interrupted = false;
     if (more) return;
-    const next = interrupted ? undefined : (await meta(open, threadId)).queued[0];
-    if (next) {
+    const thread = interrupted ? undefined : await meta(open, threadId);
+    const next = thread?.queued[0];
+    if (thread && next) {
       // The thread isn't done while queued messages remain, so it doesn't settle yet.
       await open.updateThread(threadId, (m) => ({
         ...m,
@@ -477,9 +495,10 @@ export function createAgents(options: AgentsOptions): Agents {
         attachments: next.attachments,
         ...(next.selection ? { selection: next.selection } : {}),
         by: next.by,
-        model: live.model,
-        fast: live.fast,
-        ...effort(live.effort),
+        // What the thread was last asked to run with, queued messages included.
+        model: thread.model,
+        fast: thread.fast,
+        ...effort(thread.effort),
       });
       return;
     }
@@ -531,14 +550,10 @@ export function createAgents(options: AgentsOptions): Agents {
     live.running = true;
     await open.updateThread(threadId, (m) => {
       const next: ThreadMeta = {
-        ...m,
+        ...withRunSettings(m, turn),
         running: true,
-        model: turn.model,
-        fast: turn.fast,
         updatedAt: Date.now(),
       };
-      if (turn.effort === undefined) delete next.effort;
-      else next.effort = turn.effort;
       // Messaging a snoozed or settled thread revives it.
       delete next.snoozedUntil;
       delete next.settledAt;
@@ -553,6 +568,37 @@ export function createAgents(options: AgentsOptions): Agents {
       at: Date.now(),
     });
     live.input.push(priority ? { ...message, priority } : message);
+  }
+
+  /** One send, inside the thread's turn: queue it, steer it in, or start a session for it. */
+  async function sendNow(open: OpenDesign, threadId: string, turn: Turn, mode: SendMode) {
+    refuseRemoving(open.design.id);
+    const thread = await meta(open, threadId);
+    const live = lives.get(threadId);
+    if (live?.running && mode === "queue") {
+      // A model picked for a queued message is the thread's from its next turn on.
+      await open.updateThread(threadId, (m) => ({
+        ...withRunSettings(m, turn),
+        queued: [
+          ...m.queued,
+          {
+            id: randomUUID(),
+            text: turn.text,
+            attachments: turn.attachments,
+            ...(turn.selection ? { selection: turn.selection } : {}),
+            by: turn.by,
+          },
+        ],
+        updatedAt: Date.now(),
+      }));
+      return;
+    }
+    if (live?.running) {
+      live.steers++;
+      return deliver(live, turn, "now");
+    }
+    if (live) return deliver(live, turn);
+    return deliver(await start(open, thread, turn), turn);
   }
 
   async function spawn(
@@ -576,34 +622,18 @@ export function createAgents(options: AgentsOptions): Agents {
   }
 
   const agents: Agents = {
-    send: (open, threadId, turn, mode) =>
-      inThread(threadId, async () => {
-        const thread = await meta(open, threadId);
-        const live = lives.get(threadId);
-        if (live?.running && mode === "queue") {
-          await open.updateThread(threadId, (m) => ({
-            ...m,
-            queued: [
-              ...m.queued,
-              {
-                id: randomUUID(),
-                text: turn.text,
-                attachments: turn.attachments,
-                ...(turn.selection ? { selection: turn.selection } : {}),
-                by: turn.by,
-              },
-            ],
-            updatedAt: Date.now(),
-          }));
-          return;
-        }
-        if (live?.running) {
-          live.steers++;
-          return deliver(live, turn, "now");
-        }
-        if (live) return deliver(live, turn);
-        return deliver(await start(open, thread, turn), turn);
-      }),
+    async send(open, threadId, turn, mode) {
+      const designId = open.design.id;
+      refuseRemoving(designId);
+      const entry = sending.get(threadId) ?? { designId, count: 0 };
+      entry.count++;
+      sending.set(threadId, entry);
+      try {
+        return await inThread(threadId, () => sendNow(open, threadId, turn, mode));
+      } finally {
+        if (--entry.count === 0 && sending.get(threadId) === entry) sending.delete(threadId);
+      }
+    },
 
     interrupt: (open, threadId) =>
       inThread(threadId, async () => {
@@ -645,19 +675,32 @@ export function createAgents(options: AgentsOptions): Agents {
       }),
 
     async stopDesign(designId) {
-      const threadIds = [...lives.values()]
-        .filter((live) => live.open.design.id === designId)
-        .map((live) => live.threadId);
-      await Promise.all(
-        threadIds.map((threadId) =>
-          inThread(threadId, async () => {
-            const live = lives.get(threadId);
-            if (!live) return;
-            shut(live);
-            await live.done;
-          }),
-        ),
-      );
+      removing.set(designId, (removing.get(designId) ?? 0) + 1);
+      try {
+        // Sessions running, and sends that may be starting one (they finish before our turn).
+        const threadIds = new Set([
+          ...[...lives.values()]
+            .filter((l) => l.open.design.id === designId)
+            .map((l) => l.threadId),
+          ...[...sending].filter(([, s]) => s.designId === designId).map(([id]) => id),
+        ]);
+        const stopped = await Promise.all(
+          [...threadIds].map((threadId) =>
+            inThread(threadId, async () => {
+              const live = lives.get(threadId);
+              if (!live || live.open.design.id !== designId) return undefined;
+              shut(live);
+              // Waited on outside the thread's turn: the session's last result takes it to finish.
+              return { done: live.done };
+            }),
+          ),
+        );
+        await Promise.all(stopped.flatMap((s) => (s ? [s.done] : [])));
+      } finally {
+        const n = removing.get(designId)! - 1;
+        if (n === 0) removing.delete(designId);
+        else removing.set(designId, n);
+      }
     },
 
     status,
@@ -691,6 +734,14 @@ function realpath(dir: string): string {
   } catch {
     return dir;
   }
+}
+
+/** The thread, set to run with the turn's model, effort and fast mode. */
+function withRunSettings(m: ThreadMeta, turn: Turn): ThreadMeta {
+  const next: ThreadMeta = { ...m, model: turn.model, fast: turn.fast };
+  if (turn.effort === undefined) delete next.effort;
+  else next.effort = turn.effort;
+  return next;
 }
 
 function effort(level: Turn["effort"]): Pick<Turn, "effort"> {
