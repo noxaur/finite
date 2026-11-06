@@ -161,15 +161,33 @@ fn collect_instances<'a>(
     }
 }
 
-/// Writes `scope` of `revision` as `format`. Instances of components are
-/// written expanded, as the elements they show: the file has no component
-/// for `data-instance-of` or a bundle to point at, so a codec reading the
-/// raw document would write an instance with no content. The export says so
-/// in a [`Feature::Instance`] diagnostic.
+/// Writes `scope` of `revision` as `format`, with the default router.
 pub fn export(format: Format, revision: &Revision<'_>, scope: &Scope) -> Result<Exported, Error> {
+    export_with(format, revision, scope, None)
+}
+
+/// Writes `scope` of `revision` as `format`, routing an app export with
+/// `router`. A router belongs to the app format, so asking any other format
+/// for one is refused. Instances of components are written expanded, as the
+/// elements they show: the file has no component for `data-instance-of` or a
+/// bundle to point at, so a codec reading the raw document would write an
+/// instance with no content. The export says so in a [`Feature::Instance`]
+/// diagnostic.
+pub fn export_with(
+    format: Format,
+    revision: &Revision<'_>,
+    scope: &Scope,
+    router: Option<app::RouterKind>,
+) -> Result<Exported, Error> {
+    if router.is_some() && format != Format::App {
+        return Err(Error(format!(
+            "\"router\" only applies to the app format; {} has no router",
+            format.codec().name()
+        )));
+    }
     let doc = revision.doc;
     if !doc.has_instances() {
-        return format.codec().write(revision, scope);
+        return write(format, revision, scope, router);
     }
     let mut instances = Vec::new();
     for board in revision.artboards(scope)? {
@@ -189,7 +207,7 @@ pub fn export(format: Format, revision: &Revision<'_>, scope: &Scope) -> Result<
         blobs: revision.blobs,
         measure: revision.measure,
     };
-    let mut exported = format.codec().write(&expanded, scope)?;
+    let mut exported = write(format, &expanded, scope, router)?;
     if !instances.is_empty() {
         let mut names: Vec<String> = instances
             .iter()
@@ -219,6 +237,19 @@ pub fn export(format: Format, revision: &Revision<'_>, scope: &Scope) -> Result<
         });
     }
     Ok(exported)
+}
+
+/// Runs the codec for `format`, or the app with `router` when it has one.
+fn write(
+    format: Format,
+    revision: &Revision<'_>,
+    scope: &Scope,
+    router: Option<app::RouterKind>,
+) -> Result<Exported, Error> {
+    match format {
+        Format::App => app::write_with(revision, scope, router.unwrap_or_default().router()),
+        _ => format.codec().write(revision, scope),
+    }
 }
 
 /// Reads blobs for an export. The server's store implements it.
@@ -837,6 +868,45 @@ mod tests {
         };
         let exported = export(Format::Html, &revision, &Scope::Artboard("a".into())).unwrap();
         assert!(exported.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn an_app_export_routes_with_the_router_it_was_given() {
+        let doc = with_instance();
+        let revision = Revision {
+            name: "App",
+            doc: &doc,
+            imports: &[],
+            blobs: &NoBlobs,
+            measure: &scene::NoMeasure,
+        };
+        let exported = export_with(
+            Format::App,
+            &revision,
+            &Scope::Design,
+            Some(app::RouterKind::TanStackRouter),
+        )
+        .unwrap();
+        let text = String::from_utf8(exported.bytes).unwrap();
+        assert!(text.contains("@tanstack/react-router"), "{text}");
+        assert!(
+            text.contains("Settings"),
+            "instances are still expanded: {text}"
+        );
+        assert_eq!(exported.diagnostics.len(), 1);
+
+        // Only an app has a router.
+        let error = export_with(
+            Format::Html,
+            &revision,
+            &Scope::Artboard("a".into()),
+            Some(app::RouterKind::TanStackRouter),
+        )
+        .unwrap_err();
+        assert!(
+            error.0.contains("only applies to the app format"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -75,8 +75,12 @@ suite("links", () => {
     expect(jsxHref("d 1", "a/1")).toBe("/api/designs/d%201/export?format=jsx&artboard=a%2F1");
   });
 
-  it("exports the whole design as a React app", () => {
+  it("exports the whole design as a React Router or TanStack Router app", () => {
     expect(appHref("d 1")).toBe("/api/designs/d%201/export?format=app");
+    expect(appHref("d 1", "react-router")).toBe("/api/designs/d%201/export?format=app");
+    expect(appHref("d 1", "tanstack-router")).toBe(
+      "/api/designs/d%201/export?format=app&router=tanstack-router",
+    );
   });
 
   it("point at an import's original bytes", () => {

@@ -1956,6 +1956,24 @@ async fn jsx_results_are_cut_and_the_format_only_exports() {
         !failed && text.contains("-app.tar") && text.contains("not text"),
         "{text}"
     );
+    // The chosen router comes back in the download link.
+    let (text, failed) = agent
+        .call(
+            "export_design",
+            json!({ "designId": design, "format": "app", "router": "tanstack-router" }),
+        )
+        .await;
+    assert!(!failed && text.contains("router=tanstack-router"), "{text}");
+    let (error, failed) = agent
+        .call(
+            "export_design",
+            json!({ "designId": design, "format": "app", "router": "nope" }),
+        )
+        .await;
+    assert!(
+        failed && error.contains("react-router") && error.contains("tanstack-router"),
+        "{error}"
+    );
 }
 
 /// A person posts a note for people over HTTP, then turns it back into a

@@ -1200,6 +1200,23 @@ async fn jsx_and_export_are_read_views() {
         text.contains("-app.tar") && text.contains("not text"),
         "{text}"
     );
+    let text = agent
+        .ok(
+            "read",
+            json!({ "designId": id, "export": "app", "router": "tanstack-router" }),
+        )
+        .await;
+    assert!(text.contains("router=tanstack-router"), "{text}");
+    let (error, failed) = agent
+        .call(
+            "read",
+            json!({ "designId": id, "export": "app", "router": "nope" }),
+        )
+        .await;
+    assert!(
+        failed && error.contains("react-router") && error.contains("tanstack-router"),
+        "{error}"
+    );
     let (error, failed) = agent
         .call(
             "read",

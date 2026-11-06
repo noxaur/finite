@@ -628,11 +628,13 @@ async fn import(
     Ok((StatusCode::CREATED, Json(result)))
 }
 
-/// `?format=…&artboard=…` on an export. Without an artboard it's the whole design.
+/// `?format=…&artboard=…&router=…` on an export. Without an artboard it's the
+/// whole design; a router only applies to the app format.
 #[derive(Deserialize)]
 struct ExportQuery {
     format: String,
     artboard: Option<String>,
+    router: Option<String>,
 }
 
 /// The design, or one artboard, as a file to download. `Finite-Diagnostics`
@@ -648,7 +650,12 @@ async fn export(
         Some(artboard) => finite_transfer::Scope::Artboard(artboard),
         None => finite_transfer::Scope::Design,
     };
-    let exported = transfer::export(&hub, &id, format, scope).await?;
+    let router = query
+        .router
+        .as_deref()
+        .map(transfer::router_named)
+        .transpose()?;
+    let exported = transfer::export_with(&hub, &id, format, scope, router).await?;
     Ok((
         [
             (
