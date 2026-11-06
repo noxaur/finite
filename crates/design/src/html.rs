@@ -320,6 +320,8 @@ pub struct Dropped {
     pub path: String,
     /// What it was, like `<iframe>` or `onclick`.
     pub what: String,
+    /// Whether it was an element (`what` is `<tag>`), not an attribute.
+    pub element: bool,
     pub reason: &'static str,
 }
 
@@ -500,7 +502,7 @@ impl Walk {
                 _ if is_safe_attr(name, value) => {
                     page.attrs.insert(name.to_owned(), value.to_owned());
                 }
-                _ => self.drop(None, path, name.to_owned(), UNSAFE_ATTR_REASON),
+                _ => self.drop(None, path, name.to_owned(), false, UNSAFE_ATTR_REASON),
             }
         }
     }
@@ -525,11 +527,19 @@ impl Walk {
         Ok(out)
     }
 
-    fn drop(&mut self, anchor: Option<usize>, path: &str, what: String, reason: &'static str) {
+    fn drop(
+        &mut self,
+        anchor: Option<usize>,
+        path: &str,
+        what: String,
+        element: bool,
+        reason: &'static str,
+    ) {
         self.dropped.push(Dropped {
             anchor,
             path: path.to_owned(),
             what,
+            element,
             reason,
         });
     }
@@ -557,7 +567,7 @@ impl Walk {
                 let tag = el.name();
                 if let Some(reason) = refused_element(tag, self.policy) {
                     let what = format!("<{}>", tag.to_ascii_lowercase());
-                    self.drop(anchor, &path, what, reason);
+                    self.drop(anchor, &path, what, true, reason);
                     return Ok(None);
                 }
                 let is_script = tag.eq_ignore_ascii_case("script");
@@ -595,12 +605,12 @@ impl Walk {
                         }
                         "src" if is_script => {
                             let reason = "scripts load only from https:// URLs";
-                            self.drop(Some(me), &path, "src on <script>".into(), reason);
+                            self.drop(Some(me), &path, "src on <script>".into(), false, reason);
                         }
                         _ if is_safe_attr(name, value) => {
                             fragment.attrs.insert(name.to_owned(), value.to_owned());
                         }
-                        _ => self.drop(Some(me), &path, name.to_owned(), UNSAFE_ATTR_REASON),
+                        _ => self.drop(Some(me), &path, name.to_owned(), false, UNSAFE_ATTR_REASON),
                     }
                 }
                 let outer = self.in_instance;
