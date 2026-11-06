@@ -8,6 +8,7 @@
 //! - [`comment`] holds the threads users pin to the canvas.
 //! - [`tokens`] holds the design tokens every artboard can use.
 //! - [`css`] merges a patch into a stylesheet, keeping what it doesn't touch.
+//! - [`css_scan`] finds strings, comments, rules and URLs in CSS text.
 //! - [`components`] expands instances of components and turns edits inside them into overrides.
 //! - [`flow`] reads a prototype's routes and links, and finds broken links.
 //! - [`user_edit`] plans the edits people make on the canvas, on the server and in the browser.
@@ -18,6 +19,7 @@
 pub mod comment;
 pub mod components;
 pub mod css;
+pub mod css_scan;
 mod design;
 mod document;
 pub mod edit;

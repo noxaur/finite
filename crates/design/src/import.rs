@@ -84,7 +84,7 @@ pub struct ImportRecord {
     pub artifact: BlobHash,
     /// Which codec read them, like `html` or `figma`.
     pub format: String,
-    /// What the bytes are, precisely: `figma-plugin-payload v1` is what the
+    /// What the bytes are, precisely: `figma-payload v1` is what the
     /// plugin sent, not the Figma file itself.
     pub input_kind: String,
     /// The file name the bytes came with, if any.
