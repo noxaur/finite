@@ -406,6 +406,7 @@ async fn import(
 }
 
 /// The format a file's name implies, as the web app's Import button reads it.
+/// A `.tar` is a repo, including `<design>-app.tar`: app is export only.
 fn format_of(name: &str) -> &'static str {
     let lower = name.to_ascii_lowercase();
     if lower.ends_with(".figma.json") {

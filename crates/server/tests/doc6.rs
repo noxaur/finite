@@ -1191,6 +1191,12 @@ async fn jsx_and_export_are_read_views() {
         .call("read", json!({ "designId": id, "export": "jsx" }))
         .await;
     assert!(failed && error.contains("takes one artboard"), "{error}");
+    // `app` reaches the codec. It is a stub today, so its error comes back
+    // rather than a file; once it writes, this is a download note for a tar.
+    let (error, failed) = agent
+        .call("read", json!({ "designId": id, "export": "app" }))
+        .await;
+    assert!(failed && error.contains("isn't written yet"), "{error}");
 }
 
 #[tokio::test]

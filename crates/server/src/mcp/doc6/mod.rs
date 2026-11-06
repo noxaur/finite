@@ -97,7 +97,7 @@ pub struct ReadParams {
     /// Only this page's artboards: its name or id.
     #[serde(default)]
     page: Option<String>,
-    /// Return the design, or select's artboard, as a file in this format: html, finite, repo, figma or jsx.
+    /// Return the design, or select's artboard, as a file in this format: html, finite, repo, figma, jsx or app (the whole design as a Vite + React project of the prototype flow, one route per data-route).
     #[serde(default)]
     export: Option<String>,
     /// Search for this text or value, like "#3b82f6" or "Sign in".

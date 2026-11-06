@@ -1,6 +1,6 @@
 # Import and export
 
-Finite moves designs in and out through one Rust crate, `crates/transfer`. Each format is a **codec** that converts between that format and Finite's own `Document`, so the document is the hub and there are no converters between pairs of formats. v1 ships four codecs that go both ways: HTML, a native `.finite` bundle, a folder of text files for git (`repo`), and Figma. Two more, JSX and the app, only export.
+Finite moves designs in and out through one Rust crate, `crates/transfer`. Each format is a **codec** that converts between that format and Finite's own `Document`, so the document is the hub and there are no converters between pairs of formats. v1 ships four codecs that go both ways: HTML, a native `.finite` bundle, a folder of text files for git (`repo`), and Figma. Two more only export: JSX, and `app`, a whole prototype as a Vite + React project packed as a tar.
 
 Two rules hold everything else up. Import never throws data away: Finite keeps the exact bytes it received, and anything it can't turn into nodes stays recoverable from them. And nothing that could run code reaches the document unless someone wrote it there on purpose.
 
@@ -114,6 +114,8 @@ Figma has no CSS, so Figma export reads how the artboard actually rendered. The 
 
 Flexbox becomes auto layout only when auto layout would put every child where the browser did. The codec lays the children out the way Figma would and compares; if any child is more than a pixel off, because of margins, `order` or `flex-basis`, say, the frame keeps the measured positions and reports it. Grid always exports as measured positions.
 
+The `app` codec writes the whole design's prototype flow as a standalone Vite + React project, packed as `<design>-app.tar`. Each route from `data-route` on an artboard becomes a React Router route, and each `<a href="#finite-artboard=<id>">` link points at the route of the artboard it names. It exports the whole design; one artboard isn't an app, so an artboard export is refused.
+
 ## Keeping a design in a repo
 
 The `repo` codec writes a design as a folder of text files, so it can sit next to the code and show up in pull requests:
@@ -172,7 +174,7 @@ To change a stored format, bump its version, add the upgrade step, and add a fix
 
 `crates/server/src/transfer.rs` has the three operations: `import`, `export` and `original`. The HTTP API, the MCP tools, the Figma plugin and the web UI are thin layers over them, and none of them holds conversion logic.
 
-Over HTTP, `POST /api/designs/{id}/import?format=html&name=…&strict=preserved,editable` takes the file's bytes as the body, up to 32 MB (the largest blob, since the file is kept whole), and answers `201` with the record, the new artboards and the diagnostics. `GET /api/designs/{id}/export?format=html&artboard=…` (or `format=jsx` or `format=figma` with an artboard, or `format=repo` for the folder as a tar) downloads the design, or one artboard, and its `Finite-Diagnostics` header counts the diagnostics. `GET /api/designs/{id}/imports` lists the records, and `GET /api/designs/{id}/imports/{import}/original` downloads the exact bytes, always as `application/octet-stream` with `nosniff` and `Content-Security-Policy: sandbox`, so a hostile page can't render. An unknown format or strict axis, bad input and a strict refusal all answer `422`. Agents have `import_design`, which takes the file as `content` or `contentBase64`, and `export_design`, which returns the file as text.
+Over HTTP, `POST /api/designs/{id}/import?format=html&name=…&strict=preserved,editable` takes the file's bytes as the body, up to 32 MB (the largest blob, since the file is kept whole), and answers `201` with the record, the new artboards and the diagnostics. `GET /api/designs/{id}/export?format=html&artboard=…` (or `format=jsx` or `format=figma` with an artboard, or `format=repo` for the folder as a tar, or `format=app` for the whole design as a React project in a tar) downloads the design, or one artboard, and its `Finite-Diagnostics` header counts the diagnostics. `GET /api/designs/{id}/imports` lists the records, and `GET /api/designs/{id}/imports/{import}/original` downloads the exact bytes, always as `application/octet-stream` with `nosniff` and `Content-Security-Policy: sandbox`, so a hostile page can't render. An unknown format or strict axis, bad input and a strict refusal all answer `422`. Agents have `import_design`, which takes the file as `content` or `contentBase64`, and `export_design`, which returns the file as text or, for a tar, says where to download it.
 
 ## Not in v1
 

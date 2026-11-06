@@ -1934,7 +1934,7 @@ async fn jsx_results_are_cut_and_the_format_only_exports() {
         )
         .await;
     assert!(failed && error.contains("can only be exported"), "{error}");
-    // An unknown format lists jsx among the ones that exist.
+    // An unknown format lists every one that exists.
     let (error, failed) = agent
         .call(
             "export_design",
@@ -1942,9 +1942,18 @@ async fn jsx_results_are_cut_and_the_format_only_exports() {
         )
         .await;
     assert!(
-        failed && error.contains("html, finite, figma, jsx, repo"),
+        failed && error.contains("html, finite, figma, jsx, repo, app"),
         "{error}"
     );
+    // `app` is one of them. It is a stub today, so its error comes back;
+    // once it writes, this is a download note for a tar.
+    let (error, failed) = agent
+        .call(
+            "export_design",
+            json!({ "designId": design, "format": "app" }),
+        )
+        .await;
+    assert!(failed && error.contains("isn't written yet"), "{error}");
 }
 
 /// A person posts a note for people over HTTP, then turns it back into a

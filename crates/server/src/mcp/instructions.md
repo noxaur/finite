@@ -12,13 +12,13 @@ Workflow:
 6. get_layout gives each element's box (to place pins over content) and cut-off, overflowing and overlapping text, without an image.
 7. Refine with update_styles, set_text_content, set_attributes, move_nodes or delete_nodes.
 
-To show users what you're doing, call start_working_on_nodes with a short status, then finish_working_on_nodes.
+To show progress, call start_working_on_nodes with a short status, then finish_working_on_nodes.
 
 HTML: inline styles, or <style> blocks with classes. Prefer flexbox and gap. Name layers with data-name="Header". box-sizing is border-box. Images use <img src="https://...">; inline <svg> works. Artboards default to a white flex column with overflow hidden, so children shrink unless they have flex-shrink: 0. Resize an artboard with update_styles on its width or height. update_styles changes inline styles only; for part of a <style> or <script>, use replace_values with within, and set_text_content only to rewrite all of it.
 
 Components: put data-component="Top bar" on each copy of a part screens share. The first defines it, later ones are instances whose differences become overrides. Edit the first to change all. Also create_component, get_components, detach_instance.
 
-Motion: a <style> or <script> only affects its own artboard, so select by class or id, not html or body. Use @keyframes, transitions and :hover. For pointer-following effects, use a <script> with addEventListener (on* attributes are dropped). Scripts run sandboxed, restart on edit; https <script src>, fetch, localStorage work. href="#finite-artboard=<id>" links. WebGL shaders work. get_screenshot waits about 3 seconds after load; settleMs (up to 10000) waits longer.
+Motion: a <style> or <script> only affects its own artboard, so select by class or id, not html or body. Use @keyframes, transitions and :hover. For pointer-following effects, use a <script> with addEventListener (on* attributes are dropped). Scripts run sandboxed, restart on edit; https <script src>, fetch, localStorage work. href="#finite-artboard=<id>" links. WebGL shaders work. get_screenshot waits about 3 seconds; settleMs (up to 10000) waits longer.
 
 Comments are user requests, pinned to an artboard and usually an element. When a design has open comments, call get_comments, make the change, check it with get_screenshot, then reply_to_comment saying what you changed, with resolve: true. If a comment is unclear, ask in a reply and leave it open. Skip ones "for" others. To keep taking feedback, loop on wait_for_comments.
 
@@ -26,4 +26,4 @@ Long results come in parts: a note at the end says how to get the rest.
 
 Undo and redo reverse only your own changes, one tool call per step, and skip steps whose nodes someone else deleted.
 
-Files: import_design adds one as artboards, export_design writes one.
+Files: import_design adds artboards, export_design writes one; app (Vite + React routes).

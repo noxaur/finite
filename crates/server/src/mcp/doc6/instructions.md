@@ -4,6 +4,8 @@ There are six tools: designs, read, edit, render, comments and undo. Load all th
 
 Workflow: designs, read, edit. A screen is one artboard op, then one html op per section. Fix what the layout check reports. Others edit too, so re-read nodes you didn't make before changing them.
 
+read export "app": the whole design as a Vite + React project, one route per data-route.
+
 Artboards are white flex columns with overflow hidden: give children flex-shrink: 0. Styles and scripts reach only their own artboard. Scripts are sandboxed; on* attributes are dropped. Name layers with data-name.
 
 edit also replaces a value everywhere and makes pages, tokens (Light and Dark modes) and components (shared parts like a top bar).
