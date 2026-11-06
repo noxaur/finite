@@ -207,7 +207,10 @@ pub fn write_with(
 
 /// The component for each route, in route order: `Page` and the route's
 /// words (`/order-placed` is `PageOrderPlaced`, `/` is `PageIndex`), and a
-/// number after the first when two routes make the same name.
+/// number after the first when two routes make the same name. Names that
+/// differ only by case count as the same, since each is a file and a default
+/// macOS or Windows disk keeps one file for `PageFooBar.tsx` and
+/// `PageFoobar.tsx`.
 fn component_names(flow: &Flow) -> Vec<String> {
     let mut used = HashSet::new();
     flow.routes
@@ -224,7 +227,7 @@ fn component_names(flow: &Flow) -> Vec<String> {
                 .collect();
             let mut name = base.clone();
             let mut n = 2;
-            while !used.insert(name.clone()) {
+            while !used.insert(name.to_ascii_lowercase()) {
                 name = format!("{base}{n}");
                 n += 1;
             }

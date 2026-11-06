@@ -122,8 +122,8 @@ export function App() {
     <BrowserRouter>
       <ScrollToTop />
       <Routes>
-        <Route path="/" element={<PageHome />} />
-        <Route path="/cart" element={<PageCart />} />
+        <Route caseSensitive path="/" element={<PageHome />} />
+        <Route caseSensitive path="/cart" element={<PageCart />} />
       </Routes>
     </BrowserRouter>
   );

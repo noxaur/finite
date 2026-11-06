@@ -189,6 +189,17 @@ impl Writer<'_> {
             });
             return;
         }
+        if !is_element_name(tag) {
+            self.unwritable(
+                node,
+                format!("the element <{tag}>"),
+                "its children are kept",
+            );
+            for child in self.doc.children(Some(&node.id)) {
+                self.node(child, level);
+            }
+            return;
+        }
         let mut shown = tag.as_str();
         let mut to = None;
         let mut linked = false;
@@ -259,19 +270,12 @@ impl Writer<'_> {
                 // would be a string, which React rejects. A link to an
                 // artboard has no `href` of its own to keep.
             } else {
-                self.react_attr(tag, name, value);
+                self.react_attr(node, tag, name, value);
             }
         }
         if !classes.is_empty() {
-            let classes = classes.join(" ");
-            if classes.contains(['"', '\\']) {
-                self.out.push_str(&format!(
-                    " className={{{}}}",
-                    serde_json::to_string(&classes).expect("strings serialize")
-                ));
-            } else {
-                self.out.push_str(&format!(" className=\"{classes}\""));
-            }
+            self.out
+                .push_str(&format!(" className={}", string_attr(&classes.join(" "))));
         }
         if !leftover.is_empty() {
             let object: Vec<String> = leftover
@@ -338,7 +342,7 @@ impl Writer<'_> {
     /// An HTML attribute under the name and form React wants. `name` is as
     /// the parser stored it: HTML's names are lowercase, and SVG's keep their
     /// camel case (`gradientUnits`, `stdDeviation`), which React uses too.
-    fn react_attr(&mut self, tag: &str, name: &str, value: &str) {
+    fn react_attr(&mut self, node: &Node, tag: &str, name: &str, value: &str) {
         let lower = name.to_ascii_lowercase();
         if BOOLEAN_ATTRS.contains(&lower.as_str()) {
             // React reads `disabled=""` as false.
@@ -357,8 +361,44 @@ impl Writer<'_> {
             "value" if matches!(tag, "input" | "textarea") => "defaultValue".to_owned(),
             _ => react_name(name),
         };
-        self.attr(&name, value);
+        if is_attribute_name(&name) {
+            self.attr(&name, value);
+        } else {
+            self.unwritable(node, format!("the attribute {name:?}"), "the rest is kept");
+        }
     }
+
+    /// Reports that `what` has a name JSX can't write, so `node` lost it.
+    fn unwritable(&mut self, node: &Node, what: String, kept: &str) {
+        self.diagnostics.push(Diagnostic {
+            node: Some(node.id.clone()),
+            path: format!("#{}", node.id),
+            what,
+            feature: Feature::Frame,
+            reason: format!("JSX can't write that name, so it was left out and {kept}"),
+            preserved: Score::No,
+            visual: Score::Unknown,
+            editable: Score::Yes,
+            quarantined: false,
+        });
+    }
+}
+
+/// Whether JSX reads `name` as an intrinsic element: a lowercase letter,
+/// then letters, digits and `-`. A parser keeps others, like `svg:rect`.
+fn is_element_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// Whether JSX can write `name` as an attribute that React keeps: a letter
+/// or `_`, then those, digits and `-`. A parser keeps others, like `@click`
+/// and `data-a.b`.
+fn is_attribute_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
 }
 
 /// Attributes that are on when present, whatever their value.
@@ -483,6 +523,20 @@ fn style_key(property: &str) -> String {
                 .unwrap_or_default()
         }
         None => camel(&property, ['-', '-']),
+    }
+}
+
+/// A JSX attribute's value for `value`: a quoted string when it has no
+/// character JSX reads differently, and a JSON string in braces otherwise,
+/// since a quoted JSX string has no escapes and reads `&` as an entity.
+pub fn string_attr(value: &str) -> String {
+    if value.contains(['"', '\\', '&', '\n', '\r']) {
+        format!(
+            "{{{}}}",
+            serde_json::to_string(value).expect("strings serialize")
+        )
+    } else {
+        format!("\"{value}\"")
     }
 }
 

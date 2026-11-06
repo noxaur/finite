@@ -3,6 +3,8 @@
 //! router, so a router is these four functions, and [`RouterKind`] lists
 //! them the way [`crate::Format`] lists formats.
 
+use crate::jsx;
+
 /// An npm package and the exact version the project pins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Package {
@@ -14,7 +16,9 @@ pub struct Package {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Page {
     /// Where the router serves it: `/`, or `/` and segments of letters,
-    /// digits and `-._~`. Never repeated. The first page is `/`.
+    /// digits and `-._~`. Never repeated, but two can differ only by case
+    /// (`/Cart` and `/cart`), so the router must match case-sensitively.
+    /// The first page is `/`.
     pub path: String,
     /// The default export of its module, a valid identifier.
     pub component: String,
@@ -106,8 +110,9 @@ impl Router for ReactRouter {
         );
         for page in pages {
             router.push_str(&format!(
-                "        <Route path=\"{}\" element={{<{} />}} />\n",
-                page.path, page.component
+                "        <Route caseSensitive path={} element={{<{} />}} />\n",
+                jsx::string_attr(&page.path),
+                page.component
             ));
         }
         router.push_str("      </Routes>\n    </BrowserRouter>\n  );\n}\n");

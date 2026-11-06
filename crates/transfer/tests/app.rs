@@ -342,6 +342,151 @@ fn routes_make_distinct_component_names_and_paths() {
     }
 }
 
+/// Routes that differ only by case, a route that browsers would rewrite,
+/// an id and name that make nothing safe to write as a path or a file name,
+/// and text that JSX, a template literal and an attribute each need escaped.
+fn awkward() -> Design {
+    let mut d = design();
+    screen(&mut d, "home", "Home", 800.0, Some("/"), "<p>Home</p>");
+    screen(&mut d, "a\"b", "✨", 800.0, None, "<p>Id</p>");
+    screen(&mut d, "up", "Up", 800.0, Some("/Cart"), "<p>Upper</p>");
+    screen(&mut d, "low", "Low", 800.0, Some("/cart"), "<p>Lower</p>");
+    screen(
+        &mut d,
+        "camel",
+        "Camel",
+        800.0,
+        Some("/fooBar"),
+        "<p>Camel</p>",
+    );
+    screen(
+        &mut d,
+        "flat",
+        "Flat",
+        800.0,
+        Some("/foobar"),
+        "<p>Flat</p>",
+    );
+    screen(&mut d, "dots", "Dots", 800.0, None, "<p>Dots</p>");
+    commit(&mut d, |doc| {
+        edit::update_attributes(
+            doc,
+            &["dots".into()],
+            &BTreeMap::from([("data-route".into(), Some("/a/../b".into()))]),
+        )
+    });
+    screen(
+        &mut d,
+        "text",
+        "Quote \" `tick` ${x} </style>",
+        800.0,
+        Some("/text"),
+        "<p title=\"a &quot;q&quot; &amp; b \\ {c}\">{braces} `tick` ${x} \\ &lt;b&gt;</p>\
+         <style>.a::after { content: \"`${x}\\\\\" }</style>",
+    );
+    // Names an HTML parser keeps but JSX can't write.
+    screen(
+        &mut d,
+        "names",
+        "Names",
+        800.0,
+        Some("/names"),
+        "<div @click=\"x\" data-a.b=\"1\" 1x=\"4\" a$b=\"3\" class=\"a&amp;b\"><my-el foo=\"bar\">Kept</my-el><svg:rect>Inside</svg:rect></div>",
+    );
+    d
+}
+
+#[test]
+fn routes_that_differ_by_case_stay_apart() {
+    let files = files(&export(&awkward(), react_router()).unwrap());
+    let router = &files["src/router.tsx"];
+    for path in ["/Cart", "/cart"] {
+        let route = router
+            .lines()
+            .find(|l| l.contains(&format!("\"{path}\"")))
+            .unwrap_or_else(|| panic!("{path} in {router}"));
+        // React Router matches case-insensitively unless told otherwise.
+        assert!(route.contains("caseSensitive"), "{route}");
+    }
+}
+
+#[test]
+fn a_path_is_written_as_a_string_literal() {
+    let pages = [Page {
+        path: "/a\"b\\c&d".into(),
+        component: "PageA".into(),
+        module: "./pages/PageA".into(),
+    }];
+    let router = react_router()
+        .files(&pages)
+        .into_iter()
+        .find(|f| f.path == "src/router.tsx")
+        .unwrap()
+        .text;
+    assert!(router.contains("path={\"/a\\\"b\\\\c&d\"}"), "{router}");
+    // Routes made from an id are paths a router can serve.
+    let router = &files(&export(&awkward(), react_router()).unwrap())["src/router.tsx"];
+    assert!(router.contains("path=\"/a-b\""), "{router}");
+    assert!(!router.contains("a\"b"), "{router}");
+    // A route a browser would rewrite falls back to the artboard's name, and says so.
+    assert!(router.contains("path=\"/dots\""), "{router}");
+    let exported = export(&awkward(), react_router()).unwrap();
+    assert!(
+        exported
+            .diagnostics
+            .iter()
+            .any(|d| d.what == "data-route=\"/a/../b\""),
+        "{:?}",
+        exported.diagnostics
+    );
+}
+
+#[test]
+fn names_jsx_cant_write_are_left_out_and_reported() {
+    let exported = export(&awkward(), react_router()).unwrap();
+    let names = &files(&exported)["src/pages/PageNames.tsx"];
+    assert!(names.contains("<div className=\"a&amp;b\">"), "{names}");
+    assert!(names.contains("<my-el foo=\"bar\">Kept</my-el>"), "{names}");
+    // The element goes but its text stays.
+    assert!(
+        names.contains("Inside") && !names.contains("svg:rect"),
+        "{names}"
+    );
+    for gone in ["@click", "1x", "a$b", "a.b"] {
+        assert!(!names.contains(gone), "{gone} in {names}");
+    }
+    let what: Vec<&str> = exported
+        .diagnostics
+        .iter()
+        .map(|d| d.what.as_str())
+        .collect();
+    for lost in [
+        "the attribute \"@click\"",
+        "the attribute \"data-a.b\"",
+        "the element <svg:rect>",
+    ] {
+        assert!(what.contains(&lost), "{lost} in {what:?}");
+    }
+}
+
+#[test]
+fn files_differ_by_more_than_case() {
+    let files = files(&export(&awkward(), react_router()).unwrap());
+    let pages: Vec<&String> = files
+        .keys()
+        .filter(|p| p.starts_with("src/pages/"))
+        .collect();
+    let mut lower: Vec<String> = pages.iter().map(|p| p.to_ascii_lowercase()).collect();
+    lower.sort();
+    lower.dedup();
+    // A default macOS or Windows disk keeps one file for both.
+    assert_eq!(lower.len(), pages.len(), "{pages:?}");
+    assert_eq!(pages.len(), 9, "{pages:?}");
+    let router = &files["src/router.tsx"];
+    let imports: Vec<&str> = router.lines().filter(|l| l.contains("./pages/")).collect();
+    assert_eq!(imports.len(), pages.len(), "{router}");
+}
+
 #[test]
 fn a_file_the_store_lacks_is_reported() {
     let mut d = design();
@@ -450,8 +595,15 @@ fn the_project_builds() {
         eprintln!("skipping the app build: npm isn't on PATH");
         return;
     }
-    let exported = export(&shop(), react_router()).unwrap();
-    let project = work.join(format!("app-project-{}", std::process::id()));
+    for (name, design) in [("shop", shop()), ("awkward", awkward())] {
+        builds(work, name, &design);
+    }
+}
+
+/// Unpacks `design`'s export in a project of its own and runs `npm run build`.
+fn builds(work: &Path, name: &str, design: &Design) {
+    let exported = export(design, react_router()).unwrap();
+    let project = work.join(format!("app-project-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&project);
     for entry in tar::read(&exported.bytes).unwrap() {
         let path = project.join(&entry.path);
@@ -475,8 +627,10 @@ fn the_project_builds() {
     assert!(build.status.success(), "npm run build failed:\n{log}");
     eprintln!("{log}");
     assert!(project.join("dist/index.html").exists(), "{log}");
-    let png = format!("dist/assets/{}.png", BlobHash::of(PNG));
-    assert!(project.join(png).exists(), "{log}");
+    if name == "shop" {
+        let png = format!("dist/assets/{}.png", BlobHash::of(PNG));
+        assert!(project.join(png).exists(), "{log}");
+    }
     let _ = fs::remove_dir_all(&project);
 }
 
