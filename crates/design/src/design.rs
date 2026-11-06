@@ -205,8 +205,8 @@ struct Sets {
 }
 
 impl SetLog {
-    /// How many changes it keeps, like the change log.
-    const LIMIT: usize = 512;
+    /// How many changes it keeps, as many as the change log.
+    const LIMIT: usize = comment::LOG_LIMIT;
     /// About how many bytes of values it keeps.
     const BYTE_LIMIT: usize = 8 << 20;
 

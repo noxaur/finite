@@ -15,6 +15,7 @@ use crate::{
     components,
     document::{Document, Op},
     edit::{self, EditError},
+    html::{HIDDEN_ATTR, LOCKED_ATTR, NAME_ATTR},
     id,
     node::NodeId,
 };
@@ -265,11 +266,11 @@ fn attributes_label(attrs: &BTreeMap<String, Option<String>>) -> &'static str {
     let mut keys = attrs.iter();
     match (keys.next(), keys.next()) {
         (Some((key, value)), None) => match (key.as_str(), value.is_some()) {
-            ("data-name", _) => "Rename",
-            ("hidden", true) => "Hide",
-            ("hidden", false) => "Show",
-            ("data-locked", true) => "Lock",
-            ("data-locked", false) => "Unlock",
+            (NAME_ATTR, _) => "Rename",
+            (HIDDEN_ATTR, true) => "Hide",
+            (HIDDEN_ATTR, false) => "Show",
+            (LOCKED_ATTR, true) => "Lock",
+            (LOCKED_ATTR, false) => "Unlock",
             _ => "Change attributes",
         },
         _ => "Change attributes",
@@ -298,94 +299,5 @@ impl UserEdit {
             | Self::MakeComponent { id, .. }
             | Self::SetRoute { id, .. } => Box::new(std::iter::once(id)),
         }
-    }
-
-    /// One of each kind of edit, for the golden file the web app's schema is
-    /// checked against (`fixtures/user_edits.json`).
-    pub fn examples() -> Vec<UserEdit> {
-        vec![
-            Self::SetPosition {
-                moves: vec![Position {
-                    id: "board".into(),
-                    x: 120.0,
-                    y: -40.0,
-                }],
-            },
-            Self::SetStyles {
-                ids: vec!["card".into()],
-                styles: BTreeMap::from([
-                    ("left".into(), Some("24px".into())),
-                    ("right".into(), None),
-                ]),
-            },
-            Self::Place {
-                ids: vec!["card".into()],
-                parent: Some("list".into()),
-                before: Some("other".into()),
-            },
-            Self::Place {
-                ids: vec!["card".into()],
-                parent: None,
-                before: None,
-            },
-            Self::Delete {
-                ids: vec!["card".into()],
-            },
-            Self::Duplicate {
-                ids: vec!["card".into()],
-            },
-            Self::Group {
-                ids: vec!["card".into(), "other".into()],
-            },
-            Self::Ungroup {
-                ids: vec!["group".into()],
-            },
-            Self::SetText {
-                id: "title".into(),
-                text: "Hello".into(),
-            },
-            Self::MakeComponent {
-                id: "card".into(),
-                name: Some("Card".into()),
-            },
-            Self::Detach {
-                ids: vec!["instance".into()],
-            },
-            Self::SetLink {
-                ids: vec!["button".into()],
-                to: Some("board".into()),
-            },
-            Self::SetLink {
-                ids: vec!["button".into()],
-                to: None,
-            },
-            Self::SetRoute {
-                id: "board".into(),
-                route: Some("/checkout".into()),
-            },
-            Self::SetRoute {
-                id: "board".into(),
-                route: None,
-            },
-            Self::SetAttributes {
-                ids: vec!["card".into()],
-                attrs: BTreeMap::from([
-                    ("hidden".into(), Some(String::new())),
-                    ("data-locked".into(), None),
-                ]),
-            },
-            Self::CreatePage {
-                name: "Flows".into(),
-            },
-            Self::RenamePage {
-                id: "page".into(),
-                name: "Drafts".into(),
-            },
-            Self::DeletePage { id: "page".into() },
-            Self::MoveToPage {
-                ids: vec!["board".into()],
-                page: "page".into(),
-            },
-        ]
     }
 }

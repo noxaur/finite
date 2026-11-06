@@ -110,11 +110,6 @@ pub fn parse_loose(source: &str) -> Result<SelectorList, SelectError> {
     parse_with(source, true)
 }
 
-/// The elements `list` matches in `scope`, in document order.
-pub fn matches(doc: &Document, list: &SelectorList, scope: Scope) -> Vec<NodeId> {
-    Matcher::new(doc, scope).select(list)
-}
-
 /// State pseudo-classes: they describe what a person is doing with an
 /// element, so no element matches them in a design.
 const STATES: &[&str] = &[

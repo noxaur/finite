@@ -74,7 +74,10 @@ fn page() -> Design {
 /// The names of the elements `selector` matches across the design.
 fn pick(design: &Design, selector: &str) -> Vec<String> {
     let list = select::parse(selector).unwrap_or_else(|e| panic!("{selector}: {e}"));
-    names(design, select::matches(design.doc(), &list, Scope::Design))
+    names(
+        design,
+        Matcher::new(design.doc(), Scope::Design).select(&list),
+    )
 }
 
 fn names(design: &Design, ids: Vec<String>) -> Vec<String> {
@@ -282,14 +285,18 @@ fn scope_to_a_page_or_within_nodes() {
     let list = select::parse("p, :root").unwrap();
     let first = doc.first_page().to_owned();
     assert_eq!(
-        names(&d, select::matches(doc, &list, Scope::Page(&first))),
+        names(&d, Matcher::new(doc, Scope::Page(&first)).select(&list)),
         ["home", "Home P"]
     );
     assert_eq!(
-        names(&d, select::matches(doc, &list, Scope::Page("drafts"))),
+        names(&d, Matcher::new(doc, Scope::Page("drafts")).select(&list)),
         ["about", "About P"]
     );
-    assert!(select::matches(doc, &list, Scope::Page("missing")).is_empty());
+    assert!(
+        Matcher::new(doc, Scope::Page("missing"))
+            .select(&list)
+            .is_empty()
+    );
 
     // Within a node: its descendants, matched in the context of the
     // whole artboard.
@@ -297,7 +304,7 @@ fn scope_to_a_page_or_within_nodes() {
     let within = [boxed.clone()];
     let scoped = |selector: &str| {
         let list = select::parse(selector).unwrap();
-        names(&d, select::matches(doc, &list, Scope::Within(&within)))
+        names(&d, Matcher::new(doc, Scope::Within(&within)).select(&list))
     };
     assert_eq!(scoped("*"), ["About P"]);
     assert_eq!(scoped(":root > div > p"), ["About P"]);
@@ -305,7 +312,7 @@ fn scope_to_a_page_or_within_nodes() {
     let both = ["about".to_owned(), boxed, "home".to_owned()];
     let list = select::parse("p").unwrap();
     assert_eq!(
-        names(&d, select::matches(doc, &list, Scope::Within(&both))),
+        names(&d, Matcher::new(doc, Scope::Within(&both)).select(&list)),
         ["Home P", "About P"]
     );
 }
@@ -334,7 +341,7 @@ fn text_nodes_are_named_by_id_only() {
     let (fast, live) = (text("Fast"), text("Live"));
     let list = select::parse(&format!("#{fast}, #{live}")).unwrap();
     assert_eq!(list.ids().unwrap(), [fast.clone(), live.clone()]);
-    assert!(select::matches(doc, &list, Scope::Design).is_empty());
+    assert!(Matcher::new(doc, Scope::Design).select(&list).is_empty());
     let matcher = Matcher::new(doc, Scope::Design);
     assert_eq!(matcher.text_nodes(&list), [fast.clone(), live]);
 
@@ -405,7 +412,7 @@ fn loose_selectors_match_the_element_a_rule_styles() {
     let d = page();
     let loose = |selector: &str| {
         let list = select::parse_loose(selector).unwrap();
-        names(&d, select::matches(d.doc(), &list, Scope::Design))
+        names(&d, Matcher::new(d.doc(), Scope::Design).select(&list))
     };
     assert_eq!(loose(".card:hover h2"), ["Title 1", "Title 2"]);
     assert_eq!(loose("button:focus-visible"), ["Cta"]);
@@ -438,7 +445,7 @@ fn nested_has_says_why() {
 /// its `data-id`.
 #[test]
 fn virtual_ids_name_nodes_inside_instances() {
-    let mut design = design(&[(
+    let design = design(&[(
         "board",
         None,
         r#"<header data-name="Nav" data-component="Bar"><h1 data-name="Title">Home</h1></header><header data-name="Nav" data-component="Bar"><h1 data-name="Title">Settings</h1></header>"#,
@@ -468,7 +475,6 @@ fn virtual_ids_name_nodes_inside_instances() {
         Matcher::new(&view, Scope::Design).select(&list),
         vec![title]
     );
-    let _ = &mut design;
 }
 
 /// `#a/b/c`, `#a\/b\/c` and a mix of the two are one id. A slash inside a
@@ -524,7 +530,7 @@ fn component_markers_match_what_html_writes() {
 
     let ids = |selector: &str| {
         let list = select::parse(selector).unwrap_or_else(|e| panic!("{selector}: {e}"));
-        select::matches(view, &list, Scope::Design)
+        Matcher::new(view, Scope::Design).select(&list)
     };
     assert_eq!(ids("[data-component]"), vec![component.clone()]);
     assert_eq!(ids("[data-component='Top bar']"), vec![component.clone()]);
@@ -561,8 +567,8 @@ fn component_markers_match_what_html_writes() {
     );
     let list = select::parse("[data-instance-of], [data-component]").unwrap();
     assert_eq!(
-        select::matches(d.doc(), &list, Scope::Design),
-        select::matches(view, &list, Scope::Design)
+        Matcher::new(d.doc(), Scope::Design).select(&list),
+        Matcher::new(view, Scope::Design).select(&list)
     );
 }
 
@@ -580,11 +586,15 @@ fn data_component_matches_the_written_name() {
     assert!(html.contains("data-component=\"Nav\""), "{html}");
     assert!(!html.contains("data-component=\"Bar\""), "{html}");
     let component = select::parse("[data-component='Nav']").unwrap();
-    let found = select::matches(view, &component, Scope::Design);
+    let found = Matcher::new(view, Scope::Design).select(&component);
     assert_eq!(found.len(), 1);
     assert!(view.get(&found[0]).unwrap().component);
     let original = select::parse("[data-component=Bar]").unwrap();
-    assert!(select::matches(view, &original, Scope::Design).is_empty());
+    assert!(
+        Matcher::new(view, Scope::Design)
+            .select(&original)
+            .is_empty()
+    );
 }
 
 #[test]

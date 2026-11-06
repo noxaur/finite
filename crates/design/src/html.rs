@@ -78,10 +78,20 @@ pub fn refused_element(tag: &str, policy: Policy) -> Option<&'static str> {
 const RAW_TEXT_TAGS: &[&str] = &["script", "style"];
 
 /// HTML elements that never have children or a closing tag.
-pub const VOID_TAGS: &[&str] = &[
+const VOID_TAGS: &[&str] = &[
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
     "track", "wbr",
 ];
+
+/// Whether `tag` never has children or a closing tag, in any letter case.
+pub fn is_void(tag: &str) -> bool {
+    VOID_TAGS.iter().any(|v| v.eq_ignore_ascii_case(tag))
+}
+
+/// Whether the text of `tag` is code, in any letter case.
+fn is_raw_text(tag: &str) -> bool {
+    RAW_TEXT_TAGS.iter().any(|v| v.eq_ignore_ascii_case(tag))
+}
 
 /// The size of an artboard made without one, or from a file whose size isn't
 /// in pixels: a desktop screen, width then height.
@@ -245,6 +255,11 @@ fn replace_root(css: &str) -> String {
     out
 }
 
+/// Hides a layer from the canvas and the render. People set it from the layers
+/// panel.
+pub const HIDDEN_ATTR: &str = "hidden";
+/// Locks a layer against dragging and resizing on the canvas.
+pub const LOCKED_ATTR: &str = "data-locked";
 /// Names a node when written as an attribute (`<div data-name="Header">`).
 pub const NAME_ATTR: &str = "data-name";
 /// Identifies a node in exported HTML.
@@ -428,7 +443,7 @@ fn nesting_bound(html: &str) -> usize {
                 .position(|b| !b.is_ascii_alphanumeric())
                 .unwrap_or(tag.len());
             let name = std::str::from_utf8(&tag[..name_len]).unwrap_or("");
-            if !VOID_TAGS.iter().any(|v| v.eq_ignore_ascii_case(name)) {
+            if !is_void(name) {
                 depth += 1;
                 deepest = deepest.max(depth);
             }
@@ -887,13 +902,6 @@ pub struct Export {
     pub stylesheets: usize,
 }
 
-impl Export {
-    /// Whether the HTML holds the whole subtree, so it could be written back.
-    pub fn is_complete(&self) -> bool {
-        self.collapsed == 0 && self.shortened == 0 && self.hidden_code == 0
-    }
-}
-
 /// Serializes the subtree at `id` as HTML, including what `options` ask for.
 pub fn export_with(doc: &Document, id: &str, options: &ExportOptions) -> Option<Export> {
     let node = doc.get(id)?;
@@ -1079,13 +1087,13 @@ impl Writer<'_> {
             let style = self.clip(&style_string(&node.styles)).into_owned();
             let _ = write!(self.out, " style=\"{}\"", escape(&style, true));
         }
-        if VOID_TAGS.contains(&tag.as_str()) {
+        if is_void(&tag) {
             self.out.push_str(" />");
             self.newline();
             return;
         }
         let children = doc.children(Some(&node.id));
-        if RAW_TEXT_TAGS.contains(&tag.to_ascii_lowercase().as_str()) {
+        if is_raw_text(&tag) {
             let code: String = children.iter().filter_map(|c| c.text.as_deref()).collect();
             let code = match self.options.max_code_len {
                 Some(max) if code.chars().count() > max => {
@@ -1202,13 +1210,13 @@ fn write_compact(doc: &Document, node: &Node, ids: bool, out: &mut String) {
             escape(&style_string(&node.styles), true)
         );
     }
-    if VOID_TAGS.contains(&tag.as_str()) {
+    if is_void(&tag) {
         out.push_str(" />");
         return;
     }
     out.push('>');
     let children = doc.children(Some(&node.id));
-    if RAW_TEXT_TAGS.contains(&tag.to_ascii_lowercase().as_str()) {
+    if is_raw_text(&tag) {
         let code: String = children.iter().filter_map(|c| c.text.as_deref()).collect();
         out.push_str(&raw_text(&code, tag));
     } else {
@@ -1456,7 +1464,6 @@ mod tests {
             "{}",
             export.html
         );
-        assert!(!export.is_complete());
 
         // An element holding only text still shows it at the cutoff.
         let options = ExportOptions {

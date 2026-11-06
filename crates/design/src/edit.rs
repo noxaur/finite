@@ -1352,25 +1352,6 @@ pub fn set_modes(
     Ok((ops, list))
 }
 
-/// Renames one mode.
-pub fn rename_mode(doc: &Document, id: &str, name: &str) -> Result<Vec<Op>> {
-    let names: Vec<String> = doc
-        .modes()
-        .into_iter()
-        .map(|(mode, m)| {
-            if mode == id {
-                name.to_owned()
-            } else {
-                m.name.clone()
-            }
-        })
-        .collect();
-    if !doc.modes().iter().any(|(mode, _)| *mode == id) {
-        return err(format!("mode {id:?} not found"));
-    }
-    Ok(set_modes(doc, &names, &mut || unreachable!("renaming adds no modes"))?.0)
-}
-
 /// Deletes a mode and every token value in it. Artboards in it fall back
 /// to the first mode. A design keeps at least one mode.
 pub fn delete_mode(doc: &Document, id: &str) -> Result<Vec<Op>> {

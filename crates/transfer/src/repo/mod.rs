@@ -408,7 +408,7 @@ fn lay_out(compact: &str) -> String {
             .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
             .collect::<String>()
             .to_ascii_lowercase();
-        let void = tag.ends_with("/>") || html::VOID_TAGS.contains(&name.as_str());
+        let void = tag.ends_with("/>") || html::is_void(&name);
         let mut had_text = false;
         if closing {
             depth = depth.saturating_sub(1);

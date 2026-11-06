@@ -96,7 +96,7 @@ fn main() {
                 .min_by_key(|&(_, time)| time)
                 .unwrap()
         };
-        let (found, fresh) = best(&|| select::matches(doc, &list, Scope::Design).len());
+        let (found, fresh) = best(&|| Matcher::new(doc, Scope::Design).select(&list).len());
         let (_, reused) = best(&|| matcher.select(&list).len());
         println!(
             "{selector:<52} {found:>5} matches  {fresh:>9.2?}  {reused:>9.2?} reusing the index"
