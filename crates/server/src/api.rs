@@ -15,23 +15,21 @@ use axum::{
 };
 use finite_design::{
     Document, Op, Snapshot,
-    comment::{self, Anchor, Audience, Author, AuthorKind, Comment, CommentError},
+    comment::{Anchor, Audience, Comment, CommentError},
     edit::{self, EditError},
     import::ImportRecord,
-    user_edit::UserEdit,
     version::{self, VersionError},
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::{self, error::RecvError};
 
 use crate::blob::{self, BlobHash};
-use crate::cluster::Place;
 use crate::heartbeat::{self, Heartbeat};
 use crate::hub::{
-    Actor, AdoptError, DesignHandle, DesignSummary, Hub, LOBBY_LIMIT, OpenError, Outgoing, Since,
-    Stamp, is_design_id,
+    Actor, AdoptError, ClientMessage, DesignHandle, DesignSummary, Hub, OpenError, Outgoing, Since,
+    UserAuthor,
 };
-use crate::mcp::{TokenValue, token_ops};
+use crate::id::{is_stored_id, node_id};
 use crate::transfer::{self, ImportRequest, ImportResult, TransferError};
 
 /// The largest design another server can hand off. axum's default of 2 MB
@@ -107,7 +105,7 @@ async fn list_designs(
     State(hub): State<Arc<Hub>>,
     Query(query): Query<ListQuery>,
 ) -> Json<Vec<DesignSummary>> {
-    let limit = query.limit.unwrap_or(LOBBY_LIMIT).clamp(1, 1000);
+    let limit = crate::wire::list_limit(query.limit);
     Json(hub.find(query.q.as_deref(), limit))
 }
 
@@ -153,7 +151,7 @@ impl IntoResponse for ApiError {
             Self::NotFound(message) => (StatusCode::NOT_FOUND, message).into_response(),
             Self::Misdirected { id, owner } => (
                 StatusCode::MISDIRECTED_REQUEST,
-                [("finite-owner", owner.clone())],
+                [(crate::wire::OWNER, owner.clone())],
                 format!("design {id:?} lives on {owner}"),
             )
                 .into_response(),
@@ -161,12 +159,7 @@ impl IntoResponse for ApiError {
                 (StatusCode::UNPROCESSABLE_ENTITY, message).into_response()
             }
             Self::Failed(message) => (StatusCode::INTERNAL_SERVER_ERROR, message).into_response(),
-            Self::Unavailable(message) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                [("retry-after", "1")],
-                message,
-            )
-                .into_response(),
+            Self::Unavailable(message) => crate::wire::unavailable(message),
         }
     }
 }
@@ -186,31 +179,25 @@ impl From<TransferError> for ApiError {
             TransferError::NotFound(message) => Self::NotFound(message),
             TransferError::Invalid(message) => Self::Unprocessable(message),
             TransferError::Io(_) => Self::Failed(error.to_string()),
+            TransferError::Unopened(error) => error.into(),
         }
     }
 }
 
-/// Refuses a design another server owns, or that no server can serve now.
-fn here(hub: &Hub, id: &str) -> Result<(), ApiError> {
-    match hub.place(id) {
-        Place::Here => Ok(()),
-        Place::Elsewhere(owner) => Err(ApiError::Misdirected {
-            id: id.into(),
-            owner,
-        }),
-        Place::Nowhere => Err(ApiError::Unavailable(
-            "no Finite server is serving designs right now".into(),
-        )),
+impl From<OpenError> for ApiError {
+    fn from(error: OpenError) -> Self {
+        match error {
+            OpenError::Elsewhere { id, owner } => Self::Misdirected { id, owner },
+            OpenError::Busy(_) | OpenError::Nowhere | OpenError::Failed(_) => {
+                Self::Unavailable(error.to_string())
+            }
+            OpenError::NotFound => Self::NotFound(error.to_string()),
+        }
     }
 }
 
-/// Opens a design this server owns.
 async fn open(hub: &Arc<Hub>, id: &str) -> Result<Arc<DesignHandle>, ApiError> {
-    here(hub, id)?;
-    hub.open(id).await.map_err(|error| match error {
-        OpenError::Busy(_) => ApiError::Unavailable(error.to_string()),
-        _ => ApiError::NotFound(format!("design {id:?} not found")),
-    })
+    Ok(hub.open(id).await?)
 }
 
 /// A design's snapshot. Thumbnails ask for every design in the list, so this
@@ -219,11 +206,7 @@ async fn get_design(
     State(hub): State<Arc<Hub>>,
     Path(id): Path<String>,
 ) -> Result<Json<Snapshot>, ApiError> {
-    here(&hub, &id)?;
-    hub.peek(&id)
-        .await
-        .map(Json)
-        .ok_or_else(|| ApiError::NotFound(format!("design {id:?} not found")))
+    Ok(Json(hub.peek(&id).await?))
 }
 
 #[derive(Deserialize)]
@@ -257,7 +240,7 @@ async fn adopt(State(hub): State<Arc<Hub>>, Path(id): Path<String>, body: String
         return ApiError::Unprocessable("the snapshot is for another design".into())
             .into_response();
     }
-    if !is_design_id(&id) {
+    if !is_stored_id(&id) {
         return ApiError::Unprocessable("that isn't a design id".into()).into_response();
     }
     let adopted = match tokio::task::spawn_blocking(move || hub.adopt(snapshot)).await {
@@ -328,7 +311,7 @@ async fn get_asset(
 }
 
 async fn asset(hub: &Hub, id: &str, hash: &str) -> Result<Response, ApiError> {
-    here(hub, id)?;
+    hub.require_here(id)?;
     let hash = BlobHash::parse(hash).map_err(|e| ApiError::Unprocessable(e.to_string()))?;
     let store = hub.store();
     let key = hash.clone();
@@ -355,7 +338,7 @@ async fn put_asset(
     Path((id, hash)): Path<(String, String)>,
     body: Bytes,
 ) -> Result<StatusCode, ApiError> {
-    here(&hub, &id)?;
+    hub.require_here(&id)?;
     let hash = BlobHash::parse(&hash).map_err(|e| ApiError::Unprocessable(e.to_string()))?;
     let store = hub.store();
     tokio::task::spawn_blocking(move || {
@@ -370,30 +353,6 @@ async fn put_asset(
     .await
     .map_err(|e| ApiError::Unavailable(e.to_string()))?
     .map_err(|e| ApiError::Unavailable(e.to_string()))?
-}
-
-/// Who is commenting. Users have no accounts yet, so the browser picks an id
-/// and a name, and the server marks them as users.
-#[derive(Clone, Deserialize)]
-struct UserAuthor {
-    id: String,
-    name: String,
-}
-
-impl UserAuthor {
-    fn into_author(self) -> Author {
-        let id: String = self.id.chars().take(comment::MAX_USER_ID).collect();
-        let name = self.name.trim();
-        Author {
-            id: format!("user:{id}"),
-            name: if name.is_empty() {
-                "Guest".into()
-            } else {
-                name.chars().take(comment::MAX_NAME).collect()
-            },
-            kind: AuthorKind::User,
-        }
-    }
 }
 
 #[derive(Deserialize)]
@@ -544,17 +503,17 @@ struct SetTokens {
     #[serde(default)]
     modes: Option<Vec<String>>,
     #[serde(default)]
-    tokens: BTreeMap<String, Option<TokenValue>>,
+    tokens: BTreeMap<String, edit::TokenChange>,
 }
 
-/// Names the modes and sets tokens, as `set_tokens` does for an agent.
+/// Names the modes and sets tokens, as an agent's tokens op does.
 async fn set_tokens(
     State(hub): State<Arc<Hub>>,
     Path(id): Path<String>,
     Json(body): Json<SetTokens>,
 ) -> Result<Json<Changed>, ApiError> {
     person_edit(&hub, &id, body.author, "Set tokens", |doc| {
-        token_ops(doc, body.modes.as_deref(), &body.tokens)
+        edit::edit_tokens(doc, body.modes.as_deref(), &body.tokens, &mut node_id)
     })
     .await
 }
@@ -616,7 +575,6 @@ async fn import(
     Query(query): Query<ImportQuery>,
     body: Bytes,
 ) -> Result<(StatusCode, Json<ImportResult>), ApiError> {
-    here(&hub, &id)?;
     let request = ImportRequest {
         format: transfer::format_named(&query.format)?,
         bytes: body.to_vec(),
@@ -644,7 +602,6 @@ async fn export(
     Path(id): Path<String>,
     Query(query): Query<ExportQuery>,
 ) -> Result<Response, ApiError> {
-    here(&hub, &id)?;
     let format = transfer::format_named(&query.format)?;
     let scope = match query.artboard {
         Some(artboard) => finite_transfer::Scope::Artboard(artboard),
@@ -709,7 +666,6 @@ async fn original(
     State(hub): State<Arc<Hub>>,
     Path((id, import)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
-    here(&hub, &id)?;
     let (record, bytes) = transfer::original(&hub, &id, &import).await?;
     Ok((
         [
@@ -755,30 +711,6 @@ async fn lobby_socket(State(hub): State<Arc<Hub>>, ws: WebSocketUpgrade) -> Resp
 struct ResumeQuery {
     epoch: Option<String>,
     since: Option<u64>,
-}
-
-/// What a person's tab sends on a design's socket, besides pings. Each
-/// message names the person, as comments do, and carries the tab's stamp,
-/// so the change it makes (or a `settled` message, when it makes none)
-/// tells the tab which of its messages it answers. One socket handles its
-/// messages in order.
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-enum ClientMessage {
-    /// A gesture's edits, as one undo step.
-    Mutate {
-        author: UserAuthor,
-        stamp: Stamp,
-        edits: Vec<UserEdit>,
-    },
-    Undo {
-        author: UserAuthor,
-        stamp: Stamp,
-    },
-    Redo {
-        author: UserAuthor,
-        stamp: Stamp,
-    },
 }
 
 /// The longest client id a tab's stamp can carry. Tabs make 12 characters.

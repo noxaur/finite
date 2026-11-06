@@ -13,7 +13,8 @@ import {
 } from "react";
 import { raised, strip } from "@/styles/raised";
 import { colors, fonts, radii, size, space } from "@/styles/tokens.stylex";
-import { Icon, type IconName } from "./Icons";
+import type { IconName } from "@/lib/icons";
+import { Icon } from "./Icons";
 
 /**
  * The app's two control heights. `regular` (27px) is for inspector rows, fields, strips

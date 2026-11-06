@@ -1,5 +1,5 @@
 import type { View } from "./camera";
-import type { Bounds } from "./renderer";
+import type { Bounds } from "./types";
 
 /** Side of one cell in the artboard index, in canvas pixels. */
 const CELL = 2048;

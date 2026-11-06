@@ -14,7 +14,7 @@ use finite_design::{
 
 use crate::{
     Codec, Diagnostic, Direction, Error, Exported, Feature, Imported, Input, Revision, Scope,
-    Score, Support, assets, css_scope, file_stem,
+    Score, Support, assets, css_scope, file_stem, words,
 };
 
 pub struct Jsx;
@@ -143,12 +143,8 @@ pub fn convert_with(
 /// `HomeDesktop`.
 pub(crate) fn component_name(name: &str) -> String {
     let mut out = String::new();
-    for word in name.split(|c: char| !c.is_ascii_alphanumeric()) {
-        let mut chars = word.chars();
-        if let Some(first) = chars.next() {
-            out.push(first.to_ascii_uppercase());
-            out.push_str(chars.as_str());
-        }
+    for word in words(name) {
+        push_capitalized(&mut out, word);
     }
     if out.is_empty() || out.starts_with(|c: char| c.is_ascii_digit()) {
         out.insert_str(0, "Artboard");
@@ -180,17 +176,16 @@ impl Writer<'_> {
             NodeKind::Element { tag } => tag,
         };
         if tag.eq_ignore_ascii_case("script") {
-            self.diagnostics.push(Diagnostic {
-                node: Some(node.id.clone()),
-                path: format!("#{}", node.id),
-                what: "<script>".into(),
-                feature: Feature::Script,
-                reason: "a component can't hold a script, so it was left out".into(),
-                preserved: Score::No,
-                visual: Score::Unknown,
-                editable: Score::No,
-                quarantined: false,
-            });
+            self.diagnostics.push(
+                Diagnostic::new(
+                    Feature::Script,
+                    "<script>",
+                    "a component can't hold a script, so it was left out",
+                    [Score::No, Score::Unknown, Score::No],
+                )
+                .at(format!("#{}", node.id))
+                .on(&node.id),
+            );
             return;
         }
         if !is_element_name(tag) {
@@ -216,17 +211,16 @@ impl Writer<'_> {
                     shown = links.component;
                     to = Some((links.prop, path));
                 }
-                Link::Plain(reason) => self.diagnostics.push(Diagnostic {
-                    node: Some(node.id.clone()),
-                    path: format!("#{}", node.id),
-                    what: format!("a link to {target:?}"),
-                    feature: Feature::Frame,
-                    reason,
-                    preserved: Score::No,
-                    visual: Score::Yes,
-                    editable: Score::Yes,
-                    quarantined: false,
-                }),
+                Link::Plain(reason) => self.diagnostics.push(
+                    Diagnostic::new(
+                        Feature::Frame,
+                        format!("a link to {target:?}"),
+                        reason,
+                        [Score::No, Score::Yes, Score::Yes],
+                    )
+                    .at(format!("#{}", node.id))
+                    .on(&node.id),
+                ),
             }
         }
         self.pad(level);
@@ -241,17 +235,16 @@ impl Writer<'_> {
         let mut leftover = node.styles.clone();
         for (property, value) in leftover.iter_mut() {
             if let Some(stripped) = strip_important(value) {
-                self.diagnostics.push(Diagnostic {
-                    node: Some(node.id.clone()),
-                    path: format!("#{}", node.id),
-                    what: format!("!important on {property}"),
-                    feature: Feature::Frame,
-                    reason: "a style object and a Tailwind class can't carry it, so the declaration may now lose to a stylesheet rule".into(),
-                    preserved: Score::No,
-                    visual: Score::Unknown,
-                    editable: Score::Yes,
-                    quarantined: false,
-                });
+                self.diagnostics.push(
+                    Diagnostic::new(
+                        Feature::Frame,
+                        format!("!important on {property}"),
+                        "a style object and a Tailwind class can't carry it, so the declaration may now lose to a stylesheet rule",
+                        [Score::No, Score::Unknown, Score::Yes],
+                    )
+                    .at(format!("#{}", node.id))
+                    .on(&node.id),
+                );
                 *value = stripped;
             }
         }
@@ -295,7 +288,7 @@ impl Writer<'_> {
             self.out
                 .push_str(&format!(" style={{{{ {} }}}}", object.join(", ")));
         }
-        if html::VOID_TAGS.contains(&tag.to_ascii_lowercase().as_str()) {
+        if html::is_void(tag) {
             self.out.push_str(" />\n");
             return;
         }
@@ -377,17 +370,16 @@ impl Writer<'_> {
 
     /// Reports that `what` has a name JSX can't write, so `node` lost it.
     fn unwritable(&mut self, node: &Node, what: String, kept: &str) {
-        self.diagnostics.push(Diagnostic {
-            node: Some(node.id.clone()),
-            path: format!("#{}", node.id),
-            what,
-            feature: Feature::Frame,
-            reason: format!("JSX can't write that name, so it was left out and {kept}"),
-            preserved: Score::No,
-            visual: Score::Unknown,
-            editable: Score::Yes,
-            quarantined: false,
-        });
+        self.diagnostics.push(
+            Diagnostic::new(
+                Feature::Frame,
+                what,
+                format!("JSX can't write that name, so it was left out and {kept}"),
+                [Score::No, Score::Unknown, Score::Yes],
+            )
+            .at(format!("#{}", node.id))
+            .on(&node.id),
+        );
     }
 }
 
@@ -482,23 +474,28 @@ fn react_name(name: &str) -> String {
         return name.to_owned();
     }
     // SVG: `stroke-width` is `strokeWidth`, `xlink:href` is `xlinkHref`.
-    camel(name, ['-', ':'])
+    camel(name, &['-', ':'])
 }
 
 /// `name` with each word after a separator capitalized and the separators removed.
-fn camel(name: &str, separators: [char; 2]) -> String {
+fn camel(name: &str, separators: &[char]) -> String {
     let mut out = String::new();
     for (i, word) in name.split(separators).enumerate() {
-        let mut chars = word.chars();
-        match chars.next() {
-            Some(first) if i > 0 => {
-                out.push(first.to_ascii_uppercase());
-                out.push_str(chars.as_str());
-            }
-            _ => out.push_str(word),
+        if i > 0 {
+            push_capitalized(&mut out, word);
+        } else {
+            out.push_str(word);
         }
     }
     out
+}
+
+fn push_capitalized(out: &mut String, word: &str) {
+    let mut chars = word.chars();
+    if let Some(first) = chars.next() {
+        out.push(first.to_ascii_uppercase());
+        out.push_str(chars.as_str());
+    }
 }
 
 /// `value` without a trailing `!important`, if it had one.
@@ -520,16 +517,16 @@ fn style_key(property: &str) -> String {
     let property = property.to_ascii_lowercase();
     match property.strip_prefix('-') {
         // React writes the ms prefix in lowercase.
-        Some(vendor) if vendor.starts_with("ms-") => camel(vendor, ['-', '-']),
+        Some(vendor) if vendor.starts_with("ms-") => camel(vendor, &['-']),
         Some(vendor) => {
-            let key = camel(vendor, ['-', '-']);
+            let key = camel(vendor, &['-']);
             let mut chars = key.chars();
             chars
                 .next()
                 .map(|c| c.to_ascii_uppercase().to_string() + chars.as_str())
                 .unwrap_or_default()
         }
-        None => camel(&property, ['-', '-']),
+        None => camel(&property, &['-']),
     }
 }
 
@@ -679,6 +676,7 @@ mod tests {
             position: None,
             page: None,
             styles: Default::default(),
+            ..Default::default()
         };
         let mut n = 0;
         let mut new_id = move || {

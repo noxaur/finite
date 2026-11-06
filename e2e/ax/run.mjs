@@ -3,7 +3,7 @@
 //
 //   node e2e/ax/run.mjs --task restyle --runs 3 --label baseline
 //   node e2e/ax/run.mjs --task restyle,mobile --runs 2 --label new-tools --bin /tmp/finite-server-new
-//   node e2e/ax/run.mjs --task rebrand --runs 3 --label no-search --surface e2e/ax/surfaces/no-search.mjs
+//   node e2e/ax/run.mjs --task rebrand --runs 3 --label example --surface e2e/ax/surfaces/example.mjs
 //   node e2e/ax/report.mjs                 compare every label's results
 //
 // Each run starts its own finite-server (--bin, default target/debug) with an
@@ -21,15 +21,11 @@
 // the server's own tools, answered through the same server (mock-surface.mjs).
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import net from "node:net";
-import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { findChrome, root, startServer } from "../lib.mjs";
 import { connect } from "../mcp.mjs";
 import { tasks } from "./tasks.mjs";
-
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
 const { values: opts } = parseArgs({
   options: {
@@ -44,7 +40,7 @@ const { values: opts } = parseArgs({
     surface: { type: "string" },
     parallel: { type: "string", default: "4" },
     "no-feedback": { type: "boolean", default: false },
-    // KEY=VALUE for the server, like FINITE_MCP_EXTRA=search. Repeatable.
+    // KEY=VALUE for the server, like RUST_LOG=debug. Repeatable.
     env: { type: "string", multiple: true, default: [] },
   },
 });
@@ -56,27 +52,6 @@ const FEEDBACK = `Before you go, give candid feedback on the Finite MCP tools, f
 4. Tools you saw but didn't use or didn't understand.
 Don't call any more tools.`;
 
-const freePort = () =>
-  new Promise((resolve) => {
-    const srv = net.createServer();
-    srv.listen(0, "127.0.0.1", () => {
-      const { port } = srv.address();
-      srv.close(() => resolve(port));
-    });
-  });
-
-/** A Chromium for get_screenshot, if the server wouldn't find one itself. */
-function defaultChrome() {
-  return (
-    [
-      "/opt/helium-browser-bin/chrome",
-      "/usr/bin/google-chrome",
-      "/usr/bin/chromium",
-      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    ].find((p) => fs.existsSync(p)) ?? ""
-  );
-}
-
 /** The --env pairs as an object. */
 function serverEnv() {
   return Object.fromEntries(
@@ -84,48 +59,23 @@ function serverEnv() {
   );
 }
 
-// The checks render designs in Chrome too (tasks.mjs), through e2e/cdp.mjs.
-if (!process.env.FINITE_CHROME && defaultChrome()) process.env.FINITE_CHROME = defaultChrome();
+// The checks and the server's render tool both need a browser.
+process.env.FINITE_CHROME ??= findChrome();
 
-async function startServer(bin) {
-  const port = await freePort();
-  const data = fs.mkdtempSync(path.join(os.tmpdir(), "finite-ax-data-"));
-  const child = spawn(bin, [], {
-    env: {
-      // Only when found: otherwise the server looks in its own usual places.
-      ...(defaultChrome() ? { FINITE_CHROME: defaultChrome() } : {}),
-      ...process.env,
-      ...serverEnv(),
-      FINITE_PORT: String(port),
-      FINITE_DATA_DIR: data,
-      RUST_LOG: "warn",
-      NO_COLOR: "1",
-    },
+async function startAxServer(bin) {
+  const server = await startServer({
+    bin,
+    env: { ...serverEnv(), NO_COLOR: "1" },
     stdio: "ignore",
   });
-  const base = `http://127.0.0.1:${port}`;
-  for (let i = 0; i < 100; i++) {
-    try {
-      if ((await fetch(`${base}/api/health`)).ok) break;
-    } catch {}
-    await new Promise((r) => setTimeout(r, 100));
-  }
   const api = async (method, p, body) => {
     const init = { method, headers: { "Content-Type": "application/json" } };
     if (body !== undefined) init.body = JSON.stringify(body);
-    const res = await fetch(base + p, init);
+    const res = await fetch(server.url + p, init);
     if (!res.ok) throw new Error(`${method} ${p}: ${res.status} ${await res.text()}`);
     return res.json();
   };
-  return {
-    base,
-    api,
-    stop() {
-      child.kill();
-      // The server may still be writing its last save as it exits.
-      fs.rmSync(data, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-    },
-  };
+  return { base: server.url, api, stop: () => server.stop() };
 }
 
 /** Runs `claude -p`, writing its stream-json to `file`, and resolves with the final result event. */
@@ -184,7 +134,7 @@ function analyze(file) {
           ? block.content
           : [{ type: "text", text: String(block.content ?? "") }];
         const text = parts.map((p) => p.text ?? "").join("\n");
-        if (use?.name === "get_screenshot") screenshots++;
+        if (use?.name === "render" && use.input?.output !== "layout") screenshots++;
         else resultChars += text.length;
         if (block.is_error) errors.push(`${use?.name ?? "?"}: ${text.slice(0, 220)}`);
       }
@@ -209,7 +159,7 @@ async function runOnce(taskName, index, outDir) {
   const dir = path.join(outDir, `${taskName}-${index}`);
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
-  const server = await startServer(opts.bin);
+  const server = await startAxServer(opts.bin);
   try {
     const seeder = await connect(server.base, "Seeder");
     const ctx = await task.seed(seeder, server.api);
@@ -316,9 +266,9 @@ async function runOnce(taskName, index, outDir) {
     const design = check.design ?? ctx.design;
     const board = check.screenshot ?? ctx.board;
     if (design && board) {
-      const shot = await checker.callRaw("get_screenshot", {
+      const shot = await checker.callRaw("render", {
         designId: design,
-        nodeId: board,
+        select: `#${board}`,
         scale: 0.5,
       });
       const image = shot.content?.find((c) => c.type === "image");
@@ -331,7 +281,11 @@ async function runOnce(taskName, index, outDir) {
     let clipped = null;
     if (design) {
       try {
-        const layout = await checker.call("get_layout", { designId: design, depth: 0 });
+        const layout = await checker.call("render", {
+          designId: design,
+          output: "layout",
+          depth: 0,
+        });
         clipped = layout.split("Layout: content is cut off by the artboard's edge").length - 1;
       } catch {}
     }
@@ -379,7 +333,7 @@ async function runOnce(taskName, index, outDir) {
     );
     return summary;
   } finally {
-    server.stop();
+    await server.stop();
   }
 }
 

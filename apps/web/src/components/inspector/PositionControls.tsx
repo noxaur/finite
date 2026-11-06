@@ -30,7 +30,7 @@ import {
 import type { Node, UserEdit } from "@/design/schema";
 import { IconButton, Strip, StripAction } from "../Button";
 import { numberOf } from "../DraftField";
-import type { IconName } from "../Icons";
+import type { IconName } from "@/lib/icons";
 import { Menu } from "../Menu";
 import { Block, Choice, Field, LeadIcon, StyleField } from "./controls";
 import { perTarget, rawOf, readOf, readRotation, type Scope, transformSheet } from "./scope";

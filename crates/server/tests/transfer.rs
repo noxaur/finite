@@ -13,6 +13,7 @@ use finite_server::{
     Hub, app,
     hub::Actor,
     store::{FileStore, MemoryStore, Store},
+    testing::require_browser,
     transfer::{self, ImportRequest, TransferError},
 };
 use finite_transfer::{Axis, Format, Scope};
@@ -59,11 +60,12 @@ async fn an_import_keeps_its_bytes_and_survives_a_restart() {
     assert_eq!(record, result.import);
     assert_eq!(bytes, PAGE.as_bytes());
 
-    let exported = transfer::export(
+    let exported = transfer::export_with(
         &hub,
         &id,
         Format::Html,
         Scope::Artboard(result.artboards[0].clone()),
+        None,
     )
     .await
     .unwrap();
@@ -74,7 +76,18 @@ async fn an_import_keeps_its_bytes_and_survives_a_restart() {
 
     // After a restart, the record and the nodes are both still there.
     hub.flush();
-    drop((hub, store));
+    drop(hub);
+    // The hub's background tasks let go of the store a moment later, and
+    // the folder stays locked until they do.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while Arc::strong_count(&store) > 1 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the old hub kept the store"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    drop(store);
     let hub = Hub::new(Arc::new(FileStore::new(&dir).unwrap())).unwrap();
     let (record, bytes) = transfer::original(&hub, &id, &result.import.id)
         .await
@@ -114,9 +127,15 @@ async fn strict_mode_refuses_before_anything_is_stored() {
 async fn exporting_something_that_isnt_an_artboard_fails() {
     let hub = Hub::new(Arc::new(MemoryStore::default())).unwrap();
     let id = hub.create("Empty").meta.id;
-    let error = transfer::export(&hub, &id, Format::Html, Scope::Artboard("nope".into()))
-        .await
-        .unwrap_err();
+    let error = transfer::export_with(
+        &hub,
+        &id,
+        Format::Html,
+        Scope::Artboard("nope".into()),
+        None,
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, TransferError::Invalid(_)), "{error}");
 }
 
@@ -350,12 +369,10 @@ async fn a_figma_export_is_measured_in_a_browser() {
     )
     .await
     .unwrap();
-    let exported = match transfer::export(&hub, &id, Format::Figma, Scope::Design).await {
+    let exported = match transfer::export_with(&hub, &id, Format::Figma, Scope::Design, None).await
+    {
         Ok(exported) => exported,
-        Err(TransferError::Invalid(error)) if error.contains("no Chrome") => {
-            eprintln!("skipped: {error}");
-            return;
-        }
+        Err(TransferError::Invalid(error)) if !require_browser(&error) => return,
         Err(error) => panic!("{error}"),
     };
     assert_eq!(exported.file_name, "figma.figma.json");
@@ -419,7 +436,7 @@ async fn a_design_leaves_as_a_folder_and_comes_back() {
         .await
         .unwrap();
 
-    let exported = transfer::export(&hub, &from, Format::Repo, Scope::Design)
+    let exported = transfer::export_with(&hub, &from, Format::Repo, Scope::Design, None)
         .await
         .unwrap();
     assert_eq!(exported.file_name, "home.finite-repo.tar");

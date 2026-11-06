@@ -26,7 +26,105 @@ pub struct Diagnostic {
     pub quarantined: bool,
 }
 
+/// What an import refused to write into the document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// An attribute, or the `src` of a script: code.
+    Attribute,
+    /// A `<script>` element.
+    Script,
+    /// Any other element, such as an `<iframe>`.
+    Embed,
+}
+
+impl Refused {
+    /// What a parser's [`finite_design::html::Dropped`] was.
+    pub fn of(dropped: &finite_design::html::Dropped) -> Self {
+        if dropped.element {
+            Self::element(&dropped.what)
+        } else {
+            Self::Attribute
+        }
+    }
+}
+
+impl Refused {
+    /// What a refused element is, from the `<tag>` the parsers report.
+    pub fn element(what: &str) -> Self {
+        if what == "<script>" {
+            Self::Script
+        } else {
+            Self::Embed
+        }
+    }
+}
+
 impl Diagnostic {
+    /// A loss in `feature`, scored `[preserved, visual, editable]`. It has no
+    /// node or path yet: add them with [`Diagnostic::on`] and [`Diagnostic::at`].
+    pub fn new(
+        feature: Feature,
+        what: impl Into<String>,
+        reason: impl Into<String>,
+        [preserved, visual, editable]: [Score; 3],
+    ) -> Self {
+        Self {
+            node: None,
+            path: String::new(),
+            what: what.into(),
+            feature,
+            reason: reason.into(),
+            preserved,
+            visual,
+            editable,
+            quarantined: false,
+        }
+    }
+
+    pub fn at(mut self, path: impl Into<String>) -> Self {
+        self.path = path.into();
+        self
+    }
+
+    pub fn on(mut self, node: &str) -> Self {
+        self.node = Some(node.to_owned());
+        self
+    }
+
+    /// Content an import left out of the document because it could run code
+    /// or load another document. All of it stays in the import's original
+    /// bytes, so it's preserved but not editable. `refused` says which kind
+    /// it was, whatever `what` looks like. A script might change how the page
+    /// looks once it runs, or not; an embed shows something Finite won't.
+    pub fn quarantined(
+        path: impl Into<String>,
+        what: impl Into<String>,
+        refused: Refused,
+        reason: &str,
+    ) -> Self {
+        let what = what.into();
+        let (feature, visual) = if refused == Refused::Embed {
+            (Feature::Embed, Score::No)
+        } else {
+            (Feature::Script, Score::Unknown)
+        };
+        Self {
+            quarantined: true,
+            ..Self::new(feature, what, reason, [Score::Yes, visual, Score::No]).at(path)
+        }
+    }
+
+    /// The design points at a file its store doesn't have.
+    pub fn missing_file(path: impl Into<String>, what: impl Into<String>) -> Self {
+        Self::new(
+            Feature::Image,
+            what,
+            "the design points at a file its store doesn't have",
+            [Score::No; 3],
+        )
+        .at(path)
+    }
+
     pub fn score(&self, axis: Axis) -> Score {
         match axis {
             Axis::Preserved => self.preserved,

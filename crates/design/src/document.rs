@@ -382,7 +382,7 @@ impl Document {
     }
 
     /// The document with `css` as its old shared stylesheet.
-    pub fn with_css(mut self, css: Option<String>) -> Self {
+    pub(crate) fn with_css(mut self, css: Option<String>) -> Self {
         self.css = css.filter(|css| !css.is_empty());
         self
     }
@@ -393,7 +393,7 @@ impl Document {
     }
 
     /// The document with these tokens and modes.
-    pub fn with_tokens(
+    pub(crate) fn with_tokens(
         mut self,
         tokens: BTreeMap<String, Values>,
         modes: BTreeMap<String, Mode>,
@@ -678,7 +678,7 @@ impl Document {
     }
 
     /// The sibling index right after `id`, before its next sibling.
-    pub fn index_after(&self, id: &str) -> Option<String> {
+    pub(crate) fn index_after(&self, id: &str) -> Option<String> {
         let node = self.nodes.get(id)?;
         let next = self.next_sibling(id).map(|n| n.index.as_str());
         Some(crate::fractional::key_between(Some(&node.index), next))

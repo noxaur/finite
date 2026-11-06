@@ -582,6 +582,7 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "finite-design",
+ "finite-server",
  "finite-transfer",
  "futures",
  "http",

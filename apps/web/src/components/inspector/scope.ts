@@ -2,12 +2,7 @@ import type { Editor } from "@/design/editing/editor";
 import { type Reading, readStyle, tokenOf } from "@/design/editing/inspect";
 import type { TokenTable } from "@/design/replica";
 import type { Node, UserEdit } from "@/design/schema";
-import {
-  rotationOf,
-  type TransformStyles,
-  withRotation,
-  withSheet,
-} from "@/design/editing/transform";
+import { rotationOf, type TransformStyles, withSheet } from "@/design/editing/transform";
 import { isColor, resolveToken } from "@/lib/tokens";
 
 export type Changes = Readonly<Record<string, string | null>>;
@@ -151,11 +146,6 @@ export function readRotation(scope: Scope): number | "mixed" | null {
     scope.targets.map((t) => rotationOf(withSheet(t.styles, transformSheet(scope, t)))),
   );
   return all.size > 1 ? "mixed" : ([...all][0] ?? null);
-}
-
-/** The edits that turn every target to `degrees`, keeping the rest of each one's transform. */
-export function rotationEdits(scope: Scope, degrees: number): UserEdit[] {
-  return scope.editsEach((t) => withRotation(t.styles, degrees, transformSheet(scope, t)));
 }
 
 /**

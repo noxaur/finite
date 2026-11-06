@@ -10,6 +10,12 @@ import { clampedText, numberOf, scrubber, steppedText, tidy } from "./scrub";
 
 export { numberOf };
 
+/** What `to` makes of the number `typed` starts with, or `null` when it doesn't start with one. */
+export function whenNumber<T>(typed: string, to: (n: number) => T): T | null {
+  const n = parseFloat(typed);
+  return Number.isFinite(n) ? to(n) : null;
+}
+
 /**
  * A text field that edits the design as it's typed: each key previews on
  * the canvas and in the panels, ↑ and ↓ step a number (Shift by 10), Enter

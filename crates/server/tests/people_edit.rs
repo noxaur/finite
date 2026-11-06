@@ -7,17 +7,15 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use finite_design::edit::{self, NewArtboard};
-use finite_server::{Hub, app, hub::Actor, router, store::MemoryStore};
+use finite_server::{
+    Hub, app,
+    hub::Actor,
+    store::MemoryStore,
+    testing::{front_for, listen, serve},
+};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
-
-async fn listen() -> (TcpListener, String) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("ws://{}", listener.local_addr().unwrap());
-    (listener, url)
-}
 
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -62,19 +60,23 @@ async fn a_tab_edits_and_undoes_its_own_work() {
                 position: Some((0.0, 0.0)),
                 page: None,
                 styles: BTreeMap::new(),
+                ..Default::default()
             };
             Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
         })
         .unwrap();
     let (server, server_url) = listen().await;
     let serving = hub.clone();
-    tokio::spawn(async move { axum::serve(server, app(serving, None)).await });
+    serve(server, app(serving, None));
     let (front, front_url) = listen().await;
-    let routes = router::app(vec![server_url.replacen("ws://", "http://", 1)], None);
-    tokio::spawn(async move { axum::serve(front, routes).await });
+    let routes = front_for(vec![server_url.clone()]);
+    serve(front, routes);
 
     for (n, base) in [server_url, front_url].iter().enumerate() {
-        let url = format!("{base}/api/designs/{id}/ws");
+        let url = format!(
+            "{}/api/designs/{id}/ws",
+            base.replacen("http://", "ws://", 1)
+        );
         let (mut tab, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         let (mut watcher, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         assert_eq!(next(&mut tab).await["type"], "snapshot");

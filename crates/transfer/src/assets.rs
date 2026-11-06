@@ -9,9 +9,12 @@
 use std::collections::BTreeMap;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
-use finite_design::{html::Fragment, import::BlobHash};
+use finite_design::{
+    html::Fragment,
+    import::{BlobHash, Dependency},
+};
 
-use crate::{Blobs, Diagnostic, Error, Feature, Score};
+use crate::{Blobs, Diagnostic, Error};
 
 /// How a file refers to a blob, followed by its hash.
 pub const SCHEME: &str = "finite-asset:";
@@ -80,27 +83,13 @@ pub fn rewrite_urls(value: &str, mut f: impl FnMut(&BlobHash) -> Option<String>)
 /// `data:` URL, since the URLs only work on this server. A file the store
 /// doesn't have stays a URL and gets a diagnostic.
 pub fn inline(text: &str, blobs: &dyn Blobs) -> Result<(String, Vec<Diagnostic>), Error> {
-    let mut diagnostics = Vec::new();
-    let mut failed = None;
-    let text = rewrite_urls(text, |hash| match blobs.get(hash) {
-        Ok(Some(bytes)) => Some(format!(
+    rewrite_stored(text, blobs, |_, bytes| {
+        format!(
             "data:{};base64,{}",
             media_type(&bytes),
             STANDARD.encode(&bytes)
-        )),
-        Ok(None) => {
-            diagnostics.push(missing(hash));
-            None
-        }
-        Err(error) => {
-            failed.get_or_insert(error);
-            None
-        }
-    });
-    match failed {
-        Some(error) => Err(error),
-        None => Ok((text, diagnostics)),
-    }
+        )
+    })
 }
 
 /// `text` with each stored file its URLs point to moved out to `dir`: the
@@ -113,17 +102,27 @@ pub fn extract(
     dir: &str,
     files: &mut BTreeMap<String, Vec<u8>>,
 ) -> Result<(String, Vec<Diagnostic>), Error> {
+    rewrite_stored(text, blobs, |hash, bytes| {
+        let name = format!("{hash}{}", extension(&bytes));
+        let url = format!("{dir}/{name}");
+        files.insert(name, bytes);
+        url
+    })
+}
+
+/// `text` with each blob URL replaced by what `stored` returns for the
+/// file's hash and bytes. A store that fails fails the whole call.
+fn rewrite_stored(
+    text: &str,
+    blobs: &dyn Blobs,
+    mut stored: impl FnMut(&BlobHash, Vec<u8>) -> String,
+) -> Result<(String, Vec<Diagnostic>), Error> {
     let mut diagnostics = Vec::new();
     let mut failed = None;
     let text = rewrite_urls(text, |hash| match blobs.get(hash) {
-        Ok(Some(bytes)) => {
-            let name = format!("{hash}{}", extension(&bytes));
-            let url = format!("{dir}/{name}");
-            files.insert(name, bytes);
-            Some(url)
-        }
+        Ok(Some(bytes)) => Some(stored(hash, bytes)),
         Ok(None) => {
-            diagnostics.push(missing(hash));
+            diagnostics.push(Diagnostic::missing_file(url("…", hash), "an image"));
             None
         }
         Err(error) => {
@@ -137,19 +136,28 @@ pub fn extract(
     }
 }
 
-/// The diagnostic for a file the design points at and its store lacks.
-fn missing(hash: &BlobHash) -> Diagnostic {
-    Diagnostic {
-        node: None,
-        path: url("…", hash),
-        what: "an image".into(),
-        feature: Feature::Image,
-        reason: "the design points at a file its store doesn't have".into(),
-        preserved: Score::No,
-        visual: Score::No,
-        editable: Score::No,
-        quarantined: false,
-    }
+/// The bytes of a file in an import: base64 text, decoded, and the hash
+/// of the bytes. `what` names the file in the error.
+pub(crate) fn decode(what: &str, base64: &str) -> Result<(BlobHash, Vec<u8>), Error> {
+    let bytes = STANDARD
+        .decode(base64)
+        .map_err(|_| Error(format!("{what} isn't valid base64")))?;
+    Ok((BlobHash::of(&bytes), bytes))
+}
+
+/// An import's files as [`crate::Imported`] carries them: the bytes, and a
+/// dependency on each one.
+pub(crate) fn carried(blobs: Vec<(BlobHash, Vec<u8>)>) -> (Vec<Vec<u8>>, Vec<Dependency>) {
+    blobs
+        .into_iter()
+        .map(|(hash, bytes)| {
+            let dependency = Dependency {
+                url: format!("{SCHEME}{hash}"),
+                blob: Some(hash),
+            };
+            (bytes, dependency)
+        })
+        .unzip()
 }
 
 /// The extension that lets a file manager open a blob, from its first bytes.

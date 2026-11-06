@@ -34,8 +34,8 @@ pub mod tls;
 use crate::{
     blob::{self, BlobHash},
     store::{
-        Claim, Registry, Store, Stored, Token, decode_record, decode_snapshot, encode_record,
-        encode_snapshot, fenced,
+        Claim, Refusal, Registry, Store, Stored, Token, decode_journal, decode_snapshot,
+        encode_record, encode_snapshot, not_saved,
     },
 };
 
@@ -188,7 +188,7 @@ impl PgStore {
             runtime: Some(runtime),
             idle: Mutex::new(Vec::new()),
             me: me.to_owned(),
-            instance: crate::hub::random_id(12),
+            instance: crate::id::random_id(12),
             lease,
         };
         query!(store, |client| {
@@ -304,13 +304,6 @@ impl Error {
     }
 }
 
-fn not_saved() -> Error {
-    Error::Io(io::Error::new(
-        io::ErrorKind::NotFound,
-        "design was never saved",
-    ))
-}
-
 impl Store for PgStore {
     fn ids(&self) -> io::Result<Vec<String>> {
         query!(self, |client| {
@@ -337,8 +330,7 @@ impl Store for PgStore {
                 return Ok(None);
             };
             let snapshot: String = row.get(0);
-            let Some(snapshot) = decode_snapshot(&snapshot)? else {
-                tracing::warn!(id, "skipping unreadable design");
+            let Some(snapshot) = decode_snapshot(&id, &snapshot)? else {
                 return Ok(None);
             };
             let rows = tx
@@ -347,16 +339,7 @@ impl Store for PgStore {
                     &[&id],
                 )
                 .await?;
-            let mut journal = Vec::with_capacity(rows.len());
-            for row in rows {
-                match decode_record(row.get(0))? {
-                    Some(record) => journal.push(record),
-                    None => {
-                        tracing::warn!(id, "journal has an unreadable record; ignoring the rest");
-                        break;
-                    }
-                }
-            }
+            let journal = decode_journal(&id, rows.iter().map(|row| Ok(row.get(0))))?;
             tx.commit().await?;
             Ok(Some(Stored { snapshot, journal }))
         })
@@ -376,7 +359,7 @@ impl Store for PgStore {
                 .await?;
             if updated == 0 {
                 if token != 0 {
-                    return Err(Error::Io(fenced()));
+                    return Err(Refusal::Fenced.error().into());
                 }
                 let inserted = tx
                     .execute(
@@ -386,7 +369,7 @@ impl Store for PgStore {
                     )
                     .await?;
                 if inserted == 0 {
-                    return Err(Error::Io(fenced()));
+                    return Err(Refusal::Fenced.error().into());
                 }
             }
             tx.execute("DELETE FROM finite_journal WHERE design = $1", &[&id])
@@ -414,10 +397,10 @@ impl Store for PgStore {
                 )
                 .await?
             else {
-                return Err(not_saved());
+                return Err(not_saved().into());
             };
             if row.get::<_, i64>(0) != token {
-                return Err(Error::Io(fenced()));
+                return Err(Refusal::Fenced.error().into());
             }
             tx.execute(
                 "INSERT INTO finite_journal (design, record)
@@ -426,16 +409,6 @@ impl Store for PgStore {
             )
             .await?;
             tx.commit().await?;
-            Ok(())
-        })
-    }
-
-    fn remove(&self, id: &str) -> io::Result<()> {
-        let id = id.to_owned();
-        query!(self, |client| {
-            client
-                .execute("DELETE FROM finite_designs WHERE id = $1", &[&id])
-                .await?;
             Ok(())
         })
     }
@@ -451,7 +424,7 @@ impl Store for PgStore {
                 )
                 .await?;
             if removed == 0 {
-                return Err(Error::Io(fenced()));
+                return Err(Refusal::Fenced.error().into());
             }
             Ok(())
         })
@@ -654,7 +627,7 @@ pub fn scratch_schema(url: &str) -> io::Result<String> {
 
 /// Creates an empty schema with a random name in the database at `url`.
 fn new_schema(url: &str) -> io::Result<String> {
-    let schema = format!("finite_test_{}", crate::hub::random_id(10));
+    let schema = format!("finite_test_{}", crate::id::random_id(10));
     let (base, statement) = (url.to_owned(), format!("CREATE SCHEMA {schema}"));
     // On a thread of its own, since the caller may be inside a runtime.
     std::thread::spawn(move || {
@@ -676,13 +649,11 @@ fn new_schema(url: &str) -> io::Result<String> {
     Ok(schema)
 }
 
-/// The database tests use, from `FINITE_TEST_DATABASE_URL`, with a fresh
-/// schema. `None` when it isn't set, and the test should skip.
+/// The database tests use ([`crate::testing::require_postgres`]), with a
+/// fresh schema. `None` when there is none, and the test should skip.
+#[cfg(any(test, feature = "testing"))]
 pub fn test_database() -> Option<String> {
-    let Ok(url) = std::env::var("FINITE_TEST_DATABASE_URL") else {
-        eprintln!("skipping: set FINITE_TEST_DATABASE_URL to run the tests that need Postgres");
-        return None;
-    };
+    let url = crate::testing::require_postgres()?;
     Some(scratch_schema(&url).expect("FINITE_TEST_DATABASE_URL is reachable"))
 }
 
@@ -711,11 +682,10 @@ mod tests {
     /// other's designs, or each other's servers.
     #[test]
     fn a_schema_keeps_a_deployment_to_itself() {
-        let Ok(url) = std::env::var("FINITE_TEST_DATABASE_URL") else {
-            eprintln!("skipping: set FINITE_TEST_DATABASE_URL");
+        let Some(url) = crate::testing::require_postgres() else {
             return;
         };
-        let name = |n| format!("finite_test_{}_{n}", crate::hub::random_id(8));
+        let name = |n| format!("finite_test_{}_{n}", crate::id::random_id(8));
         let (one, two) = (name(1), name(2));
         let a = PgStore::connect_in(&url, Some(&one), "http://a", LEASE).unwrap();
         let b = PgStore::connect_in(&url, Some(&two), "http://b", LEASE).unwrap();
@@ -791,7 +761,7 @@ mod tests {
             use std::sync::{Arc, atomic::Ordering};
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-            let url = std::env::var("FINITE_TEST_DATABASE_URL").ok()?;
+            let url = crate::testing::require_postgres()?;
             let schema = new_schema(&url).unwrap();
             let (database, _) = open(&url).unwrap();
             let upstream = match (&database.get_hosts()[0], database.get_ports()[0]) {
@@ -804,7 +774,7 @@ mod tests {
             ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
             let ca_cert = ca_params.self_signed(&ca_key).unwrap();
             let ca =
-                std::env::temp_dir().join(format!("finite-ca-{}.pem", crate::hub::random_id(8)));
+                std::env::temp_dir().join(format!("finite-ca-{}.pem", crate::id::random_id(8)));
             std::fs::write(&ca, ca_cert.pem()).unwrap();
             let key = rcgen::KeyPair::generate().unwrap();
             let cert = rcgen::CertificateParams::new(vec!["localhost".to_owned()])
@@ -896,7 +866,6 @@ mod tests {
     #[test]
     fn the_store_connects_over_tls() {
         let Some(front) = TlsFront::start() else {
-            eprintln!("skipping: set FINITE_TEST_DATABASE_URL");
             return;
         };
         let store = front.connect("localhost", "sslmode=require").unwrap();
@@ -909,7 +878,6 @@ mod tests {
     #[test]
     fn sslmode_decides_what_is_checked() {
         let Some(front) = TlsFront::start() else {
-            eprintln!("skipping: set FINITE_TEST_DATABASE_URL");
             return;
         };
         let works = |host: &str, tls: &str| front.connect(host, tls).map(|_| ());

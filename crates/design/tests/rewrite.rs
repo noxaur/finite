@@ -34,6 +34,7 @@ impl Board {
             position: None,
             page: None,
             styles: BTreeMap::new(),
+            ..Default::default()
         };
         let ops = edit::create_artboard(design.doc(), "board".into(), spec).unwrap();
         design.commit("A", "Create artboard", &ops, 0).unwrap();
@@ -90,7 +91,7 @@ impl Board {
         self.design.commit(actor, "Update styles", &ops, 0).unwrap();
     }
 
-    /// What `get_html` returns for `id`, with the read mark.
+    /// What `read` returns for `id`, with the read mark.
     fn read(&self, id: &str) -> String {
         let options = ExportOptions {
             ids: true,

@@ -7,11 +7,11 @@ import type { Audience, Comment } from "@/design/schema";
 import { audienceLabel, audienceOf, routeLabel, type KnownAgent } from "@/lib/audience";
 import { COMMENT_LIMIT, NAME_LIMIT, SELECTION_LIMIT } from "@/lib/limits";
 import { isLocalUser, useLocalName } from "@/lib/user";
-import { timeAgo } from "@/lib/time";
 import { Button, buttonStyle, IconButton } from "./Button";
 import { Icon } from "./Icons";
 import { Dropdown } from "./Menu";
 import { PinFilters, PinIcon, type PinState } from "./PinIcon";
+import { TimeAgo } from "./TimeAgo";
 import { raised } from "@/styles/raised";
 import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
 
@@ -396,7 +396,7 @@ function Thread({
                 {isLocalUser(message.author) ? "You" : message.author.name}
               </span>{" "}
               <span {...stylex.props(styles.muted)}>
-                {timeAgo(message.at)}
+                <TimeAgo at={message.at} />
                 {message.editedAt !== undefined && " · edited"}
               </span>
               {i === last && editable && !editing && (

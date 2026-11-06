@@ -2,7 +2,7 @@
 // spec file and answers through a real finite-server, so a redesign of the
 // tools can be tried on agents before any of it is built in Rust.
 //
-//   node e2e/ax/run.mjs --task rebrand --runs 3 --label no-search --surface e2e/ax/surfaces/no-search.mjs
+//   node e2e/ax/run.mjs --task rebrand --runs 3 --label example --surface e2e/ax/surfaces/example.mjs
 //
 // run.mjs starts it over stdio, with FINITE_BASE set to the run's server.
 // Tools the spec doesn't name pass through unchanged, so a spec only holds

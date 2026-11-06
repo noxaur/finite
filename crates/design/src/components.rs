@@ -200,7 +200,11 @@ fn uses(doc: &Document, component: &str, other: &str) -> bool {
 
 /// Refuses an instance of `component` under `parent` when the component
 /// would end up showing itself.
-pub fn check_cycle(doc: &Document, component: &str, parent: Option<&str>) -> Result<(), EditError> {
+pub(crate) fn check_cycle(
+    doc: &Document,
+    component: &str,
+    parent: Option<&str>,
+) -> Result<(), EditError> {
     let mut node = parent.and_then(|p| doc.get(real_id(p)));
     while let Some(n) = node {
         if n.component && uses(doc, component, &n.id) {
@@ -223,7 +227,7 @@ pub fn check_cycle(doc: &Document, component: &str, parent: Option<&str>) -> Res
 }
 
 /// The component `id`, or why it isn't one.
-pub fn check_component<'a>(doc: &'a Document, id: &str) -> Result<&'a Node, EditError> {
+pub(crate) fn check_component<'a>(doc: &'a Document, id: &str) -> Result<&'a Node, EditError> {
     match doc.get(id) {
         Some(node) if node.component => Ok(node),
         Some(node) if node.is_instance() => err(format!(
@@ -231,14 +235,14 @@ pub fn check_component<'a>(doc: &'a Document, id: &str) -> Result<&'a Node, Edit
             node.instance_of.as_deref().unwrap_or("")
         )),
         Some(_) => err(format!(
-            "#{id} isn't a component; make it one with create_component"
+            "#{id} isn't a component; make it one with {{\"op\": \"component\", \"select\": \"#{id}\"}}"
         )),
         None => err(format!("component {id:?} not found")),
     }
 }
 
 /// How many nodes an instance of `component` adds to the expanded design.
-pub fn expanded_size(doc: &Document, component: &str) -> usize {
+pub(crate) fn expanded_size(doc: &Document, component: &str) -> usize {
     preview(doc, component).len()
 }
 
@@ -492,7 +496,7 @@ fn refuse_inside(doc: &Document, id: &str, what: &str) -> EditError {
     EditError(format!(
         "#{id} is inside instance #{instance} of component{name}, so {what}. \
          Edit the component #{cid} to change every instance, change this one's text, styles or \
-         attributes (they become overrides; display: none hides a part), or detach_instance #{instance} first."
+         attributes (they become overrides; display: none hides a part), or detach the instance first with {{\"op\": \"component\", \"select\": \"#{instance}\", \"detach\": true}}."
     ))
 }
 
@@ -760,7 +764,7 @@ pub fn detach(
 
 /// The overrides that make an instance of `component` look like
 /// `fragment`, HTML an agent wrote for an instance, often after reading it
-/// with get_html. Elements say which node of the component they show with
+/// with `read`. Elements say which node of the component they show with
 /// [`Fragment::source`] (their `data-id`), and text inside them matches the
 /// component's text by position. Returns the overrides and how many
 /// elements didn't match a node of the component and were left out.
@@ -1028,6 +1032,186 @@ pub fn info(doc: &Document, id: &str) -> Option<Info> {
     })
 }
 
+/// The classes used inside component `id` that a `<style>` block in its
+/// artboard, outside the component, mentions. A `<style>` only styles its
+/// own artboard, so instances on other artboards don't get those rules.
+pub fn classes_styled_outside(doc: &Document, id: &str) -> Vec<String> {
+    let mut classes: Vec<String> = doc
+        .subtree(id)
+        .iter()
+        .filter_map(|n| n.attrs.get("class"))
+        .flat_map(|c| c.split_whitespace().map(str::to_owned))
+        .collect();
+    classes.sort();
+    classes.dedup();
+    let Some(board) = doc.artboard_of(id) else {
+        return Vec::new();
+    };
+    let css: String = doc
+        .subtree(&board.id)
+        .into_iter()
+        .filter(|n| n.tag().is_some_and(|t| t.eq_ignore_ascii_case("style")))
+        .filter(|n| n.id != id && !doc.is_ancestor(id, &n.id))
+        .flat_map(|n| doc.children(Some(&n.id)))
+        .filter_map(|t| t.text.as_deref())
+        .collect();
+    classes
+        .into_iter()
+        .filter(|c| {
+            let selector = format!(".{c}");
+            css.match_indices(&selector).any(|(at, _)| {
+                // `.bar` shouldn't match `.barrel`.
+                !css[at + selector.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_alphanumeric() || ch == '-' || ch == '_')
+            })
+        })
+        .collect()
+}
+
+/// An instance that a change set or cleared overrides on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Overridden {
+    pub instance: NodeId,
+    /// The component the instance shows.
+    pub component: Option<NodeId>,
+    pub set: usize,
+    pub cleared: usize,
+}
+
+/// A component that a change edited, and what showing it affects.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditedComponent {
+    pub component: NodeId,
+    /// Every instance that shows the edit, nested ones included.
+    pub instances: Vec<NodeId>,
+    /// The instances of the component itself.
+    pub direct: Vec<NodeId>,
+    /// Up to four elements the change added to the component, which have no
+    /// overrides in the instances yet. Empty for a component the change made.
+    pub added: Vec<NodeId>,
+}
+
+/// What a change did to components and instances, as [`summarize`] reads it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChangeSummary {
+    /// Instances that got overrides, or lost them.
+    pub overridden: Vec<Overridden>,
+    /// Components the change made that no instance shows yet.
+    pub defined: Vec<NodeId>,
+    /// Existing components the change edited.
+    pub edited: Vec<EditedComponent>,
+    /// Instances turned into plain copies.
+    pub detached: Vec<NodeId>,
+}
+
+/// Reads what `ops` did to components, once applied to `doc` (the real
+/// document, not the expanded view). An edit inside an instance becomes an
+/// override on it, and one inside a component changes every instance, which
+/// the HTML an agent writes doesn't show.
+pub fn summarize(doc: &Document, ops: &[Op]) -> ChangeSummary {
+    let mut summary = ChangeSummary::default();
+    if !doc.has_instances() && !doc.nodes().any(|n| n.component) {
+        return summary;
+    }
+    let mut overridden: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    let mut edited: BTreeMap<String, usize> = BTreeMap::new();
+    // Components this change made: new ones, not edits to old ones.
+    let made: Vec<&str> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Create { node } if node.component => Some(node.id.as_str()),
+            Op::Set {
+                id,
+                key: PropKey::Component,
+                value: Some(_),
+            } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    for op in ops {
+        match op {
+            Op::Set {
+                id,
+                key: PropKey::Override(_),
+                value,
+            } => {
+                let entry = overridden.entry(id.as_str()).or_default();
+                if value.is_some() {
+                    entry.0 += 1;
+                } else {
+                    entry.1 += 1;
+                }
+            }
+            Op::Set {
+                id,
+                key: PropKey::InstanceOf,
+                value: None,
+            } => summary.detached.push(id.clone()),
+            Op::Set {
+                key: PropKey::Component | PropKey::Name,
+                ..
+            } => {}
+            _ => {
+                let id = match op {
+                    Op::Create { node } => node.parent.as_deref().unwrap_or(&node.id),
+                    _ => op.id(),
+                };
+                if let Some(component) = component_of(doc, id) {
+                    *edited.entry(component.id.clone()).or_default() += 1;
+                }
+            }
+        }
+    }
+    // Detaching clears an instance's overrides; that's not news.
+    summary.overridden = overridden
+        .into_iter()
+        .filter(|(id, _)| !summary.detached.iter().any(|d| d == id))
+        .map(|(instance, (set, cleared))| Overridden {
+            instance: instance.to_owned(),
+            component: doc.get(instance).and_then(|n| n.instance_of.clone()),
+            set,
+            cleared,
+        })
+        .collect();
+    for id in &made {
+        if doc.instances_of(id).next().is_none() && doc.get(id).is_some() {
+            summary.defined.push((*id).to_owned());
+            edited.remove(*id);
+        }
+    }
+    for component in edited.into_keys() {
+        let instances: Vec<NodeId> = affected(doc, &component).into_iter().collect();
+        let direct: Vec<NodeId> = doc.instances_of(&component).map(str::to_owned).collect();
+        let was_made = made.contains(&component.as_str());
+        let added = if was_made || instances.is_empty() {
+            Vec::new()
+        } else {
+            ops.iter()
+                .filter_map(|op| match op {
+                    Op::Create { node } => doc.get(&node.id),
+                    _ => None,
+                })
+                .filter(|n| {
+                    n.tag().is_some()
+                        && component_of(doc, &n.id).is_some_and(|c| c.id == component)
+                        && n.id != component
+                })
+                .map(|n| n.id.clone())
+                .take(4)
+                .collect()
+        };
+        summary.edited.push(EditedComponent {
+            component,
+            instances,
+            direct,
+            added,
+        });
+    }
+    summary
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1274,12 +1458,14 @@ mod tests {
         let mut next = {
             let mut n = 0;
             let taken: HashSet<String> = view.nodes().map(|n| n.id.clone()).collect();
-            move || loop {
-                n += 1;
-                let id = format!("w{n}");
-                if !taken.contains(&id) {
-                    return id;
-                }
+            move || {
+                crate::id::fresh(
+                    &mut || {
+                        n += 1;
+                        format!("w{n}")
+                    },
+                    |id| taken.contains(id),
+                )
             }
         };
         let (ops, _) = crate::edit::write_html(&view, target, html, mode, None, &mut next)?;
@@ -1316,7 +1502,7 @@ mod tests {
             text(&doc, "c"),
             r#"<div><header style="display: flex"><span>Home</span></header></div>"#
         );
-        // get_html names it, so writing that back means the same component.
+        // `read` names it, so writing that back means the same component.
         let html = crate::html::export(&expand(&doc), &bar, true).unwrap();
         assert!(html.contains(r#"data-component="Bar""#), "{html}");
 
@@ -1399,7 +1585,10 @@ mod tests {
         let doc = design();
         let view = expand(&doc);
         let refused = crate::edit::create_component(&view, "i/new2", None, &[]).unwrap_err();
-        assert!(refused.0.contains("detach_instance #i"), "{refused}");
+        assert!(
+            refused.0.contains("\"select\": \"#i\", \"detach\": true"),
+            "{refused}"
+        );
     }
 
     #[test]
@@ -1408,7 +1597,10 @@ mod tests {
         let view = expand(&doc);
         let delete = crate::edit::delete(&view, &["i/new4".into()]).unwrap();
         let refused = redirect(&doc, delete, &mut fresh()).unwrap_err();
-        assert!(refused.0.contains("detach_instance #i"), "{refused}");
+        assert!(
+            refused.0.contains("\"select\": \"#i\", \"detach\": true"),
+            "{refused}"
+        );
         let write = crate::edit::write_html(
             &view,
             "i",
@@ -1528,7 +1720,7 @@ mod tests {
     #[test]
     fn html_written_for_an_instance_becomes_overrides() {
         let doc = design();
-        // What get_html shows, with the title and the button's color changed.
+        // What `read` shows, with the title and the button's color changed.
         let html = r#"<header data-id="i" data-instance-of="new1" style="color: black; padding: 8px"><h1 data-id="i/new2">Settings</h1><button data-id="i/new4" style="background: red">Go</button><p>new</p></header>"#;
         let fragment = html::parse(html).unwrap().remove(0);
         assert_eq!(fragment.instance_of.as_deref(), Some("new1"));

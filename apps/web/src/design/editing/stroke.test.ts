@@ -1,25 +1,18 @@
 import { describe, expect, it } from "vite-plus/test";
-import {
-  centerOffset,
-  hasBorder,
-  moveStroke,
-  outlinePart,
-  outlinePosition,
-  strokePosition,
-} from "./stroke";
+import { centerOffset, hasBorder, moveStroke, outlinePart, outlinePosition } from "./stroke";
 
 const reader = (styles: Record<string, string>) => (prop: string) => styles[prop];
 
 describe("stroke position", () => {
   it("reads inside, center and outside", () => {
-    expect(strokePosition(reader({ "border-style": "solid" }))).toBe("inside");
+    expect(hasBorder(reader({ "border-style": "solid" }))).toBe(true);
     const outline = { "outline-style": "solid", "outline-width": "2px" };
-    expect(strokePosition(reader({ ...outline, "outline-offset": "-1px" }))).toBe("center");
-    expect(strokePosition(reader({ ...outline, "outline-offset": "0px" }))).toBe("outside");
-    expect(strokePosition(reader({ "border-style": "none" }))).toBeNull();
+    expect(outlinePosition(reader({ ...outline, "outline-offset": "-1px" }))).toBe("center");
+    expect(outlinePosition(reader({ ...outline, "outline-offset": "0px" }))).toBe("outside");
+    expect(hasBorder(reader({ "border-style": "none" }))).toBe(false);
     // A border on one side only, like a divider's, is inside too.
-    expect(strokePosition(reader({ "border-style": "none none solid" }))).toBe("inside");
-    expect(strokePosition(reader({ "border-bottom-style": "solid" }))).toBe("inside");
+    expect(hasBorder(reader({ "border-style": "none none solid" }))).toBe(true);
+    expect(hasBorder(reader({ "border-bottom-style": "solid" }))).toBe(true);
     expect(centerOffset("var(--b-1)")).toBe("calc(var(--b-1) / -2)");
   });
 
@@ -69,7 +62,7 @@ describe("an outline shorthand", () => {
     expect(outlinePart(own, "outline-width")).toBe("2px");
     expect(outlinePart(own, "outline-style")).toBe("dotted");
     expect(outlinePart(own, "outline-color")).toBe("blue");
-    expect(strokePosition((p) => outlinePart(own, p) ?? own[p as keyof typeof own])).toBe(
+    expect(outlinePosition((p) => outlinePart(own, p) ?? own[p as keyof typeof own])).toBe(
       "outside",
     );
   });

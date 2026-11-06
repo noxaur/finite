@@ -1,4 +1,4 @@
-import type { Bounds } from "./renderer";
+import type { Bounds } from "./types";
 import { visibleBounds } from "./culling";
 
 /** The parts of a wheel event the camera reads. Sandboxed artboards forward these. */

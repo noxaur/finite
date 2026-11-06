@@ -16,14 +16,17 @@ import {
   draggedLayers,
   dropAt,
   dropEdit,
+  type FlagAttr,
+  HIDDEN_ATTR,
   type LayerModel,
+  LOCKED_ATTR,
   type Row,
   type RowFacts,
   toggleFlag,
 } from "@/design/editing/layers";
 import type { Replica } from "@/design/replica";
 import type { UserEdit } from "@/design/schema";
-import { colors, radii, shadows, size, space } from "@/styles/tokens.stylex";
+import { colors, motion, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import { IconButton } from "./Button";
 import { Icon } from "./Icons";
 
@@ -296,7 +299,7 @@ export function LayersTree({
     e.stopPropagation();
   };
 
-  const flag = (row: Row, attr: "hidden" | "data-locked") => {
+  const flag = (row: Row, attr: FlagAttr) => {
     const ids = picked.has(row.facts.id) ? selection : [row.facts.id];
     void editor.commit([toggleFlag((id) => model.node(id), ids, attr)]);
   };
@@ -386,7 +389,7 @@ interface RowActions {
   readonly toggle: (id: string) => void;
   readonly reveal: (id: string) => void;
   readonly rename: (row: Row) => void;
-  readonly flag: (row: Row, attr: "hidden" | "data-locked") => void;
+  readonly flag: (row: Row, attr: FlagAttr) => void;
   readonly renamed: () => void;
 }
 
@@ -500,7 +503,7 @@ const LayerRow = memo(function LayerRow({
             tabIndex={-1}
             // The look stays flat: the icon itself says it's locked.
             aria-pressed={facts.locked}
-            onClick={() => actions.flag(row, "data-locked")}
+            onClick={() => actions.flag(row, LOCKED_ATTR)}
             style={[
               styles.flag,
               facts.locked ? styles.flagOn : !hovered && styles.invisible,
@@ -515,7 +518,7 @@ const LayerRow = memo(function LayerRow({
             size="small"
             tabIndex={-1}
             aria-pressed={facts.hidden}
-            onClick={() => actions.flag(row, "hidden")}
+            onClick={() => actions.flag(row, HIDDEN_ATTR)}
             style={[styles.flag, facts.hidden ? styles.flagOn : !hovered && styles.invisible]}
           />
         </span>
@@ -619,7 +622,7 @@ const styles = stylex.create({
   /** Under the pointer, here or on the canvas. */
   rowHover: { backgroundColor: colors.hoverFill },
   /** What a drag drops into, ringed in the brand like its outline on the canvas. */
-  rowTarget: { boxShadow: `inset 0 0 0 2px ${colors.brand}` },
+  rowTarget: { boxShadow: shadows.target },
   rowOn: { backgroundColor: colors.activeFill },
   dimmed: { opacity: 0.45 },
   twisty: {
@@ -637,7 +640,7 @@ const styles = stylex.create({
     cursor: "var(--cursor-pointer, pointer)",
   },
   invisible: { visibility: "hidden" },
-  chevron: { display: "flex", transition: "transform 200ms cubic-bezier(.23, 1, .32, 1)" },
+  chevron: { display: "flex", transition: `transform ${motion.base} ${motion.out}` },
   chevronOpen: { transform: "rotate(90deg)" },
   icon: { display: "flex", flexShrink: 0, color: colors.faint },
   iconOn: { color: colors.text },
@@ -682,7 +685,7 @@ const styles = stylex.create({
     right: INSET,
     height: size.sm,
     borderRadius: radii.xs,
-    boxShadow: `inset 0 0 0 2px ${colors.brand}`,
+    boxShadow: shadows.target,
     pointerEvents: "none",
   },
 });

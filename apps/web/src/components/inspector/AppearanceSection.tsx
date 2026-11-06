@@ -4,6 +4,7 @@ import * as stylex from "@stylexjs/stylex";
 import { useState } from "react";
 import { BLENDS, CURSORS, opacityPercent, opacityValue } from "@/design/editing/appearance";
 import { customOf, parseInput, type Reading, tokenOf } from "@/design/editing/inspect";
+import { whenNumber } from "../DraftField";
 import { AddMenu, Choice, Field, Row, Section, Toggle } from "./controls";
 import { type Changes, rawOf, readOf, removal, type Scope } from "./scope";
 
@@ -116,10 +117,8 @@ function OpacityField({ scope, reading }: { scope: Scope; reading: Reading }) {
       custom={why ? { title: why, onReset: () => scope.commit({ opacity: null }) } : undefined}
       toChanges={(typed) => {
         if (typed.trim().startsWith("--")) return { opacity: parseInput("opacity", typed) };
-        const n = parseFloat(typed);
-        return Number.isFinite(n) ? to(n) : null;
+        return whenNumber(typed, to);
       }}
-
       lead="Opacity"
       scrub={{ start: percent ?? (raw === undefined ? 100 : null), to: (n) => to(n) }}
       min={0}

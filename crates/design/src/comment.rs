@@ -30,7 +30,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ActorId, Change, Document, NodeId, NodeKind, Op};
+use crate::{ActorId, Change, Document, NodeId, NodeKind, Op, actor};
 
 /// The longest comment or reply accepted, in characters.
 pub const MAX_BODY: usize = 4000;
@@ -46,8 +46,9 @@ pub const MAX_OPEN: usize = 500;
 pub const MAX_MESSAGES: usize = 200;
 /// How many elements one comment can point at, counting `node_id`.
 pub const MAX_SELECTION: usize = 50;
-/// How many recent changes [`ChangeLog`] remembers.
-const LOG_LIMIT: usize = 512;
+/// How many recent changes a design remembers: [`ChangeLog`] and the merge
+/// log in `design/three_way.rs` both keep this many.
+pub(crate) const LOG_LIMIT: usize = 512;
 /// How many nodes a [`ChangeRef`] lists.
 const NODE_LIMIT: usize = 24;
 
@@ -83,14 +84,9 @@ pub enum Audience {
 }
 
 impl Audience {
-    pub fn is_agents(&self) -> bool {
+    pub(crate) fn is_agents(&self) -> bool {
         matches!(self, Self::Agents)
     }
-}
-
-/// Whether `id` is an agent's actor id: `agent:…` or `mcp:…`.
-pub fn is_agent(id: &str) -> bool {
-    id.starts_with("agent:") || id.starts_with("mcp:")
 }
 
 /// Checks an audience a person picked: one agent must have an agent's id.
@@ -100,7 +96,7 @@ pub(crate) fn check_audience(audience: Audience) -> Result<Audience, CommentErro
         return Ok(audience);
     };
     let rest = id.split_once(':').map(|(_, rest)| rest);
-    if !is_agent(&id)
+    if !actor::is_agent(&id)
         || rest.is_none_or(|rest| rest.is_empty() || rest.chars().count() > MAX_USER_ID)
     {
         return Err(CommentError::BadAudience);
@@ -190,7 +186,7 @@ pub struct Point {
 
 impl Comment {
     /// The `seq` of the latest message, or 0 for an empty thread.
-    pub fn last_seq(&self) -> u64 {
+    pub(crate) fn last_seq(&self) -> u64 {
         self.messages.last().map_or(0, |m| m.seq)
     }
 
@@ -502,7 +498,7 @@ impl ChangeLog {
         self.entries
             .iter()
             .rev()
-            .find(|e| is_agent(&e.actor) && e.artboards.contains(artboard))
+            .find(|e| actor::is_agent(&e.actor) && e.artboards.contains(artboard))
             .map(|e| e.actor.as_str())
     }
 

@@ -8,6 +8,7 @@
 //! - [`comment`] holds the threads users pin to the canvas.
 //! - [`tokens`] holds the design tokens every artboard can use.
 //! - [`css`] merges a patch into a stylesheet, keeping what it doesn't touch.
+//! - [`css_scan`] finds strings, comments, rules and URLs in CSS text.
 //! - [`components`] expands instances of components and turns edits inside them into overrides.
 //! - [`flow`] reads a prototype's routes and links, and finds broken links.
 //! - [`user_edit`] plans the edits people make on the canvas, on the server and in the browser.
@@ -15,9 +16,11 @@
 //! This crate has no I/O, so the same rules run in the browser (via WASM),
 //! which shows a person's edits before the server confirms them.
 
+pub mod actor;
 pub mod comment;
 pub mod components;
 pub mod css;
+pub mod css_scan;
 mod design;
 mod document;
 pub mod edit;
@@ -25,6 +28,7 @@ pub mod flow;
 pub mod fractional;
 mod history;
 pub mod html;
+pub mod id;
 pub mod import;
 pub mod label;
 mod node;
@@ -34,9 +38,9 @@ pub mod tokens;
 pub mod user_edit;
 pub mod version;
 
+pub use actor::ActorId;
 pub use design::{
-    ActorId, Change, Design, DesignMeta, Kept, KeptNode, MIGRATION_ACTOR, Merged, Origin, Record,
-    Snapshot, Transaction,
+    Change, Design, DesignMeta, Kept, KeptNode, Merged, Origin, Record, Snapshot, Transaction,
 };
 pub use document::{Applied, Document, FIRST_PAGE, MAX_DEPTH, MAX_PAGES, Op, Page, Rejected};
 pub use history::{Entry, History};

@@ -2,9 +2,10 @@
 
 import * as stylex from "@stylexjs/stylex";
 import { type ReactNode, useRef, useState } from "react";
-import { colors, radii, shadows, size, space } from "@/styles/tokens.stylex";
+import { colors, motion, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import { IconButton, Strip, StripItem } from "./Button";
 import { Icon } from "./Icons";
+import { NameInput } from "./NameInput";
 
 export type LeftMode = "design" | "tokens";
 
@@ -69,25 +70,13 @@ export function LeftSidebar({
       {...stylex.props(styles.panel, style)}
     >
       <header {...stylex.props(styles.head)}>
-        <input
+        <NameInput
           key={name ?? ""}
-          aria-label="Design name"
-          defaultValue={name ?? ""}
+          label="Design name"
+          value={name ?? ""}
           placeholder="…"
-          spellCheck={false}
-          onBlur={(e) => {
-            const next = e.target.value.trim();
-            if (next && next !== name) onRename(next);
-            else e.target.value = name ?? "";
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") e.currentTarget.blur();
-            else if (e.key === "Escape") {
-              e.currentTarget.value = name ?? "";
-              e.currentTarget.blur();
-            }
-          }}
-          {...stylex.props(styles.name)}
+          onRename={onRename}
+          style={styles.name}
         />
         <IconButton
           icon="search"
@@ -154,25 +143,13 @@ export function LeftSidebar({
                           <span {...stylex.props(styles.rowIcon, styles.rowIconOn)}>
                             <Icon name="page" size={15} />
                           </span>
-                          <input
-                            aria-label="Page name"
-                            defaultValue={p.name}
+                          <NameInput
+                            label="Page name"
+                            value={p.name}
                             autoFocus
-                            spellCheck={false}
-                            onFocus={(e) => e.currentTarget.select()}
-                            onBlur={(e) => {
-                              const next = e.target.value.trim();
-                              if (next && next !== p.name) pageActions.rename(p.id, next);
-                              setRenaming(null);
-                            }}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") e.currentTarget.blur();
-                              else if (e.key === "Escape") {
-                                e.currentTarget.value = p.name;
-                                e.currentTarget.blur();
-                              }
-                            }}
-                            {...stylex.props(styles.pageInput)}
+                            onRename={(next) => pageActions.rename(p.id, next)}
+                            onDone={() => setRenaming(null)}
+                            style={styles.pageInput}
                           />
                         </div>
                       ) : (
@@ -352,7 +329,7 @@ const styles = stylex.create({
   },
 
   /** Where artboards dragged from Layers would move, ringed in the brand. */
-  rowDrop: { boxShadow: `inset 0 0 0 2px ${colors.brand}` },
+  rowDrop: { boxShadow: shadows.target },
   label: {
     display: "flex",
     alignItems: "center",
@@ -380,7 +357,7 @@ const styles = stylex.create({
   chevron: {
     display: "flex",
     color: colors.faint,
-    transition: "transform 200ms cubic-bezier(.23, 1, .32, 1)",
+    transition: `transform ${motion.base} ${motion.out}`,
   },
   chevronOpen: { transform: "rotate(90deg)" },
   pages: {

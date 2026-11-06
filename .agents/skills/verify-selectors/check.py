@@ -35,8 +35,8 @@ def main():
         ("child has no parent", "crates/design/src/select.rs", "self.at(self.entry().parent)", "None", 0),
         ("siblings disconnected", "crates/design/src/select.rs", "self.at(self.entry().prev)", "None", 0),
         ("node ids ignored", "crates/design/src/select.rs", "case.eq(node.id.as_bytes(), id.0.as_bytes())", "false", 0),
-        ("MCP ignores page", "crates/server/src/mcp/doc6/mod.rs", "Some(page) => select::Scope::Page(page)", "Some(_page) => select::Scope::Design", 1),
-        ("MCP ignores aliases", "crates/server/src/mcp/doc6/mod.rs", "out.push_str(id);", "out.push_str(name);", 1),
+        ("MCP ignores page", "crates/server/src/mcp/selector.rs", "Some(page) => select::Scope::Page(page)", "Some(_page) => select::Scope::Design", 1),
+        ("MCP ignores aliases", "crates/server/src/mcp/selector.rs", "out.push_str(id);", "out.push_str(name);", 1),
     ]
     with tempfile.TemporaryDirectory(prefix="finite-selectors-") as directory:
         scratch = Path(directory)

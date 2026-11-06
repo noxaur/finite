@@ -82,6 +82,7 @@ fn main() {
             position: None,
             page: None,
             styles: Default::default(),
+            ..Default::default()
         },
     )
     .unwrap();

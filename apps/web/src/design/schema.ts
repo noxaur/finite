@@ -2,7 +2,8 @@ import { Schema } from "effect";
 
 // Mirrors the Rust types in crates/design (Node, Op, Change, Snapshot, Comment, UserEdit) and
 // crates/server/src/hub/messages.rs (Presence, DesignSummary, the socket messages).
-// Keep both sides in sync.
+// wire.test.ts decodes the fixtures the Rust tests record and checks nothing is lost or left over,
+// so a field added on either side fails there.
 
 export const Node = Schema.Struct({
   id: Schema.String,
@@ -368,19 +369,22 @@ export const DesignMessage = Schema.Union([
 ]);
 export type DesignMessage = typeof DesignMessage.Type;
 
-/** What a person's tab sends on `/api/designs/{id}/ws`, besides pings. */
-export type ClientMessage =
-  | {
-      readonly type: "mutate";
-      readonly author: { readonly id: string; readonly name: string };
-      readonly stamp: Stamp;
-      readonly edits: ReadonlyArray<UserEdit>;
-    }
-  | {
-      readonly type: "undo" | "redo";
-      readonly author: { readonly id: string; readonly name: string };
-      readonly stamp: Stamp;
-    };
+/** Who a person's tab says is acting (`UserAuthor` in Rust). */
+const UserAuthor = Schema.Struct({ id: Schema.String, name: Schema.String });
+
+/** What a person's tab sends on `/api/designs/{id}/ws`, besides pings (`ClientMessage` in Rust). */
+export const ClientMessage = Schema.Union([
+  /** A gesture's edits, as one undo step. */
+  Schema.Struct({
+    type: Schema.Literal("mutate"),
+    author: UserAuthor,
+    stamp: Stamp,
+    edits: Schema.Array(UserEdit),
+  }),
+  Schema.Struct({ type: Schema.Literal("undo"), author: UserAuthor, stamp: Stamp }),
+  Schema.Struct({ type: Schema.Literal("redo"), author: UserAuthor, stamp: Stamp }),
+]);
+export type ClientMessage = typeof ClientMessage.Type;
 
 /** Sent on `/api/designs/ws`. */
 export const LobbyMessage = Schema.Union([

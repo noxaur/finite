@@ -9,12 +9,12 @@ import { Api } from "@/api/Api";
 import type { DesignSummary } from "@/design/schema";
 import { connectLobby, type SocketStatus } from "@/design/socket";
 import { mcpUrl } from "@/lib/mcp";
-import { timeAgo } from "@/lib/time";
 import { runtime } from "@/runtime";
 import { matchesName, mergeLobby } from "@/lib/lobby";
 import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import { Button } from "./Button";
 import { Thumbnail } from "./Thumbnail";
+import { TimeAgo } from "./TimeAgo";
 
 /** How long the search waits after the last keystroke. */
 const SEARCH_DELAY_MS = 250;
@@ -171,7 +171,7 @@ export function DesignGrid() {
                 <span {...stylex.props(styles.name)}>{design.name}</span>
                 <span {...stylex.props(styles.muted)}>
                   {design.artboardCount} {design.artboardCount === 1 ? "artboard" : "artboards"} ·{" "}
-                  {timeAgo(design.updatedAt)}
+                  <TimeAgo at={design.updatedAt} />
                 </span>
               </div>
             </Link>

@@ -86,9 +86,8 @@ jobs:
       # everything above it without the `test-util` feature tests turn on.
       - run: cargo test -p finite-server --test no_postgres
       - run: cp target/debug/finite-server "$RUNNER_TEMP/finite-server"
-      - run: cargo test -p finite-design
-      - run: cargo test -p finite-transfer
-      - run: cargo test -p finite-wasm
+      # The other crates; the server's tests run further down.
+      - run: cargo test --workspace --exclude finite-server
       - run: vp run -F web -F desktop -F figma-plugin test
       - run: vp run -F web... -F desktop -F figma-plugin build
       - if: github.ref == 'refs/heads/main'
@@ -108,10 +107,12 @@ jobs:
           done
           cat "$RUNNER_TEMP/postgres.log"
           exit 1
-      # FINITE_REQUIRE_BROWSER: the layout note tests fail, not skip, if the
-      # runner has no Chrome (the runner image ships it).
+      # FINITE_REQUIRE_BROWSER and FINITE_REQUIRE_POSTGRES: the tests that
+      # need a browser or the database fail, not skip, if the runner has no
+      # Chrome (the runner image ships it) or the database URL is unset.
       - env:
           FINITE_REQUIRE_BROWSER: "1"
+          FINITE_REQUIRE_POSTGRES: "1"
         run: cargo test -p finite-server --features postgres
 
       # The three end-to-end runs at once: they spend most of their time

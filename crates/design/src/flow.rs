@@ -26,10 +26,42 @@ use std::{
 
 use serde::Serialize;
 
-use crate::{Document, Node, NodeId, edit::pixel_size};
+use crate::{Document, Node, NodeId, Op, PropKey, edit::pixel_size};
+
+/// Whether `ops` could have broken a link, made a bad route, or put two
+/// screens of a route at one width, so [`flow`] is worth checking. They
+/// delete or move nodes, create or set an `href` or `data-route` (an
+/// instance's override of `href` too), or set an artboard's width. `doc` is
+/// the design as the ops left it. A deleted artboard keeps its id, so undo
+/// mends the links to it.
+pub fn can_break(doc: &Document, ops: &[Op]) -> bool {
+    let linked = |attrs: &BTreeMap<String, String>| {
+        attrs.contains_key("href") || attrs.contains_key(ROUTE_ATTR)
+    };
+    let links = ops.iter().any(|op| match op {
+        Op::Delete { .. } | Op::Move { .. } => true,
+        Op::Create { node } => {
+            linked(&node.attrs) || node.overrides.keys().any(|k| k.ends_with("attr:href"))
+        }
+        Op::Set {
+            key: PropKey::Attr(name),
+            ..
+        } => name == "href" || name == ROUTE_ATTR,
+        Op::Set {
+            key: PropKey::Override(key),
+            ..
+        } => key.ends_with("attr:href"),
+        _ => false,
+    });
+    links
+        || ops.iter().any(|op| {
+            matches!(op, Op::Set { key: PropKey::Style(name), .. } if name == "width")
+                && doc.get(op.id()).is_some_and(Node::is_artboard)
+        })
+}
 
 /// What a link's `href` starts with when it goes to an artboard, followed
-/// by the artboard's id. The viewer reads the same prefix.
+/// by the artboard's id. The viewer's scripts read it from `html::bootstrap_script`.
 pub const ARTBOARD_LINK: &str = "#finite-artboard=";
 /// The attribute that puts an artboard on a route.
 pub const ROUTE_ATTR: &str = "data-route";
@@ -112,13 +144,19 @@ pub fn link_target(node: &Node) -> Option<Cow<'_, str>> {
     if !matches!(node.tag(), Some("a" | "area")) {
         return None;
     }
-    let rest = node.attrs.get("href")?.strip_prefix(ARTBOARD_LINK)?;
+    href_target(node.attrs.get("href")?)
+}
+
+/// The artboard a link's `href` names, by the rule [`link_target`] states.
+/// The viewer asks for it through WebAssembly when a person clicks a link.
+pub fn href_target(href: &str) -> Option<Cow<'_, str>> {
+    let rest = href.strip_prefix(ARTBOARD_LINK)?;
     Some(percent_decode(rest).map_or(Cow::Borrowed(rest), Cow::Owned))
 }
 
 /// What `decodeURIComponent` returns, or `None` where it throws: a `%` that
 /// isn't followed by two hex digits, or bytes that aren't UTF-8.
-fn percent_decode(s: &str) -> Option<String> {
+pub fn percent_decode(s: &str) -> Option<String> {
     let mut bytes = Vec::with_capacity(s.len());
     let mut rest = s.as_bytes();
     while let Some((&b, tail)) = rest.split_first() {

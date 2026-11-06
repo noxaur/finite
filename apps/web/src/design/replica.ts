@@ -188,17 +188,26 @@ export class Replica {
     this.tokens = JSON.parse(this.doc.tokens()) as TokenTable;
   }
 
+  /** `page` if the design has that page, else the first page: a missing page means the first. */
+  pageOrFirst(page: string | null | undefined): string {
+    return this.pages.some((p) => p.id === page) ? page! : this.pages[0]!.id;
+  }
+
   /** The id of the page an artboard is on: its own page if that exists, else the first page. */
   pageOf(board: Node): string {
-    const { page } = board;
-    return page !== undefined && this.pages.some((p) => p.id === page) ? page : this.pages[0]!.id;
+    return this.pageOrFirst(board.page);
   }
 
   /** The id of the mode an artboard renders in: its own mode if that exists, else the first mode. */
   modeOf(board: Node): string {
     const { mode } = board;
     const { modes } = this.tokens;
-    return mode !== undefined && modes.some((m) => m.id === mode) ? mode : (modes[0]?.id ?? "");
+    return modes.some((m) => m.id === mode) ? mode! : (modes[0]?.id ?? "");
+  }
+
+  /** `id`'s `width` and `height` styles when they are plain pixels, else `null` (`edit::pixel_size`). */
+  pixelSize(id: string): { width: number | null; height: number | null } {
+    return this.doc.pixelSize(id);
   }
 
   /** Artboard `id`'s tokens in its mode, as a `<style>`'s text; empty without tokens. */

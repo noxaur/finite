@@ -1,3 +1,5 @@
+import { roundTo } from "../design/editing/units";
+
 /** A number with its unit, like `12px` or `-0.5em`; `null` for anything else. */
 export function numberOf(text: string): { value: number; unit: string } | null {
   const m = text.trim().match(/^(-?\d*\.?\d+)([a-z%]*)$/i);
@@ -5,7 +7,7 @@ export function numberOf(text: string): { value: number; unit: string } | null {
 }
 
 /** `n` without float noise: 0.1 + 0.2 shows as 0.3. */
-export const tidy = (n: number) => String(Math.round(n * 1000) / 1000);
+export const tidy = (n: number) => String(roundTo(n, 3));
 
 /** How far the pointer travels to move a scrubbed number one step; a step a pixel was too fast to aim. */
 export const PX_PER_STEP = 4;

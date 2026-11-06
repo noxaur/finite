@@ -57,6 +57,7 @@ fn screen(design: &mut Design, id: &str, name: &str, width: f64, route: Option<&
         position: None,
         page: None,
         styles: BTreeMap::new(),
+        ..Default::default()
     };
     commit(design, |doc| edit::create_artboard(doc, id.into(), spec));
     let mut n = 0;
@@ -662,10 +663,6 @@ impl Router for Next {
         }]
     }
 
-    fn link_prop(&self) -> &'static str {
-        "href"
-    }
-
     fn files(&self, pages: &[Page]) -> Vec<File> {
         let paths: Vec<&str> = pages.iter().map(|p| p.path.as_str()).collect();
         vec![File {
@@ -676,15 +673,13 @@ impl Router for Next {
 }
 
 #[test]
-fn another_router_changes_only_its_files_and_the_link_prop() {
+fn another_router_changes_only_its_files() {
     let d = shop();
     let one = files(&export(&d, react_router()).unwrap());
     let two = files(&export(&d, &Next).unwrap());
     assert_eq!(two["src/router.tsx"], "/,/cart");
     assert!(two["package.json"].contains("\"next\": \"1.0.0\""));
-    assert!(
-        two["src/pages/PageHome.tsx"].contains("<Link href=\"/cart\" data-name=\"Cart link\">")
-    );
+    assert!(two["src/pages/PageHome.tsx"].contains("<Link to=\"/cart\" data-name=\"Cart link\">"));
     for same in [
         "src/global.css",
         "src/main.tsx",

@@ -7,10 +7,12 @@ use tower_http::trace::TraceLayer;
 pub mod api;
 pub mod blob;
 pub mod cluster;
+pub mod config;
 pub mod frontend;
 pub mod guard;
 pub mod heartbeat;
 pub mod hub;
+pub mod id;
 pub mod mcp;
 #[cfg(feature = "postgres")]
 pub mod postgres;
@@ -18,7 +20,10 @@ pub mod relay;
 pub mod router;
 pub mod screenshot;
 pub mod store;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 pub mod transfer;
+pub mod wire;
 
 pub use hub::Hub;
 
@@ -28,7 +33,7 @@ pub struct Health {
     version: &'static str,
 }
 
-async fn health() -> Json<Health> {
+pub(crate) async fn health() -> Json<Health> {
     Json(Health {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
@@ -51,16 +56,9 @@ pub fn app(hub: Arc<Hub>, static_dir: Option<&str>) -> Router {
             guard::known_hosts,
         ));
     // MCP checks Host itself; the guard adds the Origin check.
-    let mcp = Router::new()
-        .nest_service(
-            "/mcp/classic",
-            mcp::service(hub.clone(), mcp::Surface::Classic),
-        )
-        .nest_service("/mcp", mcp::service(hub, mcp::Surface::from_env()))
-        .layer(axum::middleware::from_fn_with_state(
-            allowed,
-            guard::known_hosts,
-        ));
+    let mcp = Router::new().nest_service("/mcp", mcp::service(hub)).layer(
+        axum::middleware::from_fn_with_state(allowed, guard::known_hosts),
+    );
 
     let router = Router::new().nest("/api", api).merge(mcp);
 

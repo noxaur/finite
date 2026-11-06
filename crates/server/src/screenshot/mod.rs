@@ -22,14 +22,14 @@ use base64::Engine;
 use finite_design::{
     Document, NodeId, NodeKind,
     edit::pixel_size,
-    html::{self, BASE_CSS, BASE_LAYER, CSP, VIEWER_ID_ATTR},
+    html::{self, BASE_CSS, BASE_LAYER, CSP, DEFAULT_ARTBOARD_SIZE, VIEWER_ID_ATTR},
     tokens,
 };
 use finite_transfer::scene::{COMPUTED, Measure, Resolved, Scene};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::hub::random_id;
+use crate::id::random_id;
 
 mod cdp;
 mod egress;
@@ -38,9 +38,6 @@ mod network_tests;
 
 use egress::Policy;
 
-/// Artboards without a pixel width or height are captured at this size.
-const FALLBACK_WIDTH: f64 = 1440.0;
-const FALLBACK_HEIGHT: f64 = 900.0;
 /// The largest artboard side rendered, in CSS pixels.
 const MAX_SIDE: f64 = 8000.0;
 /// The longest side of a screenshot, in image pixels. The Claude API refuses
@@ -433,12 +430,6 @@ struct Built {
     scripted: bool,
 }
 
-/// The sandbox the web viewer puts an artboard that runs scripts in. No
-/// `allow-same-origin`, so the page has an opaque origin and can't reach the
-/// wrapper around it; no popups, modals, top navigation or pointer lock.
-const SANDBOX: &str = "allow-scripts allow-forms";
-const FRAME_PERMISSIONS: &str = "autoplay 'none'; fullscreen 'none'";
-
 /// A standalone HTML page showing just the artboard, and its size in CSS
 /// pixels. Every element carries its node id in [`VIEWER_ID_ATTR`], so
 /// shots can find it. The web viewer renders artboards that run scripts
@@ -446,7 +437,7 @@ const FRAME_PERMISSIONS: &str = "autoplay 'none'; fullscreen 'none'";
 ///
 /// An artboard with a `<script>` renders as the viewer does: the page above
 /// is the `srcdoc` of a sandboxed `<iframe>` in a bare wrapper, with the
-/// viewer's [`html::bootstrap`] running first. It then runs with the same limits,
+/// viewer's bootstrap ([`html::bootstrap_script`]) running first. It then runs with the same limits,
 /// an opaque origin and a `localStorage` that lasts only for the capture.
 /// An artboard without one loads directly, since nothing in it runs and the
 /// sandbox would change nothing, and its measurements need no second frame.
@@ -457,8 +448,12 @@ fn page_html(doc: &Document, artboard: &str, options: &Options) -> Option<Built>
     // Compact, so no whitespace is added between elements: it renders like the viewer.
     let body = html::export_for_viewer(doc, artboard)?;
     let (width, height) = pixel_size(node);
-    let width = width.unwrap_or(FALLBACK_WIDTH).clamp(1.0, MAX_SIDE);
-    let height = height.unwrap_or(FALLBACK_HEIGHT).clamp(1.0, MAX_SIDE);
+    let width = width
+        .unwrap_or(DEFAULT_ARTBOARD_SIZE.0)
+        .clamp(1.0, MAX_SIDE);
+    let height = height
+        .unwrap_or(DEFAULT_ARTBOARD_SIZE.1)
+        .clamp(1.0, MAX_SIDE);
     // Overrides come last in the body, after the artboard's own <style>s, so
     // they win ties.
     let mut overrides = String::new();
@@ -496,14 +491,8 @@ fn page_html(doc: &Document, artboard: &str, options: &Options) -> Option<Built>
         n.tag()
             .is_some_and(|tag| tag.eq_ignore_ascii_case("script"))
     });
-    // The bootstrap's config goes in as JSON; `<` can't end the script.
     let bootstrap = if scripted {
-        let config = json!({ "nonce": "screenshot", "storage": {} })
-            .to_string()
-            .replace('<', "\\u003c");
-        // A trailing `;` after the function would end the parentheses early.
-        let function = html::bootstrap();
-        format!("<script>({function})({config})</script>")
+        html::bootstrap_script("screenshot", &json!({}))
     } else {
         String::new()
     };
@@ -512,9 +501,11 @@ fn page_html(doc: &Document, artboard: &str, options: &Options) -> Option<Built>
     );
     let html = if scripted {
         format!(
-            "<!doctype html><html><head><meta charset=\"utf-8\"><style>html, body {{ margin: 0; }} iframe {{ display: block; border: 0; width: {}px; height: {}px; }}</style></head><body><iframe sandbox=\"{SANDBOX}\" allow=\"{FRAME_PERMISSIONS}\" srcdoc=\"{}\"></iframe></body></html>",
+            "<!doctype html><html><head><meta charset=\"utf-8\"><style>html, body {{ margin: 0; }} iframe {{ display: block; border: 0; width: {}px; height: {}px; }}</style></head><body><iframe sandbox=\"{}\" allow=\"{}\" srcdoc=\"{}\"></iframe></body></html>",
             width.ceil(),
             height.ceil(),
+            html::SANDBOX,
+            html::FRAME_PERMISSIONS,
             html::escape(&page, true)
         )
     } else {
@@ -591,18 +582,85 @@ pub async fn capture(plan: Plan) -> Result<Vec<Result<Image, String>>, String> {
 }
 
 async fn capture_with(plan: Plan, policy: Policy) -> Result<Vec<Result<Image, String>>, String> {
-    let chrome = chrome().ok_or(
-        "no Chrome, Chromium or Edge found for screenshots; set FINITE_CHROME to a browser binary",
-    )?;
+    // No time limit: a capture's length is the settle times it asks for.
+    browser_job(
+        "take screenshots",
+        None,
+        policy,
+        |mut tab, dir| async move {
+            let result = capture_pages(&mut tab, &dir, plan).await;
+            (tab, result)
+        },
+    )
+    .await
+}
+
+async fn measure_page(
+    tab: &mut cdp::Tab,
+    dir: &std::path::Path,
+    m: &Measurement,
+) -> Result<Vec<ElementBox>, String> {
+    load(tab, dir, m).await?;
+    let mut layout = measure(tab, &m.artboard, &[]).await?;
+    if settle(layout.animated, m.settle).await.is_some() {
+        layout = measure(tab, &m.artboard, &[]).await?;
+    }
+    Ok(layout.nodes.iter().map(element_box).collect())
+}
+
+/// The longest a measurement may take, so a hung browser can't hold a turn
+/// in [`browsers`] for good. It includes the page's settle time.
+const MEASURE_LIMIT: Duration = Duration::from_secs(30);
+
+/// Runs `work` in a fresh browser tab, one browser at a time per turn in
+/// [`browsers`], and closes the browser after. `purpose` finishes the
+/// sentences "found to ..." and "took too long to ...". `work` gets the tab
+/// and the profile directory, and gives the tab back with its result. Past
+/// `limit`, the work is dropped, which kills the browser and removes its
+/// profile.
+async fn browser_job<T, Work>(
+    purpose: &str,
+    limit: Option<Duration>,
+    policy: Policy,
+    work: impl FnOnce(cdp::Tab, PathBuf) -> Work,
+) -> Result<T, String>
+where
+    Work: Future<Output = (cdp::Tab, Result<T, String>)>,
+{
+    let chrome = chrome().ok_or_else(|| {
+        format!(
+            "no Chrome, Chromium or Edge found to {purpose}; set FINITE_CHROME to a browser binary"
+        )
+    })?;
     let _turn = browsers()
         .acquire()
         .await
-        .map_err(|_| "screenshots are shutting down")?;
-    let dir = std::env::temp_dir().join(format!("finite-shot-{}", random_id(10)));
-    let (browser, mut tab) = cdp::Browser::launch(&chrome, dir.clone(), policy).await?;
-    let results = capture_pages(&mut tab, &dir, plan).await;
-    browser.close(tab).await;
-    results
+        .map_err(|_| "the browser is shutting down")?;
+    let dir = std::env::temp_dir().join(format!("finite-browser-{}", random_id(10)));
+    let run = async {
+        let (browser, tab) = cdp::Browser::launch(&chrome, dir.clone(), policy).await?;
+        let (tab, result) = work(tab, dir.clone()).await;
+        browser.close(tab).await;
+        result
+    };
+    match limit {
+        Some(limit) => tokio::time::timeout(limit, run)
+            .await
+            .map_err(|_| format!("the browser took too long to {purpose}"))?,
+        None => run.await,
+    }
+}
+
+/// After a first reading of a page, waits `settle` (at most [`MAX_SETTLE`])
+/// if the page is animated or scripted, and says how long it waited. The
+/// caller then reads again, since scripts may have changed the page.
+async fn settle(animated: bool, settle: Duration) -> Option<Duration> {
+    let settle = settle.min(MAX_SETTLE);
+    if !animated || settle.is_zero() {
+        return None;
+    }
+    tokio::time::sleep(settle).await;
+    Some(settle)
 }
 
 async fn capture_pages(
@@ -787,43 +845,16 @@ pub async fn layout(m: Measurement) -> Result<Vec<ElementBox>, String> {
 }
 
 async fn layout_with(m: Measurement, policy: Policy) -> Result<Vec<ElementBox>, String> {
-    let chrome = chrome().ok_or(
-        "no Chrome, Chromium or Edge found to lay out the page; set FINITE_CHROME to a browser binary",
-    )?;
-    let _turn = browsers()
-        .acquire()
-        .await
-        .map_err(|_| "layout is shutting down")?;
-    let dir = std::env::temp_dir().join(format!("finite-layout-{}", random_id(10)));
-    let run = async {
-        let (browser, mut tab) = cdp::Browser::launch(&chrome, dir.clone(), policy).await?;
-        let result = measure_page(&mut tab, &dir, &m).await;
-        browser.close(tab).await;
-        result
-    };
-    // Dropping the run on a timeout kills the browser and removes its profile.
-    tokio::time::timeout(LAYOUT_LIMIT, run)
-        .await
-        .map_err(|_| "the browser took too long to lay out the page".to_owned())?
-}
-
-/// The longest a layout measurement may take, so a hung browser can't hold a
-/// turn in [`browsers`] for good. It includes the page's settle time.
-const LAYOUT_LIMIT: Duration = Duration::from_secs(30);
-
-async fn measure_page(
-    tab: &mut cdp::Tab,
-    dir: &std::path::Path,
-    m: &Measurement,
-) -> Result<Vec<ElementBox>, String> {
-    load(tab, dir, m).await?;
-    let mut layout = measure(tab, &m.artboard, &[]).await?;
-    let settle = m.settle.min(MAX_SETTLE);
-    if layout.animated && !settle.is_zero() {
-        tokio::time::sleep(settle).await;
-        layout = measure(tab, &m.artboard, &[]).await?;
-    }
-    Ok(layout.nodes.iter().map(element_box).collect())
+    browser_job(
+        "lay out the page",
+        Some(MEASURE_LIMIT),
+        policy,
+        |mut tab, dir| async move {
+            let result = measure_page(&mut tab, &dir, &m).await;
+            (tab, result)
+        },
+    )
+    .await
 }
 
 /// Opens a measurement's page at the artboard's size, once its images and
@@ -895,18 +926,16 @@ async fn enter_frame(tab: &mut cdp::Tab) -> Result<(), String> {
 /// which is how a text layer is drawn. Elements without a box (`display: none`, or
 /// inside one) are left out. It renders the page as [`layout`] does.
 pub async fn scene(m: Measurement) -> Result<Scene, String> {
-    let chrome = chrome().ok_or(
-        "no Chrome, Chromium or Edge found to measure the page; set FINITE_CHROME to a browser binary",
-    )?;
-    let _turn = browsers()
-        .acquire()
-        .await
-        .map_err(|_| "measuring is shutting down")?;
-    let dir = std::env::temp_dir().join(format!("finite-scene-{}", random_id(10)));
-    let (browser, mut tab) = cdp::Browser::launch(&chrome, dir.clone(), Policy::default()).await?;
-    let result = scene_page(&mut tab, &dir, &m).await;
-    browser.close(tab).await;
-    result
+    browser_job(
+        "measure the page",
+        Some(MEASURE_LIMIT),
+        Policy::default(),
+        |mut tab, dir| async move {
+            let result = scene_page(&mut tab, &dir, &m).await;
+            (tab, result)
+        },
+    )
+    .await
 }
 
 async fn scene_page(
@@ -916,9 +945,7 @@ async fn scene_page(
 ) -> Result<Scene, String> {
     load(tab, dir, m).await?;
     let mut raw = measure_scene(tab, m).await?;
-    let settle = m.settle.min(MAX_SETTLE);
-    if raw.animated && !settle.is_zero() {
-        tokio::time::sleep(settle).await;
+    if settle(raw.animated, m.settle).await.is_some() {
         raw = measure_scene(tab, m).await?;
     }
     let mut nodes = BTreeMap::new();
@@ -962,24 +989,16 @@ pub async fn computed(
     ids: Vec<NodeId>,
     props: Vec<String>,
 ) -> Result<BTreeMap<NodeId, Option<Vec<(String, String)>>>, String> {
-    let chrome = chrome().ok_or(
-        "no Chrome, Chromium or Edge found to compute styles; set FINITE_CHROME to a browser binary",
-    )?;
-    let _turn = browsers()
-        .acquire()
-        .await
-        .map_err(|_| "computing styles is shutting down")?;
-    let dir = std::env::temp_dir().join(format!("finite-computed-{}", random_id(10)));
-    let run = async {
-        let (browser, mut tab) =
-            cdp::Browser::launch(&chrome, dir.clone(), Policy::default()).await?;
-        let result = computed_page(&mut tab, &dir, m, &ids, &props).await;
-        browser.close(tab).await;
-        result
-    };
-    tokio::time::timeout(LAYOUT_LIMIT, run)
-        .await
-        .map_err(|_| "the browser took too long to compute styles".to_owned())?
+    browser_job(
+        "compute styles",
+        Some(MEASURE_LIMIT),
+        Policy::default(),
+        |mut tab, dir| async move {
+            let result = computed_page(&mut tab, &dir, m, &ids, &props).await;
+            (tab, result)
+        },
+    )
+    .await
 }
 
 async fn computed_page(
@@ -991,9 +1010,7 @@ async fn computed_page(
 ) -> Result<BTreeMap<NodeId, Option<Vec<(String, String)>>>, String> {
     load(tab, dir, m).await?;
     let mut raw = read_computed(tab, ids, props).await?;
-    let settle = m.settle.min(MAX_SETTLE);
-    if raw.animated && !settle.is_zero() {
-        tokio::time::sleep(settle).await;
+    if settle(raw.animated, m.settle).await.is_some() {
         raw = read_computed(tab, ids, props).await?;
     }
     Ok(raw.values)
@@ -1152,20 +1169,12 @@ async fn render(
     open(tab, path, page.scripted).await?;
 
     let ids: Vec<&str> = page.shots.iter().map(|s| s.element.as_str()).collect();
-    let layout = measure(tab, &page.artboard, &ids).await?;
-    let settle = options.settle.min(MAX_SETTLE);
-    let settled = if layout.animated && !settle.is_zero() {
-        tokio::time::sleep(settle).await;
-        Some(settle)
-    } else {
-        None
-    };
+    let mut layout = measure(tab, &page.artboard, &ids).await?;
+    let settled = settle(layout.animated, options.settle).await;
     // Scripts may have changed the layout while the page ran.
-    let layout = if settled.is_some() {
-        measure(tab, &page.artboard, &ids).await?
-    } else {
-        layout
-    };
+    if settled.is_some() {
+        layout = measure(tab, &page.artboard, &ids).await?;
+    }
 
     let board = rect(layout.board);
     // Scroll sizes are in the artboard's own pixels; its box on the page
@@ -1221,22 +1230,20 @@ async fn render(
         board
     };
 
+    let view = PageView {
+        layout: &layout,
+        board,
+        visible,
+        overflow,
+        settled,
+        page,
+        options,
+        requested,
+        device_scale,
+    };
     let mut images = Vec::new();
     for planned in &page.shots {
-        let image = shoot(
-            tab,
-            planned,
-            &layout,
-            board,
-            visible,
-            overflow,
-            settled,
-            page,
-            options,
-            requested,
-            device_scale,
-        )
-        .await;
+        let image = shoot(tab, planned, view).await;
         images.push((planned.index, image));
     }
     Ok(images)
@@ -1463,20 +1470,40 @@ async fn measure(tab: &mut cdp::Tab, artboard: &str, ids: &[&str]) -> Result<Lay
     serde_json::from_value(value).map_err(|e| format!("couldn't measure the page: {e}"))
 }
 
-#[allow(clippy::too_many_arguments)]
+/// An artboard's page as measured, which every shot of it is cut from.
+#[derive(Clone, Copy)]
+struct PageView<'a> {
+    layout: &'a Layout,
+    /// The artboard's box on the page.
+    board: Rect,
+    /// What can be captured: the artboard, or with its overflow revealed,
+    /// everything its content reaches.
+    visible: Rect,
+    overflow: Overflow,
+    /// How long the page was given to settle, if it was animated.
+    settled: Option<Duration>,
+    page: &'a Page,
+    options: &'a Options,
+    requested: f64,
+    device_scale: f64,
+}
+
 async fn shoot(
     tab: &mut cdp::Tab,
     planned: &PlannedShot,
-    layout: &Layout,
-    board: Rect,
-    visible: Rect,
-    overflow: Overflow,
-    settled: Option<Duration>,
-    page: &Page,
-    options: &Options,
-    requested: f64,
-    device_scale: f64,
+    view: PageView<'_>,
 ) -> Result<Image, String> {
+    let PageView {
+        layout,
+        board,
+        visible,
+        overflow,
+        settled,
+        page,
+        options,
+        requested,
+        device_scale,
+    } = view;
     let shot = &planned.shot;
     let element = layout
         .elements

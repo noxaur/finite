@@ -2,16 +2,17 @@
 
 import * as stylex from "@stylexjs/stylex";
 import { useEffect, useRef, useState } from "react";
+import { cellOf } from "@/design/editing/cells";
 import { alphaOf, opaque, resolveVars, setAlpha } from "@/design/editing/colors";
 import {
   backgroundOf,
   barText,
   COLOR_STASH,
-  cellOf,
   cellPosition,
   colorAt,
   type Empties,
   FILL_NAMES,
+  FILL_PROPS,
   FITS,
   type Fill,
   type FillLayer,
@@ -30,10 +31,11 @@ import {
   writeFills,
 } from "@/design/editing/fills";
 import { tokenOf } from "@/design/editing/inspect";
-import { moveEntry } from "@/design/editing/lists";
+import { moveEntry, stashOf } from "@/design/editing/lists";
+import { roundTo } from "@/design/editing/units";
 import type { Node } from "@/design/schema";
-import { colors, radii, shadows, size, space } from "@/styles/tokens.stylex";
-import type { IconName } from "../Icons";
+import { colors, outlines, radii, shadows, size, space } from "@/styles/tokens.stylex";
+import type { IconName } from "@/lib/icons";
 import {
   AlphaChip,
   CellGrid,
@@ -49,16 +51,11 @@ import {
   Section,
   Segments,
   Toggle,
+  EyeToggle,
+  MixedRow,
 } from "./controls";
+import { whenNumber } from "../DraftField";
 import { type Changes, isPainted, resolve, type Scope, swatchOf } from "./scope";
-
-const PROPS = [
-  "background-image",
-  "background-color",
-  "background-size",
-  "background-position",
-  "background-repeat",
-] as const;
 
 /** The mockup's row of fill types. Conic is one level down, in a gradient's editor. */
 const TYPES: ReadonlyArray<readonly [FillType, IconName, string]> = [
@@ -79,7 +76,7 @@ const GRADIENTS: ReadonlyArray<readonly [FillType, null, string]> = [
 function ownOf(target: Node): Record<string, string> {
   const own = ownBackground(target.styles);
   const out: Record<string, string> = {};
-  for (const prop of [...PROPS, COLOR_STASH, "--finite-off-background-image"]) {
+  for (const prop of [...FILL_PROPS, COLOR_STASH, stashOf("background-image")]) {
     const v = own[prop] ?? target.styles[prop];
     if (v !== undefined) out[prop] = v;
   }
@@ -110,7 +107,7 @@ function targetFills(scope: Scope, target: Node) {
     target.styles,
     backgroundOf((p) => own[p] ?? computed(p)),
   );
-  return { layers, empties, drawn: !PROPS.some((p) => own[p] !== undefined) };
+  return { layers, empties, drawn: !FILL_PROPS.some((p) => own[p] !== undefined) };
 }
 
 /**
@@ -202,28 +199,18 @@ export function FillSection({ scope }: { scope: Scope }) {
   return (
     <Section title="Fill" action={<Toggle icon="plus" title="Add fill" onClick={add} />}>
       {layers === null ? (
-        <Row
-          action={
-            <Toggle
-              icon="minus"
-              title="Remove the fills from every layer"
-              onClick={() => scope.commitEach((t) => writeFills(t.styles, [], of(t).empties))}
-            />
-          }
-        >
-          <RowBody title="The selected layers have different fills">
-            <RowName>Mixed</RowName>
-          </RowBody>
-        </Row>
+        <MixedRow
+          what="fills"
+          onRemove={() => scope.commitEach((t) => writeFills(t.styles, [], of(t).empties))}
+        />
       ) : (
         layers.length > 0 &&
         current && (
           <>
             <Row
               action={
-                <Toggle
-                  icon={current.hidden ? "eyeOff" : "eye"}
-                  title={current.hidden ? "Show fill" : "Hide fill"}
+                <EyeToggle
+                  hidden={current.hidden}
                   onClick={() =>
                     commitLayers(replace(selected, { ...current, hidden: !current.hidden }))
                   }
@@ -533,7 +520,6 @@ function GradientControls({
         {fill.stops.map((s, i) => (
           <button
             // Stops can share a color and a place, so their order names them.
-            // biome-ignore lint/suspicious/noArrayIndexKey: see above
             key={i}
             type="button"
             title={`Stop at ${Math.round(s.at)}%`}
@@ -578,10 +564,7 @@ function GradientControls({
             label="Angle"
             title="Angle"
             text={String(fill.angle)}
-            toChanges={(typed) => {
-              const n = parseFloat(typed);
-              return Number.isFinite(n) ? set(withAngle(fill, n)) : null;
-            }}
+            toChanges={(typed) => whenNumber(typed, (n) => set(withAngle(fill, n)))}
             lead={<LeadIcon name="rotate" />}
             scrub={{ start: fill.angle, to: (n) => set(withAngle(fill, n)) }}
             unit="°"
@@ -591,7 +574,7 @@ function GradientControls({
       <div {...stylex.props(styles.label)}>Stops</div>
       {fill.stops.map((s, i) => (
         <div
-          // biome-ignore lint/suspicious/noArrayIndexKey: stops are named by their order
+          // Stops can share a color and a place, so their order names them.
           key={i}
           onFocus={() => setSelected(i)}
           {...stylex.props(styles.line)}
@@ -615,11 +598,10 @@ function GradientControls({
             scope={scope}
             label={`Stop ${i + 1} position`}
             title="Position"
-            text={String(Math.round(s.at * 10) / 10)}
-            toChanges={(typed) => {
-              const n = parseFloat(typed);
-              return Number.isFinite(n) ? set(moved(i, Math.min(100, Math.max(0, n)))) : null;
-            }}
+            text={String(roundTo(s.at, 1))}
+            toChanges={(typed) =>
+              whenNumber(typed, (n) => set(moved(i, Math.min(100, Math.max(0, n)))))
+            }
             min={0}
             max={100}
             unit="%"
@@ -731,10 +713,10 @@ const styles = stylex.create({
     padding: 0,
     borderWidth: 0,
     borderRadius: radii.xs,
-    boxShadow: `inset 0 0 0 1px ${colors.borderStrong}`,
+    boxShadow: shadows.edge,
     cursor: "var(--cursor-pointer, pointer)",
   },
-  swatchOpen: { outline: `2px solid ${colors.brand}`, outlineOffset: 1 },
+  swatchOpen: { outline: outlines.focus, outlineOffset: 1 },
   thumb: { backgroundColor: colors.surface, backgroundSize: "cover", backgroundPosition: "center" },
   line: { display: "flex", alignItems: "center", gap: space.sm, minWidth: 0 },
   column: { flexGrow: 1, display: "flex", flexDirection: "column", gap: space.sm, minWidth: 0 },

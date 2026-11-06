@@ -1,4 +1,5 @@
 import type { Node, UserEdit } from "../schema";
+import { layoutOf } from "./layout";
 
 /**
  * How a person's drag becomes CSS. Only the browser can lay a design out,
@@ -156,8 +157,9 @@ export type Flow = "row" | "row-reverse" | "column" | "column-reverse" | "wrap";
 
 /** The flow a container's computed `display`, `flex-direction` and `flex-wrap` give it. */
 export function flowOf(display: string, flexDirection: string, flexWrap: string): Flow {
-  if (display.includes("grid")) return "wrap";
-  if (!display.includes("flex")) return "column";
+  const kind = layoutOf(display, flexDirection);
+  if (kind === "grid") return "wrap";
+  if (kind === "block") return "column";
   if (flexWrap !== "nowrap") return "wrap";
   return flexDirection === "row" ||
     flexDirection === "row-reverse" ||
@@ -167,7 +169,7 @@ export function flowOf(display: string, flexDirection: string, flexWrap: string)
 }
 
 /** Whether a container lays children out by itself, so dropping into it means something. */
-export const isLayout = (display: string) => display.includes("flex") || display.includes("grid");
+export const isLayout = (display: string) => layoutOf(display, "row") !== "block";
 
 /**
  * The sibling a dragged element goes right before, so the pointer sits

@@ -1,21 +1,22 @@
 "use client";
 
+import { colors } from "@/styles/tokens.stylex";
 import { PIN_PATH } from "../lib/cursors";
 
 /** `note` is an open comment for people only, which no agent acts on. */
 export type PinState = "waiting" | "working" | "replied" | "resolved" | "note" | "draft";
 
-const INK = "#171a1c";
+// A pin sits on the artboard, whichever theme the app is in, so these two stay the same in both.
 const BLUE = "#2563eb";
 const GREEN = "#15803d";
 
 const LOOK: Record<PinState, { fill: string; stroke: string; dots: boolean }> = {
-  waiting: { fill: INK, stroke: INK, dots: true },
-  working: { fill: INK, stroke: INK, dots: true },
+  waiting: { fill: colors.ink, stroke: colors.ink, dots: true },
+  working: { fill: colors.ink, stroke: colors.ink, dots: true },
   replied: { fill: BLUE, stroke: BLUE, dots: true },
   resolved: { fill: GREEN, stroke: GREEN, dots: false },
-  note: { fill: "#f8f9f9", stroke: INK, dots: false },
-  draft: { fill: "#f8f9f9", stroke: INK, dots: false },
+  note: { fill: colors.halo, stroke: colors.ink, dots: false },
+  draft: { fill: colors.halo, stroke: colors.ink, dots: false },
 };
 
 /** The typing dots, on the bubble's center line. */
@@ -58,29 +59,26 @@ export function PinIcon({ state, selected }: { state: PinState; selected?: boole
       {selected && (
         <use
           href="#pin-body"
-          fill="none"
-          stroke={look.stroke}
+          style={{ fill: "none", stroke: look.stroke }}
           strokeWidth="9"
           strokeLinejoin="round"
         />
       )}
       <use
         href="#pin-body"
-        fill="#f8f9f9"
-        stroke="#f8f9f9"
+        style={{ fill: colors.halo, stroke: colors.halo }}
         strokeWidth="6"
         strokeLinejoin="round"
       />
       <use
         href="#pin-body"
-        fill={look.fill}
-        stroke={look.stroke}
+        style={{ fill: look.fill, stroke: look.stroke }}
         strokeLinejoin="round"
         strokeWidth="2"
         strokeDasharray={state === "draft" ? "4 3" : undefined}
       />
       {look.dots && (
-        <g fill="#f8f9f9">
+        <g style={{ fill: colors.halo }}>
           {DOTS.map(([cx, cy], i) => (
             <circle
               key={i}

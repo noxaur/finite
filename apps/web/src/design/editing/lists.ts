@@ -37,7 +37,8 @@ export function commas(value: string): string[] {
 const SPACED = new Set(["filter", "backdrop-filter"]);
 
 /** The custom property that keeps a list's hidden entries, aligned by index. */
-export const stashOf = (prop: string) => `--finite-off-${prop}`;
+export const STASH_PREFIX = "--finite-off-";
+export const stashOf = (prop: string) => `${STASH_PREFIX}${prop}`;
 
 /** `prop`'s entries: split at top-level commas, or at spaces for filters. `none` has none. */
 export function splitList(prop: string, value: string | undefined): string[] {

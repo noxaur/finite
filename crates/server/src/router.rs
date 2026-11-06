@@ -65,51 +65,42 @@ impl Front {
     }
 }
 
-/// Builds the router for the servers in `nodes`. With `static_dir`, it also
-/// serves the built frontend.
-pub fn app(nodes: Vec<String>, static_dir: Option<&str>) -> Router {
-    app_with_sessions(nodes, static_dir, None)
+/// What a router is built with, besides its servers.
+pub struct Options {
+    /// The built frontend to serve.
+    pub static_dir: Option<String>,
+    /// MCP sessions kept here, so routers that share the store can each serve
+    /// any agent's session and a load balancer needn't pin them.
+    pub sessions: Option<Arc<dyn SessionStore>>,
+    /// A request fails after this long without a byte from its server. Tests
+    /// shorten it, so a stuck server doesn't hold one up for 30 seconds.
+    pub silence: std::time::Duration,
+    /// `Host` names accepted besides localhost and the servers.
+    pub allowed_hosts: Vec<String>,
 }
 
-/// Like [`app`], with MCP sessions kept in `sessions`. Routers that share it
-/// can each serve any agent's session, so a load balancer needn't pin them.
-pub fn app_with_sessions(
-    nodes: Vec<String>,
-    static_dir: Option<&str>,
-    sessions: Option<Arc<dyn SessionStore>>,
-) -> Router {
-    assert!(!nodes.is_empty(), "the router needs at least one server");
-    let members = Arc::new(Members::fixed(Cluster::observer(nodes)));
-    app_with_members(members, static_dir, sessions)
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            static_dir: None,
+            sessions: None,
+            silence: SILENT_SERVER,
+            allowed_hosts: Vec::new(),
+        }
+    }
 }
 
-/// Like [`app_with_sessions`], for servers that come and go: `members` is
-/// kept current, say by [`crate::cluster::follow`], and each request goes by
-/// the list as it is then.
-pub fn app_with_members(
-    members: Arc<Members>,
-    static_dir: Option<&str>,
-    sessions: Option<Arc<dyn SessionStore>>,
-) -> Router {
-    build(members, static_dir, sessions, SILENT_SERVER)
-}
-
-/// Like [`app`], with a request failing after `silence` without a byte from
-/// its server, instead of [`SILENT_SERVER`]. For tests, so a stuck server
-/// doesn't hold one up for 30 seconds.
-pub fn app_with_silence(nodes: Vec<String>, silence: std::time::Duration) -> Router {
-    assert!(!nodes.is_empty(), "the router needs at least one server");
-    let members = Arc::new(Members::fixed(Cluster::observer(nodes)));
-    build(members, None, None, silence)
-}
-
-fn build(
-    members: Arc<Members>,
-    static_dir: Option<&str>,
-    sessions: Option<Arc<dyn SessionStore>>,
-    silence: std::time::Duration,
-) -> Router {
-    let allowed: Arc<[String]> = members.now().allowed_hosts().into();
+/// Builds the router for `members`, which is kept current if the servers come
+/// and go (say by [`crate::cluster::follow`]); each request goes by the list
+/// as it is then. [`Members::fixed`] with [`Cluster::observer`] is a fixed list.
+pub fn app(members: Arc<Members>, options: Options) -> Router {
+    let Options {
+        static_dir,
+        sessions,
+        silence,
+        allowed_hosts,
+    } = options;
+    let allowed: Arc<[String]> = members.now().allowed_hosts(&allowed_hosts).into();
     let front = Arc::new(Front {
         members: members.clone(),
         http: reqwest::Client::builder()
@@ -120,10 +111,7 @@ fn build(
         next: AtomicUsize::new(0),
     });
     let router = Router::new()
-        .route(
-            "/api/health",
-            get(|| async { Json(json!({ "status": "ok" })) }),
-        )
+        .route("/api/health", get(crate::health))
         .route("/api/designs", get(list).post(create))
         .route("/api/designs/ws", get(lobby))
         .route("/api/designs/{id}", any(forward))
@@ -138,17 +126,16 @@ fn build(
         .merge(
             Router::new()
                 .nest_service(
-                    "/mcp/classic",
-                    crate::relay::service(members.clone(), sessions.clone(), "/mcp/classic"),
+                    "/mcp",
+                    crate::relay::service(members, sessions, &allowed_hosts),
                 )
-                .nest_service("/mcp", crate::relay::service(members, sessions, "/mcp"))
                 .layer(axum::middleware::from_fn_with_state(
                     allowed,
                     crate::guard::known_hosts,
                 )),
         );
     let router = match static_dir {
-        Some(dir) => crate::frontend::serve(router, dir),
+        Some(dir) => crate::frontend::serve(router, &dir),
         None => router,
     };
     router.layer(TraceLayer::new_for_http())
@@ -160,12 +147,7 @@ fn bad_gateway(error: impl std::fmt::Display) -> Response {
 
 /// The answer while no server is live, as when they all restart at once.
 fn no_servers() -> Response {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        [("retry-after", "1")],
-        "no Finite server is running",
-    )
-        .into_response()
+    crate::wire::unavailable(crate::wire::NO_SERVER)
 }
 
 impl Front {
@@ -178,7 +160,7 @@ impl Front {
         if status != StatusCode::MISDIRECTED_REQUEST {
             return None;
         }
-        let owner = headers.get("finite-owner")?.to_str().ok()?;
+        let owner = headers.get(crate::wire::OWNER)?.to_str().ok()?;
         (owner != base && crate::cluster::is_base_url(owner)).then(|| owner.to_owned())
     }
 }
@@ -213,7 +195,8 @@ async fn send(
 /// The headers of a server's answer the browser gets too. Some are what
 /// keeps a download safe, like `sandbox` on an SVG someone uploaded, so
 /// leaving one out here would quietly undo it.
-const PASSED_ON: [&str; 6] = [
+const PASSED_ON: [&str; 7] = [
+    "retry-after",
     "content-type",
     "cache-control",
     "content-security-policy",
@@ -299,12 +282,12 @@ async fn create(State(front): State<Arc<Front>>, headers: HeaderMap, body: Bytes
 /// `q` and `limit`, so the merged list is cut to the limit again. Servers that
 /// don't answer are left out rather than failing the whole list.
 async fn list(State(front): State<Arc<Front>>, RawQuery(query): RawQuery) -> Response {
-    let limit = query
-        .as_deref()
-        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("limit=")))
-        .and_then(|n| n.parse::<usize>().ok())
-        .unwrap_or(LOBBY_LIMIT)
-        .clamp(1, 1000);
+    let limit = crate::wire::list_limit(
+        query
+            .as_deref()
+            .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("limit=")))
+            .and_then(|n| n.parse::<usize>().ok()),
+    );
     let query = query.map(|q| format!("?{q}")).unwrap_or_default();
     let cluster = front.members.now();
     let requests = cluster.nodes().iter().map(|base| {
@@ -340,13 +323,9 @@ async fn list(State(front): State<Arc<Front>>, RawQuery(query): RawQuery) -> Res
     if !answered {
         return bad_gateway("no server answered the design list");
     }
-    sort_newest_first(&mut designs);
+    crate::wire::newest_first(&mut designs);
     designs.truncate(limit);
     Json(designs).into_response()
-}
-
-fn sort_newest_first(designs: &mut [Value]) {
-    designs.sort_by_key(|d| std::cmp::Reverse(d["updatedAt"].as_u64().unwrap_or(0)));
 }
 
 async fn owner(State(front): State<Arc<Front>>, Path(id): Path<String>) -> Json<Value> {
@@ -506,7 +485,7 @@ fn list_of(message: &Value) -> (Vec<Value>, u64) {
 /// to `LOBBY_LIMIT`, with the totals added up.
 fn merged(lists: &[(Vec<Value>, u64)]) -> String {
     let mut designs: Vec<Value> = lists.iter().flat_map(|(list, _)| list.clone()).collect();
-    sort_newest_first(&mut designs);
+    crate::wire::newest_first(&mut designs);
     designs.truncate(LOBBY_LIMIT);
     let total: u64 = lists.iter().map(|(_, total)| total).sum();
     json!({ "type": "designs", "designs": designs, "total": total }).to_string()
@@ -596,7 +575,7 @@ async fn relay_lobby(
                         list.retain(|d| d["id"] != design["id"]);
                         list.push(design.clone());
                         *total = (*total).max(list.len() as u64);
-                        sort_newest_first(list);
+                        crate::wire::newest_first(list);
                         list.truncate(LOBBY_LIMIT);
                     }
                     message.to_string()

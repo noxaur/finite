@@ -1,4 +1,5 @@
 import { commas, parts } from "./lists";
+import { roundTo } from "./units";
 
 /**
  * A color taken apart into what it is and its opacity, so opacity can be
@@ -60,7 +61,7 @@ function parse(value: string): Parsed {
   return { kind: "other", base: v };
 }
 
-const clamp = (alpha: number) => Math.min(100, Math.max(0, Math.round(alpha * 10) / 10));
+const clamp = (alpha: number) => Math.min(100, Math.max(0, roundTo(alpha, 1)));
 
 /** A color's opacity, as a percentage from 0 to 100. */
 export function alphaOf(value: string): number {
@@ -129,11 +130,6 @@ export function hexOf(color: string | undefined): string | null {
         .padStart(2, "0"),
     )
     .join("")}`;
-}
-
-/** Whether a color mixes more than its own opacity, which the controls can't show. */
-export function isOtherMix(value: string): boolean {
-  return /^\s*color-mix\(/i.test(value) && parse(value).kind === "other";
 }
 
 /** `text` with each `var(--name)` in it replaced by what `lookup` says the token is. */

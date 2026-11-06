@@ -16,6 +16,7 @@ import {
   wrapOf,
   wrapStyles,
 } from "@/design/editing/typography";
+import { roundTo } from "@/design/editing/units";
 import type { Node } from "@/design/schema";
 import { numberOf } from "../DraftField";
 import {
@@ -339,9 +340,7 @@ function LineHeightField({ scope }: { scope: Scope }) {
   const unit = parsed?.unit ?? "px";
   const to = (n: number): Changes => ({
     "line-height":
-      unit === ""
-        ? String(Math.max(0, Math.round(n * 100) / 100))
-        : `${Math.max(0, Math.round(n))}${unit}`,
+      unit === "" ? String(Math.max(0, roundTo(n, 2))) : `${Math.max(0, Math.round(n))}${unit}`,
   });
   return (
     <Field

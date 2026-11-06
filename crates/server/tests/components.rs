@@ -1,130 +1,10 @@
 //! Components over MCP, the way an agent uses them: build two screens with
 //! the same top bar, make it a component, and change it once for both.
 
-use std::sync::Arc;
+mod agent;
 
-use axum::{
-    Router,
-    body::Body,
-    http::{Request, header},
-};
-use finite_server::{Hub, app, store::MemoryStore};
-use http_body_util::BodyExt;
-use serde_json::{Value, json};
-use tower::ServiceExt;
-
-struct Agent {
-    app: Router,
-    name: &'static str,
-    session: Option<String>,
-    next_id: u64,
-}
-
-impl Agent {
-    async fn connect(app: &Router, name: &'static str) -> Self {
-        let mut agent = Self {
-            app: app.clone(),
-            name,
-            session: None,
-            next_id: 1,
-        };
-        let init = json!({
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "clientInfo": { "name": "test", "version": "1" },
-        });
-        agent.rpc("initialize", Some(init)).await;
-        agent.notify("notifications/initialized").await;
-        agent
-    }
-
-    fn request(&self, body: Value) -> Request<Body> {
-        // rmcp checks Host to block DNS rebinding, so send what a local client would.
-        let mut req = Request::post("/mcp/classic")
-            .header(header::HOST, "127.0.0.1:4100")
-            .header(header::CONTENT_TYPE, "application/json")
-            .header(header::ACCEPT, "application/json, text/event-stream");
-        // An empty name stands for an agent that doesn't name itself.
-        if !self.name.is_empty() {
-            req = req.header("x-finite-agent", self.name);
-        }
-        if let Some(session) = &self.session {
-            req = req.header("mcp-session-id", session);
-        }
-        req.body(Body::from(body.to_string())).unwrap()
-    }
-
-    async fn send(&mut self, body: Value) -> Option<Value> {
-        let res = self.app.clone().oneshot(self.request(body)).await.unwrap();
-        if let Some(session) = res.headers().get("mcp-session-id") {
-            self.session = Some(session.to_str().unwrap().to_owned());
-        }
-        let bytes = res.into_body().collect().await.unwrap().to_bytes();
-        // Responses arrive as server-sent events: `data: {...}` lines.
-        let text = String::from_utf8(bytes.to_vec()).unwrap();
-        let data: String = text
-            .lines()
-            .filter_map(|l| l.strip_prefix("data: "))
-            .collect();
-        (!data.trim().is_empty()).then(|| serde_json::from_str(&data).unwrap())
-    }
-
-    async fn notify(&mut self, method: &str) {
-        self.send(json!({ "jsonrpc": "2.0", "method": method }))
-            .await;
-    }
-
-    async fn rpc(&mut self, method: &str, params: Option<Value>) -> Value {
-        let id = self.next_id;
-        self.next_id += 1;
-        let mut body = json!({ "jsonrpc": "2.0", "id": id, "method": method });
-        if let Some(params) = params {
-            body["params"] = params;
-        }
-        let response = self.send(body).await.expect("a response");
-        assert!(
-            response.get("error").is_none(),
-            "{method} failed: {response}"
-        );
-        response["result"].clone()
-    }
-
-    /// Calls a tool and returns its text, and whether it reported an error.
-    async fn call(&mut self, tool: &str, args: Value) -> (String, bool) {
-        let result = self
-            .rpc(
-                "tools/call",
-                Some(json!({ "name": tool, "arguments": args })),
-            )
-            .await;
-        let text = result["content"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|c| c["text"].as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        (text, result["isError"] == true)
-    }
-
-    async fn ok(&mut self, tool: &str, args: Value) -> String {
-        let (text, error) = self.call(tool, args).await;
-        assert!(!error, "{tool} failed: {text}");
-        text
-    }
-}
-
-/// The first `#id` after `needle` in a tool's text output.
-fn id_after(text: &str, needle: &str) -> String {
-    let rest = &text[text
-        .find(needle)
-        .unwrap_or_else(|| panic!("{needle:?} in {text}"))..];
-    let start = rest.find('#').unwrap() + 1;
-    rest[start..]
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric())
-        .collect()
-}
+use agent::{Agent, id_after, test_app};
+use serde_json::json;
 
 /// A top bar like an agent writes for each screen.
 fn top_bar(title: &str) -> String {
@@ -133,25 +13,28 @@ fn top_bar(title: &str) -> String {
     )
 }
 
+async fn html(agent: &mut Agent, design: &str, select: &str) -> String {
+    agent
+        .ok(
+            "read",
+            json!({ "designId": design, "select": select, "as": "html" }),
+        )
+        .await
+}
+
 #[tokio::test]
 async fn a_component_changes_every_screen_in_one_edit() {
-    let app = app(Hub::new(Arc::new(MemoryStore::default())).unwrap(), None);
+    let app = test_app();
     let mut agent = Agent::connect(&app, "Ada").await;
-
-    let created = agent.ok("create_design", json!({ "name": "App" })).await;
-    let design: String = created
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .find(|w| w.len() == 10)
-        .unwrap()
-        .to_owned();
+    let design = agent.design("App").await;
     let mut screens = Vec::new();
     let mut bars = Vec::new();
     for title in ["Home", "Settings"] {
         let made = agent
-            .ok(
-                "create_artboard",
-                json!({ "designId": design, "name": title, "width": 390, "height": 844,
-                        "html": format!("{}<p>{title} content</p>", top_bar(title)) }),
+            .edit(
+                &design,
+                json!([{ "op": "artboard", "name": title, "width": 390, "height": 844,
+                         "html": format!("{}<p>{title} content</p>", top_bar(title)) }]),
             )
             .await;
         screens.push(id_after(&made, "Created artboard"));
@@ -160,10 +43,10 @@ async fn a_component_changes_every_screen_in_one_edit() {
 
     // The first bar becomes the component, the second an instance of it.
     let made = agent
-        .ok(
-            "create_component",
-            json!({ "designId": design, "nodeId": bars[0], "name": "Top bar",
-                    "replaceNodeIds": [bars[1]] }),
+        .edit(
+            &design,
+            json!([{ "op": "component", "select": format!("#{}, #{}", bars[0], bars[1]),
+                     "name": "Top bar" }]),
         )
         .await;
     assert!(
@@ -174,79 +57,59 @@ async fn a_component_changes_every_screen_in_one_edit() {
         !made.contains("styled by <style> blocks"),
         "inline styles: {made}"
     );
-    let html = agent
-        .ok(
-            "get_html",
-            json!({ "designId": design, "nodeId": screens[1] }),
-        )
-        .await;
+    let shown = html(&mut agent, &design, &format!("#{}", screens[1])).await;
     assert!(
-        html.contains(&format!(
+        shown.contains(&format!(
             r#"data-id="{}" data-instance-of="{}""#,
             bars[1], bars[0]
         )),
-        "{html}"
+        "{shown}"
     );
     assert!(
-        html.contains(">Settings</h1>"),
-        "the copy's title is an override: {html}"
+        shown.contains(">Settings</h1>"),
+        "the copy's title is an override: {shown}"
     );
     assert!(
-        html.contains(&format!(r#"data-id="{}/"#, bars[1])),
-        "{html}"
-    );
-    assert!(
-        html.contains("Elements with data-instance-of are instances"),
-        "{html}"
+        shown.contains(&format!(r#"data-id="{}/"#, bars[1])),
+        "{shown}"
     );
 
     // One edit to the component changes both screens, and says so.
     let edited = agent
-        .ok(
-            "update_styles",
-            json!({ "designId": design,
-                    "updates": [{ "nodeIds": [bars[0]], "styles": { "background": "#111827" } }] }),
+        .edit(
+            &design,
+            json!([{ "op": "css", "select": format!("#{}", bars[0]), "css": "background: #111827" }]),
         )
         .await;
     assert!(edited.contains("all 1 instance show it too"), "{edited}");
-    let html = agent
-        .ok(
-            "get_html",
-            json!({ "designId": design, "nodeId": screens[1] }),
-        )
-        .await;
-    assert!(html.contains("background: #111827"), "{html}");
+    let shown = html(&mut agent, &design, &format!("#{}", screens[1])).await;
+    assert!(shown.contains("background: #111827"), "{shown}");
 
     // An edit inside the instance changes only it.
     let title = {
         let needle = r#"<h1 data-id=""#;
-        let start = html.find(&format!("{needle}{}/", bars[1])).unwrap() + needle.len();
-        html[start..start + html[start..].find('"').unwrap()].to_owned()
+        let start = shown.find(&format!("{needle}{}/", bars[1])).unwrap() + needle.len();
+        shown[start..start + shown[start..].find('"').unwrap()].to_owned()
     };
     let text = agent
-        .ok(
-            "set_text_content",
-            json!({ "designId": design, "updates": [{ "nodeId": title, "text": "Preferences" }] }),
+        .edit(
+            &design,
+            json!([{ "op": "replace", "find": "Settings", "replace": "Preferences", "in": "text" }]),
         )
         .await;
     assert!(
         text.contains(&format!("Only instance #{}", bars[1])),
         "{text}"
     );
-    let home = agent
-        .ok(
-            "get_html",
-            json!({ "designId": design, "nodeId": screens[0] }),
-        )
-        .await;
+    let home = html(&mut agent, &design, &format!("#{}", screens[0])).await;
     assert!(
         home.contains(">Home</h1>") && !home.contains("Preferences"),
         "{home}"
     );
     let found = agent
         .ok(
-            "find_nodes",
-            json!({ "designId": design, "text": "Preferences" }),
+            "read",
+            json!({ "designId": design, "contains": "Preferences" }),
         )
         .await;
     assert!(
@@ -257,128 +120,79 @@ async fn a_component_changes_every_screen_in_one_edit() {
     // Structure inside an instance is refused, with what to do instead.
     let (refused, error) = agent
         .call(
-            "delete_nodes",
-            json!({ "designId": design, "nodeIds": [title] }),
+            "edit",
+            json!({ "designId": design, "check": false,
+                    "ops": [{ "op": "remove", "select": format!("#{title}") }] }),
         )
         .await;
-    assert!(error && refused.contains("detach_instance"), "{refused}");
+    assert!(error && refused.contains("detach"), "{refused}");
 
-    // A third screen gets an instance from insert_instance, a fourth from HTML.
+    // A third screen gets an instance from html.
     let third = agent
-        .ok(
-            "create_artboard",
-            json!({ "designId": design, "name": "Profile", "width": 390, "height": 844 }),
+        .edit(
+            &design,
+            json!([{ "op": "artboard", "name": "Profile", "width": 390, "height": 844,
+                     "html": format!(r#"<header data-instance-of="{}"></header><p>Mail</p>"#, bars[0]) }]),
         )
         .await;
-    let third = id_after(&third, "Created artboard");
-    let inserted = agent
-        .ok(
-            "insert_instance",
-            json!({ "designId": design, "componentId": bars[0], "parentId": third,
-                    "overrides": [{ "nodeId": title.split('/').nth(1).unwrap(), "text": "Profile" }] }),
-        )
-        .await;
-    assert!(inserted.contains("\"Profile\""), "{inserted}");
-    // get_layout renders the instance with its component's content.
-    let (layout, _) = agent
-        .call("get_layout", json!({ "designId": design, "nodeId": third }))
-        .await;
-    assert!(
-        layout.contains("no Chrome") || layout.contains("\"Profile\" @ "),
-        "{layout}"
-    );
-    let fourth = agent
-        .ok(
-            "create_artboard",
-            json!({ "designId": design, "name": "Inbox", "width": 390, "height": 844,
-                    "html": format!(r#"<header data-instance-of="{}"></header><p>Mail</p>"#, bars[0]) }),
-        )
-        .await;
-    assert!(fourth.contains("(instance of \"Top bar\""), "{fourth}");
-
-    let list = agent
-        .ok("get_components", json!({ "designId": design }))
-        .await;
-    let list: Value = serde_json::from_str(&list).unwrap();
-    assert_eq!(list[0]["name"], "Top bar");
-    assert_eq!(list[0]["instanceCount"], 3);
+    assert!(third.contains("(instance of \"Top bar\""), "{third}");
 
     // Changing a color everywhere changes the component, not each instance.
     agent
-        .ok(
-            "replace_values",
-            json!({ "designId": design, "find": "#111827", "replace": "#7c3aed" }),
+        .edit(
+            &design,
+            json!([{ "op": "replace", "find": "#111827", "replace": "#7c3aed" }]),
         )
         .await;
-    let info = agent
-        .ok(
-            "get_node_info",
-            json!({ "designId": design, "nodeIds": [bars[1]] }),
-        )
-        .await;
-    let info: Value = serde_json::from_str(&info).unwrap();
-    assert_eq!(info[0]["styles"]["background"], "#7c3aed");
-    // Only the title it already had: the color came from the component.
-    assert_eq!(info[0]["overrides"].as_object().unwrap().len(), 1, "{info}");
+    let shown = html(&mut agent, &design, &format!("#{}", screens[1])).await;
+    assert!(
+        shown.contains("#7c3aed") && !shown.contains("#111827"),
+        "{shown}"
+    );
 
     // Detaching makes a plain copy; undo makes it an instance again.
     let detached = agent
-        .ok(
-            "detach_instance",
-            json!({ "designId": design, "nodeIds": [bars[1]] }),
+        .edit(
+            &design,
+            json!([{ "op": "component", "select": format!("#{}", bars[1]), "detach": true }]),
         )
         .await;
     assert!(
-        detached.contains("plain copy") && !detached.contains("Only instance"),
+        detached.contains("Detached 1 instance") && !detached.contains("Only instance"),
         "{detached}"
     );
-    let html = agent
-        .ok(
-            "get_html",
-            json!({ "designId": design, "nodeId": screens[1] }),
-        )
-        .await;
+    let plain = html(&mut agent, &design, &format!("#{}", screens[1])).await;
     assert!(
-        !html.contains("data-instance-of") && html.contains("Preferences"),
-        "{html}"
+        !plain.contains("data-instance-of") && plain.contains("Preferences"),
+        "{plain}"
     );
     agent.ok("undo", json!({ "designId": design })).await;
-    let html = agent
-        .ok(
-            "get_html",
-            json!({ "designId": design, "nodeId": screens[1] }),
-        )
-        .await;
-    assert!(html.contains("data-instance-of"), "{html}");
+    let back = html(&mut agent, &design, &format!("#{}", screens[1])).await;
+    assert!(back.contains("data-instance-of"), "{back}");
 
-    // Exports and get_jsx show the instance as the elements it shows, with
-    // its override: a file has no component for it to point at, and an
-    // instance has no children of its own to read. They say so.
-    let html = agent
-        .ok(
-            "get_html",
-            json!({ "designId": design, "nodeId": screens[1] }),
-        )
-        .await;
+    // Exports and JSX show the instance as the elements it shows, with its
+    // override: a file has no component for it to point at, and an instance
+    // has no children of its own to read. They say so.
     assert!(
-        html.contains("shown expanded") && html.contains("remove the data-instance-of"),
-        "{html}"
+        back.contains("shown expanded") && back.contains("remove the data-instance-of"),
+        "{back}"
     );
     let jsx = agent
         .ok(
-            "get_jsx",
-            json!({ "designId": design, "nodeId": screens[1] }),
+            "read",
+            json!({ "designId": design, "select": format!("#{}", screens[1]), "as": "jsx" }),
         )
         .await;
     assert!(
-        jsx.contains("Preferences") && jsx.contains("Menu") && jsx.contains("component instances"),
+        jsx.contains("Preferences") && jsx.contains("Menu") && !jsx.contains("instanceOf"),
         "{jsx}"
     );
     for format in ["html", "finite", "figma", "jsx"] {
         let exported = agent
             .ok(
-                "export_design",
-                json!({ "designId": design, "format": format, "artboardId": screens[1] }),
+                "read",
+                json!({ "designId": design, "export": format,
+                        "select": format!("#{}", screens[1]) }),
             )
             .await;
         assert!(
@@ -394,32 +208,29 @@ async fn a_component_changes_every_screen_in_one_edit() {
             "{format} didn't say so: {exported}"
         );
     }
-    // The whole design as a bundle, too, keeps the page and the content.
+    // The whole design as a bundle, too, keeps the content.
     let bundle = agent
-        .ok(
-            "export_design",
-            json!({ "designId": design, "format": "finite" }),
-        )
+        .ok("read", json!({ "designId": design, "export": "finite" }))
         .await;
     assert!(
-        bundle.contains("Preferences") && bundle.contains("Profile") && bundle.contains("Mail"),
+        bundle.contains("Preferences") && bundle.contains("Mail"),
         "{bundle}"
     );
 
     // A component styled by its artboard's <style> block hears that
     // instances elsewhere won't get those rules.
     let wrote = agent
-        .ok(
-            "write_html",
-            json!({ "designId": design, "targetId": screens[0],
-                    "html": r#"<style>.pill { color: red } .pillbox { gap: 2px }</style><span data-name="Pill" class="pill">Hi</span>"# }),
+        .edit(
+            &design,
+            json!([{ "op": "html", "select": format!("#{}", screens[0]),
+                     "html": r#"<style>.pill { color: red } .pillbox { gap: 2px }</style><span data-name="Pill" class="pill">Hi</span>"# }]),
         )
         .await;
     let pill = id_after(&wrote, "\"Pill\"");
     let made = agent
-        .ok(
-            "create_component",
-            json!({ "designId": design, "nodeId": pill }),
+        .edit(
+            &design,
+            json!([{ "op": "component", "select": format!("#{pill}"), "name": "Pill" }]),
         )
         .await;
     assert!(made.contains("Its classes .pill are styled"), "{made}");
@@ -427,8 +238,10 @@ async fn a_component_changes_every_screen_in_one_edit() {
     // An instance can't go inside its own component.
     let (refused, error) = agent
         .call(
-            "insert_instance",
-            json!({ "designId": design, "componentId": bars[0], "parentId": bars[0] }),
+            "edit",
+            json!({ "designId": design, "check": false,
+                    "ops": [{ "op": "html", "select": format!("#{}", bars[0]),
+                              "html": format!("<div data-instance-of=\"{}\"></div>", bars[0]) }] }),
         )
         .await;
     assert!(error && refused.contains("contain itself"), "{refused}");

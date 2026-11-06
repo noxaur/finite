@@ -1,3 +1,4 @@
+import { HIDDEN_ATTR } from "@/design/editing/layers";
 import { isPositioned, moveAbsolute, moveArtboards, resize } from "@/design/editing/geometry";
 import { mainAxis, parentLayoutOf, ratioOf } from "@/design/editing/sizing";
 import type { Renderer } from "@/design/renderer";
@@ -23,7 +24,7 @@ export interface GeometryFacts {
  */
 export function geometryOf(node: Node, renderer: Renderer, replica: Replica): GeometryFacts | null {
   const measured = renderer.measure(node.id);
-  if (!measured || node.attrs.hidden !== undefined) return null;
+  if (!measured || node.attrs[HIDDEN_ATTR] !== undefined) return null;
   // W and H are the element's own size, which a rotation or transform
   // doesn't change; its drawn box is only their bounds. The computed size
   // leaves out a content-box element's padding and borders.

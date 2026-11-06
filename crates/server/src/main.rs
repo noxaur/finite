@@ -3,6 +3,8 @@ use std::{net::SocketAddr, sync::Arc};
 use finite_server::{
     Hub,
     cluster::{self, Cluster, Lease, Members},
+    config::{Config, Database},
+    router::Options,
     store::{FileStore, Registry, Store},
 };
 use tracing_subscriber::EnvFilter;
@@ -15,29 +17,21 @@ async fn main() -> std::io::Result<()> {
         )
         .init();
 
-    let port: u16 = std::env::var("FINITE_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(4100);
-    // Serve the built frontend when a directory is given (desktop release, web deploy).
-    let static_dir = std::env::var("FINITE_STATIC_DIR").ok();
-    // With a shared store, servers find each other through its heartbeats.
-    let database = std::env::var("FINITE_DATABASE_URL").ok();
-    let schema = database_schema();
-    let lease = Lease::from_env().unwrap_or_else(|error| fail(error));
+    let config = Config::from_env().unwrap_or_else(|error| fail(error));
+    let port = config.port;
     // `finite-server router` runs the front door for the servers in
     // FINITE_NODES, or for the live ones in FINITE_DATABASE_URL.
     if std::env::args().nth(1).as_deref() == Some("router") {
-        let members = match &database {
-            Some(url) => {
-                let (_, registry) = shared_store(url, schema.as_deref(), "router", lease);
+        let members = match &config.database {
+            Some(database) => {
+                let (_, registry) = shared_store(database, "router", config.lease);
                 let live = registry.live()?;
                 let members = Arc::new(Members::fixed(Cluster::observer(live)));
-                cluster::follow(members.clone(), registry, lease.every());
+                cluster::follow(members.clone(), registry, config.lease.every());
                 members
             }
             None => {
-                let Some(nodes) = Cluster::nodes_from_env().filter(|n| !n.is_empty()) else {
+                let Some(nodes) = config.nodes.clone().filter(|n| !n.is_empty()) else {
                     fail("the router needs FINITE_NODES or FINITE_DATABASE_URL");
                 };
                 Arc::new(Members::fixed(Cluster::observer(nodes)))
@@ -47,52 +41,56 @@ async fn main() -> std::io::Result<()> {
             tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await?;
         tracing::info!(nodes = ?members.now().nodes(), "routing on http://{}", listener.local_addr()?);
         // With a shared FINITE_SESSION_DIR, any router can serve any MCP session.
-        let sessions = match std::env::var("FINITE_SESSION_DIR") {
-            Ok(dir) => Some(Arc::new(finite_server::relay::DirSessionStore::new(dir)?) as _),
-            Err(_) => None,
+        let sessions = match &config.session_dir {
+            Some(dir) => Some(Arc::new(finite_server::relay::DirSessionStore::new(dir)?) as _),
+            None => None,
         };
-        let app = finite_server::router::app_with_members(members, static_dir.as_deref(), sessions);
+        let app = finite_server::router::app(
+            members,
+            Options {
+                static_dir: config.static_dir.clone(),
+                sessions,
+                allowed_hosts: config.settings.allowed_hosts.clone(),
+                ..Options::default()
+            },
+        );
         return axum::serve(listener, app)
             .with_graceful_shutdown(shutdown())
             .await;
     }
-    let hub = match &database {
+    let hub = match &config.database {
         // Designs are saved in Postgres, which every server shares.
-        Some(url) => {
-            if Cluster::nodes_from_env().is_some() {
+        Some(database) => {
+            if config.nodes.is_some() {
                 fail(
                     "with FINITE_DATABASE_URL, the servers come from the database; unset FINITE_NODES",
                 );
             }
-            // How the other servers and the router reach this one.
-            let me = std::env::var("FINITE_NODE_URL")
-                .unwrap_or_else(|_| format!("http://127.0.0.1:{port}"));
-            let me = me.trim_end_matches('/').to_owned();
-            if !cluster::is_base_url(&me) {
-                fail(format!(
-                    "FINITE_NODE_URL must look like http://10.0.0.2:4100, not {me:?}"
-                ));
-            }
-            let (store, registry) = shared_store(url, schema.as_deref(), &me, lease);
-            let hub = Hub::shared(store, registry, &me, lease)?;
+            let me = &config.node_url;
+            let (store, registry) = shared_store(database, me, config.lease);
+            let hub = Hub::shared(store, registry, me, config.lease)?;
             tracing::info!(
                 me,
                 designs = hub.list().len(),
-                ?lease,
+                lease = ?config.lease,
                 "joined the servers sharing the database"
             );
             hub
         }
         // Designs are saved here as JSON files.
         None => {
-            let data_dir = std::env::var("FINITE_DATA_DIR").unwrap_or_else(|_| "data".into());
-            let store = FileStore::new(&data_dir).unwrap_or_else(|error| fail(error));
-            let cluster = Cluster::from_env().unwrap_or_else(|error| fail(error));
+            let store = FileStore::new(&config.data_dir).unwrap_or_else(|error| fail(error));
+            let cluster = config.cluster().unwrap_or_else(|error| fail(error));
             let hub = Hub::with_cluster(Arc::new(store), cluster)?;
-            tracing::info!(data_dir, designs = hub.list().len(), "loaded designs");
+            tracing::info!(
+                data_dir = config.data_dir,
+                designs = hub.list().len(),
+                "loaded designs"
+            );
             hub
         }
     };
+    hub.configure(config.settings.clone());
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -101,7 +99,7 @@ async fn main() -> std::io::Result<()> {
 
     axum::serve(
         listener,
-        finite_server::app(hub.clone(), static_dir.as_deref()),
+        finite_server::app(hub.clone(), config.static_dir.as_deref()),
     )
     .with_graceful_shutdown(shutdown())
     .await?;
@@ -114,17 +112,21 @@ async fn main() -> std::io::Result<()> {
     Ok(())
 }
 
-/// The Postgres store at `url`, as the server at `me`: its designs, and the
-/// heartbeats of the servers that share it.
+/// The Postgres store in `database`, as the server at `me`: its designs, and
+/// the heartbeats of the servers that share it.
 #[cfg(feature = "postgres")]
 fn shared_store(
-    url: &str,
-    schema: Option<&str>,
+    database: &Database,
     me: &str,
     lease: Lease,
 ) -> (Arc<dyn Store>, Arc<dyn Registry>) {
-    let store = finite_server::postgres::PgStore::connect_in(url, schema, me, lease.0)
-        .unwrap_or_else(|error| fail(format!("couldn't open the database: {error}")));
+    let store = finite_server::postgres::PgStore::connect_in(
+        &database.url,
+        database.schema.as_deref(),
+        me,
+        lease.0,
+    )
+    .unwrap_or_else(|error| fail(format!("couldn't open the database: {error}")));
     let store = Arc::new(store);
     (store.clone(), store)
 }
@@ -133,29 +135,11 @@ fn shared_store(
 /// database URL that was set on purpose must not be ignored: the server would
 /// start on its own folder, and its designs would never reach the others.
 #[cfg(not(feature = "postgres"))]
-fn shared_store(
-    _: &str,
-    _: Option<&str>,
-    _: &str,
-    _: Lease,
-) -> (Arc<dyn Store>, Arc<dyn Registry>) {
+fn shared_store(_: &Database, _: &str, _: Lease) -> (Arc<dyn Store>, Arc<dyn Registry>) {
     fail(
         "FINITE_DATABASE_URL is set, but this finite-server was built without Postgres. \
          Build it with `cargo build -p finite-server --features postgres`, or unset FINITE_DATABASE_URL.",
     )
-}
-
-/// Where in the database Finite keeps its tables, if not the default schema:
-/// `FINITE_DATABASE_SCHEMA`. It's for development, so each test run, like
-/// `vp run e2e:shared`, gets empty tables in one shared database. A release
-/// build refuses it rather than ignore it, which would quietly put a
-/// deployment's tables somewhere else than its operator meant.
-fn database_schema() -> Option<String> {
-    let schema = std::env::var("FINITE_DATABASE_SCHEMA").ok()?;
-    if !cfg!(debug_assertions) {
-        fail("FINITE_DATABASE_SCHEMA is only for development builds; unset it");
-    }
-    Some(schema)
 }
 
 fn fail(error: impl std::fmt::Display) -> ! {

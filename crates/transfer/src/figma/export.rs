@@ -146,7 +146,7 @@ impl<'a> Walk<'a, '_> {
             })?;
         let (origin, _) = Placed::measured(res, 0.0);
         let mut node = self
-            .element(board, &origin)
+            .element(board, &origin)?
             .expect("a rendered artboard converts")
             .node;
         // Figma has no canvas to turn an artboard on.
@@ -156,10 +156,12 @@ impl<'a> Walk<'a, '_> {
         Ok(node)
     }
 
-    fn element(&mut self, node: &Node, parent: &Placed) -> Option<Kid<'a>> {
+    fn element(&mut self, node: &Node, parent: &Placed) -> Result<Option<Kid<'a>>, Error> {
         let scene = self.scene;
-        let res = scene.nodes.get(&node.id)?;
-        let tag = node.tag()?.to_ascii_lowercase();
+        let (Some(res), Some(tag)) = (scene.nodes.get(&node.id), node.tag()) else {
+            return Ok(None);
+        };
+        let tag = tag.to_ascii_lowercase();
         let (turn, transformed) = match css::transform(res.style("transform")) {
             Transform::None => (0.0, false),
             Transform::Rotate(angle) => (angle, true),
@@ -192,26 +194,25 @@ impl<'a> Walk<'a, '_> {
         fig.visible = !matches!(res.style("visibility"), "hidden" | "collapse");
         fig.opacity = css::number(res.style("opacity")).unwrap_or(1.0);
         let kid = |node| {
-            Some(Kid {
+            Ok(Some(Kid {
                 node,
                 res,
                 text: false,
                 transformed,
-            })
+            }))
         };
         if tag == "svg" {
             fig.kind = "VECTOR".into();
             fig.svg = html::export(self.revision.doc, &node.id, false);
             return kid(fig);
         }
-        self.paint(node, res, &mut fig);
+        self.paint(node, res, &mut fig)?;
         if tag == "img" {
             fig.kind = "RECTANGLE".into();
             fig.clips_content = false;
-            if let Some(hash) = node
-                .attrs
-                .get("src")
-                .and_then(|src| self.image(node, "src", src))
+            let src = node.attrs.get("src");
+            if let Some(src) = src
+                && let Some(hash) = self.image(node, "src", src)?
             {
                 let scale_mode = match res.style("object-fit") {
                     "contain" => "FIT",
@@ -230,7 +231,7 @@ impl<'a> Walk<'a, '_> {
         for child in self.revision.doc.children(Some(&node.id)) {
             let converted = match child.kind {
                 NodeKind::Text => self.text(child, &placed),
-                NodeKind::Element { .. } => self.element(child, &placed),
+                NodeKind::Element { .. } => self.element(child, &placed)?,
             };
             kids.extend(converted);
         }
@@ -310,7 +311,7 @@ impl<'a> Walk<'a, '_> {
     }
 
     /// An element's fills, strokes, corners, shadows and clipping.
-    fn paint(&mut self, node: &Node, res: &Resolved, fig: &mut FigNode) {
+    fn paint(&mut self, node: &Node, res: &Resolved, fig: &mut FigNode) -> Result<(), Error> {
         let background = res.style("background-color");
         if let Some(color) = self.color(node, "background-color", background)
             && color.a > 0.0
@@ -322,7 +323,7 @@ impl<'a> Walk<'a, '_> {
         for layer in layers.into_iter().rev() {
             match layer {
                 Background::Url(url) => {
-                    let Some(hash) = self.image(node, "background-image", &url) else {
+                    let Some(hash) = self.image(node, "background-image", &url)? else {
                         continue;
                     };
                     let size = res.style("background-size");
@@ -423,6 +424,7 @@ impl<'a> Walk<'a, '_> {
             .style("overflow")
             .split_whitespace()
             .any(|axis| axis != "visible");
+        Ok(())
     }
 
     /// A computed color, or `None` with a diagnostic if it isn't sRGB.
@@ -442,25 +444,22 @@ impl<'a> Walk<'a, '_> {
     }
 
     /// The key in the payload's images for the file at `url`, with its
-    /// bytes added: a blob in the design's store, or a `data:` URL.
-    fn image(&mut self, node: &Node, property: &str, url: &str) -> Option<String> {
+    /// bytes added: a blob in the design's store, or a `data:` URL. `None`
+    /// with a diagnostic when there is no such file; a store that fails
+    /// fails the export.
+    fn image(&mut self, node: &Node, property: &str, url: &str) -> Result<Option<String>, Error> {
         // The measured page is a file, so a computed `url()` that started
         // at `/api/designs/…` resolved against `file://`.
         let local = url.strip_prefix("file://").unwrap_or(url);
         let (_, found) = assets::portable(local);
         let bytes = if let Some(hash) = found.first() {
-            match self.revision.blobs.get(hash) {
-                Ok(Some(bytes)) => Some(bytes),
-                _ => {
-                    self.lost(
-                        node,
-                        property,
-                        format!("{}{hash}", assets::SCHEME),
-                        Feature::Image,
-                        "the design points at a file its store doesn't have",
-                        [Score::No, Score::No, Score::No],
-                    );
-                    return None;
+            match self.revision.blobs.get(hash)? {
+                Some(bytes) => Some(bytes),
+                None => {
+                    let missing =
+                        Diagnostic::missing_file(property, format!("{}{hash}", assets::SCHEME));
+                    self.diagnostics.push(missing.on(&node.id));
+                    return Ok(None);
                 }
             }
         } else {
@@ -482,13 +481,13 @@ impl<'a> Walk<'a, '_> {
                 reason,
                 [Score::No, Score::No, Score::Yes],
             );
-            return None;
+            return Ok(None);
         };
         let hash = BlobHash::of(&bytes).as_str().to_owned();
         self.images
             .entry(hash.clone())
             .or_insert_with(|| STANDARD.encode(&bytes));
-        Some(hash)
+        Ok(Some(hash))
     }
 
     fn lost(
@@ -498,19 +497,10 @@ impl<'a> Walk<'a, '_> {
         value: impl Into<String>,
         feature: Feature,
         reason: impl Into<String>,
-        [preserved, visual, editable]: [Score; 3],
+        scores: [Score; 3],
     ) {
-        self.diagnostics.push(Diagnostic {
-            node: Some(node.id.clone()),
-            path: property.to_owned(),
-            what: value.into(),
-            feature,
-            reason: reason.into(),
-            preserved,
-            visual,
-            editable,
-            quarantined: false,
-        });
+        let diagnostic = Diagnostic::new(feature, value, reason, scores).at(property);
+        self.diagnostics.push(diagnostic.on(&node.id));
     }
 }
 

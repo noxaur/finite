@@ -9,6 +9,9 @@ use std::{collections::BTreeMap, fmt::Write};
 use scraper::{Html, node::Node as HtmlNode};
 
 use crate::{
+    css_scan::{
+        comment_end, skip_trivia, starts_with_ignore_case, statement_end, string_end, url_end,
+    },
     document::{Document, MAX_DEPTH, Op},
     label,
     node::{Node, NodeId, NodeKind},
@@ -34,7 +37,7 @@ pub struct Fragment {
     pub source: Option<NodeId>,
     /// The component name it was written with ([`COMPONENT_ATTR`]): the
     /// first element with a name defines that component, and later ones are
-    /// instances of it (see [`crate::edit::prepare_instances`]).
+    /// instances of it (see `edit::prepare_instances`).
     pub component: Option<String>,
     /// The id to create it with, when it was decided before writing.
     pub id: Option<NodeId>,
@@ -42,25 +45,57 @@ pub struct Fragment {
 
 /// Elements dropped with their whole subtree: anything that loads other
 /// documents or changes the page outside the artboard.
-const BLOCKED_TAGS: &[&str] = &[
+pub const BLOCKED_TAGS: &[&str] = &[
     "link", "meta", "base", "title", "head", "iframe", "frame", "frameset", "object", "embed",
     "noscript", "template", "slot",
 ];
 
-/// Whether `tag` is an element that's dropped with its whole subtree: one that
-/// loads another document or changes the page outside the artboard.
-pub fn is_blocked_tag(tag: &str) -> bool {
-    BLOCKED_TAGS.contains(&tag.to_ascii_lowercase().as_str())
+/// Why [`refused_element`] refuses a blocked element.
+pub const BLOCKED_TAG_REASON: &str =
+    "it loads another document or changes the page outside the artboard";
+
+/// Why [`refused_element`] refuses a `<script>` in an imported file.
+pub const IMPORTED_SCRIPT_REASON: &str = "scripts in imported files don't run";
+
+/// Why [`is_safe_attr`] refuses an attribute.
+pub const UNSAFE_ATTR_REASON: &str = "it could run code";
+
+/// Why [`parse_with`] leaves out the element `tag` with its whole subtree
+/// under `policy`, if it does: it loads another document or changes the page
+/// outside the artboard, or it's a `<script>` in an import.
+pub fn refused_element(tag: &str, policy: Policy) -> Option<&'static str> {
+    let lower = tag.to_ascii_lowercase();
+    if BLOCKED_TAGS.contains(&lower.as_str()) {
+        Some(BLOCKED_TAG_REASON)
+    } else if lower == "script" && policy == Policy::Import {
+        Some(IMPORTED_SCRIPT_REASON)
+    } else {
+        None
+    }
 }
 
 /// Elements whose text is code, written without HTML escaping.
 const RAW_TEXT_TAGS: &[&str] = &["script", "style"];
 
 /// HTML elements that never have children or a closing tag.
-pub const VOID_TAGS: &[&str] = &[
+const VOID_TAGS: &[&str] = &[
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
     "track", "wbr",
 ];
+
+/// Whether `tag` never has children or a closing tag, in any letter case.
+pub fn is_void(tag: &str) -> bool {
+    VOID_TAGS.iter().any(|v| v.eq_ignore_ascii_case(tag))
+}
+
+/// Whether the text of `tag` is code, in any letter case.
+fn is_raw_text(tag: &str) -> bool {
+    RAW_TEXT_TAGS.iter().any(|v| v.eq_ignore_ascii_case(tag))
+}
+
+/// The size of an artboard made without one, or from a file whose size isn't
+/// in pixels: a desktop screen, width then height.
+pub const DEFAULT_ARTBOARD_SIZE: (f64, f64) = (1440.0, 900.0);
 
 /// Base styles for rendering an artboard. Screenshots and the web viewer both
 /// use them; the viewer reads them through WebAssembly. A layer a person hid
@@ -77,17 +112,41 @@ pub const BASE_CSS: &str =
 /// top navigation, pointer lock and fullscreen.
 pub const CSP: &str = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https:; connect-src https: wss:; style-src 'unsafe-inline' https:; img-src https: http: data: blob:; font-src https: data:; media-src https: data: blob:; worker-src blob:; form-action 'none'; frame-src 'none'; base-uri 'none'";
 
+/// The `sandbox` of the `<iframe>` an artboard that runs scripts renders in,
+/// in the viewer and in screenshots. No `allow-same-origin`, so the page has
+/// an opaque origin and can't reach the wrapper around it; no popups, modals,
+/// top navigation or pointer lock. Forms run their submit handlers, and
+/// [`CSP`]'s `form-action` keeps them from sending anything.
+pub const SANDBOX: &str = "allow-scripts allow-forms";
+
+/// The `allow` of that `<iframe>`: the features the page may not ask for.
+pub const FRAME_PERMISSIONS: &str = "autoplay 'none'; fullscreen 'none'; camera 'none'; microphone 'none'; geolocation 'none'; display-capture 'none'";
+
 /// Runs first in every artboard that runs scripts, before the artboard's own
 /// code: a function expression that hosts call with a config, through
-/// [`bootstrap`]: `(…)({"nonce": "…", "storage": {…}})`. It holds the private channel
+/// [`bootstrap_script`]. It holds the private channel
 /// to the viewer, the design's `localStorage`, and the limits on audio, focus
 /// and fullscreen. See the file for what it does.
-pub const BOOTSTRAP: &str = include_str!("bootstrap.js");
+const BOOTSTRAP: &str = include_str!("bootstrap.js");
 
 /// [`BOOTSTRAP`] as an expression to call. The formatter ends the file
 /// with `;`, which `(…)(config)` can't hold.
-pub fn bootstrap() -> &'static str {
+fn bootstrap() -> &'static str {
     BOOTSTRAP.trim().trim_end_matches(';')
+}
+
+/// The `<script>` that starts [`BOOTSTRAP`] with `config`, an object with
+/// the page's `nonce` and `storage`. The bootstrap also gets the prefix of
+/// links to artboards ([`crate::flow::ARTBOARD_LINK`]), so it needs no copy.
+/// `<` is escaped, so stored text such as `</script>` can't end the script.
+pub fn bootstrap_script(nonce: &str, storage: &serde_json::Value) -> String {
+    let config = serde_json::json!({
+        "nonce": nonce,
+        "storage": storage,
+        "artboardLink": crate::flow::ARTBOARD_LINK,
+    });
+    let config = config.to_string().replace('<', "\\u003c");
+    format!("<script>({})({config})</script>", bootstrap())
 }
 
 /// Whether a `<script>`'s `src` may load: only from an `https:` URL.
@@ -110,10 +169,10 @@ pub const BASE_LAYER: &str = "finite-base";
 /// any layer beat layered ones whatever their specificity, so an artboard's
 /// own `<style>` blocks and inline styles still override them. The cascade
 /// reverses that for `!important`: a shared `!important` wins.
-pub const SHARED_LAYER: &str = "finite-shared";
+pub(crate) const SHARED_LAYER: &str = "finite-shared";
 
 /// Old shared CSS as the text of a `<style>` element, with `</style` broken
-/// up so it can't end the element early. Its rules go in [`SHARED_LAYER`],
+/// up so it can't end the element early. Its rules go in `SHARED_LAYER`,
 /// and so do its leading `@import`s, which can't go inside a layer block
 /// and take a `layer()` instead. The shared CSS rendered with `:root` as
 /// `:host` in shadow roots, and one `<style>` serves both, so `:root`
@@ -122,12 +181,8 @@ pub fn layered_style(css: &str) -> String {
     let mut head = String::new();
     let mut rest = css;
     loop {
-        let at = &rest[skip_comments(rest)..];
-        let starts = |keyword: &str| {
-            at.get(..keyword.len())
-                .is_some_and(|s| s.eq_ignore_ascii_case(keyword))
-        };
-        if !starts("@import") && !starts("@charset") {
+        let at = &rest[skip_trivia(rest)..];
+        if !starts_with_ignore_case(at, "@import") && !starts_with_ignore_case(at, "@charset") {
             break;
         }
         let end = statement_end(at);
@@ -142,93 +197,23 @@ pub fn layered_style(css: &str) -> String {
     )
 }
 
-/// How far `css` starts with whitespace and comments.
-fn skip_comments(css: &str) -> usize {
-    let mut at = 0;
-    loop {
-        at = css.len() - css[at..].trim_start().len();
-        if !css[at..].starts_with("/*") {
-            return at;
-        }
-        at = comment_end(css, at);
-    }
-}
-
-/// The end of the quoted string that starts at `start`, past its closing quote.
-fn string_end(css: &str, start: usize) -> usize {
-    let bytes = css.as_bytes();
-    let mut i = start + 1;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\\' => i += 2,
-            c if c == bytes[start] => return i + 1,
-            _ => i += 1,
-        }
-    }
-    bytes.len()
-}
-
-/// The end of the comment that starts at `start`, past its `*/`.
-fn comment_end(css: &str, start: usize) -> usize {
-    css[start + 2..]
-        .find("*/")
-        .map_or(css.len(), |end| start + 2 + end + 2)
-}
-
-/// The end of the statement `css` starts with, past its `;`. Semicolons in
-/// strings, comments and parentheses, like a font URL's `wght@400;700`,
-/// don't count.
-fn statement_end(css: &str) -> usize {
-    let bytes = css.as_bytes();
-    let mut depth = 0usize;
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' | b'\'' => {
-                i = string_end(css, i);
-                continue;
-            }
-            b'/' if bytes.get(i + 1) == Some(&b'*') => {
-                i = comment_end(css, i);
-                continue;
-            }
-            b'(' => depth += 1,
-            b')' => depth = depth.saturating_sub(1),
-            b';' if depth == 0 => return i + 1,
-            _ => {}
-        }
-        i += 1;
-    }
-    bytes.len()
-}
-
 /// An `@import` with `layer(finite-shared)` after its URL, unless it names a
 /// layer already. Other rules come back as they are.
 fn layered_import(rule: &str) -> String {
-    if !rule
-        .get(..7)
-        .is_some_and(|s| s.eq_ignore_ascii_case("@import"))
-    {
+    if !starts_with_ignore_case(rule, "@import") {
         return rule.to_owned();
     }
-    let url = 7 + skip_comments(&rule[7..]);
+    let url = 7 + skip_trivia(&rule[7..]);
     let rest = &rule[url..];
     let url_len = if rest.starts_with(['"', '\'']) {
         string_end(rest, 0)
-    } else if rest
-        .get(..4)
-        .is_some_and(|s| s.eq_ignore_ascii_case("url("))
-    {
+    } else if starts_with_ignore_case(rest, "url(") {
         url_end(rest)
     } else {
         return rule.to_owned();
     };
     let after = &rest[url_len..];
-    if after
-        .trim_start()
-        .get(..5)
-        .is_some_and(|s| s.eq_ignore_ascii_case("layer"))
-    {
+    if starts_with_ignore_case(after.trim_start(), "layer") {
         return rule.to_owned();
     }
     format!(
@@ -236,22 +221,6 @@ fn layered_import(rule: &str) -> String {
         &rule[..url],
         &rest[..url_len]
     )
-}
-
-/// The end of the `url(…)` that `css` starts with, past its `)`. A quoted
-/// URL can hold a `)`.
-fn url_end(css: &str) -> usize {
-    let bytes = css.as_bytes();
-    let mut i = 4;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' | b'\'' => i = string_end(css, i),
-            b'\\' => i += 2,
-            b')' => return i + 1,
-            _ => i += 1,
-        }
-    }
-    bytes.len()
 }
 
 /// `css` with each `:root` selector, in any case, written as
@@ -286,6 +255,11 @@ fn replace_root(css: &str) -> String {
     out
 }
 
+/// Hides a layer from the canvas and the render. People set it from the layers
+/// panel.
+pub const HIDDEN_ATTR: &str = "hidden";
+/// Locks a layer against dragging and resizing on the canvas.
+pub const LOCKED_ATTR: &str = "data-locked";
 /// Names a node when written as an attribute (`<div data-name="Header">`).
 pub const NAME_ATTR: &str = "data-name";
 /// Identifies a node in exported HTML.
@@ -295,9 +269,9 @@ pub const ID_ATTR: &str = "data-id";
 pub const INSTANCE_ATTR: &str = "data-instance-of";
 /// Marks a component's root in exported HTML.
 pub const COMPONENT_ATTR: &str = "data-component";
-/// The design's change counter when `get_html` read the HTML, on its root.
+/// The design's change counter when `read` returned the HTML, on its root.
 /// Written back, it's the base of a three-way merge (see [`Parsed::read_at`]).
-pub const READ_ATTR: &str = "data-read-at";
+pub(crate) const READ_ATTR: &str = "data-read-at";
 
 /// Parses an HTML fragment into detached subtrees.
 ///
@@ -330,7 +304,7 @@ pub struct Parsed {
     /// Where each kept fragment was in the source, numbered like
     /// [`Dropped::anchor`].
     pub paths: Vec<String>,
-    /// The oldest [`READ_ATTR`] on any element: when the author read what it
+    /// The oldest `READ_ATTR` on any element: when the author read what it
     /// rewrites, so a rewrite can keep what others changed since.
     pub read_at: Option<u64>,
 }
@@ -361,6 +335,8 @@ pub struct Dropped {
     pub path: String,
     /// What it was, like `<iframe>` or `onclick`.
     pub what: String,
+    /// Whether it was an element (`what` is `<tag>`), not an attribute.
+    pub element: bool,
     pub reason: &'static str,
 }
 
@@ -469,7 +445,7 @@ fn nesting_bound(html: &str) -> usize {
                 .position(|b| !b.is_ascii_alphanumeric())
                 .unwrap_or(tag.len());
             let name = std::str::from_utf8(&tag[..name_len]).unwrap_or("");
-            if !VOID_TAGS.iter().any(|v| v.eq_ignore_ascii_case(name)) {
+            if !is_void(name) {
                 depth += 1;
                 deepest = deepest.max(depth);
             }
@@ -541,7 +517,7 @@ impl Walk {
                 _ if is_safe_attr(name, value) => {
                     page.attrs.insert(name.to_owned(), value.to_owned());
                 }
-                _ => self.drop(None, path, name.to_owned(), "it could run code"),
+                _ => self.drop(None, path, name.to_owned(), false, UNSAFE_ATTR_REASON),
             }
         }
     }
@@ -566,11 +542,19 @@ impl Walk {
         Ok(out)
     }
 
-    fn drop(&mut self, anchor: Option<usize>, path: &str, what: String, reason: &'static str) {
+    fn drop(
+        &mut self,
+        anchor: Option<usize>,
+        path: &str,
+        what: String,
+        element: bool,
+        reason: &'static str,
+    ) {
         self.dropped.push(Dropped {
             anchor,
             path: path.to_owned(),
             what,
+            element,
             reason,
         });
     }
@@ -596,23 +580,12 @@ impl Walk {
             }
             HtmlNode::Element(el) => {
                 let tag = el.name();
-                let lower = tag.to_ascii_lowercase();
-                if BLOCKED_TAGS.contains(&lower.as_str()) {
-                    let reason =
-                        "it loads another document or changes the page outside the artboard";
-                    self.drop(anchor, &path, format!("<{lower}>"), reason);
+                if let Some(reason) = refused_element(tag, self.policy) {
+                    let what = format!("<{}>", tag.to_ascii_lowercase());
+                    self.drop(anchor, &path, what, true, reason);
                     return Ok(None);
                 }
-                let is_script = lower == "script";
-                if is_script && self.policy == Policy::Import {
-                    self.drop(
-                        anchor,
-                        &path,
-                        "<script>".into(),
-                        "scripts in imported files don't run",
-                    );
-                    return Ok(None);
-                }
+                let is_script = tag.eq_ignore_ascii_case("script");
                 let me = self.paths.len();
                 self.paths.push(path.clone());
                 let mut fragment = Fragment::empty(NodeKind::Element {
@@ -647,12 +620,12 @@ impl Walk {
                         }
                         "src" if is_script => {
                             let reason = "scripts load only from https:// URLs";
-                            self.drop(Some(me), &path, "src on <script>".into(), reason);
+                            self.drop(Some(me), &path, "src on <script>".into(), false, reason);
                         }
                         _ if is_safe_attr(name, value) => {
                             fragment.attrs.insert(name.to_owned(), value.to_owned());
                         }
-                        _ => self.drop(Some(me), &path, name.to_owned(), "it could run code"),
+                        _ => self.drop(Some(me), &path, name.to_owned(), false, UNSAFE_ATTR_REASON),
                     }
                 }
                 let outer = self.in_instance;
@@ -680,7 +653,7 @@ pub fn is_attr_name(name: &str) -> bool {
 
 /// Whether an attribute is allowed on a node: no event handlers, no
 /// `srcdoc`, no `javascript:` or `vbscript:` URLs. `write_html` drops the
-/// ones that fail, and `set_attributes` refuses them.
+/// ones that fail, and `update_attributes` refuses them.
 ///
 /// A script URL is refused anywhere in the value, not just at the start:
 /// SVG animation can set an `href` at runtime from a list such as
@@ -703,7 +676,7 @@ pub fn is_safe_attr(name: &str, value: &str) -> bool {
 
 /// Splits a `style` attribute into `(property, value)` pairs, respecting
 /// quotes and parentheses (`url(data:image/png;base64,...)` contains `;`).
-pub fn parse_style(style: &str) -> Vec<(String, String)> {
+pub(crate) fn parse_style(style: &str) -> Vec<(String, String)> {
     let mut declarations = Vec::new();
     let (mut depth, mut quote, mut start) = (0usize, None::<char>, 0);
     let mut push = |decl: &str| {
@@ -903,7 +876,7 @@ pub struct ExportOptions {
     /// Indents nested elements one per line. Without it, the HTML is written
     /// exactly as it renders, with no whitespace between elements.
     pub indent: bool,
-    /// Writes [`READ_ATTR`] with this value on the root.
+    /// Writes `READ_ATTR` with this value on the root.
     pub read_at: Option<u64>,
 }
 
@@ -937,13 +910,6 @@ pub struct Export {
     pub hidden_code: usize,
     /// `<style>` elements added from elsewhere in the artboard.
     pub stylesheets: usize,
-}
-
-impl Export {
-    /// Whether the HTML holds the whole subtree, so it could be written back.
-    pub fn is_complete(&self) -> bool {
-        self.collapsed == 0 && self.shortened == 0 && self.hidden_code == 0
-    }
 }
 
 /// Serializes the subtree at `id` as HTML, including what `options` ask for.
@@ -1131,13 +1097,13 @@ impl Writer<'_> {
             let style = self.clip(&style_string(&node.styles)).into_owned();
             let _ = write!(self.out, " style=\"{}\"", escape(&style, true));
         }
-        if VOID_TAGS.contains(&tag.as_str()) {
+        if is_void(tag) {
             self.out.push_str(" />");
             self.newline();
             return;
         }
         let children = doc.children(Some(&node.id));
-        if RAW_TEXT_TAGS.contains(&tag.to_ascii_lowercase().as_str()) {
+        if is_raw_text(tag) {
             let code: String = children.iter().filter_map(|c| c.text.as_deref()).collect();
             let code = match self.options.max_code_len {
                 Some(max) if code.chars().count() > max => {
@@ -1254,13 +1220,13 @@ fn write_compact(doc: &Document, node: &Node, ids: bool, out: &mut String) {
             escape(&style_string(&node.styles), true)
         );
     }
-    if VOID_TAGS.contains(&tag.as_str()) {
+    if is_void(tag) {
         out.push_str(" />");
         return;
     }
     out.push('>');
     let children = doc.children(Some(&node.id));
-    if RAW_TEXT_TAGS.contains(&tag.to_ascii_lowercase().as_str()) {
+    if is_raw_text(tag) {
         let code: String = children.iter().filter_map(|c| c.text.as_deref()).collect();
         out.push_str(&raw_text(&code, tag));
     } else {
@@ -1508,7 +1474,6 @@ mod tests {
             "{}",
             export.html
         );
-        assert!(!export.is_complete());
 
         // An element holding only text still shows it at the cutoff.
         let options = ExportOptions {

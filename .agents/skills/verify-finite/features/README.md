@@ -6,7 +6,7 @@ This folder is the maintained source for proving Finite's user-facing behavior. 
 
 - A run launched with `$V launch`, and its `RUN` id in hand.
 - `$V doctor $RUN` prints only `ok` lines.
-- The data folder starts empty, and there's no seed data. Each recipe creates the design it needs with `call create_design`.
+- The data folder starts empty, and there's no seed data. Each recipe creates the design it needs with `call designs`.
 - The page starts on the design list at `/`.
 
 ## Driving conventions
@@ -15,7 +15,7 @@ This folder is the maintained source for proving Finite's user-facing behavior. 
 - Find elements by accessible name, `title` or `aria-label`, as the SKILL.md table lists them. Find artboard content with `[data-artboard="<id>"] >>> <css>`.
 - Read the ids (designId, artboardId, nodeId, commentId) from each tool's reply. They're random on every run.
 - Wait on a state with `$V h $RUN wait '<js>'`, not a fixed `sleep`, except where a gotcha says the page has no state to wait on.
-- To run `wait_for_comments` while a person comments, start it with `$V bg`, drive the page, then read it with `$V await`.
+- To run `comments` with `wait` while a person comments, start it with `$V bg`, drive the page, then read it with `$V await`.
 
 ## Proof and skip reporting
 
@@ -39,27 +39,27 @@ Each feature file starts with an H1 title and one paragraph on what a person or 
 
 Run every feature your diff's paths point to. A path in more than one row needs every feature in those rows.
 
-| Changed path                                                                        | Features to run                                                                                                            |
-| ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `crates/server/src/mcp/` (a tool, its params, its result text)                      | The feature that uses the tool (search this folder's files for the tool's name), plus [Live canvas](./live-canvas.md)      |
-| `crates/server/src/mcp/instructions.md`                                             | None in this map: measure it with an AX run (`e2e/ax`)                                                                     |
-| `crates/design/src/edit.rs`, `node.rs`, `document.rs`, `html.rs`, `fractional.rs`   | [Live canvas](./live-canvas.md)                                                                                            |
-| `crates/design/src/history.rs`, `design.rs`                                         | [Live canvas](./live-canvas.md) (`canvas-undo`)                                                                            |
-| `crates/design/src/comment.rs`                                                      | [Comments](./comments.md)                                                                                                  |
-| `crates/design/src/search.rs`, `crates/server/src/mcp/search.rs`                    | [Live canvas](./live-canvas.md), with `find_nodes` and `replace_values` calls                                              |
-| `crates/design/src/tokens.rs`, `crates/server/src/mcp/tokens.rs`                    | [Tokens](./tokens.md)                                                                                                      |
-| `crates/wasm/`, `apps/web/src/design/` (socket, session, replica, renderer, camera) | [Live canvas](./live-canvas.md), [Comments](./comments.md)                                                                 |
-| `crates/server/src/hub/`, `store.rs`                                                | [Live canvas](./live-canvas.md), [Design list](./design-list.md)                                                           |
-| `crates/server/src/api.rs`, `guard.rs`, `heartbeat.rs`                              | [Design list](./design-list.md), [Comments](./comments.md), [Tokens](./tokens.md), [Import and export](./import-export.md) |
-| `crates/server/src/screenshot/`                                                     | [Live canvas](./live-canvas.md) (`canvas-screenshot`)                                                                      |
-| `crates/transfer/`, `crates/server/src/transfer.rs`                                 | [Import and export](./import-export.md)                                                                                    |
-| `apps/web/src/components/DesignGrid.tsx`, `Thumbnail.tsx`, `app/page.tsx`           | [Design list](./design-list.md)                                                                                            |
-| `apps/web/src/components/DesignCanvas.tsx`, `app/design/`                           | [Live canvas](./live-canvas.md), [Comments](./comments.md)                                                                 |
-| `apps/web/src/components/Comments.tsx`, `CommentsPanel.tsx`, `PinIcon.tsx`          | [Comments](./comments.md)                                                                                                  |
-| `apps/web/src/components/TokensPanel.tsx`                                           | [Tokens](./tokens.md)                                                                                                      |
-| `apps/web/src/components/PagesSidebar.tsx`                                          | [Pages](./pages.md)                                                                                                        |
-| `apps/web/src/components/Transfer.tsx`                                              | [Import and export](./import-export.md)                                                                                    |
-| `apps/web/src/styles/`                                                              | Every feature with a screen: take a `shot` of each                                                                         |
+| Changed path                                                                        | Features to run                                                                                                                    |
+| ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/server/src/mcp/` (a tool, its params, its result text)                      | The feature that uses the tool (search this folder's files for the tool's name, or the op's), plus [Live canvas](./live-canvas.md) |
+| `crates/server/src/mcp/instructions.md`                                             | None in this map: measure it with an AX run (`e2e/ax`)                                                                             |
+| `crates/design/src/edit/`, `node.rs`, `document.rs`, `html.rs`, `fractional.rs`     | [Live canvas](./live-canvas.md)                                                                                                    |
+| `crates/design/src/history.rs`, `design/`                                           | [Live canvas](./live-canvas.md) (`canvas-undo`)                                                                                    |
+| `crates/design/src/comment.rs`                                                      | [Comments](./comments.md)                                                                                                          |
+| `crates/design/src/search.rs`, `crates/server/src/mcp/search.rs`                    | [Live canvas](./live-canvas.md), with `read` `contains` and `replace` op calls                                                     |
+| `crates/design/src/tokens.rs`, `crates/server/src/mcp/tokens.rs`                    | [Tokens](./tokens.md)                                                                                                              |
+| `crates/wasm/`, `apps/web/src/design/` (socket, session, replica, renderer, camera) | [Live canvas](./live-canvas.md), [Comments](./comments.md)                                                                         |
+| `crates/server/src/hub/`, `store.rs`                                                | [Live canvas](./live-canvas.md), [Design list](./design-list.md)                                                                   |
+| `crates/server/src/api.rs`, `guard.rs`, `heartbeat.rs`                              | [Design list](./design-list.md), [Comments](./comments.md), [Tokens](./tokens.md), [Import and export](./import-export.md)         |
+| `crates/server/src/screenshot/`                                                     | [Live canvas](./live-canvas.md) (`canvas-screenshot`)                                                                              |
+| `crates/transfer/`, `crates/server/src/transfer.rs`                                 | [Import and export](./import-export.md)                                                                                            |
+| `apps/web/src/components/DesignGrid.tsx`, `Thumbnail.tsx`, `app/page.tsx`           | [Design list](./design-list.md)                                                                                                    |
+| `apps/web/src/components/DesignCanvas.tsx`, `app/design/`                           | [Live canvas](./live-canvas.md), [Comments](./comments.md)                                                                         |
+| `apps/web/src/components/Comments.tsx`, `CommentsPanel.tsx`, `PinIcon.tsx`          | [Comments](./comments.md)                                                                                                          |
+| `apps/web/src/components/TokensPanel.tsx`                                           | [Tokens](./tokens.md)                                                                                                              |
+| `apps/web/src/components/PagesSidebar.tsx`                                          | [Pages](./pages.md)                                                                                                                |
+| `apps/web/src/components/Transfer.tsx`                                              | [Import and export](./import-export.md)                                                                                            |
+| `apps/web/src/styles/`                                                              | Every feature with a screen: take a `shot` of each                                                                                 |
 
 ## Not covered yet
 
@@ -68,7 +68,7 @@ This map has no recipe for these. Report them as not covered, and say what you c
 - The desktop app (`apps/desktop`): restarts, updates and its own data folder.
 - The Figma plugin (`apps/figma-plugin`).
 - Several servers (`cluster.rs`, `router.rs`, `relay.rs`) and the Postgres store.
-- Sandboxed (script) artboards, beyond what `get_screenshot` shows.
+- Sandboxed (script) artboards, beyond what `render` shows.
 
 ## Features
 

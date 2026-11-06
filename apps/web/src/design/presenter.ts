@@ -1,5 +1,6 @@
 import type { Camera, View } from "./camera";
-import type { Bounds, Renderer } from "./renderer";
+import type { Renderer } from "./renderer";
+import type { Bounds } from "./types";
 
 /** How long the camera takes to zoom onto an artboard, or back out. */
 export const ENTER_MS = 450;

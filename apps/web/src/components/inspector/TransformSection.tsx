@@ -15,8 +15,9 @@ import {
 } from "@/design/editing/transform";
 import type { Node } from "@/design/schema";
 import { colors, space } from "@/styles/tokens.stylex";
-import { numberOf } from "../DraftField";
-import type { IconName } from "../Icons";
+import { numberOf, whenNumber } from "../DraftField";
+import type { IconName } from "@/lib/icons";
+import { roundTo } from "@/design/editing/units";
 import {
   CustomChip,
   Field,
@@ -39,7 +40,7 @@ function agreed<T>(all: ReadonlyArray<T>): T | null {
   return set.size === 1 ? ([...set][0] as T) : null;
 }
 
-const round = (n: number) => Math.round(n * 100) / 100;
+const round = (n: number) => roundTo(n, 2);
 
 /**
  * Move, scale, skew and origin, written as the individual `translate` and
@@ -206,10 +207,9 @@ export function TransformSection({ scope }: { scope: Scope }) {
             title="Scale"
             text={percent("scaleX") ?? ""}
             placeholder={percent("scaleX") === null && !unreadable ? "Mixed" : ""}
-            toChanges={(typed) => {
-              const n = parseFloat(typed);
-              return Number.isFinite(n) ? { scaleX: factor(n), scaleY: factor(n) } : null;
-            }}
+            toChanges={(typed) =>
+              whenNumber(typed, (n) => ({ scaleX: factor(n), scaleY: factor(n) }))
+            }
             lead={<LeadIcon name="link" />}
             scrub={{
               start: Number(percent("scaleX") ?? 100),

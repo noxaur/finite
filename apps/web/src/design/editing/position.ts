@@ -1,4 +1,6 @@
 import { pinOf } from "./geometry";
+import { parts } from "./lists";
+import { parseAngle } from "./units";
 
 /** How an element is positioned: in the flow, or moved by its insets. */
 export type PositionKind = "static" | "relative" | "absolute" | "fixed" | "sticky";
@@ -22,6 +24,9 @@ export const isPlaced = (kind: string | null | undefined) =>
   kind === "absolute" || kind === "fixed" || kind === "sticky";
 
 const INSETS = ["inset", "top", "right", "bottom", "left"] as const;
+
+/** Inline properties the Position section reads and writes. */
+export const POSITION_PROPS = [...INSETS, "position", "rotate"] as const;
 
 /** A computed or inline `position` as one of the kinds; `null` for anything else. */
 export function positionKindOf(raw: string | undefined): PositionKind | null {
@@ -124,23 +129,6 @@ const SHORTHANDS: ReadonlyArray<readonly [string, ReadonlyArray<Edge>]> = [
   ["inset-inline", ["left", "right"]],
 ];
 
-/** Splits a CSS value at the spaces outside brackets: `calc(1px + 2px) 0` is two values. */
-function splitValues(value: string): string[] {
-  const parts: string[] = [];
-  let depth = 0;
-  let part = "";
-  for (const c of value.trim()) {
-    if (c === "(") depth++;
-    else if (c === ")") depth--;
-    if (depth === 0 && /\s/.test(c)) {
-      if (part) parts.push(part);
-      part = "";
-    } else part += c;
-  }
-  if (part) parts.push(part);
-  return parts;
-}
-
 /** A value the browser fills in later, like `var(--edges)`, which may stand for several values. */
 const SUBSTITUTED = /\b(?:var|env|attr)\(/i;
 
@@ -162,7 +150,7 @@ function shorthandEdges(
       for (const side of sides) edges[side] = resolved(side);
       continue;
     }
-    const values = splitValues(raw);
+    const values = parts(raw);
     if (values.length === 0) continue;
     // Like `margin`: a missing value repeats the one across from it.
     sides.forEach((side, i) => {
@@ -250,13 +238,6 @@ export function stickyEdgeStyles(
   };
 }
 
-const TURN: Readonly<Record<string, number>> = {
-  deg: 1,
-  turn: 360,
-  rad: 180 / Math.PI,
-  grad: 0.9,
-};
-
 /**
  * A `rotate` in degrees: `45deg` is 45, `0.25turn` is 90, `none` is 0.
  * `null` for a rotation about another axis, like `x 45deg`, which the
@@ -264,8 +245,5 @@ const TURN: Readonly<Record<string, number>> = {
  */
 export function degreesOf(raw: string): number | null {
   const v = raw.trim();
-  if (v === "none" || v === "0") return 0;
-  const m = v.match(/^(?:z\s+)?(-?\d*\.?\d+)(deg|turn|rad|grad)$/);
-  if (!m) return null;
-  return Math.round(parseFloat(m[1]!) * TURN[m[2]!]! * 100) / 100;
+  return v === "none" ? 0 : parseAngle(v.replace(/^z\s+/i, ""));
 }

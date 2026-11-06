@@ -18,7 +18,7 @@
 //!   is the same id.
 //! - `[data-id]`, `[data-name]`, `[data-instance-of]`, `[data-component]` and
 //!   `[style]` read the node's id, layer name, the component an instance
-//!   shows, a component root's name and its inline styles, as `get_html`
+//!   shows, a component root's name and its inline styles, as `read`
 //!   writes them.
 //! - Text nodes are never matched. [`Matcher::text_nodes`] resolves a bare
 //!   `#id` list that names them.
@@ -108,11 +108,6 @@ pub fn parse(source: &str) -> Result<SelectorList, SelectError> {
 /// module doesn't know match the element they describe.
 pub fn parse_loose(source: &str) -> Result<SelectorList, SelectError> {
     parse_with(source, true)
-}
-
-/// The elements `list` matches in `scope`, in document order.
-pub fn matches(doc: &Document, list: &SelectorList, scope: Scope) -> Vec<NodeId> {
-    Matcher::new(doc, scope).select(list)
 }
 
 /// State pseudo-classes: they describe what a person is doing with an
@@ -755,7 +750,7 @@ impl<'a> Matcher<'a> {
         &self.entries[i as usize]
     }
 
-    /// An attribute as `get_html` writes it. `data-instance-of` and
+    /// An attribute as `read` writes it. `data-instance-of` and
     /// `data-component` are node fields, not entries in `attrs`. The values
     /// are the component id and the component root's display name: what the
     /// writer puts in the attribute, before it escapes the HTML source.

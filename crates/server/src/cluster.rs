@@ -97,30 +97,6 @@ impl Cluster {
         self.me.is_some()
     }
 
-    /// The base URLs in `FINITE_NODES` (comma-separated), if it's set.
-    pub fn nodes_from_env() -> Option<Vec<String>> {
-        let list = std::env::var("FINITE_NODES").ok()?;
-        Some(
-            list.split(',')
-                .map(|n| n.trim().trim_end_matches('/').to_owned())
-                .filter(|n| !n.is_empty())
-                .collect(),
-        )
-    }
-
-    /// Reads `FINITE_NODES` (comma-separated base URLs) and `FINITE_NODE`
-    /// (this server's 0-based position). Without them, it's a single server.
-    pub fn from_env() -> Result<Self, String> {
-        let Some(nodes) = Self::nodes_from_env() else {
-            return Ok(Self::default());
-        };
-        let me = std::env::var("FINITE_NODE")
-            .map_err(|_| "FINITE_NODES is set, so FINITE_NODE must be too".to_owned())?
-            .parse()
-            .map_err(|_| "FINITE_NODE must be a number".to_owned())?;
-        Self::new(nodes, me)
-    }
-
     pub fn nodes(&self) -> &[String] {
         &self.nodes
     }
@@ -131,10 +107,9 @@ impl Cluster {
     }
 
     /// The `Host` values MCP accepts. MCP rejects unknown hosts to block DNS
-    /// rebinding, so this is localhost, every server in the cluster, and any
-    /// extra names in `FINITE_ALLOWED_HOSTS` (comma-separated, like
-    /// `finite.example.com`).
-    pub fn allowed_hosts(&self) -> Vec<String> {
+    /// rebinding, so this is localhost, every server in the cluster, and the
+    /// `extra` names an operator allows, like `finite.example.com`.
+    pub fn allowed_hosts(&self, extra: &[String]) -> Vec<String> {
         let mut hosts: Vec<String> = ["localhost", "127.0.0.1", "::1"].map(String::from).to_vec();
         for node in &self.nodes {
             let authority = node.split("://").nth(1).unwrap_or(node);
@@ -143,15 +118,7 @@ impl Cluster {
                 hosts.push(authority.to_owned());
             }
         }
-        if let Ok(extra) = std::env::var("FINITE_ALLOWED_HOSTS") {
-            hosts.extend(
-                extra
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|h| !h.is_empty())
-                    .map(String::from),
-            );
-        }
+        hosts.extend_from_slice(extra);
         hosts
     }
 
@@ -188,27 +155,19 @@ impl Cluster {
     }
 }
 
-/// How long a server's heartbeat counts, from `FINITE_LEASE_MS` (10 seconds
-/// by default). A server renews it five times per lease, so it takes several
+/// How long a server's heartbeat counts: `FINITE_LEASE_MS`, 10 seconds by
+/// default. A server renews it five times per lease, so it takes several
 /// missed heartbeats in a row to be counted as gone.
 #[derive(Clone, Copy, Debug)]
 pub struct Lease(pub Duration);
 
-impl Lease {
-    pub fn from_env() -> Result<Self, String> {
-        match std::env::var("FINITE_LEASE_MS") {
-            Err(_) => Ok(Self(Duration::from_secs(10))),
-            Ok(ms) => ms
-                .parse()
-                .ok()
-                .filter(|&ms| ms >= 100)
-                .map(|ms| Self(Duration::from_millis(ms)))
-                .ok_or_else(|| {
-                    "FINITE_LEASE_MS must be a number of milliseconds, 100 or more".into()
-                }),
-        }
+impl Default for Lease {
+    fn default() -> Self {
+        Self(Duration::from_secs(10))
     }
+}
 
+impl Lease {
     /// How often a server renews its heartbeat and checks the list.
     pub fn every(&self) -> Duration {
         self.0 / 5
@@ -406,9 +365,10 @@ mod tests {
 
     #[test]
     fn mcp_accepts_the_cluster_hosts() {
-        let hosts = cluster(2).allowed_hosts();
+        let hosts = cluster(2).allowed_hosts(&["finite.example".into()]);
         assert!(hosts.contains(&"node1:4100".to_owned()), "{hosts:?}");
         assert!(hosts.contains(&"127.0.0.1".to_owned()));
+        assert!(hosts.contains(&"finite.example".to_owned()));
     }
 
     #[test]

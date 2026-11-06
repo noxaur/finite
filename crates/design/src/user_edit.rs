@@ -15,6 +15,8 @@ use crate::{
     components,
     document::{Document, Op},
     edit::{self, EditError},
+    html::{HIDDEN_ATTR, LOCKED_ATTR, NAME_ATTR},
+    id,
     node::NodeId,
 };
 
@@ -135,7 +137,6 @@ pub const MAX_TEXT: usize = 100_000;
 /// can select a copy and keep editing it before the server answers. An id
 /// the document already has is skipped.
 pub fn new_ids<'a>(doc: &'a Document, client: &str, mid: u64) -> impl FnMut() -> NodeId + 'a {
-    const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     // FNV-1a: plain arithmetic, so the server and WebAssembly agree.
     let fnv = |h: u64, bytes: &[u8]| {
         bytes
@@ -147,20 +148,19 @@ pub fn new_ids<'a>(doc: &'a Document, client: &str, mid: u64) -> impl FnMut() ->
         &mid.to_le_bytes(),
     );
     let mut n = 0_u64;
-    move || loop {
+    let alphabet = id::ALPHABET;
+    let mut make = move || {
         n += 1;
         let mut h = fnv(seed, &n.to_le_bytes());
-        let id: String = (0..8)
+        (0..id::LEN)
             .map(|_| {
-                let c = ALPHABET[(h % 36) as usize] as char;
-                h /= 36;
+                let c = alphabet[(h % alphabet.len() as u64) as usize] as char;
+                h /= alphabet.len() as u64;
                 c
             })
-            .collect();
-        if !doc.contains(&id) {
-            return id;
-        }
-    }
+            .collect::<String>()
+    };
+    move || id::fresh(&mut make, |id| doc.contains(id))
 }
 
 /// Turns a gesture's edits into ops. Every edit is planned against `view`,
@@ -228,12 +228,7 @@ pub fn plan(
                 edit::update_attributes(view, ids, attrs)?
             }
             UserEdit::CreatePage { name } => {
-                let id = loop {
-                    let id = new_id();
-                    if view.page(&id).is_none() {
-                        break id;
-                    }
-                };
+                let id = id::fresh(new_id, |id| view.page(id).is_some());
                 edit::create_page(view, id, name)?
             }
             UserEdit::RenamePage { id, name } => edit::rename_page(view, id, name)?,
@@ -281,11 +276,11 @@ fn attributes_label(attrs: &BTreeMap<String, Option<String>>) -> &'static str {
     let mut keys = attrs.iter();
     match (keys.next(), keys.next()) {
         (Some((key, value)), None) => match (key.as_str(), value.is_some()) {
-            ("data-name", _) => "Rename",
-            ("hidden", true) => "Hide",
-            ("hidden", false) => "Show",
-            ("data-locked", true) => "Lock",
-            ("data-locked", false) => "Unlock",
+            (NAME_ATTR, _) => "Rename",
+            (HIDDEN_ATTR, true) => "Hide",
+            (HIDDEN_ATTR, false) => "Show",
+            (LOCKED_ATTR, true) => "Lock",
+            (LOCKED_ATTR, false) => "Unlock",
             _ => "Change attributes",
         },
         _ => "Change attributes",
@@ -315,98 +310,5 @@ impl UserEdit {
             | Self::MakeComponent { id, .. }
             | Self::SetRoute { id, .. } => Box::new(std::iter::once(id)),
         }
-    }
-
-    /// One of each kind of edit, for the golden file the web app's schema is
-    /// checked against (`fixtures/user_edits.json`).
-    pub fn examples() -> Vec<UserEdit> {
-        vec![
-            Self::SetPosition {
-                moves: vec![Position {
-                    id: "board".into(),
-                    x: 120.0,
-                    y: -40.0,
-                }],
-            },
-            Self::SetStyles {
-                ids: vec!["card".into()],
-                styles: BTreeMap::from([
-                    ("left".into(), Some("24px".into())),
-                    ("right".into(), None),
-                ]),
-            },
-            Self::Place {
-                ids: vec!["card".into()],
-                parent: Some("list".into()),
-                before: Some("other".into()),
-            },
-            Self::Place {
-                ids: vec!["card".into()],
-                parent: None,
-                before: None,
-            },
-            Self::Delete {
-                ids: vec!["card".into()],
-            },
-            Self::Duplicate {
-                ids: vec!["card".into()],
-            },
-            Self::Group {
-                ids: vec!["card".into(), "other".into()],
-            },
-            Self::Ungroup {
-                ids: vec!["group".into()],
-            },
-            Self::SetText {
-                id: "title".into(),
-                text: "Hello".into(),
-            },
-            Self::MakeComponent {
-                id: "card".into(),
-                name: Some("Card".into()),
-            },
-            Self::Detach {
-                ids: vec!["instance".into()],
-            },
-            Self::SetLink {
-                ids: vec!["button".into()],
-                to: Some("board".into()),
-            },
-            Self::SetLink {
-                ids: vec!["button".into()],
-                to: None,
-            },
-            Self::SetRoute {
-                id: "board".into(),
-                route: Some("/checkout".into()),
-            },
-            Self::SetRoute {
-                id: "board".into(),
-                route: None,
-            },
-            Self::SetAttributes {
-                ids: vec!["card".into()],
-                attrs: BTreeMap::from([
-                    ("hidden".into(), Some(String::new())),
-                    ("data-locked".into(), None),
-                ]),
-            },
-            Self::CreatePage {
-                name: "Flows".into(),
-            },
-            Self::RenamePage {
-                id: "page".into(),
-                name: "Drafts".into(),
-            },
-            Self::SetPageBackground {
-                id: "page".into(),
-                background: Some("#e8eef0".into()),
-            },
-            Self::DeletePage { id: "page".into() },
-            Self::MoveToPage {
-                ids: vec!["board".into()],
-                page: "page".into(),
-            },
-        ]
     }
 }

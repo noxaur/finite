@@ -38,7 +38,7 @@ session_dir() { node -e 'const c=require("crypto"),o=require("os"),p=require("pa
 # same hash build the same app.
 inputs() {
   (cd "$1" && git ls-files -co --exclude-standard -z -- crates apps/web e2e/headless.mjs e2e/cdp.mjs \
-    e2e/mcp.mjs Cargo.toml Cargo.lock package.json pnpm-lock.yaml pnpm-workspace.yaml \
+    e2e/lib.mjs e2e/mcp.mjs Cargo.toml Cargo.lock package.json pnpm-lock.yaml pnpm-workspace.yaml \
     | python3 -c '
 import hashlib, os, sys
 h = hashlib.sha256()
@@ -134,9 +134,9 @@ case "$cmd" in
       echo "FAIL the code changed since this build: run cleanup $run, then launch again"; ok=0
     fi
     if chrome="$(find_chrome)"; then
-      echo "ok   Chrome for get_screenshot: $chrome"
+      echo "ok   Chrome for render: $chrome"
     else
-      echo "FAIL no Chrome, Chromium or Edge for get_screenshot; set FINITE_CHROME"; ok=0
+      echo "FAIL no Chrome, Chromium or Edge for render; set FINITE_CHROME"; ok=0
     fi
     page="$(headless "$run" eval 'location.href' 2>&1)" \
       && echo "ok   page answers: $page" || { echo "FAIL page: $page"; ok=0; }

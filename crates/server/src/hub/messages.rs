@@ -2,15 +2,11 @@
 //! messages sent on a design's WebSocket and on the design list's.
 
 use finite_design::{
-    ActorId, Change, Design, DesignMeta, NodeId, Snapshot,
-    comment::{Comment, Listening},
+    ActorId, Change, Design, DesignMeta, NodeId, Snapshot, actor,
+    comment::{self, Author, AuthorKind, Comment, Listening},
+    user_edit::UserEdit,
 };
 use serde::{Deserialize, Serialize};
-
-/// The id prefix of an agent known only by its MCP session on this server.
-/// Sessions live in memory, so such an agent never comes back once its
-/// session ends or the server restarts.
-pub const SESSION_ACTOR: &str = "mcp:";
 
 /// Whoever is making a change, with a name to show in the UI.
 #[derive(Clone, Debug, Serialize)]
@@ -26,6 +22,55 @@ pub struct Actor {
 pub struct Stamp {
     pub client: String,
     pub mid: u64,
+}
+
+/// Who a person's tab says is acting. Users have no accounts yet, so the
+/// browser picks an id and a name, and the server marks them as users.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UserAuthor {
+    pub id: String,
+    pub name: String,
+}
+
+impl UserAuthor {
+    pub fn into_author(self) -> Author {
+        let id: String = self.id.chars().take(comment::MAX_USER_ID).collect();
+        let name = self.name.trim();
+        Author {
+            id: actor::user(&id),
+            name: if name.is_empty() {
+                "Guest".into()
+            } else {
+                name.chars().take(comment::MAX_NAME).collect()
+            },
+            kind: AuthorKind::User,
+        }
+    }
+}
+
+/// What a person's tab sends on a design's socket, besides pings
+/// ([`crate::heartbeat::PING`]). Each carries the tab's [`Stamp`], so the
+/// change it makes (or a `settled` message, when it makes none) tells the
+/// tab which of its messages it answers. One socket handles its messages in
+/// order. The web app's `ClientMessage` (`schema.ts`) mirrors this, and
+/// `fixtures/messages.json` holds one of each.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ClientMessage {
+    /// A gesture's edits, as one undo step.
+    Mutate {
+        author: UserAuthor,
+        stamp: Stamp,
+        edits: Vec<UserEdit>,
+    },
+    Undo {
+        author: UserAuthor,
+        stamp: Stamp,
+    },
+    Redo {
+        author: UserAuthor,
+        stamp: Stamp,
+    },
 }
 
 /// Shows what an actor is working on, like an agent's indicator on an artboard.

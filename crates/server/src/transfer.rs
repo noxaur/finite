@@ -16,7 +16,8 @@ use finite_transfer::{
 };
 
 use crate::{
-    hub::{Actor, Hub, OpenError, now_ms, random_id},
+    hub::{Actor, Hub, OpenError, now_ms},
+    id::{node_id, random_id},
     screenshot,
     store::Store,
 };
@@ -49,6 +50,9 @@ pub enum TransferError {
     Invalid(String),
     /// Storage failed. Nothing changed.
     Io(std::io::Error),
+    /// The design couldn't be opened here: it lives on another server, or is
+    /// moving. Nothing changed.
+    Unopened(OpenError),
 }
 
 impl std::fmt::Display for TransferError {
@@ -56,6 +60,7 @@ impl std::fmt::Display for TransferError {
         match self {
             Self::NotFound(what) | Self::Invalid(what) => f.write_str(what),
             Self::Io(e) => write!(f, "storage failed: {e}"),
+            Self::Unopened(e) => e.fmt(f),
         }
     }
 }
@@ -65,7 +70,7 @@ impl From<OpenError> for TransferError {
         match e {
             OpenError::NotFound => Self::NotFound("no such design".into()),
             OpenError::Failed(e) => Self::Io(e),
-            busy @ OpenError::Busy(_) => Self::Io(std::io::Error::other(busy.to_string())),
+            other => Self::Unopened(other),
         }
     }
 }
@@ -101,22 +106,24 @@ pub fn router_named(name: &str) -> Result<RouterKind, TransferError> {
     })
 }
 
+const AXES: [Axis; 3] = [Axis::Preserved, Axis::Visual, Axis::Editable];
+
 /// The axes strict mode holds, from names like `preserved,editable`.
 pub fn strict_named<'a>(
     names: impl IntoIterator<Item = &'a str>,
 ) -> Result<Vec<Axis>, TransferError> {
     let mut axes = Vec::new();
     for name in names.into_iter().flat_map(|n| n.split(',')) {
-        let axis = match name.trim() {
-            "" => continue,
-            "preserved" => Axis::Preserved,
-            "visual" => Axis::Visual,
-            "editable" => Axis::Editable,
-            other => {
-                return Err(TransferError::Invalid(format!(
-                    "no strict axis {other:?}; use preserved, visual or editable"
-                )));
-            }
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let Some(axis) = AXES.into_iter().find(|axis| axis.name() == name) else {
+            let known: Vec<&str> = AXES.iter().map(|axis| axis.name()).collect();
+            return Err(TransferError::Invalid(format!(
+                "no strict axis {name:?}; use one of {}",
+                known.join(", ")
+            )));
         };
         if !axes.contains(&axis) {
             axes.push(axis);
@@ -245,7 +252,7 @@ impl Prepared {
             file_name: self.file_name,
             received_at: now_ms(),
         };
-        let (import, placed) = self.imported.place(tx, receipt, &mut || random_id(8))?;
+        let (import, placed) = self.imported.place(tx, receipt, &mut node_id)?;
         tx.record_import(import.clone());
         Ok(ImportResult {
             import,
@@ -276,16 +283,6 @@ pub async fn import(
         .transact(actor, &label, |tx| prepared.place(tx, page))
         .map_err(|e| TransferError::Invalid(e.0))?;
     Ok(result)
-}
-
-/// Writes `scope` of design `id` as `format`, with the default router.
-pub async fn export(
-    hub: &Arc<Hub>,
-    id: &str,
-    format: Format,
-    scope: Scope,
-) -> Result<Exported, TransferError> {
-    export_with(hub, id, format, scope, None).await
 }
 
 /// Writes `scope` of design `id` as `format`, routing an app export with

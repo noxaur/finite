@@ -41,6 +41,7 @@ fn screen(design: &mut Design, id: &str, name: &str, width: f64, html: &str) {
         position: None,
         page: None,
         styles: BTreeMap::new(),
+        ..Default::default()
     };
     commit(design, |doc| edit::create_artboard(doc, id.into(), spec));
     if html.is_empty() {

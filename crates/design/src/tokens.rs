@@ -15,7 +15,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::document::Document;
+use crate::{
+    css_scan::{comment_end, string_end, strip_comments},
+    document::Document,
+};
 
 /// A set of token values, like Light or Dark. Artboards pick one.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,7 +169,7 @@ pub fn style_at(doc: &Document, mode: &str, selector: &str) -> String {
     css
 }
 
-/// Old shared CSS split for [`crate::Design::migrate_css`].
+/// Old shared CSS split by [`migrate`].
 #[derive(Debug, Default, PartialEq)]
 pub struct Migrated {
     /// The custom properties its top-level `:root` rules defined, in order.
@@ -246,20 +249,6 @@ fn block_open(rule: &str) -> Option<usize> {
     }
 }
 
-/// `css` without its comments.
-fn strip_comments(css: &str) -> String {
-    let mut out = String::new();
-    let mut rest = css;
-    while let Some(at) = rest.find("/*") {
-        out.push_str(&rest[..at]);
-        rest = rest[at + 2..]
-            .find("*/")
-            .map_or("", |end| &rest[at + 2 + end + 2..]);
-    }
-    out.push_str(rest);
-    out
-}
-
 /// The end of the top-level rule or statement at `start`: past the `}`
 /// that closes its block, or past its `;`. Leading whitespace and comments
 /// belong to it.
@@ -271,9 +260,7 @@ fn rule_end(css: &str, start: usize) -> usize {
         match bytes[i] {
             b'\\' => i += 1,
             b'"' | b'\'' => i = string_end(css, i) - 1,
-            b'/' if bytes.get(i + 1) == Some(&b'*') => {
-                i = css[i + 2..].find("*/").map_or(css.len(), |end| i + end + 3);
-            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => i = comment_end(css, i) - 1,
             b'{' => depth += 1,
             b'}' if depth <= 1 => return i + 1,
             b'}' => depth -= 1,
@@ -294,11 +281,7 @@ fn split_declarations(body: &str) -> Vec<&str> {
         match bytes[i] {
             b'\\' => i += 1,
             b'"' | b'\'' => i = string_end(body, i) - 1,
-            b'/' if bytes.get(i + 1) == Some(&b'*') => {
-                i = body[i + 2..]
-                    .find("*/")
-                    .map_or(body.len(), |end| i + end + 3);
-            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => i = comment_end(body, i) - 1,
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => depth = depth.saturating_sub(1),
             b';' if depth == 0 => {
@@ -311,20 +294,6 @@ fn split_declarations(body: &str) -> Vec<&str> {
     }
     parts.push(&body[from..]);
     parts
-}
-
-/// The end of the quoted string that starts at `start`, past its closing quote.
-fn string_end(css: &str, start: usize) -> usize {
-    let bytes = css.as_bytes();
-    let mut i = start + 1;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\\' => i += 2,
-            c if c == bytes[start] => return i + 1,
-            _ => i += 1,
-        }
-    }
-    bytes.len()
 }
 
 #[cfg(test)]

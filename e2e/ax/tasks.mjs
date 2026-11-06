@@ -13,32 +13,39 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { launch } from "../cdp.mjs";
-import { idAfter } from "../mcp.mjs";
 
 /**
- * Renders an artboard's HTML (from get_html) in Chrome and returns every
- * element's box, relative to the artboard, with its text and computed
- * styles, so a check can test what a person would see. It doesn't depend on
- * the server build under test.
- */
-/**
- * The design's tokens as CSS for each artboard, in its mode, as Finite
- * renders them: a function from an artboard's id to a `:root` rule.
+ * The design's tokens as CSS: a function from an artboard's id to a `:root`
+ * rule in that artboard's mode (`read` lists the artboards not in the first
+ * mode as `artboardModes`).
  */
 async function tokenCss(mcp, design) {
-  const listed = await mcp.callRaw("get_tokens", { designId: design }).catch(() => null);
-  if (!listed || listed.isError) return () => "";
-  const { modes, tokens, artboardModes = {} } = JSON.parse(listed.content?.[0]?.text ?? "{}");
+  const text = await mcp.call("read", { designId: design, as: "css" }).catch(() => "");
+  const json = text.match(/^\{[\s\S]*?^\}/m)?.[0];
+  if (!json) return () => "";
+  const { modes, tokens, artboardModes = {} } = JSON.parse(json);
+  const modeOf = new Map(
+    Object.entries(artboardModes).flatMap(([mode, ids]) => ids.map((id) => [id, mode])),
+  );
   return (board) => {
-    const mode = Object.keys(artboardModes).find((m) => artboardModes[m].includes(board));
+    const mode = modeOf.get(board) ?? modes[0];
     const rules = Object.entries(tokens).map(([name, value]) => {
-      const v = typeof value === "string" ? value : (value[mode] ?? value[modes[0]]);
+      const v =
+        typeof value === "string"
+          ? value
+          : (value[mode] ?? value[modes[0]] ?? Object.values(value)[0]);
       return v === undefined ? "" : `${name}: ${v};`;
     });
     return `:root { ${rules.join(" ")} }`;
   };
 }
 
+/**
+ * Renders an artboard's HTML (from read) in Chrome and returns every
+ * element's box, relative to the artboard, with its text and computed
+ * styles, so a check can test what a person would see. It doesn't depend on
+ * the server build under test.
+ */
 async function rendered(html, width, height, css = "") {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "finite-ax-check-"));
   const file = path.join(dir, "page.html");
@@ -77,8 +84,12 @@ const centerIn = (pin, target, slack = 4) => {
     cy <= target.y + target.height + slack
   );
 };
+/** Whether two boxes overlap. An artboard that grows with its content has no height here, so counts as flat. */
 const overlaps = (a, b) =>
-  a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+  a.x < b.x + b.width &&
+  b.x < a.x + a.width &&
+  a.y < b.y + (b.height ?? 0) &&
+  b.y < a.y + (a.height ?? 0);
 
 const BLUE = "#3b82f6";
 
@@ -134,29 +145,24 @@ const landing = `
 <footer data-name="Footer" style="margin-top: auto; padding: 32px 64px; border-top: 1px solid #e5e7eb; font: 14px Inter, sans-serif; color: #6b7280">© 2026 Acme · <a style="color: ${BLUE}">Status</a></footer>`;
 
 async function seedLanding(mcp, name) {
-  const design = (await mcp.call("create_design", { name })).match(/designId "([^"]+)"/)[1];
-  const board = idAfter(
-    await mcp.call("create_artboard", {
-      designId: design,
-      name: "Landing — desktop",
-      width: 1440,
-      height: 1000,
-      x: 0,
-      y: 0,
-    }),
-    "artboard",
-  );
-  await mcp.call("write_html", { designId: design, targetId: board, html: landing });
+  const design = await mcp.createDesign(name);
+  const board = await mcp.artboard(design, {
+    name: "Landing — desktop",
+    width: 1440,
+    height: 1000,
+    x: 0,
+    y: 0,
+    html: landing,
+  });
   return { design, board };
 }
 
-/** Every node in a design, as get_html's markup, one artboard at a time. */
+/** The design's artboards and node count, and every artboard's HTML. */
 async function allHtml(mcp, design) {
-  const info = JSON.parse(await mcp.call("get_basic_info", { designId: design }));
+  const { artboards, nodes } = await mcp.overview(design);
   const parts = [];
-  for (const a of info.artboards)
-    parts.push(await mcp.call("get_html", { designId: design, nodeId: a.id }));
-  return { info, html: parts.join("\n") };
+  for (const a of artboards) parts.push(await mcp.readFullHtml(design, `#${a.id}`));
+  return { info: { artboards, nodeCount: nodes }, html: parts.join("\n") };
 }
 
 /**
@@ -169,43 +175,35 @@ async function seedPage(mcp, file, name) {
   const dir = process.env.FINITE_AX_PAGES;
   if (!dir || !fs.existsSync(path.join(dir, file)))
     throw new Error(`set FINITE_AX_PAGES to a folder holding ${file}`);
-  const design = (await mcp.call("create_design", { name })).match(/designId "([^"]+)"/)[1];
+  const design = await mcp.createDesign(name);
   const content = fs.readFileSync(path.join(dir, file), "utf8");
-  await mcp.call("import_design", { designId: design, format: "html", content, name: file });
-  const info = JSON.parse(await mcp.call("get_basic_info", { designId: design }));
-  const board = info.artboards[0].id;
-  await mcp.call("update_styles", {
-    designId: design,
-    updates: [{ nodeIds: [board], styles: { height: null } }],
-  });
-  return { design, board, nodes: info.nodeCount };
+  await mcp.edit(design, [{ op: "import", name: file, content }]);
+  const { artboards, nodes } = await mcp.overview(design);
+  const board = artboards[0].id;
+  return { design, board, nodes };
 }
 
-/** How many elements find_nodes matches, from its first line. */
-const matches = async (mcp, design, query) => {
-  const text = await mcp.call("find_nodes", { designId: design, ...query });
-  return text.startsWith("No elements") ? 0 : Number(text.match(/^(\d+) element/)?.[1] ?? 0);
+/** How many elements `read` finds `text` in, in "text", "styles" or "attributes". */
+const matches = async (mcp, design, text, where = "text") => {
+  const found = await mcp.call("read", { designId: design, contains: text }).catch(() => "");
+  return Number(found.match(new RegExp(`In ${where}[^:\\n]*: (\\d+) elements?`))?.[1] ?? 0);
 };
 
 export const tasks = {
   "delete-design": {
     workdir: "none",
     async seed(mcp) {
-      const create = async (name) => {
-        const text = await mcp.call("create_design", { name });
-        return text.match(/designId "([a-z0-9]+)"/)[1];
-      };
-      const design = await create("Discarded draft");
-      const keep = await create("Published work");
-      await mcp.call("create_artboard", { designId: design, name: "Draft", width: 390 });
+      const design = await mcp.createDesign("Discarded draft");
+      const keep = await mcp.createDesign("Published work");
+      await mcp.artboard(design, { name: "Draft", width: 390 });
       return { design, keep };
     },
     prompt: () =>
       'Permanently delete the Finite design named "Discarded draft". Keep "Published work" unchanged. Use the Finite MCP tools and stop when done.',
     async check(mcp, ctx) {
-      const designs = await mcp.call("list_designs");
-      const deleted = await mcp.callRaw("get_basic_info", { designId: ctx.design });
-      const kept = await mcp.callRaw("get_basic_info", { designId: ctx.keep });
+      const designs = await mcp.call("designs");
+      const deleted = await mcp.callRaw("read", { designId: ctx.design });
+      const kept = await mcp.callRaw("read", { designId: ctx.keep });
       const checks = [!designs.includes(ctx.design), !!deleted.isError, !kept.isError];
       return {
         passed: checks.filter(Boolean).length,
@@ -249,23 +247,13 @@ export const tasks = {
   "code-edit": {
     workdir: "none",
     async seed(mcp) {
-      const design = (await mcp.call("create_design", { name: "Motion lab" })).match(
-        /designId "([^"]+)"/,
-      )[1];
-      const board = idAfter(
-        await mcp.call("create_artboard", {
-          designId: design,
-          name: "Carousel",
-          width: 800,
-          height: 400,
-          x: 0,
-          y: 0,
-        }),
-        "artboard",
-      );
-      await mcp.call("write_html", {
-        designId: design,
-        targetId: board,
+      const design = await mcp.createDesign("Motion lab");
+      const board = await mcp.artboard(design, {
+        name: "Carousel",
+        width: 800,
+        height: 400,
+        x: 0,
+        y: 0,
         html: `<style>
 .slide { position: absolute; inset: 0; display: grid; place-items: center; font: 700 32px Inter, sans-serif; opacity: 0; transition: opacity 400ms ease }
 .slide.on { opacity: 1 }
@@ -290,7 +278,7 @@ setInterval(next, 3000);
       `the slide fade should take 800ms instead of 400ms, and the carousel should advance every 5000ms instead of 3000ms. ` +
       `Don't change anything else. Stop when you're done.`,
     async check(mcp, ctx) {
-      const html = await mcp.call("get_html", { designId: ctx.design, nodeId: ctx.board });
+      const html = await mcp.readHtml(ctx.design, `#${ctx.board}`);
       const checks = [
         /opacity 800ms ease/.test(html) && !/opacity 400ms/.test(html),
         /setInterval\(next, 5000\)/.test(html) && !/3000/.test(html),
@@ -314,7 +302,7 @@ setInterval(next, 3000);
       const { info, html } = await allHtml(mcp, ctx.design);
       const mobile = info.artboards.find((a) => a.id !== ctx.board && a.width <= 430);
       const overlap =
-        mobile && info.artboards.some((a) => a.id !== mobile.id && rectsOverlap(a, mobile));
+        mobile && info.artboards.some((a) => a.id !== mobile.id && overlaps(a, mobile));
       const keeps = ["Start free", "Book a demo", "Deploy", "Observe", "Scale", "Status"].filter(
         (t) => (html.match(new RegExp(t, "g")) ?? []).length >= 2,
       );
@@ -333,34 +321,28 @@ setInterval(next, 3000);
 
   // Fill a fixed-height artboard a section at a time. Six sections don't fit
   // in 700 px unless the agent makes them small or the artboard taller, which
-  // is what the layout note on write_html results (FINITE_MCP_EXTRA=layout)
-  // is meant to prompt. run.mjs counts the artboards left clipped.
+  // is what the layout check after each edit is meant to prompt. run.mjs
+  // counts the artboards left clipped.
   sections: {
     workdir: "none",
     async seed(mcp) {
-      const design = (await mcp.call("create_design", { name: "Pocket app" })).match(
-        /designId "([^"]+)"/,
-      )[1];
-      const board = idAfter(
-        await mcp.call("create_artboard", {
-          designId: design,
-          name: "Landing",
-          width: 390,
-          height: 700,
-          x: 0,
-          y: 0,
-        }),
-        "artboard",
-      );
+      const design = await mcp.createDesign("Pocket app");
+      const board = await mcp.artboard(design, {
+        name: "Landing",
+        width: 390,
+        height: 700,
+        x: 0,
+        y: 0,
+      });
       return { design, board };
     },
     prompt: () =>
       `Use the Finite MCP tools. The Finite design "Pocket app" has an empty 390 px wide phone artboard named "Landing". ` +
-      `Build a landing page for a budgeting app called Pocket in it, one write_html call per section, with these six sections in order: ` +
+      `Build a landing page for a budgeting app called Pocket in it, one html op per section, with these six sections in order: ` +
       `a header with the logo and a menu, a hero with a headline and a sign-up button, three feature cards, a testimonial, a pricing card, and a footer with links. ` +
       `Stop when you're done.`,
     async check(mcp, ctx) {
-      const html = await mcp.call("get_html", { designId: ctx.design, nodeId: ctx.board });
+      const html = await mcp.readHtml(ctx.design, `#${ctx.board}`);
       const checks = [
         /pocket/i.test(html),
         /<button/i.test(html),
@@ -376,7 +358,7 @@ setInterval(next, 3000);
     workdir: "none",
     async seed(mcp, api) {
       const ctx = await seedLanding(mcp, "Acme landing");
-      const tree = await mcp.call("get_tree_summary", { designId: ctx.design, depth: 6 });
+      const tree = await mcp.call("read", { designId: ctx.design, select: ":root", depth: 6 });
       const id = (label) => tree.match(new RegExp(`"${label}" #([a-z0-9]+)`))[1];
       const comment = (nodeId, body) =>
         api("POST", `/api/designs/${ctx.design}/comments`, {
@@ -397,7 +379,7 @@ setInterval(next, 3000);
     prompt: () =>
       `Use the Finite MCP tools. Users left comments on the Finite design "Acme landing". Handle them, then stop.`,
     async check(mcp, ctx) {
-      const open = await mcp.call("get_comments", { designId: ctx.design });
+      const open = await mcp.call("comments", { designId: ctx.design });
       const { html } = await allHtml(mcp, ctx.design);
       const secondary =
         html.match(/data-name="Secondary"[^>]*>|<[^>]*data-name="Secondary"/)?.[0] ?? "";
@@ -415,30 +397,28 @@ setInterval(next, 3000);
     workdir: "none",
     async seed(mcp) {
       const ctx = await seedLanding(mcp, "Acme site");
-      await mcp.call("duplicate_nodes", { designId: ctx.design, nodeIds: [ctx.board] });
-      const pricing = idAfter(
-        await mcp.call("create_artboard", {
-          designId: ctx.design,
-          name: "Pricing",
-          width: 1440,
-          height: 800,
-          x: 0,
-          y: 1200,
-        }),
-        "artboard",
-      );
+      await mcp.edit(ctx.design, [
+        { op: "move", select: `#${ctx.board}`, copy: true, x: 1540, y: 0 },
+      ]);
+      const pricing = await mcp.artboard(ctx.design, {
+        name: "Pricing",
+        width: 1440,
+        height: 800,
+        x: 0,
+        y: 1200,
+      });
       const plan = (name, price, featured) => `
 <div class="plan${featured ? " featured" : ""}" data-name="${name}"><span class="badge">${name}</span><div style="font: 800 40px Inter, sans-serif">${price}</div>
 <button style="background: ${featured ? BLUE : "white"}; color: ${featured ? "white" : BLUE}; border: 1px solid ${BLUE}; padding: 12px; border-radius: 8px; font: 600 15px Inter, sans-serif">Choose ${name}</button></div>`;
-      await mcp.call("write_html", {
-        designId: ctx.design,
-        targetId: pricing,
-        html: `<style>.plan { flex: 1; display: flex; flex-direction: column; gap: 16px; padding: 32px; border: 1px solid #e5e7eb; border-radius: 16px }
+      await mcp.write(
+        ctx.design,
+        pricing,
+        `<style>.plan { flex: 1; display: flex; flex-direction: column; gap: 16px; padding: 32px; border: 1px solid #e5e7eb; border-radius: 16px }
 .plan.featured { border-color: ${BLUE}; box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.25) }
 .badge { align-self: flex-start; background: ${BLUE}; color: white; padding: 4px 10px; border-radius: 999px; font: 600 12px Inter, sans-serif }</style>
 <h2 data-name="Title" style="font: 800 40px Inter, sans-serif; text-align: center; margin: 64px 0 40px">Pricing</h2>
 <div data-name="Plans" style="display: flex; gap: 24px; padding: 0 120px">${plan("Starter", "$0", false)}${plan("Team", "$49", true)}${plan("Scale", "$199", false)}</div>`,
-      });
+      );
       return { ...ctx, pricing };
     },
     prompt: () =>
@@ -463,11 +443,7 @@ setInterval(next, 3000);
   // Build from nothing: three screens that should share one look.
   screens: {
     workdir: "none",
-    seed: async (mcp) => ({
-      design: (await mcp.call("create_design", { name: "Plantpal onboarding" })).match(
-        /designId "([^"]+)"/,
-      )[1],
-    }),
+    seed: async (mcp) => ({ design: await mcp.createDesign("Plantpal onboarding") }),
     prompt: () =>
       `Use the Finite MCP tools. In the Finite design "Plantpal onboarding", design a three-screen mobile onboarding flow for a plant-care app: ` +
       `Welcome, Pick your plants (a grid of at least 6 selectable plant cards, two selected), and All set. ` +
@@ -475,7 +451,7 @@ setInterval(next, 3000);
     async check(mcp, ctx) {
       const { info, html } = await allHtml(mcp, ctx.design);
       const boards = info.artboards;
-      const overlap = boards.some((a, i) => boards.some((b, j) => i < j && rectsOverlap(a, b)));
+      const overlap = boards.some((a, i) => boards.some((b, j) => i < j && overlaps(a, b)));
       const checks = [boards.length >= 3, !overlap, /Welcome/i.test(html) && /All set/i.test(html)];
       return {
         passed: checks.filter(Boolean).length,
@@ -491,7 +467,7 @@ setInterval(next, 3000);
     workdir: "none",
     async seed(mcp) {
       const ctx = await seedLanding(mcp, "Acme landing");
-      const html = await mcp.call("get_html", { designId: ctx.design, nodeId: ctx.board });
+      const html = await mcp.readHtml(ctx.design, `#${ctx.board}`);
       const before = await rendered(html, 1440, 1000);
       const at = (text, tag) => before.find((e) => e.tag === tag && e.text === text);
       return { ...ctx, start: at("Start free", "button"), observe: at("Observe", "h3") };
@@ -502,7 +478,7 @@ setInterval(next, 3000);
       `A pin is a 28 px red (#ef4444) circle with its number in white, absolutely positioned inside the artboard, ` +
       `and its center must land on its target. Don't move or change anything else. Stop when you're done.`,
     async check(mcp, ctx) {
-      const html = await mcp.call("get_html", { designId: ctx.design, nodeId: ctx.board });
+      const html = await mcp.readHtml(ctx.design, `#${ctx.board}`);
       const after = await rendered(html, 1440, 1000);
       const pin = (n) =>
         after.find(
@@ -540,27 +516,23 @@ setInterval(next, 3000);
   overlap: {
     workdir: "none",
     async seed(mcp) {
-      const design = (await mcp.call("create_design", { name: "Canvas mock" })).match(
-        /designId "([^"]+)"/,
-      )[1];
-      const board = idAfter(
-        await mcp.call("create_artboard", {
-          designId: design,
-          name: "Canvas",
-          width: 1200,
-          height: 700,
-          x: 0,
-          y: 0,
-          styles: { "background-color": "#f4f4f5" },
-          html: `<div data-name="Frame" style="position: relative; margin: 64px; width: 640px; height: 420px; flex-shrink: 0">
+      const design = await mcp.createDesign("Canvas mock");
+      const board = await mcp.artboard(design, {
+        name: "Canvas",
+        width: 1200,
+        height: 700,
+        x: 0,
+        y: 0,
+        html: `<div data-name="Frame" style="position: relative; margin: 64px; width: 640px; height: 420px; flex-shrink: 0">
   <div data-name="Frame title" style="position: absolute; left: 0; top: -22px; font: 500 13px Inter, sans-serif; color: #52525b">Checkout — desktop</div>
   <div data-name="Working badge" style="position: absolute; left: 96px; top: -24px; padding: 2px 8px; border-radius: 999px; background: #7c3aed; color: white; font: 600 11px Inter, sans-serif; white-space: nowrap">An agent is working on this</div>
   <div data-name="Frame body" style="width: 100%; height: 100%; background: white; border: 1px solid #e4e4e7; border-radius: 8px"></div>
 </div>
 <div data-name="Toolbar" style="position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); display: flex; gap: 4px; padding: 4px; background: white; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,.12)"><button style="padding: 6px 10px">Pointer</button><button style="padding: 6px 10px">Comment</button></div>`,
-        }),
-        "artboard",
-      );
+      });
+      await mcp.edit(design, [
+        { op: "css", select: `#${board}`, css: "background-color: #f4f4f5" },
+      ]);
       return { design, board };
     },
     prompt: () =>
@@ -568,7 +540,7 @@ setInterval(next, 3000);
       `overlaps the frame's name above it. Fix it so they don't overlap and both stay readable and above the frame, ` +
       `without changing anything else. Stop when you're done.`,
     async check(mcp, ctx) {
-      const html = await mcp.call("get_html", { designId: ctx.design, nodeId: ctx.board });
+      const html = await mcp.readHtml(ctx.design, `#${ctx.board}`);
       const after = await rendered(html, 1200, 700);
       const title = after.find((e) => e.text === "Checkout — desktop" && e.tag === "div");
       const badge = after.find((e) => e.text === "An agent is working on this" && e.tag === "div");
@@ -600,11 +572,7 @@ setInterval(next, 3000);
   // agent's top complaint was that this meant editing every copy.
   "screens-change": {
     workdir: "none",
-    seed: async (mcp) => ({
-      design: (await mcp.call("create_design", { name: "Plantpal onboarding" })).match(
-        /designId "([^"]+)"/,
-      )[1],
-    }),
+    seed: async (mcp) => ({ design: await mcp.createDesign("Plantpal onboarding") }),
     prompt: () =>
       `Use the Finite MCP tools. In the Finite design "Plantpal onboarding", design a three-screen mobile onboarding flow for a plant-care app: ` +
       `Welcome, Pick your plants (a grid of at least 6 selectable plant cards, two selected), and All set. ` +
@@ -613,12 +581,12 @@ setInterval(next, 3000);
       `The client changed their mind: the top bar on every screen should be dark green (#14532d) with white text. ` +
       `Make that change on all screens and check it. Stop when you're done.`,
     async check(mcp, ctx) {
-      const info = JSON.parse(await mcp.call("get_basic_info", { designId: ctx.design }));
+      const info = await allHtml(mcp, ctx.design).then((r) => r.info);
       const tokens = await tokenCss(mcp, ctx.design);
       let green = 0;
       for (const a of info.artboards) {
-        const html = await mcp.call("get_html", { designId: ctx.design, nodeId: a.id });
-        const els = await rendered(html, a.width, a.height, tokens(a.id));
+        const html = await mcp.readFullHtml(ctx.design, `#${a.id}`);
+        const els = await rendered(html, a.width, a.height ?? 900, tokens(a.id));
         const bar = els.find(
           (e) => e.background === "rgb(20, 83, 45)" && e.y < 160 && e.width >= a.width * 0.8,
         );
@@ -636,11 +604,7 @@ setInterval(next, 3000);
   // which tokens alone can't make in one place.
   "screens-restructure": {
     workdir: "none",
-    seed: async (mcp) => ({
-      design: (await mcp.call("create_design", { name: "Plantpal onboarding" })).match(
-        /designId "([^"]+)"/,
-      )[1],
-    }),
+    seed: async (mcp) => ({ design: await mcp.createDesign("Plantpal onboarding") }),
     prompt: () =>
       `Use the Finite MCP tools. In the Finite design "Plantpal onboarding", design a three-screen mobile onboarding flow for a plant-care app: ` +
       `Welcome, Pick your plants (a grid of at least 6 selectable plant cards, two selected), and All set. ` +
@@ -649,14 +613,14 @@ setInterval(next, 3000);
       `The top bar changed. On every screen it now needs a back-arrow button at its left and a "Help" link at its right, ` +
       `and its title should be bold. Each screen keeps its own title. Make the change on all screens and check it. Stop when you're done.`,
     async check(mcp, ctx) {
-      const info = JSON.parse(await mcp.call("get_basic_info", { designId: ctx.design }));
+      const info = await allHtml(mcp, ctx.design).then((r) => r.info);
       const tokens = await tokenCss(mcp, ctx.design);
       const titles = ["Welcome", "Pick your plants", "All set"];
       let done = 0;
       const notes = [];
       for (const a of info.artboards) {
-        const html = await mcp.call("get_html", { designId: ctx.design, nodeId: a.id });
-        const top = (await rendered(html, a.width, a.height, tokens(a.id))).filter(
+        const html = await mcp.readFullHtml(ctx.design, `#${a.id}`);
+        const top = (await rendered(html, a.width, a.height ?? 900, tokens(a.id))).filter(
           (e) => e.visible && e.y < 140,
         );
         const has = {
@@ -683,29 +647,21 @@ setInterval(next, 3000);
     workdir: "none",
     files: { "landing.html": IMPORT_PAGE },
     async seed(mcp) {
-      const design = (await mcp.call("create_design", { name: "Northwind" })).match(
-        /designId "([^"]+)"/,
-      )[1];
-      await mcp.call("create_artboard", {
-        designId: design,
-        name: "Home",
-        width: 1440,
-        height: 900,
-      });
-      await mcp.call("create_page", { designId: design, name: "Inbox" });
+      const design = await mcp.createDesign("Northwind");
+      await mcp.edit(design, [
+        { op: "artboard", name: "Home", width: 1440, height: 900 },
+        { op: "page", create: "Inbox" },
+      ]);
       return { design };
     },
     prompt: () =>
       `Use the Finite MCP tools. Put the page in landing.html, in this folder, into the Finite design "Northwind" on its "Inbox" page, so the team can keep designing it there. ` +
       `Then tell me in two or three sentences whether anything on the page didn't come across, and why. Stop when you're done.`,
     async check(mcp, ctx) {
-      const info = JSON.parse(await mcp.call("get_basic_info", { designId: ctx.design }));
-      const inbox = info.pages.find((p) => p.name === "Inbox");
-      const boards = info.artboards.filter((a) => a.pageId === inbox?.id);
+      const { artboards } = await mcp.overview(ctx.design);
+      const boards = artboards.filter((a) => a.page === "Inbox");
       const html = (
-        await Promise.all(
-          boards.map((a) => mcp.call("get_html", { designId: ctx.design, nodeId: a.id })),
-        )
+        await Promise.all(boards.map((a) => mcp.readHtml(ctx.design, `#${a.id}`)))
       ).join("\n");
       const checks = [
         boards.length >= 1,
@@ -713,7 +669,7 @@ setInterval(next, 3000);
         /#1f2a1d|rgb\(31, ?42, ?29\)/i.test(html),
         !/onclick|track\(|<iframe/i.test(html),
       ];
-      const notes = [`${boards.length} artboard(s) on Inbox`, `${info.artboards.length} in all`];
+      const notes = [`${boards.length} artboard(s) on Inbox`, `${artboards.length} in all`];
       return { passed: checks.filter(Boolean).length, total: checks.length, notes };
     },
   },
@@ -729,25 +685,23 @@ setInterval(next, 3000);
       `remove the "Book of the week" card (only that card, not the "What's happening" section around it); change the "Ready to get started?" heading to "Start building today"; ` +
       `and replace the brand purple #635bff with #0a7cff everywhere it's used. Stop when you're done.`,
     async check(mcp, ctx) {
-      const info = JSON.parse(await mcp.call("get_basic_info", { designId: ctx.design }));
-      const count = (query) => matches(mcp, ctx.design, query);
-      const purple = (await count({ style: "#635bff" })) + (await count({ attribute: "#635bff" }));
+      const { nodes } = await mcp.overview(ctx.design);
+      const count = (text, where) => matches(mcp, ctx.design, text, where);
+      const purple = (await count("#635bff", "styles")) + (await count("#635bff", "attributes"));
       const checks = [
         // The page holds the headline twice (two layouts); both change.
-        (await count({ text: "Payments for every business" })) >= 1 &&
-          (await count({ text: "to grow your revenue" })) === 0,
-        (await count({ text: "Book of the week" })) === 0 &&
-          (await count({ text: "How Africa Works" })) === 0,
-        (await count({ text: "Start building today" })) >= 1 &&
-          (await count({ text: "Ready to get started" })) === 0,
-        purple === 0 && (await count({ style: "#0a7cff" })) >= 1,
+        (await count("Payments for every business")) >= 1 &&
+          (await count("to grow your revenue")) === 0,
+        (await count("Book of the week")) === 0 && (await count("How Africa Works")) === 0,
+        (await count("Start building today")) >= 1 && (await count("Ready to get started")) === 0,
+        purple === 0 && (await count("#0a7cff", "styles")) >= 1,
         // Book of the week is one card of about 50 nodes in the "What's
         // happening" section, whose other cards stay.
-        (await count({ text: "What's happening" })) >= 1 &&
-          (await count({ text: "Tobi Lütke" })) >= 1 &&
-          info.nodeCount > ctx.nodes - 120,
+        (await count("What's happening")) >= 1 &&
+          (await count("Tobi Lütke")) >= 1 &&
+          nodes > ctx.nodes - 120,
       ];
-      const notes = [`${info.nodeCount}/${ctx.nodes} nodes`, `${purple} purple left`];
+      const notes = [`${nodes}/${ctx.nodes} nodes`, `${purple} purple left`];
       return { passed: checks.filter(Boolean).length, total: checks.length, notes };
     },
   },
@@ -761,16 +715,16 @@ setInterval(next, 3000);
       `In the article's visible text, replace every "typeface" with "font" and every "Typefaces" or "typefaces" with "fonts", keeping capitals ("Typeface" becomes "Font"). ` +
       `Then change the page title heading "Typography" at the top to "Typography (draft)". Change nothing else. Stop when you're done.`,
     async check(mcp, ctx) {
-      const left = await matches(mcp, ctx.design, { text: "typeface" });
-      const info = JSON.parse(await mcp.call("get_basic_info", { designId: ctx.design }));
+      const left = await matches(mcp, ctx.design, "typeface");
+      const { nodes } = await mcp.overview(ctx.design);
       const checks = [
         left === 0,
-        (await matches(mcp, ctx.design, { text: "font" })) >= 30,
+        (await matches(mcp, ctx.design, "font")) >= 30,
         // The heading's text sits in a child span, so find it by its text.
-        (await matches(mcp, ctx.design, { text: "Typography (draft)" })) >= 1,
-        info.nodeCount > ctx.nodes * 0.98,
+        (await matches(mcp, ctx.design, "Typography (draft)")) >= 1,
+        nodes > ctx.nodes * 0.98,
       ];
-      const notes = [`${left} with "typeface" left`, `${info.nodeCount}/${ctx.nodes} nodes`];
+      const notes = [`${left} with "typeface" left`, `${nodes}/${ctx.nodes} nodes`];
       return { passed: checks.filter(Boolean).length, total: checks.length, notes };
     },
   },
@@ -808,20 +762,18 @@ setInterval(next, 3000);
       `the comment tool, comment threads, loading and error states, and so on), drawn as faithfully as you can, so a designer can review them all. ` +
       `Stop when you're done.`,
     async check(mcp) {
-      const list = JSON.parse(await mcp.call("list_designs", { query: "UI states" }));
-      if (!list.length) return { passed: 0, total: 1, notes: ["no design"] };
-      const info = JSON.parse(await mcp.call("get_basic_info", { designId: list[0].designId }));
+      const design = (await mcp.call("designs", { query: "UI states" })).match(
+        /"designId": "([a-z0-9]+)"/,
+      )?.[1];
+      if (!design) return { passed: 0, total: 1, notes: ["no design"] };
+      const { artboards, nodes } = await mcp.overview(design);
       return {
         passed: 1,
         total: 1,
-        notes: [`${info.artboardCount} artboards, ${info.nodeCount} nodes`],
-        design: list[0].designId,
-        screenshot: info.artboards[0]?.id,
+        notes: [`${artboards.length} artboards, ${nodes} nodes`],
+        design,
+        screenshot: artboards[0]?.id,
       };
     },
   },
 };
-
-function rectsOverlap(a, b) {
-  return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
-}

@@ -2,7 +2,7 @@
 // test the app headless.
 //
 //   node e2e/headless.mjs start            build, then start a server and headless Chrome
-//   node e2e/headless.mjs call create_design '{"name":"Test"}'
+//   node e2e/headless.mjs call designs '{"create":"Test"}'
 //   node e2e/headless.mjs design <designId>
 //   node e2e/headless.mjs screenshot
 //   node e2e/headless.mjs stop
@@ -18,19 +18,17 @@ import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { launch } from "./cdp.mjs";
+import { root, sleep, startServer, waitHealthy } from "./lib.mjs";
 import { connect } from "./mcp.mjs";
 
 const self = fileURLToPath(import.meta.url);
-const root = path.resolve(path.dirname(self), "..");
 const bin = path.join(root, "target/debug/finite-server");
 const staticDir = path.join(root, "apps/web/out");
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const HELP = `Drive a live Finite headless: a server, headless Chrome and MCP agents.
 
@@ -55,7 +53,7 @@ Agents (MCP)
   tools [name]                List the MCP tools, or show one's description and input.
   call <tool> [json|@file|-] [--agent <name>]
                               Call a tool and print its text. Images, like
-                              get_screenshot's, are saved as PNG files. Each
+                              render's, are saved as PNG files. Each
                               --agent name is its own MCP session with its own
                               undo history (default "Agent").
   api <METHOD> <path> [json]  Call the web API, like: api GET /api/designs
@@ -361,42 +359,39 @@ async function daemon(dir, options) {
   fs.mkdirSync(shots, { recursive: true });
 
   let server = null;
-  let dataDir = null;
   let base = options.url?.replace(/\/$/, "");
   let api = options.server?.replace(/\/$/, "") ?? base;
   /** Why the server stopped, if it stopped on its own. */
   let serverExit = null;
   if (!base) {
-    const port = await freePort();
-    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "finite-headless-data-"));
     const out = fs.openSync(path.join(dir, "server.log"), "w");
-    server = spawn(bin, [], {
+    server = await startServer({
+      bin,
+      staticDir,
+      // verify.sh's doctor looks for this prefix to tell a private server.
+      dataPrefix: "finite-headless-data-",
+      wait: false,
+      stdio: ["ignore", out, out],
       env: {
-        ...process.env,
         // The server's default, without a line for every MCP session, in a
         // file, so without colors.
         RUST_LOG: process.env.RUST_LOG ?? "info,tower_http=debug,rmcp=warn",
         NO_COLOR: "1",
-        FINITE_PORT: String(port),
-        FINITE_DATA_DIR: dataDir,
-        FINITE_STATIC_DIR: staticDir,
       },
-      stdio: ["ignore", out, out],
     });
-    server.once("exit", (code, signal) => {
+    server.child.once("exit", (code, signal) => {
       serverExit = signal ? `signal ${signal}` : `code ${code}`;
       log(`server exited with ${serverExit}`);
     });
-    base = api = `http://127.0.0.1:${port}`;
+    base = api = server.url;
   }
   let page;
   try {
-    if (!(await healthy(api))) throw new Error(`no Finite server answered at ${api}/api/health`);
+    await (server ? server.ready() : waitHealthy(api));
     page = await launch({ width: options.width, height: options.height });
   } catch (error) {
     log(error.stack ?? String(error));
-    server?.kill();
-    if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 5 });
+    await server?.stop();
     process.exit(1);
   }
   /** Everything the page logged, and how much of it `console` has shown. */
@@ -433,15 +428,8 @@ async function daemon(dir, options) {
     stopping = true;
     log("stopping");
     fs.rmSync(path.join(dir, "state.json"), { force: true });
-    // SIGTERM makes the server save every open design, so let it finish
-    // before its data folder goes.
-    if (server && server.exitCode === null && !serverExit) {
-      const exited = new Promise((r) => server.once("exit", r));
-      server.kill();
-      await exited;
-    }
+    await server?.stop();
     await page.close().catch(() => {});
-    if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 5 });
     process.exit(0);
   };
   process.on("SIGTERM", stop);
@@ -603,7 +591,7 @@ async function daemon(dir, options) {
       const { x, y, label } = await point(page, target, nth);
       await page.move(x - 1, y - 1);
       await page.click(x, y, { shift, double });
-      await settle(page);
+      await page.settle();
       const how = `${shift ? "Shift-" : ""}${double ? "double-clicked" : "clicked"}`;
       return `${how[0].toUpperCase()}${how.slice(1)} ${label} at ${Math.round(x)},${Math.round(y)}`;
     },
@@ -615,17 +603,10 @@ async function daemon(dir, options) {
       await page.move(px, py);
       // Ten events 16 ms apart: one gesture, as a trackpad sends it.
       for (let i = 0; i < 10; i++) {
-        await page.send("Input.dispatchMouseEvent", {
-          type: "mouseWheel",
-          x: px,
-          y: py,
-          deltaX: sx / 10,
-          deltaY: sy / 10,
-          modifiers: ctrl ? 2 : 0,
-        });
-        await new Promise((done) => setTimeout(done, 16));
+        await page.wheel(px, py, sx / 10, sy / 10, { ctrl });
+        await sleep(16);
       }
-      await settle(page);
+      await page.settle();
       return `Scrolled ${sx},${sy} at ${px},${py}`;
     },
     async hover({ args: target, flags: { nth } }) {
@@ -633,7 +614,7 @@ async function daemon(dir, options) {
       // Two moves, so the page sees the pointer arrive.
       await page.move(x - 5, y - 5);
       await page.move(x, y);
-      await settle(page);
+      await page.settle();
       return `Moved to ${label} at ${Math.round(x)},${Math.round(y)}`;
     },
     async drag({ args: target, flags: { nth, by, to, steps, shift } }) {
@@ -647,7 +628,7 @@ async function daemon(dir, options) {
         end = { x: from.x + dx, y: from.y + dy };
       }
       await page.drag(from, end, { steps: Number(steps ?? 10), shift });
-      await settle(page);
+      await page.settle();
       return `Dragged ${from.label} from ${Math.round(from.x)},${Math.round(from.y)} to ${Math.round(end.x)},${Math.round(end.y)}`;
     },
     async upload({ args: [selector, file], flags: { nth } }) {
@@ -660,7 +641,7 @@ async function daemon(dir, options) {
         throw new Error(exceptionDetails.exception?.description ?? exceptionDetails.text);
       // Chrome fires the input's change event, as it does after the OS picker.
       await page.send("DOM.setFileInputFiles", { files: [file], objectId: result.objectId });
-      await settle(page);
+      await page.settle();
       return `Picked ${path.basename(file)} in ${selector}`;
     },
     async type({ args: [text] }) {
@@ -670,8 +651,8 @@ async function daemon(dir, options) {
     },
     async key({ args: [spec] }) {
       if (!spec) throw new Error("usage: key <key>, like Enter or Shift+1");
-      await pressKey(page, spec);
-      await settle(page);
+      await page.press(spec);
+      await page.settle();
       return `Pressed ${spec}`;
     },
     async viewport({ args: [width, height] }) {
@@ -710,7 +691,7 @@ async function daemon(dir, options) {
   /**
    * Page commands run one at a time, so two shells can't interleave clicks and
    * keys. MCP calls don't touch the page, so they skip the queue: a
-   * `call wait_for_comments` left waiting mustn't hold up the clicks that post
+   * `call comments` left waiting mustn't hold up the clicks that post
    * the comment it waits for.
    */
   let queue = Promise.resolve();
@@ -763,7 +744,7 @@ async function daemon(dir, options) {
     token,
     base,
     server: api,
-    dataDir,
+    dataDir: server?.dataDir ?? null,
     dir,
     idleMinutes: options.idleMinutes,
   };
@@ -818,42 +799,13 @@ window.$deepText = (el) => {
 };
 `;
 
-const freePort = () =>
-  new Promise((resolve) => {
-    const probe = net.createServer().listen(0, "127.0.0.1", () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
-
-async function healthy(url) {
-  for (let i = 0; i < 150; i++) {
-    try {
-      if ((await fetch(`${url}/api/health`)).ok) return true;
-    } catch {}
-    await sleep(100);
-  }
-  return false;
-}
-
-/** Loads a URL and waits for its load event, then lets the page settle. */
+/** Loads a URL, then installs the deep queries and lets React hydrate. */
 async function navigate(page, url) {
-  let off;
-  const loaded = new Promise((r) => (off = page.on("Page.loadEventFired", r)));
-  try {
-    const { errorText } = await page.send("Page.navigate", { url });
-    if (errorText) throw new Error(`couldn't open ${url}: ${errorText}`);
-    await Promise.race([loaded, sleep(15_000)]);
-  } finally {
-    off();
-  }
+  await page.goto(url);
   await page.send("Runtime.evaluate", { expression: DEEP });
+  // Hydration leaves nothing to wait on from outside.
   await sleep(300);
 }
-
-/** Two animation frames, so React and the canvas draw what an input changed. */
-const settle = (page) =>
-  page.eval(`new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))`);
 
 const format = (value) =>
   value === undefined
@@ -888,93 +840,6 @@ async function point(page, target, nth) {
     );
   }
   return { x, y, label: selector };
-}
-
-const NAMED_KEYS = {
-  Enter: 13,
-  Escape: 27,
-  Tab: 9,
-  Backspace: 8,
-  Delete: 46,
-  Space: 32,
-  ArrowLeft: 37,
-  ArrowUp: 38,
-  ArrowRight: 39,
-  ArrowDown: 40,
-  Home: 36,
-  End: 35,
-  PageUp: 33,
-  PageDown: 34,
-};
-const MODIFIERS = { Alt: 1, Control: 2, Ctrl: 2, Meta: 4, Cmd: 4, Shift: 8 };
-const SHIFTED = {
-  1: "!",
-  2: "@",
-  3: "#",
-  4: "$",
-  5: "%",
-  6: "^",
-  7: "&",
-  8: "*",
-  9: "(",
-  0: ")",
-  "=": "+",
-  "-": "_",
-};
-const CODES = {
-  "=": ["Equal", 187],
-  "+": ["Equal", 187],
-  "-": ["Minus", 189],
-  "!": ["Digit1", 49],
-  "]": ["BracketRight", 221],
-  "[": ["BracketLeft", 219],
-};
-
-async function pressKey(page, spec) {
-  const parts = spec.split("+");
-  // "+" on its own, or as the last part of "Shift++", is the key itself.
-  if (spec.endsWith("+") && parts.at(-1) === "") parts.splice(-2, 2, "+");
-  let name = parts.pop();
-  let modifiers = 0;
-  for (const m of parts) {
-    if (!(m in MODIFIERS))
-      throw new Error(`unknown modifier ${m}: use Alt, Control, Meta or Shift`);
-    modifiers |= MODIFIERS[m];
-  }
-  let key, code, keyCode;
-  if (name === "Space") name = " ";
-  if (name in NAMED_KEYS) {
-    [key, code, keyCode] = [name, name, NAMED_KEYS[name]];
-  } else if (name === " ") {
-    [key, code, keyCode] = [" ", "Space", 32];
-  } else if (name.length === 1) {
-    const shift = modifiers & 8;
-    if (/[a-z]/i.test(name)) {
-      [key, code, keyCode] = [
-        shift ? name.toUpperCase() : name,
-        `Key${name.toUpperCase()}`,
-        name.toUpperCase().charCodeAt(0),
-      ];
-    } else if (/\d/.test(name)) {
-      [key, code, keyCode] = [shift ? SHIFTED[name] : name, `Digit${name}`, name.charCodeAt(0)];
-    } else {
-      const [c, k] = CODES[name] ?? ["", 0];
-      [key, code, keyCode] = [shift && SHIFTED[name] ? SHIFTED[name] : name, c, k];
-    }
-  } else {
-    throw new Error(
-      `unknown key ${name}: use a character, or one of ${Object.keys(NAMED_KEYS).join(", ")}`,
-    );
-  }
-  // A printable key types its character, unless Control or Meta turns it into a shortcut.
-  const text = key.length === 1 && !(modifiers & 6) ? key : undefined;
-  const event = { key, code, windowsVirtualKeyCode: keyCode, modifiers };
-  await page.send("Input.dispatchKeyEvent", {
-    type: "keyDown",
-    ...event,
-    ...(text ? { text } : {}),
-  });
-  await page.send("Input.dispatchKeyEvent", { type: "keyUp", ...event });
 }
 
 /** The accessibility tree as indented lines, like `button "Start"`, without the empty wrappers. */

@@ -1,6 +1,6 @@
 ---
 name: verify-selectors
-description: Check selectors used by the six MCP tools after changes to select.rs or doc6 selector normalization, aliases, page filtering, or text-node fallback.
+description: Check selectors used by the six MCP tools after changes to select.rs or the selector normalization in `crates/server/src/mcp/selector.rs`, aliases, page filtering, or text-node fallback.
 ---
 
 # Verify selectors
@@ -21,14 +21,14 @@ A selector returns exactly the specified nodes, in the specified order, within i
 
 The 26 selector forms cover universal, class, node ID, data-id, root, empty, child position, filtered nth-child, is, not, repeated selector lists, all four combinators, and has with each combinator. The expected results use parent relations, not Servo or Matcher's flattened index. A Within scope matches the union of each selected root's strict descendants. A selected inner root can match when it descends from another selected root. Ancestors outside the scope remain available for matching. Different artboards never count as CSS siblings.
 
-`crates/server/src/mcp/doc6/selector_verification.rs` checks all 258 ordered lists of length one through three over six spellings: two aliases, two bare IDs and two hash IDs. Each runs as a string and JSON array, over the design, either page and a missing page. These are 2,064 comparisons through the real selector_text and matched functions. Additional examples check quoted commas and aliases, unknown aliases, and text-node fallback. Those additional examples are not exhaustive.
+`crates/server/src/mcp/selector/verification.rs` checks all 258 ordered lists of length one through three over six spellings: two aliases, two bare IDs and two hash IDs. Each runs as a string and JSON array, over the design, either page and a missing page. These are 2,064 comparisons through the real selector_text and matched functions. Additional examples check quoted commas and aliases, unknown aliases, and text-node fallback. Those additional examples are not exhaustive.
 
 ## Coverage and exclusions
 
 Last synchronized with e9a1833 (the source baseline on which this check was added).
 
 - `crates/design/src/select.rs`: parse, Matcher::new/add/select, and Element navigation, classes and IDs for the domain above.
-- `crates/server/src/mcp/doc6/mod.rs`: selector_text, looks_like_id, split_top, with_refs and matched for the adapter domain above. These functions feed the six-tool MCP surface.
+- `crates/server/src/mcp/selector.rs`: selector_text, split_top, with_refs and matched for the adapter domain above. These functions feed the six-tool MCP surface.
 
 Not covered exhaustively: arbitrary CSS syntax, arbitrary Unicode or escaping, arbitrary attribute values, tags other than div, visible-text folding and hidden text, parse_loose, components, text_nodes, page layouts beyond the two-board adapter fixture, or documents larger than five elements. The existing select and doc6 suites cover further examples. These checks do not cover transport, edit transaction, undo, renderer, Wasm ABI, storage or cluster correctness.
 
