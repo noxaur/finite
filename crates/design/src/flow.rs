@@ -143,12 +143,14 @@ pub fn link_href(id: &str) -> String {
 }
 
 /// Whether `route` is a path a router can serve: `/`, or `/` and segments
-/// of letters, digits and `-._~`, with no trailing slash.
+/// of letters, digits and `-._~`, with no trailing slash. A segment can't
+/// be `.` or `..`, since a browser removes those from the URL.
 pub fn is_route(route: &str) -> bool {
     route == "/"
         || route.strip_prefix('/').is_some_and(|rest| {
             rest.split('/').all(|segment| {
                 !segment.is_empty()
+                    && !matches!(segment, "." | "..")
                     && segment
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || "-._~".contains(c))
@@ -157,18 +159,23 @@ pub fn is_route(route: &str) -> bool {
 }
 
 /// The route an artboard named `name` gets when it doesn't set one:
-/// lowercase words joined by `-`, or `fallback` when the name has none.
+/// lowercase words joined by `-`. A name without a letter or digit uses the
+/// words of `fallback`, the artboard's id, and `artboard` if that has none.
 fn slug(name: &str, fallback: &str) -> String {
-    let words: Vec<String> = name
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect();
+    let words_of = |text: &str| -> Vec<String> {
+        text.split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect()
+    };
+    let mut words = words_of(name);
     if words.is_empty() {
-        format!("/{fallback}")
-    } else {
-        format!("/{}", words.join("-"))
+        words = words_of(fallback);
     }
+    if words.is_empty() {
+        words.push("artboard".to_owned());
+    }
+    format!("/{}", words.join("-"))
 }
 
 /// Reads the design's routes and links. Give it the design as it renders
