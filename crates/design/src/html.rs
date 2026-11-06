@@ -63,8 +63,11 @@ pub const VOID_TAGS: &[&str] = &[
 ];
 
 /// Base styles for rendering an artboard. Screenshots and the web viewer both
-/// use them; the viewer reads them through WebAssembly.
-pub const BASE_CSS: &str = "*, *::before, *::after { box-sizing: border-box; }";
+/// use them; the viewer reads them through WebAssembly. A layer a person hid
+/// has the `hidden` attribute, which an author's `display` can't undo: an
+/// important rule in a cascade layer beats every unlayered one.
+pub const BASE_CSS: &str =
+    "*, *::before, *::after { box-sizing: border-box; } [hidden] { display: none !important; }";
 
 /// The content policy for artboards that run scripts. Scripts are inline or
 /// load from `https:` (libraries from a CDN), and can call `https:` and `wss:`

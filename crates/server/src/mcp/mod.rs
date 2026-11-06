@@ -1857,7 +1857,7 @@ impl FiniteMcp {
     }
 
     #[tool(
-        description = "Set or remove HTML attributes on elements, such as an image's src and alt, an SVG path's d, or class and id. data-name sets the layer name (null clears it); data-id can't be changed. A null value removes the attribute. For prototypes, artboards sharing data-route=\"/cart\" are one page at several widths, and a link to <a href=\"#finite-artboard=<id>\"> opens the closest width."
+        description = "Set or remove HTML attributes on elements, such as an image's src and alt, an SVG path's d, or class and id. data-name sets the layer name (null clears it); data-id can't be changed. A null value removes the attribute. People hide layers with hidden and lock them with data-locked; leave both unless asked. Artboards sharing data-route=\"/cart\" are one page at several widths."
     )]
     async fn set_attributes(
         &self,

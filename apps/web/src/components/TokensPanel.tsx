@@ -7,6 +7,7 @@ import type { Node } from "@/design/schema";
 import { aliasOf, bezierOf, displayName, hexOf, isColor, resolveToken } from "@/lib/tokens";
 import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import { Icon } from "./Icons";
+import { Dropdown } from "./Menu";
 
 /** A change to send: modes by name in order, and tokens by name (see `Api.setTokens`). */
 export interface TokensChange {
@@ -349,20 +350,21 @@ export function TokensPanel({
           <div role="group" aria-label="Artboard modes" {...stylex.props(styles.group)}>
             <p {...stylex.props(styles.label)}>Artboards on this page</p>
             {artboards.map((board) => (
-              <label key={board.id} {...stylex.props(styles.row)}>
+              <div key={board.id} {...stylex.props(styles.row)}>
                 <span {...stylex.props(styles.boardName)}>{board.name ?? board.tag}</span>
-                <select
+                <Dropdown
+                  label={`Mode for ${board.name ?? board.tag}`}
                   value={modeOf(board)}
-                  onChange={(e) => void run(actions.setArtboardMode(board.id, e.target.value))}
-                  {...stylex.props(styles.select)}
+                  options={modes.map((m) => [m.id, m.name] as const)}
+                  onPick={(id) => void run(actions.setArtboardMode(board.id, id))}
+                  style={styles.select}
                 >
-                  {modes.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                  <span {...stylex.props(styles.selectText)}>
+                    {modes.find((m) => m.id === modeOf(board))?.name}
+                  </span>
+                  <Icon name="chevronDown" size={12} />
+                </Dropdown>
+              </div>
             ))}
           </div>
         )}
@@ -662,8 +664,8 @@ const styles = stylex.create({
     backgroundColor: { default: "transparent", ":hover": colors.bg },
   },
   swatch: {
-    width: 16,
-    height: 16,
+    width: 12,
+    height: 12,
     flexShrink: 0,
     borderRadius: radii.xs,
     boxShadow: `inset 0 0 0 1px ${colors.borderStrong}`,
@@ -764,12 +766,20 @@ const styles = stylex.create({
     fontSize: 14,
   },
   select: {
+    display: "flex",
+    alignItems: "center",
+    gap: space.xs,
     height: size.xs,
-    borderWidth: 0,
+    paddingInline: space.sm,
     borderRadius: radii.xs,
     backgroundColor: colors.sunk,
+    boxShadow: {
+      default: "none",
+      ":hover": `inset 0 0 0 1px ${colors.border}`,
+      ":focus-visible": `inset 0 0 0 1px ${colors.borderStrong}`,
+    },
     color: colors.text,
-    font: "inherit",
     fontSize: 12,
   },
+  selectText: { color: colors.text },
 });

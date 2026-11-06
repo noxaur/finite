@@ -8,6 +8,8 @@ import { audienceLabel, audienceOf, routeLabel, type KnownAgent } from "@/lib/au
 import { COMMENT_LIMIT, NAME_LIMIT, SELECTION_LIMIT } from "@/lib/limits";
 import { isLocalUser, useLocalName } from "@/lib/user";
 import { timeAgo } from "@/lib/time";
+import { Icon } from "./Icons";
+import { Dropdown } from "./Menu";
 import { PinFilters, PinIcon, type PinState } from "./PinIcon";
 import { colors, radii, space } from "@/styles/tokens.stylex";
 
@@ -253,36 +255,43 @@ function AudiencePicker({
   const value = audienceOf(comment);
   const gone = value.kind === "agent" && !agents.some((a) => a.id === value.id);
   const options = gone ? [...agents, { id: value.id, name: value.name }] : agents;
+  const choices: ReadonlyArray<readonly [string, string]> = [
+    ["agents", value.kind === "agents" ? routeLabel(comment) : "Any agent"],
+    ["people", audienceLabel({ kind: "people" })],
+    ...options.map(
+      (agent) =>
+        [
+          agent.id,
+          value.kind === "agent" && value.id === agent.id
+            ? routeLabel(comment)
+            : audienceLabel({ kind: "agent", ...agent }),
+        ] as const,
+    ),
+  ];
   return (
-    <select
-      aria-label="Who it's for"
-      title="Who it's for"
+    <Dropdown
+      label="Who it's for"
       value={value.kind === "agent" ? value.id : value.kind}
-      onChange={(e) => {
-        const picked = e.currentTarget.value;
+      options={choices}
+      onPick={(picked) => {
         if (picked === "agents" || picked === "people") return onChange({ kind: picked });
         const agent = options.find((a) => a.id === picked);
         if (agent) onChange({ kind: "agent", id: agent.id, name: agent.name });
       }}
-      {...stylex.props(styles.audience)}
+      style={styles.audience}
     >
-      <option value="agents">{value.kind === "agents" ? routeLabel(comment) : "Any agent"}</option>
-      <option value="people">{audienceLabel({ kind: "people" })}</option>
-      {options.map((agent) => (
-        <option key={agent.id} value={agent.id}>
-          {value.kind === "agent" && value.id === agent.id
-            ? routeLabel(comment)
-            : audienceLabel({ kind: "agent", ...agent })}
-        </option>
-      ))}
-    </select>
+      <span {...stylex.props(styles.audienceText)}>
+        {choices.find(([v]) => v === (value.kind === "agent" ? value.id : value.kind))?.[1]}
+      </span>
+      <Icon name="chevronDown" size={12} />
+    </Dropdown>
   );
 }
 
 /** Room kept between a popover and the window's edge, in pixels. */
-const EDGE = 8;
+const EDGE = 6;
 /** The top bar's height: popovers flip below their pin rather than slide under it. */
-const TOP_BAR = 56;
+const TOP_BAR = 51;
 
 /**
  * The box beside a pin. It opens up and to the right of the pin, and flips
@@ -579,7 +588,7 @@ const styles = stylex.create({
   pin: {
     position: "absolute",
     left: -3,
-    bottom: -2,
+    bottom: -3,
     display: "block",
     padding: 0,
     borderWidth: 0,
@@ -589,8 +598,8 @@ const styles = stylex.create({
   popover: {
     position: "absolute",
     left: POPOVER_GAP,
-    bottom: -4,
-    width: 280,
+    bottom: -3,
+    width: 279,
     display: "flex",
     flexDirection: "column",
     gap: space.sm,
@@ -605,15 +614,19 @@ const styles = stylex.create({
     userSelect: "text",
   },
   // Mirror the default placement: to the pin's left, or hanging below it.
-  popoverLeft: { left: "auto", right: 8 },
-  popoverBelow: { bottom: "auto", top: 4 },
+  popoverLeft: { left: "auto", right: 6 },
+  popoverBelow: { bottom: "auto", top: 3 },
   threadHead: { display: "flex", alignItems: "center", gap: space.xs },
   spacer: { flexGrow: 1 },
   muted: { color: colors.muted, fontSize: 12 },
+  audienceText: { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   audience: {
-    maxWidth: 160,
-    height: 22,
-    paddingInline: 4,
+    display: "flex",
+    alignItems: "center",
+    gap: 3,
+    maxWidth: 156,
+    height: 21,
+    paddingInline: 3,
     borderWidth: 0,
     borderRadius: 4,
     backgroundColor: { default: "transparent", ":hover": colors.bg },
@@ -646,10 +659,10 @@ const styles = stylex.create({
     fontFamily: "inherit",
   },
   danger: { color: colors.danger },
-  inlineButton: { height: 18, marginLeft: 2, color: colors.muted },
+  inlineButton: { height: 18, marginLeft: 3, color: colors.muted },
   textButton: {
     paddingInline: 6,
-    height: 22,
+    height: 21,
     borderWidth: 0,
     borderRadius: 4,
     backgroundColor: { default: "transparent", ":hover": colors.bg },
@@ -664,14 +677,14 @@ const styles = stylex.create({
     gap: space.sm,
     margin: 0,
     padding: 0,
-    maxHeight: 320,
+    maxHeight: 318,
     overflowY: "auto",
     listStyle: "none",
   },
-  message: { display: "flex", flexDirection: "column", gap: 2 },
+  message: { display: "flex", flexDirection: "column", gap: 3 },
   author: { fontWeight: 600 },
   body: { margin: 0, whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.4 },
-  changes: { display: "flex", flexWrap: "wrap", gap: 4, marginTop: 2 },
+  changes: { display: "flex", flexWrap: "wrap", gap: 3, marginTop: 3 },
   change: {
     maxWidth: "100%",
     minWidth: 0,
@@ -725,8 +738,8 @@ const styles = stylex.create({
     outline: { default: "none", ":focus": `2px solid ${colors.accent}` },
   },
   send: {
-    width: 28,
-    height: 28,
+    width: 27,
+    height: 27,
     borderWidth: 0,
     borderRadius: "50%",
     backgroundColor: { default: colors.accent, ":disabled": colors.border },

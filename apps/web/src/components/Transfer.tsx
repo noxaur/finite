@@ -209,7 +209,7 @@ export function ImportResultCard({
 
 const styles = stylex.create({
   tool: {
-    minWidth: 28,
+    minWidth: 27,
     height: 24,
     paddingInline: 6,
     borderWidth: 0,
@@ -221,7 +221,7 @@ const styles = stylex.create({
   },
   card: {
     position: "absolute",
-    top: 52,
+    top: 51,
     right: space.sm,
     width: 300,
     display: "flex",
@@ -274,7 +274,7 @@ const styles = stylex.create({
   button: {
     display: "inline-flex",
     alignItems: "center",
-    height: 28,
+    height: 27,
     paddingInline: space.sm,
     boxSizing: "border-box",
     borderWidth: 1,

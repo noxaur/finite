@@ -83,6 +83,30 @@ pub enum UserEdit {
         id: NodeId,
         route: Option<String>,
     },
+    /// Sets attributes on elements, or removes one when its value is
+    /// `None`. A person renames a layer with `data-name`, hides it with
+    /// `hidden` and locks it with `data-locked`.
+    SetAttributes {
+        ids: Vec<NodeId>,
+        attrs: BTreeMap<String, Option<String>>,
+    },
+    /// Adds a page after the others, with an id made like a new node's.
+    CreatePage {
+        name: String,
+    },
+    RenamePage {
+        id: String,
+        name: String,
+    },
+    /// Deletes a page and every artboard on it.
+    DeletePage {
+        id: String,
+    },
+    /// Moves artboards to another page, into free space there.
+    MoveToPage {
+        ids: Vec<NodeId>,
+        page: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -189,6 +213,26 @@ pub fn plan(
             UserEdit::Detach { ids } => edit::detach_instances(view, ids, new_id)?,
             UserEdit::SetLink { ids, to } => edit::set_link(view, ids, to.as_deref())?,
             UserEdit::SetRoute { id, route } => edit::set_route(view, id, route.as_deref())?,
+            UserEdit::SetAttributes { ids, attrs } => {
+                if attrs.values().flatten().any(|v| v.len() > MAX_TEXT) {
+                    return Err(EditError(format!(
+                        "an attribute can be at most {MAX_TEXT} bytes"
+                    )));
+                }
+                edit::update_attributes(view, ids, attrs)?
+            }
+            UserEdit::CreatePage { name } => {
+                let id = loop {
+                    let id = new_id();
+                    if view.page(&id).is_none() {
+                        break id;
+                    }
+                };
+                edit::create_page(view, id, name)?
+            }
+            UserEdit::RenamePage { id, name } => edit::rename_page(view, id, name)?,
+            UserEdit::DeletePage { id } => edit::delete_page(view, id)?,
+            UserEdit::MoveToPage { ids, page } => edit::move_to_page(view, ids, page)?,
         });
     }
     components::redirect(doc, ops, new_id)
@@ -208,12 +252,33 @@ pub fn label(edits: &[UserEdit]) -> &'static str {
         UserEdit::Detach { .. } => "Detach instance",
         UserEdit::SetLink { .. } => "Link",
         UserEdit::SetRoute { .. } => "Set route",
+        UserEdit::SetAttributes { attrs, .. } => attributes_label(attrs),
+        UserEdit::CreatePage { .. } => "Add page",
+        UserEdit::RenamePage { .. } => "Rename page",
+        UserEdit::DeletePage { .. } => "Delete page",
+        UserEdit::MoveToPage { .. } => "Move to page",
     });
     let first = kinds.next().unwrap_or("Edit");
     if kinds.all(|k| k == first) {
         first
     } else {
         "Edit"
+    }
+}
+
+/// What setting `attrs` does, in the words of the layers panel's buttons.
+fn attributes_label(attrs: &BTreeMap<String, Option<String>>) -> &'static str {
+    let mut keys = attrs.iter();
+    match (keys.next(), keys.next()) {
+        (Some((key, value)), None) => match (key.as_str(), value.is_some()) {
+            ("data-name", _) => "Rename",
+            ("hidden", true) => "Hide",
+            ("hidden", false) => "Show",
+            ("data-locked", true) => "Lock",
+            ("data-locked", false) => "Unlock",
+            _ => "Change attributes",
+        },
+        _ => "Change attributes",
     }
 }
 
@@ -229,7 +294,12 @@ impl UserEdit {
             | Self::Group { ids }
             | Self::Ungroup { ids }
             | Self::Detach { ids }
-            | Self::SetLink { ids, .. } => Box::new(ids.iter()),
+            | Self::SetLink { ids, .. }
+            | Self::SetAttributes { ids, .. }
+            | Self::MoveToPage { ids, .. } => Box::new(ids.iter()),
+            Self::CreatePage { .. } | Self::RenamePage { .. } | Self::DeletePage { .. } => {
+                Box::new(std::iter::empty())
+            }
             Self::SetText { id, .. }
             | Self::MakeComponent { id, .. }
             | Self::SetRoute { id, .. } => Box::new(std::iter::once(id)),
@@ -302,6 +372,25 @@ impl UserEdit {
             Self::SetRoute {
                 id: "board".into(),
                 route: None,
+            },
+            Self::SetAttributes {
+                ids: vec!["card".into()],
+                attrs: BTreeMap::from([
+                    ("hidden".into(), Some(String::new())),
+                    ("data-locked".into(), None),
+                ]),
+            },
+            Self::CreatePage {
+                name: "Flows".into(),
+            },
+            Self::RenamePage {
+                id: "page".into(),
+                name: "Drafts".into(),
+            },
+            Self::DeletePage { id: "page".into() },
+            Self::MoveToPage {
+                ids: vec!["board".into()],
+                page: "page".into(),
             },
         ]
     }
