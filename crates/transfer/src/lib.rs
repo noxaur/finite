@@ -22,6 +22,7 @@
 //!
 //! [`Design::import`]: finite_design::Design::import
 
+pub mod app;
 pub mod assets;
 mod feature;
 pub mod figma;
@@ -58,15 +59,19 @@ pub enum Format {
     Jsx,
     /// A design as a folder of text files, packed as a tar archive.
     Repo,
+    /// A prototype as a Vite + React project, packed as a tar archive.
+    /// Export only.
+    App,
 }
 
 impl Format {
-    pub const ALL: [Format; 5] = [
+    pub const ALL: [Format; 6] = [
         Format::Html,
         Format::Finite,
         Format::Figma,
         Format::Jsx,
         Format::Repo,
+        Format::App,
     ];
 
     pub fn codec(self) -> &'static dyn Codec {
@@ -76,6 +81,7 @@ impl Format {
             Format::Figma => &figma::Figma,
             Format::Jsx => &jsx::Jsx,
             Format::Repo => &repo::Repo,
+            Format::App => &app::App,
         }
     }
 
