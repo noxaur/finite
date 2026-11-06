@@ -19,6 +19,7 @@ import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.styl
 import { numberOf, ScrubLabel, useDraftField } from "../DraftField";
 import type { IconName } from "@/lib/icons";
 import { Icon } from "../Icons";
+import { useDismiss } from "../useDismiss";
 import { Dropdown, Menu, type MenuItem } from "../Menu";
 import type { Geometry, GeometryFacts } from "./geometry";
 import {
@@ -1381,8 +1382,11 @@ export function Popover({
 }) {
   const panel = useRef<HTMLDivElement>(null);
   const [at, setAt] = useState<{ top: number; right: number } | null>(null);
-  const close = useRef(onClose);
-  close.current = onClose;
+  useDismiss({
+    contains: (t) => Boolean(panel.current?.contains(t) || anchor?.contains(t)),
+    onClose,
+    enabled: anchor !== null,
+  });
   useEffect(() => {
     if (!anchor) return;
     const place = () => {
@@ -1397,28 +1401,10 @@ export function Popover({
     place();
     const resize = new ResizeObserver(place);
     if (panel.current) resize.observe(panel.current);
-    const away = (e: PointerEvent) => {
-      const target = e.target as HTMLElement | null;
-      if (
-        !panel.current?.contains(target) &&
-        !anchor.contains(target) &&
-        !target?.closest("[role='menu']")
-      )
-        close.current();
-    };
-    const escape = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || document.querySelector("[role='menu']")) return;
-      e.stopPropagation();
-      close.current();
-    };
     window.addEventListener("resize", place);
-    window.addEventListener("pointerdown", away, true);
-    window.addEventListener("keydown", escape, true);
     return () => {
       resize.disconnect();
       window.removeEventListener("resize", place);
-      window.removeEventListener("pointerdown", away, true);
-      window.removeEventListener("keydown", escape, true);
     };
   }, [anchor]);
   if (!anchor) return null;

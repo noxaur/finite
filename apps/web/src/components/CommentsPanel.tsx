@@ -6,11 +6,11 @@ import type { Replica } from "@/design/replica";
 import type { Activity } from "@/design/session";
 import type { Comment } from "@/design/schema";
 import { isLocalUser } from "@/lib/user";
-import { timeAgo } from "@/lib/time";
 import { colors, radii, size, space } from "@/styles/tokens.stylex";
 import { ANY_AGENT, audienceLabel, routeLabel } from "@/lib/audience";
 import { pinState } from "./Comments";
 import { PinIcon } from "./PinIcon";
+import { TimeAgo } from "./TimeAgo";
 
 type Tab = "comments" | "activity";
 
@@ -79,7 +79,9 @@ export function CommentsPanel({
                   <span {...stylex.props(styles.author)}>
                     {first ? (isLocalUser(first.author) ? "You" : first.author.name) : ""}
                   </span>
-                  <span {...stylex.props(styles.muted)}>{timeAgo(comment.createdAt)}</span>
+                  <span {...stylex.props(styles.muted)}>
+                    <TimeAgo at={comment.createdAt} />
+                  </span>
                 </span>
                 <span {...stylex.props(styles.body)}>{first?.body}</span>
                 <span {...stylex.props(styles.muted)}>
@@ -129,7 +131,9 @@ export function CommentsPanel({
                 <li key={a.seq} {...stylex.props(styles.activity)}>
                   <span {...stylex.props(styles.author)}>{a.actor}</span>
                   <span {...stylex.props(styles.activityLabel)}>{a.label}</span>
-                  <span {...stylex.props(styles.muted)}>{timeAgo(a.at)}</span>
+                  <span {...stylex.props(styles.muted)}>
+                    <TimeAgo at={a.at} />
+                  </span>
                 </li>
               ))}
             </ol>

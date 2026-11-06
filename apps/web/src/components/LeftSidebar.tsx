@@ -5,6 +5,7 @@ import { type ReactNode, useRef, useState } from "react";
 import type { Listener, Presence } from "@/design/schema";
 import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import { Icon } from "./Icons";
+import { NameInput } from "./NameInput";
 
 export type LeftMode = "design" | "tokens";
 
@@ -62,25 +63,13 @@ export function LeftSidebar({
   return (
     <aside data-camera-ignore aria-label="Design" {...stylex.props(styles.panel)}>
       <header {...stylex.props(styles.head)}>
-        <input
+        <NameInput
           key={name ?? ""}
-          aria-label="Design name"
-          defaultValue={name ?? ""}
+          label="Design name"
+          value={name ?? ""}
           placeholder="…"
-          spellCheck={false}
-          onBlur={(e) => {
-            const next = e.target.value.trim();
-            if (next && next !== name) onRename(next);
-            else e.target.value = name ?? "";
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") e.currentTarget.blur();
-            else if (e.key === "Escape") {
-              e.currentTarget.value = name ?? "";
-              e.currentTarget.blur();
-            }
-          }}
-          {...stylex.props(styles.name)}
+          onRename={onRename}
+          style={styles.name}
         />
         <button
           type="button"
@@ -155,25 +144,13 @@ export function LeftSidebar({
                       {...stylex.props(stylex.defaultMarker(), styles.pageItem)}
                     >
                       {renaming === p.id ? (
-                        <input
-                          aria-label="Page name"
-                          defaultValue={p.name}
+                        <NameInput
+                          label="Page name"
+                          value={p.name}
                           autoFocus
-                          spellCheck={false}
-                          onFocus={(e) => e.currentTarget.select()}
-                          onBlur={(e) => {
-                            const next = e.target.value.trim();
-                            if (next && next !== p.name) pageActions.rename(p.id, next);
-                            setRenaming(null);
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") e.currentTarget.blur();
-                            else if (e.key === "Escape") {
-                              e.currentTarget.value = p.name;
-                              e.currentTarget.blur();
-                            }
-                          }}
-                          {...stylex.props(styles.pageInput)}
+                          onRename={(next) => pageActions.rename(p.id, next)}
+                          onDone={() => setRenaming(null)}
+                          style={styles.pageInput}
                         />
                       ) : (
                         <button
