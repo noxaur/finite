@@ -13,5 +13,7 @@ describe("layout", () => {
     expect(layoutOf("inline-flex", "column-reverse")).toBe("column");
     expect(layoutOf("inline-grid", "row")).toBe("grid");
     expect(layoutOf("none", "row")).toBe("block");
+    expect(layoutOf("inline flex", "row")).toBe("row");
+    expect(layoutOf("var(--grid-display)", "row")).toBe("block");
   });
 });
