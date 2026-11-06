@@ -130,9 +130,12 @@ export class Editor {
     viewport.addEventListener("pointermove", (e) => this.onMove(e), options);
     viewport.addEventListener("pointerup", (e) => this.onUp(e), options);
     viewport.addEventListener("pointercancel", () => this.cancel(), options);
+    // Only leaving the viewport itself: listening in the capture phase also
+    // hears every element inside it, like the selection redrawn under a click.
     viewport.addEventListener(
       "pointerleave",
-      () => {
+      (e) => {
+        if (e.target !== viewport) return;
         // A hover test still waiting would undo what a panel's row shows hovered next.
         cancelAnimationFrame(this.hoverFrame);
         this.update({ hover: null });
