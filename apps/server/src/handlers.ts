@@ -1,0 +1,260 @@
+import { randomUUID } from "node:crypto";
+import {
+  type Canvas,
+  type Comment,
+  type OpenDesign,
+  PROTOCOL_VERSION,
+  Refused,
+  type ThreadMeta,
+} from "@finite/protocol";
+import type { Context, Handlers } from "./hub.ts";
+
+/**
+ * One function per request type: thin glue from the wire to the modules in store/, preview/,
+ * source/ and agent/. Logic that's more than a line or two belongs in the module.
+ */
+export const handlers: Handlers = {
+  async hello({ user }, { client }) {
+    client.user = user;
+    return { version: PROTOCOL_VERSION, user };
+  },
+
+  "designs.list": (_, { modules }) => modules.store.designs(),
+  "design.create": ({ name, kind, source }, { modules }) =>
+    modules.store.create({ name, kind, ...(source === undefined ? {} : { source }) }),
+  "design.connect": ({ path }, { modules }) => modules.store.connect(path),
+  async "design.remove"({ id }, { modules }) {
+    await modules.previews.stop(id);
+    await modules.store.remove(id);
+    return null;
+  },
+
+  async subscribe({ designId }, { client, hub, modules }) {
+    const open = await hub.open(designId);
+    client.subscriptions.add(designId);
+    modules.previews
+      .ensure(open.design)
+      .catch((error: unknown) => console.error(`preview for ${designId} failed:`, error));
+    const [canvases, threads, routes] = await Promise.all([
+      open.canvases(),
+      open.threads(),
+      modules.previews.routes(designId).catch(() => []),
+    ]);
+    return {
+      design: open.design,
+      canvases,
+      threads,
+      preview: modules.previews.state(designId),
+      routes,
+    };
+  },
+  async unsubscribe({ designId }, { client }) {
+    client.subscriptions.delete(designId);
+    return null;
+  },
+
+  async "canvas.create"({ designId, kind, name, threadId }, ctx) {
+    const open = await ctx.hub.open(designId);
+    return open.createCanvas(
+      { kind, name, ...(threadId === undefined ? {} : { threadId }) },
+      ctx.by,
+    );
+  },
+  "canvas.rename": ({ designId, canvasId, name }, ctx) =>
+    updateCanvas(ctx, designId, canvasId, (c) => ({ ...c, name })),
+  "canvas.remove": ({ designId, canvasId }, ctx) =>
+    updateCanvas(ctx, designId, canvasId, (c) => ({ ...c, removedAt: Date.now() })),
+  "canvas.restore": ({ designId, canvasId }, ctx) =>
+    updateCanvas(ctx, designId, canvasId, (c) => without(c, "removedAt")),
+  async "canvas.patch"({ designId, canvasId, patch }, ctx) {
+    const open = await ctx.hub.open(designId);
+    return open.patchCanvas(canvasId, patch, ctx.by);
+  },
+
+  async "source.edit"({ designId, canvasId, edits }, ctx) {
+    const open = await ctx.hub.open(designId);
+    const canvas = await findCanvas(open, canvasId);
+    const { remap } = await ctx.modules.source.apply(open, edits, ctx.by, canvas);
+    return { remap };
+  },
+  async "source.undo"({ designId }, ctx) {
+    await ctx.modules.source.undo(await ctx.hub.open(designId), ctx.by);
+    return null;
+  },
+  async "source.redo"({ designId }, ctx) {
+    await ctx.modules.source.redo(await ctx.hub.open(designId), ctx.by);
+    return null;
+  },
+  async "source.detach"({ designId, ...input }, ctx) {
+    return ctx.modules.source.detach(await ctx.hub.open(designId), input, ctx.by);
+  },
+
+  "comment.add": ({ designId, canvasId, anchor, text }, ctx) =>
+    updateCanvas(ctx, designId, canvasId, (c) => ({
+      ...c,
+      comments: [
+        ...c.comments,
+        { id: randomUUID(), anchor, author: ctx.by, text, replies: [], createdAt: Date.now() },
+      ],
+    })),
+  "comment.reply": ({ designId, canvasId, commentId, text }, ctx) =>
+    updateComment(ctx, designId, canvasId, commentId, (comment) => ({
+      ...comment,
+      replies: [
+        ...comment.replies,
+        { id: randomUUID(), author: ctx.by, text, createdAt: Date.now() },
+      ],
+    })),
+  "comment.resolve": ({ designId, canvasId, commentId }, ctx) =>
+    updateComment(ctx, designId, canvasId, commentId, (comment) => ({
+      ...comment,
+      resolvedAt: Date.now(),
+    })),
+  "comment.reopen": ({ designId, canvasId, commentId }, ctx) =>
+    updateComment(ctx, designId, canvasId, commentId, (comment) => without(comment, "resolvedAt")),
+
+  async "thread.send"(params, ctx) {
+    const { designId, text, attachments, selection, model, effort, fast, mode } = params;
+    const open = await ctx.hub.open(designId);
+    let threadId = params.threadId;
+    if (threadId === undefined) {
+      const canvasId = params.new?.canvasId;
+      const parentId = params.new?.parentId;
+      const meta = await open.createThread({
+        model,
+        fast,
+        ...(effort === undefined ? {} : { effort }),
+        ...(parentId === undefined ? {} : { parentId }),
+        canvasIds: canvasId === undefined ? [] : [canvasId],
+      });
+      threadId = meta.id;
+      if (canvasId !== undefined) {
+        const id = meta.id;
+        await open.updateCanvas(
+          canvasId,
+          (c) => ({ ...c, threadIds: [...c.threadIds, id] }),
+          ctx.by,
+        );
+      }
+    } else {
+      // Messaging a snoozed or settled thread revives it.
+      await open.updateThread(threadId, (meta) => without(meta, "snoozedUntil", "settledAt"));
+    }
+    await ctx.modules.agents.send(
+      open,
+      threadId,
+      {
+        text,
+        attachments,
+        model,
+        fast,
+        by: ctx.by,
+        ...(selection === undefined ? {} : { selection }),
+        ...(effort === undefined ? {} : { effort }),
+      },
+      mode,
+    );
+    return { threadId };
+  },
+  async "thread.queued"({ designId, threadId, queuedId, text }, ctx) {
+    return ctx.modules.agents.editQueued(await ctx.hub.open(designId), threadId, queuedId, text);
+  },
+  async "thread.interrupt"({ designId, threadId }, ctx) {
+    await ctx.modules.agents.interrupt(await ctx.hub.open(designId), threadId);
+    return null;
+  },
+  "thread.snooze": ({ designId, threadId, until }, ctx) =>
+    updateThread(ctx, designId, threadId, (meta) =>
+      until === null ? without(meta, "snoozedUntil") : { ...meta, snoozedUntil: until },
+    ),
+  "thread.settle": ({ designId, threadId, settled }, ctx) =>
+    updateThread(ctx, designId, threadId, (meta) =>
+      settled ? { ...meta, settledAt: Date.now() } : without(meta, "settledAt"),
+    ),
+  "thread.rename": ({ designId, threadId, title }, ctx) =>
+    updateThread(ctx, designId, threadId, (meta) => ({ ...meta, title })),
+  async "thread.history"({ designId, threadId }, ctx) {
+    return (await ctx.hub.open(designId)).history(threadId);
+  },
+
+  "settings.get": (_, { modules }) => modules.store.settings(),
+  async "settings.set"({ settings }, { hub, modules }) {
+    const patch = Object.fromEntries(
+      Object.entries(settings).filter(([, v]) => v !== undefined),
+    ) as Parameters<typeof modules.store.setSettings>[0];
+    const next = await modules.store.setSettings(patch);
+    hub.broadcastAll({ type: "settings", settings: next });
+    return next;
+  },
+  "claude.status": (_, { modules }) => modules.agents.status(),
+
+  async "tokens.get"({ designId }, ctx) {
+    return ctx.modules.source.tokens((await ctx.hub.open(designId)).design);
+  },
+  async "tokens.set"({ designId, ...input }, ctx) {
+    return ctx.modules.source.setToken((await ctx.hub.open(designId)).design, input);
+  },
+  async "components.list"({ designId }, ctx) {
+    return ctx.modules.source.components((await ctx.hub.open(designId)).design);
+  },
+
+  async "frame.error"({ designId, frameId, kind, message, stack }, { modules }) {
+    modules.previews.reportError(designId, {
+      frameId,
+      kind,
+      message,
+      at: Date.now(),
+      ...(stack === undefined ? {} : { stack }),
+    });
+    return null;
+  },
+};
+
+async function findCanvas(open: OpenDesign, canvasId: string): Promise<Canvas> {
+  const canvas = (await open.canvases()).find((c) => c.id === canvasId);
+  if (!canvas) throw new Refused(`no canvas ${canvasId} in this design`, "not-found");
+  return canvas;
+}
+
+async function updateCanvas(
+  ctx: Context,
+  designId: string,
+  canvasId: string,
+  fn: (canvas: Canvas) => Canvas,
+): Promise<Canvas> {
+  return (await ctx.hub.open(designId)).updateCanvas(canvasId, fn, ctx.by);
+}
+
+function updateComment(
+  ctx: Context,
+  designId: string,
+  canvasId: string,
+  commentId: string,
+  fn: (comment: Comment) => Comment,
+): Promise<Canvas> {
+  return updateCanvas(ctx, designId, canvasId, (canvas) => {
+    if (!canvas.comments.some((c) => c.id === commentId)) {
+      throw new Refused(`no comment ${commentId} on this canvas`, "not-found");
+    }
+    return { ...canvas, comments: canvas.comments.map((c) => (c.id === commentId ? fn(c) : c)) };
+  });
+}
+
+async function updateThread(
+  ctx: Context,
+  designId: string,
+  threadId: string,
+  fn: (meta: ThreadMeta) => ThreadMeta,
+): Promise<ThreadMeta> {
+  return (await ctx.hub.open(designId)).updateThread(threadId, (meta) => ({
+    ...fn(meta),
+    updatedAt: Date.now(),
+  }));
+}
+
+/** A copy of `value` without `keys`, for clearing optional fields. */
+function without<T extends object, K extends keyof T>(value: T, ...keys: K[]): Omit<T, K> {
+  const copy = { ...value };
+  for (const key of keys) delete copy[key];
+  return copy;
+}

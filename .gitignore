@@ -51,3 +51,6 @@ sweep.timestamp
 
 # Evidence from .agents/skills/verify-finite runs
 .verify/
+
+# Designs saved by the Node dev server (FINITE_DATA_DIR default)
+.finite-data

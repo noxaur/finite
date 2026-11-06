@@ -1,0 +1,35 @@
+{
+  "name": "@finite/server",
+  "version": "0.0.2",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/main.ts",
+    "start": "node src/main.ts",
+    "test": "vp test"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "catalog:",
+    "@anthropic-ai/sdk": "catalog:",
+    "@babel/parser": "catalog:",
+    "@babel/types": "catalog:",
+    "@finite/protocol": "workspace:*",
+    "@modelcontextprotocol/sdk": "catalog:",
+    "busboy": "catalog:",
+    "chrome-launcher": "catalog:",
+    "fflate": "catalog:",
+    "magic-string": "catalog:",
+    "postcss": "catalog:",
+    "puppeteer-core": "catalog:",
+    "tailwind-merge": "catalog:",
+    "ws": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/busboy": "catalog:",
+    "@types/node": "catalog:",
+    "@types/ws": "catalog:",
+    "typescript": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}

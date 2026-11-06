@@ -12,6 +12,7 @@
     "allowJs": true,
     "skipLibCheck": true,
     "noEmit": true,
+    "allowImportingTsExtensions": true,
     "incremental": true,
     "plugins": [
       {

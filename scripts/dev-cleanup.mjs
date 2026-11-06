@@ -51,7 +51,7 @@ try {
 
 for (const pid of pids) {
   const command = run("ps", ["-o", "command=", "-p", String(pid)]);
-  if (!/finite-server|next-server|next dev/.test(command)) {
+  if (!/finite-server|next-server|next dev|node (--watch )?src\/main\.ts/.test(command)) {
     console.error(`dev-cleanup: ${command || `process ${pid}`} holds a dev port; stop it first.`);
     process.exit(1);
   }

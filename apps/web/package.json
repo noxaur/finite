@@ -8,6 +8,7 @@
     "test": "vp test"
   },
   "dependencies": {
+    "@finite/protocol": "workspace:*",
     "@stylexjs/stylex": "catalog:",
     "effect": "catalog:",
     "next": "catalog:",
