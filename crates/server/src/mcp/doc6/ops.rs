@@ -237,7 +237,7 @@ fn kind_of(fields: &Fields) -> Result<Kind, String> {
     let has = |k: &str| fields.get(k).is_some_and(|v| !v.is_null());
     Ok(if (has("width") || has("from")) && has("name") {
         Kind::Artboard
-    } else if has("detach") {
+    } else if has("detach") && !has("copy") {
         Kind::Component
     } else if has("content") || has("contentBase64") {
         Kind::Import
@@ -419,80 +419,262 @@ fn format_of(name: &str) -> &'static str {
     }
 }
 
-/// A short summary of the ops, for the change's label when the edit has
-/// no status: `Replace #3b82f6 → #f97316, css on .btn`.
+/// A one-line label for an edit that has no status, about
+/// [`finite_design::label::SUMMARY`] characters: `Replace #3b82f6 → #f97316, CSS on .btn`.
+/// Selectors show as `#a, #b`, or `N elements` when there are more than two
+/// or the pair is long. The same phrase twice in one edit is listed once.
 pub(super) fn summary(steps: &[Step]) -> String {
     const SHOWN: usize = 3;
-    let select = |f: &Fields| select_of(f).map(|s| plain(&s)).unwrap_or_default();
-    let parts: Vec<String> = steps
-        .iter()
-        .take(SHOWN)
-        .map(|step| {
-            let f = &step.fields;
-            match step.kind {
-                Kind::Artboard => match text(f, "from") {
-                    Some(from) => format!("artboard from {from}"),
-                    None => format!("artboard {:?}", text(f, "name").unwrap_or_default()),
-                },
-                Kind::Html => format!("html on {}", select(f)),
-                Kind::Css => match select_of(f) {
-                    Some(s) => format!("css on {}", plain(&s)),
-                    None => {
-                        let css = text(f, "css").unwrap_or_default();
-                        let selectors: Vec<String> = finite_design::css::patch_rules(&css)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(|r| r.selector)
-                            .take(2)
-                            .collect();
-                        format!("css on {}", selectors.join(", "))
-                    }
-                },
-                Kind::Attrs => format!("attrs on {}", select(f)),
-                Kind::Move => format!("move {}", select(f)),
-                Kind::Remove => format!("remove {}", select(f)),
-                Kind::Replace => format!(
-                    "replace {} → {}",
-                    text(f, "find").unwrap_or_default(),
-                    text(f, "replace").unwrap_or_default()
-                ),
-                Kind::Page => {
-                    let name = ["create", "rename", "remove", "name"]
-                        .iter()
-                        .find_map(|k| text(f, k))
-                        .unwrap_or_default();
-                    format!("page {name:?}")
-                }
-                Kind::Tokens => {
-                    let names: Vec<String> = object(f, "set")
-                        .ok()
-                        .flatten()
-                        .map(|m| m.keys().take(3).cloned().collect())
-                        .unwrap_or_default();
-                    format!("tokens {}", names.join(", ")).trim_end().to_owned()
-                }
-                Kind::Component if flag(f, "detach") => format!("detach {}", select(f)),
-                Kind::Component => match text(f, "name") {
-                    Some(name) => format!("component {name:?}"),
-                    None => format!("component {}", select(f)),
-                },
-                Kind::Import => match step.import.as_ref() {
-                    Some(import) => {
-                        format!("import {}", import.label().trim_start_matches("Import "))
-                    }
-                    None => "import".into(),
-                },
-            }
-        })
-        .collect();
-    let mut label = parts.join(", ");
-    if steps.len() > SHOWN {
-        label.push_str(&format!(" and {} more", steps.len() - SHOWN));
+    let mut parts = Vec::new();
+    for step in steps {
+        let part = step_phrase(step);
+        if !parts.contains(&part) {
+            parts.push(part);
+        }
     }
-    let mut chars = label.chars();
-    let label = match chars.next() {
-        Some(first) => first.to_uppercase().chain(chars).collect(),
-        None => "Edit".to_owned(),
+    let extra = parts.len().saturating_sub(SHOWN);
+    let mut label = parts.into_iter().take(SHOWN).collect::<Vec<_>>().join(", ");
+    if extra > 0 {
+        label.push_str(&format!(" and {extra} more"));
+    }
+    let label = one_line(&label);
+    let label = if label.is_empty() {
+        "Edit".to_owned()
+    } else {
+        label
     };
-    finite_design::label::clip(&label, finite_design::label::STATUS)
+    finite_design::label::clip(&label, finite_design::label::SUMMARY)
+}
+
+/// One op, with its name capitalized the same way every time.
+fn step_phrase(step: &Step) -> String {
+    let f = &step.fields;
+    let target = || selector_label(&select_of(f).unwrap_or(Value::Null));
+    match step.kind {
+        Kind::Artboard => match text(f, "from") {
+            Some(from) => format!("Artboard from {}", one_line(&from)),
+            None => format!(
+                "Artboard {:?}",
+                one_line(&text(f, "name").unwrap_or_default())
+            ),
+        },
+        Kind::Html => on("HTML", &target()),
+        Kind::Css => on("CSS", &css_target(f)),
+        Kind::Attrs => on("Attrs", &target()),
+        Kind::Move => targeting("Move", &target()),
+        Kind::Remove => targeting("Remove", &target()),
+        Kind::Replace => format!(
+            "Replace {} → {}",
+            bit(&text(f, "find").unwrap_or_default()),
+            bit(&text(f, "replace").unwrap_or_default())
+        ),
+        Kind::Page => {
+            let name = ["create", "rename", "remove", "name"]
+                .iter()
+                .find_map(|k| text(f, k))
+                .unwrap_or_default();
+            format!("Page {:?}", one_line(&name))
+        }
+        Kind::Tokens => {
+            let names: Vec<String> = object(f, "set")
+                .ok()
+                .flatten()
+                .map(|m| m.keys().take(3).cloned().collect())
+                .unwrap_or_default();
+            let names = names.join(", ");
+            if names.is_empty() {
+                "Tokens".to_owned()
+            } else {
+                format!("Tokens {names}")
+            }
+        }
+        Kind::Component if flag(f, "detach") => targeting("Detach", &target()),
+        Kind::Component => match text(f, "name") {
+            Some(name) => format!("Component {:?}", one_line(&name)),
+            None => targeting("Component", &target()),
+        },
+        Kind::Import => match step.import.as_ref() {
+            Some(import) => {
+                let rest = one_line(import.label().trim_start_matches("Import "));
+                if rest.is_empty() {
+                    "Import".to_owned()
+                } else {
+                    format!("Import {rest}")
+                }
+            }
+            None => "Import".into(),
+        },
+    }
+}
+
+/// `Op on target`, or just `Op` when nothing was selected.
+fn on(op: &str, target: &str) -> String {
+    if target.is_empty() {
+        op.to_owned()
+    } else {
+        format!("{op} on {target}")
+    }
+}
+
+/// `Op target`, or just `Op` when nothing was selected.
+fn targeting(op: &str, target: &str) -> String {
+    if target.is_empty() {
+        op.to_owned()
+    } else {
+        format!("{op} {target}")
+    }
+}
+
+/// Selectors for a label. An array is `#a, #b`, not JSON. More than two,
+/// or two that would crowd the label, become `N elements`.
+fn selector_label(value: &Value) -> String {
+    let items: Vec<String> = match value {
+        Value::Array(items) => items.iter().filter_map(selector_text).collect(),
+        other => selector_text(other).into_iter().collect(),
+    };
+    list_label(&items)
+}
+
+fn selector_text(value: &Value) -> Option<String> {
+    let text = match value {
+        Value::String(s) => s.clone(),
+        Value::Null => return None,
+        other => other.to_string(),
+    };
+    let text = one_line(&text);
+    (!text.is_empty()).then_some(text)
+}
+
+/// The selectors a css op names: its `select`, or the rules in `css`.
+fn css_target(fields: &Fields) -> String {
+    if let Some(select) = select_of(fields) {
+        return selector_label(&select);
+    }
+    let css = text(fields, "css").unwrap_or_default();
+    let selectors: Vec<String> = finite_design::css::patch_rules(&css)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|rule| one_line(&rule.selector))
+        .filter(|selector| !selector.is_empty())
+        .collect();
+    list_label(&selectors)
+}
+
+/// `#a, #b` for one or two short selectors, otherwise `N elements`.
+fn list_label(items: &[String]) -> String {
+    /// Two selectors longer than this crowd a 60-character label.
+    const PAIR: usize = 40;
+    let mut unique = Vec::new();
+    for item in items {
+        if !unique.contains(item) {
+            unique.push(item.clone());
+        }
+    }
+    match unique.len() {
+        0 => String::new(),
+        1 => unique[0].clone(),
+        2 => {
+            let joined = format!("{}, {}", unique[0], unique[1]);
+            if joined.chars().count() <= PAIR {
+                joined
+            } else {
+                "2 elements".to_owned()
+            }
+        }
+        n => format!("{n} elements"),
+    }
+}
+
+/// `text` as one line, cut so a find and a replace both fit in the label.
+fn bit(text: &str) -> String {
+    finite_design::label::clip(&one_line(text), 24)
+}
+
+/// `text` with surrounding whitespace and line breaks collapsed.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn step(kind: Kind, fields: serde_json::Value) -> Step {
+        Step {
+            kind,
+            fields: serde_json::from_value(fields).unwrap(),
+            html: None,
+            import: None,
+        }
+    }
+
+    #[test]
+    fn labels_are_one_line_with_selectors_not_json() {
+        let attrs = summary(&[step(
+            Kind::Attrs,
+            json!({ "select": ["#rg3abcde", "#ab12cd34"], "set": { "title": "Hi" } }),
+        )]);
+        assert_eq!(attrs, "Attrs on #rg3abcde, #ab12cd34");
+
+        let many = summary(&[step(Kind::Move, json!({ "select": ["#a", "#b", "#c"] }))]);
+        assert_eq!(many, "Move 3 elements");
+
+        let repeated = summary(&[step(
+            Kind::Css,
+            json!({ "select": ["#a", "#a"], "css": "color: red" }),
+        )]);
+        assert_eq!(repeated, "CSS on #a");
+
+        let pair = summary(&[step(
+            Kind::Css,
+            json!({
+                "select": ["div.card ".repeat(6), "section.panel ".repeat(4)],
+                "css": "color: red",
+            }),
+        )]);
+        assert_eq!(pair, "CSS on 2 elements");
+
+        let twice = summary(&[
+            step(
+                Kind::Html,
+                json!({ "select": "#355ttrw2", "html": "<p>a</p>" }),
+            ),
+            step(
+                Kind::Html,
+                json!({ "select": "#355ttrw2", "html": "<p>b</p>" }),
+            ),
+        ]);
+        assert_eq!(twice, "HTML on #355ttrw2");
+
+        let mixed = summary(&[
+            step(Kind::Html, json!({ "select": "#a", "html": "<p>a</p>" })),
+            step(Kind::Css, json!({ "select": ".card", "css": "margin: 0" })),
+        ]);
+        assert_eq!(mixed, "HTML on #a, CSS on .card");
+
+        let css = summary(&[step(
+            Kind::Css,
+            json!({ "css": ".a { color: red } .b { color: blue } .c { color: green }" }),
+        )]);
+        assert_eq!(css, "CSS on 3 elements");
+
+        let replaced = summary(&[step(
+            Kind::Replace,
+            json!({
+                "find": ".al svg path {\n  stroke-width: 1.6\n}",
+                "replace": ".ins svg path {\n  stroke-width: 2\n}",
+            }),
+        )]);
+        assert!(!replaced.contains('\n'), "{replaced}");
+        assert!(replaced.starts_with("Replace .al svg path"), "{replaced}");
+        assert!(replaced.contains('→'), "{replaced}");
+        assert!(
+            replaced.chars().count() <= finite_design::label::SUMMARY,
+            "{replaced}"
+        );
+
+        assert_eq!(summary(&[]), "Edit");
+    }
 }

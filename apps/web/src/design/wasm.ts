@@ -38,6 +38,7 @@ interface Exports {
   is_safe_attr(nameLen: number, valueLen: number): number;
   base_css(): number;
   csp(): number;
+  bootstrap(): number;
 }
 
 const encoder = new TextEncoder();
@@ -49,6 +50,8 @@ export class DesignModel {
   readonly baseCss: string;
   /** The content policy for artboards that run scripts (`html::CSP`). */
   readonly csp: string;
+  /** The script that runs first in artboards that run scripts (`html::BOOTSTRAP`). */
+  readonly bootstrap: string;
   /** Set once the module has panicked. A panic aborts mid-call, so its state can't be trusted. */
   private broken: Error | null = null;
   private readonly freeHandle = new FinalizationRegistry<number>((handle) => {
@@ -59,6 +62,7 @@ export class DesignModel {
     exports.init();
     this.baseCss = this.call(() => exports.base_css());
     this.csp = this.call(() => exports.csp());
+    this.bootstrap = this.call(() => exports.bootstrap());
   }
 
   /** `html::is_safe_attr`: no event handlers, no `srcdoc`, no script URLs. */

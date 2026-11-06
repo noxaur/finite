@@ -1,16 +1,20 @@
 //! How tools describe the document to agents: compact outlines and node JSON.
 
-use std::fmt::Write;
+use std::{borrow::Cow, cell::OnceCell, fmt::Write};
 
 use finite_design::{
     Design, Document, NodeKind,
     comment::{Audience, Comment},
+    tokens,
 };
 
-/// The most text one tool result returns, about 15,000 tokens. Claude Code
-/// cuts MCP results at 25,000 tokens by default, wherever that falls, and a
-/// long result crowds out the rest of the agent's context anyway.
-pub(super) const OUTPUT_LIMIT: usize = 60_000;
+use super::layout::{layout_notes, overlap_note};
+
+/// The most text one tool result returns, about 10,000 tokens. Claude Code
+/// cuts MCP results at 25,000 tokens by default, wherever that falls, and
+/// other clients cap lower: a 56,000-character read went over one's limit
+/// twice. A long result crowds out the rest of the agent's context anyway.
+pub(super) const OUTPUT_LIMIT: usize = 40_000;
 
 /// Cuts `text` to [`OUTPUT_LIMIT`] at the end of a line, and says how to see
 /// the rest with `hint`.
@@ -31,14 +35,36 @@ pub(super) fn cut(text: String, hint: &str) -> String {
     )
 }
 
+/// The first `shown` of `ids` like `#a, #b, #c, … +8`, for lines that name
+/// many nodes at once.
+pub(super) fn some_ids<S: AsRef<str>>(ids: &[S], shown: usize) -> String {
+    let mut text: Vec<String> = ids
+        .iter()
+        .take(shown)
+        .map(|id| format!("#{}", id.as_ref()))
+        .collect();
+    if ids.len() > shown {
+        text.push(format!("… +{}", ids.len() - shown));
+    }
+    text.join(", ")
+}
+
 /// One line per node, indented by depth: `tag "Name" #id [width×height] "text"`.
 pub(super) fn outline(doc: &Document, id: &str, max_depth: usize) -> String {
     let mut out = String::new();
-    outline_into(doc, id, 0, max_depth, &mut out);
+    outline_into(doc, id, 0, max_depth, &OnceCell::new(), &mut out);
     out
 }
 
-fn outline_into(doc: &Document, id: &str, depth: usize, max_depth: usize, out: &mut String) {
+/// `sheets` holds the artboard's `<style>` text once an element needs it.
+fn outline_into(
+    doc: &Document,
+    id: &str,
+    depth: usize,
+    max_depth: usize,
+    sheets: &OnceCell<String>,
+    out: &mut String,
+) {
     let Some(node) = doc.get(id) else { return };
     let pad = "  ".repeat(depth);
     match &node.kind {
@@ -75,6 +101,10 @@ fn outline_into(doc: &Document, id: &str, depth: usize, max_depth: usize, out: &
             }
             let size = |k: &str| node.styles.get(k).map(String::as_str);
             if let (Some(w), Some(h)) = (size("width"), size("height")) {
+                let (w, h) = (
+                    resolve_vars(doc, node, w, sheets),
+                    resolve_vars(doc, node, h, sheets),
+                );
                 let _ = write!(out, " [{w} × {h}]");
             }
             if let Some(display) = size("display") {
@@ -95,10 +125,114 @@ fn outline_into(doc: &Document, id: &str, depth: usize, max_depth: usize, out: &
         _ => {
             out.push('\n');
             for child in children {
-                outline_into(doc, &child.id, depth + 1, max_depth, out);
+                outline_into(doc, &child.id, depth + 1, max_depth, sheets, out);
             }
         }
     }
+}
+
+/// `value` with each `var(--token)` the design defines replaced by the
+/// token's value in the mode of `node`'s artboard, so an outline shows
+/// `44px` where the style says `var(--button-h)`. A `var()` naming no token
+/// takes its fallback, or stays as it is. A `var()` stays as written where
+/// `node` or an ancestor sets that property in its style attribute, or the
+/// artboard's `<style>` blocks mention setting it: the renderers compute
+/// something else there, and the outline doesn't evaluate stylesheets.
+fn resolve_vars<'a>(
+    doc: &Document,
+    node: &finite_design::Node,
+    value: &'a str,
+    sheets: &OnceCell<String>,
+) -> Cow<'a, str> {
+    if !value.contains("var(") {
+        return Cow::Borrowed(value);
+    }
+    let mode = doc.artboard_of(&node.id).map(|board| doc.mode_of(board));
+    let mode = mode.unwrap_or(doc.first_mode());
+    let set_nearer = |name: &str| {
+        let mut at = Some(node);
+        while let Some(n) = at {
+            if n.styles.contains_key(name) {
+                return true;
+            }
+            at = n.parent.as_deref().and_then(|p| doc.get(p));
+        }
+        let sheets = sheets.get_or_init(|| {
+            let mut text = doc.css().unwrap_or("").to_owned();
+            if let Some(board) = doc.artboard_of(&node.id) {
+                for n in doc.subtree(&board.id) {
+                    if n.tag().is_some_and(|t| t.eq_ignore_ascii_case("style")) {
+                        for child in doc.children(Some(&n.id)) {
+                            text.push_str(child.text.as_deref().unwrap_or(""));
+                        }
+                    }
+                }
+            }
+            text
+        });
+        sets_property(sheets, name)
+    };
+    Cow::Owned(substitute(doc, mode, value, 0, &set_nearer))
+}
+
+/// Whether `css` declares the custom property `name`, as in `--name: 1px`.
+fn sets_property(css: &str, name: &str) -> bool {
+    // A whole name: `--gap` isn't set by `--component--gap: 24px`.
+    let ident = |c: char| c.is_alphanumeric() || c == '-' || c == '_' || !c.is_ascii();
+    css.match_indices(name).any(|(i, _)| {
+        !css[..i].chars().next_back().is_some_and(ident)
+            && css[i + name.len()..].trim_start().starts_with(':')
+    })
+}
+
+/// How deep a token's value may itself use `var()` before it stays as written.
+const VAR_DEPTH: usize = 4;
+
+fn substitute(
+    doc: &Document,
+    mode: &str,
+    text: &str,
+    depth: usize,
+    set_nearer: &dyn Fn(&str) -> bool,
+) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("var(") {
+        out.push_str(&rest[..start]);
+        let inner = &rest[start + 4..];
+        // The matching close paren, so a fallback like `calc(1px + 2px)` stays whole.
+        let mut open = 1;
+        let end = inner.find(|c| {
+            match c {
+                '(' => open += 1,
+                ')' => open -= 1,
+                _ => {}
+            }
+            open == 0
+        });
+        let Some(end) = end else { break };
+        let (name, fallback) = match inner[..end].split_once(',') {
+            Some((name, fallback)) => (name.trim(), Some(fallback.trim())),
+            None => (inner[..end].trim(), None),
+        };
+        let value = if set_nearer(name) {
+            None
+        } else {
+            doc.tokens()
+                .get(name)
+                .and_then(|values| tokens::value(doc, values, mode))
+                .or(fallback)
+        };
+        match value {
+            Some(value) if depth < VAR_DEPTH => {
+                out.push_str(&substitute(doc, mode, value, depth + 1, set_nearer))
+            }
+            _ => out.push_str(&rest[start..start + 4 + end + 1]),
+        }
+        rest = &inner[end + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// How much of a text node the outline shows. Layer names stop at 24
@@ -300,21 +434,44 @@ pub(super) fn shot(image: &crate::screenshot::Image) -> String {
     let px = |v: f64| format!("{}", (v * 10.0).round() / 10.0);
     let a = &image.area;
     let b = &image.bounds;
-    let mut out = format!(
-        "#{} in artboard #{}: shows {}×{} at ({}, {}); the node's box is {}×{} at ({}, {}). {}×{} pixels.",
-        image.node,
-        image.artboard,
-        px(a.width),
-        px(a.height),
-        px(a.x),
-        px(a.y),
-        px(b.width),
-        px(b.height),
-        px(b.x),
-        px(b.y),
-        image.pixel_width,
-        image.pixel_height,
-    );
+    // The shot is snapped out to whole pixels, so each of its edges is under
+    // one from the box's; that isn't worth a second set of numbers.
+    let same = (a.x - b.x).abs() < 1.0
+        && (a.y - b.y).abs() < 1.0
+        && ((a.x + a.width) - (b.x + b.width)).abs() < 1.0
+        && ((a.y + a.height) - (b.y + b.height)).abs() < 1.0;
+    let mut out = if image.node == image.artboard {
+        format!("Artboard #{}", image.artboard)
+    } else {
+        format!("#{} in artboard #{}", image.node, image.artboard)
+    };
+    if same {
+        let _ = write!(
+            out,
+            ": shows the node's box, {}×{} at ({}, {}). {}×{} pixels.",
+            px(b.width),
+            px(b.height),
+            px(b.x),
+            px(b.y),
+            image.pixel_width,
+            image.pixel_height,
+        );
+    } else {
+        let _ = write!(
+            out,
+            ": shows {}×{} at ({}, {}); the node's box is {}×{} at ({}, {}). {}×{} pixels.",
+            px(a.width),
+            px(a.height),
+            px(a.x),
+            px(a.y),
+            px(b.width),
+            px(b.height),
+            px(b.x),
+            px(b.y),
+            image.pixel_width,
+            image.pixel_height,
+        );
+    }
     if image.element != image.node {
         let _ = write!(out, " A text node: captured its parent #{}.", image.element);
     }
@@ -343,152 +500,35 @@ pub(super) fn shot(image: &crate::screenshot::Image) -> String {
             ", and is cut off there; pass revealOverflow to see it."
         });
     }
-    if let Some(settled) = image.settled {
-        let _ = write!(
-            out,
-            " It has scripts or animations, captured {:.1}s after load.",
-            settled.as_secs_f64()
-        );
-    }
     out
 }
 
-/// How many elements a layout note names before it says how many more.
-const LAYOUT_NAMED: usize = 8;
-
-/// What a screenshot's measurements say about an artboard's layout: content
-/// cut off at its edges, and text that runs past its own box. Agents only
-/// spotted these in the image before, and often didn't, so the note names
-/// the elements and says what to change.
-pub(super) fn layout_notes(
-    doc: &Document,
-    artboard: &str,
-    boxes: &[crate::screenshot::ElementBox],
-    surface: super::Surface,
-) -> String {
-    use std::collections::{HashMap, HashSet};
-    let by_id: HashMap<&str, &crate::screenshot::ElementBox> =
-        boxes.iter().map(|b| (b.id.as_str(), b)).collect();
-    let Some(board) = by_id.get(artboard) else {
-        return String::new();
-    };
-    let line = |id: &str| {
-        outline(doc, id, 0)
-            .lines()
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_owned()
-    };
-    // Elements reaching past the artboard's bottom or right edge. Only the
-    // outermost is named: its children stick out because it does.
-    let (bottom, right) = (board.y + board.height, board.x + board.width);
-    let out: HashSet<&str> = boxes
-        .iter()
-        .filter(|b| {
-            b.id != artboard && (b.y + b.height > bottom + 1.0 || b.x + b.width > right + 1.0)
-        })
-        .map(|b| b.id.as_str())
-        .collect();
-    let mut notes = Vec::new();
-    if !out.is_empty() {
-        let content_bottom = boxes.iter().map(|b| b.y + b.height).fold(bottom, f64::max) - board.y;
-        let content_right = boxes.iter().map(|b| b.x + b.width).fold(right, f64::max) - board.x;
-        let outermost: Vec<&str> = boxes
-            .iter()
-            .map(|b| b.id.as_str())
-            .filter(|id| out.contains(id))
-            .filter(|id| {
-                doc.get(id)
-                    .and_then(|n| n.parent.as_deref())
-                    .is_none_or(|p| !out.contains(p))
-            })
-            .collect();
-        let mut text = String::from("Layout: content is cut off by the artboard's edge.");
-        if content_bottom > board.height + 1.0 {
-            let _ = write!(
-                text,
-                " It is {content_bottom:.0} px tall, but the artboard is {:.0} px. If it should all show, make the artboard taller with {}.",
-                board.height,
-                if surface.doc6() {
-                    format!(
-                        "{{\"op\": \"css\", \"css\": \"#{artboard} {{ height: {content_bottom:.0}px }}\"}}"
-                    )
-                } else {
-                    format!(
-                        "update_styles {{\"updates\": [{{\"nodeIds\": [\"{artboard}\"], \"styles\": {{\"height\": \"{content_bottom:.0}px\"}}}}]}}"
-                    )
-                }
-            );
+/// Which of `images` have scripts or animations, and how long they ran
+/// before capture. Every image waits the same, so a call says it once.
+pub(super) fn settled_note<'a>(
+    images: impl Iterator<Item = &'a crate::screenshot::Image>,
+) -> Option<String> {
+    let mut settled = None;
+    let mut nodes = Vec::new();
+    for image in images {
+        if let Some(wait) = image.settled {
+            settled = Some(wait);
+            nodes.push(image.node.as_str());
         }
-        if content_right > board.width + 1.0 {
-            let _ = write!(
-                text,
-                " It is {content_right:.0} px wide, but the artboard is {:.0} px.",
-                board.width
-            );
-        }
-        text.push_str(" Sticking out:");
-        for id in outermost.iter().take(LAYOUT_NAMED) {
-            let b = by_id[id];
-            let _ = write!(
-                text,
-                "\n  {} (ends at x {:.0}, y {:.0})",
-                line(id),
-                b.x + b.width - board.x,
-                b.y + b.height - board.y
-            );
-        }
-        if outermost.len() > LAYOUT_NAMED {
-            let _ = write!(text, "\n  … and {} more", outermost.len() - LAYOUT_NAMED);
-        }
-        notes.push(text);
     }
-    let spilling: Vec<&crate::screenshot::ElementBox> = boxes
-        .iter()
-        // Down, a few pixels is a tall glyph, like an emoji, in a tight line height.
-        .filter(|b| b.text_overflow.0 > 2.0 || b.text_overflow.1 > 8.0)
-        .collect();
-    if !spilling.is_empty() {
-        let mut text =
-            String::from("Layout: text runs past its box, so it may overlap or be clipped:");
-        for b in spilling.iter().take(LAYOUT_NAMED) {
-            let _ = write!(text, "\n  {} ", line(&b.id));
-            match b.text_overflow {
-                (x, y) if x > 2.0 && y > 8.0 => {
-                    let _ = write!(text, "({x:.0} px too wide, {y:.0} px too tall)");
-                }
-                (x, _) if x > 2.0 => {
-                    let _ = write!(text, "({x:.0} px too wide)");
-                }
-                (_, y) => {
-                    let _ = write!(text, "({y:.0} px too tall)");
-                }
-            }
-        }
-        if spilling.len() > LAYOUT_NAMED {
-            let _ = write!(text, "\n  … and {} more", spilling.len() - LAYOUT_NAMED);
-        }
-        notes.push(text);
-    }
-    if notes.is_empty() {
-        let used = boxes
-            .iter()
-            .filter(|b| b.id != artboard)
-            .map(|b| b.y + b.height)
-            .fold(board.y, f64::max)
-            - board.y;
-        return format!(
-            "Layout: nothing is cut off, and no text overflows. The lowest element ends at y {used:.0}; the artboard is {:.0} px tall.",
-            board.height
-        );
-    }
-    notes.join("\n")
+    let wait = settled?;
+    Some(format!(
+        "{} {} scripts or animations, so {} captured {:.1}s after load.",
+        some_ids(&nodes, 3),
+        if nodes.len() == 1 { "has" } else { "have" },
+        if nodes.len() == 1 {
+            "it was"
+        } else {
+            "they were"
+        },
+        wait.as_secs_f64()
+    ))
 }
-
-/// How many text elements the overlap check compares, so a huge artboard
-/// stays fast. It compares every pair, so this is at most about 2 million.
-const OVERLAP_CHECKED: usize = 2_000;
 
 /// The subtree at `root` as an outline with where each element rendered,
 /// relative to its artboard, then what the layout check found in it:
@@ -525,7 +565,7 @@ pub(super) fn rendered_outline(
     if !checked.starts_with("Layout: nothing is cut off") {
         notes.push(checked);
     }
-    notes.extend(overlap_note(doc, &in_scope));
+    notes.extend(overlap_note(doc, board, &in_scope));
     if notes.is_empty() {
         out.push_str("Layout: nothing is cut off, no text overflows its box, and no text overlaps other text.\n");
     } else {
@@ -533,58 +573,6 @@ pub(super) fn rendered_outline(
         out.push('\n');
     }
     out
-}
-
-/// The layout check's note on text elements in `boxes` that overlap
-/// each other, other than an element and what's inside it.
-pub(super) fn overlap_note(
-    doc: &Document,
-    boxes: &[crate::screenshot::ElementBox],
-) -> Option<String> {
-    let text: Vec<&crate::screenshot::ElementBox> = boxes
-        .iter()
-        .filter(|b| b.has_text && b.width > 0.0 && b.height > 0.0)
-        .take(OVERLAP_CHECKED)
-        .collect();
-    let mut pairs = Vec::new();
-    for (i, a) in text.iter().enumerate() {
-        for b in &text[i + 1..] {
-            let (w, h) = (
-                (a.x + a.width).min(b.x + b.width) - a.x.max(b.x),
-                (a.y + a.height).min(b.y + b.height) - a.y.max(b.y),
-            );
-            if w > 2.0
-                && h > 2.0
-                && !doc.is_ancestor(&a.id, &b.id)
-                && !doc.is_ancestor(&b.id, &a.id)
-            {
-                pairs.push((a.id.as_str(), b.id.as_str(), w, h));
-            }
-        }
-    }
-    if !pairs.is_empty() {
-        let line = |id: &str| {
-            outline(doc, id, 0)
-                .lines()
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_owned()
-        };
-        let mut text = format!(
-            "Layout: {} pair{} of text elements overlap. Check that's intended, like a badge over a card:",
-            pairs.len(),
-            if pairs.len() == 1 { "" } else { "s" }
-        );
-        for (a, b, w, h) in pairs.iter().take(LAYOUT_NAMED) {
-            let _ = write!(text, "\n  {} and {} ({w:.0} × {h:.0} px)", line(a), line(b));
-        }
-        if pairs.len() > LAYOUT_NAMED {
-            let _ = write!(text, "\n  … and {} more", pairs.len() - LAYOUT_NAMED);
-        }
-        return Some(text);
-    }
-    None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -669,3 +657,86 @@ fn rendered_into(
 
 /// Elements whose content is code, not text.
 const RAW_TEXT: &[&str] = &["style", "script"];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::screenshot::{Image, Overflow, Rect};
+    use std::time::Duration;
+
+    fn image(node: &str, artboard: &str, settled: Option<u64>) -> Image {
+        let rect = Rect::new(0.0, 0.0, 100.0, 50.0);
+        Image {
+            data: Vec::new(),
+            mime: "image/png",
+            node: node.into(),
+            artboard: artboard.into(),
+            element: node.into(),
+            area: rect,
+            bounds: rect,
+            pixel_width: 100,
+            pixel_height: 50,
+            scale: 1.0,
+            requested_scale: 1.0,
+            cut_off: false,
+            overflow: Overflow::default(),
+            overflow_shown: false,
+            settled: settled.map(Duration::from_secs),
+            boxes: None,
+        }
+    }
+
+    #[test]
+    fn a_shot_snapped_to_whole_pixels_does_not_report_a_second_box() {
+        let shot_of = |area, bounds| {
+            shot(&Image {
+                area,
+                bounds,
+                ..image("n", "a", None)
+            })
+        };
+        let snapped = shot_of(
+            Rect::new(0.0, 0.0, 390.0, 338.0),
+            Rect::new(0.0, 0.4, 390.0, 337.0),
+        );
+        assert!(
+            snapped.contains("shows the node's box, 390×337"),
+            "{snapped}"
+        );
+        assert!(!snapped.contains("the node's box is"), "{snapped}");
+        let moved = shot_of(
+            Rect::new(0.0, 0.0, 390.0, 338.0),
+            Rect::new(0.0, 0.0, 390.0, 300.0),
+        );
+        assert!(moved.contains("the node's box is 390×300"), "{moved}");
+    }
+
+    #[test]
+    fn a_shot_of_the_artboard_does_not_name_it_twice() {
+        assert!(shot(&image("ab", "ab", None)).starts_with("Artboard #ab: shows"));
+        assert!(shot(&image("n1", "ab", None)).starts_with("#n1 in artboard #ab: shows"));
+        assert!(!shot(&image("ab", "ab", Some(3))).contains("scripts"));
+    }
+
+    #[test]
+    fn the_wait_for_scripts_is_said_once_per_call() {
+        let images = [
+            image("a", "a", Some(3)),
+            image("b", "b", None),
+            image("c", "c", Some(3)),
+        ];
+        assert_eq!(
+            settled_note(images.iter()).unwrap(),
+            "#a, #c have scripts or animations, so they were captured 3.0s after load."
+        );
+        assert_eq!(settled_note(images[1..2].iter()), None);
+    }
+
+    #[test]
+    fn some_ids_names_the_first_few_and_counts_the_rest() {
+        let ids: Vec<String> = (1..=11).map(|i| format!("n{i}")).collect();
+        assert_eq!(some_ids(&ids, 3), "#n1, #n2, #n3, … +8");
+        assert_eq!(some_ids(&ids[..2], 3), "#n1, #n2");
+        assert_eq!(some_ids::<&str>(&[], 3), "");
+    }
+}

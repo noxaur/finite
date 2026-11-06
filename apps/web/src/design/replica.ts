@@ -48,8 +48,8 @@ export interface PageEntry {
 
 /**
  * A prototype's routes and links (`flow::Flow` in Rust). A link is an
- * element's `data-to`, naming an artboard; a route groups the artboards
- * whose `data-route` match, one per width.
+ * `<a href="#finite-artboard=<id>">`; a route groups the artboards whose
+ * `data-route` match, one per width.
  */
 export interface Flow {
   readonly routes: ReadonlyArray<{

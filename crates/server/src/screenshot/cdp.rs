@@ -18,6 +18,8 @@ use tokio::{
 };
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 
+use super::egress::{Egress, Policy};
+
 /// How long Chrome may take to start and print its DevTools address.
 const STARTUP: Duration = Duration::from_secs(15);
 /// How long one command may take, such as a capture of a large page.
@@ -27,6 +29,8 @@ const COMMAND: Duration = Duration::from_secs(30);
 pub struct Browser {
     child: Child,
     dir: PathBuf,
+    /// The proxy all of Chrome's traffic goes through. It lives as long as the browser.
+    _egress: Egress,
 }
 
 impl Drop for Browser {
@@ -43,11 +47,23 @@ pub struct Tab {
     session: String,
     next_id: u64,
     events: Vec<(String, Value)>,
+    /// The execution context [`Tab::evaluate`] runs in, such as the one in a
+    /// child frame. `None` is the page's own.
+    context: Option<i64>,
 }
 
 impl Browser {
     /// Starts `chrome` with a fresh profile in `dir` and opens a blank tab.
-    pub async fn launch(chrome: &std::path::Path, dir: PathBuf) -> Result<(Self, Tab), String> {
+    /// Everything the browser sends to a network goes through an [`Egress`]
+    /// proxy that applies `policy`.
+    pub async fn launch(
+        chrome: &std::path::Path,
+        dir: PathBuf,
+        policy: Policy,
+    ) -> Result<(Self, Tab), String> {
+        let egress = Egress::start(policy)
+            .await
+            .map_err(|e| format!("couldn't start the screenshot proxy: {e}"))?;
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|e| e.to_string())?;
@@ -56,8 +72,7 @@ impl Browser {
             .arg("--disable-gpu")
             // Without a GPU, WebGL falls back to SwiftShader, which renders
             // on the CPU, so shaders show in screenshots. Since Chrome 137
-            // that fallback needs this flag; captured pages can't reach the
-            // network.
+            // that fallback needs this flag.
             .arg("--enable-unsafe-swiftshader")
             .arg("--hide-scrollbars")
             .arg("--no-first-run")
@@ -66,6 +81,25 @@ impl Browser {
             .arg("--disable-extensions")
             .arg("--disable-background-networking")
             .arg("--disable-sync")
+            // Every connection goes through the egress proxy, which refuses
+            // internal addresses. `<-loopback>` removes the default bypass
+            // for localhost and 127.0.0.0/8, so those go to the proxy too.
+            .arg(format!("--proxy-server=http://{}", egress.addr()))
+            .arg("--proxy-bypass-list=<-loopback>")
+            // With the proxy set, Chrome leaves name lookups to it. If some
+            // path went around the proxy anyway, every name would fail to
+            // resolve here; only the proxy's own address is an exception.
+            .arg("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1")
+            // HTTP/3 and WebTransport run over UDP, which a proxy can't carry.
+            .arg("--disable-quic")
+            // WebRTC sends UDP to addresses of a page's choosing. This makes
+            // it use the proxy or nothing.
+            .arg("--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
+            // A sandboxed iframe in its own process would have its own
+            // DevTools session; measuring needs the frame in the page's.
+            .arg("--disable-features=IsolateSandboxedIframes,NetworkPrediction")
+            .arg("--dns-prefetch-disable")
+            .arg("--no-pings")
             .arg(format!("--user-data-dir={}", dir.join("profile").display()))
             // Port 0 picks a free port; Chrome prints the address it chose.
             .arg("--remote-debugging-port=0")
@@ -83,7 +117,11 @@ impl Browser {
             }
         };
         let stderr = child.stderr.take().expect("stderr is piped");
-        let browser = Self { child, dir };
+        let browser = Self {
+            child,
+            dir,
+            _egress: egress,
+        };
         let mut lines = BufReader::new(stderr).lines();
         // Chrome's last lines, to say why it failed if it does.
         let mut log = std::collections::VecDeque::new();
@@ -127,6 +165,7 @@ impl Browser {
             session: String::new(),
             next_id: 1,
             events: Vec::new(),
+            context: None,
         };
         let target = tab
             .browser_call("Target.createTarget", json!({ "url": "about:blank" }))
@@ -224,6 +263,15 @@ impl Tab {
         }
     }
 
+    /// Makes [`Tab::evaluate`] run in `context`, or in the page's own with `None`.
+    pub fn set_context(&mut self, context: Option<i64>) {
+        self.context = context;
+    }
+
+    pub fn context(&self) -> Option<i64> {
+        self.context
+    }
+
     /// Forgets the events seen so far, before an action whose events matter.
     pub fn clear_events(&mut self) {
         self.events.clear();
@@ -232,12 +280,12 @@ impl Tab {
     /// Evaluates `expression` in the page, awaiting it if it's a promise, and
     /// returns its value. A thrown exception is an error.
     pub async fn evaluate(&mut self, expression: &str) -> Result<Value, String> {
-        let result = self
-            .call(
-                "Runtime.evaluate",
-                json!({ "expression": expression, "returnByValue": true, "awaitPromise": true }),
-            )
-            .await?;
+        let mut params =
+            json!({ "expression": expression, "returnByValue": true, "awaitPromise": true });
+        if let Some(context) = self.context {
+            params["contextId"] = json!(context);
+        }
+        let result = self.call("Runtime.evaluate", params).await?;
         if let Some(exception) = result.get("exceptionDetails") {
             let text = exception["exception"]["description"]
                 .as_str()

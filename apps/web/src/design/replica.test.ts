@@ -217,8 +217,10 @@ describe("Replica", () => {
         board("home", 1440, "/", "a"),
         board("cart", 1440, "/cart", "b"),
         board("cart-m", 390, "/cart", "c"),
-        { ...node("buy", "home"), attrs: { "data-to": "cart" } },
-        { ...node("gone", "home", "k"), attrs: { "data-to": "deleted" } },
+        { ...node("buy", "home"), tag: "a", attrs: { href: "#finite-artboard=cart" } },
+        { ...node("gone", "home", "k"), tag: "a", attrs: { href: "#finite-artboard=deleted" } },
+        // Only a link's href counts.
+        { ...node("button", "home", "s"), tag: "button", attrs: { href: "#finite-artboard=cart" } },
       ],
       comments: [],
     });

@@ -72,7 +72,8 @@ pub enum UserEdit {
     Detach {
         ids: Vec<NodeId>,
     },
-    /// Makes elements links to the artboard `to`, or plain when it's `None`.
+    /// Points links (`<a>`) at the artboard `to`, or takes their `href`
+    /// away when it's `None`.
     SetLink {
         ids: Vec<NodeId>,
         to: Option<NodeId>,

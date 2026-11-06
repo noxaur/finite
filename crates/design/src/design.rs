@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     NodeId,
     comment::{
-        self, Anchor, Audience, Author, AuthorKind, ChangeLog, Comment, CommentError, Message,
-        Point,
+        self, Anchor, Audience, Author, AuthorKind, ChangeLog, ChangeRef, Comment, CommentError,
+        Message, Point,
     },
     document::{Applied, Document, Op, Page, Rejected},
     edit::{self, EditError},
@@ -285,6 +285,7 @@ pub struct Transaction<'a> {
     doc: &'a mut Document,
     actor: &'a str,
     sets: &'a SetLog,
+    comments: &'a [Comment],
     applied: Vec<Op>,
     /// Each applied op's inverse, in the order the ops applied.
     inverse: Vec<Vec<Op>>,
@@ -299,11 +300,17 @@ pub struct Transaction<'a> {
 }
 
 impl<'a> Transaction<'a> {
-    fn new(doc: &'a mut Document, actor: &'a str, sets: &'a SetLog) -> Self {
+    fn new(
+        doc: &'a mut Document,
+        actor: &'a str,
+        sets: &'a SetLog,
+        comments: &'a [Comment],
+    ) -> Self {
         Self {
             doc,
             actor,
             sets,
+            comments,
             applied: Vec::new(),
             inverse: Vec::new(),
             before: BTreeSet::new(),
@@ -311,6 +318,12 @@ impl<'a> Transaction<'a> {
             view: std::cell::OnceCell::new(),
             imports: Vec::new(),
         }
+    }
+
+    /// The design's comments as they were when the transaction began. Edits
+    /// never change them, so an op can warn about the ones it would orphan.
+    pub fn comments(&self) -> &[Comment] {
+        self.comments
     }
 
     /// The document with every op so far applied.
@@ -518,6 +531,12 @@ impl Design {
         self.seq
     }
 
+    /// The artboards changed after change `seq`, or `None` when that isn't
+    /// known or a change (such as a token's) may have changed them all.
+    pub fn artboards_changed_since(&self, seq: u64) -> Option<BTreeSet<NodeId>> {
+        self.log.artboards_since(seq)
+    }
+
     pub fn history(&self, actor: &str) -> Option<&History> {
         self.histories.get(actor)
     }
@@ -584,7 +603,7 @@ impl Design {
         now: u64,
         build: impl FnOnce(&mut Transaction<'_>) -> Result<T, E>,
     ) -> Result<(Option<Change>, T), E> {
-        let mut tx = Transaction::new(&mut self.doc, actor, &self.sets);
+        let mut tx = Transaction::new(&mut self.doc, actor, &self.sets, &self.comments);
         let output = match build(&mut tx) {
             Ok(output) => output,
             Err(error) => {
@@ -628,7 +647,7 @@ impl Design {
         actor: &str,
         build: impl FnOnce(&mut Transaction<'_>) -> Result<T, E>,
     ) -> Result<(Vec<Op>, T), E> {
-        let mut tx = Transaction::new(&mut self.doc, actor, &self.sets);
+        let mut tx = Transaction::new(&mut self.doc, actor, &self.sets, &self.comments);
         let result = build(&mut tx);
         let applied = std::mem::take(&mut tx.applied);
         if !applied.is_empty() {
@@ -923,28 +942,28 @@ impl Design {
     ) -> Result<&Comment, CommentError> {
         let body = comment::check_body(body)?;
         let room_to_open = self.check_room_to_open();
-        let comment = find(&mut self.comments, id)?;
-        if comment.messages.len() >= comment::MAX_MESSAGES {
+        let index = self
+            .comments
+            .iter()
+            .position(|c| c.id == id)
+            .ok_or_else(|| CommentError::NotFound(id.into()))?;
+        if self.comments[index].messages.len() >= comment::MAX_MESSAGES {
             return Err(CommentError::ThreadFull);
         }
-        let resolved = resolve.unwrap_or(comment.resolved && author.kind == AuthorKind::Agent);
-        if comment.resolved && !resolved {
+        let resolved =
+            resolve.unwrap_or(self.comments[index].resolved && author.kind == AuthorKind::Agent);
+        if self.comments[index].resolved && !resolved {
             room_to_open?;
         }
         let changes = match author.kind {
-            AuthorKind::Agent => {
-                comment.taken_by = Some(author.clone());
-                self.log.since(
-                    &author.id,
-                    comment.last_seq(),
-                    comment.artboard_id.as_deref(),
-                )
-            }
-            AuthorKind::User => {
-                comment.passed_by.clear();
-                Vec::new()
-            }
+            AuthorKind::Agent => changes_for_reply(&self.comments, &self.log, index, &author.id),
+            AuthorKind::User => Vec::new(),
         };
+        let comment = &mut self.comments[index];
+        match author.kind {
+            AuthorKind::Agent => comment.taken_by = Some(author.clone()),
+            AuthorKind::User => comment.passed_by.clear(),
+        }
         mark_resolved(comment, resolved, now);
         comment.messages.push(Message {
             author,
@@ -995,6 +1014,39 @@ impl Design {
         if message.author.kind == AuthorKind::User {
             comment.passed_by.clear();
         }
+        comment.rev += 1;
+        Ok(comment)
+    }
+
+    /// Pins comment `id` to `node`, an artboard or an element inside one,
+    /// when the one it was pinned to is gone (a screen that was removed and
+    /// rebuilt). The pin keeps its offset from the artboard's top-left corner,
+    /// held inside the artboard, and the comment's other elements are dropped.
+    pub fn repin(&mut self, id: &str, node: &str) -> Result<&Comment, CommentError> {
+        let (board, origin, size) = {
+            let doc = self.view();
+            let board = doc
+                .artboard_of(node)
+                .ok_or_else(|| CommentError::NodeNotFound(node.into()))?;
+            (
+                board.id.clone(),
+                (board.x.unwrap_or(0.0), board.y.unwrap_or(0.0)),
+                crate::edit::pixel_size(board),
+            )
+        };
+        let comment = find(&mut self.comments, id)?;
+        if comment.artboard_id.is_none() {
+            // A canvas pin's x and y are canvas coordinates.
+            comment.x -= origin.0;
+            comment.y -= origin.1;
+        }
+        let inside = |at: f64, extent: Option<f64>| at.clamp(0.0, extent.unwrap_or(f64::MAX));
+        comment.x = inside(comment.x, size.0);
+        comment.y = inside(comment.y, size.1);
+        comment.node_id = (node != board).then(|| node.to_owned());
+        comment.artboard_id = Some(board);
+        comment.extra_node_ids.clear();
+        comment.detached_at = None;
         comment.rev += 1;
         Ok(comment)
     }
@@ -1072,6 +1124,30 @@ impl Design {
         self.comments.remove(index);
         Ok(())
     }
+}
+
+/// Edits `actor` made on this comment's artboard that a reply should link.
+///
+/// The window opens after the thread's latest message. An edit already
+/// linked to any message is skipped, and each edit (one change `seq`) is
+/// linked once.
+fn changes_for_reply(
+    comments: &[Comment],
+    log: &ChangeLog,
+    index: usize,
+    actor: &str,
+) -> Vec<ChangeRef> {
+    let comment = &comments[index];
+    let mut seen: HashSet<u64> = comments
+        .iter()
+        .flat_map(|c| &c.messages)
+        .flat_map(|m| &m.changes)
+        .map(|c| c.seq)
+        .collect();
+    log.since(actor, comment.last_seq(), comment.artboard_id.as_deref())
+        .into_iter()
+        .filter(|change| seen.insert(change.seq))
+        .collect()
 }
 
 /// Sets the resolved state, and when it went to resolved.
@@ -1471,6 +1547,110 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_links_an_edit_once() {
+        let mut d = design();
+        d.commit(
+            "agent",
+            "boards",
+            &[create("a", None), create("b", None)],
+            1,
+        );
+        let first = pin(&mut d, "a");
+        let second = pin(&mut d, "a");
+        let on_b = pin(&mut d, "b");
+        let agent = author("agent", AuthorKind::Agent);
+        let labels = |d: &Design, id: &str| -> Vec<String> {
+            d.comments()
+                .iter()
+                .find(|c| c.id == id)
+                .unwrap()
+                .messages
+                .last()
+                .unwrap()
+                .changes
+                .iter()
+                .map(|c| c.label.clone())
+                .collect()
+        };
+
+        d.commit("agent", "one", &[color("a", "red")], 2);
+        d.commit("agent", "two", &[color("a", "blue")], 3);
+        d.reply(&first, agent.clone(), "First", Some(true), 4)
+            .unwrap();
+        assert_eq!(labels(&d, &first), ["one", "two"]);
+
+        // Another thread on the same artboard does not take those edits again.
+        d.commit("agent", "three", &[color("a", "green")], 5);
+        d.reply(&second, agent.clone(), "Second", Some(true), 6)
+            .unwrap();
+        assert_eq!(labels(&d, &second), ["three"]);
+
+        // The same thread's next reply only adds edits made since it.
+        d.commit("agent", "four", &[color("a", "black")], 7);
+        d.reply(&first, agent.clone(), "More", None, 8).unwrap();
+        assert_eq!(labels(&d, &first), ["four"]);
+
+        // One edit that touches two artboards is linked by the first reply.
+        d.commit(
+            "agent",
+            "both",
+            &[color("a", "white"), color("b", "white")],
+            9,
+        );
+        d.reply(&on_b, agent.clone(), "On B", None, 10).unwrap();
+        assert_eq!(labels(&d, &on_b), ["both"]);
+        d.reply(&second, agent.clone(), "Not again", None, 11)
+            .unwrap();
+        assert!(labels(&d, &second).is_empty());
+
+        // A later message in the thread moves the window, so the edit before
+        // it stays unlinked.
+        d.commit("agent", "before", &[color("a", "pink")], 12);
+        d.reply(
+            &second,
+            author("user:1", AuthorKind::User),
+            "Now do this",
+            None,
+            13,
+        )
+        .unwrap();
+        d.commit("agent", "after", &[color("a", "orange")], 14);
+        d.reply(&second, agent, "After", None, 15).unwrap();
+        assert_eq!(labels(&d, &second), ["after"]);
+    }
+
+    #[test]
+    fn an_older_thread_links_edits_a_later_reply_missed() {
+        let mut d = design();
+        d.commit("agent", "boards", &[create("a", None)], 1);
+        let older = pin(&mut d, "a");
+        d.commit("agent", "red", &[color("a", "red")], 2);
+        let newer = pin(&mut d, "a");
+        let agent = author("agent", AuthorKind::Agent);
+        let labels = |d: &Design, id: &str| -> Vec<String> {
+            d.comments()
+                .iter()
+                .find(|c| c.id == id)
+                .unwrap()
+                .messages
+                .last()
+                .unwrap()
+                .changes
+                .iter()
+                .map(|c| c.label.clone())
+                .collect()
+        };
+
+        // The newer thread starts after the edit, so its reply links nothing.
+        d.reply(&newer, agent.clone(), "Nothing new", None, 3)
+            .unwrap();
+        assert!(labels(&d, &newer).is_empty());
+        // The older thread's window still covers that edit, and nobody has linked it.
+        d.reply(&older, agent, "That was it", None, 4).unwrap();
+        assert_eq!(labels(&d, &older), ["red"]);
+    }
+
+    #[test]
     fn a_comment_goes_to_the_agent_that_edited_its_artboard() {
         let mut d = design();
         d.commit(
@@ -1840,5 +2020,51 @@ mod tests {
         let updated = d.take_comment_updates();
         assert_eq!(updated[0].id, id);
         assert_eq!(updated[0].detached_at, None, "back on its artboard");
+    }
+
+    #[test]
+    fn a_pin_can_move_to_a_rebuilt_artboard() {
+        let mut d = design();
+        let sized = |id: &str, x: f64, width: &str| {
+            let mut board = Node::element(id, "div");
+            board.index = "V".into();
+            board.x = Some(x);
+            board.y = Some(50.0);
+            board.styles.insert("width".into(), width.into());
+            board.styles.insert("height".into(), "200px".into());
+            Op::Create { node: board }
+        };
+        d.commit("agent", "board", &[sized("a", 100.0, "300px")], 1);
+        let id = pin(&mut d, "a");
+        let orphans = |d: &Design, root: &str| {
+            comment::pinned_inside(d.view(), d.comments(), &[root.into()]).len()
+        };
+        assert_eq!(orphans(&d, "a"), 1);
+
+        // The screen is removed and rebuilt narrow, elsewhere, with a new id.
+        d.commit("agent", "delete", &[Op::Delete { id: "a".into() }], 2);
+        d.commit(
+            "agent",
+            "rebuild",
+            &[sized("b", 900.0, "5px"), create("h", Some("b"))],
+            3,
+        );
+        d.take_comment_updates();
+        assert!(d.comments()[0].detached_at.is_some());
+
+        let pinned = d.repin(&id, "h").unwrap().clone();
+        assert_eq!(pinned.artboard_id.as_deref(), Some("b"));
+        assert_eq!(pinned.node_id.as_deref(), Some("h"));
+        assert_eq!(pinned.detached_at, None);
+        // The offset is kept, held inside the 5px-wide artboard.
+        assert_eq!((pinned.x, pinned.y), (5.0, 20.0));
+        assert_eq!(orphans(&d, "h"), 1);
+        assert_eq!(orphans(&d, "b"), 1, "removing its artboard orphans it too");
+
+        // Pointing it at the artboard itself leaves no element.
+        let pinned = d.repin(&id, "b").unwrap();
+        assert_eq!(pinned.node_id, None);
+        assert!(d.repin(&id, "nowhere").is_err());
+        assert!(d.repin("missing", "b").is_err());
     }
 }

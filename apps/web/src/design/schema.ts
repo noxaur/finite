@@ -140,7 +140,7 @@ export const UserEdit = Schema.Union([
   }),
   /** Turns instances into plain copies of what they show. */
   Schema.Struct({ kind: Schema.Literal("detach"), ids: Schema.Array(Schema.String) }),
-  /** Makes elements links to the artboard `to` (`data-to`), or plain when it's `null`. */
+  /** Points links (`<a>`) at the artboard `to` (`#finite-artboard=<id>`), or takes their `href` away when `null`. */
   Schema.Struct({
     kind: Schema.Literal("setLink"),
     ids: Schema.Array(Schema.String),

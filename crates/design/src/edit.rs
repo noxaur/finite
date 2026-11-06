@@ -3,7 +3,7 @@
 //! [`crate::Design::commit`] so they land on the right actor's history.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt,
 };
 
@@ -1075,7 +1075,9 @@ pub fn update_attributes(
         for (name, value) in attrs {
             let lower = name.to_ascii_lowercase();
             if lower == "style" {
-                return err("use update_styles to change inline styles");
+                return err(format!(
+                    "#{id}: style isn't an attribute; use update_styles to change inline styles"
+                ));
             }
             if lower.starts_with("on") {
                 return err(format!(
@@ -1111,12 +1113,23 @@ pub fn update_attributes(
             if lower == html::ID_ATTR {
                 return err("data-id is the node id and can't be changed");
             }
-            // The same rule write_html applies when it parses HTML.
+            // The same rules write_html applies when it parses HTML.
             if let Some(value) = value
                 && !html::is_safe_attr(name, value)
             {
                 return err(format!(
                     "{name}={value:?} isn't allowed: no srcdoc, and no javascript: or vbscript: URLs"
+                ));
+            }
+            if let Some(value) = value
+                && lower == "src"
+                && element(doc, id)?
+                    .tag()
+                    .is_some_and(|tag| tag.eq_ignore_ascii_case("script"))
+                && !html::is_safe_script_src(value)
+            {
+                return err(format!(
+                    "src={value:?} isn't allowed on a <script>: scripts load only from https:// URLs"
                 ));
             }
             ops.push(Op::Set {
@@ -1129,8 +1142,8 @@ pub fn update_attributes(
     Ok(ops)
 }
 
-/// Makes elements links to artboard `to` (see [`flow`]), or plain again
-/// when `to` is `None`.
+/// Points links (`<a>` or `<area>`) at artboard `to` (see [`flow`]), or
+/// takes their `href` away when `to` is `None`.
 pub fn set_link(doc: &Document, ids: &[NodeId], to: Option<&str>) -> Result<Vec<Op>> {
     if let Some(to) = to
         && !doc.get(to).is_some_and(Node::is_artboard)
@@ -1141,13 +1154,13 @@ pub fn set_link(doc: &Document, ids: &[NodeId], to: Option<&str>) -> Result<Vec<
     }
     let mut ops = Vec::with_capacity(ids.len());
     for id in ids {
-        if element(doc, id)?.is_artboard() {
-            return err("an artboard can't be a link; link an element on it");
+        if !matches!(element(doc, id)?.tag(), Some("a" | "area")) {
+            return err("only a link (<a>) can go to an artboard; put the element inside one");
         }
         ops.push(Op::Set {
             id: id.clone(),
-            key: PropKey::Attr(flow::TO_ATTR.to_owned()),
-            value: to.map(Value::from),
+            key: PropKey::Attr("href".to_owned()),
+            value: to.map(|to| Value::from(flow::link_href(to))),
         });
     }
     Ok(ops)
@@ -1910,10 +1923,10 @@ pub fn duplicate(
     if !copies.is_empty() {
         for op in &mut ops {
             if let Op::Create { node } = op
-                && let Some(to) = node.attrs.get_mut(flow::TO_ATTR)
-                && let Some(copy) = copies.get(to.trim())
+                && let Some(copy) = flow::link_target(node).and_then(|to| copies.get(to))
             {
-                *to = (*copy).to_owned();
+                let href = flow::link_href(copy);
+                node.attrs.insert("href".to_owned(), href);
             }
         }
     }
@@ -1933,8 +1946,9 @@ pub fn create_component(
     replace: &[NodeId],
 ) -> Result<Vec<Op>> {
     if components::is_virtual(id) {
+        let instance = components::split(id).map_or(id, |(root, _)| root);
         return err(format!(
-            "#{id} is inside an instance; make a component from the component's own nodes, or detach_instance first"
+            "#{id} is inside an instance; make a component from the component's own nodes, or detach_instance #{instance} first"
         ));
     }
     let node = element(doc, id)?;
@@ -2156,6 +2170,109 @@ pub fn detach_instances(
         ops.extend(components::detach(doc, id, new_id)?);
     }
     Ok(ops)
+}
+
+/// The instances at or below `roots`, roots included. An instance inside
+/// another is skipped: it only exists while its outer instance shows it. So
+/// is one inside a component's definition: the component is shared, and
+/// rewriting its nodes would orphan the overrides of its instances
+/// elsewhere. With `copies`, the roots are fresh copies, which nothing
+/// follows yet, so a root that sits inside a definition still counts.
+pub fn instances_in(doc: &Document, roots: &[NodeId], copies: bool) -> Vec<NodeId> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for root in roots {
+        if !copies && components::component_of(doc, root).is_some() {
+            continue;
+        }
+        let mut stack: Vec<&Node> = doc.get(root).into_iter().collect();
+        while let Some(node) = stack.pop() {
+            if node.component {
+                continue;
+            }
+            if node.is_instance() && !components::is_virtual(&node.id) && seen.insert(&node.id) {
+                out.push(node.id.clone());
+            }
+            stack.extend(doc.children(Some(&node.id)).into_iter().rev());
+        }
+    }
+    out
+}
+
+/// Turns every instance at or below `roots` into plain elements, however
+/// deep they nest: detaching one leaves the instances it held, and those
+/// are detached in turn. Where [`detach_instances`] stops at the one
+/// instance, this makes a frozen copy of a screen. `doc` is the real
+/// document, not the expanded view: an expanded instance still has its
+/// virtual children after it is detached, and the next round would copy
+/// them along with the real ones.
+pub fn detach_all(
+    doc: &Document,
+    roots: &[NodeId],
+    copies: bool,
+    new_id: &mut impl FnMut() -> NodeId,
+) -> Result<Vec<Op>> {
+    let mut ops = Vec::new();
+    let mut staged: Option<Document> = None;
+    loop {
+        let current = staged.as_ref().unwrap_or(doc);
+        let instances = instances_in(current, roots, copies);
+        if instances.is_empty() {
+            return Ok(ops);
+        }
+        let round = detach_instances(current, &instances, &mut *new_id)?;
+        if detached_count(&round) == 0 {
+            return err("instances couldn't be detached");
+        }
+        let nested = round
+            .iter()
+            .any(|op| matches!(op, Op::Create { node } if node.is_instance()));
+        if nested {
+            let mut next = current.clone();
+            next.apply_all(&round);
+            staged = Some(next);
+        }
+        ops.extend(round);
+        if !nested {
+            return Ok(ops);
+        }
+    }
+}
+
+/// How many instances `ops` turn into plain elements.
+pub fn detached_count(ops: &[Op]) -> usize {
+    ops.iter()
+        .filter(|op| {
+            matches!(
+                op,
+                Op::Set {
+                    key: PropKey::InstanceOf,
+                    value: None,
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+/// [`duplicate`], then [`detach_all`] on the copies, so they keep what the
+/// components show but no longer follow them.
+pub fn duplicate_detached(
+    doc: &Document,
+    ids: &[NodeId],
+    new_id: &mut impl FnMut() -> NodeId,
+) -> Result<(Vec<Op>, Vec<NodeId>)> {
+    let (mut ops, roots) = duplicate(doc, ids, &mut *new_id)?;
+    let follows = ids
+        .iter()
+        .flat_map(|id| doc.subtree(id))
+        .any(|n| n.is_instance() || n.component);
+    if follows {
+        let mut copied = doc.clone();
+        copied.apply_all(&ops);
+        ops.extend(detach_all(&copied, &roots, true, new_id)?);
+    }
+    Ok((ops, roots))
 }
 
 /// Refuses an edit that would leave the design with more than [`MAX_NODES`].
@@ -2645,6 +2762,14 @@ mod tests {
         assert!(set("x\" onload=\"alert(1)", "y").is_err());
         assert!(set("", "y").is_err());
         assert!(set("data-id", "n9").is_err());
+        let style = set("style", "color: red").unwrap_err();
+        assert!(
+            style
+                .0
+                .contains(&format!("#{board}: style isn't an attribute"))
+                && style.0.contains("update_styles"),
+            "{style}"
+        );
     }
 
     #[test]

@@ -214,7 +214,23 @@ try {
     page.eval(
       `(() => { const r = (${js}).getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; })()`,
     );
-  const activity = `[...document.querySelectorAll('ol[aria-label="Recent changes"] li')].map((l) => l.textContent)[0] ?? ""`;
+  const tab = (name) =>
+    `[...document.querySelectorAll('[role="tab"]')].find((t) => t.textContent.startsWith("${name}"))`;
+  const clickOn = async (js) => {
+    await page.until(js);
+    const r = await rectOf(js);
+    await page.click(r.x + r.w / 2, r.y + r.h / 2);
+  };
+  // The newest line in the comment tool's Activity tab, which this opens and closes.
+  const activity = async () => {
+    await page.key("c", "KeyC", 67);
+    await clickOn(tab("Activity"));
+    const newest = `document.querySelector('ol[aria-label="Recent changes"] li')?.textContent ?? ""`;
+    await page.until(newest);
+    const text = await page.eval(newest);
+    await page.key("Escape", "Escape", 27);
+    return text;
+  };
 
   // Live edits and undo.
   await agent.call("update_styles", {
@@ -229,7 +245,7 @@ try {
       ),
     ),
   );
-  check("the activity list shows it", (await page.eval(activity)).includes("Update styles"));
+  check("the activity list shows it", (await activity()).includes("Update styles"));
   await agent.call("undo", { designId: design });
   check(
     "undo reverts it",
@@ -379,11 +395,11 @@ try {
   // The agent's presence chip moves the header's buttons, so wait for the edit first.
   await page.until(`getComputedStyle(${shadow}.querySelector("button")).color === "rgb(1, 2, 3)"`);
   const panel = `document.querySelector('section[aria-label="Tokens"]')`;
-  const tokensToggle = await rectOf(
-    `[...document.querySelectorAll("header button")].find((b) => b.textContent === "Tokens")`,
-  );
-  await page.click(tokensToggle.x + tokensToggle.w / 2, tokensToggle.y + tokensToggle.h / 2);
+  await clickOn(tab("Tokens"));
   await page.until(panel);
+  await clickOn(
+    `[...${panel}.querySelectorAll("button")].find((b) => b.textContent === "Create token")`,
+  );
   const field = (label) => `${panel}.querySelector('input[aria-label="${label}"]')`;
   const nameBox = await rectOf(field("New token name"));
   await page.click(nameBox.x + 10, nameBox.y + nameBox.h / 2);
@@ -403,10 +419,7 @@ try {
         ),
       ),
   );
-  check(
-    "the activity list shows the person's edit",
-    (await page.eval(activity)).includes("Set tokens"),
-  );
+  check("the activity list shows the person's edit", (await activity()).includes("Set tokens"));
   check(
     "the panel lists the token",
     Boolean(await page.until(`${field("--ok in Default")}?.value === "rgb(0, 128, 0)"`)),
@@ -418,6 +431,7 @@ try {
     modes: ["Light", "Dark"],
     tokens: { "--ok": { Dark: "rgb(0, 0, 255)" } },
   });
+  await clickOn(tab("Dark"));
   await page.until(`${field("--ok in Dark")}?.value === "rgb(0, 0, 255)"`);
   // The select of the artboard named "Page".
   const select = `[...${panel}.querySelectorAll("label")].find((l) => l.textContent.startsWith("Page")).querySelector("select")`;
@@ -428,8 +442,7 @@ try {
     "an artboard in the Dark mode takes its values",
     Boolean(await page.until(`${ctaStyle}.color === "rgb(0, 0, 255)"`)),
   );
-  const close = await rectOf(`${panel}.querySelector('button[type="button"]')`);
-  await page.click(close.x + close.w / 2, close.y + close.h / 2);
+  await clickOn(tab("Design"));
   await page.until(`!${panel}`);
   await fetch(`${base}/api/designs/${design}/tokens`, {
     method: "PUT",
@@ -921,6 +934,96 @@ try {
         5000,
       ),
     ),
+  );
+
+  // Interactive mode: P zooms onto the selected artboard on the canvas, its
+  // page takes clicks, a link flies to another artboard, and Escape goes
+  // back to the same view. With the pointer, the page's buttons don't press.
+  const play = (await agent.call("create_design", { name: "Interactive" })).match(
+    /designId "([a-z0-9]+)"/,
+  )[1];
+  const app = idAfter(
+    await agent.call("create_artboard", { designId: play, name: "App", width: 390, height: 600 }),
+    "artboard",
+  );
+  const next = idAfter(
+    await agent.call("create_artboard", {
+      designId: play,
+      name: "Next",
+      width: 390,
+      height: 600,
+      x: 500,
+    }),
+    "artboard",
+  );
+  await agent.call("write_html", {
+    designId: play,
+    targetId: app,
+    html: `<div style="padding:16px;display:flex;flex-direction:column;gap:16px"><button id="tap" style="height:120px">Tap</button><a href="#finite-artboard=${next}" style="display:block;height:80px">Next</a><script>let n=0;document.getElementById("tap").addEventListener("click",()=>parent.postMessage({taps:++n},"*"))</script></div>`,
+  });
+  await agent.call("write_html", { designId: play, targetId: next, html: `<p>Next page</p>` });
+  await page.goto(`${base}/design/?id=${play}`);
+  await page.until(`!!document.querySelector('[data-artboard="${app}"] iframe')`, 10_000);
+  await page.sleep(500);
+  await page.eval(
+    `window.taps = 0; addEventListener("message", (e) => { if (e.data?.taps) window.taps = e.data.taps; })`,
+  );
+  const boxOf = (sel) =>
+    page.eval(
+      `(() => { const r = document.querySelector(${JSON.stringify(sel)}).getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; })()`,
+    );
+  const canvasView = await zoom();
+  // Moves into the iframe first, as a person's pointer does: Chrome routes a
+  // press to a sandboxed frame once the pointer has moved over it.
+  const tapAt = async (x, y) => {
+    await page.move(x - 2, y - 2);
+    await page.move(x, y);
+    await page.sleep(100);
+    await page.click(x, y);
+  };
+  // The pointer selects the artboard; its button doesn't press.
+  let appBox = await boxOf(`[data-artboard="${app}"] iframe`);
+  await page.click(appBox.x + appBox.width / 2, appBox.y + 10);
+  await page.sleep(300);
+  check("with the pointer, a page's button doesn't press", (await page.eval("window.taps")) === 0);
+  await page.key("p", "KeyP");
+  const pill = `document.querySelector('[aria-label="Interactive mode"]')`;
+  check(
+    "P zooms onto the selected artboard in interactive mode",
+    Boolean(await page.until(`${pill}?.innerText.includes("App")`, 5000)) &&
+      Boolean(
+        await page.until(
+          `document.querySelector('[data-artboard="${app}"] iframe').style.pointerEvents === ""`,
+          5000,
+        ),
+      ),
+  );
+  appBox = await boxOf(`[data-artboard="${app}"] iframe`);
+  const scale = appBox.width / 390;
+  const tx = appBox.x + appBox.width / 2,
+    ty = appBox.y + (16 + 60) * scale;
+  await tapAt(tx, ty);
+  check("the page takes clicks", Boolean(await page.until("window.taps === 1", 5000)));
+  await tapAt(appBox.x + 40 * scale, appBox.y + (16 + 120 + 16 + 40) * scale);
+  check(
+    "a link to another artboard flies there, with Back",
+    Boolean(
+      await page.until(
+        `${pill}?.innerText.includes("Next") && ${pill}.innerText.includes("Back")`,
+        5000,
+      ),
+    ),
+  );
+  await page.key("Escape");
+  check(
+    "Escape goes back to the canvas, to the same view",
+    Boolean(await page.until(`!${pill}`, 5000)) &&
+      Boolean(
+        await page.until(
+          `getComputedStyle(document.querySelector("[data-artboard]").parentElement.parentElement).transform === ${JSON.stringify(canvasView)}`,
+          5000,
+        ),
+      ),
   );
 
   check("no errors on the page", page.errors.length === 0, page.errors.join(" | "));

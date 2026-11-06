@@ -32,6 +32,11 @@ use serde_json::{Value, json};
 use crate::hub::random_id;
 
 mod cdp;
+mod egress;
+#[cfg(test)]
+mod network_tests;
+
+use egress::Policy;
 
 /// Artboards without a pixel width or height are captured at this size.
 const FALLBACK_WIDTH: f64 = 1440.0;
@@ -265,6 +270,16 @@ pub struct Image {
     pub boxes: Option<Vec<ElementBox>>,
 }
 
+/// The part of the page that shows, as the edges that clip: a side is `None`
+/// where nothing clips it, as with `overflow-x: clip` and `overflow-y: visible`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Window {
+    pub left: Option<f64>,
+    pub top: Option<f64>,
+    pub right: Option<f64>,
+    pub bottom: Option<f64>,
+}
+
 /// Where an element rendered, in CSS pixels from the page's top left corner.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ElementBox {
@@ -280,6 +295,19 @@ pub struct ElementBox {
     /// Where that text itself rendered, which can be much smaller than the
     /// element's box: a heading's text in a full-width block, say.
     pub text: Option<Rect>,
+    /// Whether an ancestor between the element and the artboard clips it
+    /// across and down: `overflow` other than visible (a scroller, an
+    /// `<svg>`'s viewport), or a `clip-path` that crops it to within the
+    /// artboard. What it clips isn't cut off by
+    /// the artboard's edge.
+    pub clipped: (bool, bool),
+    /// The part of the page the scrollers, viewports and clip-paths around
+    /// the element (and its own clip-path) show, which is all of it that
+    /// people see.
+    pub visible: Window,
+    /// Whether the element is positioned out of the flow (`absolute` or
+    /// `fixed`), so a taller artboard wouldn't make room for it.
+    pub out_of_flow: bool,
 }
 
 /// A capture, decided from the document and ready to render.
@@ -297,6 +325,9 @@ struct Page {
     html: String,
     width: f64,
     height: f64,
+    /// The artboard runs scripts, so `html` is a wrapper holding it in a
+    /// sandboxed iframe, and the page is measured in that frame.
+    scripted: bool,
     shots: Vec<PlannedShot>,
 }
 
@@ -374,13 +405,14 @@ pub fn plan(doc: &Document, shots: Vec<Shot>, options: Options) -> Result<Plan, 
         match pages.iter_mut().find(|p| p.artboard == artboard) {
             Some(page) => page.shots.push(planned),
             None => {
-                let (html, width, height) =
+                let built =
                     page_html(doc, &artboard, &options).expect("the artboard is in the document");
                 pages.push(Page {
                     artboard,
-                    html,
-                    width,
-                    height,
+                    html: built.html,
+                    width: built.width,
+                    height: built.height,
+                    scripted: built.scripted,
                     shots: vec![planned],
                 });
             }
@@ -393,11 +425,34 @@ pub fn plan(doc: &Document, shots: Vec<Shot>, options: Options) -> Result<Plan, 
     })
 }
 
+/// A page to render, and the artboard's size in CSS pixels.
+struct Built {
+    html: String,
+    width: f64,
+    height: f64,
+    scripted: bool,
+}
+
+/// The sandbox the web viewer puts an artboard that runs scripts in. No
+/// `allow-same-origin`, so the page has an opaque origin and can't reach the
+/// wrapper around it; no popups, modals, top navigation or pointer lock.
+const SANDBOX: &str = "allow-scripts allow-forms";
+const FRAME_PERMISSIONS: &str = "autoplay 'none'; fullscreen 'none'";
+
 /// A standalone HTML page showing just the artboard, and its size in CSS
 /// pixels. Every element carries its node id in [`VIEWER_ID_ATTR`], so
 /// shots can find it. The web viewer renders artboards that run scripts
 /// from the same HTML.
-fn page_html(doc: &Document, artboard: &str, options: &Options) -> Option<(String, f64, f64)> {
+///
+/// An artboard with a `<script>` renders as the viewer does: the page above
+/// is the `srcdoc` of a sandboxed `<iframe>` in a bare wrapper, with the
+/// viewer's [`html::bootstrap`] running first. It then runs with the same limits,
+/// an opaque origin and a `localStorage` that lasts only for the capture.
+/// An artboard without one loads directly, since nothing in it runs and the
+/// sandbox would change nothing, and its measurements need no second frame.
+/// The frame sits at the wrapper's (0, 0) and fills it, so coordinates are
+/// the same either way.
+fn page_html(doc: &Document, artboard: &str, options: &Options) -> Option<Built> {
     let node = doc.get(artboard)?;
     // Compact, so no whitespace is added between elements: it renders like the viewer.
     let body = html::export_for_viewer(doc, artboard)?;
@@ -437,10 +492,40 @@ fn page_html(doc: &Document, artboard: &str, options: &Options) -> Option<(Strin
     } else {
         format!("<style>{tokens}</style>")
     };
+    let scripted = doc.subtree(artboard).iter().any(|n| {
+        n.tag()
+            .is_some_and(|tag| tag.eq_ignore_ascii_case("script"))
+    });
+    // The bootstrap's config goes in as JSON; `<` can't end the script.
+    let bootstrap = if scripted {
+        let config = json!({ "nonce": "screenshot", "storage": {} })
+            .to_string()
+            .replace('<', "\\u003c");
+        // A trailing `;` after the function would end the parentheses early.
+        let function = html::bootstrap();
+        format!("<script>({function})({config})</script>")
+    } else {
+        String::new()
+    };
     let page = format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\"><style>@layer {BASE_LAYER} {{ {BASE_CSS} html, body {{ margin: 0; }} }}</style>{shared}</head><body>{body}<style>{overrides}</style></body></html>"
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\">{bootstrap}<style>@layer {BASE_LAYER} {{ {BASE_CSS} html, body {{ margin: 0; }} }}</style>{shared}</head><body>{body}<style>{overrides}</style></body></html>"
     );
-    Some((page, width, height))
+    let html = if scripted {
+        format!(
+            "<!doctype html><html><head><meta charset=\"utf-8\"><style>html, body {{ margin: 0; }} iframe {{ display: block; border: 0; width: {}px; height: {}px; }}</style></head><body><iframe sandbox=\"{SANDBOX}\" allow=\"{FRAME_PERMISSIONS}\" srcdoc=\"{}\"></iframe></body></html>",
+            width.ceil(),
+            height.ceil(),
+            html::escape(&page, true)
+        )
+    } else {
+        page
+    };
+    Some(Built {
+        html,
+        width,
+        height,
+        scripted,
+    })
 }
 
 /// A CSS selector for the element with node id `id`.
@@ -502,6 +587,10 @@ fn chrome() -> Option<PathBuf> {
 /// the order it was asked for. A shot fails when its node has no box on the
 /// page (`display: none`, or empty) or lies wholly outside the artboard.
 pub async fn capture(plan: Plan) -> Result<Vec<Result<Image, String>>, String> {
+    capture_with(plan, Policy::default()).await
+}
+
+async fn capture_with(plan: Plan, policy: Policy) -> Result<Vec<Result<Image, String>>, String> {
     let chrome = chrome().ok_or(
         "no Chrome, Chromium or Edge found for screenshots; set FINITE_CHROME to a browser binary",
     )?;
@@ -510,7 +599,7 @@ pub async fn capture(plan: Plan) -> Result<Vec<Result<Image, String>>, String> {
         .await
         .map_err(|_| "screenshots are shutting down")?;
     let dir = std::env::temp_dir().join(format!("finite-shot-{}", random_id(10)));
-    let (browser, mut tab) = cdp::Browser::launch(&chrome, dir.clone()).await?;
+    let (browser, mut tab) = cdp::Browser::launch(&chrome, dir.clone(), policy).await?;
     let results = capture_pages(&mut tab, &dir, plan).await;
     browser.close(tab).await;
     results
@@ -567,9 +656,24 @@ struct Layout {
     nodes: Vec<RawBox>,
 }
 
-type RawBox = (String, f64, f64, f64, f64, f64, f64, bool, Option<[f64; 4]>);
+type RawBox = (
+    String,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    bool,
+    Option<[f64; 4]>,
+    (bool, bool),
+    bool,
+    Option<[Option<f64>; 4]>,
+);
 
-fn element_box((id, x, y, width, height, ox, oy, has_text, text): &RawBox) -> ElementBox {
+fn element_box(
+    (id, x, y, width, height, ox, oy, has_text, text, clipped, out_of_flow, visible): &RawBox,
+) -> ElementBox {
     ElementBox {
         id: id.clone(),
         x: *x,
@@ -579,6 +683,9 @@ fn element_box((id, x, y, width, height, ox, oy, has_text, text): &RawBox) -> El
         text_overflow: (*ox, *oy),
         has_text: *has_text,
         text: text.map(rect),
+        clipped: *clipped,
+        visible: visible.map_or_else(Window::default, window),
+        out_of_flow: *out_of_flow,
     }
 }
 
@@ -588,8 +695,16 @@ pub struct Measurement {
     html: String,
     width: f64,
     height: f64,
+    scripted: bool,
     settle: Duration,
     texts: Vec<TextRuns>,
+}
+
+impl Measurement {
+    /// The artboard being measured.
+    pub fn artboard(&self) -> &str {
+        &self.artboard
+    }
 }
 
 /// Where an element's text nodes are on the page. Text nodes have no
@@ -651,14 +766,14 @@ pub fn plan_measurement(
         .ok_or_else(|| format!("node {node:?} not found"))?
         .id
         .clone();
-    let (html, width, height) =
-        page_html(doc, &artboard, &options).expect("the artboard is in the document");
+    let built = page_html(doc, &artboard, &options).expect("the artboard is in the document");
     Ok(Measurement {
         texts: text_runs(doc, &artboard),
         artboard,
-        html,
-        width,
-        height,
+        html: built.html,
+        width: built.width,
+        height: built.height,
+        scripted: built.scripted,
         settle: options.settle,
     })
 }
@@ -668,6 +783,10 @@ pub fn plan_measurement(
 /// screenshot would, but takes no picture, so it's cheap to call after
 /// every edit.
 pub async fn layout(m: Measurement) -> Result<Vec<ElementBox>, String> {
+    layout_with(m, Policy::default()).await
+}
+
+async fn layout_with(m: Measurement, policy: Policy) -> Result<Vec<ElementBox>, String> {
     let chrome = chrome().ok_or(
         "no Chrome, Chromium or Edge found to lay out the page; set FINITE_CHROME to a browser binary",
     )?;
@@ -677,7 +796,7 @@ pub async fn layout(m: Measurement) -> Result<Vec<ElementBox>, String> {
         .map_err(|_| "layout is shutting down")?;
     let dir = std::env::temp_dir().join(format!("finite-layout-{}", random_id(10)));
     let run = async {
-        let (browser, mut tab) = cdp::Browser::launch(&chrome, dir.clone()).await?;
+        let (browser, mut tab) = cdp::Browser::launch(&chrome, dir.clone(), policy).await?;
         let result = measure_page(&mut tab, &dir, &m).await;
         browser.close(tab).await;
         result
@@ -725,12 +844,47 @@ async fn load(tab: &mut cdp::Tab, dir: &std::path::Path, m: &Measurement) -> Res
         }),
     )
     .await?;
+    open(tab, &path, m.scripted).await
+}
+
+/// Navigates to the page at `path` and waits for it to load. For a wrapper
+/// page (`scripted`), later evaluations then run in the artboard's frame.
+async fn open(tab: &mut cdp::Tab, path: &std::path::Path, scripted: bool) -> Result<(), String> {
     tab.clear_events();
+    tab.set_context(None);
     let url = format!("file://{}", path.display());
     tab.call("Page.navigate", json!({ "url": url })).await?;
+    // A slow image shouldn't stop the capture; it shows as not loaded.
     tab.wait_for("Page.loadEventFired", LOAD).await?;
+    if scripted {
+        enter_frame(tab).await?;
+    }
     tab.evaluate("document.fonts.ready.then(() => true)")
         .await?;
+    Ok(())
+}
+
+/// Points [`cdp::Tab::evaluate`] at the wrapper's iframe. It runs in an
+/// isolated world there: it sees the artboard's DOM, but not the page's
+/// own variables, so a script can't change what the measuring code calls.
+/// The world belongs to the frame's current document, so a page that
+/// navigates itself away ends it.
+async fn enter_frame(tab: &mut cdp::Tab) -> Result<(), String> {
+    let tree = tab.call("Page.getFrameTree", json!({})).await?;
+    let frame = tree["frameTree"]["childFrames"][0]["frame"]["id"]
+        .as_str()
+        .ok_or("the artboard's frame isn't in the page")?
+        .to_owned();
+    let world = tab
+        .call(
+            "Page.createIsolatedWorld",
+            json!({ "frameId": frame, "worldName": "finite-measure" }),
+        )
+        .await?;
+    let context = world["executionContextId"]
+        .as_i64()
+        .ok_or("the artboard's frame has no script context")?;
+    tab.set_context(Some(context));
     Ok(())
 }
 
@@ -749,7 +903,7 @@ pub async fn scene(m: Measurement) -> Result<Scene, String> {
         .await
         .map_err(|_| "measuring is shutting down")?;
     let dir = std::env::temp_dir().join(format!("finite-scene-{}", random_id(10)));
-    let (browser, mut tab) = cdp::Browser::launch(&chrome, dir.clone()).await?;
+    let (browser, mut tab) = cdp::Browser::launch(&chrome, dir.clone(), Policy::default()).await?;
     let result = scene_page(&mut tab, &dir, &m).await;
     browser.close(tab).await;
     result
@@ -796,6 +950,86 @@ async fn scene_page(
         );
     }
     Ok(Scene { nodes })
+}
+
+/// The values `getComputedStyle` gives each element in `ids` for the
+/// properties `props`, in the order asked, with the artboard's mode applied.
+/// An element the page doesn't have comes back as `None`. It renders the
+/// page as [`layout`] does, so a value is what a screenshot shows, whichever
+/// way the artboard renders in the viewer.
+pub async fn computed(
+    m: &Measurement,
+    ids: Vec<NodeId>,
+    props: Vec<String>,
+) -> Result<BTreeMap<NodeId, Option<Vec<(String, String)>>>, String> {
+    let chrome = chrome().ok_or(
+        "no Chrome, Chromium or Edge found to compute styles; set FINITE_CHROME to a browser binary",
+    )?;
+    let _turn = browsers()
+        .acquire()
+        .await
+        .map_err(|_| "computing styles is shutting down")?;
+    let dir = std::env::temp_dir().join(format!("finite-computed-{}", random_id(10)));
+    let run = async {
+        let (browser, mut tab) =
+            cdp::Browser::launch(&chrome, dir.clone(), Policy::default()).await?;
+        let result = computed_page(&mut tab, &dir, m, &ids, &props).await;
+        browser.close(tab).await;
+        result
+    };
+    tokio::time::timeout(LAYOUT_LIMIT, run)
+        .await
+        .map_err(|_| "the browser took too long to compute styles".to_owned())?
+}
+
+async fn computed_page(
+    tab: &mut cdp::Tab,
+    dir: &std::path::Path,
+    m: &Measurement,
+    ids: &[NodeId],
+    props: &[String],
+) -> Result<BTreeMap<NodeId, Option<Vec<(String, String)>>>, String> {
+    load(tab, dir, m).await?;
+    let mut raw = read_computed(tab, ids, props).await?;
+    let settle = m.settle.min(MAX_SETTLE);
+    if raw.animated && !settle.is_zero() {
+        tokio::time::sleep(settle).await;
+        raw = read_computed(tab, ids, props).await?;
+    }
+    Ok(raw.values)
+}
+
+#[derive(serde::Deserialize)]
+struct RawComputed {
+    values: BTreeMap<NodeId, Option<Vec<(String, String)>>>,
+    animated: bool,
+}
+
+async fn read_computed(
+    tab: &mut cdp::Tab,
+    ids: &[NodeId],
+    props: &[String],
+) -> Result<RawComputed, String> {
+    let ids = serde_json::to_string(ids).expect("strings serialize");
+    let props = serde_json::to_string(props).expect("strings serialize");
+    let script = format!(
+        r#"(() => {{
+  const props = {props};
+  const values = {{}};
+  for (const id of {ids}) {{
+    const el = document.querySelector(`[{VIEWER_ID_ATTR}="${{CSS.escape(id)}}"]`);
+    if (!el) {{ values[id] = null; continue; }}
+    const computed = getComputedStyle(el);
+    values[id] = props.map((name) => [name, computed.getPropertyValue(name).trim()]);
+  }}
+  return {{
+    values,
+    animated: document.scripts.length > 0 || document.getAnimations().length > 0,
+  }};
+}})()"#
+    );
+    let value = tab.evaluate(&script).await?;
+    serde_json::from_value(value).map_err(|e| format!("couldn't read computed styles: {e}"))
 }
 
 /// Measures artboards for an export in headless Chrome, with [`scene`].
@@ -878,6 +1112,15 @@ fn rect([x, y, width, height]: [f64; 4]) -> Rect {
     Rect::new(x, y, width, height)
 }
 
+fn window([left, top, right, bottom]: [Option<f64>; 4]) -> Window {
+    Window {
+        left,
+        top,
+        right,
+        bottom,
+    }
+}
+
 /// Loads one artboard's page and takes its shots.
 async fn render(
     tab: &mut cdp::Tab,
@@ -906,13 +1149,7 @@ async fn render(
         )
         .await?;
     }
-    tab.clear_events();
-    let url = format!("file://{}", path.display());
-    tab.call("Page.navigate", json!({ "url": url })).await?;
-    // A slow image shouldn't stop the capture; it shows as not loaded.
-    tab.wait_for("Page.loadEventFired", LOAD).await?;
-    tab.evaluate("document.fonts.ready.then(() => true)")
-        .await?;
+    open(tab, path, page.scripted).await?;
 
     let ids: Vec<&str> = page.shots.iter().map(|s| s.element.as_str()).collect();
     let layout = measure(tab, &page.artboard, &ids).await?;
@@ -956,6 +1193,20 @@ async fn render(
             selector(&page.artboard)
         );
         set_style(tab, "finite-reveal-style", &css).await?;
+        if page.scripted {
+            // The artboard is in a frame, which clips what reaches past its
+            // own size; make the frame as big as what's revealed.
+            grow_frame(
+                tab,
+                Rect::new(
+                    board.x,
+                    board.y,
+                    board.width + overflow.right,
+                    board.height + overflow.bottom,
+                ),
+            )
+            .await?;
+        }
     }
     // What can be captured: the artboard, or with its overflow revealed,
     // everything its content reaches.
@@ -1014,6 +1265,149 @@ async fn measure(tab: &mut cdp::Tab, artboard: &str, ids: &[&str]) -> Result<Lay
     ];
   }};
   const board = find({board});
+  // The element whose box lays out `el`'s: its parent, or for a positioned
+  // element the nearest ancestor that positions it. Overflow clips only what
+  // it contains, so a skipped ancestor doesn't clip `el`.
+  const makesBlock = (s) => s.transform !== "none" || s.filter !== "none" || s.perspective !== "none" || /paint|layout|strict|content/.test(s.contain);
+  const containing = (el, position) => {{
+    if (position !== "absolute" && position !== "fixed") return el.parentElement;
+    for (let p = el.parentElement; p && p !== board; p = p.parentElement) {{
+      const s = getComputedStyle(p);
+      if (makesBlock(s) || (position === "absolute" && s.position !== "static")) return p;
+    }}
+    return position === "absolute" ? board : null;
+  }};
+  // Splits at top-level whitespace or commas, so a calc() stays whole.
+  const split = (v, comma) => {{
+    const out = [];
+    let depth = 0, cur = "";
+    for (const c of v) {{
+      if (c === "(") depth++;
+      if (c === ")") depth--;
+      if (!depth && (comma ? c === "," : /\s/.test(c))) {{ out.push(cur); cur = ""; }} else cur += c;
+    }}
+    out.push(cur);
+    return out.map((p) => p.trim()).filter(Boolean);
+  }};
+  // Whether `el` or an element above it is scaled or rotated, which its
+  // box (taken after the transform) no longer measures a clip-path against.
+  const turned = new Map();
+  const transformed = (el) => {{
+    if (!el || el === board) return false;
+    if (!turned.has(el)) {{
+      const s = getComputedStyle(el);
+      turned.set(el, s.transform !== "none" || s.scale !== "none" || s.rotate !== "none" || transformed(el.parentElement));
+    }}
+    return turned.get(el);
+  }};
+  // Whether `el`'s clip-path is a shape that is read (not a path(), a url(),
+  // another reference box).
+  const read = (s) => /^(inset|circle|ellipse|polygon)\(.*\)$/.test(s.clipPath);
+  // The bounds of what `el`'s clip-path keeps, as [left, top, right, bottom],
+  // or null for one that can't be worked out exactly, which crops nothing.
+  const kept = new Map();
+  const pathBounds = (el, s) => {{
+    if (s.clipPath === "none" || !read(s) || transformed(el)) return null;
+    if (!kept.has(el)) {{
+      kept.set(el, (() => {{
+        const m = /^(inset|circle|ellipse|polygon)\((.*)\)$/.exec(s.clipPath);
+        const [l, t, w, h] = box(el);
+        const len = (v, whole) => v.endsWith("%") ? parseFloat(v) / 100 * whole : parseFloat(v);
+        const word = {{ left: "0%", top: "0%", center: "50%", right: "100%", bottom: "100%" }};
+        const spot = (v) => {{
+          const p = split(v);
+          return p.length === 2 ? [len(word[p[0]] ?? p[0], w), len(word[p[1]] ?? p[1], h)] : [NaN, NaN];
+        }};
+        // The distances from (cx, cy) to the sides, for closest-side and farthest-side.
+        const radius = (v, whole, near, far) => v === "farthest-side" ? Math.max(...far) : v === "closest-side" || v === "" ? Math.min(...near) : len(v, whole);
+        let out;
+        if (m[1] === "inset") {{
+          const [top, right = top, bottom = top, left = right] = split(m[2].split(/\s+round\s+/)[0]);
+          out = [l + len(left, w), t + len(top, h), l + w - len(right, w), t + h - len(bottom, h)];
+        }} else if (m[1] === "polygon") {{
+          const points = split(m[2].replace(/^\s*(evenodd|nonzero)\s*,/, ""), true).map(spot);
+          out = [Math.min(...points.map((p) => p[0])) + l, Math.min(...points.map((p) => p[1])) + t,
+                 Math.max(...points.map((p) => p[0])) + l, Math.max(...points.map((p) => p[1])) + t];
+        }} else {{
+          const [shape, at = "50% 50%"] = m[2].split(/\s+at\s+/);
+          const [cx, cy] = spot(at).map((v, i) => v + (i ? t : l));
+          const dx = [cx - l, l + w - cx].map(Math.abs);
+          const dy = [cy - t, t + h - cy].map(Math.abs);
+          const [rx, ry] = m[1] === "circle"
+            ? Array(2).fill(radius(shape.trim(), Math.hypot(w, h) / Math.SQRT2, [...dx, ...dy], [...dx, ...dy]))
+            : [radius(split(shape)[0] ?? "", w, dx, dx), radius(split(shape)[1] ?? "", h, dy, dy)];
+          out = [cx - rx, cy - ry, cx + rx, cy + ry];
+        }}
+        return out.some(Number.isNaN) ? null : out;
+      }})());
+    }}
+    return kept.get(el);
+  }};
+  // Whether `el`'s clip-path crops it, across and down, to within the
+  // artboard's far edges. A shape that isn't read is taken to crop it all,
+  // and one that can't be worked out exactly to crop nothing.
+  const pathClips = (el, s) => {{
+    if (s.clipPath === "none") return [false, false];
+    if (!read(s)) return [true, true];
+    const bounds = pathBounds(el, s);
+    if (!bounds) return [false, false];
+    const [x, y, w, h] = box(board);
+    return [bounds[2] <= x + w + 1, bounds[3] <= y + h + 1];
+  }};
+  // Whether `el` or any element above it has a clip-path that crops it. A
+  // clip-path crops everything inside it, whichever element positions that.
+  const cropped = new Map();
+  const croppedBy = (el) => {{
+    if (!el || el === board || !board.contains(el)) return [false, false];
+    if (!cropped.has(el)) {{
+      const [x, y] = croppedBy(el.parentElement);
+      const path = pathClips(el, getComputedStyle(el));
+      cropped.set(el, [path[0] || x, path[1] || y]);
+    }}
+    return cropped.get(el);
+  }};
+  // Whether `el` clips what it contains, across and down, or an element
+  // containing it does. The artboard's own clipping is what is being checked.
+  const holds = new Map();
+  const clips = (el) => {{
+    if (!el || el === board || !board.contains(el)) return [false, false];
+    if (!holds.has(el)) {{
+      const s = getComputedStyle(el);
+      const [x, y] = clips(containing(el, s.position));
+      holds.set(el, [x || s.overflowX !== "visible", y || s.overflowY !== "visible"]);
+    }}
+    return holds.get(el);
+  }};
+  // The tighter of two windows, as [left, top, right, bottom], where null
+  // leaves a side unclipped: a wrapper may clip across and not down.
+  const pick = (f, a, b) => a == null ? b : b == null ? a : f(a, b);
+  const narrow = (a, b) => !a ? b : !b ? a : [pick(Math.max, a[0], b[0]), pick(Math.max, a[1], b[1]), pick(Math.min, a[2], b[2]), pick(Math.min, a[3], b[3])];
+  // What the clip-paths around `el`, and its own, show of the page.
+  const paths = new Map();
+  const shownByPaths = (el) => {{
+    if (!el || el === board || !board.contains(el)) return null;
+    if (!paths.has(el)) paths.set(el, narrow(shownByPaths(el.parentElement), pathBounds(el, getComputedStyle(el))));
+    return paths.get(el);
+  }};
+  // What the scrollers and viewports around `el` (and `el` itself, for what
+  // it contains) show of the page.
+  const windows = new Map();
+  const shown = (el) => {{
+    if (!el || el === board || !board.contains(el)) return null;
+    if (!windows.has(el)) {{
+      const s = getComputedStyle(el);
+      let out = shown(containing(el, s.position));
+      const [across, down] = [s.overflowX !== "visible", s.overflowY !== "visible"];
+      if (across || down) {{
+        const [x, y, w, h] = box(el);
+        const px = (name) => parseFloat(s[name]) || 0;
+        out = narrow(out, [across ? x + px("borderLeftWidth") : null, down ? y + px("borderTopWidth") : null,
+                           across ? x + w - px("borderRightWidth") : null, down ? y + h - px("borderBottomWidth") : null]);
+      }}
+      windows.set(el, out);
+    }}
+    return windows.get(el);
+  }};
   const elements = {{}};
   for (const id of {ids}) {{
     const el = find(id);
@@ -1025,7 +1419,8 @@ async fn measure(tab: &mut cdp::Tab, artboard: &str, ids: &[&str]) -> Result<Lay
     if (!w && !h) continue;
     let text = false;
     for (const c of el.childNodes) if (c.nodeType === 3 && c.textContent.trim()) text = true;
-    const inline = getComputedStyle(el).display === "inline";
+    const style = getComputedStyle(el);
+    const inline = style.display === "inline";
     const spill = text && !inline;
     // The union of the element's own text runs.
     let ink = null;
@@ -1043,9 +1438,16 @@ async fn measure(tab: &mut cdp::Tab, artboard: &str, ids: &[&str]) -> Result<Lay
     }}
     nodes.push([el.getAttribute("{VIEWER_ID_ATTR}"), x, y, w, h,
       spill ? el.scrollWidth - el.clientWidth : 0, spill ? el.scrollHeight - el.clientHeight : 0, text,
-      ink ? [ink[0], ink[1], ink[2] - ink[0], ink[3] - ink[1]] : null]);
+      ink ? [ink[0], ink[1], ink[2] - ink[0], ink[3] - ink[1]] : null,
+      (() => {{
+        const [x, y] = clips(containing(el, style.position));
+        const [px, py] = croppedBy(el);
+        return [px || x, py || y];
+      }})(),
+      style.position === "absolute" || style.position === "fixed",
+      narrow(shown(containing(el, style.position)), shownByPaths(el))]);
   }}
-  nodes.unshift([{board}, ...box(board), 0, 0, false, null]);
+  nodes.unshift([{board}, ...box(board), 0, 0, false, null, [false, false], false, null]);
   return {{
     nodes,
     board: box(board),
@@ -1178,6 +1580,30 @@ async fn shoot(
         boxes: (planned.element == page.artboard)
             .then(|| layout.nodes.iter().map(element_box).collect()),
     })
+}
+
+/// Resizes the wrapper's iframe to cover `area`, so content that overflows
+/// the artboard shows in the capture.
+async fn grow_frame(tab: &mut cdp::Tab, area: Rect) -> Result<(), String> {
+    let (width, height) = (
+        area.right().ceil().clamp(1.0, MAX_SIDE * 2.0),
+        area.bottom().ceil().clamp(1.0, MAX_SIDE * 2.0),
+    );
+    // The wrapper's own context, not the frame's.
+    let frame = tab.context();
+    tab.set_context(None);
+    let resized = tab
+        .evaluate(&format!(
+            r#"(() => {{
+  const frame = document.querySelector("iframe");
+  frame.style.width = "{width}px";
+  frame.style.height = "{height}px";
+  return new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done(true))));
+}})()"#
+        ))
+        .await;
+    tab.set_context(frame);
+    resized.map(|_| ())
 }
 
 /// The `<style>` element holding CSS for one shot only.

@@ -1389,6 +1389,14 @@ mod tests {
     }
 
     #[test]
+    fn a_component_cant_be_made_from_a_node_an_instance_shows() {
+        let doc = design();
+        let view = expand(&doc);
+        let refused = crate::edit::create_component(&view, "i/new2", None, &[]).unwrap_err();
+        assert!(refused.0.contains("detach_instance #i"), "{refused}");
+    }
+
+    #[test]
     fn structure_inside_an_instance_is_refused() {
         let doc = design();
         let view = expand(&doc);

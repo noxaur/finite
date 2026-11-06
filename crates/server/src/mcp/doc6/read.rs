@@ -1,10 +1,10 @@
 //! The `read` tool's views of a design: the overview, and for what a
 //! selector matches, its outline, HTML, CSS or JSX, or a search inside it.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, fmt::Write, sync::Arc};
 
 use finite_design::{
-    Design, Document, NodeId, css, html,
+    Design, Document, NodeId, NodeKind, css, html,
     search::{self, Query},
     select,
 };
@@ -18,6 +18,7 @@ use crate::{
         FiniteMcp, ToolResult, cut, fail, format::OUTPUT_LIMIT, html_component_note, ok, outline,
         params::ExportParams, search::found_text, tokens::listed,
     },
+    screenshot,
 };
 
 /// How many matches a view shows before it asks to narrow select.
@@ -68,6 +69,14 @@ pub(super) async fn read(
         };
         return ok(handle.read(|d| jsx_view(d.view(), &ids, p.tailwind)));
     }
+    if view.as_deref() == Some("computed") {
+        let Some(ids) = ids else {
+            return fail(
+                "as: \"computed\" needs select, like {\"select\": \"#k3x9a2bq\", \"as\": \"computed\"}.",
+            );
+        };
+        return computed(handle, ids, p.properties).await;
+    }
     if let Some(needle) = p.contains.as_deref().filter(|c| !c.is_empty()) {
         return ok(handle.read(|d| contains(d.view(), needle, ids.as_deref(), page.as_deref())));
     }
@@ -82,14 +91,215 @@ pub(super) async fn read(
                 overview(d, listening, &presence, actor, page.as_deref(), p.depth)
             }))
         }
-        (Some("html"), Some(ids)) => ok(handle.read(|d| html_view(d, &ids, p.depth))),
+        (Some("html"), Some(ids)) => ok(handle.read(|d| html_view(d, &ids, p.depth, p.offset))),
         (Some("outline") | None, Some(ids)) => {
             ok(handle.read(|d| outline_view(d.view(), &ids, p.depth)))
         }
         (Some(other), _) => fail(format!(
-            "as {other:?} isn't one of outline (default), html, css or jsx."
+            "as {other:?} isn't one of outline (default), html, css, jsx or computed."
         )),
     }
+}
+
+/// What `as: "computed"` shows without `properties`.
+const COMPUTED: [&str; 10] = [
+    "color",
+    "background-color",
+    "font",
+    "width",
+    "height",
+    "padding",
+    "gap",
+    "border",
+    "border-radius",
+    "display",
+];
+
+/// The most properties one `as: "computed"` asks for.
+const MAX_PROPERTIES: usize = 40;
+
+/// `properties` as CSS names: `backgroundColor` becomes `background-color`,
+/// and `--bg` stays as it is, since custom properties are case-sensitive.
+fn property_names(given: Option<Vec<String>>) -> Result<Vec<String>, String> {
+    let Some(given) = given.filter(|g| !g.is_empty()) else {
+        return Ok(COMPUTED.map(str::to_owned).to_vec());
+    };
+    if given.len() > MAX_PROPERTIES {
+        return Err(format!(
+            "properties lists {} names; one read takes at most {MAX_PROPERTIES}.",
+            given.len()
+        ));
+    }
+    given
+        .iter()
+        .map(|name| {
+            let name = name.trim();
+            let custom = name.starts_with("--");
+            let mut css = String::with_capacity(name.len());
+            for c in name.chars() {
+                if c.is_ascii_uppercase() && !custom {
+                    css.push('-');
+                    css.push(c.to_ascii_lowercase());
+                } else {
+                    css.push(c);
+                }
+            }
+            let body = css.trim_start_matches('-');
+            let valid = !body.is_empty()
+                && css.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            if valid {
+                Ok(css)
+            } else {
+                Err(format!(
+                    "{name:?} isn't a CSS property. Use names like \"color\", \"background-color\" or \"--bg\"."
+                ))
+            }
+        })
+        .collect()
+}
+
+/// The values the browser computes for what select matches, in each
+/// artboard's mode: a token as `var(--bg)` resolves, `100%` as pixels.
+async fn computed(
+    handle: &Arc<DesignHandle>,
+    ids: Vec<NodeId>,
+    properties: Option<Vec<String>>,
+) -> ToolResult {
+    let defaulted = properties.as_ref().is_none_or(Vec::is_empty);
+    let props = match property_names(properties) {
+        Ok(props) => props,
+        Err(error) => return fail(error),
+    };
+    // What the browser measures, and the labels and modes to show beside it,
+    // from one look at the design, so they agree whatever happens meanwhile.
+    let planned = handle.read(|d| -> Result<Snapshot, String> {
+        let doc = d.view();
+        if ids.len() > screenshot::MAX_SHOTS {
+            return Err(format!(
+                "select matches {} elements; as: \"computed\" takes at most {}. Narrow select: {}.",
+                ids.len(),
+                screenshot::MAX_SHOTS,
+                describe(doc, &ids)
+            ));
+        }
+        let many = ids.len() > 1;
+        let mut boards: Vec<(NodeId, Vec<NodeId>)> = Vec::new();
+        let mut entries = Vec::new();
+        for (i, id) in ids.iter().enumerate() {
+            // A text node has its parent's values.
+            let element = match doc.get(id) {
+                Some(n) if n.kind == NodeKind::Text => {
+                    n.parent.clone().unwrap_or_else(|| id.clone())
+                }
+                _ => id.clone(),
+            };
+            let board = doc
+                .artboard_of(&element)
+                .ok_or_else(|| format!("#{id} isn't in an artboard."))?;
+            let mode = (doc.modes().len() > 1)
+                .then_some(board)
+                .map(|board| {
+                    let mode = doc.mode_of(board);
+                    let name = doc.mode_map().get(mode).map_or(mode, |m| m.name.as_str());
+                    format!(" (mode {name:?})")
+                })
+                .unwrap_or_default();
+            let mut head = if many {
+                heading(doc, &ids, i)
+            } else {
+                String::new()
+            };
+            let _ = writeln!(head, "{}{mode}", label(doc, &element));
+            entries.push((head, element.clone(), board.id.clone()));
+            match boards.iter_mut().find(|(b, _)| *b == board.id) {
+                Some((_, list)) => list.push(element),
+                None => boards.push((board.id.clone(), vec![element])),
+            }
+        }
+        let measurements = boards
+            .into_iter()
+            .map(|(board, list)| {
+                screenshot::plan_measurement(doc, &board, screenshot::Options::default())
+                    .map(|m| (m, list))
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Snapshot {
+            seq: d.seq(),
+            entries,
+            measurements,
+        })
+    });
+    let snapshot = match planned {
+        Ok(snapshot) => snapshot,
+        Err(error) => return fail(error),
+    };
+    // One browser for each artboard, without the design's lock.
+    let results = futures::future::join_all(
+        snapshot
+            .measurements
+            .iter()
+            .map(|(m, list)| screenshot::computed(m, list.clone(), props.clone())),
+    )
+    .await;
+    let mut values = HashMap::new();
+    for result in results {
+        match result {
+            Ok(found) => values.extend(found),
+            Err(error) => return fail(error),
+        }
+    }
+    // The browser measured the design as it was; say so where it has changed
+    // since. The change log answers that without rebuilding pages under the lock.
+    let changed: Vec<NodeId> = handle.read(|d| {
+        if d.seq() == snapshot.seq {
+            return Vec::new();
+        }
+        let since = d.artboards_changed_since(snapshot.seq);
+        snapshot
+            .measurements
+            .iter()
+            .map(|(m, _)| m.artboard())
+            .filter(|board| since.as_ref().is_none_or(|s| s.contains(*board)))
+            .map(str::to_owned)
+            .collect()
+    });
+    let mut text = String::new();
+    for (head, element, board) in &snapshot.entries {
+        text.push_str(head);
+        match values.get(element) {
+            Some(Some(list)) => {
+                for (name, value) in list {
+                    let shown = if value.is_empty() { "(not set)" } else { value };
+                    let _ = writeln!(text, "  {name}: {shown}");
+                }
+                if changed.contains(board) {
+                    let _ = writeln!(
+                        text,
+                        "  The design changed while the browser measured; these values are from change {}. Read again for the current ones.",
+                        snapshot.seq
+                    );
+                }
+            }
+            _ => text.push_str(
+                "  not on the page any more: the design changed meanwhile. Read again.\n",
+            ),
+        }
+    }
+    if defaulted {
+        text.push_str(
+            "\nPass properties for others, like [\"--bg\", \"font-size\", \"margin\"]. Values are what the browser computes with the artboard's mode applied.",
+        );
+    }
+    ok(text)
+}
+
+/// What `as: "computed"` measures, with how to show it, as the design was at
+/// change `seq`.
+struct Snapshot {
+    seq: u64,
+    /// For each match: its heading and label, the element measured, and its artboard.
+    entries: Vec<(String, NodeId, NodeId)>,
+    measurements: Vec<(screenshot::Measurement, Vec<NodeId>)>,
 }
 
 /// The comment before each match when there are several, naming its artboard.
@@ -273,14 +483,14 @@ fn outline_view(doc: &Document, ids: &[NodeId], depth: Option<usize>) -> String 
     )
 }
 
-fn html_view(design: &Design, ids: &[NodeId], depth: Option<usize>) -> String {
+fn html_view(design: &Design, ids: &[NodeId], depth: Option<usize>, offset: usize) -> String {
     let doc = design.view();
     let shown = ids.len().min(SHOWN);
     let limit = OUTPUT_LIMIT / shown.max(1);
     let mut parts = Vec::new();
     for (i, id) in ids.iter().take(SHOWN).enumerate() {
         let mut text = heading(doc, ids, i);
-        text.push_str(&html_of(design, id, depth, limit));
+        text.push_str(&html_of(design, id, depth, offset, limit));
         parts.push(text.trim_end().to_owned());
     }
     let mut text = parts.join("\n\n");
@@ -288,13 +498,25 @@ fn html_view(design: &Design, ids: &[NodeId], depth: Option<usize>) -> String {
     text
 }
 
+/// The longest `<style>` or `<script>` code read shows inside an element's
+/// HTML. A page's stylesheet can be most of an artboard's HTML, and reading
+/// the element on its own shows all of it.
+const CODE_SHOWN: usize = 2_000;
+
 /// One node's HTML, as an html op takes it back, cut to fit `limit`.
-fn html_of(design: &Design, id: &str, depth: Option<usize>, limit: usize) -> String {
+fn html_of(design: &Design, id: &str, depth: Option<usize>, offset: usize, limit: usize) -> String {
     let doc = design.view();
+    if let Some(page) = code_page(doc, id, offset, limit) {
+        return page;
+    }
     let options = html::ExportOptions {
         ids: true,
         styles: true,
         depth,
+        max_code_len: (!doc.get(id).and_then(|n| n.tag()).is_some_and(|tag| {
+            tag.eq_ignore_ascii_case("style") || tag.eq_ignore_ascii_case("script")
+        }))
+        .then_some(CODE_SHOWN),
         read_at: Some(design.seq()),
         ..Default::default()
     };
@@ -347,6 +569,18 @@ fn html_of(design: &Design, id: &str, depth: Option<usize>, limit: usize) -> Str
             },
         ));
     }
+    if export.hidden_code > 0 {
+        out.push_str(&format!(
+            "\n{} <style> or <script> {} replaced by a comment saying how to read {}. Don't write this HTML back as it is.",
+            export.hidden_code,
+            if export.hidden_code == 1 {
+                "body was"
+            } else {
+                "bodies were"
+            },
+            if export.hidden_code == 1 { "it" } else { "them" },
+        ));
+    }
     if let Some(note) = html_component_note(design, id, &out) {
         out.push('\n');
         out.push_str(&note);
@@ -360,6 +594,65 @@ fn html_of(design: &Design, id: &str, depth: Option<usize>, limit: usize) -> Str
         ));
     }
     out
+}
+
+/// A `<style>` or `<script>` whose code is more than a result holds (or any
+/// of it from `offset` on), as the characters that fit and the offset of the
+/// rest. `None` when the element isn't one, or all its code fits.
+fn code_page(doc: &Document, id: &str, offset: usize, limit: usize) -> Option<String> {
+    /// Room for the heading line and the element's tag.
+    const HEADING: usize = 300;
+    let node = doc.get(id)?;
+    let tag = node.tag()?;
+    if !(tag.eq_ignore_ascii_case("style") || tag.eq_ignore_ascii_case("script")) {
+        return None;
+    }
+    let code: String = doc
+        .children(Some(id))
+        .iter()
+        .filter_map(|c| c.text.as_deref())
+        .collect();
+    let total = code.chars().count();
+    if offset == 0 && code.len() + HEADING <= limit {
+        return None;
+    }
+    if offset >= total {
+        return Some(format!(
+            "{} has {total} characters of code; offset {offset} is past the end.",
+            label(doc, id)
+        ));
+    }
+    let start = code
+        .char_indices()
+        .nth(offset)
+        .map_or(code.len(), |(i, _)| i);
+    let mut end = code.len().min(start + limit.saturating_sub(HEADING));
+    while !code.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end < code.len()
+        && let Some(line) = code[start..end].rfind('\n').filter(|&i| i > 0)
+    {
+        end = start + line + 1;
+    }
+    let shown_to = offset + code[start..end].chars().count();
+    let next = if shown_to < total {
+        format!(" Read the rest with offset: {shown_to}.")
+    } else {
+        String::new()
+    };
+    // The marker right after the code keeps its trailing whitespace, which
+    // the result would otherwise trim, so the pieces join back exactly.
+    let end_mark = if shown_to < total {
+        format!("⟨piece ends; offset {shown_to} continues⟩")
+    } else {
+        "⟨code ends⟩".to_owned()
+    };
+    Some(format!(
+        "{}'s code is {total} characters, more than a result holds, so this is a piece of it, not HTML to write back. Showing characters {offset} to {shown_to}, up to the ⟨…⟩ mark.{next}\n{}{end_mark}",
+        label(doc, id),
+        &code[start..end]
+    ))
 }
 
 /// The `<style>` elements in `board`, with their CSS.

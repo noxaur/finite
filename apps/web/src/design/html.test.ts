@@ -27,10 +27,12 @@ const replica = (nodes: ReadonlyArray<Node>) => {
   return r;
 };
 
+const boot = { nonce: "n", storage: {} };
+
 describe("artboardDocument", () => {
   it("wraps an artboard in a page with the server's content policy and base CSS", () => {
     const r = replica([el("a", null, "div", { attrs: { class: "x" } })]);
-    const page = artboardDocument(r, "a");
+    const page = artboardDocument(r, "a", boot);
     expect(page).toContain(`content="${designModel().csp}"`);
     expect(designModel().csp).toContain("default-src 'none'");
     expect(page).toContain(designModel().baseCss);
@@ -42,30 +44,25 @@ describe("artboardDocument", () => {
   it("puts the tokens before the artboard, in a layer its own styles override", () => {
     const r = replica([el("a", null, "div")]);
     r.apply({ op: "token", name: "--brand", modeId: "mode-1", value: "red" });
-    const page = artboardDocument(r, "a");
+    const page = artboardDocument(r, "a", boot);
     const tokens = page.indexOf("<style>@layer finite-tokens { :root { --brand: red; } }</style>");
     expect(tokens).toBeGreaterThan(page.indexOf(designModel().baseCss));
     expect(tokens).toBeLessThan(page.indexOf("<body>"));
   });
 
-  it("lets a preview page scroll instead of forwarding the wheel to the canvas", () => {
+  it("runs the bootstrap first, with a config a stored </script> can't break out of", () => {
     const r = replica([el("a", null, "div")]);
-    expect(artboardDocument(r, "a")).toContain('type: "wheel"');
-    const preview = artboardDocument(r, "a", true);
-    expect(preview).not.toContain('type: "wheel"');
-    expect(preview).toContain('type: "key"');
-    expect(preview).toContain('<body><div data-finite-id="a"></div></body>');
-  });
-
-  it("keeps links in a preview page, where its runtime follows them", () => {
-    const r = replica([
-      el("a", null, "div"),
-      el("b", "a", "button", { attrs: { "data-to": "c" } }),
-      el("c", null, "div"),
-    ]);
-    const preview = artboardDocument(r, "a", true);
-    expect(preview).toContain('data-to="c"');
-    expect(preview).toContain('type: "navigate"');
+    const page = artboardDocument(r, "a", { nonce: "n1", storage: { k: "</script><b>" } });
+    const script = page.indexOf(`<script>(${designModel().bootstrap})(`);
+    expect(script).toBeGreaterThan(page.indexOf("Content-Security-Policy"));
+    expect(script).toBeLessThan(page.indexOf("<style>"));
+    expect(page.match(/<\/script>/g)).toHaveLength(1);
+    expect(page).toContain('{"nonce":"n1","storage":{"k":"\\u003c/script>\\u003cb>"}}');
+    // It's code a browser can run, not just text that looks right.
+    const code = page.slice(script + "<script>".length, page.indexOf("</script>"));
+    // Parsing it is the point here; it never runs.
+    // oxlint-disable-next-line typescript/no-implied-eval
+    expect(() => new Function(code)).not.toThrow();
   });
 });
 

@@ -32,6 +32,9 @@ Preconditions:
 ## Gotchas
 
 - `key Enter` doesn't submit the `Add a token` form in headless Chrome, which sends no keypress. Click its button.
+- The panel shows names without the leading `--` and adds it back on save, so `input[aria-label="Token name"]` holds `brand` for `--brand`.
+- A value that is a whole `var(--x)` shows as a pill: `select[aria-label="<name> in <mode>"]` lists tokens of the same kind, and its empty option detaches it into the plain value. A color's swatch holds `input[type=color][aria-label="Pick a color for <name>"]`, which saves on its native `change` event. headless has no select or picker command, so set `value` and dispatch `input` and `change` with `eval`.
+- The header's buttons by position are the modes, then `Add a mode`, then `Delete mode <name>`. Pick `Create token` by its text, not by `--nth`: a miss deletes a mode and its values.
 - A value cell saves when it loses focus. Enter blurs it, so `key Enter` works there.
 - An empty cell in a mode other than the first shows the first mode's value as its placeholder, and the artboard uses that value.
 - A value the server refuses, like `red; color: blue`, shows a `role="alert"` in the panel. Snapshot the panel, not just the artboard.

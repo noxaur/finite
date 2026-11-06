@@ -42,8 +42,8 @@ export function SelectionLayer({
     return editor.subscribe(() => setState(editor.state));
   }, [editor]);
 
-  const rectOf = (id: string) => {
-    const rect = renderer.nodeRect(id);
+  const rectOf = (id: string, outer = false) => {
+    const rect = outer ? renderer.outerRect(id) : renderer.nodeRect(id);
     if (!rect) return null;
     const a = camera.toWorld(rect.left, rect.top);
     const b = camera.toWorld(rect.right, rect.bottom);
@@ -54,7 +54,9 @@ export function SelectionLayer({
   const resizable =
     state.selection.length === 1 && only !== undefined && renderer.measure(only) !== null;
   const hover =
-    state.hover !== null && !state.selection.includes(state.hover) ? rectOf(state.hover) : null;
+    state.hover !== null && !state.selection.includes(state.hover)
+      ? rectOf(state.hover, true)
+      : null;
   const target = state.target === null ? null : rectOf(state.target);
   // Guides and the selection box come in page pixels.
   const world = (left: number, top: number, right: number, bottom: number) => {
@@ -68,6 +70,18 @@ export function SelectionLayer({
   return (
     <>
       {hover && <div {...stylex.props(styles.box(hover), styles.hover)} />}
+      {/* The corner marks wobble like the tool icons. */}
+      <svg width="0" height="0" style={{ position: "absolute" }} aria-hidden="true">
+        <filter id="hover-wob" x="-20%" y="-20%" width="140%" height="140%">
+          <feTurbulence type="fractalNoise" baseFrequency="0.3" numOctaves="1" seed="3" />
+          <feDisplacementMap
+            in="SourceGraphic"
+            scale="1.2"
+            xChannelSelector="R"
+            yChannelSelector="G"
+          />
+        </filter>
+      </svg>
       {target && <div {...stylex.props(styles.box(target), styles.target)} />}
       {area && <div data-area {...stylex.props(styles.box(area), styles.area)} />}
       {state.guides.map((g, i) => (
@@ -83,24 +97,58 @@ export function SelectionLayer({
         />
       ))}
       {state.selection.map((id) => {
-        const rect = rectOf(id);
+        const rect = rectOf(id, true);
         if (!rect) return null;
+        const handles = resizable && !state.dragging;
         return (
-          <div key={id} data-selected={id} {...stylex.props(styles.box(rect), styles.selected)}>
-            {resizable &&
-              !state.dragging &&
+          <div
+            key={id}
+            data-selected={id}
+            {...stylex.props(styles.box(rect), styles.selected, id === state.hover && styles.hover)}
+          >
+            {handles &&
               HANDLES.map((handle) => (
                 <div
                   key={handle}
                   data-handle={handle}
                   data-camera-ignore
-                  {...stylex.props(styles.handle(handle))}
-                />
+                  {...stylex.props(
+                    styles.handle(handle),
+                    (handle === "n" || handle === "s") && styles.across,
+                    (handle === "e" || handle === "w") && styles.along,
+                  )}
+                >
+                  {CORNERS.includes(handle) && <Mark />}
+                </div>
+              ))}
+            {!handles &&
+              CORNERS.map((corner) => (
+                <div key={corner} {...stylex.props(styles.corner(corner))}>
+                  <Mark />
+                </div>
               ))}
           </div>
         );
       })}
     </>
+  );
+}
+
+/** A selection's corner mark: white inside, blue outside, wobbled like the tool icons. */
+function Mark() {
+  return (
+    <svg viewBox="0 0 12 12" overflow="visible" aria-hidden="true" {...stylex.props(styles.fill)}>
+      <rect
+        x="2"
+        y="2"
+        width="8"
+        height="8"
+        strokeWidth="2"
+        strokeLinejoin="round"
+        filter="url(#hover-wob)"
+        {...stylex.props(styles.mark)}
+      />
+    </svg>
   );
 }
 
@@ -115,6 +163,9 @@ export function EditorNotice({ editor }: { editor: Editor }) {
     </div>
   );
 }
+
+/** The selection's corners, which carry a mark each. */
+const CORNERS: readonly Handle[] = ["nw", "ne", "sw", "se"];
 
 /** Where a handle sits on its box, as fractions of the width and height. */
 const spot = (handle: Handle) => ({
@@ -146,9 +197,9 @@ const styles = stylex.create({
     height: r.height,
     pointerEvents: "none",
   }),
+  /** Selected and not under the pointer: the thin line. */
   selected: {
-    outline: `calc(1.5px * var(--inv-zoom, 1)) solid ${colors.ink}`,
-    boxShadow: `0 0 0 calc(3px * var(--inv-zoom, 1)) ${colors.halo}`,
+    outline: `calc(1.5px * var(--inv-zoom, 1)) solid ${colors.hover}`,
   },
   area: {
     outline: `calc(1px * var(--inv-zoom, 1)) solid ${colors.ink}`,
@@ -160,25 +211,54 @@ const styles = stylex.create({
   horizontal: {
     borderTop: `calc(1px * var(--inv-zoom, 1)) solid ${colors.danger}`,
   },
+  /** Under the pointer, selected or not: the heavy line. */
   hover: {
-    outline: `calc(1px * var(--inv-zoom, 1)) solid ${colors.ink}`,
-    opacity: 0.5,
+    outline: `calc(3px * var(--inv-zoom, 1)) solid ${colors.hover}`,
+  },
+  fill: {
+    display: "block",
+    width: "100%",
+    height: "100%",
+  },
+  corner: (corner: Handle) => ({
+    position: "absolute",
+    left: `${spot(corner).x * 100}%`,
+    top: `${spot(corner).y * 100}%`,
+    width: "calc(12px * var(--inv-zoom, 1))",
+    height: "calc(12px * var(--inv-zoom, 1))",
+    transform: "translate(-50%, -50%)",
+  }),
+  mark: {
+    fill: colors.halo,
+    stroke: colors.hover,
   },
   target: {
     outline: `calc(1.5px * var(--inv-zoom, 1)) dashed ${colors.ink}`,
     boxShadow: `0 0 0 calc(3px * var(--inv-zoom, 1)) ${colors.halo}`,
   },
+  // Corner handles draw a mark, over the sides.
   handle: (handle: Handle) => ({
     position: "absolute",
     left: `${spot(handle).x * 100}%`,
     top: `${spot(handle).y * 100}%`,
-    width: "calc(9px * var(--inv-zoom, 1))",
-    height: "calc(9px * var(--inv-zoom, 1))",
+    width: "calc(12px * var(--inv-zoom, 1))",
+    height: "calc(12px * var(--inv-zoom, 1))",
     transform: "translate(-50%, -50%)",
-    backgroundColor: colors.halo,
-    border: `calc(1.5px * var(--inv-zoom, 1)) solid ${colors.ink}`,
-    boxSizing: "border-box",
+    zIndex: 1,
     cursor: CURSORS[handle],
     pointerEvents: "auto",
   }),
+  // Side handles are unseen strips along the whole side, so any point on it resizes.
+  across: {
+    left: 0,
+    width: "100%",
+    transform: "translateY(-50%)",
+    zIndex: 0,
+  },
+  along: {
+    top: 0,
+    height: "100%",
+    transform: "translateX(-50%)",
+    zIndex: 0,
+  },
 });

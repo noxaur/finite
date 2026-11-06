@@ -2,8 +2,9 @@
 //! goes. Both are ordinary attributes, so ops, undo, the stores and every
 //! tool already carry them:
 //!
-//! - `data-to="<artboard id>"` on any element makes it a link to that
-//!   artboard. Ids don't change, so renaming the target keeps the link.
+//! - `<a href="#finite-artboard=<id>">` links to that artboard, which
+//!   interactive mode flies to. Ids don't change, so renaming the target
+//!   keeps the link.
 //! - `data-route="/checkout"` on an artboard puts it on that route. A desktop
 //!   and a mobile artboard with the same route are one page at two widths.
 //!   An artboard without one has a route of its own, made from its name.
@@ -16,10 +17,11 @@ use std::collections::{BTreeMap, HashSet};
 
 use serde::Serialize;
 
-use crate::{Document, NodeId, edit::pixel_size};
+use crate::{Document, Node, NodeId, edit::pixel_size};
 
-/// The attribute that makes an element a link to an artboard.
-pub const TO_ATTR: &str = "data-to";
+/// What a link's `href` starts with when it goes to an artboard, followed
+/// by the artboard's id. The viewer reads the same prefix.
+pub const ARTBOARD_LINK: &str = "#finite-artboard=";
 /// The attribute that puts an artboard on a route.
 pub const ROUTE_ATTR: &str = "data-route";
 
@@ -56,7 +58,7 @@ pub struct Screen {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Link {
-    /// The element with `data-to`, and the artboard it's on.
+    /// The link, and the artboard it's on.
     pub element: NodeId,
     pub from: NodeId,
     pub to: NodeId,
@@ -78,6 +80,24 @@ pub struct Broken {
 pub struct BadRoute {
     pub artboard: NodeId,
     pub route: String,
+}
+
+/// The artboard `node` links to, when it's a link (`<a>` or `<area>`)
+/// whose `href` starts with [`ARTBOARD_LINK`].
+pub fn link_target(node: &Node) -> Option<&str> {
+    if !matches!(node.tag(), Some("a" | "area")) {
+        return None;
+    }
+    node.attrs
+        .get("href")?
+        .trim()
+        .strip_prefix(ARTBOARD_LINK)
+        .map(str::trim)
+}
+
+/// The `href` of a link to artboard `id`.
+pub fn link_href(id: &str) -> String {
+    format!("{ARTBOARD_LINK}{id}")
 }
 
 /// Whether `route` is a path a router can serve: `/`, or `/` and segments
@@ -109,8 +129,8 @@ fn slug(name: &str, fallback: &str) -> String {
     }
 }
 
-/// Reads the design's routes and links. Only elements count as links, and
-/// instances count once, in their component.
+/// Reads the design's routes and links. Links inside a component count
+/// once, in the component.
 pub fn flow(doc: &Document) -> Flow {
     let mut boards = Vec::new();
     for (page, _) in doc.pages() {
@@ -176,12 +196,9 @@ pub fn flow(doc: &Document) -> Flow {
     for (page, _) in doc.pages() {
         for board in doc.artboards_on(page) {
             for node in doc.subtree(&board.id) {
-                let Some(to) = node.attrs.get(TO_ATTR).map(|t| t.trim()) else {
+                let Some(to) = link_target(node) else {
                     continue;
                 };
-                if node.tag().is_none() {
-                    continue;
-                }
                 match route_of.get(to) {
                     Some(route) => links.push(Link {
                         element: node.id.clone(),

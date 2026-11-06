@@ -142,6 +142,17 @@ pub struct NodesParams {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+pub struct DuplicateParams {
+    pub(super) design_id: String,
+    #[serde(alias = "nodeId", deserialize_with = "lenient")]
+    pub(super) node_ids: Vec<String>,
+    /// Detach every instance in the copies, so they stop following their components.
+    #[serde(default)]
+    pub(super) detach: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ChildrenParams {
     pub(super) design_id: String,
     /// Parent node. Omit to list the artboards.
@@ -540,11 +551,34 @@ pub struct WorkingParams {
     pub(super) status: Option<String>,
 }
 
+/// Longest a comments wait may block, in seconds.
+///
+/// MCP clients commonly time out a tool call well under two minutes. A wait
+/// of 120 seconds or more comes back as the client's own timeout, so the
+/// agent never sees this server's answer. 55 still returns it. The default
+/// wait is this same cap.
+pub(crate) const MAX_COMMENT_WAIT_SECS: u64 = 55;
+
+/// How many seconds to block for a comment. `None` is the default, which is
+/// the maximum. A request above the maximum still waits the maximum, and a
+/// request below 1 waits 1.
+pub(crate) fn comment_wait_secs(requested: Option<u64>) -> u64 {
+    requested
+        .unwrap_or(MAX_COMMENT_WAIT_SECS)
+        .clamp(1, MAX_COMMENT_WAIT_SECS)
+}
+
+/// What a comments wait says when nothing arrives. `seconds` is how long the
+/// call actually blocked, after the cap above.
+pub(crate) fn no_comments_arrived(seconds: u64) -> String {
+    format!("No comments arrived in {seconds} seconds. Call again to keep listening.")
+}
+
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WaitParams {
     pub(super) design_id: String,
-    /// How long to wait, in seconds. Defaults to 60; at most 300.
+    /// How long to wait, in seconds. Defaults to 55, which is also the most; a longer value waits 55.
     #[serde(default)]
     pub(super) timeout_seconds: Option<u64>,
 }
@@ -556,7 +590,7 @@ pub struct FindParams {
     /// Search only inside this node, such as an artboard. Omit to search every artboard.
     #[serde(default)]
     pub(super) within: Option<String>,
-    /// Text the element contains, ignoring case.
+    /// Visible text the element contains, ignoring case. Not text inside <script> or <style>, including an SVG <style>.
     #[serde(default)]
     pub(super) text: Option<String>,
     /// Part of the layer name, ignoring case.
@@ -584,7 +618,7 @@ pub struct ReplaceParams {
     /// Replace only inside this node, such as an artboard. Omit for every artboard.
     #[serde(default)]
     pub(super) within: Option<String>,
-    /// Also replace it in text content, like a product name. Defaults to false: styles, attributes and the code in <style> and <script> only.
+    /// Also replace it in visible text, like a product name. Not text inside <script> or <style> (including an SVG <style>), which is always searched as code. Defaults to false: styles, attributes and that code only.
     #[serde(default)]
     pub(super) include_text: bool,
     /// Replace every match even when a non-color value matches more than once inside a <style> or <script>. Without it, that case is refused with the match count and the lines, so you can narrow it with within or a longer find. dryRun never refuses.

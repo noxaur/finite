@@ -18,7 +18,7 @@ HTML: inline styles, or <style> blocks with classes. Prefer flexbox and gap. Nam
 
 Components: put data-component="Top bar" on each copy of a part screens share. The first defines it, later ones are instances whose differences become overrides. Edit the first to change all. Also create_component, get_components, detach_instance.
 
-Motion: a <style> or <script> only affects its own artboard, so select by class or id, not html or body. Use @keyframes, transitions and :hover. For pointer-following effects, use a <script> with addEventListener (on* attributes are dropped). Scripts run sandboxed: inline only, no network requests, remote images and fonts allowed, restarted after every edit. WebGL shaders work. get_screenshot waits about 3 seconds after load; settleMs (up to 10000) waits longer.
+Motion: a <style> or <script> only affects its own artboard, so select by class or id, not html or body. Use @keyframes, transitions and :hover. For pointer-following effects, use a <script> with addEventListener (on* attributes are dropped). Scripts run sandboxed, restart on edit; https <script src>, fetch, localStorage work. href="#finite-artboard=<id>" links. WebGL shaders work. get_screenshot waits about 3 seconds after load; settleMs (up to 10000) waits longer.
 
 Comments are user requests, pinned to an artboard and usually an element. When a design has open comments, call get_comments, make the change, check it with get_screenshot, then reply_to_comment saying what you changed, with resolve: true. If a comment is unclear, ask in a reply and leave it open. Skip ones "for" others. To keep taking feedback, loop on wait_for_comments.
 

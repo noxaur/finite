@@ -1,4 +1,4 @@
-//! A prototype's flow: `data-to` links between artboards and the
+//! A prototype's flow: `#finite-artboard=<id>` links between artboards and the
 //! `data-route` that groups artboards into pages at several widths.
 
 use std::collections::BTreeMap;
@@ -71,14 +71,14 @@ fn shop() -> Design {
         "home",
         "Home",
         1440.0,
-        r#"<button data-to="cart">Cart</button>"#,
+        r##"<a href="#finite-artboard=cart">Cart</a>"##,
     );
     screen(
         &mut d,
         "cart",
         "Cart",
         1440.0,
-        r##"<a href="#" data-to="done">Pay</a>"##,
+        r##"<a href=" #finite-artboard=done ">Pay</a>"##,
     );
     screen(&mut d, "done", "Done", 1440.0, "<p>Thanks</p>");
     screen(
@@ -86,14 +86,14 @@ fn shop() -> Design {
         "home-m",
         "Home mobile",
         390.0,
-        r#"<button data-to="cart">Cart</button>"#,
+        r##"<a href="#finite-artboard=cart">Cart</a>"##,
     );
     screen(
         &mut d,
         "cart-m",
         "Cart mobile",
         390.0,
-        r#"<div data-to="done">Pay</div>"#,
+        r##"<div><a href="#finite-artboard=done"><span>Pay</span></a></div>"##,
     );
     for (id, path) in [
         ("home", "/"),
@@ -198,15 +198,15 @@ fn deleting_a_target_breaks_its_links_until_undo() {
 #[test]
 fn a_link_to_a_node_inside_an_artboard_is_broken() {
     let mut d = shop();
-    let button = flow::flow(d.doc()).links[0].element.clone();
+    let links = flow::flow(d.doc()).links;
+    let (link, other) = (links[0].element.clone(), links[1].element.clone());
     commit(&mut d, |doc| {
         edit::update_attributes(
             doc,
-            &["home-m".into()],
-            &BTreeMap::from([("data-to".into(), Some(button.clone()))]),
+            &[link],
+            &BTreeMap::from([("href".into(), Some(flow::link_href(&other)))]),
         )
     });
-    // An artboard is a node like any other, so its own data-to counts too.
     let flow = flow::flow(d.doc());
     assert_eq!(flow.broken.len(), 1);
     assert!(flow.broken[0].not_artboard);
@@ -319,7 +319,7 @@ fn people_link_and_set_routes_with_their_own_edits() {
             }],
             &mut new_id
         )
-        .contains("an artboard can't be a link")
+        .contains("only a link (<a>) can go to an artboard")
     );
     assert!(
         refused(
