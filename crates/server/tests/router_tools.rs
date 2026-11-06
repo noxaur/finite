@@ -170,6 +170,27 @@ async fn names_and_prefixes_reach_the_server_that_owns_the_design() {
 }
 
 #[tokio::test]
+async fn a_name_resolves_when_newer_designs_crowd_the_list() {
+    let (client, _hubs, _cluster) = deployment().await;
+    let ids = create(&client, &["Needle"]).await;
+    let long = format!("Needle {}", "x".repeat(110));
+    let crowd: Vec<String> = (0..400).map(|i| format!("{long} {i}")).collect();
+    let crowd: Vec<&str> = crowd.iter().map(String::as_str).collect();
+    create(&client, &crowd).await;
+    let made = ok(
+        &client,
+        "edit",
+        json!({ "designId": "Needle", "check": false,
+                "op": "artboard", "name": "Found", "width": 400, "height": 300 }),
+    )
+    .await;
+    assert!(made.contains("Created artboard"), "{made}");
+    let read = ok(&client, "read", json!({ "designId": ids[0] })).await;
+    assert!(read.contains("Found"), "{read}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_name_on_both_servers_is_ambiguous() {
     let (client, _, cluster) = deployment().await;
     let ids = create(&client, &["Twin", "Twin"]).await;

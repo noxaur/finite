@@ -128,12 +128,20 @@ impl FiniteMcp {
     /// The designs, most recently edited first, with a note when the list
     /// was cut or the query matched ids and no name.
     fn list(&self, query: Option<&str>, limit: Option<usize>) -> ToolResult {
-        let matching: Vec<_> = self
+        let mut matching: Vec<_> = self
             .hub
             .list()
             .into_iter()
             .filter(|d| matches(query, &d.meta.id, &d.meta.name))
             .collect();
+        // What the query names exactly comes first, so a list cut to fit
+        // still holds it, and the router can resolve the name from it.
+        if let Some(query) = query.map(str::trim) {
+            matching.sort_by_key(|d| {
+                let named = d.meta.id == query || d.meta.name.trim().eq_ignore_ascii_case(query);
+                !named
+            });
+        }
         let limit = list_limit(limit);
         let (list, shown) = fit(matching.iter().take(limit).map(|d| {
             json!({
