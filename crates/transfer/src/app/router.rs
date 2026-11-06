@@ -162,9 +162,16 @@ impl Router for TanStackRouter {
         }
         router.push_str("\nconst rootRoute = createRootRoute();\n");
         for (i, page) in pages.iter().enumerate() {
+            // TanStack reads a path of `__root__` as the root route's id and
+            // serves it at `/`. A trailing slash keeps it a path.
+            let path = if page.path == "/__root__" {
+                "/__root__/"
+            } else {
+                &page.path
+            };
             router.push_str(&format!(
                 "const route{i} = createRoute({{ getParentRoute: () => rootRoute, path: {}, component: {} }});\n",
-                serde_json::to_string(&page.path).expect("strings serialize"),
+                serde_json::to_string(path).expect("strings serialize"),
                 page.component
             ));
         }

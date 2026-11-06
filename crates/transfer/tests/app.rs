@@ -455,6 +455,31 @@ fn routes_that_differ_by_case_stay_apart() {
 }
 
 #[test]
+fn tanstack_keeps_a_route_named_like_its_root() {
+    let pages = [
+        Page {
+            path: "/".into(),
+            component: "PageIndex".into(),
+            module: "./pages/PageIndex".into(),
+        },
+        Page {
+            path: "/__root__".into(),
+            component: "PageRoot".into(),
+            module: "./pages/PageRoot".into(),
+        },
+    ];
+    let router = RouterKind::TanStackRouter
+        .router()
+        .files(&pages)
+        .into_iter()
+        .find(|f| f.path == "src/router.tsx")
+        .unwrap()
+        .text;
+    assert!(router.contains("path: \"/__root__/\""), "{router}");
+    assert!(router.contains("path: \"/\""), "{router}");
+}
+
+#[test]
 fn a_path_is_written_as_a_string_literal() {
     let pages = [Page {
         path: "/a\"b\\c&d".into(),
