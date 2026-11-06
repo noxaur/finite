@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use finite_design::{Document, NodeId, NodeKind, id, select};
+use finite_design::{Document, NodeId, NodeKind, css_scan, id, select};
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 use serde_json::Value;
@@ -43,8 +43,9 @@ pub(super) fn selector_text(
         return Err("select is empty".into());
     }
     let resolved = with_refs(&joined, refs, true)?;
-    Ok(split_top(&resolved)
+    Ok(css_scan::split_top(&resolved, |b| b == b',')
         .into_iter()
+        .filter(|p| !p.trim().is_empty())
         .map(|part| {
             let part = part.trim();
             if id::is_node_id(part) {
@@ -122,34 +123,6 @@ pub(super) fn with_refs(
         }
     }
     Ok(out)
-}
-
-/// Splits a selector list at its top-level commas.
-fn split_top(text: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let (mut depth, mut quote, mut start) = (0i32, None, 0);
-    let mut escaped = false;
-    for (i, c) in text.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match (quote, c) {
-            (_, '\\') => escaped = true,
-            (Some(q), c) if c == q => quote = None,
-            (Some(_), _) => {}
-            (None, '"' | '\'') => quote = Some(c),
-            (None, '(' | '[') => depth += 1,
-            (None, ')' | ']') => depth -= 1,
-            (None, ',') if depth == 0 => {
-                out.push(&text[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    out.push(&text[start..]);
-    out.into_iter().filter(|p| !p.trim().is_empty()).collect()
 }
 
 /// The elements `selector` matches in document order, on `page` when given,
