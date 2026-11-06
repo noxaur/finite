@@ -194,6 +194,9 @@ fn selector_list(list: &str, class: &str, out: &mut Rewritten) -> String {
     split_top(&list, |b| b == b',')
         .into_iter()
         .map(|selector| {
+            if selector.trim().is_empty() {
+                return selector.to_owned();
+            }
             let lead = selector.len() - selector.trim_start().len();
             let trail = selector.trim_end().len();
             let core = &selector[lead..trail];
@@ -353,6 +356,10 @@ fn anchored_alternatives(selector: &str, class: &str) -> Option<String> {
     let alternatives: Vec<String> = split_top(&selector[open + 1..close], |b| b == b',')
         .into_iter()
         .map(|alternative| {
+            // A forgiving list drops an empty alternative, so it stays empty.
+            if alternative.trim().is_empty() {
+                return alternative.to_owned();
+            }
             let lead = alternative.len() - alternative.trim_start().len();
             let trail = alternative.trim_end().len();
             let core = &alternative[lead..trail];
@@ -561,6 +568,11 @@ mod tests {
             ":where(.finite-root)[data-x=\"/*\"],  [a='\\'/*'] {}"
         );
         assert_eq!(css(":root{--a:\"/*\"}"), ".finite-root{--a:\"/*\"}");
+    }
+
+    #[test]
+    fn an_empty_selector_stays_empty() {
+        assert_eq!(css("body, {a:b}"), ":where(.finite-root), {a:b}");
     }
 
     #[test]

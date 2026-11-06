@@ -83,6 +83,9 @@ fn selector_list(list: &str, class: &str) -> String {
     split_top(list, |b| b == b',')
         .into_iter()
         .map(|selector| {
+            if selector.trim().is_empty() {
+                return selector.to_owned();
+            }
             let lead = selector.len() - selector.trim_start().len();
             let trail = selector.trim_end().len();
             let core = &selector[lead..trail];
@@ -111,6 +114,16 @@ mod tests {
         );
         assert_eq!(css("*{a:b}"), ":where(.s) *{a:b}");
         assert_eq!(css("/* x, y */ .a{b:c}"), " :where(.s) .a{b:c}");
+    }
+
+    #[test]
+    fn empty_selectors_stay_empty() {
+        assert_eq!(
+            css(":is(.card, ) .t{a:b}"),
+            ":where(.s) :is(.card, ) .t{a:b}"
+        );
+        assert_eq!(css(":is(body, ) .t{a:b}"), ":is(:where(.s), ) .t{a:b}");
+        assert_eq!(css(".a, {a:b}"), ":where(.s) .a, {a:b}");
     }
 
     #[test]
