@@ -1,6 +1,5 @@
-// A minimal MCP client over Streamable HTTP, enough to drive Finite's tools.
-// It uses /mcp/classic, which serves today's tools whichever surface /mcp
-// serves (FINITE_MCP_SURFACE), since the scripts call them by name.
+// A minimal MCP client over Streamable HTTP, enough to drive Finite's six
+// tools (designs, read, edit, render, comments, undo) the way an agent does.
 export async function connect(base, agent = "E2E") {
   let session;
   let id = 0;
@@ -11,7 +10,7 @@ export async function connect(base, agent = "E2E") {
       "X-Finite-Agent": agent,
     };
     if (session) headers["Mcp-Session-Id"] = session;
-    const res = await fetch(`${base}/mcp/classic`, {
+    const res = await fetch(`${base}/mcp`, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
@@ -59,6 +58,54 @@ export async function connect(base, agent = "E2E") {
     /** Lists the server's tools, with their descriptions and input schemas. */
     async tools() {
       return (await request("tools/list", {})).tools;
+    },
+    /** Creates a design and returns its designId. */
+    async createDesign(name) {
+      return (await this.call("designs", { create: name })).match(/designId "([a-z0-9]+)"/)[1];
+    },
+    /**
+     * Runs `ops` as one edit and returns the result text. The layout check
+     * is off unless `extra` turns it on, since it waits for a browser.
+     */
+    edit(designId, ops, extra = {}) {
+      return this.call("edit", { designId, ops, check: false, ...extra });
+    },
+    /** Adds an artboard (`fields` are the artboard op's) and returns its id. */
+    async artboard(designId, fields) {
+      const text = await this.edit(designId, [{ op: "artboard", ...fields }]);
+      return text.match(/Created artboard \S+ (?:".*" )?#([a-z0-9]+)/)[1];
+    },
+    /** Appends `html` to the node `id`, and returns the result text. */
+    write(designId, id, html) {
+      return this.edit(designId, [{ op: "html", select: `#${id}`, html }]);
+    },
+    /** A selector's HTML, as `read` shows it. */
+    readHtml(designId, select) {
+      return this.call("read", { designId, select, as: "html" });
+    },
+    /** A design's size and artboards, read from `read`'s overview. */
+    async overview(designId) {
+      const text = await this.call("read", { designId });
+      const nodes = Number(text.match(/: \d+ artboards?, (\d+) nodes/)?.[1] ?? 0);
+      const artboards = [];
+      let page = null;
+      for (const line of text.split("\n")) {
+        page = line.match(/^Page "(.*)":$/)?.[1] ?? page;
+        const m = line.match(
+          /^\S+ (?:"(.*)" )?#([a-z0-9]+) \(artboard at (-?[\d.]+), (-?[\d.]+)\) \[(\d+)px × (\d+|auto)(?:px)?\]/,
+        );
+        if (m)
+          artboards.push({
+            id: m[2],
+            name: m[1] ?? null,
+            x: Number(m[3]),
+            y: Number(m[4]),
+            width: Number(m[5]),
+            height: m[6] === "auto" ? null : Number(m[6]),
+            page,
+          });
+      }
+      return { nodes, artboards };
     },
   };
 }

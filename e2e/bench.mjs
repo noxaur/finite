@@ -15,25 +15,21 @@
 //   every artboard comes into view once. Every tenth artboard has a script and
 //   an animation, so it renders in a sandboxed iframe. It reports frames per
 //   second and main-thread task time per second of the sweep.
-// - write: one write_html of 30,000 nodes into an open design, from the
-//   tool call until the last node is on the page, plus script and task time.
+// - write: one edit with an html op of 30,000 nodes into an open design, from
+//   the tool call until the last node is on the page, plus script and task time.
 // - thumbnails: the design list with four 5,000-node designs, the most a
 //   preview draws, as script and task time per thumbnail.
 //
 // Script and task time come from the DevTools Performance domain
 // (`Performance.getMetrics`), so they count only work on the page's main
-// thread. Set BENCH_SKIP_BUILD=1 to reuse the last builds and BENCH_RUNS to
-// change the number of runs.
-import { spawn, spawnSync } from "node:child_process";
-import fs from "node:fs";
-import net from "node:net";
-import os from "node:os";
+// thread. Set BENCH_SKIP_BUILD=1 to reuse the last builds, BENCH_RUNS to change
+// the number of runs, and BENCH_SERVER to measure another server binary.
+import { spawnSync } from "node:child_process";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { launch } from "./cdp.mjs";
-import { connect, idAfter } from "./mcp.mjs";
+import { launch, shadowOf } from "./cdp.mjs";
+import { root, sleep, startServer } from "./lib.mjs";
+import { connect } from "./mcp.mjs";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const runs = Number(process.env.BENCH_RUNS ?? 3);
 
 if (!process.env.BENCH_SKIP_BUILD) {
@@ -46,30 +42,11 @@ if (!process.env.BENCH_SKIP_BUILD) {
   run("vp", ["run", "web#build"]);
 }
 
-const port = await new Promise((resolve) => {
-  const probe = net.createServer().listen(0, "127.0.0.1", () => {
-    const { port } = probe.address();
-    probe.close(() => resolve(port));
-  });
+const server = await startServer({
+  bin: process.env.BENCH_SERVER || path.join(root, "target/release/finite-server"),
+  staticDir: path.join(root, "apps/web/out"),
 });
-const data = fs.mkdtempSync(path.join(os.tmpdir(), "finite-bench-data-"));
-const server = spawn(path.join(root, "target/release/finite-server"), [], {
-  env: {
-    ...process.env,
-    RUST_LOG: "warn",
-    FINITE_PORT: String(port),
-    FINITE_DATA_DIR: data,
-    FINITE_STATIC_DIR: path.join(root, "apps/web/out"),
-  },
-  stdio: ["ignore", "inherit", "inherit"],
-});
-const base = `http://127.0.0.1:${port}`;
-for (let i = 0; i < 100; i++) {
-  try {
-    if ((await fetch(`${base}/api/health`)).ok) break;
-  } catch {}
-  await new Promise((r) => setTimeout(r, 100));
-}
+const base = server.url;
 
 const median = (values) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
 const ms = (n) => `${Math.round(n)} ms`;
@@ -82,16 +59,8 @@ const cards = (count) =>
   ).join("")}</div>`;
 
 const agent = await connect(base, "Bench");
-const createDesign = async (name) =>
-  (await agent.call("create_design", { name })).match(/designId "([a-z0-9]+)"/)[1];
-const addArtboard = async (designId, i, html) => {
-  const id = idAfter(
-    await agent.call("create_artboard", { designId, name: `Board ${i}`, width: 800, height: 1000 }),
-    "artboard",
-  );
-  if (html) await agent.call("write_html", { designId, targetId: id, html });
-  return id;
-};
+const addArtboard = (designId, i, html) =>
+  agent.artboard(designId, { name: `Board ${i}`, width: 800, height: 1000, html });
 const nodeCount = async (designId) =>
   (await (await fetch(`${base}/api/designs/${designId}`)).json()).nodes.length;
 
@@ -109,8 +78,6 @@ const busy = async (work) => {
   const after = await metrics();
   return { ...result, script: after.script - before.script, task: after.task - before.task };
 };
-const settle = () =>
-  page.eval(`new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(0))))`);
 
 try {
   // Thumbnails first, while these are the only designs on the list. The
@@ -118,8 +85,7 @@ try {
   const listPage = async (count) => {
     const samples = [];
     for (let run = 0; run < runs; run++) {
-      await page.send("Page.navigate", { url: "about:blank" });
-      await page.sleep(300);
+      await page.goto("about:blank");
       samples.push(
         await busy(async () => {
           await page.send("Page.navigate", { url: `${base}/` });
@@ -128,8 +94,10 @@ try {
             `document.querySelector("main") && [...document.querySelectorAll("[data-artboard]")].filter((a) => [...a.querySelectorAll("*")].some((e) => e.shadowRoot && e.shadowRoot.childElementCount > 2)).length === ${count}`,
             30_000,
           );
-          await page.sleep(500);
-          await settle();
+          // Work that follows the last preview, like a trailing refetch, belongs
+          // in the measurement, and nothing marks its end.
+          await sleep(500);
+          await page.settle();
           return {};
         }),
       );
@@ -139,7 +107,7 @@ try {
   const emptyList = await listPage(0);
   const previews = [];
   for (let i = 0; i < 4; i++) {
-    const id = await createDesign(`Preview ${i}`);
+    const id = await agent.createDesign(`Preview ${i}`);
     await addArtboard(id, 0, cards(999));
     previews.push(id);
   }
@@ -147,7 +115,7 @@ try {
   const thumbs = await listPage(4);
 
   // A 90,000-node design across 240 artboards.
-  const big = await createDesign("Big");
+  const big = await agent.createDesign("Big");
   // Every tenth artboard has a script and an animation, which makes it a sandboxed iframe.
   const live = `<style>@keyframes pulse{50%{opacity:.5}}.note{animation:pulse 1s infinite}</style><script>setInterval(() => { document.title = String(Date.now()); }, 50);</script>`;
   for (let i = 0; i < 240; i++) await addArtboard(big, i, cards(75) + (i % 10 === 0 ? live : ""));
@@ -157,13 +125,12 @@ try {
   const zoomedPans = [];
   const sweeps = [];
   for (let run = 0; run < runs; run++) {
-    await page.send("Page.navigate", { url: "about:blank" });
-    await page.sleep(300);
+    await page.goto("about:blank");
     opens.push(
       await busy(async () => {
-        await page.send("Page.navigate", { url: `${base}/design/?id=${big}` });
+        await page.goto(`${base}/design/?id=${big}`);
         await page.until(`document.querySelectorAll("[data-artboard]").length === 240`, 60_000);
-        await settle();
+        await page.settle();
         return { wall: await page.eval(`performance.now()`) };
       }),
     );
@@ -171,35 +138,24 @@ try {
     await page.eval(
       `window.__frames = 0; (function count() { __frames++; requestAnimationFrame(count); })(); 0`,
     );
-    const wheel = (deltaX) =>
-      page.send("Input.dispatchMouseEvent", {
-        type: "mouseWheel",
-        x: 700,
-        y: 450,
-        deltaX,
-        deltaY: 0,
-      });
+    const wheel = (deltaX) => page.wheel(700, 450, deltaX);
     const panFor = async (ms) => {
       await page.eval(`__frames = 0; 0`);
       const started = Date.now();
       let step = 0;
       while (Date.now() - started < ms) {
-        await page.send("Input.dispatchMouseEvent", {
-          type: "mouseWheel",
-          x: 700,
-          y: 450,
-          deltaX: step++ % 40 < 20 ? 40 : -40,
-          deltaY: 0,
-        });
+        await wheel(step++ % 40 < 20 ? 40 : -40);
       }
       return (await page.eval(`__frames`)) / ((Date.now() - started) / 1000);
     };
     pans.push(await panFor(2000));
     // The "0" key sets 100% zoom, and the settle lets the browser redraw.
-    await page.send("Input.dispatchKeyEvent", { type: "keyDown", key: "0", text: "0" });
-    await page.send("Input.dispatchKeyEvent", { type: "keyUp", key: "0" });
-    await page.sleep(500);
-    await settle();
+    await page.press("0");
+    // At 100% the artboards outside the view are hidden.
+    await page.until(
+      `[...document.querySelectorAll("[data-artboard]")].some((a) => a.style.display === "none")`,
+    );
+    await page.settle();
     const zoomed = await busy(async () => ({ fps: await panFor(2000) }));
     zoomedPans.push(zoomed);
     // Back to the start, then sweep across every artboard.
@@ -207,8 +163,10 @@ try {
       `Math.max(...[...document.querySelectorAll("[data-artboard]")].map((a) => new DOMMatrix(a.style.transform).m41)) + 800`,
     );
     for (let x = 0; x < extent + 2000; x += 400) await wheel(-400);
-    await page.sleep(500);
-    await settle();
+    // The wheel pans past the start, where the view may show no artboard,
+    // so nothing marks when the canvas has redrawn.
+    await sleep(500);
+    await page.settle();
     sweeps.push(
       await busy(async () => {
         await page.eval(`__frames = 0; 0`);
@@ -220,24 +178,24 @@ try {
     );
   }
 
-  // One write_html of 30,000 nodes into an open design.
+  // One edit with 30,000 nodes of HTML into an open design.
   const writes = [];
   for (let run = 0; run < runs; run++) {
-    const id = await createDesign(`Write ${run}`);
-    const board = await addArtboard(id, 0, null);
-    await page.send("Page.navigate", { url: `${base}/design/?id=${id}` });
+    const id = await agent.createDesign(`Write ${run}`);
+    const board = await addArtboard(id, 0);
+    await page.goto(`${base}/design/?id=${id}`);
     await page.until(`document.querySelectorAll("[data-artboard]").length === 1`, 10_000);
-    await settle();
+    await page.settle();
     const html = cards(5999);
     writes.push(
       await busy(async () => {
         const started = Date.now();
-        await agent.call("write_html", { designId: id, targetId: board, html });
+        await agent.write(id, board, html);
         await page.until(
-          `[...document.querySelector("[data-artboard]").querySelectorAll("*")].find((e) => e.shadowRoot)?.shadowRoot.querySelector("div > div:nth-child(5999)")`,
+          `${shadowOf('document.querySelector("[data-artboard]")')}?.querySelector("div > div:nth-child(5999)")`,
           60_000,
         );
-        await settle();
+        await page.settle();
         return { wall: Date.now() - started };
       }),
     );
@@ -255,7 +213,7 @@ try {
   console.log(
     `  task per second swept   ${ms(median(sweeps.map((p) => p.task / p.seconds)))} (${median(sweeps.map((p) => p.seconds)).toFixed(1)} s)`,
   );
-  console.log(`write_html, 30,000 nodes`);
+  console.log(`edit html, 30,000 nodes`);
   console.log(`  until drawn   ${ms(median(writes.map((w) => w.wall)))}`);
   console.log(`  script        ${ms(median(writes.map((w) => w.script)))}`);
   console.log(`  task          ${ms(median(writes.map((w) => w.task)))}`);
@@ -269,8 +227,5 @@ try {
   );
 } finally {
   await page.close();
-  const exited = new Promise((r) => server.once("exit", r));
-  server.kill();
-  await exited;
-  fs.rmSync(data, { recursive: true, force: true });
+  await server.stop();
 }

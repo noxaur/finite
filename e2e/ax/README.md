@@ -12,7 +12,7 @@ node e2e/ax/grade.mjs              # blind 1-10 grades of each final screenshot
 node e2e/ax/report.mjs --tools     # one row per label and task, plus calls per tool
 ```
 
-Pass `--env FINITE_MCP_EXTRA=layout` to try a tool group that's off by default. Results go to `e2e/ax/results/<label>/<task>-<n>/`, which git ignores. Each run folder holds `transcript.jsonl`, `feedback.md` (the agent's own account), `metrics.json` and `final.png`. Runs cost real money and use your Claude plan, about $0.05 to $0.80 each. A full round of 18 runs per variant can reach a 5-hour usage limit. A run cut off by a limit is marked `api error` in `metrics.json`, and `report.mjs` leaves it out. `--budget` caps each run at $4 by default.
+Pass `--env KEY=VALUE` to set an environment variable on the server. Results go to `e2e/ax/results/<label>/<task>-<n>/`, which git ignores. Each run folder holds `transcript.jsonl`, `feedback.md` (the agent's own account), `metrics.json` and `final.png`. Runs cost real money and use your Claude plan, about $0.05 to $0.80 each. A full round of 18 runs per variant can reach a 5-hour usage limit. A run cut off by a limit is marked `api error` in `metrics.json`, and `report.mjs` leaves it out. `--budget` caps each run at $4 by default.
 
 ## Trying a tool design before building it
 
@@ -24,11 +24,11 @@ Pass `--env FINITE_MCP_EXTRA=layout` to try a tool group that's off by default. 
 - **Fake a feature that doesn't exist** with a canned `text` reply, to see whether agents reach for it.
 
 ```bash
-node e2e/ax/run.mjs --task rebrand --runs 3 --label no-search --surface e2e/ax/surfaces/no-search.mjs
+node e2e/ax/run.mjs --task rebrand --runs 3 --label example --surface e2e/ax/surfaces/example.mjs
 node e2e/ax/run.mjs --task restyle --runs 3 --label cheap --surface e2e/ax/surfaces/example.mjs --model haiku --effort low
 ```
 
-`surfaces/example.mjs` has one tool of each kind to copy from. `surfaces/no-search.mjs` drops the search tools, so a round on it against a round on the real server should repeat the first study's rebrand numbers below. Run that comparison before trusting a mock's results. A Haiku run at low effort costs about $0.01, so try designs on Haiku first and confirm the best ones on Sonnet.
+`surfaces/example.mjs` has one tool of each kind to copy from. Before trusting a mock's results, run a round on a spec that changes nothing and compare it with a round on the real server. A Haiku run at low effort costs about $0.01, so try designs on Haiku first and confirm the best ones on Sonnet.
 
 Real tools keep the real server's argument checks. For a schema a spec writes, the mock checks required fields and top-level types and enums, accepts arrays and objects sent as JSON strings like the real server, and fails the call with "failed to deserialize parameters" as the real server does. It doesn't check nested schemas. It can only show what the real server can compute. A tool that needs data the server doesn't have yet has to answer with canned text, and then the task's check has nothing real to test, so judge it from the transcript and the feedback.
 
@@ -47,7 +47,7 @@ Real tools keep the real server's argument checks. For a schema a spec writes, t
 | `ui-states`           | Draw every state of Finite's own web app, from its source                           | A long session                |
 | `pins`                | Put numbered pins over a button and a heading the agent didn't size                 | Finding where things rendered |
 | `overlap`             | Fix a small badge overlapping the frame name above it                               | Spotting and fixing overlaps  |
-| `sections`            | Fill a fixed-height artboard with six sections, one `write_html` call each          | Overflow after an edit        |
+| `sections`            | Fill a fixed-height artboard with six sections, one `html` op each                  | Overflow after an edit        |
 | `screens-change`      | Build three screens, then change their shared top bar in the same session           | Keeping a design up to date   |
 | `import-page`         | Import a web page with scripts, handlers and an embed onto a named page             | Importing safely              |
 | `screens-restructure` | `screens-change`, but the change adds elements to the bar, which shared CSS can't   | Components                    |
@@ -126,7 +126,7 @@ What made the difference:
 
 ## What the third study found: six tools
 
-Finite's ~35 tools cost an agent a call for nearly every element it touched. The redesign, doc6, has six: `designs`, `read`, `edit`, `render`, `comments` and `undo`. Elements are addressed with CSS selectors, and one `edit` call is a list of ops that apply all or nothing, as one change and one undo step. It was tried first as a mock surface (`--surface`, PR #41), against a 24-tool design with the same parameter names everywhere. doc6 took 123 calls to the other's 149 and today's 198 on Haiku, with level grades, so it was built (#75, #76, #78) and is now what `/mcp` serves. `--env FINITE_MCP_SURFACE=classic` runs today's tools instead, for comparisons.
+Finite's ~35 tools cost an agent a call for nearly every element it touched. The redesign, doc6, has six: `designs`, `read`, `edit`, `render`, `comments` and `undo`. Elements are addressed with CSS selectors, and one `edit` call is a list of ops that apply all or nothing, as one change and one undo step. It was tried first as a mock surface (`--surface`, PR #41), against a 24-tool design with the same parameter names everywhere. doc6 took 123 calls to the other's 149 and today's 198 on Haiku, with level grades, so it was built (#75, #76, #78) and is now what `/mcp` serves. The old tools were removed once doc6 was the default, so the first two studies' tool names (`get_layout`, `find_nodes`, `write_html` and so on) refer to the server of that time.
 
 On the real build, every task passed every check on both surfaces:
 
