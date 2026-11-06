@@ -92,20 +92,23 @@ export function Settings({ onClose }: { onClose: () => void }) {
             <section {...stylex.props(styles.group)}>
               <h3 {...stylex.props(styles.label)}>New messages</h3>
               <Row label="Model">
-                <Dropdown
-                  label="Default model"
-                  value={settings.model}
-                  options={pickableModels(models, settings.model).map(
-                    (m) => [m.value, m.displayName] as const,
-                  )}
-                  onPick={(model) => void set({ model })}
-                  style={[buttonStyle({}), styles.dropdown]}
-                >
-                  <span {...stylex.props(styles.dropdownText)}>
-                    {modelName(models, settings.model)}
-                  </span>
-                  <Icon name="chevronDown" size={12} />
-                </Dropdown>
+                {/* The menu lines up under its anchor, the button's parent: this, not the row. */}
+                <div {...stylex.props(styles.dropdownAnchor)}>
+                  <Dropdown
+                    label="Default model"
+                    value={settings.model}
+                    options={pickableModels(models, settings.model).map(
+                      (m) => [m.value, m.displayName] as const,
+                    )}
+                    onPick={(model) => void set({ model })}
+                    style={[buttonStyle({}), styles.dropdown]}
+                  >
+                    <span {...stylex.props(styles.dropdownText)}>
+                      {modelName(models, settings.model)}
+                    </span>
+                    <Icon name="chevronDown" size={12} />
+                  </Dropdown>
+                </div>
               </Row>
               {levels.length > 0 && (
                 <Row label="Reasoning">
@@ -115,6 +118,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                         key={level}
                         picked={settings.effort === level}
                         onClick={() => void set({ effort: level })}
+                        style={styles.fitItem}
                       >
                         {effortShort(level)}
                       </StripItem>
@@ -228,6 +232,9 @@ const styles = stylex.create({
   },
   rowLabel: { flexShrink: 1, minWidth: 0 },
   strip: { width: 210 },
+  /** Five levels share 210px by their label widths, so "Medium" isn't cut. */
+  fitItem: { flexBasis: "auto" },
+  dropdownAnchor: { display: "flex" },
   dropdown: { width: 210, justifyContent: "space-between" },
   dropdownText: { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" },
   toggleRow: {

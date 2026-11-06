@@ -15,7 +15,7 @@ import type {
 import { useSyncExternalStore } from "react";
 import type { Camera } from "@/design/camera";
 import { bridgeOf, mountedBridges } from "./bridge";
-import { childrenIn, pathIn } from "./layers";
+import { childrenIn, layerName, layerNameAt, pathIn } from "./layers";
 import { undoOrderFor } from "./undoOrder";
 import { finite } from "@/client/finite";
 import {
@@ -312,10 +312,32 @@ export class CanvasEditor {
     this.facts.set(keyOf(item), facts);
   }
 
+  /**
+   * Selects one hit element, remembering what edits to it need. Its name is the layer name: the
+   * component or tag's meaning at once, then the bridge's own name (text, label) once it answers.
+   */
   private selectHit(frameId: string, hit: Hit | HitElement, index: number, path: HitElement[]) {
-    const item = { frameId, loc: hit.loc, index, name: hit.tag };
+    const parentFile = path[0] && fileOf(path[0].loc);
+    const name = layerName({ loc: hit.loc, tag: hit.tag, name: "" }, parentFile);
+    const item = { frameId, loc: hit.loc, index, name };
     this.factsFor(item, { rev: hit.rev, tag: hit.tag, path });
+    void this.nameFromLayers(item);
     return item;
+  }
+
+  private async nameFromLayers(item: SelectionItem & { loc: Loc }) {
+    const layers = await bridgeOf(item.frameId)
+      ?.layers()
+      .catch(() => null);
+    const name = layers && layerNameAt(layers, item.loc, item.index ?? 0);
+    if (!name || name === item.name) return;
+    const key = keyOf(item);
+    const now = selectionStore.get();
+    if (now.some((s) => keyOf(s) === key)) {
+      selectionStore.set(now.map((s) => (keyOf(s) === key ? { ...s, name } : s)));
+    }
+    // The press that hit it may put this item in the selection later: it carries the name there.
+    item.name = name;
   }
 
   /** Measures what's selected again and fills in facts it doesn't have (from the layers panel, say). */
@@ -483,6 +505,10 @@ export class CanvasEditor {
   private onDown(e: PointerEvent) {
     if (e.button !== 0 || this.space || this.ignored(e)) return;
     if (this.state.editingText) return;
+    // A press on the canvas takes the keys back from a field outside it, like the composer, so
+    // canvas shortcuts don't type into it. The camera's own handling keeps focus from moving.
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && !this.viewport.contains(active)) active.blur();
     const target = e.target instanceof Element ? e.target : null;
     const world = this.worldOf(e);
     const screen = { x: e.clientX, y: e.clientY };

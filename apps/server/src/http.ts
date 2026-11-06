@@ -31,6 +31,8 @@ export function createHttpHandler(hub: Hub, modules: Modules, staticDir: string 
         json(res, 200, await open.saveAttachment(file.name, file.data));
       },
     ],
+    // GET /api/designs/:id/export?canvasId=…[&frameIds=a,b]: a zip of the frames' files at their
+    // paths in the design (see `SourceEditor.exportFrames`), named after the canvas.
     [
       "GET",
       /^\/api\/designs\/([^/]+)\/export$/,

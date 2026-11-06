@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { targetNode } from "./portal";
 
 interface Layer {
   readonly contains: (target: globalThis.Node | null) => boolean;
@@ -39,16 +40,19 @@ export function useDismiss({
       layers.slice(layers.indexOf(layer) + 1).some((l) => l.contains(target));
     const outside = (target: globalThis.Node | null) => !layer.contains(target) && !above(target);
     const press = (e: PointerEvent) => {
-      if (outside(e.target as globalThis.Node | null)) latest.current.onClose();
+      if (outside(targetNode(e.target))) latest.current.onClose();
     };
     const escape = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || layers.at(-1) !== layer) return;
+      // Default prevented too, so a modal dialog the popup opened from stays open.
+      e.preventDefault();
       e.stopPropagation();
       latest.current.onEscape?.();
       latest.current.onClose();
     };
+    // A resize's target is the window, which counts as outside.
     const leave = (e: Event) => {
-      if (outside(e.target as globalThis.Node | null)) latest.current.onClose();
+      if (outside(targetNode(e.target))) latest.current.onClose();
     };
     window.addEventListener("pointerdown", press, true);
     window.addEventListener("keydown", escape, true);

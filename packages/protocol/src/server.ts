@@ -127,7 +127,12 @@ export interface SourceEditor {
     from: { name: string } | { route: string },
     toFile: string,
   ): Promise<{ file: string }>;
-  /** The frames' TSX files and the `.finite/` files they import, for a zip. */
+  /**
+   * The files a zip of these frames holds, at their paths relative to the design root (so the
+   * zip unpacks into the same layout): `package.json`, the design's stylesheets, each frame's
+   * file (a route frame's route file), and every file inside the root those import, transitively
+   * — modules, CSS (`@import`, `url()`) and assets such as `mark.svg`, production files included.
+   */
   exportFrames(
     open: OpenDesign,
     canvasId: string,

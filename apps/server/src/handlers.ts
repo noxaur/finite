@@ -8,7 +8,7 @@ import {
   type Route,
   type ThreadMeta,
 } from "@finite/protocol";
-import { startThread } from "./agent/index.ts";
+import { carrySelection, startThread } from "./agent/index.ts";
 import type { Context, Handlers } from "./hub.ts";
 import { installOf } from "./store/index.ts";
 import { syncRoutes } from "./store/routes.ts";
@@ -138,10 +138,19 @@ export const handlers: Handlers = {
       ...(selection === undefined ? {} : { selection }),
       ...(effort === undefined ? {} : { effort }),
     };
+    if (params.threadId !== undefined) {
+      await ctx.modules.agents.send(open, params.threadId, turn, mode);
+      return { threadId: params.threadId };
+    }
     // `new.prototype` makes the thread's canvas with it; `new.canvasId` joins one; else it has none.
-    const threadId = params.threadId ?? (await startThread(open, params.new ?? {}, turn)).id;
-    await ctx.modules.agents.send(open, threadId, turn, mode);
-    return { threadId };
+    const thread = await startThread(open, params.new ?? {}, turn);
+    // A prototype started from a selection starts with the selected frames on its canvas.
+    const canvasId = thread.canvasIds[0];
+    if (params.new?.prototype && canvasId && selection?.length) {
+      turn.selection = await carrySelection(open, canvasId, selection, ctx.by);
+    }
+    await ctx.modules.agents.send(open, thread.id, turn, mode);
+    return { threadId: thread.id };
   },
   async "thread.queued"({ designId, threadId, queuedId, text }, ctx) {
     return ctx.modules.agents.editQueued(await ctx.hub.open(designId), threadId, queuedId, text);

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { Actor, Canvas, DesignChange, Frame } from "@finite/protocol";
 import { afterEach, describe, expect, it } from "vite-plus/test";
+import { BRAND_BOARD, brandBoard, ensureBrandBoard } from "./brand.ts";
 import { createStore, DEFAULT_SETTINGS, type FileStore } from "./index.ts";
 import { INTERRUPTED_BY_RESTART, REMOVED_KEEP_MS } from "./open.ts";
 
@@ -113,10 +114,34 @@ describe("connect", () => {
       "Components",
       "Routes",
     ]);
+    // The Brand page shows the assets board, a file Finite keeps up to date.
+    const brand = (await open.canvases()).find((c) => c.name === "Brand")!;
+    expect(brand.frames).toMatchObject([
+      { name: "Brand assets", hug: true, source: { kind: "file", file: BRAND_BOARD } },
+    ]);
+    const board = await fs.readFile(path.join(root, BRAND_BOARD), "utf8");
+    expect(board).toContain(`import.meta.glob("../../../src/assets/brand/**/*"`);
+    expect(board).toContain(`import.meta.glob(["../../../src/styles.css"]`);
+    expect(board).toBe(brandBoard(open.design));
     // Connecting the same folder again is the same design.
     const same = { ...entry, updatedAt: expect.any(Number) };
     expect(await store.connect(root)).toEqual(same);
     expect(await store.designs()).toEqual([same]);
+  });
+
+  it("keeps the brand board up to date, but leaves a board someone took over and a removed frame", async () => {
+    const { root, open } = await connected();
+    const file = path.join(root, BRAND_BOARD);
+    const brand = () => open.canvases().then((all) => all.find((c) => c.name === "Brand")!);
+    await fs.writeFile(file, (await fs.readFile(file, "utf8")).replace("Brand", "Old"));
+    const { id } = (await brand()).frames[0]!;
+    await open.patchCanvas((await brand()).id, { op: "removeFrames", frameIds: [id] }, by);
+    await ensureBrandBoard(open, by);
+    expect(await fs.readFile(file, "utf8")).toBe(brandBoard(open.design));
+    expect((await brand()).frames).toEqual([]);
+    await fs.writeFile(file, "export default () => <p>Mine</p>;\n");
+    await ensureBrandBoard(open, by);
+    expect(await fs.readFile(file, "utf8")).toBe("export default () => <p>Mine</p>;\n");
   });
 
   it("tells TanStack, CSS modules and inline styles apart", async () => {

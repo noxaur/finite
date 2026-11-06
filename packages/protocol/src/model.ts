@@ -101,6 +101,8 @@ export const Frame = z.object({
   /** The route this frame shows is no longer in the app. The frame stays until someone removes it. */
   gone: z.boolean().optional(),
   source: FrameSource,
+  /** The agent that placed it, so its thread may remove it again. */
+  placedBy: Actor.optional(),
 });
 export type Frame = z.infer<typeof Frame>;
 

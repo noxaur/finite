@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type {
@@ -7,14 +7,32 @@ import type {
   SDKMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { Design, OpenDesign, Previews, SourceEditor, Store, Turn } from "@finite/protocol";
+import type {
+  Actor,
+  Design,
+  OpenDesign,
+  Previews,
+  SourceEditor,
+  Store,
+  Turn,
+} from "@finite/protocol";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { createLocks } from "../source/files.ts";
 import { openDesign, type OpenedDesign } from "../store/open.ts";
 import { createEventMapper } from "./events.ts";
-import { createAgents, type QueryFn, type QueryLike, shortTitle, startThread } from "./index.ts";
+import { BRAND_BOARD } from "../store/brand.ts";
+import {
+  agentActor,
+  BUILT_IN_TOOLS,
+  carrySelection,
+  createAgents,
+  type QueryFn,
+  type QueryLike,
+  shortTitle,
+  startThread,
+} from "./index.ts";
 import { FINITE_INSTRUCTIONS } from "./instructions.ts";
 import { policy } from "./policy.ts";
 import { createStatus, NOT_INSTALLED, NOT_LOGGED_IN } from "./status.ts";
@@ -354,6 +372,10 @@ describe("agents", () => {
       model: "haiku",
       permissionMode: "default",
       systemPrompt: { type: "preset", preset: "claude_code" },
+      // Not the person's ~/.claude: their CLAUDE.md, skills and plugins cost tokens and don't apply.
+      settingSources: ["project"],
+      tools: BUILT_IN_TOOLS,
+      strictMcpConfig: true,
     });
     expect(q.options.resume).toBeUndefined();
     const append = (q.options.systemPrompt as { append: string }).append;
@@ -410,6 +432,60 @@ describe("agents", () => {
     await new Promise((r) => setTimeout(r, 10));
     expect((await meta(thread.id)).running).toBe(true);
     q.emit(result());
+    await vi.waitFor(async () => expect((await meta(thread.id)).running).toBe(false));
+  });
+
+  it("keeps a steered turn running through the result that ends the turn it cut short", async () => {
+    const thread = await newThread("first");
+    const q = sdk.queries[0]!;
+    q.emit({ type: "system", subtype: "init", session_id: "s1" } as unknown as SDKMessage);
+    await agents.send(open, thread.id, turn("steer: blue"), "steer");
+    await vi.waitFor(() => expect(q.sent).toHaveLength(2));
+    // Claude Code ends the cut-short turn with an empty result that counts no queued turns.
+    q.emit(
+      result({
+        subtype: "error_during_execution",
+        is_error: true,
+        errors: [],
+        usage: { input_tokens: 0, output_tokens: 0 },
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await meta(thread.id)).running).toBe(true);
+    // ⌥⏎ right after the steer still queues.
+    await agents.send(open, thread.id, turn("after that, labels"), "queue");
+    expect((await meta(thread.id)).queued.map((m) => m.text)).toEqual(["after that, labels"]);
+    expect(q.sent).toHaveLength(2);
+    q.emit({ type: "system", subtype: "init", session_id: "s1" } as unknown as SDKMessage);
+    q.emit(result());
+    // The steer's own result ends it, and the queue goes next.
+    await vi.waitFor(() =>
+      expect(q.sent.map(textOf)).toEqual(["first", "steer: blue", "after that, labels"]),
+    );
+    expect((await meta(thread.id)).running).toBe(true);
+    expect((await open.history(thread.id)).filter((e) => e.type === "error")).toEqual([]);
+    q.emit({ type: "system", subtype: "init", session_id: "s1" } as unknown as SDKMessage);
+    q.emit(result());
+    await vi.waitFor(async () => expect((await meta(thread.id)).running).toBe(false));
+  });
+
+  it("ends a steered turn when the steer's own turn never starts", async () => {
+    await agents.close();
+    agents = createAgents({
+      store: {} as Store,
+      previews,
+      source,
+      query: sdk.query,
+      claudePath: async () => "/bin/claude",
+      idleMs: 50,
+      steerGraceMs: 30,
+    });
+    const thread = await newThread("first");
+    const q = sdk.queries[0]!;
+    await agents.send(open, thread.id, turn("steer"), "steer");
+    q.emit(result());
+    await new Promise((r) => setTimeout(r, 5));
+    expect((await meta(thread.id)).running).toBe(true);
     await vi.waitFor(async () => expect((await meta(thread.id)).running).toBe(false));
   });
 
@@ -580,6 +656,48 @@ describe("agents", () => {
     expect(thread.canvasIds).toEqual([canvas!.id]);
   });
 
+  it("starts a prototype from a selection with a copy of the selected frame", async () => {
+    const routes = await open.createCanvas({ kind: "page", name: "Routes" }, person);
+    const home = {
+      id: "home",
+      name: "Home",
+      x: 500,
+      y: 300,
+      width: 1440,
+      height: 900,
+      gone: true,
+      source: { kind: "route" as const, path: "/" },
+    };
+    await open.patchCanvas(routes.id, { op: "addFrames", frames: [home] }, person);
+    const thread = await startThread(
+      open,
+      { prototype: true },
+      turn("Explore 2 color directions for Home"),
+    );
+    const canvasId = thread.canvasIds[0]!;
+    const selection = await carrySelection(
+      open,
+      canvasId,
+      [{ frameId: "home", loc: "src/Home.tsx:3:4" }, { frameId: "home" }],
+      person,
+    );
+    const proto = (await open.canvases()).find((c) => c.id === canvasId)!;
+    expect(proto.frames).toHaveLength(1);
+    const copy = proto.frames[0]!;
+    expect(copy).toMatchObject({ name: "Home", x: 0, y: 0, width: 1440, source: home.source });
+    expect(copy.id).not.toBe("home");
+    expect(copy.gone).toBeUndefined();
+    expect(selection).toEqual([
+      { frameId: copy.id, loc: "src/Home.tsx:3:4" },
+      { frameId: copy.id },
+    ]);
+    expect(proto.texts.map((t) => [t.title, t.body, t.y])).toEqual([
+      ["Home", "The source: production route /.", -LABEL_OFFSET],
+    ]);
+    // Variants then go to its right.
+    expect(layoutRow(proto.frames, [{ width: 400, height: 300 }], copy)[0]!.x).toBe(1440 + GAP);
+  });
+
   it("sends attachments and the selection in the message", async () => {
     await mkdir(path.join(root, ".finite/attachments"), { recursive: true });
     await writeFile(path.join(root, ".finite/attachments/shot.png"), new Uint8Array([1, 2, 3]));
@@ -681,23 +799,91 @@ describe("agents", () => {
     // The thread's prototype canvas takes its name.
     expect((await open.canvases()).find((x) => x.id === canvas.id)!.name).toBe("Pricing page");
 
-    await call("comment", {
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(
+      path.join(root, "src/A.tsx"),
+      "export default () => (\n  <main>\n    <h1>Hi</h1>\n  </main>\n);\n",
+    );
+    // A 1-based column lands on the element whose tag holds it.
+    const pinned = await call("comment", {
       frameId: placed[0].id,
-      loc: "src/A.tsx:1:1",
+      loc: "src/A.tsx:3:5",
       index: 2,
       text: "Look here",
     });
+    expect(pinned.loc).toBe("src/A.tsx:3:4");
+    await call("comment", { frameId: placed[0].id, loc: "src/A.tsx", match: "hi", text: "Hi" });
+    await expect(
+      call("comment", { frameId: placed[0].id, loc: "src/A.tsx:1:0", text: "Nope" }),
+    ).rejects.toThrow(
+      /no HTML element at line 1, column 0 in src\/A.tsx. Elements near there: <main> src\/A.tsx:2:2/,
+    );
+    await expect(
+      call("comment", { frameId: placed[0].id, loc: "src/Missing.tsx:1:0", text: "Nope" }),
+    ).rejects.toThrow(/isn't a file in the design/);
     const comments = (await open.canvases()).find((x) => x.id === canvas.id)!.comments;
+    expect(comments.map((m) => m.anchor)).toEqual([
+      { frameId: placed[0].id, loc: "src/A.tsx:3:4", index: 2 },
+      { frameId: placed[0].id, loc: "src/A.tsx:3:4" },
+    ]);
     expect(comments[0]).toMatchObject({
-      anchor: { frameId: placed[0].id, loc: "src/A.tsx:1:1", index: 2 },
       author: { kind: "agent", id: thread.id },
       text: "Look here",
     });
 
     const read = await call("read_canvas", {});
     expect(read.frames).toHaveLength(2);
-    expect(read.comments).toHaveLength(1);
+    expect(read.comments).toHaveLength(2);
     expect(await call("frame_errors", { frameId: placed[0].id })).toBe("No errors.");
+
+    // A prototype's frames can be removed, with the labels above them.
+    await call("remove_frames", { canvasId: canvas.id, frameIds: [placed[1].id] });
+    const after = (await open.canvases()).find((x) => x.id === canvas.id)!;
+    expect(after.frames.map((f) => f.id)).toEqual([placed[0].id]);
+    expect(after.texts.map((t) => t.title)).toEqual(["Calm"]);
+  });
+
+  it("removes only its own frames from a page", async () => {
+    const page = await open.createCanvas({ kind: "page", name: "Brand" }, person);
+    const frame = (id: string, by?: Actor) => ({
+      id,
+      name: id,
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+      source: { kind: "file" as const, file: "a.tsx" },
+      ...(by ? { placedBy: by } : {}),
+    });
+    const thread = await newThread("Tidy", page.id);
+    await open.patchCanvas(
+      page.id,
+      { op: "addFrames", frames: [frame("mine", agentActor(thread.id)), frame("theirs")] },
+      person,
+    );
+    const call = await connectTools(sdk.queries[0]!);
+    await expect(
+      call("remove_frames", { canvasId: page.id, frameIds: ["theirs"] }),
+    ).rejects.toThrow(/wasn't placed by this thread/);
+    await call("remove_frames", { canvasId: page.id, frameIds: ["mine"] });
+    const after = (await open.canvases()).find((c) => c.id === page.id)!;
+    expect(after.frames.map((f) => f.id)).toEqual(["theirs"]);
+  });
+
+  it("add_brand_asset copies the file into the brand folder and shows the board", async () => {
+    const thread = await newThread("Logo");
+    await writeFile(path.join(root, "logo.svg"), "<svg/>");
+    const call = await connectTools(sdk.queries[0]!);
+    const out = await call("add_brand_asset", { path: "logo.svg" });
+    expect(out.file).toBe("src/assets/brand/logo.svg");
+    expect(await readFile(path.join(root, "src/assets/brand/logo.svg"), "utf8")).toBe("<svg/>");
+    const brand = (await open.canvases()).find((c) => c.id === out.brandCanvasId)!;
+    expect(brand.name).toBe("Brand");
+    expect(brand.texts).toEqual([]);
+    expect(brand.frames.map((f) => [f.source, f.hug])).toEqual([
+      [{ kind: "file", file: BRAND_BOARD }, true],
+    ]);
+    expect(thread.id).toBeTruthy();
   });
 
   it("move_to_prod allows production writes for the rest of the turn and settles it", async () => {

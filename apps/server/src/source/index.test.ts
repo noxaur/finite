@@ -407,37 +407,62 @@ export function Card() {
     expect(await get(file)).toContain(`import x from "../../../src/routes/x";`);
   });
 
-  it("exports frame files and the .finite files they import, not production", async () => {
+  it("exports what the frames need to run elsewhere: every local file they import", async () => {
     await put(
       ".finite/boards/c1/Home.tsx",
-      `import { Card } from "./Card";\nimport { App } from "../../../src/App";\nimport "./home.css";\nexport default () => <Card />;\n`,
+      `import { Card } from "./Card";\nimport { App } from "../../../src/App";\nimport mark from "../../../src/assets/brand/mark.svg?url";\nimport "./home.css";\nimport { x } from "react";\nexport default () => <Card />;\n`,
     );
     await put(
       ".finite/boards/c1/Card.tsx",
       `import { cn } from "./cn";\nexport const Card = () => <div />;\n`,
     );
     await put(".finite/boards/c1/cn.ts", `export const cn = () => "";\n`);
-    await put(".finite/boards/c1/home.css", `.a {}\n`);
+    await put(
+      ".finite/boards/c1/home.css",
+      `@import "./base.css";\n.a { background: url("../../../src/bg.png"); }\n.b { background: url(data:image/png;base64,AA); }\n`,
+    );
+    await put(".finite/boards/c1/base.css", `.base {}\n`);
     await put("src/App.tsx", APP);
+    await put("src/Card.tsx", `export const Card = () => <i />;\n`);
+    await put("src/assets/brand/mark.svg", `<svg/>`);
+    await put("src/bg.png", "png");
+    await put("src/index.css", `@import "tailwindcss";\n`);
+    await put("package.json", `{"name":"d"}`);
+    await put("src/unused.tsx", `export {};\n`);
+    await put(
+      ".finite/boards/c1/Escape.tsx",
+      `import "../../../../outside";\nexport default () => null;\n`,
+    );
     const source = createSourceEditor();
-    const frame = {
-      id: "f1",
+    const frame = (file: string) => ({
+      id: file,
       name: "Home",
       x: 0,
       y: 0,
       width: 100,
       height: 100,
-      source: { kind: "file" as const, file: ".finite/boards/c1/Home.tsx" },
-    };
-    const files = await source.exportFrames(open(design()), "c1", [frame]);
+      source: { kind: "file" as const, file },
+    });
+    const files = await source.exportFrames(open(design()), "c1", [
+      frame(".finite/boards/c1/Home.tsx"),
+      frame(".finite/boards/c1/Escape.tsx"),
+    ]);
     expect(files.map((f) => f.path).sort()).toEqual([
       ".finite/boards/c1/Card.tsx",
+      ".finite/boards/c1/Escape.tsx",
       ".finite/boards/c1/Home.tsx",
+      ".finite/boards/c1/base.css",
       ".finite/boards/c1/cn.ts",
       ".finite/boards/c1/home.css",
+      "package.json",
+      "src/App.tsx",
+      "src/Card.tsx",
+      "src/assets/brand/mark.svg",
+      "src/bg.png",
+      "src/index.css",
     ]);
-    expect(new TextDecoder().decode(files.find((f) => f.path.endsWith("cn.ts"))!.data)).toBe(
-      `export const cn = () => "";\n`,
+    expect(new TextDecoder().decode(files.find((f) => f.path.endsWith("mark.svg"))!.data)).toBe(
+      "<svg/>",
     );
   });
 });

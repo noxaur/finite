@@ -129,3 +129,132 @@ export function slot(
 export function siblings(parent: t.JSXElement | t.JSXFragment): t.Node[] {
   return parent.children.filter((child) => !isWhitespaceText(child));
 }
+
+/** Where to point at an element: a 1-based line, a 0-based column, and/or text it shows. */
+export type Near = { line?: number | undefined; column?: number | undefined; match?: string };
+
+type Candidate = {
+  node: t.JSXElement;
+  tag: string;
+  intrinsic: boolean;
+  line: number;
+  column: number;
+  text: string;
+};
+
+/**
+ * The stamped loc (`file:line:col`, the column of the `<`) of the HTML element `near` points at:
+ * the one whose tag starts there, else whose opening tag holds the position (a column off by one
+ * still lands), else the one on `line` or showing `match`. Only intrinsic (lowercase) elements are
+ * stamped, so only they can be pinned. Refuses with the elements nearby when none fits.
+ */
+export function snapLoc(code: string, file: string, near: Near): string {
+  const all: Candidate[] = [];
+  walk(parseModule(code, file), (node) => {
+    if (node.type !== "JSXElement") return;
+    const opening = node.openingElement;
+    const tag = tagName(opening.name);
+    all.push({
+      node,
+      tag,
+      intrinsic: opening.name.type === "JSXIdentifier" && /^[a-z]/.test(tag),
+      line: opening.loc!.start.line,
+      column: opening.loc!.start.column,
+      text: shownText(node),
+    });
+  });
+  const html = all.filter((c) => c.intrinsic);
+  const at = (c: Candidate) => `${file}:${c.line}:${c.column}`;
+  const innermost = (list: Candidate[]) =>
+    list.reduce<Candidate | undefined>(
+      (best, c) => (!best || c.node.start! >= best.node.start! ? c : best),
+      undefined,
+    );
+  const { line, column } = near;
+  const match = near.match?.trim().toLowerCase();
+  const shows = (c: Candidate) => !match || c.text.toLowerCase().includes(match);
+
+  if (line !== undefined && column !== undefined) {
+    const offset = offsetOf(code, line, column);
+    const inTag = innermost(
+      all.filter(
+        (c) => c.node.openingElement.start! <= offset && offset < c.node.openingElement.end!,
+      ),
+    );
+    const inElement =
+      inTag ?? innermost(all.filter((c) => c.node.start! <= offset && offset < c.node.end!));
+    if (inElement?.intrinsic) return at(inElement);
+    if (inElement) {
+      throw new Refused(
+        `<${inElement.tag}> at ${file}:${inElement.line}:${inElement.column} is a component; comments pin to HTML elements. ${nearby(html, file, line)}`,
+        "invalid",
+      );
+    }
+  }
+  if (line !== undefined) {
+    const onLine = html.filter((c) => c.line === line && shows(c));
+    if (onLine[0]) return at(onLine[0]);
+    // A multi-line opening tag, or an element whose content is on that line.
+    const spanning = innermost(
+      html.filter(
+        (c) => c.node.loc!.start.line <= line && line <= c.node.loc!.end.line && shows(c),
+      ),
+    );
+    if (spanning && !match) return at(spanning);
+  }
+  if (match) {
+    const shown = html.filter(shows);
+    const distance = (c: Candidate) => (line === undefined ? 0 : Math.abs(c.line - line));
+    const best = shown.sort(
+      (a, b) =>
+        distance(a) - distance(b) || a.node.end! - a.node.start! - (b.node.end! - b.node.start!),
+    )[0];
+    if (best) return at(best);
+  }
+  const where =
+    line === undefined ? "" : ` at line ${line}${column === undefined ? "" : `, column ${column}`}`;
+  const what = match ? ` showing "${near.match}"` : "";
+  throw new Refused(
+    `There's no HTML element${where}${what} in ${file}. ${nearby(html, file, line)}`,
+    "invalid",
+  );
+}
+
+function offsetOf(code: string, line: number, column: number): number {
+  let offset = 0;
+  for (let l = 1; l < line; l++) {
+    const next = code.indexOf("\n", offset);
+    if (next === -1) return code.length;
+    offset = next + 1;
+  }
+  return offset + column;
+}
+
+/** The text an element shows itself: its own text children and labelling attributes. */
+function shownText(el: t.JSXElement): string {
+  const parts: string[] = [];
+  for (const child of el.children) {
+    if (child.type === "JSXText" && child.value.trim()) parts.push(child.value.trim());
+    if (child.type === "JSXExpressionContainer" && child.expression.type === "StringLiteral") {
+      parts.push(child.expression.value);
+    }
+  }
+  for (const name of ["alt", "aria-label", "title", "placeholder", "data-name"]) {
+    const value = attribute(el, name)?.value;
+    if (value?.type === "StringLiteral") parts.push(value.value);
+  }
+  return parts.join(" ").replace(/\s+/g, " ");
+}
+
+function nearby(html: Candidate[], file: string, line: number | undefined): string {
+  if (html.length === 0)
+    return `${file} has no HTML elements to pin to; leave loc out to pin the frame.`;
+  const close = [...html]
+    .sort((a, b) => (line === undefined ? 0 : Math.abs(a.line - line) - Math.abs(b.line - line)))
+    .slice(0, 6)
+    .sort((a, b) => a.node.start! - b.node.start!)
+    .map(
+      (c) => `<${c.tag}> ${file}:${c.line}:${c.column}${c.text ? ` "${c.text.slice(0, 30)}"` : ""}`,
+    );
+  return `Elements ${line === undefined ? "in the file" : "near there"}: ${close.join(", ")}.`;
+}

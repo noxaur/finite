@@ -12,6 +12,7 @@ import {
   Settings,
   type Store,
 } from "@finite/protocol";
+import { ensureBrandBoard } from "./brand.ts";
 import { detectProject } from "./detect.ts";
 import { readJson, serial, toJson, writeAtomic } from "./files.ts";
 import { type Install, install } from "./install.ts";
@@ -161,6 +162,12 @@ export function createStore(options: StoreOptions): FileStore {
         const { updatedAt: _at, installing: _installing, ...base } = row;
         const design: Design = { ...base, ...rest };
         const opened = await openDesign(design);
+        // Designs made before the Brand page had its assets board get it now.
+        if ((await opened.canvases()).length) {
+          await ensureBrandBoard(opened, FINITE).catch((error: unknown) => {
+            console.error(`adding the brand board to ${design.root} failed:`, error);
+          });
+        }
         installers.set(opened, () => startInstall(row));
         opened.on((change) => {
           if (change.type === "canvas" || change.type === "thread") touch(id);
@@ -179,7 +186,7 @@ export function createStore(options: StoreOptions): FileStore {
    */
   async function addPages(design: OpenDesign, routes: string[]) {
     if ((await design.canvases()).length) return;
-    const by = { kind: "person", id: "finite", name: "Finite" } as const;
+    const by = FINITE;
     const routesPage = await design.createCanvas({ kind: "page", name: ROUTES_PAGE }, by);
     const frames = routeFrames(
       routes.map((route) => ({ path: route, params: [] })),
@@ -188,7 +195,7 @@ export function createStore(options: StoreOptions): FileStore {
     if (frames.length) {
       await design.updateCanvas(routesPage.id, (c) => ({ ...c, frames }), by);
     }
-    await design.createCanvas({ kind: "page", name: "Brand" }, by);
+    await ensureBrandBoard(design, by);
     await design.createCanvas({ kind: "page", name: "Components" }, by);
   }
 
@@ -341,6 +348,8 @@ async function personalize(root: string, name: string) {
 }
 
 /** `scaffold/` next to the server's source or its bundle (`src/store/` or `dist/`). */
+const FINITE = { kind: "person", id: "finite", name: "Finite" } as const;
+
 function scaffoldDir(override: string | undefined): string {
   if (override) return override;
   let dir = path.dirname(fileURLToPath(import.meta.url));

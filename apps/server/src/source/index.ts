@@ -238,24 +238,23 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
     },
 
     async exportFrames(open, _canvasId, frames) {
-      const root = open.design.root;
+      const { root, css } = open.design;
       const seen = new Set<string>();
-      const queue: string[] = [];
+      const queue: string[] = ["package.json", ...css];
       for (const frame of frames) queue.push(...(await frameFiles(open.design, frame)));
       const out: { path: string; data: Uint8Array }[] = [];
       while (queue.length > 0) {
         const file = queue.shift()!;
         if (seen.has(file)) continue;
         seen.add(file);
-        const abs = inRoot(root, file);
-        const data = await readFile(abs).catch(() => undefined);
+        const data = await readFile(inRoot(root, file)).catch(() => undefined);
         if (!data) continue;
         out.push({ path: file, data: new Uint8Array(data) });
-        if (!/\.[jt]sx?$/.test(file)) continue;
-        for (const lit of specifiers(parseModule(data.toString("utf8"), file))) {
-          if (!isRelative(lit.value)) continue;
-          const dep = await existing(root, candidates(resolveSpec(file, lit.value)));
-          if (dep?.startsWith(PROTOTYPE_DIR)) queue.push(dep);
+        for (const spec of localImports(file, data.toString("utf8"))) {
+          const target = spec.startsWith("/") ? spec.slice(1) : resolveSpec(file, spec);
+          if (!isInside(root, target)) continue;
+          const dep = await existing(root, candidates(target));
+          if (dep) queue.push(dep);
         }
       }
       return out;
@@ -281,6 +280,39 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
       });
       return moved;
     });
+  }
+}
+
+/**
+ * The local files a module or stylesheet pulls in, as written: relative (or root-absolute) import
+ * specifiers of a JS/TS module, `@import` and `url()` of CSS. Query strings (`?url`) are dropped.
+ */
+function localImports(file: string, code: string): string[] {
+  let specs: string[] = [];
+  if (/\.[cm]?[jt]sx?$/.test(file)) {
+    let ast: ReturnType<typeof parseModule>;
+    try {
+      ast = parseModule(code, file);
+    } catch {
+      return [];
+    }
+    specs = specifiers(ast).map((lit) => lit.value);
+  } else if (file.endsWith(".css")) {
+    const plain = code.replace(/\/\*[\s\S]*?\*\//g, "");
+    for (const m of plain.matchAll(/@import\s+(?:url\(\s*)?["']([^"']+)["']/g)) specs.push(m[1]!);
+    for (const m of plain.matchAll(/url\(\s*["']?([^"')]+)["']?\s*\)/g)) specs.push(m[1]!);
+  }
+  return specs
+    .map((spec) => spec.replace(/[?#].*$/, ""))
+    .filter((spec) => isRelative(spec) || (spec.startsWith("/") && !spec.startsWith("//")));
+}
+
+function isInside(root: string, file: string): boolean {
+  try {
+    inRoot(root, file);
+    return true;
+  } catch {
+    return false;
   }
 }
 

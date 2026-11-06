@@ -42,8 +42,9 @@ export function createStore<T>(initial: T, equal: (a: T, b: T) => boolean = Obje
   };
 }
 
+/** The same items with the same names: a name found later still reaches the composer's chips. */
 const sameList = (a: readonly SelectionItem[], b: readonly SelectionItem[]) =>
-  a.length === b.length && a.every((x, i) => sameItem(x, b[i]!));
+  a.length === b.length && a.every((x, i) => sameItem(x, b[i]!) && x.name === b[i]!.name);
 
 export const selectionStore: Store<readonly SelectionItem[]> = createStore<
   readonly SelectionItem[]

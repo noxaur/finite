@@ -214,7 +214,7 @@ describe("the hub", () => {
     const bo = await client(url, "bo");
     const { id } = (await ana.request("design.connect", { path: root })) as { id: string };
     const state = (await ana.request("subscribe", { designId: id })) as { canvases: Canvas[] };
-    const canvasId = state.canvases.find((c) => c.name === "Brand")!.id;
+    const canvasId = state.canvases.find((c) => c.name === "Components")!.id;
     const patch = (who: typeof ana, p: object) =>
       who.request("canvas.patch", { designId: id, canvasId, patch: p }) as Promise<Canvas>;
     const frame = {

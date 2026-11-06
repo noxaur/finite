@@ -12,9 +12,11 @@ import {
 import {
   type Actor,
   type Agents,
+  type Frame,
   type OpenDesign,
   type Previews,
   Refused,
+  type Selection,
   type SourceEditor,
   type Store,
   type ThreadMeta,
@@ -27,7 +29,7 @@ import { userMessage } from "./message.ts";
 import { policy, underRoot } from "./policy.ts";
 import { createScreenshots, type Screenshots } from "./screenshot.ts";
 import { createStatus, findClaude, NOT_INSTALLED } from "./status.ts";
-import { boardDir, canvasServer } from "./tools.ts";
+import { boardDir, canvasServer, LABEL_OFFSET, layoutRow } from "./tools.ts";
 
 /** The part of the SDK's `Query` the agents use; tests pass a fake. */
 export type QueryLike = AsyncIterable<SDKMessage> &
@@ -52,12 +54,26 @@ export type AgentsOptions = {
   locks?: Locked;
   /** The longest a Write/Edit holds its file's lock when Claude Code never reports it done. */
   writeLockMs?: number;
+  /** How long a result after a steer waits for the steer's own turn to start (default 3 s). */
+  steerGraceMs?: number;
 };
 
 export const IDLE_MS = 10 * 60_000;
 export const WRITE_LOCK_MS = 30_000;
+export const STEER_GRACE_MS = 3_000;
 const WRITE_TOOLS = "Write|Edit|MultiEdit|NotebookEdit";
 export const DEFAULT_TITLE = "New prototype";
+/** Claude Code's built-in tools a Finite agent gets; the rest (subagents, plans, cron, worktrees) only cost tokens. */
+export const BUILT_IN_TOOLS = [
+  "Read",
+  "Write",
+  "Edit",
+  "Bash",
+  "Glob",
+  "Grep",
+  "WebFetch",
+  "WebSearch",
+];
 
 /** The actor for a thread's agent: its id is the thread id. */
 export function agentActor(threadId: string): Actor {
@@ -103,6 +119,60 @@ export async function startThread(
   return meta;
 }
 
+/**
+ * Puts a copy of each selected frame from another canvas (same source: a reference to the route or
+ * file, not a copy of its code) on a new prototype's canvas, in a row from the origin with its
+ * name above, so variants can sit to its right. Returns the selection pointing at the copies.
+ */
+export async function carrySelection(
+  open: OpenDesign,
+  canvasId: string,
+  selection: Selection[],
+  by: Actor,
+): Promise<Selection[]> {
+  const canvases = await open.canvases();
+  const target = canvases.find((c) => c.id === canvasId);
+  if (!target) return selection;
+  const copies = new Map<string, Frame>();
+  for (const { frameId } of selection) {
+    if (copies.has(frameId) || target.frames.some((f) => f.id === frameId)) continue;
+    const from = canvases.flatMap((c) => c.frames).find((f) => f.id === frameId);
+    if (from) copies.set(frameId, from);
+  }
+  if (copies.size === 0) return selection;
+  const originals = [...copies.values()];
+  const boxes = layoutRow(
+    target.frames,
+    originals.map(({ width, height }) => ({ width, height })),
+  );
+  const placed = originals.map((f, i): Frame => {
+    const { gone: _gone, placedBy: _by, ...rest } = f;
+    return { ...rest, ...boxes[i]!, id: randomUUID() };
+  });
+  await open.patchCanvas(canvasId, { op: "addFrames", frames: placed }, by);
+  for (const frame of placed) {
+    const what = frame.source.kind === "route" ? `route ${frame.source.path}` : frame.source.file;
+    await open.patchCanvas(
+      canvasId,
+      {
+        op: "setText",
+        text: {
+          id: randomUUID(),
+          x: frame.x,
+          y: frame.y - LABEL_OFFSET,
+          width: frame.width,
+          title: frame.name,
+          body: `The source: production ${what}.`,
+          author: by,
+        },
+      },
+      by,
+    );
+  }
+  const ids = new Map(originals.map((f, i) => [f.id, placed[i]!.id]));
+  return selection.map((s) => ({ ...s, frameId: ids.get(s.frameId) ?? s.frameId }));
+}
+
 /** The first line of a message, cut to about six words. */
 export function shortTitle(text: string): string {
   const line = (text.split("\n").find((l) => l.trim()) ?? "").trim().replace(/\s+/g, " ");
@@ -134,6 +204,16 @@ type Live = {
   done: Promise<void>;
   /** File locks held by Write/Edit calls in flight, by tool use id. */
   writing: Map<string, () => void>;
+  /**
+   * Steers pushed into a running turn whose own turn hasn't started yet. Claude Code ends the
+   * running turn for a steer with a result that says `queued_turn_count: 0` (often an empty
+   * `error_during_execution` one), then starts the steer's turn with a `system/init`.
+   */
+  steers: number;
+  /** A result held back until the steer's turn starts, finished by this timer if it never does. */
+  steerWait: NodeJS.Timeout | undefined;
+  /** A result came and no turn has started since. */
+  betweenTurns: boolean;
 };
 
 export function createAgents(options: AgentsOptions): Agents {
@@ -152,6 +232,7 @@ export function createAgents(options: AgentsOptions): Agents {
   const lives = new Map<string, Live>();
   const locks = options.locks ?? fileLocks;
   const writeLockMs = options.writeLockMs ?? WRITE_LOCK_MS;
+  const steerGraceMs = options.steerGraceMs ?? STEER_GRACE_MS;
   /**
    * One thread's sends, results and interrupts run one at a time, so two sends can't both start a
    * session and a send can't queue a message just after the turn decided the queue was empty.
@@ -187,6 +268,9 @@ export function createAgents(options: AgentsOptions): Agents {
       idle: undefined,
       done: Promise.resolve(),
       writing: new Map(),
+      steers: 0,
+      steerWait: undefined,
+      betweenTurns: false,
     };
     const fence = (name: string, toolInput: Record<string, unknown>) =>
       policy(name, toolInput, { root, realRoot, brandDir, prodWrite: live.prodWrite });
@@ -260,6 +344,10 @@ export function createAgents(options: AgentsOptions): Agents {
           preset: "claude_code",
           append: `${FINITE_INSTRUCTIONS}\n${context(open, thread)}`,
         },
+        // Only the project's own settings and CLAUDE.md: the person's global ~/.claude config
+        // (their CLAUDE.md, skills, plugins, hooks) is about their own work, not this design.
+        settingSources: ["project"],
+        tools: [...BUILT_IN_TOOLS],
         mcpServers: { finite: server },
         strictMcpConfig: true,
         permissionMode: "default",
@@ -291,14 +379,29 @@ export function createAgents(options: AgentsOptions): Agents {
           if (sessionId !== resumed)
             await open.updateThread(threadId, (m) => ({ ...m, sessionId }));
         }
+        if (message.type === "system" && message.subtype === "init") {
+          // A turn after a result started: a steer's own turn, if one is pending.
+          if (live.betweenTurns && live.steers > 0) live.steers--;
+          live.betweenTurns = false;
+          clearTimeout(live.steerWait);
+          live.steerWait = undefined;
+        }
         const now = Date.now();
-        for (const event of map(message, now, live.interrupted)) {
+        // A turn a steer cut short isn't a failure.
+        for (const event of map(message, now, live.interrupted || live.steers > 0)) {
           await open.appendEvent(threadId, event);
         }
         if (message.type === "result") {
+          live.betweenTurns = true;
           const ok = message.subtype === "success" && !message.is_error;
-          const more = (message.queued_turn_count ?? 0) > 0;
-          await inThread(threadId, () => finishTurn(live, ok, { more }));
+          const queuedTurns = message.queued_turn_count ?? 0;
+          const more = queuedTurns > 0;
+          await inThread(threadId, async () => {
+            // Claude Code counted those steers itself.
+            live.steers = Math.max(0, live.steers - queuedTurns);
+            if (live.steers > 0 && !live.interrupted && !more) return holdForSteer(live, ok);
+            return finishTurn(live, ok, { more });
+          });
         }
       }
       if (!live.closing) throw new Error("Claude Code stopped.");
@@ -337,6 +440,21 @@ export function createAgents(options: AgentsOptions): Agents {
 
   function releaseWrites(live: Live): void {
     for (const release of live.writing.values()) release();
+  }
+
+  /** Waits for a steer's turn to start; if it doesn't in time, the result was the end after all. */
+  function holdForSteer(live: Live, ok: boolean): void {
+    clearTimeout(live.steerWait);
+    const timer = setTimeout(() => {
+      void inThread(live.threadId, async () => {
+        if (live.steerWait !== timer) return;
+        live.steerWait = undefined;
+        live.steers = 0;
+        await finishTurn(live, ok, { more: false });
+      });
+    }, steerGraceMs);
+    timer.unref?.();
+    live.steerWait = timer;
   }
 
   /** After a turn's result: revoke prod writes, settle, send the next queued message or hand back. */
@@ -389,6 +507,7 @@ export function createAgents(options: AgentsOptions): Agents {
   function shut(live: Live): void {
     live.closing = true;
     clearTimeout(live.idle);
+    clearTimeout(live.steerWait);
     if (lives.get(live.threadId) === live) lives.delete(live.threadId);
     live.input.end();
     live.query.close();
@@ -478,7 +597,11 @@ export function createAgents(options: AgentsOptions): Agents {
           }));
           return;
         }
-        if (live) return deliver(live, turn, live.running ? "now" : undefined);
+        if (live?.running) {
+          live.steers++;
+          return deliver(live, turn, "now");
+        }
+        if (live) return deliver(live, turn);
         return deliver(await start(open, thread, turn), turn);
       }),
 
@@ -489,6 +612,9 @@ export function createAgents(options: AgentsOptions): Agents {
           live.interrupted = true;
           live.running = false;
           live.prodWrite = false;
+          live.steers = 0;
+          clearTimeout(live.steerWait);
+          live.steerWait = undefined;
           await live.query.interrupt();
           armIdle(live);
         } else {

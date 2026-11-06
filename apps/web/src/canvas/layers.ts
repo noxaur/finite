@@ -139,3 +139,19 @@ export function layerName(n: Pick<LayerNode, "loc" | "tag" | "name">, parentFile
   }
   return TAG_NAMES[n.tag] ?? n.tag;
 }
+
+/**
+ * The layer name of the `index`th rendered `loc`, as its row in the layers panel says it, or
+ * null when the tree doesn't have it.
+ */
+export function layerNameAt(layers: readonly LayerNode[], loc: Loc, index: number): string | null {
+  const walk = (nodes: readonly LayerNode[], parentFile: string | undefined): string | null => {
+    for (const n of nodes) {
+      if (n.loc === loc && n.index === index) return layerName(n, parentFile);
+      const found = walk(n.children, fileOf(n.loc));
+      if (found !== null) return found;
+    }
+    return null;
+  };
+  return walk(layers, undefined);
+}

@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { Loc } from "./model.ts";
 
 /**
  * Input shapes of the canvas tools agents call through the `finite` MCP server. They're raw zod
@@ -24,6 +23,7 @@ export const canvasTools = {
       .min(1),
     rightOf: z.string().optional(),
   },
+  remove_frames: { canvasId: z.string(), frameIds: z.array(z.string()).min(1) },
   write_text: {
     canvasId: z.string(),
     textId: z.string().optional(),
@@ -35,7 +35,10 @@ export const canvasTools = {
   },
   comment: {
     frameId: z.string(),
-    loc: Loc.optional(),
+    /** `file:line:col` (col = 0-based column of the `<`), `file:line`, or `file` with `match`. */
+    loc: z.string().optional(),
+    /** Text the element shows (its words, alt or aria-label), to find it on `line` or in `file`. */
+    match: z.string().optional(),
     /** Which rendered instance of `loc` (from a selection), default 0. */
     index: z.number().int().min(0).optional(),
     text: z.string().min(1),
@@ -49,7 +52,6 @@ export const canvasTools = {
   add_brand_asset: {
     path: z.string().optional(),
     url: z.string().optional(),
-    kind: z.enum(["logo", "image", "font", "other"]),
   },
   spawn_thread: { prompt: z.string().min(1), canvasId: z.string().optional() },
   name_thread: { title: z.string().min(1) },

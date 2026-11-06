@@ -58,16 +58,40 @@ export function frameFile(
   return { file: relative.split(path.sep).join("/") };
 }
 
+/** The page a file frame shows when the design's CSS paints no background of its own. */
+export const PAGE_BACKGROUND = "#f7f9fa";
+
+/**
+ * A file frame's page. Like a Figma frame it has a fill: the background the design's CSS gives
+ * `html` or `body`, else `PAGE_BACKGROUND`. The default rule switches off whenever the design's
+ * stylesheets (which Vite adds and updates as `<style>`s in the head) paint either one.
+ */
 export function frameHtml(entry: string): string {
   return `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <style>html, body { background: transparent; }</style>
+    <style id="finite-page">html { background: ${PAGE_BACKGROUND}; }</style>
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      (() => {
+        const page = document.getElementById("finite-page");
+        const clear = (el) => {
+          const s = getComputedStyle(el);
+          return s.backgroundImage === "none" && ["transparent", "rgba(0, 0, 0, 0)"].includes(s.backgroundColor);
+        };
+        const check = () => {
+          page.disabled = true;
+          page.disabled = !(clear(document.documentElement) && clear(document.body));
+        };
+        new MutationObserver(check).observe(document.head, { childList: true, subtree: true, characterData: true });
+        addEventListener("load", check);
+        check();
+      })();
+    </script>
     <script type="module" src="${escapeAttr(entry)}"></script>
   </body>
 </html>

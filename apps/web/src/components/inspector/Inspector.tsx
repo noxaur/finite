@@ -8,6 +8,7 @@ import { finite } from "@/client/finite";
 import { type CanvasEditor, useActiveEditor, useEditorState } from "@/canvas/editor";
 import { baseName, fileOf } from "@/canvas/gestures";
 import { keyOf, type SelectionItem, useSelection } from "@/canvas/selection";
+import { radiusOf } from "@/design/editing/appearance";
 import { routeStyles } from "@/design/editing/inspect";
 import type { TokenTable } from "@/design/types";
 import { colors, fonts, size, space } from "@/styles/tokens.stylex";
@@ -43,11 +44,24 @@ export function tokenTable(tokens: readonly Token[]): TokenTable {
   };
 }
 
+const CORNERS = [
+  "borderTopLeftRadius",
+  "borderTopRightRadius",
+  "borderBottomRightRadius",
+  "borderBottomLeftRadius",
+] as const;
+
 const camel = (prop: string) => prop.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
 
 /** A `CSSStyleDeclaration` the fields can read, from what the bridge measured (camelCase keys). */
 function declaration(computed: Readonly<Record<string, string>>): CSSStyleDeclaration {
-  const read = (prop: string) => computed[prop] ?? computed[camel(prop)] ?? "";
+  const own = (prop: string) => computed[prop] ?? computed[camel(prop)] ?? "";
+  // The bridge measures the corners; the radius field reads them as one, like `rounded-card`.
+  const read = (prop: string) => {
+    if (prop !== "border-radius" && prop !== "borderRadius") return own(prop);
+    const corners = CORNERS.map(own) as [string, string, string, string];
+    return own(prop) || (corners.every(Boolean) ? radiusOf(corners) : "");
+  };
   // Fields read it both ways: `getPropertyValue("flex-direction")` and `.flexDirection`.
   return new Proxy({} as CSSStyleDeclaration, {
     get: (_, key) =>

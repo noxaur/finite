@@ -1,9 +1,10 @@
 import type { LayerNode } from "@finite/protocol";
 import { describe, expect, it } from "vite-plus/test";
-import { childrenIn, layerName, layerRows, pathIn } from "./layers";
+import { ATTACH_RANGE, labelAnchor } from "./labelAnchor";
+import { childrenIn, layerName, layerNameAt, layerRows, pathIn } from "./layers";
 import { pinSpot } from "./pins";
 import { frameSrc } from "./frameSrc";
-import { keyOf, remapSelection, toggleItem } from "./selection";
+import { keyOf, remapSelection, selectionStore, toggleItem } from "./selection";
 import { framesToMount } from "./virtualize";
 
 const box = (id: string, x: number, y = 0) => ({ id, x, y, width: 100, height: 100 });
@@ -35,6 +36,18 @@ describe("which frames keep an iframe", () => {
 });
 
 describe("the selection", () => {
+  it("tells its readers when only an item's name changes", () => {
+    const item = { frameId: "f", loc: "a.tsx:1:1", index: 0, name: "Button" };
+    selectionStore.set([item]);
+    let told = 0;
+    const off = selectionStore.subscribe(() => told++);
+    selectionStore.set([{ ...item }]);
+    selectionStore.set([{ ...item, name: "Get started" }]);
+    off();
+    selectionStore.set([]);
+    expect(told).toBe(1);
+  });
+
   it("follows remapped locs and keeps frames as they are", () => {
     const items = [
       { frameId: "f", loc: "src/A.tsx:3:2", index: 1 },
@@ -109,6 +122,26 @@ describe("layer trees", () => {
     expect(layerName(bare("src/App.tsx:9:5", "nav"), "src/App.tsx")).toBe("Nav");
     expect(layerName(bare("src/App.tsx:9:5", "div"), "src/App.tsx")).toBe("div");
   });
+
+  it("names a selected element as its layers row does, for the composer", () => {
+    const named = [
+      {
+        loc: "src/Home.tsx:1:1",
+        rev: "r",
+        tag: "div",
+        index: 0,
+        name: "div",
+        children: [
+          { loc: "src/Hero.tsx:2:1", rev: "r", tag: "div", index: 0, name: "div", children: [] },
+          { loc: "src/Home.tsx:5:1", rev: "r", tag: "h1", index: 0, name: "Hello", children: [] },
+        ],
+      },
+    ];
+    expect(layerNameAt(named, "src/Home.tsx:1:1", 0)).toBe("Home");
+    expect(layerNameAt(named, "src/Hero.tsx:2:1", 0)).toBe("Hero");
+    expect(layerNameAt(named, "src/Home.tsx:5:1", 0)).toBe("Hello");
+    expect(layerNameAt(named, "src/Home.tsx:5:1", 1)).toBeNull();
+  });
 });
 
 describe("frame sources", () => {
@@ -168,5 +201,24 @@ describe("frameSrc", () => {
     expect(route("/posts/{-$id}", { id: "42" })).toBe("http://127.0.0.1:5000/posts/42");
     expect(route("/posts/{-$id}")).toBe("http://127.0.0.1:5000/posts");
     expect(route("/docs/$", { _splat: "a/b" })).toBe("http://127.0.0.1:5000/docs/a/b");
+  });
+});
+
+describe("which frame a label sits over", () => {
+  const frames = [
+    { x: 0, y: 0, width: 400 },
+    { x: 500, y: 0, width: 400 },
+    { x: 0, y: 1000, width: 400 },
+  ];
+
+  it("anchors the label place_frames writes above a frame to that frame's top", () => {
+    expect(labelAnchor({ x: 500, y: -120, width: 400 }, frames)).toBe(0);
+    expect(labelAnchor({ x: 0, y: 880, width: 400 }, frames)).toBe(1000);
+  });
+
+  it("leaves labels free when they're far above, below, or beside every frame", () => {
+    expect(labelAnchor({ x: 0, y: -ATTACH_RANGE - 1, width: 400 }, frames)).toBeNull();
+    expect(labelAnchor({ x: 0, y: 600, width: 400 }, frames)).toBeNull();
+    expect(labelAnchor({ x: 420, y: -120, width: 60 }, frames)).toBeNull();
   });
 });

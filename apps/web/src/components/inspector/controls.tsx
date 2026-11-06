@@ -23,6 +23,7 @@ import { type ColorEdit, type ColorPick, ColorPicker } from "../ColorPicker";
 import { numberOf, ScrubLabel, useDraftField } from "../DraftField";
 import type { IconName } from "@/lib/icons";
 import { Icon } from "../Icons";
+import { popupHost } from "../portal";
 import { useDismiss } from "../useDismiss";
 import { Dropdown, Menu, type MenuItem } from "../Menu";
 import type { Geometry, GeometryFacts } from "./geometry";
@@ -1533,7 +1534,7 @@ export function Popover({
     >
       {children}
     </div>,
-    document.body,
+    popupHost(anchor),
   );
 }
 

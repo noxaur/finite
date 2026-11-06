@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { copyFile, mkdir, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   type AnyZodRawShape,
@@ -19,6 +19,9 @@ import {
   type TextLabel,
   type ThreadMeta,
 } from "@finite/protocol";
+import { inRoot } from "../source/files.ts";
+import { snapLoc } from "../source/jsx.ts";
+import { ensureBrandBoard } from "../store/brand.ts";
 import type { Screenshots } from "./screenshot.ts";
 
 type CallToolResult = Awaited<ReturnType<Parameters<typeof tool>[3]>>;
@@ -271,6 +274,7 @@ export function canvasServer(ctx: ToolContext) {
           ...boxes[i]!,
           ...(f.height === undefined ? { hug: true } : {}),
           source: { kind: "file", file: files[i]! },
+          placedBy: actor,
         }));
         await open.patchCanvas(canvasId, { op: "addFrames", frames: placed }, actor);
         for (const [i, frame] of placed.entries()) {
@@ -301,6 +305,33 @@ export function canvasServer(ctx: ToolContext) {
     ),
 
     safeTool(
+      "remove_frames",
+      "Removes frames (and the title labels above them) from a canvas: any frame on a prototype canvas, only the frames this thread placed on a page.",
+      canvasTools.remove_frames,
+      async ({ canvasId, frameIds }) => {
+        const c = await canvas(canvasId);
+        for (const id of frameIds) {
+          const frame = c.frames.find((f) => f.id === id);
+          if (!frame) throw new Refused(`There's no frame ${id} on ${c.name}. Call read_canvas.`);
+          if (c.kind === "page" && frame.placedBy?.id !== actor.id) {
+            throw new Refused(
+              `"${frame.name}" on the ${c.name} page wasn't placed by this thread, so it stays. Ask the person to remove it.`,
+            );
+          }
+        }
+        const gone = c.frames.filter((f) => frameIds.includes(f.id));
+        const labels = c.texts.filter((t) =>
+          gone.some((f) => t.x === f.x && t.y === f.y - LABEL_OFFSET),
+        );
+        await open.patchCanvas(canvasId, { op: "removeFrames", frameIds }, actor);
+        for (const label of labels) {
+          await open.patchCanvas(canvasId, { op: "removeText", textId: label.id }, actor);
+        }
+        return json({ removed: frameIds });
+      },
+    ),
+
+    safeTool(
       "write_text",
       "Writes a text label (title + body) on a canvas, or rewrites the one with textId. Without x/y it goes below everything else.",
       canvasTools.write_text,
@@ -327,10 +358,14 @@ export function canvasServer(ctx: ToolContext) {
 
     safeTool(
       "comment",
-      "Pins a comment on a frame, or on one element in it (loc = file:line:col from a selection or the source; index = which rendered instance of loc, from the selection). Use it to point people at what you changed or what you need from them.",
+      "Pins a comment on a frame, or on one HTML element in it. loc is file:line:col as a selection gives it (col = the 0-based column of the element's `<`), or file:line, or a file with match (text the element shows); it snaps to the element there. index = which rendered instance of loc, from the selection. Use it to point people at what you changed or what you need from them.",
       canvasTools.comment,
-      async ({ frameId, loc, index, text }) => {
+      async ({ frameId, loc, match, index, text }) => {
         const { canvas: c } = await findFrame(frameId);
+        if (loc === undefined && match !== undefined) {
+          throw new Refused("match needs loc: give the file (and line) the element is in.");
+        }
+        const pinned = loc === undefined ? undefined : await pinLoc(design.root, loc, match);
         const id = randomUUID();
         await open.updateCanvas(
           c.id,
@@ -342,8 +377,8 @@ export function canvasServer(ctx: ToolContext) {
                 id,
                 anchor: {
                   frameId,
-                  ...(loc === undefined ? {} : { loc }),
-                  ...(loc === undefined || index === undefined ? {} : { index }),
+                  ...(pinned === undefined ? {} : { loc: pinned }),
+                  ...(pinned === undefined || index === undefined ? {} : { index }),
                 },
                 author: actor,
                 text,
@@ -354,7 +389,7 @@ export function canvasServer(ctx: ToolContext) {
           }),
           actor,
         );
-        return json({ commentId: id, canvasId: c.id });
+        return json({ commentId: id, canvasId: c.id, ...(pinned ? { loc: pinned } : {}) });
       },
     ),
 
@@ -401,9 +436,9 @@ export function canvasServer(ctx: ToolContext) {
 
     safeTool(
       "add_brand_asset",
-      `Copies a file (path relative to the project, or absolute) or downloads a URL into the brand folder (${design.brandDir}) and lists it on the Brand page.`,
+      `Copies a file (path relative to the project, or absolute) or downloads a URL into the brand folder (${design.brandDir}). The Brand page's assets board shows every file there (logos, images, fonts) by itself.`,
       canvasTools.add_brand_asset,
-      async ({ path: from, url, kind }) => {
+      async ({ path: from, url }) => {
         if ((from === undefined) === (url === undefined)) {
           throw new Refused("Give exactly one of path and url.");
         }
@@ -420,28 +455,8 @@ export function canvasServer(ctx: ToolContext) {
           name = path.posix.basename(new URL(url!).pathname) || `asset${extension(res)}`;
           await writeFile(path.join(dir, name), new Uint8Array(await res.arrayBuffer()));
         }
-        const rel = path.posix.join(design.brandDir, name);
-        const all = await open.canvases();
-        const brand =
-          all.find((c) => c.kind === "page" && c.name === "Brand" && !c.removedAt) ??
-          (await open.createCanvas({ kind: "page", name: "Brand" }, actor));
-        const at = belowAll(await canvas(brand.id));
-        await open.patchCanvas(
-          brand.id,
-          {
-            op: "setText",
-            text: {
-              id: randomUUID(),
-              ...at,
-              width: NOTE_WIDTH,
-              title: name,
-              body: `${kind} · ${rel}`,
-              author: actor,
-            },
-          },
-          actor,
-        );
-        return json({ file: rel, brandCanvasId: brand.id });
+        const brand = await ensureBrandBoard(open, actor);
+        return json({ file: path.posix.join(design.brandDir, name), brandCanvasId: brand.id });
       },
     ),
 
@@ -531,6 +546,28 @@ function text(value: string): CallToolResult {
 
 function json(value: unknown): CallToolResult {
   return text(JSON.stringify(value));
+}
+
+/**
+ * The stamped loc an agent's `file[:line[:col]]` (plus optional text) means, snapped to the HTML
+ * element there.
+ */
+export async function pinLoc(root: string, loc: string, match?: string): Promise<string> {
+  const parts = /^(.+?)(?::(\d+))?(?::(\d+))?$/.exec(loc.trim());
+  if (!parts) throw new Refused(`${loc} isn't a loc. Write file:line:col, file:line or a file.`);
+  const [, given, line, column] = parts;
+  const file = path.posix.normalize(given!.replace(/\\/g, "/").replace(/^\.\//, ""));
+  const code = await readFile(inRoot(root, file), "utf8").catch(() => undefined);
+  if (code === undefined) {
+    throw new Refused(
+      `${file} isn't a file in the design. loc's file is relative to the project root.`,
+    );
+  }
+  return snapLoc(code, file, {
+    line: line === undefined ? undefined : Number(line),
+    column: column === undefined ? undefined : Number(column),
+    ...(match === undefined ? {} : { match }),
+  });
 }
 
 /** `/` → Home, `/cart/:id` → CartId. */

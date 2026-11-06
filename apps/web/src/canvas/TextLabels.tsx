@@ -6,23 +6,32 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { colors, fonts, radii, space } from "@/styles/tokens.stylex";
 import { bridgeOf } from "./bridge";
 import type { CanvasEditor, EditorState, TextEdit } from "./editor";
+import { labelAnchor } from "./labelAnchor";
 
 /**
  * The agent's notes above the frames it made: a direction's title and why. People move them
- * (drag), edit them (double-click), and delete them (select, then Delete).
+ * (drag), edit them (double-click), and delete them (select, then Delete). A label that belongs
+ * to a frame (see `labelAnchor`) sits by its bottom edge just over the frame's title.
  */
 export function TextLabels({ editor, state }: { editor: CanvasEditor; state: EditorState }) {
+  const frames = editor.frames.map((f) => editor.boxOf(f));
   return (
     <>
       {editor.texts.map((text) => {
         const at = state.textOverrides[text.id] ?? text;
         const selected = state.selectedText === text.id;
         const editing = state.editingLabel === text.id;
+        const above = labelAnchor(text, frames);
+        // While dragged, an attached label moves by the drag from where it's drawn.
+        const placed =
+          above === null
+            ? styles.label(at.x, at.y, text.width)
+            : styles.attached(at.x, above + at.y - text.y, text.width);
         return (
           <div
             key={text.id}
             data-text-id={editing ? undefined : text.id}
-            {...stylex.props(styles.label(at.x, at.y, text.width), selected && styles.selected)}
+            {...stylex.props(placed, selected && styles.selected)}
           >
             {editing ? (
               <LabelEditor
@@ -174,6 +183,19 @@ const styles = stylex.create({
     left: x,
     top: y,
     width,
+    padding: space.xs,
+    borderRadius: radii.sm,
+    color: colors.text,
+    fontFamily: fonts.sans,
+    cursor: "default",
+  }),
+  /** `bottom` is the frame's top: the label ends a gap above the frame's title (15px + 6px). */
+  attached: (x: number, bottom: number, width: number) => ({
+    position: "absolute",
+    left: x,
+    top: bottom,
+    width,
+    transform: "translateY(calc(-100% - 27px * var(--inv-zoom, 1)))",
     padding: space.xs,
     borderRadius: radii.sm,
     color: colors.text,

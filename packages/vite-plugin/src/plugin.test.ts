@@ -6,7 +6,7 @@ import path from "node:path";
 import { BRIDGE_CONNECT, BRIDGE_HELLO } from "@finite/protocol";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { allowsOrigin, CONNECT, HELLO } from "./client/bridge.ts";
-import { frameEntry, frameFile, frameHtml } from "./frame.ts";
+import { frameEntry, frameFile, frameHtml, PAGE_BACKGROUND } from "./frame.ts";
 import { finite } from "./index.ts";
 import { injectIntoHtml } from "./html.ts";
 import { routeParams, scanRoutes } from "./routes.ts";
@@ -104,8 +104,13 @@ describe("frames", () => {
     expect(code).toContain(`createMemoryRouter([{ path: "*", Component: element }])`);
   });
 
-  test("the file frame page is transparent", () => {
-    expect(frameHtml("/entry")).toContain("background: transparent");
+  test("the file frame page has a light fill unless the design paints its own", () => {
+    const html = frameHtml("/entry");
+    expect(html).toContain(
+      `<style id="finite-page">html { background: ${PAGE_BACKGROUND}; }</style>`,
+    );
+    expect(PAGE_BACKGROUND).toBe("#f7f9fa");
+    expect(html).not.toContain("transparent; }");
   });
 
   test("checks the frame file", () => {

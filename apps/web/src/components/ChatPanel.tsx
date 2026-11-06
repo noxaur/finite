@@ -2,11 +2,13 @@
 
 import * as stylex from "@stylexjs/stylex";
 import type { ThreadEvent, ThreadMeta } from "@finite/protocol";
-import { useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useMemo, useRef } from "react";
 import { useThreadEvents } from "@/client/finite";
+import { chatRows } from "@/lib/chat";
 import { colors, fonts, radii, size, space } from "@/styles/tokens.stylex";
 import { IconButton } from "./Button";
 import { Icon } from "./Icons";
+import { Markdown } from "./Markdown";
 
 /**
  * A thread's messages down the right side: what people sent, the agent's replies, and its tool
@@ -23,6 +25,7 @@ export function ChatPanel({
   onClose?: (() => void) | undefined;
 }) {
   const { events, streaming, loaded } = useThreadEvents(designId, thread.id);
+  const rows = useMemo(() => chatRows(events), [events]);
   const scroller = useRef<HTMLDivElement>(null);
 
   // Follows the conversation while it's scrolled to the bottom.
@@ -30,7 +33,7 @@ export function ChatPanel({
   useLayoutEffect(() => {
     const el = scroller.current;
     if (el && pinned.current) el.scrollTop = el.scrollHeight;
-  }, [events.length, streaming]);
+  }, [rows.length, streaming]);
 
   return (
     <aside aria-label="Messages" {...stylex.props(styles.panel)}>
@@ -58,10 +61,10 @@ export function ChatPanel({
         {loaded && events.length === 0 && !streaming && (
           <p {...stylex.props(styles.note)}>No messages yet.</p>
         )}
-        {events.map((event, i) => (
-          <EventRow key={i} event={event} />
+        {rows.map((event, i) => (
+          <EventRow key={event.type === "tool" ? event.id : i} event={event} />
         ))}
-        {streaming && <p {...stylex.props(styles.text)}>{streaming}</p>}
+        {streaming && <Markdown text={streaming} />}
         {thread.running && !streaming && (
           <p {...stylex.props(styles.note)}>
             <span {...stylex.props(styles.spinner)} aria-hidden /> Working…
@@ -87,7 +90,7 @@ function EventRow({ event }: { event: ThreadEvent }) {
         </div>
       );
     case "text":
-      return <p {...stylex.props(styles.text)}>{event.text}</p>;
+      return <Markdown text={event.text} />;
     case "tool":
       return (
         <div {...stylex.props(styles.tool, event.status === "error" && styles.toolError)}>
@@ -190,13 +193,6 @@ const styles = stylex.create({
     gap: space.xs,
     color: colors.muted,
     fontSize: 12,
-  },
-  text: {
-    margin: 0,
-    fontSize: 13,
-    lineHeight: "19px",
-    whiteSpace: "pre-wrap",
-    overflowWrap: "anywhere",
   },
   tool: {
     display: "flex",
