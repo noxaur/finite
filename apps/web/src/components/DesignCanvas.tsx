@@ -1,18 +1,19 @@
 "use client";
 
 import * as stylex from "@stylexjs/stylex";
-import { Cause, Exit } from "effect";
+import { Cause, type Effect, Exit } from "effect";
 import Link from "next/link";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Api, Refused } from "@/api/Api";
 import { Camera, union, type View } from "@/design/camera";
-import { Editor } from "@/design/editing/editor";
+import { Editor, isTyping } from "@/design/editing/editor";
 import { LayerModel } from "@/design/editing/layers";
 import { pixelSize } from "@/design/html";
 import { Presenter, type PresenterState } from "@/design/presenter";
-import { type FrameKey, type Hit, Renderer } from "@/design/renderer";
+import { type FrameKey, Renderer } from "@/design/renderer";
+import type { Hit } from "@/design/types";
 import { Replica } from "@/design/replica";
-import type { Audience } from "@/design/schema";
+import type { Audience, Comment } from "@/design/schema";
 import { knownAgents } from "@/lib/audience";
 import { DesignSession, initialSessionState, type SessionState } from "@/design/session";
 import { loadDesignModel } from "@/design/wasm";
@@ -78,17 +79,6 @@ const UPDATED_MS = 1800;
 /** How long a notice, like a link to a missing artboard, stays up. */
 const NOTICE_MS = 2400;
 
-/** Whether a key event is typing into a field, in a shadow-root artboard too. */
-const isTyping = (e: Event) => {
-  const target = e.composedPath()[0] ?? e.target;
-  return (
-    target instanceof HTMLInputElement ||
-    target instanceof HTMLTextAreaElement ||
-    target instanceof HTMLSelectElement ||
-    (target instanceof HTMLElement && target.isContentEditable)
-  );
-};
-
 /** The artboards a selection is in, once each, in selection order. */
 function boardsOf(replica: Replica, selection: ReadonlyArray<string>): string[] {
   const boards: string[] = [];
@@ -140,6 +130,14 @@ function unsent(cause: Cause.Cause<unknown>): string {
     return `${reason.charAt(0).toUpperCase()}${reason.slice(1)}.`;
   }
   return "Couldn’t send. Check the connection and try again.";
+}
+
+/** A call to the server that went through, with its result, or the reason it didn’t. */
+type Sent<A> = { readonly value: A; readonly unsent?: undefined } | { readonly unsent: string };
+
+async function send<A>(call: Effect.Effect<A, unknown, Api>): Promise<Sent<A>> {
+  const exit = await runtime.runPromiseExit(call);
+  return Exit.isSuccess(exit) ? { value: exit.value } : { unsent: unsent(exit.cause) };
 }
 /**
  * Waits for finite.wasm, which holds the document rules. Returns `"ready"`,
@@ -557,9 +555,6 @@ export function DesignCanvas({ id }: { id: string }) {
     window.addEventListener("keyup", onKeyUp);
     window.addEventListener("blur", onBlur);
 
-    // Keeps "2 minutes ago" labels fresh.
-    const ticker = setInterval(() => setTick((t) => t + 1), 15_000);
-
     return () => {
       savePlaceNow();
       window.removeEventListener("pagehide", savePlaceNow);
@@ -582,7 +577,6 @@ export function DesignCanvas({ id }: { id: string }) {
       unwatchSelection();
       unwatchPresenter();
       presenterRef.current = null;
-      clearInterval(ticker);
       cancelAnimationFrame(hoverFrame.current);
       cancelAnimationFrame(partFrame.current);
       frames.replaceChildren();
@@ -727,32 +721,30 @@ export function DesignCanvas({ id }: { id: string }) {
       (node) => replica?.artboardOf(node)?.id === draft.artboardId,
     );
     const pin = { ...draft, nodeId, extraNodeIds };
-    const exit = await runtime.runPromiseExit(
+    const sent = await send(
       Api.use((api) => api.createComment(id, { author: localUser(), body, ...pin })),
     );
-    if (Exit.isFailure(exit)) return unsent(exit.cause);
-    sessionRef.current?.upsertComment(exit.value);
+    if (sent.unsent !== undefined) return sent.unsent;
+    sessionRef.current?.upsertComment(sent.value);
     setDraft(null);
     return undefined;
   };
 
-  const reply = async (commentId: string, body: string) => {
-    const exit = await runtime.runPromiseExit(
-      Api.use((api) => api.replyToComment(id, commentId, { author: localUser(), body })),
-    );
-    if (Exit.isFailure(exit)) return unsent(exit.cause);
-    sessionRef.current?.upsertComment(exit.value);
+  /** Sends a change to a thread and shows the comment the server answers with. */
+  const sendComment = async (call: Effect.Effect<Comment, unknown, Api>) => {
+    const sent = await send(call);
+    if (sent.unsent !== undefined) return sent.unsent;
+    sessionRef.current?.upsertComment(sent.value);
     return undefined;
   };
 
-  const editMessage = async (commentId: string, body: string) => {
-    const exit = await runtime.runPromiseExit(
+  const reply = (commentId: string, body: string) =>
+    sendComment(Api.use((api) => api.replyToComment(id, commentId, { author: localUser(), body })));
+
+  const editMessage = (commentId: string, body: string) =>
+    sendComment(
       Api.use((api) => api.editLastMessage(id, commentId, { author: localUser(), body })),
     );
-    if (Exit.isFailure(exit)) return unsent(exit.cause);
-    sessionRef.current?.upsertComment(exit.value);
-    return undefined;
-  };
 
   const deleteComment = (commentId: string) => {
     setOpenId(null);
@@ -821,24 +813,13 @@ export function DesignCanvas({ id }: { id: string }) {
   };
 
   const tokenActions: TokensActions = {
-    save: async (change) => {
-      const exit = await runtime.runPromiseExit(
-        Api.use((api) => api.setTokens(id, localUser(), change)),
-      );
-      return Exit.isFailure(exit) ? unsent(exit.cause) : undefined;
-    },
-    deleteMode: async (modeId) => {
-      const exit = await runtime.runPromiseExit(
-        Api.use((api) => api.deleteMode(id, localUser(), modeId)),
-      );
-      return Exit.isFailure(exit) ? unsent(exit.cause) : undefined;
-    },
-    setArtboardMode: async (boardId, modeId) => {
-      const exit = await runtime.runPromiseExit(
-        Api.use((api) => api.setArtboardMode(id, localUser(), [boardId], modeId)),
-      );
-      return Exit.isFailure(exit) ? unsent(exit.cause) : undefined;
-    },
+    save: async (change) =>
+      (await send(Api.use((api) => api.setTokens(id, localUser(), change)))).unsent,
+    deleteMode: async (modeId) =>
+      (await send(Api.use((api) => api.deleteMode(id, localUser(), modeId)))).unsent,
+    setArtboardMode: async (boardId, modeId) =>
+      (await send(Api.use((api) => api.setArtboardMode(id, localUser(), [boardId], modeId))))
+        .unsent,
   };
 
   // The new artboards arrive over the socket, so all this shows is how the import went.
@@ -854,32 +835,24 @@ export function DesignCanvas({ id }: { id: string }) {
     }
     setImported({ status: "working" });
     const bytes = new Uint8Array(await file.arrayBuffer());
-    const exit = await runtime.runPromiseExit(
+    const sent = await send(
       // Onto the page being looked at, so the new artboards show at once.
       Api.use((api) => api.importFile(id, { name: file.name, format, bytes }, page.id)),
     );
     setImported(
-      Exit.isSuccess(exit)
-        ? { status: "done", result: exit.value }
-        : { status: "failed", message: unsent(exit.cause) },
+      sent.unsent === undefined
+        ? { status: "done", result: sent.value }
+        : { status: "failed", message: sent.unsent },
     );
     setPanel("import");
   };
 
   const setAudience = (commentId: string, audience: Audience) => {
-    void runtime
-      .runPromiseExit(Api.use((api) => api.setCommentAudience(id, commentId, audience)))
-      .then((exit) => {
-        if (Exit.isSuccess(exit)) sessionRef.current?.upsertComment(exit.value);
-      });
+    void sendComment(Api.use((api) => api.setCommentAudience(id, commentId, audience)));
   };
 
   const resolve = (commentId: string, resolved: boolean) => {
-    void runtime
-      .runPromiseExit(Api.use((api) => api.setCommentResolved(id, commentId, resolved)))
-      .then((exit) => {
-        if (Exit.isSuccess(exit)) sessionRef.current?.upsertComment(exit.value);
-      });
+    void sendComment(Api.use((api) => api.setCommentResolved(id, commentId, resolved)));
   };
 
   // Outline what a comment points at: the draft's elements, the open
@@ -1404,7 +1377,7 @@ const styles = stylex.create({
     transformOrigin: "bottom left",
   },
   flash: {
-    backgroundColor: "rgba(21, 128, 61, 0.12)",
+    backgroundColor: `color-mix(in srgb, ${colors.ok} 12%, transparent)`,
     outlineColor: colors.ok,
     outlineWidth: "calc(2px * var(--inv-zoom, 1))",
   },

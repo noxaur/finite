@@ -3,8 +3,18 @@
 import * as stylex from "@stylexjs/stylex";
 import { type ReactNode, useRef, useState } from "react";
 import type { Listener, Presence } from "@/design/schema";
-import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
+import {
+  colors,
+  fonts,
+  motion,
+  outlines,
+  radii,
+  shadows,
+  size,
+  space,
+} from "@/styles/tokens.stylex";
 import { Icon } from "./Icons";
+import { NameInput } from "./NameInput";
 
 export type LeftMode = "design" | "tokens";
 
@@ -62,25 +72,13 @@ export function LeftSidebar({
   return (
     <aside data-camera-ignore aria-label="Design" {...stylex.props(styles.panel)}>
       <header {...stylex.props(styles.head)}>
-        <input
+        <NameInput
           key={name ?? ""}
-          aria-label="Design name"
-          defaultValue={name ?? ""}
+          label="Design name"
+          value={name ?? ""}
           placeholder="…"
-          spellCheck={false}
-          onBlur={(e) => {
-            const next = e.target.value.trim();
-            if (next && next !== name) onRename(next);
-            else e.target.value = name ?? "";
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") e.currentTarget.blur();
-            else if (e.key === "Escape") {
-              e.currentTarget.value = name ?? "";
-              e.currentTarget.blur();
-            }
-          }}
-          {...stylex.props(styles.name)}
+          onRename={onRename}
+          style={styles.name}
         />
         <button
           type="button"
@@ -155,25 +153,13 @@ export function LeftSidebar({
                       {...stylex.props(stylex.defaultMarker(), styles.pageItem)}
                     >
                       {renaming === p.id ? (
-                        <input
-                          aria-label="Page name"
-                          defaultValue={p.name}
+                        <NameInput
+                          label="Page name"
+                          value={p.name}
                           autoFocus
-                          spellCheck={false}
-                          onFocus={(e) => e.currentTarget.select()}
-                          onBlur={(e) => {
-                            const next = e.target.value.trim();
-                            if (next && next !== p.name) pageActions.rename(p.id, next);
-                            setRenaming(null);
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") e.currentTarget.blur();
-                            else if (e.key === "Escape") {
-                              e.currentTarget.value = p.name;
-                              e.currentTarget.blur();
-                            }
-                          }}
-                          {...stylex.props(styles.pageInput)}
+                          onRename={(next) => pageActions.rename(p.id, next)}
+                          onDone={() => setRenaming(null)}
+                          style={styles.pageInput}
                         />
                       ) : (
                         <button
@@ -339,7 +325,7 @@ const styles = stylex.create({
     fontSize: 14,
     fontWeight: 500,
     textOverflow: "ellipsis",
-    outline: { default: "none", ":focus-visible": `2px solid ${colors.brand}` },
+    outline: { default: "none", ":focus-visible": outlines.focus },
   },
   iconButton: {
     display: "grid",
@@ -428,9 +414,9 @@ const styles = stylex.create({
     color: colors.text,
     font: "inherit",
     fontSize: 14,
-    outline: `2px solid ${colors.brand}`,
+    outline: outlines.focus,
   },
-  rowDrop: { boxShadow: `inset 0 0 0 2px ${colors.brand}` },
+  rowDrop: { boxShadow: shadows.target },
   label: {
     display: "flex",
     alignItems: "center",
@@ -458,7 +444,7 @@ const styles = stylex.create({
   chevron: {
     display: "flex",
     color: colors.faint,
-    transition: "transform 200ms cubic-bezier(.23, 1, .32, 1)",
+    transition: `transform ${motion.base} ${motion.out}`,
   },
   chevronOpen: { transform: "rotate(90deg)" },
   footerChevron: { color: colors.muted },
@@ -520,7 +506,7 @@ const styles = stylex.create({
     color: colors.text,
     font: "inherit",
     fontSize: 13,
-    outline: { default: "none", ":focus-visible": `2px solid ${colors.brand}` },
+    outline: { default: "none", ":focus-visible": outlines.focus },
   },
   footer: {
     flexShrink: 0,

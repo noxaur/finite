@@ -1,3 +1,4 @@
+import { layoutOf } from "./layout";
 import { parts } from "./lists";
 
 /**
@@ -42,9 +43,7 @@ export function sizeContextOf(own: Computed, parent: ParentComputed | null): Siz
 }
 
 export function parentLayoutOf(display: string, direction: string): ParentLayout {
-  if (display.includes("grid")) return "grid";
-  if (display.includes("flex")) return direction.startsWith("column") ? "column" : "row";
-  return display === "none" || display === "contents" ? "none" : "block";
+  return display === "none" || display === "contents" ? "none" : layoutOf(display, direction);
 }
 
 /** The axis a flex parent lays its children along, or `null` when it isn't flex. */
@@ -148,6 +147,22 @@ export function flexParts(flex: string): [string, string, string] | null {
 
 /** Which part of `flex` a longhand is. */
 export const FLEX_PARTS = ["flex-grow", "flex-shrink", "flex-basis"] as const;
+
+/** Inline properties the Size section reads and writes, shorthands included. */
+export const SIZE_PROPS = [
+  "width",
+  "height",
+  "min-width",
+  "max-width",
+  "min-height",
+  "max-height",
+  "aspect-ratio",
+  "overflow",
+  "overflow-x",
+  "overflow-y",
+  "flex",
+  ...FLEX_PARTS,
+] as const;
 
 /** An `aspect-ratio` as width over height: `16 / 9` is 1.78; `null` for `auto` or a `var()`. */
 export function ratioOf(raw: string): number | null {

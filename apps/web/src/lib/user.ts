@@ -12,21 +12,33 @@ const NAME_KEY = "finite.user.name";
  * under ("Guest" until someone sets one).
  */
 export function localUser(): CommentAuthor {
-  let id = localStorage.getItem(ID_KEY);
-  if (!id) {
-    id = crypto.randomUUID();
-    localStorage.setItem(ID_KEY, id);
+  try {
+    let id = localStorage.getItem(ID_KEY);
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem(ID_KEY, id);
+    }
+    return { id, name: localStorage.getItem(NAME_KEY) || "Guest" };
+  } catch {
+    // Private windows and blocked storage keep the identity until the page closes.
+    unsaved.id ??= crypto.randomUUID();
+    return { id: unsaved.id, name: unsaved.name || "Guest" };
   }
-  return { id, name: localStorage.getItem(NAME_KEY) || "Guest" };
 }
+
+const unsaved: { id?: string; name?: string } = {};
 
 /** The name this browser comments under, and a setter that saves it. */
 export function useLocalName(): [string, (name: string) => void] {
   const [name, setName] = useState(() => localUser().name);
   const save = (next: string) => {
     const trimmed = next.trim().slice(0, NAME_LIMIT);
-    if (trimmed) localStorage.setItem(NAME_KEY, trimmed);
-    else localStorage.removeItem(NAME_KEY);
+    try {
+      if (trimmed) localStorage.setItem(NAME_KEY, trimmed);
+      else localStorage.removeItem(NAME_KEY);
+    } catch {
+      unsaved.name = trimmed;
+    }
     setName(trimmed || "Guest");
   };
   return [name, save];

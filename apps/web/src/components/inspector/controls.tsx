@@ -17,7 +17,9 @@ import {
 import { isColor } from "@/lib/tokens";
 import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import { numberOf, ScrubLabel, useDraftField } from "../DraftField";
-import { Icon, type IconName } from "../Icons";
+import type { IconName } from "@/lib/icons";
+import { Icon } from "../Icons";
+import { useDismiss } from "../useDismiss";
 import { Dropdown, Menu, type MenuItem } from "../Menu";
 import type { Geometry, GeometryFacts } from "./geometry";
 import {
@@ -541,32 +543,6 @@ export function Actions({ children }: { children: ReactNode }) {
   return <span {...stylex.props(styles.actions)}>{children}</span>;
 }
 
-/** A small icon button at the end of a field, for what acts on that field. */
-export function FieldToggle({
-  icon,
-  title,
-  pressed,
-  onClick,
-}: {
-  icon: IconName;
-  title: string;
-  pressed: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      title={title}
-      aria-label={title}
-      aria-pressed={pressed}
-      onClick={onClick}
-      {...stylex.props(styles.fieldButton, pressed && styles.iconButtonOn)}
-    >
-      <Icon name={icon} size={14} />
-    </button>
-  );
-}
-
 /**
  * The shell every field shares: a lead that scrubs `scrub`'s number, a text
  * input that previews `toChanges` as it's typed, and whatever comes `after`.
@@ -844,26 +820,6 @@ export function TokenButton({
       icon={menu ? "chevronDown" : "token"}
       items={items}
       empty={`This design has no ${KIND_NAMES[kind]} tokens yet. Add them under Tokens.`}
-    />
-  );
-}
-
-/** A ▾ button that sets one of `items`' styles. */
-export function ListButton({
-  scope,
-  title,
-  items,
-}: {
-  scope: Scope;
-  title: string;
-  items: ReadonlyArray<{ key: string; label: string; pick: Changes }>;
-}) {
-  return (
-    <Popup
-      title={title}
-      icon="chevronDown"
-      items={items.map((i) => ({ key: i.key, label: i.label, run: () => scope.commit(i.pick) }))}
-      empty=""
     />
   );
 }
@@ -1244,15 +1200,6 @@ export function DragList({
   );
 }
 
-/** The handle on a list's row that can be dragged to reorder; only where reordering works. */
-export function DragGrip() {
-  return (
-    <span title="Drag to reorder" aria-hidden="true" {...stylex.props(styles.grip)}>
-      <Icon name="grip" size={12} />
-    </span>
-  );
-}
-
 /** The chevron that opens a row's details beneath it, and closes them. */
 export function ExpandButton({
   open,
@@ -1274,6 +1221,28 @@ export function ExpandButton({
     >
       <Icon name="chevronDown" size={12} />
     </button>
+  );
+}
+
+/** The eye in a list row's gutter, as a toggle: hides the entry without losing it, or shows it again. */
+export function EyeToggle({ hidden, onClick }: { hidden: boolean; onClick: () => void }) {
+  return (
+    <Toggle icon={hidden ? "eyeOff" : "eye"} title={hidden ? "Show" : "Hide"} onClick={onClick} />
+  );
+}
+
+/** The row that stands for a list the selected layers don't share, with a way to clear it from all of them. */
+export function MixedRow({ what, onRemove }: { what: string; onRemove: () => void }) {
+  return (
+    <Row
+      action={
+        <Toggle icon="minus" title={`Remove the ${what} from every layer`} onClick={onRemove} />
+      }
+    >
+      <RowBody title={`The selected layers have different ${what}`}>
+        <RowName>Mixed</RowName>
+      </RowBody>
+    </Row>
   );
 }
 
@@ -1373,34 +1342,6 @@ export function Block({
   return <div {...stylex.props(...layout)}>{children}</div>;
 }
 
-/** A swatch that draws `shadow` and acts as a button. */
-export function SwatchButton({
-  title,
-  pressed,
-  disabled,
-  onClick,
-  shadow,
-}: {
-  title: string;
-  pressed: boolean;
-  disabled: boolean;
-  onClick: () => void;
-  shadow: string | undefined;
-}) {
-  return (
-    <button
-      type="button"
-      title={title}
-      aria-label={title}
-      aria-pressed={pressed}
-      disabled={disabled}
-      onClick={onClick}
-      {...stylex.props(styles.swatch, styles.shadowSwatch)}
-      style={{ boxShadow: shadow }}
-    />
-  );
-}
-
 /** A color as a small square, for a row that shows it without a picker. */
 export function PaintDot({ color }: { color: string | undefined }) {
   return <span {...stylex.props(styles.swatch)} style={{ background: color ?? "transparent" }} />;
@@ -1441,8 +1382,11 @@ export function Popover({
 }) {
   const panel = useRef<HTMLDivElement>(null);
   const [at, setAt] = useState<{ top: number; right: number } | null>(null);
-  const close = useRef(onClose);
-  close.current = onClose;
+  useDismiss({
+    contains: (t) => Boolean(panel.current?.contains(t) || anchor?.contains(t)),
+    onClose,
+    enabled: anchor !== null,
+  });
   useEffect(() => {
     if (!anchor) return;
     const place = () => {
@@ -1457,28 +1401,10 @@ export function Popover({
     place();
     const resize = new ResizeObserver(place);
     if (panel.current) resize.observe(panel.current);
-    const away = (e: PointerEvent) => {
-      const target = e.target as HTMLElement | null;
-      if (
-        !panel.current?.contains(target) &&
-        !anchor.contains(target) &&
-        !target?.closest("[role='menu']")
-      )
-        close.current();
-    };
-    const escape = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || document.querySelector("[role='menu']")) return;
-      e.stopPropagation();
-      close.current();
-    };
     window.addEventListener("resize", place);
-    window.addEventListener("pointerdown", away, true);
-    window.addEventListener("keydown", escape, true);
     return () => {
       resize.disconnect();
       window.removeEventListener("resize", place);
-      window.removeEventListener("pointerdown", away, true);
-      window.removeEventListener("keydown", escape, true);
     };
   }, [anchor]);
   if (!anchor) return null;
@@ -1700,12 +1626,7 @@ const styles = stylex.create({
     padding: 0,
     borderWidth: 0,
     borderRadius: radii.xs,
-    boxShadow: `inset 0 0 0 1px ${colors.borderStrong}`,
-  },
-  shadowSwatch: {
-    overflow: "visible",
-    backgroundColor: colors.surface,
-    cursor: "var(--cursor-pointer, pointer)",
+    boxShadow: shadows.edge,
   },
   picker: {
     position: "absolute",
@@ -1907,14 +1828,6 @@ const styles = stylex.create({
     cursor: "var(--cursor-pointer, pointer)",
   },
   eyeOff: { color: colors.muted },
-  grip: {
-    display: "flex",
-    flexShrink: 0,
-    marginLeft: -3,
-    marginRight: -6,
-    color: colors.faint,
-    cursor: "grab",
-  },
   expandOpen: { rotate: "180deg", color: colors.text },
   rowBody: { cursor: "default", userSelect: "none" },
   rowBodyOpen: { boxShadow: `inset 0 0 0 1px ${colors.border}` },

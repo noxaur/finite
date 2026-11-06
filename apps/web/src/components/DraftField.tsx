@@ -4,6 +4,7 @@ import * as stylex from "@stylexjs/stylex";
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { Draft, Editor } from "@/design/editing/editor";
+import { roundTo } from "@/design/editing/units";
 import type { UserEdit } from "@/design/schema";
 import { colors, cursors, motion } from "@/styles/tokens.stylex";
 
@@ -13,8 +14,14 @@ export function numberOf(text: string): { value: number; unit: string } | null {
   return m ? { value: parseFloat(m[1]!), unit: m[2]! } : null;
 }
 
+/** What `to` makes of the number `typed` starts with, or `null` when it doesn't start with one. */
+export function whenNumber<T>(typed: string, to: (n: number) => T): T | null {
+  const n = parseFloat(typed);
+  return Number.isFinite(n) ? to(n) : null;
+}
+
 /** `n` without float noise: 0.1 + 0.2 shows as 0.3. */
-const tidy = (n: number) => String(Math.round(n * 1000) / 1000);
+const tidy = (n: number) => String(roundTo(n, 3));
 
 /**
  * A text field that edits the design as it's typed: each key previews on

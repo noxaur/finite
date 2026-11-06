@@ -1,4 +1,5 @@
 import type { ImportDiagnostic, ImportResult, TransferFormat } from "@/api/Api";
+import { API_PATH } from "../api/path";
 
 /** What the Import picker accepts. */
 export const IMPORT_ACCEPT = ".html,.htm,.finite,.figma.json,.tar";
@@ -19,7 +20,7 @@ export function formatOf(fileName: string): TransferFormat | null {
   return null;
 }
 
-const designPath = (designId: string) => `/api/designs/${encodeURIComponent(designId)}`;
+const designPath = (designId: string) => `${API_PATH}/designs/${encodeURIComponent(designId)}`;
 
 /** The link that downloads one artboard as HTML, or the whole design as `.finite`. */
 export function exportHref(designId: string, artboardId: string | null): string {

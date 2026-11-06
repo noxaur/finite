@@ -1,11 +1,15 @@
 import { Context, Effect, flow, Layer, Schema } from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
-import { type Audience, Comment, DesignSummary, Snapshot } from "@/design/schema";
+import { API_PATH } from "./path";
+import { type Audience, type Author, Comment, DesignSummary, Snapshot } from "@/design/schema";
 
-/** Who is commenting. Users have no accounts yet; see `@/lib/user`. */
-export interface CommentAuthor {
-  readonly id: string;
-  readonly name: string;
+/** Who is commenting, as a request names them. Users have no accounts yet; see `@/lib/user`. */
+export type CommentAuthor = Pick<Author, "id" | "name">;
+
+/** What a reply or an edit says, and who says it. */
+export interface Message {
+  readonly author: CommentAuthor;
+  readonly body: string;
 }
 
 export interface NewComment {
@@ -18,7 +22,6 @@ export interface NewComment {
   readonly extraNodeIds: ReadonlyArray<string>;
   readonly x: number;
   readonly y: number;
-  /** Who it's for. Any agent when left out. */
 }
 
 /** What an edit made: its change's `seq`, or `null` when nothing changed. */
@@ -80,11 +83,6 @@ export const ImportResult = Schema.Struct({
 });
 export type ImportResult = typeof ImportResult.Type;
 
-export class Health extends Schema.Class<Health>("Health")({
-  status: Schema.Literal("ok"),
-  version: Schema.String,
-}) {}
-
 export class ApiError extends Schema.TaggedError<ApiError>()("ApiError", {
   cause: Schema.Defect(),
 }) {}
@@ -106,7 +104,6 @@ export class Refused extends Schema.TaggedError<Refused>()("Refused", {
 export class Api extends Context.Service<
   Api,
   {
-    readonly health: Effect.Effect<Health, ApiError>;
     /** Designs whose name contains `query`, most recently edited first. */
     searchDesigns(query: string): Effect.Effect<ReadonlyArray<DesignSummary>, ApiError>;
     createDesign(name: string): Effect.Effect<DesignSummary, ApiError>;
@@ -119,7 +116,7 @@ export class Api extends Context.Service<
     replyToComment(
       designId: string,
       commentId: string,
-      reply: { readonly author: CommentAuthor; readonly body: string },
+      reply: Message,
     ): Effect.Effect<Comment, ApiError | Refused>;
     setCommentResolved(
       designId: string,
@@ -136,7 +133,7 @@ export class Api extends Context.Service<
     editLastMessage(
       designId: string,
       commentId: string,
-      edit: { readonly author: CommentAuthor; readonly body: string },
+      edit: Message,
     ): Effect.Effect<Comment, ApiError | Refused>;
     deleteComment(designId: string, commentId: string): Effect.Effect<void, ApiError>;
     /**
@@ -185,22 +182,16 @@ export class Api extends Context.Service<
       const client = (yield* HttpClient.HttpClient).pipe(
         HttpClient.mapRequest(
           flow(
-            HttpClientRequest.prependUrl(`${window.location.origin}/api`),
+            HttpClientRequest.prependUrl(`${window.location.origin}${API_PATH}`),
             HttpClientRequest.acceptJson,
           ),
         ),
         HttpClient.filterStatusOk,
       );
 
-      const toApiError = Effect.mapError((cause: unknown) => new ApiError({ cause }));
+      const design = (designId: string) => `/designs/${encodeURIComponent(designId)}`;
 
-      const health = client
-        .get("/health")
-        .pipe(
-          Effect.flatMap(HttpClientResponse.schemaBodyJson(Health)),
-          toApiError,
-          Effect.withSpan("Api.health"),
-        );
+      const toApiError = Effect.mapError((cause: unknown) => new ApiError({ cause }));
 
       const searchDesigns = (query: string) =>
         client
@@ -222,7 +213,7 @@ export class Api extends Context.Service<
 
       const getDesign = Effect.fn("Api.getDesign")(function* (id: string) {
         return yield* client
-          .get(`/designs/${encodeURIComponent(id)}`)
+          .get(design(id))
           .pipe(Effect.flatMap(HttpClientResponse.schemaBodyJson(Snapshot)), toApiError);
       });
 
@@ -255,7 +246,9 @@ export class Api extends Context.Service<
       const sendComment = (request: HttpClientRequest.HttpClientRequest, body: unknown) =>
         send(request, body, Comment);
 
-      const comments = (designId: string) => `/designs/${encodeURIComponent(designId)}/comments`;
+      const comments = (designId: string) => `${design(designId)}/comments`;
+      const comment = (designId: string, commentId: string) =>
+        `${comments(designId)}/${encodeURIComponent(commentId)}`;
 
       const createComment = Effect.fn("Api.createComment")(function* (
         designId: string,
@@ -267,9 +260,9 @@ export class Api extends Context.Service<
       const replyToComment = Effect.fn("Api.replyToComment")(function* (
         designId: string,
         commentId: string,
-        reply: { readonly author: CommentAuthor; readonly body: string },
+        reply: Message,
       ) {
-        const path = `${comments(designId)}/${encodeURIComponent(commentId)}/replies`;
+        const path = `${comment(designId, commentId)}/replies`;
         return yield* sendComment(HttpClientRequest.post(path), reply);
       });
 
@@ -278,7 +271,7 @@ export class Api extends Context.Service<
         commentId: string,
         resolved: boolean,
       ) {
-        const path = `${comments(designId)}/${encodeURIComponent(commentId)}`;
+        const path = comment(designId, commentId);
         return yield* sendComment(HttpClientRequest.patch(path), { resolved });
       });
 
@@ -287,16 +280,16 @@ export class Api extends Context.Service<
         commentId: string,
         audience: Audience,
       ) {
-        const path = `${comments(designId)}/${encodeURIComponent(commentId)}`;
+        const path = comment(designId, commentId);
         return yield* sendComment(HttpClientRequest.patch(path), { audience });
       });
 
       const editLastMessage = Effect.fn("Api.editLastMessage")(function* (
         designId: string,
         commentId: string,
-        edit: { readonly author: CommentAuthor; readonly body: string },
+        edit: Message,
       ) {
-        const path = `${comments(designId)}/${encodeURIComponent(commentId)}/messages/last`;
+        const path = `${comment(designId, commentId)}/messages/last`;
         return yield* sendComment(HttpClientRequest.patch(path), edit);
       });
 
@@ -304,11 +297,9 @@ export class Api extends Context.Service<
         designId: string,
         commentId: string,
       ) {
-        const path = `${comments(designId)}/${encodeURIComponent(commentId)}`;
+        const path = comment(designId, commentId);
         yield* client.del(path).pipe(toApiError);
       });
-
-      const design = (designId: string) => `/designs/${encodeURIComponent(designId)}`;
 
       const renameDesign = Effect.fn("Api.renameDesign")(function* (id: string, name: string) {
         const request = HttpClientRequest.patch(design(id)).pipe(
@@ -361,9 +352,7 @@ export class Api extends Context.Service<
         page?: string,
       ) {
         const params = { format: file.format, name: file.name, ...(page ? { page } : {}) };
-        const request = HttpClientRequest.post(
-          `/designs/${encodeURIComponent(designId)}/import`,
-        ).pipe(
+        const request = HttpClientRequest.post(`${design(designId)}/import`).pipe(
           HttpClientRequest.setUrlParams(params),
           HttpClientRequest.bodyUint8Array(file.bytes, "application/octet-stream"),
         );
@@ -372,7 +361,6 @@ export class Api extends Context.Service<
       });
 
       return Api.of({
-        health,
         searchDesigns,
         createDesign,
         getDesign,

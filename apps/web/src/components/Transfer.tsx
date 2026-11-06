@@ -14,7 +14,7 @@ import {
   repoHref,
   summarize,
 } from "@/lib/transfer";
-import { colors, radii, space } from "@/styles/tokens.stylex";
+import { colors, radii, shadows, space } from "@/styles/tokens.stylex";
 
 /** Where an import is: sending the file, done, or refused with the server's reason. */
 export type ImportState =
@@ -254,7 +254,7 @@ const styles = stylex.create({
     borderStyle: "solid",
     borderColor: colors.border,
     backgroundColor: colors.surface,
-    boxShadow: "0 4px 16px rgba(0, 0, 0, 0.08)",
+    boxShadow: shadows.raised,
   },
   result: { width: 360 },
   item: {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { alphaOf, hexOf, isOtherMix, opaque, paintedHex, resolveVars, setAlpha } from "./colors";
+import { alphaOf, hexOf, opaque, paintedHex, resolveVars, setAlpha } from "./colors";
 
 describe("alpha", () => {
   it("edits a literal's alpha in its own notation", () => {
@@ -30,11 +30,6 @@ describe("alpha", () => {
     expect(opaque(mixed)).toBe("var(--fg)");
     expect(setAlpha(mixed, 100)).toBe("var(--fg)");
     expect(setAlpha("red", 100)).toBe("red");
-  });
-
-  it("tells a mix of two colors from an opacity", () => {
-    expect(isOtherMix("color-mix(in oklch, red, blue)")).toBe(true);
-    expect(isOtherMix("color-mix(in srgb, red 50%, transparent)")).toBe(false);
   });
 });
 

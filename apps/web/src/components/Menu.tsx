@@ -4,7 +4,9 @@ import * as stylex from "@stylexjs/stylex";
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
-import { Icon, type IconName } from "./Icons";
+import type { IconName } from "@/lib/icons";
+import { Icon } from "./Icons";
+import { useDismiss } from "./useDismiss";
 
 export interface MenuItem {
   readonly key: string;
@@ -57,8 +59,6 @@ export function Menu({
   const [minWidth] = useState(() =>
     matchWidth ? Math.max(anchor.getBoundingClientRect().width, 120) : undefined,
   );
-  const close = useRef(onClose);
-  close.current = onClose;
   const choices = items.some((i) => i.checked !== undefined);
 
   // Measured once it's drawn, so it can open upward or slide back into the window.
@@ -87,34 +87,13 @@ export function Menu({
     const current = list.current?.querySelector<HTMLElement>("[aria-checked='true']");
     (current ?? buttons()[0] ?? list.current)?.focus();
   }, [placed]);
-  useEffect(() => {
-    const away = (e: PointerEvent) => {
-      const target = e.target as globalThis.Node | null;
-      if (!list.current?.contains(target) && !trigger?.contains(target)) close.current();
-    };
-    // Escape closes the menu and nothing else, so the selection stays.
-    const escape = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      e.stopPropagation();
-      trigger?.focus();
-      close.current();
-    };
-    const leave = (e: Event) => {
-      if (!list.current?.contains(e.target as globalThis.Node | null)) close.current();
-    };
-    window.addEventListener("pointerdown", away, true);
-    window.addEventListener("keydown", escape, true);
-    window.addEventListener("scroll", leave, true);
-    window.addEventListener("resize", leave);
-    return () => {
-      window.removeEventListener("pointerdown", away, true);
-      window.removeEventListener("keydown", escape, true);
-      window.removeEventListener("scroll", leave, true);
-      window.removeEventListener("resize", leave);
-    };
-    // The trigger and what's listed are fixed while it's open.
-    // biome-ignore lint/correctness/useExhaustiveDependencies: see above
-  }, []);
+  // Escape closes the menu and nothing else, so the selection stays.
+  useDismiss({
+    contains: (t) => Boolean(list.current?.contains(t) || trigger?.contains(t)),
+    onClose,
+    onEscape: () => trigger?.focus(),
+    closeOnScroll: true,
+  });
 
   const move = (e: React.KeyboardEvent) => {
     const all = buttons();
@@ -158,7 +137,7 @@ export function Menu({
       aria-label={title}
       tabIndex={-1}
       onKeyDown={(e) => {
-        if (e.key === "Tab") return close.current();
+        if (e.key === "Tab") return onClose();
         move(e);
       }}
       style={{
@@ -182,7 +161,7 @@ export function Menu({
             onPointerMove={(e) => e.currentTarget.focus({ preventScroll: true })}
             onClick={() => {
               trigger?.focus();
-              close.current();
+              onClose();
               item.run();
             }}
             {...stylex.props(styles.item, item.checked && styles.checked)}
@@ -333,7 +312,7 @@ const styles = stylex.create({
     width: 12,
     height: 12,
     borderRadius: radii.xs,
-    boxShadow: `inset 0 0 0 1px ${colors.borderStrong}`,
+    boxShadow: shadows.edge,
   },
   label: { flexGrow: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" },
   note: {

@@ -223,7 +223,7 @@ const styles = stylex.create({
   },
   area: {
     outline: `calc(1px * var(--inv-zoom, 1)) solid ${colors.ink}`,
-    backgroundColor: "rgba(26, 26, 24, 0.06)",
+    backgroundColor: `color-mix(in srgb, ${colors.ink} 6%, transparent)`,
   },
   vertical: {
     borderLeft: `calc(1px * var(--inv-zoom, 1)) solid ${colors.danger}`,

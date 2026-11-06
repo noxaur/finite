@@ -22,7 +22,6 @@ import { shifted, snapTargets } from "./snapping";
  * and the layout puts it where it lands.
  */
 export const moveElement: Gesture = {
-  name: "move element",
   begin(press, ctx) {
     if (!press.hit) return null;
     const id = lineage(ctx.replica, press.hit.nodeId).find((n) => ctx.selection.includes(n));

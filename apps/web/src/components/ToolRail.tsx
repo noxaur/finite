@@ -3,7 +3,16 @@
 import * as stylex from "@stylexjs/stylex";
 import type { Ref } from "react";
 import { PIN_PATH } from "@/lib/cursors";
-import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
+import {
+  colors,
+  fonts,
+  motion,
+  outlines,
+  radii,
+  shadows,
+  size,
+  space,
+} from "@/styles/tokens.stylex";
 import type { Mode } from "./Comments";
 
 /**
@@ -160,8 +169,8 @@ const styles = stylex.create({
     font: "inherit",
     cursor: "var(--cursor-pointer, pointer)",
     transform: { default: "none", ":active": "scale(.97)" },
-    transition: "background-color 150ms ease, transform 120ms cubic-bezier(.23, 1, .32, 1)",
-    outline: { default: "none", ":focus-visible": `2px solid ${colors.brand}` },
+    transition: `background-color ${motion.fast} ease, transform 120ms ${motion.out}`,
+    outline: { default: "none", ":focus-visible": outlines.focus },
     outlineOffset: -3,
   },
   on: {

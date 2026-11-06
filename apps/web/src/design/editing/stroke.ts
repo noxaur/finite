@@ -47,14 +47,6 @@ export function centerOffset(width: string): string {
   return `calc(${width} / -2)`;
 }
 
-/**
- * Where the stroke is, from the border's style and the outline's style,
- * width and offset; `null` when there's none. A border wins over an outline.
- */
-export function strokePosition(read: (prop: string) => string | undefined): StrokePosition | null {
-  return hasBorder(read) ? "inside" : outlinePosition(read);
-}
-
 /** Whether any side of the border draws a line. */
 export const hasBorder = (read: (prop: string) => string | undefined) =>
   SIDES.some((side) => painted(sideStyle(read, side)));

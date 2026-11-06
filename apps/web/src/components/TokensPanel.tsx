@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import type { TokenTable } from "@/design/replica";
 import type { Node } from "@/design/schema";
 import { aliasOf, bezierOf, displayName, hexOf, isColor, resolveToken } from "@/lib/tokens";
-import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
+import { colors, fonts, motion, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import { Icon } from "./Icons";
 import { Dropdown } from "./Menu";
 
@@ -560,7 +560,7 @@ const styles = stylex.create({
   chevron: {
     display: "flex",
     color: colors.faint,
-    transition: "transform 200ms cubic-bezier(.23, 1, .32, 1)",
+    transition: `transform ${motion.base} ${motion.out}`,
   },
   chevronOpen: { transform: "rotate(90deg)" },
   modes: {
@@ -668,7 +668,7 @@ const styles = stylex.create({
     height: 12,
     flexShrink: 0,
     borderRadius: radii.xs,
-    boxShadow: `inset 0 0 0 1px ${colors.borderStrong}`,
+    boxShadow: shadows.edge,
   },
   noSwatch: { boxShadow: "none", backgroundColor: colors.sunk },
   pickable: { position: "relative", cursor: "var(--cursor-pointer, pointer)" },
@@ -733,7 +733,7 @@ const styles = stylex.create({
     height: 10,
     flexShrink: 0,
     borderRadius: radii.xs,
-    boxShadow: `inset 0 0 0 1px ${colors.borderStrong}`,
+    boxShadow: shadows.edge,
   },
   pillName: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   pillSelect: {

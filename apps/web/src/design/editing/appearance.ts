@@ -1,13 +1,17 @@
 import { sides } from "./inspect";
 import { parts } from "./lists";
+import { roundTo } from "./units";
 
 /** `opacity` as a percentage: `0.5` and `50%` are 50; `null` for a `calc()` or a token. */
 export function opacityPercent(raw: string): number | null {
   const m = raw.trim().match(/^(\d*\.?\d+)(%?)$/);
   if (!m) return null;
   const n = Number(m[1]);
-  return Math.round((m[2] ? n : n * 100) * 10) / 10;
+  return roundTo(m[2] ? n : n * 100, 1);
 }
+
+/** Inline properties the Appearance section reads and writes. */
+export const APPEARANCE_PROPS = ["opacity", "mix-blend-mode", "cursor"] as const;
 
 /** A percentage as `opacity` writes it, from 0 to 1. */
 export function opacityValue(percent: number): string {

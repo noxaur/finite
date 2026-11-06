@@ -89,7 +89,7 @@ Sibling order uses fractional indexes, so inserting or moving a node rewrites on
 | --------------------- | ------------------------------------------------------------------------------------------------------- |
 | `apps/web`            | Next.js + StyleX + Effect frontend, built as a static export into `out/`                                |
 | `apps/web/src/design` | The canvas client: schemas, `Replica` (document copy), `Renderer` (DOM), `Camera` (pan/zoom)            |
-| `apps/desktop`        | Electron main and preload processes, bundled with `vp pack`                                             |
+| `apps/desktop`        | Electron main process, bundled with `vp pack`                                                           |
 | `apps/figma-plugin`   | The Finite plugin for Figma, which trades `.figma.json` files with Finite's Import and Export           |
 | `crates/design`       | The document model with no I/O: nodes, ops and inverses, history, edit commands, HTML import/export     |
 | `crates/transfer`     | Import and export: the HTML, `.finite`, repo, Figma, JSX and app codecs (`docs/import-export.md`)       |
@@ -181,8 +181,6 @@ Without a Developer ID, the app isn't notarized, so Gatekeeper blocks the first 
 Keep the certificate. The original is in `~/.config/finite-signing/` on the machine that made it, with its password. If you lose it and sign with a new one, every Mac install stops updating, and people have to download the app again. The same goes for moving to an Apple Developer ID later.
 
 Two other details. On a Mac, an app run from the disk image or from Downloads is read-only, so it can't replace itself. At launch the app offers to move itself to Applications. And `apps/desktop/scripts/stage-server.mjs` builds `finite-server` for each architecture and copies it into `apps/desktop/server/<arch>/`. electron-builder copies it from there, with `apps/web/out` as `web/`, into the app's resources folder, where `main.ts` finds them.
-
-The preload script exposes `window.finite` (platform and versions) to the renderer. Its type lives in `apps/web/src/global.d.ts`. Update both files together.
 
 ## Gotchas
 

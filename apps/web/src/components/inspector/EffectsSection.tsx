@@ -18,8 +18,8 @@ import { opaque } from "@/design/editing/colors";
 import { bare, customOf, parseInput, type Reading, tokenOf } from "@/design/editing/inspect";
 import { type ListEntry, moveEntry, readList, splitList, writeList } from "@/design/editing/lists";
 import type { Node } from "@/design/schema";
-import { numberOf } from "../DraftField";
-import type { IconName } from "../Icons";
+import { numberOf, whenNumber } from "../DraftField";
+import type { IconName } from "@/lib/icons";
 import {
   AddMenu,
   Block,
@@ -38,6 +38,8 @@ import {
   TokenButton,
   TokenChip,
   Toggle,
+  EyeToggle,
+  MixedRow,
 } from "./controls";
 import { type Changes, rawOf, readOf, removal, resolve, type Scope, swatchOf } from "./scope";
 
@@ -123,20 +125,11 @@ export function EffectsSection({ scope }: { scope: Scope }) {
       {/* Each kind is its own list: rows reorder within it, not across. */}
       {lists.map((list) =>
         list.entries === null ? (
-          <Row
+          <MixedRow
             key={list.prop}
-            action={
-              <Toggle
-                icon="minus"
-                title="Remove these effects from every layer"
-                onClick={() => scope.commitEach(write(list, () => []))}
-              />
-            }
-          >
-            <RowBody title="The selected layers have different effects here">
-              <RowName>Mixed</RowName>
-            </RowBody>
-          </Row>
+            what="effects"
+            onRemove={() => scope.commitEach(write(list, () => []))}
+          />
         ) : (
           list.entries.length > 0 && (
             <DragList
@@ -222,9 +215,8 @@ function EffectRow({
     <Toggle icon="minus" title={`Remove ${name.toLowerCase()}`} onClick={() => commit(null)} />
   );
   const eye = (
-    <Toggle
-      icon={entry.hidden ? "eyeOff" : "eye"}
-      title={entry.hidden ? "Show" : "Hide"}
+    <EyeToggle
+      hidden={entry.hidden}
       onClick={() => commit([{ css: entry.css, hidden: !entry.hidden }])}
     />
   );
@@ -286,10 +278,9 @@ function EffectRow({
           label={`${name} amount`}
           title={name}
           text={String(filter.amount)}
-          toChanges={(typed) => {
-            const n = parseFloat(typed);
-            return Number.isFinite(n) ? to(filter.fn === "hue-rotate" ? n : Math.max(n, 0)) : null;
-          }}
+          toChanges={(typed) =>
+            whenNumber(typed, (n) => to(filter.fn === "hue-rotate" ? n : Math.max(n, 0)))
+          }
           lead={<LeadIcon name="letterSpacing" />}
           scrub={{
             start: filter.amount,

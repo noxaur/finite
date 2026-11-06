@@ -225,8 +225,8 @@ export class LayerModel {
       virtual,
       container: node.type === "element" && !virtual && !instance && !VOID_TAGS.has(node.tag ?? ""),
       kids: text === null ? all.map((n) => n.id) : [],
-      hidden: node.attrs.hidden !== undefined,
-      locked: node.attrs["data-locked"] !== undefined,
+      hidden: node.attrs[HIDDEN_ATTR] !== undefined,
+      locked: node.attrs[LOCKED_ATTR] !== undefined,
     };
     this.facts.set(id, facts);
     return facts;
@@ -390,11 +390,16 @@ export function draggedLayers(
   return [...shown, ...rest].filter((id) => !id.includes("/"));
 }
 
+/** The attributes that hide a layer and lock it, as the server and the exports spell them. */
+export const HIDDEN_ATTR = "hidden";
+export const LOCKED_ATTR = "data-locked";
+export type FlagAttr = typeof HIDDEN_ATTR | typeof LOCKED_ATTR;
+
 /** Hides or locks `ids`, or shows or unlocks them when every one already is. */
 export function toggleFlag(
   nodeOf: (id: string) => Node | undefined,
   ids: ReadonlyArray<string>,
-  attr: "hidden" | "data-locked",
+  attr: FlagAttr,
 ): UserEdit {
   const all = ids.every((id) => nodeOf(id)?.attrs[attr] !== undefined);
   return { kind: "setAttributes", ids: [...ids], attrs: { [attr]: all ? null : "" } };

@@ -7,11 +7,11 @@ import type { Audience, Comment } from "@/design/schema";
 import { audienceLabel, audienceOf, routeLabel, type KnownAgent } from "@/lib/audience";
 import { COMMENT_LIMIT, NAME_LIMIT, SELECTION_LIMIT } from "@/lib/limits";
 import { isLocalUser, useLocalName } from "@/lib/user";
-import { timeAgo } from "@/lib/time";
 import { Icon } from "./Icons";
 import { Dropdown } from "./Menu";
 import { PinFilters, PinIcon, type PinState } from "./PinIcon";
-import { colors, radii, space } from "@/styles/tokens.stylex";
+import { TimeAgo } from "./TimeAgo";
+import { colors, radii, shadows, space } from "@/styles/tokens.stylex";
 
 /** How far right of its pin a popover starts, in pixels. */
 const POPOVER_GAP = 36;
@@ -418,7 +418,7 @@ function Thread({
                 {isLocalUser(message.author) ? "You" : message.author.name}
               </span>{" "}
               <span {...stylex.props(styles.muted)}>
-                {timeAgo(message.at)}
+                <TimeAgo at={message.at} />
                 {message.editedAt !== undefined && " · edited"}
               </span>
               {i === last && editable && !editing && (
@@ -609,7 +609,7 @@ const styles = stylex.create({
     borderStyle: "solid",
     borderColor: colors.border,
     backgroundColor: colors.surface,
-    boxShadow: "0 8px 24px rgba(0, 0, 0, 0.12)",
+    boxShadow: shadows.raised,
     cursor: "var(--cursor-arrow, default)",
     userSelect: "text",
   },

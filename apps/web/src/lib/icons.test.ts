@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { ICON_NAMES, iconMarkup } from "./Icons";
+import { ICON_NAMES, iconMarkup } from "./icons";
 
 describe("iconMarkup", () => {
   it.each(ICON_NAMES)("%s carries the filter it references and follows the text color", (name) => {

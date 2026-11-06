@@ -10,10 +10,10 @@ import {
   moveAbsolute,
   moveArtboards,
 } from "./geometry";
-import type { Hit } from "../renderer";
+import type { Hit } from "../types";
 import type { EditContext, Pointer, Press, Run } from "./gesture";
 import { GESTURES } from "./gestures";
-import { toggleFlag } from "./layers";
+import { HIDDEN_ATTR, LOCKED_ATTR, toggleFlag } from "./layers";
 import { lineage, nodeOf } from "./tree";
 
 /** How far the pointer moves before a press becomes a drag, in page pixels. */
@@ -401,7 +401,7 @@ export class Editor {
     let nodeId = hit.nodeId;
     for (const id of lineage(this.session.replica, hit.nodeId)) {
       const node = nodeOf(this.session.replica, id);
-      if (node?.attrs["data-locked"] === undefined) continue;
+      if (node?.attrs[LOCKED_ATTR] === undefined) continue;
       if (node.parent === null) return null;
       nodeId = node.parent;
     }
@@ -609,7 +609,7 @@ export class Editor {
       case "KeyH":
       case "KeyL": {
         if (!some || !e.shiftKey) return null;
-        const attr = e.code === "KeyH" ? "hidden" : "data-locked";
+        const attr = e.code === "KeyH" ? HIDDEN_ATTR : LOCKED_ATTR;
         return () => void this.commit([toggleFlag((id) => nodeOf(replica, id), selection, attr)]);
       }
       // ⌥⌘K makes a component and ⌥⌘B detaches an instance, as in Figma.
@@ -796,8 +796,8 @@ const pointerOf = (e: PointerEvent): Pointer => ({
  * artboard's shadow root reaches the window retargeted to its host, so
  * this reads where the event really started.
  */
-function isTyping(e: KeyboardEvent) {
-  const target = e.composedPath()[0];
+export function isTyping(e: Event) {
+  const target = e.composedPath()[0] ?? e.target;
   return (
     target instanceof HTMLElement &&
     (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))

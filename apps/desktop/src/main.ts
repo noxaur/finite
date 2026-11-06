@@ -125,7 +125,6 @@ async function createWindow() {
     height: 760,
     show: false,
     webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,

@@ -1,5 +1,7 @@
+import { CELL_X, CELL_Y, cellOf } from "./cells";
 import { tokenOf } from "./inspect";
 import { commas, parts } from "./lists";
+import { parseAngle, roundTo } from "./units";
 
 /**
  * A layer's transform as the Transform section shows it. The browser
@@ -35,7 +37,16 @@ export type TransformStyles = Readonly<
   Partial<Record<"translate" | "rotate" | "scale" | "transform", string>>
 >;
 
-const round = (n: number) => Math.round(n * 1e4) / 1e4;
+/** Inline properties the Transform section reads and writes. */
+export const TRANSFORM_PROPS = [
+  "translate",
+  "rotate",
+  "scale",
+  "transform",
+  "transform-origin",
+] as const;
+
+const round = (n: number) => roundTo(n, 4);
 
 /** A length, a percentage or a length token, as written; `null` for a `calc()` or a keyword. */
 function length(v: string): string | null {
@@ -43,17 +54,6 @@ function length(v: string): string | null {
   const m = v.trim().match(/^(-?\d*\.?\d+)([a-z%]*)$/i);
   if (!m) return null;
   return Number(m[1]) === 0 ? "0" : `${m[1]}${m[2]}`;
-}
-
-/** An angle in degrees: `45deg`, `0.25turn`, `1rad`, `50grad` or `0`. */
-export function angle(v: string): number | null {
-  const m = v.trim().match(/^(-?\d*\.?\d+)(deg|turn|rad|grad)?$/i);
-  if (!m) return null;
-  const n = Number(m[1]);
-  const unit = m[2]?.toLowerCase();
-  if (unit === undefined) return n === 0 ? 0 : null;
-  const k = { deg: 1, turn: 360, rad: 180 / Math.PI, grad: 0.9 }[unit]!;
-  return round(n * k);
 }
 
 /** A scale factor: `1.2` or `120%`. */
@@ -85,8 +85,8 @@ export function parseScale(v: string | undefined): [number, number] | null {
 export function parseRotate(v: string | undefined): number | null {
   const all = parts(v ?? "none");
   if (all.length === 0 || (all.length === 1 && all[0] === "none")) return 0;
-  if (all.length === 2 && /^z$/i.test(all[0]!)) return angle(all[1]!);
-  return all.length === 1 ? angle(all[0]!) : null;
+  if (all.length === 2 && /^z$/i.test(all[0]!)) return parseAngle(all[1]!);
+  return all.length === 1 ? parseAngle(all[0]!) : null;
 }
 
 /** Where each function goes in translate, rotate, scale, skew order. */
@@ -159,7 +159,7 @@ export function parseTransform(
       }
       case "rotate":
       case "rotatez": {
-        const deg = b === undefined ? angle(a) : null;
+        const deg = b === undefined ? parseAngle(a) : null;
         if (deg === null) return null;
         out.rotate = deg;
         break;
@@ -176,8 +176,8 @@ export function parseTransform(
         break;
       }
       default: {
-        const x = angle(a);
-        const y = b === undefined ? 0 : angle(b);
+        const x = parseAngle(a);
+        const y = b === undefined ? 0 : parseAngle(b);
         if (x === null || y === null) return null;
         if (name === "skewy") out.skewY = x;
         else Object.assign(out, name === "skewx" ? { skewX: x } : { skewX: x, skewY: y });
@@ -320,39 +320,17 @@ export function withRotation(
   return transformStyles(styles, { ...value, rotate: degrees }, sheet);
 }
 
-const X = ["left", "center", "right"] as const;
-const Y = ["top", "center", "bottom"] as const;
-
-/** Where one `transform-origin` part sits along its axis, and which axis it must be: `left` is x. */
-function originPart(p: string): { at: number; axis: "x" | "y" | null } | null {
-  const i = { "0%": 0, "50%": 1, "100%": 2, center: 1 }[p];
-  if (i !== undefined) return { at: i, axis: null };
-  if ((X as readonly string[]).includes(p))
-    return { at: X.indexOf(p as (typeof X)[number]), axis: "x" };
-  if ((Y as readonly string[]).includes(p))
-    return { at: Y.indexOf(p as (typeof Y)[number]), axis: "y" };
-  return null;
-}
-
 /** Which cell of a 3×3 grid `transform-origin` names, or `null` when it's off the grid. */
 export function originCell(v: string | undefined): { x: number; y: number } | null {
   const all = parts(v ?? "");
   // A third part is the depth, which the grid leaves at 0.
   if (all.length === 3 && /^0(px)?$/.test(all[2]!)) all.pop();
-  if (all.length === 0) return { x: 1, y: 1 };
-  if (all.length > 2) return null;
-  const [a, b] = all.map(originPart);
-  if (!a || b === null) return null;
-  if (b === undefined) return a.axis === "y" ? { x: 1, y: a.at } : { x: a.at, y: 1 };
-  // Keywords may come either way round, `top left`; numbers are x then y.
-  const [x, y] = a.axis === "y" || b.axis === "x" ? [b, a] : [a, b];
-  if (x.axis === "y" || y.axis === "x") return null;
-  return { x: x.at, y: y.at };
+  return all.length === 0 ? { x: 1, y: 1 } : cellOf(all.join(" "));
 }
 
 /** `transform-origin` for cell (`x`, `y`): `left top`, `center`, `right bottom`. */
 export function originValue(x: number, y: number): string {
-  return x === 1 && y === 1 ? "center" : `${X[x]} ${Y[y]}`;
+  return x === 1 && y === 1 ? "center" : `${CELL_X[x]} ${CELL_Y[y]}`;
 }
 
 /**

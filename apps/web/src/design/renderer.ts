@@ -1,11 +1,12 @@
 import * as stylex from "@stylexjs/stylex";
-import { iconMarkup } from "@/components/Icons";
+import { iconMarkup } from "@/lib/icons";
 import { colors } from "@/styles/tokens.stylex";
 import { Culler, pageBox } from "./culling";
 import { artboardDocument, artboardLinkTarget, BASE_LAYER, pixelSize } from "./html";
 import { type Outset, strokeOutset } from "./outset";
 import type { Applied, Replica } from "./replica";
 import type { Node } from "./schema";
+import type { Bounds, Hit, Measured } from "./types";
 import { designModel } from "./wasm";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -142,13 +143,11 @@ interface Frame {
 /** How long a sandboxed node's reported position is trusted before it's asked again. */
 const RECT_TTL_MS = 250;
 
-export interface Bounds {
-  readonly x: number;
-  readonly y: number;
-  readonly width: number;
-  readonly height: number;
-  /** How far the node's strokes reach past the box, from a sandboxed artboard. */
-  readonly outset?: Outset;
+/** The nodes of an expanded instance: its children by parent id, and the virtual ids drawn so far. */
+interface Inside {
+  readonly root: string;
+  readonly children: ReadonlyMap<string, readonly Node[]>;
+  readonly drawn: string[];
 }
 
 /** A wheel event forwarded out of a sandboxed artboard, in page coordinates. */
@@ -161,41 +160,6 @@ export interface ForwardedWheel {
   readonly shiftKey: boolean;
   readonly clientX: number;
   readonly clientY: number;
-}
-
-/** The artboard, and the deepest element in it, under a point. */
-/**
- * What the live DOM says about one drawn element, which a person's edit
- * needs to turn a drag into CSS: the document only holds inline styles,
- * and the cascade (`<style>` blocks, classes, the shared CSS) decides the rest.
- */
-export interface Measured {
-  /** The border box, in page pixels. */
-  readonly rect: DOMRect;
-  /** Page pixels per CSS pixel of the artboard: the camera's zoom. */
-  readonly scale: number;
-  readonly position: string;
-  readonly display: string;
-  readonly flexDirection: string;
-  readonly flexWrap: string;
-  readonly flexGrow: number;
-  /**
-   * With `box-sizing: content-box`, the padding and borders across and
-   * down, in CSS pixels, which `width` and `height` leave out. 0 for `border-box`.
-   */
-  readonly frameX: number;
-  readonly frameY: number;
-  /** Resolved insets in CSS pixels, `NaN` for `auto`. */
-  readonly left: number;
-  readonly top: number;
-  readonly right: number;
-  readonly bottom: number;
-}
-
-export interface Hit {
-  readonly artboardId: string;
-  /** For a sandboxed artboard, the artboard itself until its iframe answers. */
-  readonly nodeId: string;
 }
 
 export interface RendererOptions {
@@ -1212,15 +1176,23 @@ export class Renderer {
     return null;
   }
 
-  /** Creates the DOM for `node` and its descendants. Appends to `container` when given. */
-  private build(node: Node, container: ParentNode | null, inSvg: boolean): Element | Text {
-    if (node.instanceOf !== undefined) return this.buildInstance(node, container, inSvg);
+  /**
+   * Creates the DOM for `node` and its descendants. Appends to `container` when given.
+   * `inside` is set while drawing an expanded instance, whose nodes come from it, not the replica.
+   */
+  private build(
+    node: Node,
+    container: ParentNode | null,
+    inSvg: boolean,
+    inside?: Inside,
+  ): Element | Text {
+    if (node.instanceOf !== undefined && !inside) return this.buildInstance(node, container, inSvg);
     const el = this.create(node, inSvg);
+    if (inside && node.id !== inside.root) inside.drawn.push(node.id);
     if (el instanceof Element) {
       const childSvg = (inSvg || node.tag === "svg") && node.tag !== "foreignObject";
-      for (const child of this.replica.children(node.id)) {
-        el.appendChild(this.build(child, null, childSvg));
-      }
+      const kids = inside ? (inside.children.get(node.id) ?? []) : this.replica.children(node.id);
+      for (const child of kids) el.appendChild(this.build(child, null, childSvg, inside));
     }
     container?.appendChild(el);
     return el;
@@ -1232,27 +1204,17 @@ export class Renderer {
    * hit tests and comments can point at them.
    */
   private buildInstance(node: Node, container: ParentNode | null, inSvg: boolean): Element | Text {
-    const [root, ...inside] = this.replica.expand(node.id);
+    const [root, ...rest] = this.replica.expand(node.id);
     const children = new Map<string, Node[]>();
-    for (const n of inside) {
+    for (const n of rest) {
       if (n.parent === null) continue;
       let list = children.get(n.parent);
       if (!list) children.set(n.parent, (list = []));
       list.push(n);
     }
-    const drawn: string[] = [];
-    const draw = (n: Node, svg: boolean): Element | Text => {
-      const el = this.create(n, svg);
-      if (n.id !== node.id) drawn.push(n.id);
-      if (el instanceof Element) {
-        const childSvg = (svg || n.tag === "svg") && n.tag !== "foreignObject";
-        for (const child of children.get(n.id) ?? []) el.appendChild(draw(child, childSvg));
-      }
-      return el;
-    };
-    const el = draw(root ?? node, inSvg);
-    this.virtuals.set(node.id, drawn);
-    container?.appendChild(el);
+    const inside: Inside = { root: node.id, children, drawn: [] };
+    const el = this.build(root ?? node, container, inSvg, inside);
+    this.virtuals.set(node.id, inside.drawn);
     return el;
   }
 
@@ -1627,9 +1589,7 @@ export class Renderer {
       // Sent on every press and key, so skip it while it's already the latest.
       if (this.takesInput(boardId) && [...this.used.keys()].at(-1) !== boardId) this.use(boardId);
     } else if (m.type === "wheel" && this.options.onWheel) {
-      // The iframe's content is unscaled; the canvas zoom scales its box.
-      const rect = iframe.getBoundingClientRect();
-      const scale = iframe.offsetWidth > 0 ? rect.width / iframe.offsetWidth : 1;
+      const { left, top, scale } = iframeBox(iframe);
       this.options.onWheel({
         deltaX: num("deltaX"),
         deltaY: num("deltaY"),
@@ -1637,8 +1597,8 @@ export class Renderer {
         ctrlKey: m.ctrlKey === true,
         metaKey: m.metaKey === true,
         shiftKey: m.shiftKey === true,
-        clientX: rect.left + num("clientX") * scale,
-        clientY: rect.top + num("clientY") * scale,
+        clientX: left + num("clientX") * scale,
+        clientY: top + num("clientY") * scale,
       });
     }
   }
@@ -1689,7 +1649,6 @@ function forgetLayout(frame: Frame) {
   frame.pendingRects.clear();
 }
 
-/** Where an iframe's content sits on the page, and how much the canvas zoom scales it. */
 /** `rect` grown by `outset`, which is in pixels `scale` times smaller than the page's. */
 function grow(rect: DOMRect, outset: Outset, scale: number) {
   return new DOMRect(
@@ -1700,6 +1659,7 @@ function grow(rect: DOMRect, outset: Outset, scale: number) {
   );
 }
 
+/** Where an iframe's content sits on the page, and how much the canvas zoom scales its unscaled content. */
 function iframeBox(iframe: HTMLIFrameElement) {
   const rect = iframe.getBoundingClientRect();
   const scale = iframe.offsetWidth > 0 ? rect.width / iframe.offsetWidth : 1;

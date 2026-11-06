@@ -1,22 +1,23 @@
 "use client";
 
 import { useEffect } from "react";
+import { colors } from "@/styles/tokens.stylex";
 import { PIN_PATH } from "../lib/cursors";
 
 /** `note` is an open comment for people only, which no agent acts on. */
 export type PinState = "waiting" | "working" | "replied" | "resolved" | "note" | "draft";
 
-const INK = "#1a1a18";
+// A pin sits on the artboard, whichever theme the app is in, so these two stay the same in both.
 const BLUE = "#2563eb";
 const GREEN = "#15803d";
 
 const LOOK: Record<PinState, { fill: string; stroke: string; dots: boolean }> = {
-  waiting: { fill: INK, stroke: INK, dots: true },
-  working: { fill: INK, stroke: INK, dots: true },
+  waiting: { fill: colors.ink, stroke: colors.ink, dots: true },
+  working: { fill: colors.ink, stroke: colors.ink, dots: true },
   replied: { fill: BLUE, stroke: BLUE, dots: true },
   resolved: { fill: GREEN, stroke: GREEN, dots: false },
-  note: { fill: "#fafbfd", stroke: INK, dots: false },
-  draft: { fill: "#fff", stroke: INK, dots: false },
+  note: { fill: colors.halo, stroke: colors.ink, dots: false },
+  draft: { fill: colors.halo, stroke: colors.ink, dots: false },
 };
 
 const DOTS = [
@@ -75,12 +76,16 @@ export function PinIcon({ state, selected }: { state: PinState; selected?: boole
       style={{ display: "block", overflow: "visible" }}
       aria-hidden="true"
     >
-      <use href="#pin-body" fill="none" filter={filter} stroke="#fff" strokeWidth="6" />
       <use
         href="#pin-body"
-        fill={look.fill}
         filter={filter}
-        stroke={look.stroke}
+        strokeWidth="6"
+        style={{ fill: "none", stroke: colors.halo }}
+      />
+      <use
+        href="#pin-body"
+        filter={filter}
+        style={{ fill: look.fill, stroke: look.stroke }}
         strokeLinejoin="round"
         strokeWidth={selected ? 3 : 2.5}
         strokeDasharray={state === "draft" ? "4 3" : undefined}
@@ -88,15 +93,14 @@ export function PinIcon({ state, selected }: { state: PinState; selected?: boole
       {selected && (
         <use
           href="#pin-body"
-          fill="none"
           filter="url(#pin-wob2)"
-          stroke={look.stroke}
+          style={{ fill: "none", stroke: look.stroke }}
           strokeWidth="2"
           transform="translate(2.5 -2)"
         />
       )}
       {look.dots && (
-        <g fill="#fff">
+        <g style={{ fill: colors.halo }}>
           {DOTS.map(([cx, cy], i) => (
             <circle
               key={i}
