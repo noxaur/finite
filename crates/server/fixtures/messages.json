@@ -147,7 +147,22 @@
       "type": "change"
     },
     {
-      "listening": [],
+      "listening": [
+        {
+          "actor": "agent:Claude",
+          "name": "Claude"
+        }
+      ],
+      "presence": [],
+      "type": "presence"
+    },
+    {
+      "listening": [
+        {
+          "actor": "agent:Claude",
+          "name": "Claude"
+        }
+      ],
       "presence": [
         {
           "actor": "agent:Claude",
@@ -873,7 +888,12 @@
           "y": 5.0
         }
       ],
-      "listening": [],
+      "listening": [
+        {
+          "actor": "agent:Claude",
+          "name": "Claude"
+        }
+      ],
       "meta": {
         "createdAt": 0,
         "id": "design1",
@@ -895,7 +915,12 @@
     },
     {
       "epoch": "epoch1",
-      "listening": [],
+      "listening": [
+        {
+          "actor": "agent:Claude",
+          "name": "Claude"
+        }
+      ],
       "presence": [
         {
           "actor": "agent:Claude",
