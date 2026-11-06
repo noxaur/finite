@@ -210,16 +210,31 @@ fn selector_list(list: &str, class: &str, out: &mut Rewritten) -> String {
         .join(",")
 }
 
+/// `s` without its comments. A `/*` inside a string or after a backslash
+/// isn't one.
 pub(crate) fn strip_comments(s: &str) -> String {
+    let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(start) = rest.find("/*") {
-        out.push_str(&rest[..start]);
-        rest = rest[start + 2..]
-            .find("*/")
-            .map_or("", |end| &rest[start + 2 + end + 2..]);
+    let (mut copied, mut i) = (0, 0);
+    while i < bytes.len() {
+        match bytes[i] {
+            quote @ (b'"' | b'\'') => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b'\\' => i += 2,
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                out.push_str(&s[copied..i]);
+                i = s[i + 2..].find("*/").map_or(s.len(), |end| i + 2 + end + 2);
+                copied = i;
+            }
+            _ => i += 1,
+        }
     }
-    out.push_str(rest);
+    out.push_str(&s[copied.min(s.len())..]);
     out
 }
 
@@ -292,11 +307,69 @@ fn complex(selector: &str, class: &str, out: &mut Rewritten) -> Option<(String, 
 /// with `class`, if it starts with one of them: `html.dark body > main` is
 /// `:where(.screen).dark > main`. `None` if it doesn't, or names them in a
 /// way that doesn't map onto one element, like `html + p`.
+///
+/// A selector that starts with `:is()` or `:where()` can name the page in one
+/// of its alternatives, and then matches the element itself or what is inside
+/// it: `:is(body, .x) .title` is `:is(:where(.screen), :where(.screen) .x)
+/// .title`. Page names anywhere else in a pseudo-class, like `:not(body)` or
+/// `.a:is(body, .b)`, map when the selector starts with the page and
+/// otherwise stay as they were, which is how a page name that can't be
+/// inside the element already behaves.
 pub(crate) fn map_selector(selector: &str, class: &str) -> Option<String> {
     match complex(selector, class, &mut Rewritten::default()) {
         Some((mapped, true)) => Some(mapped),
-        _ => None,
+        Some((_, false)) => anchored_alternatives(selector, class),
+        None => None,
     }
+}
+
+/// `selector` when its first compound is `:is(…)` or `:where(…)` and one
+/// of the alternatives names the page: each alternative is written for the
+/// element, or limited to inside it, so the compound still matches only the
+/// element and what is in it.
+fn anchored_alternatives(selector: &str, class: &str) -> Option<String> {
+    let (mut open, mut close, mut end) = (None, None, selector.len());
+    scan(selector, |at, byte, depth| {
+        match byte {
+            b'(' if depth == 0 && open.is_none() => open = Some(at),
+            b')' if depth == 0 && close.is_none() && open.is_some() => close = Some(at),
+            b if depth == 0 && (b.is_ascii_whitespace() || matches!(b, b'>' | b'+' | b'~')) => {
+                end = at;
+                return false;
+            }
+            _ => {}
+        }
+        true
+    });
+    let (open, close) = (open?, close.filter(|&close| close < end)?);
+    let name = selector.strip_prefix(':')?.get(..open - 1)?;
+    if !["is", "where", "matches"]
+        .iter()
+        .any(|pseudo| name.eq_ignore_ascii_case(pseudo))
+    {
+        return None;
+    }
+    let mut names_page = false;
+    let alternatives: Vec<String> = split_top(&selector[open + 1..close], |b| b == b',')
+        .into_iter()
+        .map(|alternative| {
+            let lead = alternative.len() - alternative.trim_start().len();
+            let trail = alternative.trim_end().len();
+            let core = &alternative[lead..trail];
+            let mapped = map_selector(core, class);
+            names_page |= mapped.is_some();
+            let mapped = mapped.unwrap_or_else(|| format!(":where(.{class}) {core}"));
+            format!("{}{mapped}{}", &alternative[..lead], &alternative[trail..])
+        })
+        .collect();
+    names_page.then(|| {
+        format!(
+            "{}{}{}",
+            &selector[..=open],
+            alternatives.join(","),
+            &selector[close..]
+        )
+    })
 }
 
 fn join(parts: &[(String, Compound)]) -> String {
@@ -479,6 +552,15 @@ mod tests {
             css(".a { content: 'body' } body {}"),
             ".a { content: 'body' } :where(.finite-root) {}"
         );
+    }
+
+    #[test]
+    fn comment_marks_in_strings_stay() {
+        assert_eq!(
+            css("[data-x=\"/*\"] body, /* body */ [a='\\'/*'] {}"),
+            ":where(.finite-root)[data-x=\"/*\"],  [a='\\'/*'] {}"
+        );
+        assert_eq!(css(":root{--a:\"/*\"}"), ".finite-root{--a:\"/*\"}");
     }
 
     #[test]

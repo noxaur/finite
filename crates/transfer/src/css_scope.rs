@@ -14,6 +14,12 @@ use crate::html::page_css::{
 /// the like are limited too. `@keyframes`, `@font-face` and the rest stay as
 /// they are, and so does a style rule's block, with any rules nested in it,
 /// since nested selectors are relative to the rule already.
+///
+/// A selector that starts with `:is()` or `:where()` and names the page in
+/// one alternative matches the element and what is inside it, see
+/// [`map_selector`]. A page name anywhere else inside a pseudo-class, like
+/// `.a:is(body, .b)`, is left as it was, and so doesn't match, since the page
+/// is never inside the element.
 pub(crate) fn scope(css: &str, class: &str) -> String {
     let mut out = String::with_capacity(css.len() + 32);
     rules(css, class, &mut out);
@@ -147,6 +153,56 @@ mod tests {
         assert_eq!(
             css(".a::after{content:\"} { .b\"}.c{d:e}"),
             ":where(.s) .a::after{content:\"} { .b\"}:where(.s) .c{d:e}"
+        );
+    }
+
+    #[test]
+    fn comment_marks_in_strings_are_not_comments() {
+        assert_eq!(
+            css("[data-x=\"/*\"] { color:red }"),
+            ":where(.s) [data-x=\"/*\"] { color:red }"
+        );
+        assert_eq!(
+            css("[data-x='/*'], .b { c:d } /* \"x */ .e { f:g }"),
+            ":where(.s) [data-x='/*'], :where(.s) .b { c:d }  :where(.s) .e { f:g }"
+        );
+        // An escaped quote doesn't end the string, and an escaped slash doesn't start a comment.
+        assert_eq!(
+            css("[a=\"\\\"/*\"] .b { c:d } .c\\/* .d { e:f }"),
+            ":where(.s) [a=\"\\\"/*\"] .b { c:d } :where(.s) .c\\/* .d { e:f }"
+        );
+        assert_eq!(
+            css("@media (x) { [data-x=\"/*\"] { c:d } }"),
+            "@media (x) { :where(.s) [data-x=\"/*\"] { c:d } }"
+        );
+    }
+
+    #[test]
+    fn pages_named_inside_pseudo_classes_are_the_element() {
+        // The page alternative is the element, and the others are inside it.
+        assert_eq!(
+            css(":is(body, .x) .title{a:b}"),
+            ":is(:where(.s), :where(.s) .x) .title{a:b}"
+        );
+        assert_eq!(
+            css(":where( html , .x ) > .t{a:b}"),
+            ":where( :where(.s) , :where(.s) .x ) > .t{a:b}"
+        );
+        assert_eq!(
+            css(":is(:root, body .a, .b):hover{a:b}"),
+            ":is(.s, :where(.s) .a, :where(.s) .b):hover{a:b}"
+        );
+        assert_eq!(
+            css(":is(:is(body), .x) .t{a:b}"),
+            ":is(:is(:where(.s)), :where(.s) .x) .t{a:b}"
+        );
+        // Without a page, it is limited as any selector is.
+        assert_eq!(css(":is(.a, .b) .t{c:d}"), ":where(.s) :is(.a, .b) .t{c:d}");
+        // Elsewhere a page can't be inside the element, and the selector stays.
+        assert_eq!(css(".t:not(body){a:b}"), ":where(.s) .t:not(body){a:b}");
+        assert_eq!(
+            css(".a :is(body, .x){a:b}"),
+            ":where(.s) .a :is(body, .x){a:b}"
         );
     }
 
