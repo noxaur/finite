@@ -60,14 +60,17 @@ pub enum RouterKind {
     /// React Router 7 in its declarative mode.
     #[default]
     ReactRouter,
+    /// TanStack Router, with its route tree written in code.
+    TanStackRouter,
 }
 
 impl RouterKind {
-    pub const ALL: [RouterKind; 1] = [RouterKind::ReactRouter];
+    pub const ALL: [RouterKind; 2] = [RouterKind::ReactRouter, RouterKind::TanStackRouter];
 
     pub fn router(self) -> &'static dyn Router {
         match self {
             RouterKind::ReactRouter => &ReactRouter,
+            RouterKind::TanStackRouter => &TanStackRouter,
         }
     }
 
@@ -120,6 +123,59 @@ impl Router for ReactRouter {
             File {
                 path: "src/link.ts".into(),
                 text: "export { Link } from \"react-router\";\n".into(),
+            },
+            File {
+                path: "src/router.tsx".into(),
+                text: router,
+            },
+        ]
+    }
+}
+
+struct TanStackRouter;
+
+impl Router for TanStackRouter {
+    fn name(&self) -> &'static str {
+        "tanstack-router"
+    }
+
+    fn packages(&self) -> &'static [Package] {
+        &[Package {
+            name: "@tanstack/react-router",
+            version: "1.170.46",
+        }]
+    }
+
+    fn link_prop(&self) -> &'static str {
+        "to"
+    }
+
+    fn files(&self, pages: &[Page]) -> Vec<File> {
+        let mut router = String::from(
+            "import { RouterProvider, createRootRoute, createRoute, createRouter } from \"@tanstack/react-router\";\n",
+        );
+        for page in pages {
+            router.push_str(&format!(
+                "import {} from \"{}\";\n",
+                page.component, page.module
+            ));
+        }
+        router.push_str("\nconst rootRoute = createRootRoute();\n");
+        for (i, page) in pages.iter().enumerate() {
+            router.push_str(&format!(
+                "const route{i} = createRoute({{ getParentRoute: () => rootRoute, path: \"{}\", component: {} }});\n",
+                page.path, page.component
+            ));
+        }
+        let routes: Vec<String> = (0..pages.len()).map(|i| format!("route{i}")).collect();
+        router.push_str(&format!(
+            "\nconst router = createRouter({{\n  routeTree: rootRoute.addChildren([{}]),\n  scrollRestoration: true,\n}});\n\ndeclare module \"@tanstack/react-router\" {{\n  interface Register {{\n    router: typeof router;\n  }}\n}}\n\nexport function App() {{\n  return <RouterProvider router={{router}} />;\n}}\n",
+            routes.join(", ")
+        ));
+        vec![
+            File {
+                path: "src/link.ts".into(),
+                text: "export { Link } from \"@tanstack/react-router\";\n".into(),
             },
             File {
                 path: "src/router.tsx".into(),

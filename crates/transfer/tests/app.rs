@@ -1,8 +1,10 @@
 //! The app export: a Vite + React project from a prototype's flow.
 //!
 //! `a_small_flow_exports_the_same_project` compares the project with
-//! `fixtures/app/shop.txt`; regenerate it with `FINITE_UPDATE_FIXTURES=1`.
-//! `the_project_builds` unpacks the archive and runs `vite build` on it.
+//! `fixtures/app/shop.txt`, and the TanStack one with
+//! `shop-tanstack-router.txt`; regenerate them with `FINITE_UPDATE_FIXTURES=1`.
+//! `the_project_builds` unpacks the archive of each router and runs
+//! `vite build` on it.
 
 use std::{
     collections::BTreeMap,
@@ -155,11 +157,8 @@ fn shop() -> Design {
     d
 }
 
-#[test]
-fn a_small_flow_exports_the_same_project() {
-    let exported = export(&shop(), react_router()).unwrap();
-    assert_eq!(exported.file_name, "shop-app.tar");
-    assert_eq!(exported.media_type, "application/x-tar");
+/// The project as text, to compare with a fixture: each file, then the diagnostics.
+fn golden(exported: &Exported) -> String {
     let mut golden = String::new();
     for entry in tar::read(&exported.bytes).unwrap() {
         match std::str::from_utf8(&entry.bytes) {
@@ -175,17 +174,38 @@ fn a_small_flow_exports_the_same_project() {
     for d in &exported.diagnostics {
         golden.push_str(&format!("{:?}: {} ({})\n", d.feature, d.what, d.reason));
     }
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/app/shop.txt");
+    golden
+}
+
+/// Compares `golden` with `fixtures/app/<fixture>`, or rewrites it.
+fn check_fixture(fixture: &str, golden: &str) {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/app")
+        .join(fixture);
     if std::env::var_os("FINITE_UPDATE_FIXTURES").is_some() {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, &golden).unwrap();
+        fs::write(&path, golden).unwrap();
         return;
     }
     let saved = fs::read_to_string(&path).unwrap_or_default();
     assert_eq!(
         saved, golden,
-        "fixtures/app/shop.txt is stale: run with FINITE_UPDATE_FIXTURES=1"
+        "fixtures/app/{fixture} is stale: run with FINITE_UPDATE_FIXTURES=1"
     );
+}
+
+#[test]
+fn a_small_flow_exports_the_same_project() {
+    let exported = export(&shop(), react_router()).unwrap();
+    assert_eq!(exported.file_name, "shop-app.tar");
+    assert_eq!(exported.media_type, "application/x-tar");
+    check_fixture("shop.txt", &golden(&exported));
+}
+
+#[test]
+fn a_small_flow_exports_the_same_tanstack_project() {
+    let exported = export(&shop(), RouterKind::TanStackRouter.router()).unwrap();
+    check_fixture("shop-tanstack-router.txt", &golden(&exported));
 }
 
 #[test]
@@ -623,6 +643,36 @@ fn another_router_changes_only_its_files_and_the_link_prop() {
 }
 
 #[test]
+fn tanstack_router_writes_a_route_tree_and_registers_it() {
+    let router = RouterKind::TanStackRouter.router();
+    assert_eq!(
+        RouterKind::named("tanstack-router"),
+        Some(RouterKind::TanStackRouter)
+    );
+    assert_eq!(RouterKind::default(), RouterKind::ReactRouter);
+    let files = files(&export(&shop(), router).unwrap());
+    let tree = &files["src/router.tsx"];
+    for path in ["/", "/cart"] {
+        assert_eq!(
+            tree.matches(&format!("path: \"{path}\"")).count(),
+            1,
+            "{tree}"
+        );
+    }
+    assert!(
+        tree.contains("rootRoute.addChildren([route0, route1])"),
+        "{tree}"
+    );
+    assert!(tree.contains("interface Register"), "{tree}");
+    assert_eq!(
+        files["src/link.ts"],
+        "export { Link } from \"@tanstack/react-router\";\n"
+    );
+    assert!(files["package.json"].contains("\"@tanstack/react-router\": \"1.170.46\""));
+    assert!(!files["package.json"].contains("react-router\": \"7"));
+}
+
+#[test]
 fn the_codec_is_an_export_only_format() {
     let exported = app::App.write(&revision(&shop()), &Scope::Design).unwrap();
     assert_eq!(exported.file_name, "shop-app.tar");
@@ -657,13 +707,17 @@ fn the_project_builds() {
         ("awkward", awkward()),
         ("styles", cart_with_styles()),
     ] {
-        builds(work, name, &design);
+        for kind in RouterKind::ALL {
+            builds(work, name, &design, kind.router());
+        }
     }
 }
 
-/// Unpacks `design`'s export in a project of its own and runs `npm run build`.
-fn builds(work: &Path, name: &str, design: &Design) {
-    let exported = export(design, react_router()).unwrap();
+/// Unpacks `design`'s export for `router` in a project of its own and runs
+/// `npm run build`.
+fn builds(work: &Path, design_name: &str, design: &Design, router: &dyn Router) {
+    let name = format!("{design_name}-{}", router.name());
+    let exported = export(design, router).unwrap();
     let project = work.join(format!("app-project-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&project);
     for entry in tar::read(&exported.bytes).unwrap() {
@@ -685,12 +739,15 @@ fn builds(work: &Path, name: &str, design: &Design) {
         String::from_utf8_lossy(&build.stdout),
         String::from_utf8_lossy(&build.stderr)
     );
-    assert!(build.status.success(), "npm run build failed:\n{log}");
-    eprintln!("{log}");
-    assert!(project.join("dist/index.html").exists(), "{log}");
-    if name == "shop" {
+    assert!(
+        build.status.success(),
+        "{name}: npm run build failed:\n{log}"
+    );
+    eprintln!("{name}:\n{log}");
+    assert!(project.join("dist/index.html").exists(), "{name}: {log}");
+    if design_name == "shop" {
         let png = format!("dist/assets/{}.png", BlobHash::of(PNG));
-        assert!(project.join(png).exists(), "{log}");
+        assert!(project.join(png).exists(), "{name}: {log}");
     }
     let _ = fs::remove_dir_all(&project);
 }
