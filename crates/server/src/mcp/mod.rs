@@ -2090,13 +2090,20 @@ impl FiniteMcp {
     ) -> ToolResult {
         let handle = design!(self, &p.design_id);
         let actor = self.actor(&ctx);
-        let undone: Vec<String> = (0..p.steps.unwrap_or(1).max(1))
-            .map_while(|_| handle.undo(&actor, None).map(|c| c.label))
+        let undone: Vec<Change> = (0..p.steps.unwrap_or(1).max(1))
+            .map_while(|_| handle.undo(&actor, None))
             .collect();
         if undone.is_empty() {
             return ok("Nothing to undo.");
         }
-        ok(format!("Undid: {}", undone.join(", ")))
+        let labels: Vec<&str> = undone.iter().map(|c| c.label.as_str()).collect();
+        let mut text = format!("Undid: {}", labels.join(", "));
+        // Undoing an artboard's creation can break the links to it.
+        if let Some(note) = undone.iter().find_map(|c| flow_note(&handle, c)) {
+            text.push('\n');
+            text.push_str(&note);
+        }
+        ok(text)
     }
 
     #[tool(description = "Redo changes you undid on a design.")]
@@ -2107,13 +2114,20 @@ impl FiniteMcp {
     ) -> ToolResult {
         let handle = design!(self, &p.design_id);
         let actor = self.actor(&ctx);
-        let redone: Vec<String> = (0..p.steps.unwrap_or(1).max(1))
-            .map_while(|_| handle.redo(&actor, None).map(|c| c.label))
+        let redone: Vec<Change> = (0..p.steps.unwrap_or(1).max(1))
+            .map_while(|_| handle.redo(&actor, None))
             .collect();
         if redone.is_empty() {
             return ok("Nothing to redo.");
         }
-        ok(format!("Redid: {}", redone.join(", ")))
+        let labels: Vec<&str> = redone.iter().map(|c| c.label.as_str()).collect();
+        let mut text = format!("Redid: {}", labels.join(", "));
+        // Redoing a delete can break the links to what it removed.
+        if let Some(note) = redone.iter().find_map(|c| flow_note(&handle, c)) {
+            text.push('\n');
+            text.push_str(&note);
+        }
+        ok(text)
     }
 
     #[tool(

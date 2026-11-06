@@ -493,6 +493,68 @@ async fn a_person_sets_tokens() {
     );
 }
 
+/// Another agent can link to an artboard you made, so your undo of it breaks
+/// their link, and redoing a delete you made does too.
+#[tokio::test]
+async fn undo_and_redo_report_links_they_break() {
+    let app = test_app();
+    let mut alice = Agent::connect(&app, "Alice").await;
+    let mut bob = Agent::connect(&app, "Bob").await;
+    let created = alice.ok("create_design", json!({ "name": "Shop" })).await;
+    let design: String = created
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 10)
+        .expect("a design id")
+        .to_owned();
+    let home = alice
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Home", "width": 390, "height": 600,
+                    "html": "<a data-name=\"Pay\">Pay</a>" }),
+        )
+        .await;
+    let pay = id_after(&home, "Pay");
+    let cart = alice
+        .ok(
+            "create_artboard",
+            json!({ "designId": design, "name": "Cart", "width": 390, "height": 600 }),
+        )
+        .await;
+    let cart = id_after(&cart, "Created artboard");
+    let linked = bob
+        .ok(
+            "set_attributes",
+            json!({ "designId": design, "updates": [{ "nodeIds": [pay],
+                    "attributes": { "href": format!("#finite-artboard={cart}") } }] }),
+        )
+        .await;
+    assert!(!linked.contains("Links:"), "{linked}");
+
+    let undone = alice.ok("undo", json!({ "designId": design })).await;
+    assert!(undone.starts_with("Undid:"), "{undone}");
+    assert!(
+        undone.contains("Links: 1 link goes to no artboard") && undone.contains("\"Pay\""),
+        "{undone}"
+    );
+    // The artboard comes back with its id, so the link works again.
+    let redone = alice.ok("redo", json!({ "designId": design })).await;
+    assert!(!redone.contains("Links:"), "{redone}");
+
+    alice
+        .ok(
+            "delete_nodes",
+            json!({ "designId": design, "nodeIds": [cart] }),
+        )
+        .await;
+    let undone = alice.ok("undo", json!({ "designId": design })).await;
+    assert!(!undone.contains("Links:"), "{undone}");
+    let redone = alice.ok("redo", json!({ "designId": design })).await;
+    assert!(
+        redone.contains("Links: 1 link goes to no artboard"),
+        "{redone}"
+    );
+}
+
 /// Viewers show an agent's name, so a long one is cut like a person's.
 #[tokio::test]
 async fn long_agent_names_are_cut() {
