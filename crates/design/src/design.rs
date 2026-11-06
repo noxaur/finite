@@ -378,12 +378,7 @@ impl<'a> Transaction<'a> {
     /// An id from `make_id` that no node has, counting the nodes this
     /// transaction made, so ids stay unique across all of its steps.
     pub fn new_id(&self, make_id: &mut impl FnMut() -> NodeId) -> NodeId {
-        loop {
-            let id = make_id();
-            if !self.doc.contains(&id) {
-                return id;
-            }
-        }
+        crate::id::fresh(make_id, |id| self.doc.contains(id))
     }
 
     /// [`Design::merge`] against the document as staged. What this
@@ -502,12 +497,7 @@ impl Design {
             return Ok(None);
         }
         let doc = &self.doc;
-        let mut fresh = || loop {
-            let id = new_id();
-            if !doc.contains(&id) {
-                return id;
-            }
-        };
+        let mut fresh = || crate::id::fresh(new_id, |id| doc.contains(id));
         let ops = edit::migrate_css(doc, &mut fresh)?;
         self.histories.clear();
         let change = self.commit(MIGRATION_ACTOR, "Moved shared CSS into tokens", &ops, now);
@@ -895,12 +885,7 @@ impl Design {
         comment::check_anchor(self.view(), &anchor)?;
         let audience = comment::check_audience(audience)?;
         self.check_room_to_open()?;
-        let id = loop {
-            let id = new_id();
-            if !self.comments.iter().any(|c| c.id == id) {
-                break id;
-            }
-        };
+        let id = crate::id::fresh(new_id, |id| self.comments.iter().any(|c| c.id == id));
         self.comments.push(Comment {
             id,
             artboard_id: anchor.artboard_id,

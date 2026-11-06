@@ -6,13 +6,13 @@ mod agent;
 mod layout_common;
 
 use agent::{Agent, id_after, test_app};
-use layout_common::{board, clip, enable_group};
+use layout_common::{board, clip, set_wait};
 use serde_json::json;
 use std::time::Duration;
 
 #[tokio::test]
 async fn an_edit_that_fixes_the_problem_does_not_return_the_note_about_it() {
-    enable_group(Some(0));
+    set_wait(0);
     let app = test_app();
     let mut agent = Agent::connect(&app, "Fixer").await;
     let Some(b) = board(&mut agent).await else {
@@ -23,9 +23,9 @@ async fn an_edit_that_fixes_the_problem_does_not_return_the_note_about_it() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     let fixed = agent
         .ok(
-            "update_styles",
-            json!({ "designId": b.design,
-                    "updates": [{ "nodeIds": [tall], "styles": { "height": "20px" } }] }),
+            "edit",
+            json!({ "designId": b.design, "op": "css", "select": format!("#{tall}"),
+                    "css": "height: 20px" }),
         )
         .await;
     assert!(

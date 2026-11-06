@@ -8,13 +8,14 @@ use base64::Engine;
 use finite_design::{edit, html};
 use serde_json::{Map, Value};
 
-use super::{EditParams, plain};
+use super::EditParams;
+use crate::mcp::selector::plain;
 use crate::{hub::Hub, transfer};
 
 pub(super) type Fields = Map<String, Value>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Kind {
+pub(in crate::mcp) enum Kind {
     Artboard,
     Html,
     Css,
@@ -60,7 +61,7 @@ impl Kind {
     }
 
     /// One op of this kind, for error messages.
-    pub(super) fn example(self) -> &'static str {
+    pub(in crate::mcp) fn example(self) -> &'static str {
         match self {
             Kind::Artboard => {
                 r#"{"op": "artboard", "name": "Home — mobile", "width": 390, "height": 844, "html": "<header data-name=\"Nav\">…</header>", "as": "m"}"#

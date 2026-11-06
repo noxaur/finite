@@ -15,6 +15,7 @@ use crate::{
     components,
     document::{Document, Op},
     edit::{self, EditError},
+    id,
     node::NodeId,
 };
 
@@ -129,7 +130,6 @@ pub const MAX_TEXT: usize = 100_000;
 /// can select a copy and keep editing it before the server answers. An id
 /// the document already has is skipped.
 pub fn new_ids<'a>(doc: &'a Document, client: &str, mid: u64) -> impl FnMut() -> NodeId + 'a {
-    const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     // FNV-1a: plain arithmetic, so the server and WebAssembly agree.
     let fnv = |h: u64, bytes: &[u8]| {
         bytes
@@ -141,20 +141,19 @@ pub fn new_ids<'a>(doc: &'a Document, client: &str, mid: u64) -> impl FnMut() ->
         &mid.to_le_bytes(),
     );
     let mut n = 0_u64;
-    move || loop {
+    let alphabet = id::ALPHABET;
+    let mut make = move || {
         n += 1;
         let mut h = fnv(seed, &n.to_le_bytes());
-        let id: String = (0..8)
+        (0..id::LEN)
             .map(|_| {
-                let c = ALPHABET[(h % 36) as usize] as char;
-                h /= 36;
+                let c = alphabet[(h % alphabet.len() as u64) as usize] as char;
+                h /= alphabet.len() as u64;
                 c
             })
-            .collect();
-        if !doc.contains(&id) {
-            return id;
-        }
-    }
+            .collect::<String>()
+    };
+    move || id::fresh(&mut make, |id| doc.contains(id))
 }
 
 /// Turns a gesture's edits into ops. Every edit is planned against `view`,
@@ -222,12 +221,7 @@ pub fn plan(
                 edit::update_attributes(view, ids, attrs)?
             }
             UserEdit::CreatePage { name } => {
-                let id = loop {
-                    let id = new_id();
-                    if view.page(&id).is_none() {
-                        break id;
-                    }
-                };
+                let id = id::fresh(new_id, |id| view.page(id).is_some());
                 edit::create_page(view, id, name)?
             }
             UserEdit::RenamePage { id, name } => edit::rename_page(view, id, name)?,

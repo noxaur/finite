@@ -6,31 +6,32 @@ mod agent;
 mod layout_common;
 
 use agent::{Agent, test_app};
-use layout_common::{board, enable_group, note_after};
+use layout_common::{board, note_after, set_wait};
 use serde_json::json;
 
 #[tokio::test]
 async fn an_edit_redirected_to_an_instance_gets_a_note_about_what_it_shows() {
-    enable_group(None);
+    set_wait(5_000);
     let app = test_app();
     let mut agent = Agent::connect(&app, "Instancer").await;
     let Some(b) = board(&mut agent).await else {
         return;
     };
+    let on_board = format!("#{}", b.board);
     let bar = r#"<div data-component="Bar" data-name="Bar" style="height: 20px; flex-shrink: 0">Bar</div>"#;
     for _ in 0..2 {
         let written = agent
             .ok(
-                "write_html",
-                json!({ "designId": b.design, "targetId": b.board, "html": bar }),
+                "edit",
+                json!({ "designId": b.design, "op": "html", "select": on_board, "html": bar }),
             )
             .await;
-        assert!(!written.contains("Layout:"), "{written}");
+        assert!(!written.contains("cut off by"), "{written}");
     }
     let tree = agent
         .ok(
-            "get_html",
-            json!({ "designId": b.design, "nodeId": b.board }),
+            "read",
+            json!({ "designId": b.design, "select": on_board, "as": "html" }),
         )
         .await;
     let instance = {
@@ -42,9 +43,9 @@ async fn an_edit_redirected_to_an_instance_gets_a_note_about_what_it_shows() {
     // Its height is set on the instance, so the edit becomes an override.
     let edited = agent
         .ok(
-            "update_styles",
-            json!({ "designId": b.design,
-                    "updates": [{ "nodeIds": [instance], "styles": { "height": "600px" } }] }),
+            "edit",
+            json!({ "designId": b.design, "op": "css", "select": format!("#{instance}"),
+                    "css": "height: 600px" }),
         )
         .await;
     assert!(

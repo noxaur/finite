@@ -12,17 +12,17 @@
 //! with a shared session store ([`DirSessionStore`]), a session can move to
 //! another router mid-conversation and keep its undo history.
 //!
-//! - `list_designs`, and doc6's `designs` with no `create`, `rename` or
-//!   `delete`, ask every server at once and merge the lists. A server that
-//!   doesn't answer, or answers with an error, is named at the end instead
-//!   of failing the call. Only when none answers does the call fail.
-//! - `create_design`, and `designs` with `create`, take turns between
-//!   servers, like `POST /api/designs`.
+//! - `designs` with no `create`, `rename` or `delete` asks every server at
+//!   once and merges the lists. A server that doesn't answer, or answers
+//!   with an error, is named at the end instead of failing the call. Only
+//!   when none answers does the call fail.
+//! - `designs` with `create` takes turns between servers, like
+//!   `POST /api/designs`.
 //! - Every other tool goes to the owner of its `designId`, and `designs`
 //!   with `delete` to the owner of that design.
 //!
-//! doc6 takes a design's exact name or the start of its id for its id, and
-//! each server only knows its own designs. So on doc6 the relay resolves a
+//! A tool takes a design's exact name or the start of its id for its id, and
+//! each server only knows its own designs. So the relay resolves a
 //! `designId` it hasn't seen in a list against every server's designs, the
 //! way one server would ([`resolve_design`]), and passes the real id on.
 //!
@@ -65,8 +65,10 @@ use tokio::sync::Mutex;
 
 use crate::{
     cluster::Members,
-    mcp::{ID_MATCH_NOTE, Surface, inexact_delete, params::ListParams, resolve_design},
-    mcp::{OWNER_META, instructions},
+    mcp::{
+        ID_MATCH_NOTE, INSTRUCTIONS, MAX_LIMIT, OWNER_META, inexact_delete, list_limit, only_by_id,
+        resolve_design,
+    },
     router::UPSTREAM_TIMEOUT,
 };
 
@@ -83,13 +85,8 @@ pub struct Relay {
     /// router's list yet. Each has its own lock, so a slow server doesn't
     /// hold up calls to the others.
     backends: std::sync::Mutex<HashMap<String, Arc<Mutex<Option<Backend>>>>>,
-    /// The backends' endpoint this relays to: `/mcp`, or `/mcp/classic`.
-    path: &'static str,
-    /// The tools the backends serve at `path`. The router reads
-    /// `FINITE_MCP_SURFACE` as the servers do, so they must agree.
-    surface: Surface,
     /// Every design id a list has shown this session, so a call by id needs
-    /// no lookup on doc6. Ids never change owner by name, so one that was
+    /// no lookup. Ids never change owner by name, so one that was
     /// deleted since just gets the owner's "not found".
     known: std::sync::Mutex<HashSet<String>>,
 }
@@ -113,31 +110,22 @@ impl Gathered<'_> {
     }
 }
 
-/// The router's MCP endpoint, to mount at `path` (`/mcp` or `/mcp/classic`),
-/// relaying to the same path on the servers. With `sessions`, routers that
-/// share the store can each serve any session.
+/// The router's MCP endpoint, relaying to `/mcp` on the servers. With
+/// `sessions`, routers that share the store can each serve any session.
 pub fn service(
     members: Arc<Members>,
     sessions: Option<Arc<dyn SessionStore>>,
-    path: &'static str,
 ) -> StreamableHttpService<Relay, LocalSessionManager> {
     let mut config =
         StreamableHttpServerConfig::default().with_allowed_hosts(members.now().allowed_hosts());
     config.session_store = sessions;
     let next = Arc::new(AtomicUsize::new(0));
-    let surface = if path == "/mcp/classic" {
-        Surface::Classic
-    } else {
-        Surface::from_env()
-    };
     StreamableHttpService::new(
         move || {
             Ok(Relay {
                 members: members.clone(),
                 next: next.clone(),
                 backends: Default::default(),
-                path,
-                surface,
                 known: Default::default(),
             })
         },
@@ -192,7 +180,7 @@ fn unreachable(base: &str, error: impl std::fmt::Display) -> McpError {
 
 /// Waits at most `UPSTREAM_TIMEOUT` for `work` on `base`. A server that's
 /// stuck, rather than down, accepts connections and never answers, and
-/// without a limit it held up `list_designs` for every agent. Only for quick
+/// without a limit it held up the designs list for every agent. Only for quick
 /// steps: a comments wait can last 55 seconds.
 async fn in_time<T>(
     base: &str,
@@ -225,7 +213,7 @@ impl Relay {
         {
             return Ok(backend.clone());
         }
-        let config = StreamableHttpClientTransportConfig::with_uri(format!("{base}{}", self.path))
+        let config = StreamableHttpClientTransportConfig::with_uri(format!("{base}/mcp"))
             .custom_headers(identity(ctx));
         let connect = async {
             ().serve(StreamableHttpClientTransport::from_config(config))
@@ -236,11 +224,10 @@ impl Relay {
         let theirs = backend
             .peer_info()
             .and_then(|info| info.instructions.clone());
-        if theirs.as_deref() != Some(instructions(self.surface)) {
+        if theirs.as_deref() != Some(INSTRUCTIONS) {
             tracing::warn!(
                 base,
-                path = self.path,
-                "this Finite server's MCP instructions differ from the router's; give both the same FINITE_MCP_SURFACE"
+                "this Finite server's MCP instructions differ from the router's; run the same version of both"
             );
         }
         Ok(slot.insert(Arc::new(backend)).clone())
@@ -288,7 +275,7 @@ impl Relay {
         }
     }
 
-    /// Calls a list tool (`list_designs`, or doc6's `designs`) on every
+    /// Calls `designs` to list on every
     /// server at once and merges the JSON arrays, newest first. Servers that
     /// don't answer are left out and named. The ids go into `known`.
     async fn gather<'a>(
@@ -342,22 +329,20 @@ impl Relay {
         ctx: &RequestContext<RoleServer>,
     ) -> CallToolResult {
         let cluster = self.members.now();
-        let limit = params
-            .arguments
-            .as_ref()
-            .and_then(|args| args.get("limit"))
-            .and_then(Value::as_u64)
-            .map_or(ListParams::DEFAULT_LIMIT, |n| {
-                (n as usize).clamp(1, ListParams::MAX_LIMIT)
-            });
-        let query = ListParams::with_query(
+        let limit = list_limit(
             params
                 .arguments
                 .as_ref()
-                .and_then(|args| args.get("query"))
-                .and_then(Value::as_str)
-                .map(str::to_owned),
+                .and_then(|args| args.get("limit"))
+                .and_then(Value::as_u64)
+                .map(|n| n as usize),
         );
+        let query = params
+            .arguments
+            .as_ref()
+            .and_then(|args| args.get("query"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let Gathered {
             mut designs,
             missing,
@@ -373,7 +358,8 @@ impl Relay {
         // server that cut its own list may have left a name match out, so
         // then the relay says nothing rather than something wrong.
         let only_by_id = !cut
-            && query.only_by_id(
+            && only_by_id(
+                query.as_deref(),
                 designs
                     .iter()
                     .filter_map(|d| Some((d["designId"].as_str()?, d["name"].as_str()?))),
@@ -419,11 +405,13 @@ impl Relay {
         self.call(last, request, ctx).await
     }
 
-    /// The id of the design doc6's `given` names, across every server: an id
+    /// The id of the design `given` names, across every server: an id
     /// a list showed this session as it is, or else what [`resolve_design`]
     /// finds among every server's designs that match it. With `exact`, for
     /// a delete, only an exact id or name will do. An id no server lists
-    /// goes through while a server is missing, for its owner to answer.
+    /// goes through while a server is missing, or when it has the shape of a
+    /// design's id, for its owner to answer: the router may not know the
+    /// owner yet.
     async fn resolve(
         &self,
         given: &str,
@@ -435,14 +423,16 @@ impl Relay {
             return Ok(want.to_owned());
         }
         let cluster = self.members.now();
-        let args = json!({ "query": want, "limit": ListParams::MAX_LIMIT });
+        let args = json!({ "query": want, "limit": MAX_LIMIT });
         let list = CallToolRequestParams::new("designs")
             .with_arguments(args.as_object().expect("an object").clone());
         let gathered = self.gather(&cluster, list, ctx).await;
         let designs = gathered.pairs();
         let refuse = |text: String| CallToolResult::error(vec![ContentBlock::text(text)]);
-        let id =
-            resolve_design(want, &designs, |_| !gathered.missing.is_empty()).map_err(refuse)?;
+        let id = resolve_design(want, &designs, |id| {
+            !gathered.missing.is_empty() || finite_design::id::is_design_id(id)
+        })
+        .map_err(refuse)?;
         if exact
             && let Some((_, name)) = designs.iter().find(|(d, _)| *d == id)
             && let Some(error) = inexact_delete(want, &id, name)
@@ -460,7 +450,7 @@ impl ServerHandler for Relay {
                 "finite-router",
                 env!("CARGO_PKG_VERSION"),
             ))
-            .with_instructions(instructions(self.surface))
+            .with_instructions(INSTRUCTIONS)
     }
 
     /// Every server has the same tools, so the first that answers lists them.
@@ -518,7 +508,7 @@ impl ServerHandler for Relay {
         if designs && arg("create").is_some() {
             return Ok(self.create(nodes, request, &ctx).await?.into());
         }
-        // doc6's delete names its design in `delete`, by exact id or name.
+        // A delete names its design in `delete`, by exact id or name.
         if designs && let Some(Value::String(given)) = arg("delete") {
             let id = match self.resolve(&given, true, &ctx).await {
                 Ok(id) => id,
@@ -530,9 +520,7 @@ impl ServerHandler for Relay {
             design_id = Some(id);
         } else if designs && arg("rename").is_none() {
             return Ok(self.list_designs(request, &ctx).await.into());
-        } else if self.surface.doc6()
-            && let Some(given) = &design_id
-        {
+        } else if let Some(given) = &design_id {
             let id = match self.resolve(given, false, &ctx).await {
                 Ok(id) => id,
                 Err(refused) => return Ok(refused.into()),
@@ -542,15 +530,13 @@ impl ServerHandler for Relay {
             }
             design_id = Some(id);
         }
-        let result = match (request.name.as_ref(), design_id) {
-            ("list_designs", _) => self.list_designs(request, &ctx).await,
-            ("create_design", _) => self.create(nodes, request, &ctx).await?,
-            (_, Some(id)) => {
+        let result = match design_id {
+            Some(id) => {
                 let owner = cluster.owner_url(&id).expect("some server is live");
                 self.call(owner, request, &ctx).await?
             }
             // No designId: let a server report the missing argument.
-            (_, None) => self.call(&nodes[0], request, &ctx).await?,
+            None => self.call(&nodes[0], request, &ctx).await?,
         };
         Ok(result.into())
     }

@@ -14,7 +14,7 @@ use finite_design::{
     comment::{Anchor, Audience, Author, AuthorKind, Comment, CommentError, Listening},
     components,
     edit::EditError,
-    label,
+    id, label,
     user_edit::{self, UserEdit},
 };
 use tokio::sync::{broadcast, watch};
@@ -22,7 +22,7 @@ use tokio::sync::{broadcast, watch};
 use super::{
     Actor, COMPACT_AFTER, COMPACT_BYTES, DesignMessage, DesignSummary, EVENT_BUFFER, HISTORY_TTL,
     Listener, Missed, Outgoing, PRESENCE_TTL, Presence, RESUME_BYTES, RESUME_LIMIT, SESSION_ACTOR,
-    Stamp, UNLOAD_AFTER, now_ms, random_id,
+    Stamp, UNLOAD_AFTER, node_id, now_ms, random_id,
 };
 use crate::store::{Claim, Store, Stored, Token};
 
@@ -148,7 +148,7 @@ impl DesignState {
             design.replay(record);
         }
         let id = design.meta.id.clone();
-        match design.migrate_css(now_ms(), &mut || random_id(8)) {
+        match design.migrate_css(now_ms(), &mut node_id) {
             Ok(migrated) => needs_snapshot |= migrated.is_some(),
             Err(error) => {
                 tracing::error!(design = id, %error, "couldn't move shared CSS into tokens")
@@ -715,12 +715,7 @@ impl DesignHandle {
         state.touch(actor, now);
         let (ops, output) = build(&state.design)?;
         let doc = state.design.doc();
-        let mut new_id = || loop {
-            let id = random_id(8);
-            if !doc.contains(&id) {
-                return id;
-            }
-        };
+        let mut new_id = || id::fresh(&mut node_id, |id| doc.contains(id));
         let ops = components::redirect(doc, ops, &mut new_id)?;
         let change = state.design.commit(&actor.id, label, &ops, now);
         if let Some(change) = &change {
@@ -884,14 +879,7 @@ impl DesignHandle {
         body: &str,
     ) -> Result<Comment, CommentError> {
         self.update_comment(|design| {
-            design.add_comment(
-                author,
-                anchor,
-                audience,
-                body,
-                &mut || random_id(8),
-                now_ms(),
-            )
+            design.add_comment(author, anchor, audience, body, &mut node_id, now_ms())
         })
     }
 

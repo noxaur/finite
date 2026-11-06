@@ -27,6 +27,7 @@ fn artboard(design: &mut Design, id: &str) {
         position: None,
         page: None,
         styles: BTreeMap::new(),
+        ..Default::default()
     };
     let ops = edit::create_artboard(design.doc(), id.into(), spec).unwrap();
     design.commit("agent", "Create artboard", &ops, 0).unwrap();

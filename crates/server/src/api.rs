@@ -29,9 +29,8 @@ use crate::cluster::Place;
 use crate::heartbeat::{self, Heartbeat};
 use crate::hub::{
     Actor, AdoptError, DesignHandle, DesignSummary, Hub, LOBBY_LIMIT, OpenError, Outgoing, Since,
-    Stamp, is_design_id,
+    Stamp, is_design_id, node_id,
 };
-use crate::mcp::{TokenValue, token_ops};
 use crate::transfer::{self, ImportRequest, ImportResult, TransferError};
 
 /// The largest design another server can hand off. axum's default of 2 MB
@@ -544,17 +543,17 @@ struct SetTokens {
     #[serde(default)]
     modes: Option<Vec<String>>,
     #[serde(default)]
-    tokens: BTreeMap<String, Option<TokenValue>>,
+    tokens: BTreeMap<String, edit::TokenChange>,
 }
 
-/// Names the modes and sets tokens, as `set_tokens` does for an agent.
+/// Names the modes and sets tokens, as an agent's tokens op does.
 async fn set_tokens(
     State(hub): State<Arc<Hub>>,
     Path(id): Path<String>,
     Json(body): Json<SetTokens>,
 ) -> Result<Json<Changed>, ApiError> {
     person_edit(&hub, &id, body.author, "Set tokens", |doc| {
-        token_ops(doc, body.modes.as_deref(), &body.tokens)
+        edit::edit_tokens(doc, body.modes.as_deref(), &body.tokens, &mut node_id)
     })
     .await
 }

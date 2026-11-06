@@ -1,4 +1,4 @@
-//! How tools describe the document to agents: compact outlines and node JSON.
+//! How tools describe the document to agents: compact outlines and comments.
 
 use std::{borrow::Cow, cell::OnceCell, fmt::Write};
 
@@ -250,80 +250,8 @@ fn text_snippet(node: &finite_design::Node) -> String {
     snippet
 }
 
-pub(super) fn node_json(doc: &Document, id: &str) -> serde_json::Value {
-    let Some(node) = doc.get(id) else {
-        return serde_json::json!({ "id": id, "error": "not found" });
-    };
-    let children = doc.children(Some(id));
-    let child_ids: Vec<&str> = children
-        .iter()
-        .take(CHILD_IDS)
-        .map(|c| c.id.as_str())
-        .collect();
-    let shorten = |map: &std::collections::BTreeMap<String, String>| {
-        map.iter()
-            .map(|(k, v)| (k.clone(), short(v)))
-            .collect::<std::collections::BTreeMap<_, _>>()
-    };
-    let mut json = serde_json::json!({
-        "id": node.id,
-        "type": if node.kind == NodeKind::Text { "text" } else { "element" },
-        "tag": node.tag(),
-        "name": node.display_name(),
-        "parentId": node.parent,
-        "artboardId": doc.artboard_of(id).map(|a| &a.id),
-        "x": node.x,
-        "y": node.y,
-        "text": node.text.as_deref().map(short),
-        "styles": shorten(&node.styles),
-        "attributes": shorten(&node.attrs),
-        "childCount": children.len(),
-        "childIds": child_ids,
-    });
-    if node.component {
-        json["component"] = true.into();
-        // The view also counts instances shown inside other instances.
-        json["instanceCount"] = doc
-            .instances_of(&node.id)
-            .filter(|i| !finite_design::components::is_virtual(i))
-            .count()
-            .into();
-    }
-    if let Some(component) = &node.instance_of {
-        json["instanceOf"] = component.clone().into();
-        if !node.overrides.is_empty() {
-            json["overrides"] = serde_json::to_value(&node.overrides).expect("strings serialize");
-        }
-    }
-    if let Some((instance, _)) = finite_design::components::split(id) {
-        json["insideInstance"] = instance.into();
-    }
-    json
-}
-
-/// How many child ids `get_node_info` lists; `get_children` pages through the rest.
-const CHILD_IDS: usize = 200;
-/// Values longer than this are shortened in `get_node_info`.
-const VALUE_LIMIT: usize = 2_000;
-
-/// `value`, or its start and its length if it's longer than [`VALUE_LIMIT`].
-/// An image's inline `data:` URL can be megabytes of base64 that an agent
-/// has no use for in full.
-fn short(value: &str) -> String {
-    if value.len() <= VALUE_LIMIT {
-        return value.to_owned();
-    }
-    let mut end = 200;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}… ({} characters in all)", &value[..end], value.len())
-}
-
-// Tool parameters. Doc comments become the JSON Schema descriptions agents see.
-
 /// The longest element HTML a comment includes. Longer elements are
-/// usually whole sections, and get_html reads them.
+/// usually whole sections, and read with as: "html" shows them.
 const COMMENT_NODE_HTML: usize = 2_000;
 
 /// How many of a thread's latest messages agents see, after its first.
@@ -539,7 +467,6 @@ pub(super) fn rendered_outline(
     root: &str,
     max_depth: usize,
     boxes: &[crate::screenshot::ElementBox],
-    surface: super::Surface,
 ) -> String {
     use std::collections::HashMap;
     let by_id: HashMap<&str, &crate::screenshot::ElementBox> =
@@ -561,7 +488,7 @@ pub(super) fn rendered_outline(
         })
         .cloned()
         .collect();
-    let checked = layout_notes(doc, &board.id, &in_scope, surface);
+    let checked = layout_notes(doc, &board.id, &in_scope);
     if !checked.starts_with("Layout: nothing is cut off") {
         notes.push(checked);
     }

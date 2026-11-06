@@ -7,23 +7,22 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use finite_design::{
-    Document, NodeId, Op, Transaction, comment, css,
+    Document, NodeId, Op, Transaction, comment, components, css,
     edit::{self, NewArtboard, WriteMode},
+    id,
     search::{self, Places},
     select,
 };
 use serde_json::Value;
 
-use super::{
-    describe, label, matched,
-    ops::{Fields, Kind, Step, failed, flag, need, number, object, select_of, text},
-    page_id, plain, selector_text, with_refs,
-};
+use super::ops::{Fields, Kind, Step, failed, flag, need, number, object, select_of, text};
 use crate::{
-    hub::random_id,
+    hub::node_id,
     mcp::{
-        TokenValue, component_tools::classes_styled_outside, cut, following_note, kept_nodes_note,
-        kept_note, left_out, outline, token_ops, transfer,
+        format::{cut, outline},
+        notes::{following_note, kept_nodes_note, kept_note, left_out},
+        selector::{describe, label, line, matched, page_id, plain, selector_text, with_refs},
+        transfer,
     },
 };
 
@@ -38,8 +37,7 @@ pub(super) fn run(tx: &mut Transaction<'_>, steps: Vec<Step>) -> Result<Vec<Stri
     for (index, step) in steps.into_iter().enumerate() {
         let kind = step.kind;
         let name = text(&step.fields, "as").map(|a| a.trim().trim_start_matches('@').to_owned());
-        let (text, made) =
-            apply(tx, step, &refs).map_err(|e| failed(index, Some(kind), &for_doc6(&e)))?;
+        let (text, made) = apply(tx, step, &refs).map_err(|e| failed(index, Some(kind), &e))?;
         if let (Some(name), Some(id)) = (name.filter(|n| !n.is_empty()), made) {
             refs.insert(name, id);
         }
@@ -51,125 +49,6 @@ pub(super) fn run(tx: &mut Transaction<'_>, steps: Vec<Step>) -> Result<Vec<Stri
         ));
     }
     Ok(sections)
-}
-
-/// Design errors name the classic tools. This surface doesn't have them, so
-/// say which op to use instead. `run` applies it to every error an op returns.
-fn for_doc6(error: &str) -> String {
-    let error = rewrite_style(error)
-        .replace(
-            "need the data-id get_html gave them",
-            "need the data-id read with as: \"html\" gave them",
-        )
-        .replace(
-            "use the ids get_html shows for it",
-            "use the ids read with as: \"html\" shows for it",
-        )
-        .replace(
-            "replace it with insert_instance",
-            "write it as <div data-instance-of=\"…\"></div>",
-        )
-        .replace(
-            "use mode \"replace-children\" instead",
-            "use mode \"inner\" instead",
-        );
-    rewrite_detach(&rewrite_make_component(&error))
-}
-
-/// The whole design error for a `style` attribute, `#{id}: style isn't an
-/// attribute; use update_styles to change inline styles`, or that sentence
-/// alone. A value an agent sent can quote the phrase inside a different
-/// error, and a substring rewrite would turn that value into css advice.
-fn rewrite_style(error: &str) -> String {
-    const SHORT: &str = "use update_styles to change inline styles";
-    const FULL: &str = "style isn't an attribute; use update_styles to change inline styles";
-    let advice = |prefix: &str, id: &str| {
-        format!(
-            "{prefix}style isn't an attribute; change inline styles with a css op, like {{\"op\": \"css\", \"select\": \"#{id}\", \"css\": \"color: red\"}}"
-        )
-    };
-    if error == SHORT || error == FULL {
-        return advice("", "id");
-    }
-    if let Some(head) = error.strip_suffix(FULL)
-        && let Some(id) = node_id_before(head)
-        && head == format!("#{id}: ")
-    {
-        return advice(head, id);
-    }
-    error.to_owned()
-}
-
-/// The node id in the last `#{id}` before `end`, when one is there.
-/// A virtual id keeps its `/`, since that is the node a css op has to select.
-fn node_id_before(text: &str) -> Option<&str> {
-    let hash = text.rfind('#')?;
-    let rest = &text[hash + 1..];
-    let end = rest
-        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/'))
-        .unwrap_or(rest.len());
-    let id = &rest[..end];
-    (!id.is_empty()).then_some(id)
-}
-
-/// `#{id} isn't a component; make it one with create_component` names the
-/// node, so the component op can select it.
-fn rewrite_make_component(error: &str) -> String {
-    const PHRASE: &str = "make it one with create_component";
-    let Some(at) = error.find(PHRASE) else {
-        return error.to_owned();
-    };
-    let id = error[..at].rfind('#').map(|hash| {
-        let rest = &error[hash + 1..at];
-        let end = rest
-            .find(|c: char| c.is_whitespace() || c == ';')
-            .unwrap_or(rest.len());
-        &rest[..end]
-    });
-    let advice = match id {
-        Some(id) if !id.is_empty() => {
-            format!("make it one with {{\"op\": \"component\", \"select\": \"#{id}\"}}")
-        }
-        _ => "make it one with a component op".to_owned(),
-    };
-    let mut out = String::with_capacity(error.len() + advice.len());
-    out.push_str(&error[..at]);
-    out.push_str(&advice);
-    out.push_str(&error[at + PHRASE.len()..]);
-    out
-}
-
-/// `detach_instance #id`, and a bare `detach #id`, become the component op
-/// that detaches that instance.
-fn rewrite_detach(error: &str) -> String {
-    let mut error = error.to_owned();
-    // The longer needle first, so `detach_instance #id` isn't read as `detach`.
-    for needle in ["detach_instance #", "detach #"] {
-        while let Some(start) = error.find(needle) {
-            let rest = &error[start + needle.len()..];
-            let id_len = rest
-                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
-                .unwrap_or(rest.len());
-            let id = &rest[..id_len];
-            if id.is_empty() {
-                break;
-            }
-            let op = format!("{{\"op\": \"component\", \"select\": \"#{id}\", \"detach\": true}}");
-            let mut after = &rest[id_len..];
-            if let Some(skipped) = after.strip_prefix(" first") {
-                after = skipped;
-            }
-            let mut out = String::with_capacity(error.len() + op.len());
-            out.push_str(&error[..start]);
-            out.push_str(&op);
-            out.push_str(after);
-            error = out;
-        }
-    }
-    error.replace(
-        "detach_instance",
-        "detach the instance with {\"op\": \"component\", \"select\": \"#instance\", \"detach\": true}",
-    )
 }
 
 /// An edit's result: `head`, then each op's section.
@@ -202,17 +81,13 @@ fn apply(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String, O
     }
 }
 
-fn make_id() -> NodeId {
-    random_id(8)
-}
-
 /// An id no node has, counting the ones this transaction made.
 fn fresh(tx: &Transaction<'_>) -> NodeId {
-    tx.new_id(&mut make_id)
+    tx.new_id(&mut node_id)
 }
 
 fn stage(tx: &mut Transaction<'_>, ops: Vec<Op>) -> Result<()> {
-    tx.edit(ops, &mut make_id).map_err(|e| e.to_string())
+    tx.edit(ops, &mut node_id).map_err(|e| e.to_string())
 }
 
 /// The elements `select` matches, as a selector and ids. None is an error.
@@ -366,9 +241,9 @@ fn artboard(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String
             .into_iter()
             .filter_map(|(k, v)| Some((k, v?)))
             .collect(),
+        class: text(f, "class"),
+        mode: text(f, "mode"),
     };
-    let class = text(f, "class").filter(|c| !c.trim().is_empty());
-    let mode = text(f, "mode");
     let (fragments, dropped) = step
         .html
         .map(|parsed| (parsed.fragments, parsed.dropped))
@@ -377,17 +252,9 @@ fn artboard(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String
         let t = &*tx;
         let doc = t.view();
         let id = fresh(t);
-        let (mut ops, roots) =
+        let (ops, roots) =
             edit::create_artboard_with(doc, id.clone(), spec, fragments, &mut || fresh(t))
                 .map_err(|e| e.to_string())?;
-        if let Some(Op::Create { node }) = ops.first_mut() {
-            if let Some(class) = &class {
-                node.attrs.insert("class".into(), class.trim().to_owned());
-            }
-            if let Some(mode) = &mode {
-                node.mode = edit::artboard_mode(doc, mode).map_err(|e| e.to_string())?;
-            }
-        }
         (id, ops, roots)
     };
     stage(tx, ops)?;
@@ -467,18 +334,6 @@ fn copy_artboard(
             ));
         }
     };
-    let (ops, roots) = {
-        let t = &*tx;
-        edit::duplicate(t.view(), std::slice::from_ref(&src), &mut || fresh(t))
-            .map_err(|e| e.to_string())?
-    };
-    stage(tx, ops)?;
-    let id = roots.first().cloned().ok_or("the copy made nothing")?;
-    let frozen = freeze(tx, &roots, flag(f, "detach"))?;
-    if let Some(name) = text(f, "name") {
-        let ops = edit::rename(tx.view(), &id, Some(&name)).map_err(|e| e.to_string())?;
-        stage(tx, ops)?;
-    }
     let mut styles = declarations(f, "css")?;
     styles.extend(declarations(f, "styles")?);
     for key in ["width", "height"] {
@@ -486,46 +341,30 @@ fn copy_artboard(
             styles.insert(key.into(), Some(format!("{px}px")));
         }
     }
-    if !styles.is_empty() {
-        let ops = edit::update_styles(tx.view(), std::slice::from_ref(&id), &styles)
-            .map_err(|e| e.to_string())?;
-        stage(tx, ops)?;
-    }
-    if let Some(page) = page {
-        let ops = edit::move_to_page(tx.view(), std::slice::from_ref(&id), &page)
-            .map_err(|e| e.to_string())?;
-        stage(tx, ops)?;
-    }
-    let (x, y) = (number(f, "x")?, number(f, "y")?);
-    if x.is_some() || y.is_some() {
-        let node = tx.view().get(&id).ok_or("the copy is gone")?;
-        let (x, y) = (x.or(node.x).unwrap_or(0.0), y.or(node.y).unwrap_or(0.0));
-        let ops = edit::set_position(tx.view(), &id, x, y).map_err(|e| e.to_string())?;
-        stage(tx, ops)?;
-    }
-    if let Some(mode) = text(f, "mode") {
-        let ops = edit::set_artboard_mode(tx.view(), std::slice::from_ref(&id), Some(&mode))
-            .map_err(|e| e.to_string())?;
-        stage(tx, ops)?;
-    }
-    let mut dropped = Vec::new();
-    if let Some(parsed) = step.html {
-        dropped = parsed.dropped;
-        let ops = {
-            let t = &*tx;
-            edit::write_fragments(
-                t.view(),
-                &id,
-                parsed.fragments,
-                WriteMode::Append,
-                None,
-                &mut || fresh(t),
-            )
-            .map_err(|e| e.to_string())?
-            .0
-        };
-        stage(tx, ops)?;
-    }
+    let (fragments, dropped) = step
+        .html
+        .map(|parsed| (parsed.fragments, parsed.dropped))
+        .unwrap_or_default();
+    let copy = edit::ArtboardCopy {
+        name: text(f, "name"),
+        styles,
+        page,
+        x: number(f, "x")?,
+        y: number(f, "y")?,
+        mode: text(f, "mode"),
+        detach: flag(f, "detach"),
+        fragments,
+    };
+    let copied = edit::copy_artboard(tx, &src, copy, &mut node_id).map_err(|e| e.to_string())?;
+    let id = copied.id;
+    let frozen = match (copied.detached, copied.following) {
+        (0, 0) => None,
+        (0, n) => Some(following_note(n)),
+        (n, _) => Some(format!(
+            "Detached {n} instance{} in the copy; it no longer follows any component.",
+            plural(n)
+        )),
+    };
     let doc = tx.view();
     let mut text = format!(
         "Copied {} as #{id}:\n{}",
@@ -648,7 +487,7 @@ fn html_op(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String,
 /// How many nodes a repeated result names before it counts the rest.
 const REPEATS_NAMED: usize = 3;
 
-/// `text` with every `#` followed by an 8-character id as `#_`, so results
+/// `text` with every `#` followed by a node-id-length id as `#_`, so results
 /// that differ only in the ids they made compare equal.
 fn mask_ids(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -660,7 +499,7 @@ fn mask_ids(text: &str) -> String {
             .bytes()
             .take_while(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
             .count();
-        if id == 8 {
+        if id == id::LEN {
             out.push('_');
             rest = &rest[id..];
         }
@@ -806,222 +645,13 @@ fn css_op(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<String> {
     }
 }
 
-fn ident_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
-}
-
-/// `url(` at `i`, and not the tail of a longer name such as `noturl(`.
-fn at_url(bytes: &[u8], i: usize) -> bool {
-    if i > 0 && ident_byte(bytes[i - 1]) {
-        return false;
-    }
-    let Some(head) = bytes.get(i..i + 4) else {
-        return false;
-    };
-    head[3] == b'('
-        && head[0].eq_ignore_ascii_case(&b'u')
-        && head[1].eq_ignore_ascii_case(&b'r')
-        && head[2].eq_ignore_ascii_case(&b'l')
-}
-
-/// The index just past the `url(...)` that starts at `start`.
-fn skip_url(bytes: &[u8], start: usize) -> usize {
-    let mut i = start + 4;
-    while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
-        i += 1;
-    }
-    if matches!(bytes.get(i), Some(b'"' | b'\'')) {
-        let quote = bytes[i];
-        i += 1;
-        while i < bytes.len() {
-            if bytes[i] == b'\\' {
-                i += 2;
-                continue;
-            }
-            if bytes[i] == quote {
-                i += 1;
-                break;
-            }
-            i += 1;
-        }
-        while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
-            i += 1;
-        }
-        if bytes.get(i) == Some(&b')') {
-            i += 1;
-        }
-        return i;
-    }
-    while i < bytes.len() {
-        if bytes[i] == b'\\' {
-            i += 2;
-            continue;
-        }
-        if bytes[i] == b')' {
-            return i + 1;
-        }
-        i += 1;
-    }
-    bytes.len()
-}
-
-/// The end of the attribute selector that opens at `i` (a `[`), past any
-/// quoted value and escape inside it.
-fn skip_attribute(bytes: &[u8], mut i: usize) -> usize {
-    let mut quote = None;
-    i += 1;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'\\' {
-            i += 2;
-            continue;
-        }
-        match quote {
-            Some(q) if b == q => quote = None,
-            Some(_) => {}
-            None if b == b'"' || b == b'\'' => quote = Some(b),
-            None if b == b']' => return i + 1,
-            None => {}
-        }
-        i += 1;
-    }
-    bytes.len()
-}
-
-/// The character a CSS escape starting at `i` (a `\\`) stands for, and where
-/// the escape ends: up to six hex digits and one whitespace, or one char.
-fn css_escape(source: &str, i: usize) -> (char, usize) {
-    let rest = &source[i + 1..];
-    let hex: String = rest
-        .chars()
-        .take_while(char::is_ascii_hexdigit)
-        .take(6)
-        .collect();
-    if hex.is_empty() {
-        return match rest.chars().next() {
-            Some(c) => (c, i + 1 + c.len_utf8()),
-            None => ('\\', i + 1),
-        };
-    }
-    let mut end = i + 1 + hex.len();
-    if source[end..].starts_with(|c: char| c.is_ascii_whitespace()) {
-        end += 1;
-    }
-    let ch = u32::from_str_radix(&hex, 16)
-        .ok()
-        .and_then(char::from_u32)
-        .unwrap_or('\u{fffd}');
-    (ch, end)
-}
-
-/// Ids named by `#` tokens in `source`, outside strings, comments and
-/// `url(...)`. `\/` reads as `/`, so `#inst/part` and `#inst\/part` are one id.
-fn hash_ids(source: &str) -> Vec<String> {
-    let bytes = source.as_bytes();
-    let mut out = Vec::new();
-    let mut quote = None;
-    let mut comment = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if comment {
-            if b == b'*' && bytes.get(i + 1) == Some(&b'/') {
-                comment = false;
-                i += 2;
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-        if let Some(q) = quote {
-            if b == b'\\' {
-                i += 2;
-                continue;
-            }
-            if b == q {
-                quote = None;
-            }
-            i += 1;
-            continue;
-        }
-        // `url(https://cdn.example/*)` is a url token, not a comment. A
-        // `/*` inside it must not swallow the rest of the sheet, and a `#`
-        // in a url is a fragment, not a selector.
-        if at_url(bytes, i) {
-            i = skip_url(bytes, i);
-            continue;
-        }
-        if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
-            comment = true;
-            i += 2;
-            continue;
-        }
-        if b == b'"' || b == b'\'' {
-            quote = Some(b);
-            i += 1;
-            continue;
-        }
-        // `[href=\#a\/b]` matches an attribute's value, not an id.
-        if b == b'[' {
-            i = skip_attribute(bytes, i);
-            continue;
-        }
-        if b != b'#' {
-            i += 1;
-            continue;
-        }
-        i += 1;
-        let mut id = String::new();
-        while i < bytes.len() {
-            let c = bytes[i];
-            if c == b'\\' {
-                // `\/`, `\2f ` and `\00002F` all read as `/`.
-                let (ch, next) = css_escape(source, i);
-                id.push(ch);
-                i = next;
-                continue;
-            }
-            if ident_byte(c) {
-                id.push(c as char);
-                i += 1;
-                continue;
-            }
-            // A slash continues the id only when another id character follows,
-            // so `16px/1.5` and a trailing `/` stay out of it.
-            if c == b'/' && bytes.get(i + 1).is_some_and(|n| ident_byte(*n)) {
-                id.push('/');
-                i += 1;
-                continue;
-            }
-            break;
-        }
-        if !id.is_empty() {
-            out.push(id);
-        }
-    }
-    out
-}
-
-/// Refuses a stylesheet whose selector names a node inside an instance.
-/// `#inst/part` and `#inst\/part` are the same id, and a rule written
-/// either way never reaches the rendered part. Style it with `select`,
-/// which becomes an override, or edit the component. A `/` in a value, a
-/// `url(...)`, a string or a comment is not that selector, so it stays.
+/// Refuses a stylesheet whose selector names a node inside an instance:
+/// style it with `select`, which becomes an override, or edit the component.
 fn refuse_instance_paths(doc: &Document, css: &str) -> Result<()> {
-    let rules = css::patch_rules(css).map_err(|e| e.to_string())?;
-    for rule in &rules {
-        for id in hash_ids(&rule.selector) {
-            // A path starts at an instance. Any other id with a `/` is the
-            // author's own, like `#account\/settings`.
-            let in_instance = finite_design::components::split(&id)
-                .and_then(|(root, _)| doc.get(root))
-                .is_some_and(|root| root.instance_of.is_some());
-            if in_instance {
-                return Err(instance_path_message(doc, &id));
-            }
-        }
+    match edit::instance_path_in_rules(doc, css).map_err(|e| e.to_string())? {
+        Some(path) => Err(instance_path_message(doc, &path)),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 fn instance_path_message(doc: &Document, path: &str) -> String {
@@ -1133,55 +763,23 @@ fn style(tx: &mut Transaction<'_>, css: &str, within: Option<Vec<NodeId>>) -> Re
     for board in &boards {
         let (ops, text) = {
             let t = &*tx;
-            let doc = t.view();
-            let name = doc.get(board).map(|b| b.display_name()).unwrap_or_default();
-            let sheet = doc
-                .subtree(board)
-                .into_iter()
-                .find(|n| n.tag().is_some_and(|t| t.eq_ignore_ascii_case("style")))
-                .map(|n| n.id.clone());
-            match sheet {
-                Some(sheet) => {
-                    let existing: String = doc
-                        .children(Some(&sheet))
-                        .iter()
-                        .filter_map(|c| c.text.as_deref())
-                        .collect();
-                    let (next, changes) =
-                        css::merge_sheet(&existing, css).map_err(|e| e.to_string())?;
-                    if next == existing {
-                        (
-                            Vec::new(),
-                            format!("<style> #{sheet} in {name:?} already had that."),
-                        )
-                    } else {
-                        let ops = edit::set_text(doc, &sheet, &next, &mut || fresh(t))
-                            .map_err(|e| e.to_string())?;
-                        let changes: Vec<String> =
-                            changes.iter().map(ToString::to_string).collect();
-                        (
-                            ops,
-                            format!("<style> #{sheet} in {name:?}: {}.", changes.join("; ")),
-                        )
-                    }
-                }
-                None => {
-                    let (next, _) = css::merge_sheet("", css).map_err(|e| e.to_string())?;
-                    let fragments = edit::parse_html(&format!("<style>{next}</style>"))
-                        .map_err(|e| e.to_string())?;
-                    let (ops, roots) = edit::write_fragments(
-                        doc,
-                        board,
-                        fragments,
-                        WriteMode::Append,
-                        Some(0),
-                        &mut || fresh(t),
-                    )
-                    .map_err(|e| e.to_string())?;
-                    let id = roots.first().cloned().unwrap_or_default();
-                    (ops, format!("New <style> block #{id} in {name:?}."))
-                }
-            }
+            let name = t
+                .view()
+                .get(board)
+                .map(|b| b.display_name())
+                .unwrap_or_default();
+            let merge = edit::merge_style(t.view(), board, css, &mut || fresh(t))
+                .map_err(|e| e.to_string())?;
+            let sheet = &merge.sheet;
+            let text = if merge.created {
+                format!("New <style> block #{sheet} in {name:?}.")
+            } else if merge.ops.is_empty() {
+                format!("<style> #{sheet} in {name:?} already had that.")
+            } else {
+                let changes: Vec<String> = merge.changes.iter().map(ToString::to_string).collect();
+                format!("<style> #{sheet} in {name:?}: {}.", changes.join("; "))
+            };
+            (merge.ops, text)
         };
         stage(tx, ops)?;
         parts.push(text);
@@ -1588,7 +1186,7 @@ fn component(
             " Add an instance with an html op: <div data-instance-of=\"{id}\"></div>."
         ));
     }
-    let outside = classes_styled_outside(tx.doc(), &id);
+    let outside = components::classes_styled_outside(tx.doc(), &id);
     if !outside.is_empty() {
         text.push_str(&format!(
             "\nIts classes {} are styled by <style> blocks outside it. A <style> only styles its own artboard, so instances elsewhere don't follow changes to those rules. Move the rules into a <style> inside the component, or style it inline with tokens.",
@@ -1797,7 +1395,7 @@ fn replace(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<String> 
             {
                 label(doc, id)
             }
-            _ => super::line(doc, id),
+            _ => line(doc, id),
         };
         // Copies of one stylesheet change the same way: say so once. Only a
         // style or script with the same code is a copy: other code can change
@@ -1878,14 +1476,15 @@ fn tokens(tx: &mut Transaction<'_>, f: &Fields) -> Result<String> {
     }
     let set = set.unwrap_or_default();
     let count = set.len();
-    let tokens: BTreeMap<String, Option<TokenValue>> = serde_json::from_value(Value::Object(set))
+    let tokens: BTreeMap<String, edit::TokenChange> = serde_json::from_value(Value::Object(set))
         .map_err(|_| {
-        format!(
-            "each token is a value, a value per mode, or null, like {}",
-            Kind::Tokens.example()
-        )
-    })?;
-    let ops = token_ops(tx.view(), modes.as_deref(), &tokens).map_err(|e| e.to_string())?;
+            format!(
+                "each token is a value, a value per mode, or null, like {}",
+                Kind::Tokens.example()
+            )
+        })?;
+    let ops = edit::edit_tokens(tx.view(), modes.as_deref(), &tokens, &mut node_id)
+        .map_err(|e| e.to_string())?;
     if ops.is_empty() {
         return Ok("Nothing changed: the tokens already were that.".into());
     }
@@ -1908,12 +1507,7 @@ fn page(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<(String, Op
     });
     if let Some(name) = create {
         let doc = tx.view();
-        let id = loop {
-            let id = random_id(8);
-            if doc.page(&id).is_none() {
-                break id;
-            }
-        };
+        let id = id::fresh(&mut node_id, |id| doc.page(id).is_some());
         let ops = edit::create_page(doc, id.clone(), &name).map_err(|e| e.to_string())?;
         stage(tx, ops)?;
         return Ok((
@@ -1988,63 +1582,6 @@ fn import(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use finite_design::{Document, Node, Op};
-
-    /// A component `comp0001` with part `part0001`, and instance `inst0001`.
-    fn instance() -> Document {
-        let mut doc = Document::default();
-        let mut component = Node::element("comp0001", "header");
-        component.component = true;
-        let part = Node {
-            parent: Some("comp0001".into()),
-            index: "a".into(),
-            ..Node::element("part0001", "h1")
-        };
-        let instance = Node {
-            instance_of: Some("comp0001".into()),
-            ..Node::element("inst0001", "header")
-        };
-        for node in [component, part, instance] {
-            assert!(doc.apply(&Op::Create { node }).is_some());
-        }
-        doc
-    }
-
-    #[test]
-    fn a_path_selector_is_refused_and_a_url_is_not_a_selector() {
-        let doc = instance();
-        let values = "h1 { font: 16px/1.5 sans-serif; background: url(https://cdn.example/*); color: #112233 }";
-        assert!(refuse_instance_paths(&doc, values).is_ok(), "{values}");
-
-        // A `/*` inside an unquoted url does not hide the path selector after it.
-        let raw = "h1 { background: url(https://cdn.example/*) } #inst0001/part0001 { color: red }";
-        let err = refuse_instance_paths(&doc, raw).unwrap_err();
-        let told = r##"{"op":"css","select":"#inst0001/part0001","css":"…"}"##;
-        assert!(
-            err.contains(told)
-                && err.contains("can't reach a part inside an instance")
-                && err.contains("or edit the component #comp0001"),
-            "{err}"
-        );
-        let escaped = r"#inst0001\/part0001 { color: blue }";
-        let err = refuse_instance_paths(&doc, escaped).unwrap_err();
-        assert!(err.contains(told) && err.contains("#comp0001"), "{err}");
-
-        // A slash in a value, a fragment, a quoted url and a comment stay.
-        let kept = r##"h1 { font: 16px/1.5 sans-serif; background: url( https://cdn.example/* ) } p { background: url(https://cdn.example/a#inst0001/part0001) } b { background: url("https://cdn.example/*") } /* #inst0001/part0001 */ h1 { content: "#inst0001/part0001" }"##;
-        assert!(refuse_instance_paths(&doc, kept).is_ok(), "{kept}");
-        // The same `#` inside a selector's string or comment is not the id.
-        assert!(
-            refuse_instance_paths(&doc, r##"a[href="#inst0001/part0001"] { color: red }"##).is_ok()
-        );
-        assert!(refuse_instance_paths(&doc, "h1 /* #inst0001/part0001 */ { color: red }").is_ok());
-        // An author's own id with a slash, outside any instance, is kept.
-        assert!(refuse_instance_paths(&doc, r"#account\/settings { color: red }").is_ok());
-        assert!(refuse_instance_paths(&doc, r"[href=\#inst0001\/part0001] { color: red }").is_ok());
-        // A hex escape for `/` names the same path, inside :is() too.
-        let hex = refuse_instance_paths(&doc, r":is(#inst0001\2f part0001) { color: red }");
-        assert!(hex.unwrap_err().contains(told));
-    }
 
     #[test]
     fn ids_are_masked_only_when_they_are_eight_characters() {
@@ -2082,108 +1619,5 @@ mod tests {
              Wrote 1 root node:\ni #nnnnnnn1 \"x\"\n\
              before div #bbbbbbb1: Wrote 1 root node:\nb #nnnnnnn5"
         );
-    }
-
-    #[test]
-    fn doc6_errors_name_doc6_ops() {
-        let style = for_doc6("use update_styles to change inline styles");
-        assert!(style.contains("\"op\": \"css\""), "{style}");
-        assert!(style.contains("\"select\": \"#id\""), "{style}");
-        assert!(style.contains("style isn't an attribute"), "{style}");
-
-        let named =
-            for_doc6("#h1abc: style isn't an attribute; use update_styles to change inline styles");
-        assert!(named.contains("\"select\": \"#h1abc\""), "{named}");
-        assert!(named.starts_with("#h1abc:"), "{named}");
-
-        // The node inside an instance, not just the instance, is what the css op selects.
-        let inside = for_doc6(
-            "#k2n0d9xa/9qd2h0ce: style isn't an attribute; use update_styles to change inline styles",
-        );
-        assert!(
-            inside.contains("\"select\": \"#k2n0d9xa/9qd2h0ce\""),
-            "{inside}"
-        );
-        assert!(inside.starts_with("#k2n0d9xa/9qd2h0ce:"), "{inside}");
-
-        let detach = for_doc6(
-            "#i/new2 is inside instance #i of component \"Bar\", so it can't be deleted on its own. \
-             Edit the component #new1 to change every instance, or detach_instance #i first.",
-        );
-        assert!(
-            detach.contains("{\"op\": \"component\", \"select\": \"#i\", \"detach\": true}"),
-            "{detach}"
-        );
-        assert!(detach.ends_with('.'), "{detach}");
-
-        let made = for_doc6(
-            "#i/new2 is inside an instance; make a component from the component's own nodes, or detach_instance #i first",
-        );
-        assert!(
-            made.contains("{\"op\": \"component\", \"select\": \"#i\", \"detach\": true}"),
-            "{made}"
-        );
-
-        let component = for_doc6("#box isn't a component; make it one with create_component");
-        assert!(
-            component.contains("{\"op\": \"component\", \"select\": \"#box\"}"),
-            "{component}"
-        );
-
-        let html = for_doc6(
-            "elements inside it need the data-id get_html gave them. Add new content to the component",
-        );
-        assert!(html.contains("read with as: \"html\""), "{html}");
-
-        let copy = for_doc6("leave it out and replace it with insert_instance.");
-        assert!(
-            copy.contains("<div data-instance-of=\"…\"></div>"),
-            "{copy}"
-        );
-
-        let bare = for_doc6(
-            "#i/new2 is inside instance #i; detach #i, or the nested instance from the component it's in",
-        );
-        assert!(
-            bare.contains("{\"op\": \"component\", \"select\": \"#i\", \"detach\": true}"),
-            "{bare}"
-        );
-        assert!(!bare.contains("detach #"), "{bare}");
-
-        // The phrase is the value the agent set, inside a different error.
-        // Rewriting by substring turns that value into css advice.
-        let quoted = for_doc6(
-            "srcdoc=\"use update_styles to change inline styles\" isn't allowed: no srcdoc, and no javascript: or vbscript: URLs",
-        );
-        assert!(
-            quoted.contains("srcdoc=\"use update_styles to change inline styles\""),
-            "{quoted}"
-        );
-        assert!(!quoted.contains("\"op\": \"css\""), "{quoted}");
-
-        let mode = for_doc6("can't replace an artboard; use mode \"replace-children\" instead");
-        assert!(mode.contains("mode \"inner\""), "{mode}");
-        assert!(!mode.contains("replace-children"), "{mode}");
-
-        for error in [
-            &style, &named, &inside, &detach, &made, &component, &html, &copy, &bare, &mode,
-        ] {
-            for name in [
-                "update_styles",
-                "write_html",
-                "set_attributes",
-                "replace_values",
-                "detach_instance",
-                "set_text_content",
-                "move_nodes",
-                "delete_nodes",
-                "get_html",
-                "get_screenshot",
-                "create_component",
-                "insert_instance",
-            ] {
-                assert!(!error.contains(name), "{name} in {error}");
-            }
-        }
     }
 }
