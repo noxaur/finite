@@ -18,6 +18,70 @@ import type {
 } from "./schema";
 import { connectDesign, type SocketStatus } from "./socket";
 
+/** Where a batch of applied ops came from. */
+export type Origin = "draft" | "local" | "remote";
+
+/**
+ * What one call on the replica changed: a snapshot, a gesture's draft
+ * frame, this tab's own edit, or a change from the server. Panels that
+ * draw the document invalidate what they cache from it, so they follow
+ * every edit the moment the canvas does.
+ */
+export interface DocChange {
+  readonly origin: Origin;
+  /** A snapshot replaced everything. */
+  readonly reset: boolean;
+  /**
+   * Nodes whose own row may look different: every node set, created or
+   * moved, the parents whose children changed, and the element whose lone
+   * text child changed, since it reads as that text.
+   */
+  readonly touched: ReadonlySet<string>;
+  /** A node was created, deleted or moved. */
+  readonly structural: boolean;
+  readonly pages: boolean;
+  readonly tokens: boolean;
+}
+
+/** The `DocChange` for the ops one call applied. */
+export function summarize(origin: Origin, applied: ReadonlyArray<Applied>): DocChange {
+  const touched = new Set<string>();
+  let structural = false;
+  let pages = false;
+  let tokens = false;
+  const parent = (id: string | null) => id !== null && touched.add(id);
+  for (const a of applied) {
+    switch (a.op) {
+      case "create":
+        structural = true;
+        touched.add(a.node.id);
+        parent(a.node.parent);
+        break;
+      case "delete":
+        structural = true;
+        parent(a.parent);
+        break;
+      case "move":
+        structural = true;
+        touched.add(a.node.id);
+        parent(a.node.parent);
+        parent(a.from);
+        break;
+      case "set":
+        touched.add(a.node.id);
+        if (a.node.type === "text") parent(a.node.parent);
+        break;
+      case "tokens":
+        tokens = true;
+        break;
+      case "page":
+        pages = true;
+        break;
+    }
+  }
+  return { origin, reset: false, touched, structural, pages, tokens };
+}
+
 /** One line in the activity list: a recent change and who made it. */
 export interface Activity {
   readonly seq: number;
@@ -57,7 +121,10 @@ export interface SessionState {
   readonly tokens: TokenTable;
   /** The design's pages in order, with how many artboards each has. */
   readonly pages: ReadonlyArray<PageEntry & { readonly artboardCount: number }>;
-  /** Bumps after every snapshot or change, so anything positioned on the design can follow it. */
+  /**
+   * Bumps after every snapshot, change and edit of this tab's own (not each
+   * draft frame), so anything positioned on the design can follow it.
+   */
   readonly version: number;
 }
 
@@ -120,6 +187,7 @@ export class DesignSession {
   private early: Array<{ readonly mid: number; readonly seq: number; readonly error?: string }> =
     [];
   private readonly draftLost = new Set<(reason: string) => void>();
+  private readonly docListeners = new Set<(change: DocChange) => void>();
 
   /** `view` must draw from `replica`, so pass the renderer the same replica. */
   constructor(
@@ -138,6 +206,44 @@ export class DesignSession {
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /** Calls `listener` after every call that changed the document, draft frames included. */
+  subscribeDoc(listener: (change: DocChange) => void): () => void {
+    this.docListeners.add(listener);
+    return () => this.docListeners.delete(listener);
+  }
+
+  /**
+   * Runs one call on the replica: each op it applies goes to the view, the
+   * view catches up, and the document's listeners hear what changed. Every
+   * call that changes the replica goes through here, so no panel waits for
+   * the server to learn about the tab's own edits.
+   */
+  private patch<T>(origin: Origin, call: (each: (applied: Applied) => void) => T): T {
+    const applied: Applied[] = [];
+    const result = call((a) => {
+      applied.push(a);
+      this.view.apply(a);
+    });
+    this.view.flush();
+    if (applied.length > 0) {
+      const change = summarize(origin, applied);
+      for (const listener of this.docListeners) listener(change);
+      // A draft frame moves only what's drawn; pages and tokens are listed in the chrome.
+      if (origin !== "draft" || change.pages || change.tokens) this.changed = true;
+    }
+    return result;
+  }
+
+  /** Set by `patch` when the session's own state should follow the document. */
+  private changed = false;
+
+  /** Updates the state that follows the document, if `patch` changed it outside `receive`. */
+  private resync() {
+    if (!this.changed) return;
+    this.changed = false;
+    this.update(this.synced());
   }
 
   /**
@@ -171,8 +277,8 @@ export class DesignSession {
    */
   draft(edits: ReadonlyArray<UserEdit> | null): LocalOutcome {
     // Planned as the mutation it'll be sent as, so the nodes it makes keep their ids.
-    const outcome = this.replica.draft(this.nextMid, edits, (a) => this.view.apply(a));
-    this.view.flush();
+    const outcome = this.patch("draft", (each) => this.replica.draft(this.nextMid, edits, each));
+    this.resync();
     return outcome;
   }
 
@@ -183,8 +289,8 @@ export class DesignSession {
    */
   commit(edits: ReadonlyArray<UserEdit>): Promise<EditResult> {
     const mid = this.nextMid++;
-    const outcome = this.replica.propose(mid, edits, (a) => this.view.apply(a));
-    this.view.flush();
+    const outcome = this.patch("local", (each) => this.replica.propose(mid, edits, each));
+    this.resync();
     if (outcome.error !== null) {
       return Promise.resolve({ kind: "refused", message: outcome.error });
     }
@@ -234,8 +340,8 @@ export class DesignSession {
     this.early = this.early.filter((s) => s.seq > this.replica.seq);
     for (const { mid, error } of ready) {
       if (this.waiting.get(mid)?.message.type === "mutate") {
-        this.replica.settle(mid, (a) => this.view.apply(a));
-        this.view.flush();
+        this.patch("remote", (each) => this.replica.settle(mid, each));
+        this.resync();
       }
       this.answer(
         mid,
@@ -256,6 +362,16 @@ export class DesignSession {
         this.early = [];
         for (const mid of [...this.waiting.keys()]) this.answer(mid, { kind: "lost" });
         this.view.reset();
+        const reset: DocChange = {
+          origin: "remote",
+          reset: true,
+          touched: new Set(),
+          structural: true,
+          pages: true,
+          tokens: true,
+        };
+        for (const listener of this.docListeners) listener(reset);
+        this.changed = false;
         this.update({
           meta: message.snapshot.meta,
           comments: new Map(message.snapshot.comments.map((c) => [c.id, c])),
@@ -338,8 +454,9 @@ export class DesignSession {
     const mine = mutation?.client === this.client ? mutation.mid : null;
     // One call into WebAssembly for the whole change; the view patches op by op.
     this.view.setActor?.(mine === null ? actor : null);
-    const outcome = this.replica.receive(change.ops, mine, (applied) => this.view.apply(applied));
-    this.view.flush();
+    const outcome = this.patch("remote", (each) => this.replica.receive(change.ops, mine, each));
+    // `receive` updates the state the document drives itself.
+    this.changed = false;
     this.view.setActor?.(null);
     this.replica.seq = change.seq;
     if (mine !== null) this.answer(mine, { kind: "landed" });

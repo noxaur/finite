@@ -147,7 +147,7 @@ const styles = stylex.create({
   tool: {
     display: "inline-grid",
     placeItems: "center",
-    minWidth: 28,
+    minWidth: 27,
     height: 24,
     paddingInline: 6,
     borderWidth: 0,

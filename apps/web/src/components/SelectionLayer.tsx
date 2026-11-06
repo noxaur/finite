@@ -6,6 +6,7 @@ import type { Camera } from "@/design/camera";
 import type { Editor } from "@/design/editing/editor";
 import { HANDLES, type Handle } from "@/design/editing/geometry";
 import type { Renderer } from "@/design/renderer";
+import type { DesignSession } from "@/design/session";
 import { colors, radii, space } from "@/styles/tokens.stylex";
 
 /** The cursor over each resize handle. */
@@ -20,27 +21,46 @@ const CURSORS: Record<Handle, string> = {
   se: "nwse-resize",
 };
 
+/** Draws the caller again once per frame in which the design changed. */
+export function useRedrawOnChange(session: DesignSession) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    let frame = 0;
+    const off = session.subscribeDoc(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => setTick((t) => t + 1));
+    });
+    return () => {
+      off();
+      cancelAnimationFrame(frame);
+    };
+  }, [session]);
+}
+
 /**
  * Draws what the editor shows on the canvas: the selection with its resize
  * handles, the node under the pointer, and the container a move drops
- * into. It sits in the camera's world, so it pans and zooms with the design.
- * `version` changes whenever the design does, so it follows edits.
+ * into. It sits in the camera's world, so it pans and zooms with the design,
+ * and it draws again after every change to the design, drafts included, so
+ * outlines follow what a panel previews.
  */
 export function SelectionLayer({
   editor,
+  session,
   renderer,
   camera,
 }: {
   editor: Editor;
+  session: DesignSession;
   renderer: Renderer;
   camera: Camera;
-  version: number;
 }) {
   const [state, setState] = useState(editor.state);
   useEffect(() => {
     setState(editor.state);
     return editor.subscribe(() => setState(editor.state));
   }, [editor]);
+  useRedrawOnChange(session);
 
   const rectOf = (id: string) => {
     const rect = renderer.nodeRect(id);
@@ -126,9 +146,9 @@ const styles = stylex.create({
   notice: {
     position: "absolute",
     left: "50%",
-    bottom: 76,
+    bottom: 75,
     transform: "translateX(-50%)",
-    maxWidth: "min(480px, calc(100% - 32px))",
+    maxWidth: "min(480px, calc(100% - 30px))",
     paddingBlock: space.xs,
     paddingInline: space.sm,
     borderRadius: radii.sm,

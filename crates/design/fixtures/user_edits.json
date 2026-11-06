@@ -75,5 +75,35 @@
       "instance"
     ],
     "kind": "detach"
+  },
+  {
+    "attrs": {
+      "data-locked": null,
+      "hidden": ""
+    },
+    "ids": [
+      "card"
+    ],
+    "kind": "setAttributes"
+  },
+  {
+    "kind": "createPage",
+    "name": "Flows"
+  },
+  {
+    "id": "page",
+    "kind": "renamePage",
+    "name": "Drafts"
+  },
+  {
+    "id": "page",
+    "kind": "deletePage"
+  },
+  {
+    "ids": [
+      "board"
+    ],
+    "kind": "moveToPage",
+    "page": "page"
   }
 ]

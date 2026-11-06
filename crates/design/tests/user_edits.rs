@@ -294,3 +294,76 @@ fn examples_match_the_shared_fixture() {
     let back: Vec<UserEdit> = serde_json::from_value(stored).unwrap();
     assert_eq!(back, UserEdit::examples());
 }
+
+fn attrs(ids: &[&str], attrs: &[(&str, Option<&str>)]) -> UserEdit {
+    UserEdit::SetAttributes {
+        ids: ids.iter().map(|s| s.to_string()).collect(),
+        attrs: attrs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.map(Into::into)))
+            .collect(),
+    }
+}
+
+#[test]
+fn attributes_rename_hide_and_lock_layers() {
+    let mut d = design();
+    let rename = attrs(&["a"], &[("data-name", Some("Header"))]);
+    assert_eq!(user_edit::label(std::slice::from_ref(&rename)), "Rename");
+    apply(&mut d, &[rename]);
+    assert_eq!(d.doc().get("a").unwrap().name.as_deref(), Some("Header"));
+
+    let hide = attrs(&["a", "b"], &[("hidden", Some(""))]);
+    assert_eq!(user_edit::label(std::slice::from_ref(&hide)), "Hide");
+    apply(&mut d, &[hide]);
+    assert!(d.doc().get("b").unwrap().attrs.contains_key("hidden"));
+    apply(&mut d, &[attrs(&["a", "b"], &[("hidden", None)])]);
+    assert!(!d.doc().get("b").unwrap().attrs.contains_key("hidden"));
+
+    let lock = attrs(&["c"], &[("data-locked", Some(""))]);
+    assert_eq!(user_edit::label(std::slice::from_ref(&lock)), "Lock");
+    assert!(
+        plan(&d, &[attrs(&["c"], &[("onclick", Some("x"))])])
+            .unwrap_err()
+            .contains("event handler")
+    );
+}
+
+#[test]
+fn pages_are_added_renamed_moved_to_and_deleted() {
+    let mut d = design();
+    apply(
+        &mut d,
+        &[UserEdit::CreatePage {
+            name: "Flows".into(),
+        }],
+    );
+    let pages = d.doc().pages();
+    assert_eq!(pages.len(), 2);
+    let id = pages[1].0.to_owned();
+
+    apply(
+        &mut d,
+        &[UserEdit::RenamePage {
+            id: id.clone(),
+            name: "Drafts".into(),
+        }],
+    );
+    assert_eq!(d.doc().page(&id).unwrap().name, "Drafts");
+
+    apply(
+        &mut d,
+        &[UserEdit::MoveToPage {
+            ids: vec!["board".into()],
+            page: id.clone(),
+        }],
+    );
+    assert_eq!(
+        d.doc().get("board").unwrap().page.as_deref(),
+        Some(id.as_str())
+    );
+
+    apply(&mut d, &[UserEdit::DeletePage { id: id.clone() }]);
+    assert!(d.doc().page(&id).is_none());
+    assert!(d.doc().get("board").is_none(), "its artboards go with it");
+}

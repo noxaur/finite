@@ -245,7 +245,7 @@ const styles = stylex.create({
   list: {
     display: "flex",
     flexDirection: "column",
-    gap: 2,
+    gap: 3,
     margin: 0,
     padding: 0,
     overflowY: "auto",
@@ -271,12 +271,12 @@ const styles = stylex.create({
   icon: {
     flexShrink: 0,
     width: 24,
-    height: 22,
-    marginTop: 2,
+    height: 21,
+    marginTop: 3,
     transform: "scale(0.6)",
     transformOrigin: "0 0",
   },
-  text: { display: "flex", flexDirection: "column", gap: 2, minWidth: 0 },
+  text: { display: "flex", flexDirection: "column", gap: 3, minWidth: 0 },
   meta: { display: "flex", alignItems: "baseline", gap: space.xs },
   author: { fontWeight: 600 },
   body: {

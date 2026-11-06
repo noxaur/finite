@@ -7,6 +7,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Api, Refused } from "@/api/Api";
 import { Camera, union, type View } from "@/design/camera";
 import { Editor } from "@/design/editing/editor";
+import { LayerModel } from "@/design/editing/layers";
 import { Presenter, type PresenterState } from "@/design/presenter";
 import { type FrameKey, type Hit, Renderer } from "@/design/renderer";
 import { Replica } from "@/design/replica";
@@ -31,7 +32,7 @@ import {
 } from "./Comments";
 import { CommentsPanel } from "./CommentsPanel";
 import { Icon } from "./Icons";
-import { Inspector } from "./Inspector";
+import { Inspector } from "./inspector/Inspector";
 import { LayersTree } from "./LayersTree";
 import { type LeftMode, LeftSidebar } from "./LeftSidebar";
 import { ToolRail } from "./ToolRail";
@@ -175,6 +176,7 @@ export function DesignCanvas({ id }: { id: string }) {
   const rendererRef = useRef<Renderer | null>(null);
   const sessionRef = useRef<DesignSession | null>(null);
   const editorRef = useRef<Editor | null>(null);
+  const layersRef = useRef<LayerModel | null>(null);
   const presenterRef = useRef<Presenter | null>(null);
 
   // Re-rendering on every session update also moves pins with their artboards.
@@ -332,6 +334,9 @@ export function DesignCanvas({ id }: { id: string }) {
     sessionRef.current = session;
     const editor = new Editor(viewport, session, renderer, () => camera.view.zoom);
     editorRef.current = editor;
+    const layers = new LayerModel(replica);
+    layersRef.current = layers;
+    const unwatchDoc = session.subscribeDoc((change) => layers.apply(change));
     rendererRef.current = renderer;
     cameraRef.current = camera;
     const unwatchSelection = editor.subscribe(() => setSelection(editor.state.selection));
@@ -558,6 +563,8 @@ export function DesignCanvas({ id }: { id: string }) {
       resize.disconnect();
       editor.dispose();
       editorRef.current = null;
+      unwatchDoc();
+      layersRef.current = null;
       camera.dispose();
       renderer.dispose();
       // The document lives in WebAssembly memory, which isn't garbage collected.
@@ -768,6 +775,25 @@ export function DesignCanvas({ id }: { id: string }) {
     framedRef.current = bounds ? (cameraRef.current?.view ?? null) : null;
   };
 
+  /** Adds a page and shows it; it shows before the server answers. */
+  const addPage = () => {
+    const session = sessionRef.current;
+    if (!session || !editorRef.current) return;
+    const before = new Set(session.replica.pages.map((p) => p.id));
+    const name = `Page ${session.replica.pages.length + 1}`;
+    void editorRef.current.commit([{ kind: "createPage", name }]);
+    const added = session.replica.pages.find((p) => !before.has(p.id));
+    if (added) showPage(added.id);
+  };
+
+  const pageActions = {
+    add: addPage,
+    rename: (pageId: string, name: string) =>
+      void editorRef.current?.commit([{ kind: "renamePage", id: pageId, name }]),
+    remove: (pageId: string) =>
+      void editorRef.current?.commit([{ kind: "deletePage", id: pageId }]),
+  };
+
   // From the comments list: open the thread and bring its pin into view,
   // on its artboard's page.
   const showComment = (commentId: string) => {
@@ -915,6 +941,10 @@ export function DesignCanvas({ id }: { id: string }) {
   };
 
   // From Layers: center the canvas on a layer.
+  /** The page whose row in the sidebar is under a page point. */
+  const pageAt = (x: number, y: number) =>
+    document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-page-id]")?.dataset.pageId ?? null;
+
   const revealNode = (nodeId: string) => {
     const rect = canvasRect(nodeId);
     if (rect) cameraRef.current?.centerOn(rect.x + rect.width / 2, rect.y + rect.height / 2);
@@ -1027,19 +1057,23 @@ export function DesignCanvas({ id }: { id: string }) {
           pages={pages}
           page={page?.id ?? null}
           onPage={showPage}
+          pageActions={pageActions}
           presence={presence}
           listening={listening}
-          layers={(query) =>
+          layers={(query, onDropPage) =>
             editorRef.current &&
+            layersRef.current &&
             replica &&
             page && (
               <LayersTree
+                model={layersRef.current}
                 replica={replica}
                 editor={editorRef.current}
                 page={page.id}
                 query={query}
                 onReveal={revealNode}
-                version={session.version}
+                onPageAt={pageAt}
+                onDropPage={onDropPage}
               />
             )
           }
@@ -1100,9 +1134,9 @@ export function DesignCanvas({ id }: { id: string }) {
             {!presenting && editorRef.current && rendererRef.current && cameraRef.current && (
               <SelectionLayer
                 editor={editorRef.current}
+                session={sessionRef.current!}
                 renderer={rendererRef.current}
                 camera={cameraRef.current}
-                version={session.version}
               />
             )}
             {(!presenting || tool === "comment") &&
@@ -1241,10 +1275,10 @@ export function DesignCanvas({ id }: { id: string }) {
             replica && (
               <Inspector
                 editor={editorRef.current}
+                session={sessionRef.current!}
                 renderer={rendererRef.current}
                 replica={replica}
                 tokens={session.tokens}
-                version={session.version}
               />
             )
           )}
@@ -1344,7 +1378,7 @@ const styles = stylex.create({
     position: "absolute",
     left: 0,
     bottom: "100%",
-    marginBottom: 2,
+    marginBottom: 3,
     paddingInline: 6,
     paddingBlock: 1,
     borderRadius: 4,
@@ -1395,8 +1429,8 @@ const styles = stylex.create({
     fontSize: 12,
   },
   dot: {
-    width: 8,
-    height: 8,
+    width: 6,
+    height: 6,
     borderRadius: "50%",
   },
   online: { backgroundColor: colors.ok },
@@ -1417,7 +1451,7 @@ const styles = stylex.create({
     fontWeight: 500,
   },
   tool: {
-    minWidth: 28,
+    minWidth: 27,
     height: 24,
     paddingInline: 6,
     borderWidth: 0,
@@ -1449,7 +1483,7 @@ const styles = stylex.create({
   gone: { display: "none" },
   notice: {
     left: "50%",
-    bottom: 64,
+    bottom: 63,
     transform: "translateX(-50%)",
     margin: 0,
   },

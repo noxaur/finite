@@ -3,7 +3,7 @@
 import * as stylex from "@stylexjs/stylex";
 import { type ReactNode, useRef, useState } from "react";
 import type { Listener, Presence } from "@/design/schema";
-import { colors, radii, shadows, size, space } from "@/styles/tokens.stylex";
+import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import { Icon } from "./Icons";
 
 export type LeftMode = "design" | "tokens";
@@ -18,7 +18,8 @@ interface PageRow {
  * The left side of the canvas: the design's name, then either its pages
  * and layers or its tokens, and the agents working on it. The canvas
  * shows one page at a time, so picking one swaps which artboards are
- * drawn. Agents create and fill pages; people switch between them.
+ * drawn. People and agents add, rename and delete pages; artboards dragged
+ * from Layers onto a page move there.
  */
 export function LeftSidebar({
   name,
@@ -28,6 +29,7 @@ export function LeftSidebar({
   pages,
   page,
   onPage,
+  pageActions,
   layers,
   tokens,
   presence,
@@ -40,14 +42,21 @@ export function LeftSidebar({
   pages: ReadonlyArray<PageRow>;
   page: string | null;
   onPage: (id: string) => void;
-  /** The layers of the shown page, matching the search typed. */
-  layers: (query: string) => ReactNode;
+  pageActions: {
+    add(): void;
+    rename(id: string, name: string): void;
+    remove(id: string): void;
+  };
+  /** The layers of the shown page, matching the search typed. A drag over a page calls `onDropPage`. */
+  layers: (query: string, onDropPage: (page: string | null) => void) => ReactNode;
   tokens: ReactNode;
   presence: ReadonlyArray<Presence>;
   listening: ReadonlyArray<Listener>;
 }) {
   const [query, setQuery] = useState<string | null>(null);
   const [pagesOpen, setPagesOpen] = useState(true);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [dropPage, setDropPage] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
   return (
@@ -112,41 +121,109 @@ export function LeftSidebar({
         <>
           {query === null && pages.length > 0 && (
             <section aria-label="Pages" {...stylex.props(styles.section)}>
-              <button
-                type="button"
-                aria-expanded={pagesOpen}
-                onClick={() => setPagesOpen(!pagesOpen)}
-                {...stylex.props(styles.label, styles.toggle)}
-              >
-                <span {...stylex.props(styles.chevron, pagesOpen && styles.chevronOpen)}>
-                  <Icon name="next" size={10} />
-                </span>
-                Pages
-              </button>
+              <div {...stylex.props(stylex.defaultMarker(), styles.labelRow)}>
+                <button
+                  type="button"
+                  aria-expanded={pagesOpen}
+                  onClick={() => setPagesOpen(!pagesOpen)}
+                  {...stylex.props(styles.label, styles.toggle)}
+                >
+                  <span {...stylex.props(styles.chevron, pagesOpen && styles.chevronOpen)}>
+                    <Icon name="next" size={16} />
+                  </span>
+                  Pages
+                </button>
+                <button
+                  type="button"
+                  aria-label="Add page"
+                  title="Add page"
+                  onClick={() => {
+                    setPagesOpen(true);
+                    pageActions.add();
+                  }}
+                  {...stylex.props(styles.iconButton, styles.small, styles.onHover)}
+                >
+                  <Icon name="plus" size={14} />
+                </button>
+              </div>
               {pagesOpen && (
                 <ol {...stylex.props(styles.pages)}>
                   {pages.map((p) => (
-                    <li key={p.id}>
-                      <button
-                        type="button"
-                        aria-current={p.id === page ? "page" : undefined}
-                        onClick={() => onPage(p.id)}
-                        title={p.name}
-                        {...stylex.props(styles.row, p.id === page && styles.rowOn)}
-                      >
-                        <span {...stylex.props(styles.rowIcon)}>
-                          <Icon name="page" size={14} />
-                        </span>
-                        <span {...stylex.props(styles.rowName)}>{p.name}</span>
-                        <span {...stylex.props(styles.count)}>{p.artboardCount}</span>
-                      </button>
+                    <li
+                      key={p.id}
+                      data-page-id={p.id}
+                      {...stylex.props(stylex.defaultMarker(), styles.pageItem)}
+                    >
+                      {renaming === p.id ? (
+                        <input
+                          aria-label="Page name"
+                          defaultValue={p.name}
+                          autoFocus
+                          spellCheck={false}
+                          onFocus={(e) => e.currentTarget.select()}
+                          onBlur={(e) => {
+                            const next = e.target.value.trim();
+                            if (next && next !== p.name) pageActions.rename(p.id, next);
+                            setRenaming(null);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") e.currentTarget.blur();
+                            else if (e.key === "Escape") {
+                              e.currentTarget.value = p.name;
+                              e.currentTarget.blur();
+                            }
+                          }}
+                          {...stylex.props(styles.pageInput)}
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          aria-current={p.id === page ? "page" : undefined}
+                          onClick={() => onPage(p.id)}
+                          onDoubleClick={() => setRenaming(p.id)}
+                          title={`${p.name}, ${p.artboardCount} ${p.artboardCount === 1 ? "artboard" : "artboards"} (double-click to rename)`}
+                          {...stylex.props(
+                            styles.row,
+                            p.id === page && styles.rowOn,
+                            dropPage === p.id && styles.rowDrop,
+                          )}
+                        >
+                          <span {...stylex.props(styles.rowIcon)}>
+                            <Icon name="page" size={16} />
+                          </span>
+                          <span {...stylex.props(styles.rowName)}>{p.name}</span>
+                        </button>
+                      )}
+                      {pages.length > 1 && p.id === page && renaming !== p.id && (
+                        <button
+                          type="button"
+                          aria-label={`Delete ${p.name}`}
+                          title="Delete page and its artboards (⌘Z brings it back)"
+                          onClick={() => pageActions.remove(p.id)}
+                          {...stylex.props(
+                            styles.iconButton,
+                            styles.small,
+                            styles.pageDelete,
+                            styles.onHover,
+                          )}
+                        >
+                          <Icon name="close" size={12} />
+                        </button>
+                      )}
                     </li>
                   ))}
                 </ol>
               )}
             </section>
           )}
-          <section aria-label="Layers" {...stylex.props(styles.section, styles.grow)}>
+          <section
+            aria-label="Layers"
+            {...stylex.props(
+              styles.section,
+              styles.grow,
+              query === null && pages.length > 0 && styles.rule,
+            )}
+          >
             {query === null ? (
               <p {...stylex.props(styles.label)}>Layers</p>
             ) : (
@@ -163,7 +240,7 @@ export function LeftSidebar({
                 {...stylex.props(styles.search)}
               />
             )}
-            {layers(query ?? "")}
+            {layers(query ?? "", setDropPage)}
           </section>
         </>
       )}
@@ -191,6 +268,19 @@ function AgentsFooter({
   const working = presence.filter((p) => p.status).length;
   return (
     <footer aria-label="Agents" {...stylex.props(styles.footer)}>
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+        {...stylex.props(styles.footerButton)}
+      >
+        <span {...stylex.props(styles.chevron, styles.footerChevron, open && styles.chevronOpen)}>
+          <Icon name="next" size={16} />
+        </span>
+        <span {...stylex.props(styles.rowName)}>Agents</span>
+        {!open && working > 0 && <span {...stylex.props(styles.working)}>{working} working</span>}
+        <span {...stylex.props(styles.count)}>{agents.length}</span>
+      </button>
       {open && (
         <ul {...stylex.props(styles.agents)}>
           {agents.length === 0 && <li {...stylex.props(styles.idle)}>No agents connected.</li>}
@@ -199,26 +289,16 @@ function AgentsFooter({
               <span {...stylex.props(styles.chip, a.status !== null && styles.chipOn)}>
                 {a.name}
               </span>
-              <span {...stylex.props(styles.status)} title={a.status ?? undefined}>
+              <span
+                {...stylex.props(styles.status, a.status === null && styles.statusIdle)}
+                title={a.status ?? undefined}
+              >
                 {a.status ?? "Idle"}
               </span>
             </li>
           ))}
         </ul>
       )}
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen(!open)}
-        {...stylex.props(styles.footerButton)}
-      >
-        <span {...stylex.props(styles.chevron, styles.chevronUp, open && styles.chevronDown)}>
-          <Icon name="next" size={10} />
-        </span>
-        <span {...stylex.props(styles.rowName)}>Agents</span>
-        {working > 0 && <span {...stylex.props(styles.count)}>{working} working</span>}
-        <span {...stylex.props(styles.count)}>{agents.length}</span>
-      </button>
     </footer>
   );
 }
@@ -241,7 +321,9 @@ const styles = stylex.create({
     height: size.lg,
     flexShrink: 0,
     paddingInline: space.ms,
-    paddingRight: space.sm,
+    borderBottomWidth: 1,
+    borderBottomStyle: "solid",
+    borderBottomColor: colors.border,
   },
   name: {
     flexGrow: 1,
@@ -277,7 +359,8 @@ const styles = stylex.create({
     display: "flex",
     flexShrink: 0,
     marginInline: space.ms,
-    marginBottom: space.sm,
+    marginTop: space.ms,
+    marginBottom: space.xs,
     padding: space.px,
     borderRadius: radii.sm,
     backgroundColor: colors.sunk,
@@ -302,12 +385,52 @@ const styles = stylex.create({
     flexDirection: "column",
     gap: space.px,
     flexShrink: 0,
-    paddingTop: space.ms,
+    paddingBlock: space.ms,
+  },
+  rule: {
     borderTopWidth: 1,
     borderTopStyle: "solid",
     borderTopColor: colors.borderSoft,
   },
   grow: { flexGrow: 1, flexShrink: 1, minHeight: 0 },
+  labelRow: {
+    display: "flex",
+    alignItems: "center",
+    paddingRight: space.sm,
+  },
+  /** Shown while the pointer is over its row, or the control has focus. */
+  onHover: {
+    opacity: {
+      default: 0,
+      [stylex.when.ancestor(":hover")]: 1,
+      ":focus-visible": 1,
+    },
+  },
+  small: { width: 21, height: 21 },
+  pageItem: {
+    position: "relative",
+    display: "flex",
+    alignItems: "center",
+  },
+  pageDelete: {
+    position: "absolute",
+    right: space.sm,
+    backgroundColor: { default: colors.sunk, ":hover": colors.bg },
+  },
+  pageInput: {
+    flexGrow: 1,
+    height: size.sm,
+    marginInline: space.sm,
+    paddingInline: space.xs,
+    borderWidth: 0,
+    borderRadius: radii.xs,
+    backgroundColor: colors.surface,
+    color: colors.text,
+    font: "inherit",
+    fontSize: 14,
+    outline: `2px solid ${colors.brand}`,
+  },
+  rowDrop: { boxShadow: `inset 0 0 0 2px ${colors.brand}` },
   label: {
     display: "flex",
     alignItems: "center",
@@ -318,8 +441,10 @@ const styles = stylex.create({
     color: colors.muted,
     fontSize: 12,
     fontWeight: 500,
+    lineHeight: "16px",
   },
   toggle: {
+    flexGrow: 1,
     width: "100%",
     borderWidth: 0,
     backgroundColor: "transparent",
@@ -327,6 +452,7 @@ const styles = stylex.create({
     font: "inherit",
     fontSize: 12,
     fontWeight: 500,
+    lineHeight: "16px",
     cursor: "var(--cursor-pointer, pointer)",
   },
   chevron: {
@@ -335,15 +461,13 @@ const styles = stylex.create({
     transition: "transform 200ms cubic-bezier(.23, 1, .32, 1)",
   },
   chevronOpen: { transform: "rotate(90deg)" },
-  chevronUp: { transform: "rotate(-90deg)" },
-  chevronDown: { transform: "rotate(90deg)" },
+  footerChevron: { color: colors.muted },
   pages: {
     display: "flex",
     flexDirection: "column",
     gap: space.px,
     maxHeight: 180,
     margin: 0,
-    marginBottom: space.sm,
     padding: 0,
     overflowY: "auto",
     listStyle: "none",
@@ -360,6 +484,7 @@ const styles = stylex.create({
     color: colors.text,
     font: "inherit",
     fontSize: 14,
+    lineHeight: "20px",
     textAlign: "left",
     cursor: "var(--cursor-pointer, pointer)",
   },
@@ -378,10 +503,12 @@ const styles = stylex.create({
   },
   count: {
     color: colors.faint,
+    fontFamily: fonts.mono,
     fontSize: 12,
     fontVariantNumeric: "tabular-nums",
     whiteSpace: "nowrap",
   },
+  working: { color: colors.muted, fontSize: 12, whiteSpace: "nowrap" },
   search: {
     height: size.xs,
     marginInline: space.ms,
@@ -409,20 +536,21 @@ const styles = stylex.create({
     height: `calc(${size.lg} - 1px)`,
     paddingInline: space.ms,
     borderWidth: 0,
-    backgroundColor: { default: "transparent", ":hover": colors.bg },
-    color: colors.text,
+    backgroundColor: "transparent",
+    color: { default: colors.muted, ":hover": colors.text },
     font: "inherit",
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: 500,
     cursor: "var(--cursor-pointer, pointer)",
   },
   agents: {
     display: "flex",
     flexDirection: "column",
-    gap: space.xs,
-    maxHeight: 200,
+    gap: space.sm,
+    maxHeight: 198,
     margin: 0,
-    paddingTop: space.sm,
+    paddingTop: 0,
+    paddingBottom: space.ms,
     paddingInline: space.ms,
     overflowY: "auto",
     listStyle: "none",
@@ -431,8 +559,8 @@ const styles = stylex.create({
   agent: { display: "flex", alignItems: "center", gap: space.sm, minWidth: 0 },
   chip: {
     flexShrink: 0,
-    paddingInline: 6,
-    height: 22,
+    paddingInline: space.sm,
+    height: 21,
     display: "inline-flex",
     alignItems: "center",
     borderRadius: radii.xs,
@@ -448,6 +576,7 @@ const styles = stylex.create({
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
     color: colors.muted,
-    fontSize: 13,
+    fontSize: 12,
   },
+  statusIdle: { color: colors.faint },
 });

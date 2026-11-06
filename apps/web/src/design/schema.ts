@@ -140,6 +140,26 @@ export const UserEdit = Schema.Union([
   }),
   /** Turns instances into plain copies of what they show. */
   Schema.Struct({ kind: Schema.Literal("detach"), ids: Schema.Array(Schema.String) }),
+  /**
+   * Sets attributes, or removes one when its value is `null`: `data-name`
+   * renames a layer, `hidden` hides it and `data-locked` locks it.
+   */
+  Schema.Struct({
+    kind: Schema.Literal("setAttributes"),
+    ids: Schema.Array(Schema.String),
+    attrs: Schema.Record(Schema.String, Schema.NullOr(Schema.String)),
+  }),
+  /** Adds a page after the others. */
+  Schema.Struct({ kind: Schema.Literal("createPage"), name: Schema.String }),
+  Schema.Struct({ kind: Schema.Literal("renamePage"), id: Schema.String, name: Schema.String }),
+  /** Deletes a page and every artboard on it. */
+  Schema.Struct({ kind: Schema.Literal("deletePage"), id: Schema.String }),
+  /** Moves artboards to another page, into free space there. */
+  Schema.Struct({
+    kind: Schema.Literal("moveToPage"),
+    ids: Schema.Array(Schema.String),
+    page: Schema.String,
+  }),
 ]);
 export type UserEdit = typeof UserEdit.Type;
 

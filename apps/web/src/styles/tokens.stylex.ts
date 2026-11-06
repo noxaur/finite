@@ -50,33 +50,34 @@ export const colors = stylex.defineVars({
   component: { default: "#7c3aed", [DARK]: "#a78bfa" },
 });
 
+/** Spacing steps, all multiples of a 3px unit: 1u, 2u, 3u, 4u, 6u, 10u. */
 export const space = stylex.defineVars({
-  px: "2px",
-  xs: "4px",
-  sm: "8px",
-  ms: "12px",
-  md: "16px",
-  lg: "24px",
-  xl: "40px",
+  px: "3px",
+  xs: "3px",
+  sm: "6px",
+  ms: "9px",
+  md: "12px",
+  lg: "18px",
+  xl: "30px",
 });
 
 /** Control and row heights. */
 export const size = stylex.defineVars({
   xs: "24px",
-  sm: "28px",
+  sm: "27px",
   md: "36px",
-  lg: "44px",
+  lg: "42px",
   /** The sidebars and the tool rail. */
-  left: "248px",
-  rail: "44px",
-  right: "304px",
-  bar: "40px",
+  left: "246px",
+  rail: "42px",
+  right: "303px",
+  bar: "39px",
 });
 
 export const radii = stylex.defineVars({
-  xs: "2px",
-  sm: "4px",
-  md: "8px",
+  xs: "3px",
+  sm: "3px",
+  md: "6px",
 });
 
 export const fonts = stylex.defineVars({
@@ -100,4 +101,11 @@ export const motion = stylex.defineVars({
   fast: "150ms",
   base: "200ms",
   out: "cubic-bezier(.23, 1, .32, 1)",
+});
+
+/** Pointer images, for what a plain `cursor` keyword can't say. */
+export const cursors = stylex.defineVars({
+  /** Two arrowheads, ◀ ▶, touching: over a number that scrubs. DraftField draws the same pair, apart, while it's held. */
+  scrub:
+    "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Cpath d='M10.5 6.5 3.5 12l7 5.5ZM13.5 6.5l7 5.5-7 5.5Z' fill='%23fafcfb' stroke='%232a312d' stroke-width='1.5' stroke-linejoin='round'/%3E%3C/svg%3E\") 12 12, ew-resize",
 });
