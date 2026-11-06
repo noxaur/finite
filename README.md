@@ -1,160 +1,89 @@
 # Finite
 
-Finite is a design canvas that agents edit. Agents connect over MCP and build designs out of HTML and inline CSS. Several agents can work at once, on the same design or on different ones. People open the app to browse every design in a grid and watch any one of them update live on a pan-and-zoom canvas. People steer agents by pinning comments to the canvas, and they can edit it themselves: select things, drag and resize them with snapping, type into text, set exact positions and sizes, duplicate, copy and paste, group, restack, delete and nudge them, and undo their own edits with ⌘Z.
+Finite is a design canvas for real React projects. Each design is a React and TypeScript codebase, and each frame on the canvas is a live page of it. You can connect a codebase you already have (a Vite app with React Router or TanStack Router), create a blank design (a new Vite, React, TypeScript and Tailwind project), or import one from a Figma link, a URL or files.
 
-For a guided tour of the internals, read [How Finite works](docs/how-finite-works.md).
+You edit frames like in Figma: select an element, move and resize it, change its text and styles in the inspector, undo with ⌘Z. Finite writes each edit back to the TSX in the project's own convention, so a Tailwind project gets Tailwind classes and a CSS-modules project gets a changed rule. Agents work beside you. On the Prototypes tab, a message to the composer starts a thread, which runs your local Claude Code CLI on the project. The agent writes prototype components onto a canvas, labels each one with what it tried and why, and leaves comments. It can read all of production but writes only prototypes and brand assets, until you ask it to move a prototype to prod.
 
-The frontend is Next.js (React), styled with StyleX, and talks to the backend through an Effect HTTP client and WebSockets. The backend is a Rust server built on axum. The document rules are Rust too, and the browser runs them compiled to WebAssembly. Vite+ (`vp`) runs the JavaScript side, and Cargo builds the Rust side.
+For a tour of the internals, read [How Finite works](docs/how-finite-works.md).
 
 ## Setup
 
-You need Node 22.18 or later, Vite+ (`vp`) and a Rust toolchain from [rustup](https://rustup.rs). The browser runs the Rust rules as WebAssembly, so add that target once:
+You need:
+
+- Node 22.18 or later, which runs the server's TypeScript directly.
+- [Vite+](https://viteplus.dev) (`vp`), which manages the toolchain and pnpm.
+- The [Claude Code](https://claude.com/claude-code) CLI on your `PATH`, logged in: run `claude` once and log in. Finite has no API key setting. Without it, everything but threads works, and Settings and the composer tell you to run `claude`.
+- Google Chrome or Chromium, for the agent's `screenshot` tool and the end-to-end test. Set `FINITE_CHROME` if yours isn't in a standard place.
 
 ```bash
-rustup target add wasm32-unknown-unknown
 vp install
+vp run dev     # the web app on http://localhost:5310, the server on :4100
 ```
 
-`vp run ready`, `vp test` and `vp run dev` build `crates/wasm/dist/finite.wasm` when they need it. To build it yourself, run `vp run wasm#build`.
+Designs you create in dev go to `apps/server/.finite-data/`. A connected codebase stays where it is, with a `.finite/` folder added to its root for the canvases, comments and threads. Commit that folder with the project.
 
-In [T3 Code](https://t3.codes), `t3.json` starts each new thread in its own worktree and runs `vp install` there. Its scripts menu has Dev and Ready. When a thread settles, `cargo clean` deletes that worktree's `target/`, so the next `cargo` command rebuilds from scratch.
+In [T3 Code](https://t3.codes), `t3.json` starts each new thread in a separate worktree and runs `vp install` there. Its scripts menu has Dev and Ready.
 
-## Connect an agent
-
-Start the app with `vp run dev`, then point an MCP client at the server's Streamable HTTP endpoint:
+## Desktop app
 
 ```bash
-claude mcp add --transport http finite http://127.0.0.1:4100/mcp
+vp run dev:desktop      # dev, plus an Electron window on the dev server
+vp run start:desktop    # builds everything, then Electron with the bundled server
+vp run package:desktop  # packages the app for this machine into apps/desktop/release
 ```
 
-Agents get six tools: `designs` lists, creates, renames and deletes designs (deleting is permanent, with the design's comments and undo history), `read` shows a design as text, `edit` changes it, `render` shows it as images, `comments` is the feedback loop, and `undo` takes back the agent's own edits. Elements are addressed with CSS selectors, and each `edit` call is a list of ops that applies all at once or not at all. Every tool except `designs` takes a `designId`, or a design's name. The server's MCP instructions (`crates/server/src/mcp/instructions.md`) explain the workflow to the agent, and `crates/server/src/mcp/tools.rs` declares every tool.
-
-`render` renders artboards with a local headless Chrome, Chromium or Edge, and reports anything cut off by the artboard's edge. Set `FINITE_CHROME` if yours isn't in a standard location. After each `edit`, the same check measures the artboards it touched and adds a note when content is cut off or overflowing.
-
-`read` with `as: "jsx"` returns a node as JSX for a React codebase, with style objects or, with `tailwind`, Tailwind classes. `contains` searches a design, and the `replace` op changes a value, like a brand color, everywhere at once. The `tokens` op holds the design's tokens, and an artboard's `mode` picks the mode it renders in. The `component` op makes one element a component that copies on other screens follow, so a top bar changes once for every screen. The `page` op splits a design into pages, which people switch between in the sidebar on the canvas. `e2e/ax` runs real agents against the tools to measure whether a change helps (see `e2e/ax/README.md`).
-
-## Styles, motion and scripts
-
-Agents can style with inline `style` attributes or with `<style>` blocks and classes, so `@keyframes` animations and `:hover` effects work. Each artboard renders inside a shadow root, which scopes its CSS to that artboard and keeps the app's CSS out. Values that every artboard needs, like a `--brand` color or a font stack, are the design's tokens: CSS variables that any artboard reads with `var(--brand)`. A token can have a value per mode, like Light and Dark, and each artboard renders in one mode. Artboards get the tokens before their own styles, so those still override them. To share markup, like a top bar on every screen, use a component. People can read and edit the tokens and modes in the Tokens tab of the left sidebar. Fonts come from the fonts installed on the machine.
-
-An artboard that contains a `<script>` renders in a sandboxed iframe instead. The iframe's `sandbox="allow-scripts allow-forms"` gives it an opaque origin, so its code can't reach the app or the app's API, and leaves out dialogs, popups, pointer lock and navigating the app. Its content security policy lets scripts load from `https:` (libraries from a CDN) and call `https:` and `wss:` APIs, and `form-action 'none'` keeps forms from sending anything. A bootstrap script (`crates/design/src/bootstrap.js`) runs before the artboard's own code. It gives the page a `localStorage` that the design's pages share, kept in this browser only. It also mutes audio until interactive mode, keeps the page from taking focus by itself or going fullscreen, and reports the hosts it reaches, which show as a wifi icon on the artboard's label. The iframe reloads after each burst of edits, so a script's state resets when an agent changes the artboard, unless someone pressed Hold on it. The server strips inline `on*` handlers and `<script src>` that isn't `https://`, so scripts attach listeners with `addEventListener`.
-
-Thumbnails never run scripts. Screenshots run them in the same sandboxed iframe, with the same content policy, capturing the frame about 3 seconds after load. Chrome's traffic in a screenshot goes through a proxy in the server that refuses loopback, private and link-local addresses and any port but 80 and 443, so a script can't use `fetch` to reach the server's own network.
-
-## Using pages: the Interact tool and interactive mode
-
-Around the canvas, the left sidebar holds the design's name, its pages and the layers of the page shown, or its tokens, and the agents connected. Drag layers to reorder them or move them into another layer, double-click a name to rename it, hide or lock a layer from its row, and add, rename or delete pages; drop artboards on a page to move them there. The tool rail beside it has the tools and the zoom. The right sidebar is the inspector for what's selected: its layout, size, fill, stroke (inside, center or outside), radius, effects (several shadows, blurs and filters, each with an eye to hide it and a drag to reorder), type, and an Advanced list of the inline styles no control covers. A field shows the token a value uses, every color has an opacity, and a value the controls can't express shows as a Custom chip instead of CSS. What you type shows on the canvas as you type it, ↑ and ↓ step a number, dragging a field's label scrubs it, and a color's swatch opens a picker. Enter sets it on the whole selection, as one change agents see and one undo takes back.
-
-The tool rail's middle button is the Interact tool (`I`). With it you use pages right on the canvas: click buttons, type in fields, and scroll. A scroll that starts over something scrollable in a page stays in it, even at its end, and a scroll anywhere else pans. A drag that starts in a page is the page's, and Space-drag always pans. With the pointer tool, pages keep running, but a click only selects.
-
-Interactive mode zooms the camera onto one artboard and lets you use it as a page. `P`, the Interactive button in the top bar, or the play button on an artboard's label opens it. It opens the selected artboard, or the one you last used with the Interact tool. The camera springs onto the artboard, fitting it to the space no chrome covers at no more than 100%, and the page wakes up when it lands. A tall artboard fits by width and scrolls inside a window as high as the screen. The camera stays locked, so the wheel scrolls the page. Tab and Shift+Tab move through the page's own links and fields and then the pill, and skip the other artboards and the buttons on artboard labels. The left and right arrow keys step through the page's artboards, or through the selected ones when several are selected. A link with `href="#finite-artboard=<id>"` flies to that artboard, Back or `⌘[` flies back, and Restart or `R` flies to the artboard you started on. Holding `C` shows the comment pins and lets you pin a comment. The pill at the top has Reload, Hold, which holds off reloads while agents edit, and the hosts the page reached. `Esc`, the pill's close button, a click beside the artboard, or trying to pan goes back to exactly where you were.
-
-To link a screen to another, select a link (`<a>`) and pick the target under Prototype → **Link** in the inspector, or ask an agent. Links hold the target's id, so renaming the target keeps them working. Deleting it breaks them: the notice, the pill and the agent's edit result say so, and undo brings the artboard back. An artboard's **Route** (`data-route="/cart"`) groups artboards into one page at several widths. Give the desktop and the mobile cart the same route, and a link drawn to the desktop cart opens the mobile one when you follow it from a mobile screen. An artboard without a route has one made from its name. Duplicating several artboards at once points the links between them at the copies and drops the copies' routes, so they get routes from their names. Copying one artboard keeps its route, for starting a mobile version. Links inside components and their instances count, with each instance's own link target.
-
-## Comments
-
-The pill at the bottom of the canvas switches between the pointer tool (`V`), the Interact tool (`I`) and the comment tool (`C`). In comment mode, you see an outline around the element under the cursor, and a click pins a comment to it. Shift-click more elements of the same artboard to point the comment at all of them. The left button no longer drags the canvas in comment mode; the wheel and the middle button still pan.
-
-A comment stores its artboard, the elements you clicked, and the pin's offset from the artboard's corner, so the pin follows the artboard when an agent moves it. This works inside sandboxed (script) artboards too: the canvas asks the iframe which element is under the pointer.
-
-Agents read comments with `comments` and answer with its `reply`, usually with `resolve: true`. `read`'s overview counts open comments, and the MCP instructions tell agents to check them. When an agent replies, the server links that agent's changes to the comment's artboard since the thread's previous message. An edit already linked to a reply is not linked again. The thread shows them as buttons, and clicking one outlines the elements it changed. A reply from you reopens a resolved comment, so you can keep steering in the same thread. An agent can also call `comments` with `wait`, which returns as soon as a comment or reply is waiting for it and gives up after at most 55 seconds, so you can leave feedback for an agent that's already running. Each comment goes to one agent, picked by the server: the agent already on the thread, or else the agent that last edited that artboard, as long as it's listening for comments. Otherwise the first agent to ask takes it, so two agents never start on the same comment. An agent that reads a note between people marks it as one, and then no agent acts on it. The thread's header shows where a comment went, and you can open it to send it to another agent, to any agent, or to people only.
-
-A resolved pin leaves the canvas at once. With the comment tool, the right sidebar lists every comment, open and resolved, and the design's recent changes. Picking a comment opens its thread on the canvas. In a thread you can delete the comment, or edit your own message while it's still the newest one, before an agent has answered.
-
-Comments aren't part of the document, so undo never touches them. They're saved with the design's snapshot. People have no accounts yet: each browser keeps a random id in local storage and posts over `POST /api/designs/{id}/comments`. It posts as "Guest" until you click the name in a new comment's box and set your own, which is saved in the same browser.
-
-## Undo and redo
-
-Each agent can undo only its own changes. This follows Liveblocks' [multiplayer undo/redo design](https://liveblocks.io/blog/how-to-build-undo-redo-in-a-multiplayer-environment), which is the command pattern: applying an op returns its inverse, captured from the document at that moment, and undo applies that inverse as a new change. Undo never restores a snapshot, so it can't wipe out another agent's work.
-
-Conflicts resolve per property, last writer wins. Two things are easy to miss:
-
-- If another agent deleted the nodes an undo step touches, that step is skipped, and undo moves on to the next one that still applies.
-- Undo then redo returns the document to where it was. If you delete an artboard that holds another agent's nodes, redo brings those nodes back too, because the inverse captured the whole subtree.
-
-The history belongs to an actor, per design. Today an actor is an MCP session, or the value of an `X-Finite-Agent` header if the client sends one. Send the header if you can: a named agent's undo survives restarts and lasts six idle hours, while a session's undo ends with the session, after an hour without a call. Each stack keeps up to 200 steps and about 32 MB of ops. A user's browser tab will be another kind of actor when users can edit. `History` also supports batching (Liveblocks calls it pausing), so a drag can undo in one step.
-
-## How a change flows
-
-1. An MCP tool call, like an `edit` with a `css` op, runs an edit command from `crates/design/src/edit/`. The command validates the request and turns it into ops: `create`, `delete`, `set` (one property) or `move`.
-2. `Design::commit` applies the ops to the server's document, pushes the inverse onto the actor's undo stack, and assigns the change a sequence number. Each design has its own lock, so edits to one design are applied in a single order, and edits to different designs never wait on each other.
-3. The hub broadcasts the change to every viewer's WebSocket and saves the design to disk a moment later.
-4. In the browser, `Replica` applies the same ops with the same Rust code, built as WebAssembly. `Renderer` patches only the DOM nodes they touched.
-
-Sibling order uses fractional indexes, so inserting or moving a node rewrites only that node. That keeps concurrent edits from conflicting and is what multiplayer editing will build on.
-
-## Layout
-
-| Path                  | What it is                                                                                              |
-| --------------------- | ------------------------------------------------------------------------------------------------------- |
-| `apps/web`            | Next.js + StyleX + Effect frontend, built as a static export into `out/`                                |
-| `apps/web/src/design` | The canvas client: schemas, `Replica` (document copy), `Renderer` (DOM), `Camera` (pan/zoom)            |
-| `apps/desktop`        | Electron main process, bundled with `vp pack`                                                           |
-| `apps/figma-plugin`   | The Finite plugin for Figma, which trades `.figma.json` files with Finite's Import and Export           |
-| `crates/design`       | The document model with no I/O: nodes, ops and inverses, history, edit commands, HTML import/export     |
-| `crates/transfer`     | Import and export: the HTML, `.finite`, repo, Figma, JSX and app codecs (`docs/import-export.md`)       |
-| `crates/wasm`         | The same model built as WebAssembly (`dist/finite.wasm`), which the web app loads                       |
-| `crates/server`       | Rust server (axum). Serves `/api/*`, the MCP endpoint at `/mcp`, and the built frontend in release mode |
-| `Cargo.toml`          | Cargo workspace for everything in `crates/`                                                             |
-
-Each crate's `package.json` wraps its Cargo commands, so `vp run` can start, test and build the Rust crates along with the JS packages. The web app lists `wasm` as a dependency, so `vp run -r build` builds `finite.wasm` before the web app.
+The packaged app runs the server bundle (`apps/server/dist/main.mjs`) with Electron's own Node, on port 4100 or a free port when that's taken, and keeps its designs in Electron's user data folder. It passes your login shell's `PATH` to the server, so it finds `claude` and `pnpm` the way a terminal does. Connect a codebase there with **Choose…**, which opens a folder picker. If the server stops on its own, Electron starts it again on the same port and open pages reconnect. After three stops in a minute it shows an error and quits (`apps/desktop/src/restarts.ts`).
 
 ## Commands
 
 ```bash
-vp install              # install deps (also downloads the Electron binary)
-vp run dev              # web on http://localhost:5310, Rust API on :4100
-vp run dev:desktop      # same, plus an Electron window pointed at the dev server
-vp run start:desktop    # release build of everything, then Electron with the Rust sidecar
-vp run package:desktop  # package the desktop app for this machine into apps/desktop/release
-vp run test             # cargo test for every crate, plus the web app's, desktop app's and Figma plugin's Vitest suites
-vp run e2e              # build, start a server, and drive the app in headless Chrome
-vp run e2e:router       # the same checks through a router in front of two servers
-vp run e2e:shared       # the same, with both servers on one Postgres
-vp run bench            # time a 90,000-node design, a big write and thumbnails in headless Chrome
-vp run ready            # format, lint and type check (web and Rust, clippy too), test, build
+vp run dev              # web on :5310, server on :4100 (node --watch)
+vp run test             # every package's Vitest suite
+vp run build            # every package's build, the web app's static export included
+vp run e2e              # build the web app, start a server, and drive it in headless Chrome
+vp run ready            # vp check (format, lint, type check), test, build
 ```
 
-Both dev commands start with `scripts/dev-cleanup.mjs`. It stops a Finite dev server an earlier run left holding port 4100 or 5310, and with `cargo install cargo-sweep` it deletes build files in `target/` that nothing has used since the previous run started.
+`vp run dev` starts with `scripts/dev-cleanup.mjs`. It stops a Finite dev server an earlier run left holding port 4100 or 5310, and refuses to touch any other process on them, such as the desktop app's server.
 
-To try a change by hand, or let an agent try it, `node e2e/headless.mjs start` builds and starts Finite with an empty data folder and opens it in headless Chrome. Each later command does one thing to that running app: `call edit '{…}'` calls an MCP tool, `click`, `type` and `key` drive the page, `snapshot` prints its accessibility tree, and `screenshot` saves a PNG. `node e2e/headless.mjs help` lists them all, and `.agents/skills/finite-headless/SKILL.md` shows agents how to use it. To script the same session from Python, import `Finite` from `e2e/finite_headless.py`.
+`FINITE_REAL_AGENT=1 vp run e2e` also sends a thread message to your local `claude`, and `FINITE_REAL_AGENT=1 vp test` runs the server's real-agent test. Both use your Claude subscription. To try a change by hand, or let an agent try it, use the `finite-headless` skill (`.agents/skills/finite-headless/`): it starts a private server, web app and Chrome on ports from 4300 and drives them from the shell.
 
-`.github/workflows/ci.yml` runs `vp run ready`, then `vp run e2e` and `vp run e2e:router`, on pushes to `main` and on pull requests. A second job turns on the `postgres` feature, which every other build leaves off. It runs clippy and the tests that way, with a Postgres to talk to. Then it runs `vp run e2e:shared`.
+`.github/workflows/ci.yml` runs `vp check`, the tests, the builds and `vp run e2e` on pushes to `main` and on pull requests. If the e2e step fails, the workflow uploads the failure screenshot. Each commit runs `vp staged` from the pre-commit hook (`.vite-hooks/pre-commit`), which runs `vp check --fix` on the staged files.
 
-If you don't set `FINITE_TEST_DATABASE_URL`, the database tests and `e2e:shared` skip on your machine. You'll find a quick way to run a Postgres for them in the guide.
+## Layout
 
-CI hasn't run yet, because the repo has no GitHub remote. If the e2e step fails, the workflow uploads the failure screenshot.
-
-Each commit runs `vp staged` from the pre-commit hook (`.vite-hooks/pre-commit`). It runs `vp check --fix` on the staged files and `rustfmt` on staged Rust files, as set in the `staged` block of `vite.config.ts`.
+| Path                   | What it is                                                                                   |
+| ---------------------- | -------------------------------------------------------------------------------------------- |
+| `apps/web`             | The Next.js app, styled with StyleX, built as a static export into `out/`                    |
+| `apps/server`          | The Node server: `/api/ws`, the design store, previews, the source editor and agents         |
+| `apps/server/scaffold` | The project a blank design starts from                                                       |
+| `apps/server/fixtures` | Small React Router and TanStack apps the tests connect                                       |
+| `apps/desktop`         | The Electron app, bundled with `vp pack`                                                     |
+| `packages/protocol`    | The wire protocol, the data model and the module interfaces, as zod schemas and types        |
+| `packages/vite-plugin` | `@finite/vite-plugin`: stamps JSX with its source location, injects the bridge, lists routes |
+| `e2e`                  | The end-to-end test and its helpers                                                          |
 
 ## How the pieces connect
 
-The frontend calls the API with relative `/api/...` URLs, so it needs both on the same origin:
+The page calls the server with relative `/api/...` URLs, so it needs both on one origin:
 
-- **Web dev:** `next dev` rewrites `/api/*` to the Rust server on `127.0.0.1:4100`. Set `FINITE_API_URL` to point elsewhere.
+- **Web dev:** `next dev` rewrites `/api/*`, the `/api/ws` WebSocket included, to the server on `127.0.0.1:4100`. Set `FINITE_API_URL` to point elsewhere.
 - **Desktop dev:** Electron loads the Next.js dev server, so it uses the same rewrite.
-- **Desktop release:** Electron starts `finite-server` as a sidecar process on port 4100 (or a free port if that's taken), with `FINITE_STATIC_DIR` pointing at `apps/web/out`. The window loads that server. Electron starts it once: on macOS the app stays open with no windows, and a new window reuses the running server, because a second one would find the data folder locked. When the app quits, Electron sends the server SIGTERM and waits up to 5 seconds for it to save and exit. If the server stops on its own, say the system killed it, Electron starts it again on the same port, and open pages reconnect and resume. After three stops within a minute, it shows an error and quits (`apps/desktop/src/restarts.ts`).
-- **Web deploy:** run `finite-server` with `FINITE_STATIC_DIR` and `FINITE_PORT`. To run several servers that fail over to each other, build with `--features postgres`. Then give them all the same Postgres database in `FINITE_DATABASE_URL`, give each its own `FINITE_NODE_URL`, and put `finite-server router` in front, with the same `FINITE_DATABASE_URL`. Servers then find each other by heartbeat, and a dead server's designs move to the others in about one lease (`FINITE_LEASE_MS`, 10 seconds by default). Servers that keep their own data folders work too, with a fixed `FINITE_NODES` and `FINITE_NODE` on each (see the guide's "Running more than one server"). If agents or the router reach a server by a hostname other than localhost, add it to `FINITE_ALLOWED_HOSTS`. To run several routers, give them a shared `FINITE_SESSION_DIR` so any of them can serve any agent's MCP session.
+- **Desktop release and deploys:** the server serves the built web app itself, from `FINITE_STATIC_DIR`.
 
-If you use a managed Postgres, like RDS, add `sslmode=verify-full` to the URL, and its CA file in `sslrootcert`. The guide's "Connecting with TLS" lists each mode.
+Frames load from each design's own Vite dev server, which the server starts on a free port on the same host when someone opens the design. `next build` produces a static export (`output: "export"` in `apps/web/next.config.ts`), so Next features that need a server at request time (route handlers, server actions, middleware, dynamic routes without `generateStaticParams`) aren't available.
 
-The API client is `apps/web/src/api/Api.ts`, an Effect `Context.Service` whose responses are decoded with `Schema`. Live updates arrive over two WebSockets: `/api/designs/ws` streams the design list, and `/api/designs/{id}/ws` streams one design (a snapshot, then every change and presence update). After a dropped connection, the browser resumes with `?epoch=…&since=…` and gets only the changes it missed. `apps/web/src/design/schema.ts` defines the schemas for both. Keep them in sync with the Rust types in `crates/design` and `crates/server/src/hub/messages.rs`.
-
-The server saves each design in `FINITE_DATA_DIR/designs/` (default `./data`, so `crates/server/data` in dev) as a snapshot (`<id>.json`) plus an append-only journal of later edits (`<id>.log`). `vp run dev` first copies each snapshot in `crates/server/seed/designs/` into the dev data folder unless that design is already there, so a fresh checkout opens with the Finite app screens. The guide explains how the journal is compacted and recovered after a crash. The desktop app sets it to Electron's user data folder. Storage goes through the `Store` trait in `crates/server/src/store.rs`. With `FINITE_DATABASE_URL`, the same snapshot and journal live in Postgres instead (`crates/server/src/postgres/mod.rs`), and every write carries a fencing token, so a server that lost a design can't overwrite it. StyleX design tokens are in `apps/web/src/styles/tokens.stylex.ts`.
-
-`next build` produces a static export (`output: "export"` in `apps/web/next.config.ts`), so there's no Node server to ship. That rules out Next features that need a server at request time: route handlers, server actions, middleware, and dynamic routes without `generateStaticParams`. The Rust server handles everything dynamic. Components that use Effect or `window` need `"use client"`.
-
-StyleX compiles through Babel (`apps/web/babel.config.js`) and the StyleX PostCSS plugin (`apps/web/postcss.config.js`). The PostCSS plugin replaces the `@stylex;` line in `src/app/globals.css` with the collected rules. This setup follows StyleX's official Next.js example.
+StyleX compiles through Babel (`apps/web/babel.config.js`) and the StyleX PostCSS plugin (`apps/web/postcss.config.js`), which replaces the `@stylex;` line in `src/app/globals.css` with the collected rules. This follows StyleX's official Next.js example.
 
 ## Releases and updates
 
-The desktop app updates itself, with no prompts. electron-updater looks for a new version at launch, every four hours and when the computer wakes. It downloads the new version in the background and installs it the next time the app quits. It never restarts the app on its own, because agents would lose their MCP sessions. On Windows and Linux, closing the last window quits. On a Mac it doesn't, but choosing Quit, logging out or restarting does. `apps/desktop/src/updates.ts` does all this, and it only runs in a packaged app.
+The desktop app updates itself, with no prompts. electron-updater looks for a new version at launch, every four hours and when the computer wakes. It downloads it in the background and installs it the next time the app quits. It never restarts the app on its own, because that would stop every running agent turn. On Windows and Linux, closing the last window quits. On a Mac it doesn't, but choosing Quit, logging out or restarting does. `apps/desktop/src/updates.ts` does all this, and it only runs in a packaged app.
 
-Every push to main that passes CI is a release. `.github/workflows/release.yml` starts when the CI run finishes, builds the app on three runners and publishes it in two places. The Mac runner builds for Apple silicon and Intel, Windows gets an NSIS installer, and Linux gets an AppImage. Pushes that only change Markdown or `docs/` skip CI, so they don't release. To release by hand, such as after a failed run, run the workflow from the Actions tab.
+Every push to main that passes CI is a release. `.github/workflows/release.yml` starts when the CI run finishes and builds the app on three runners: the Mac runner for Apple silicon and Intel, Windows an NSIS installer, Linux an AppImage. Each runner builds the web app, the desktop app and the server bundle (`vp run @finite/server#build`), which Electron's own Node runs, so one bundle serves every architecture. Pushes that only change Markdown or `docs/` skip CI, so they don't release. To release by hand, such as after a failed run, run the workflow from the Actions tab.
 
 The version is the major and minor from the root `package.json`, then the number of commits on main. The 152nd commit is `0.0.152`. To start `0.1.x`, change the root `package.json` to `0.1.0`. The patch keeps counting commits, so it never goes back down.
 
-Each release is a GitHub release in this repo, tagged `v0.0.152` on the released commit, with notes generated from the merged pull requests. It also holds the Figma plugin as `finite-figma-plugin.zip`, built once on Linux. The name has no version, so `releases/latest/download/finite-figma-plugin.zip` always fetches the newest, and the web app's Export menu links there. The plugin only goes to the GitHub release, not the bucket. This repo is private, and electron-updater downloads without a token, so the updater can't read those. It reads an S3-compatible bucket instead, like Cloudflare R2 or AWS S3. The workflow uploads the builds there first, then the `latest*.yml` files the updater reads, with `Cache-Control: no-cache`. So the updater never sees a version with one platform's files missing. The bucket's URL is built into each app's `app-update.yml` (`-c.publish.url`). A local `vp run package:desktop` has no feed, so it doesn't update.
+Each release is a GitHub release in this repo, tagged `v0.0.152` on the released commit, with notes generated from the merged pull requests. This repo is private, and electron-updater downloads without a token, so the updater reads an S3-compatible bucket instead, like Cloudflare R2 or AWS S3. The workflow uploads the builds there first, then the `latest*.yml` files the updater reads, with `Cache-Control: no-cache`, so the updater never sees a version with one platform's files missing. The bucket's URL is built into each app's `app-update.yml` (`-c.publish.url`). A local `vp run package:desktop` has no feed, so it doesn't update.
 
 The workflow needs these secrets and variables:
 
@@ -170,23 +99,17 @@ The workflow needs these secrets and variables:
 | `UPDATES_URL`               | variable | The bucket's public URL, which the updater downloads from    |
 | `UPDATES_LIMIT_BYTES`       | variable | The most the bucket may hold. Leave it unset for 10 GB       |
 
-The bucket has to be publicly readable. Don't change `UPDATES_URL` once apps are installed: they keep reading the URL they were built with.
+The bucket has to be publicly readable. Don't change `UPDATES_URL` once apps are installed: they keep reading the URL they were built with. Before each upload, the workflow deletes the oldest versions' builds until the bucket, with the new version added, fits under `UPDATES_LIMIT_BYTES`. It never deletes the newest version already there, because `latest*.yml` points at it until the upload replaces them. If even that doesn't fit, the release fails before it deletes or uploads anything. The GitHub releases keep every version.
 
-The bucket stays under 10 GB. Before each upload, the workflow deletes the oldest versions' builds until the bucket, with the new version added, fits. A release is about 730 MB, so the bucket holds the newest 12 or so. It never deletes the newest version already there, because `latest*.yml` points at it until the upload replaces them. If even that doesn't fit, the release fails before it deletes or uploads anything. The GitHub releases keep every version.
+Mac builds are signed with a self-signed certificate, not an Apple Developer ID. Squirrel.Mac, which installs updates on a Mac, only checks that an update is signed with the same certificate as the running app. `apps/desktop/scripts/sign-mac.cjs` signs the app, because electron-builder only signs with certificates macOS trusts. The Mac build fails without `MAC_CERTIFICATE`, because an unsigned build could never update. Keep the certificate: the original is in `~/.config/finite-signing/` on the machine that made it, with its password. If you sign with a new one, every Mac install stops updating, and people have to download the app again.
 
-Mac builds are signed with a self-signed certificate, not an Apple Developer ID. Squirrel.Mac, which installs updates on a Mac, only checks that an update is signed with the same certificate as the running app. Apple doesn't have to issue it. `apps/desktop/scripts/sign-mac.cjs` signs the app, because electron-builder only signs with certificates macOS trusts. The Mac build fails without `MAC_CERTIFICATE`, because an unsigned build could never update.
-
-Without a Developer ID, the app isn't notarized, so Gatekeeper blocks the first launch with "Apple could not verify Finite". Open System Settings, then Privacy & Security, and click Open Anyway. You only do this once. Updates don't come from a browser, so macOS doesn't quarantine them, and they open without asking. Windows builds are unsigned too, so SmartScreen warns on the first install, and updates install without a warning.
-
-Keep the certificate. The original is in `~/.config/finite-signing/` on the machine that made it, with its password. If you lose it and sign with a new one, every Mac install stops updating, and people have to download the app again. The same goes for moving to an Apple Developer ID later.
-
-Two other details. On a Mac, an app run from the disk image or from Downloads is read-only, so it can't replace itself. At launch the app offers to move itself to Applications. And `apps/desktop/scripts/stage-server.mjs` builds `finite-server` for each architecture and copies it into `apps/desktop/server/<arch>/`. electron-builder copies it from there, with `apps/web/out` as `web/`, into the app's resources folder, where `main.ts` finds them.
+Without a Developer ID, the app isn't notarized, so Gatekeeper blocks the first launch with "Apple could not verify Finite". Open System Settings, then Privacy & Security, and click Open Anyway, once. Windows builds are unsigned too, so SmartScreen warns on the first install. On a Mac, an app run from the disk image or from Downloads is read-only, so it can't replace itself, and at launch it offers to move itself to Applications.
 
 ## Gotchas
 
-- If the browser gets `403` with `unknown host` or `requests from … aren't allowed`, you opened Finite under a name it doesn't know, such as your machine's network address. Add that name to `FINITE_ALLOWED_HOSTS` (comma-separated, like `192.168.1.20,finite.example.com`). The check keeps other websites from reading your designs.
-- If a tool call or comment is refused with a limit, that's on purpose, and the message says what to do instead. A design holds up to 100,000 nodes nested at most 256 deep, 500 open comments, and 200 messages per thread. An agent's working indicator names up to 100 nodes. Long tool results are cut at 40,000 characters, with a note on how to see the rest. The guide's sections on edit commands, MCP and comments say why each limit exists.
-- If the server exits with `another Finite server is using …`, a second server is pointed at the same data folder. Stop the other one, or give this one its own `FINITE_DATA_DIR`.
-- With a shared database, a request can get `503` with "the design is moving" for up to one lease after the servers change. The old owner is saving its last snapshot first. Browsers and agents just try again. A server that logs `another live Finite server is using the URL …` shares its `FINITE_NODE_URL` with a running one, and stays out of the cluster until you fix that.
+- If the browser gets `403` with `unknown host` or `requests from … aren't allowed`, you opened Finite under a name it doesn't know, such as your machine's network address. Add that name to `FINITE_ALLOWED_HOSTS` (comma-separated). The check keeps other websites from reading your designs.
+- If **Connect** refuses a folder, the reason says what's missing: Finite needs a `package.json`, Vite, and React Router or TanStack Router.
+- If a design's dev server fails to start, the canvas shows the end of its output, such as a plugin in the project's `vite.config.ts` that throws. Fix the project, then open the design again.
+- If threads don't start, run `claude` in a terminal and log in. In the desktop app, Finite looks for `claude` on your login shell's `PATH`.
 - If Electron crashes with `Cannot read properties of undefined (reading 'whenReady')`, your shell has `ELECTRON_RUN_AS_NODE=1` set. Electron-based terminals and editors often export it. Run `unset ELECTRON_RUN_AS_NODE` first.
-- A Mac build made without `MAC_CERTIFICATE` is unsigned, and it can't update itself. `vp run package:desktop` makes one, which is fine for trying a package. Squirrel.Mac refuses the download with `Code signature … did not pass validation`.
+- `vp run dev` refuses to start while the desktop app holds port 4100. Quit the app, or run the server on another port (`FINITE_PORT=4200 node apps/server/src/main.ts`) and `FINITE_API_URL=http://127.0.0.1:4200 next dev` in `apps/web`.

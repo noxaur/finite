@@ -18,12 +18,6 @@
       "name": "Ready",
       "command": "vp run ready",
       "icon": "test"
-    },
-    {
-      "name": "Delete Build Output",
-      "command": "cargo clean",
-      "icon": "build",
-      "runOnSettle": true
     }
   ]
 }

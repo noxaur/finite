@@ -1,13 +1,9 @@
-// Cleans up after the previous `vp run dev`, so the next one can start and
-// target/ doesn't grow forever.
+// Cleans up after the previous `vp run dev`, so the next one can start.
 //
 // A dev server that outlived its terminal keeps the ports, and a live
 // `next dev` also holds apps/web/.next/dev/lock, so a new run would fail.
 // The ports are fixed, so only one checkout can run dev at a time: this stops
 // a Finite dev server from any checkout, and refuses to touch anything else.
-//
-// Cargo never deletes old artifacts, so with cargo-sweep installed this
-// deletes every build file nothing has used since the previous run started.
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -28,14 +24,6 @@ const alive = (pid) => {
   }
 };
 
-const sweep = (flag) => spawnSync("cargo", ["sweep", flag, root], { stdio: "inherit" }).status;
-if (spawnSync("cargo", ["sweep", "--version"]).status !== 0) {
-  console.log("dev-cleanup: `cargo install cargo-sweep` to delete stale build files from target/");
-} else {
-  if (fs.existsSync(path.join(root, "sweep.timestamp"))) sweep("--file");
-  sweep("--stamp");
-}
-
 if (process.platform === "win32") process.exit(0);
 
 const pids = new Set();
@@ -51,7 +39,7 @@ try {
 
 for (const pid of pids) {
   const command = run("ps", ["-o", "command=", "-p", String(pid)]);
-  if (!/finite-server|next-server|next dev|node (--watch )?src\/main\.ts/.test(command)) {
+  if (!/next-server|next dev|node (--watch )?src\/main\.ts/.test(command)) {
     console.error(`dev-cleanup: ${command || `process ${pid}`} holds a dev port; stop it first.`);
     process.exit(1);
   }

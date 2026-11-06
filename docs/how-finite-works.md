@@ -1,1020 +1,170 @@
 # How Finite works
 
-Finite is a design canvas that agents edit, and people too. An agent connects over MCP and sends tool calls like "write this HTML into that artboard"; a person drags things on the canvas. The Rust server turns each call into a few small edits and applies them to the one true copy of the design. Then it streams those edits to every browser that has the design open. Each browser keeps its own copy, applies the same edits with the same Rust code compiled to WebAssembly, and patches the page.
+Finite is a design canvas where every design is a real React and TypeScript project. A frame on the canvas is a live iframe of that project's Vite dev server. A person selects an element in a frame and changes it in the inspector, and Finite rewrites the TSX that made it. An agent works in a thread, which runs the person's local Claude Code CLI on the same project with a set of canvas tools.
 
-If you remember two ideas, make it these. The rest of this guide builds on them.
+Two ideas carry the rest of this guide:
 
-- **Every change is a list of ops.** An op is one tiny edit, like "set this node's `color` to red". Applying an op hands back its inverse, the op that undoes it. Undo, live updates and the comment links are all built from ops.
-- **The server is the single source of truth.** Each design has a lock, so its edits happen one at a time in one order. Every browser applies the same ops in the same order, so every copy ends up the same.
-
-How far you read depends on what you want:
-
-- **To understand Finite,** read through "Following one edit end to end". That covers the document, undo, the server and one edit's whole trip.
-- **To change how people edit,** read "People edit too". It covers adding a gesture or a kind of edit.
-- **To change the browser side,** read "The viewer" and "Comments". "The viewer" ends with how a browser reconnects without starting over, and how each end notices a connection that died silently.
-- **To run it for real,** read "Saving and recovering". It covers what's saved, when, and what survives a crash, undo included.
-- **To test a change the way a person sees it,** read "The end-to-end test".
-- **To look up a limit,** like how many nodes a design holds, see "Limits at a glance" near the end.
-- **To run more than one server,** read "Running more than one server" at the end. It covers servers that share a Postgres database and fail over to each other. One server is the default, and you can skip that section until you need it.
-
-"Words used in the code" at the very end is a glossary for when a term isn't clear.
+- **Files are the truth.** The project's source, plus a `.finite/` folder of JSON in its root, hold everything: canvases, comments and threads. The server keeps a copy in memory and writes every change straight back. So git, an editor and an agent's `Edit` tool all see the same state the canvas shows.
+- **Every rendered element knows where it came from.** A Vite plugin stamps each JSX element with its file, line and column, and a hash of the file. A hand edit names those, and the server refuses it when the file has changed since (optimistic concurrency).
 
 ## The big picture
 
 ```
- Agent (Claude, Cursor, …)                      Browser
-        │  MCP tool call                           ▲  WebSocket: snapshot, then changes
-        ▼                                          │
- ┌─────────────── finite-server (Rust, axum) ──────┴──────────┐
- │  mcp/     tool → edit command → ops                        │
- │  hub/     lock the design, commit, broadcast, save later   │
- │  api.rs   REST + WebSockets for the web app                │
- │  store.rs snapshot + append-only journal per design        │
- └────────────────────────────────────────────────────────────┘
-        uses
- ┌─────────── finite-design (Rust, no I/O) ───────────┐
- │  node, document, design, history, edit, html, …    │
- └────────────────────────────────────────────────────┘
-        compiled to WebAssembly by crates/wasm, so the browser runs it too
+browser tab / Electron window (Next.js static app, apps/web)
+   │  one WebSocket per tab: /api/ws (JSON, packages/protocol)
+   ▼
+apps/server (Node 22, node:http + ws)
+   ├─ store/    designs.json, settings.json, each design's .finite/
+   ├─ preview/  one Vite child per open design, with @finite/vite-plugin
+   ├─ source/   hand edits → TSX, tokens, per-actor undo
+   └─ agent/    one Claude Agent SDK query per live thread
+                     │ spawns
+                     ▼
+               the local `claude` CLI, cwd = the design's root
+
+iframes ──────────▶ each design's own Vite dev server (another port, same host)
 ```
 
-That's one server, which is the default. With several, a router sits in front, and each server holds a share of the designs (see "Running more than one server").
+The page talks to the server over one socket. It loads frames from the design's dev server directly, so Vite's hot module replacement (HMR) updates every viewer's iframes when a file changes, whoever changed it.
 
-You can think of the code as three layers:
+In development, `vp run dev` starts `node --watch apps/server/src/main.ts` on port 4100 and `next dev` on 5310, which proxies `/api/*`, the WebSocket included, to `FINITE_API_URL` (default `http://127.0.0.1:4100`). In the desktop app, Electron runs the bundled server (`apps/server/dist/main.mjs`) with its own Node (`ELECTRON_RUN_AS_NODE=1`), passes the login shell's `PATH` so it finds `claude` and `pnpm`, and points `FINITE_STATIC_DIR` at the web export, so the page and `/api` share one origin.
 
-| Layer          | Where                 | What it knows                                                         |
-| -------------- | --------------------- | --------------------------------------------------------------------- |
-| Document model | `crates/design`       | Nodes, ops, undo stacks, edit rules, HTML. No network, no disk.       |
-| Browser build  | `crates/wasm`         | The document model as `finite.wasm`, with a small API for the viewer. |
-| Server         | `crates/server`       | Who is calling, locking, broadcasting, saving, screenshots.           |
-| Viewer         | `apps/web/src/design` | A copy of the document, the DOM it draws, and the pan-and-zoom view.  |
+`apps/server/src/config.ts` reads every setting:
 
-The document model has no I/O on purpose. You can test it with plain function calls, and it compiles to WebAssembly, so the browser runs the exact same rules. "One set of rules for server and browser" explains how.
+| Variable               | Default          | What it is                                                                            |
+| ---------------------- | ---------------- | ------------------------------------------------------------------------------------- |
+| `FINITE_PORT`          | `4100`           | The port. The desktop app picks a free one when 4100 is taken.                        |
+| `FINITE_HOST`          | `127.0.0.1`      | The host. Each design's Vite server binds the same one.                               |
+| `FINITE_DATA_DIR`      | `./.finite-data` | The registry, settings and blank projects. The desktop app uses its user data folder. |
+| `FINITE_STATIC_DIR`    | unset            | A built web app to serve outside `/api`.                                              |
+| `FINITE_ALLOWED_HOSTS` | loopback names   | Extra host names the guard accepts, comma-separated.                                  |
 
-## A design is a flat map of nodes
+The guard (`guard.ts`) checks `Host` and `Origin` on every request and upgrade. Browsers don't apply the same-origin policy to WebSockets, so without it any web page could open `ws://127.0.0.1:4100/api/ws` and read every design (cross-site WebSocket hijacking), and DNS rebinding could reach the HTTP side.
 
-A design holds artboards, and artboards hold ordinary HTML. Finite stores that tree as a flat map from node id to node, where each node points at its parent:
-
-```json
-{
-  "id": "4biyjm26",
-  "parent": "k2n0d9xa",
-  "index": "V",
-  "type": "element",
-  "tag": "button",
-  "name": "Primary CTA",
-  "styles": { "background-color": "#111" },
-  "attrs": {}
-}
-```
-
-A few rules shape everything else:
-
-- A node with `parent: null` is an artboard. Only artboards have a canvas position (`x`, `y`).
-- A node is either an element (a tag, styles and attributes) or a text node (a string).
-- Sibling order comes from `index`, a short string such as `"V"` or `"Vk"`. Siblings sort by it. This is **fractional indexing**. To put a node between `"V"` and `"W"`, you give it a key like `"VV"`. A move rewrites only the moved node. `crates/design/src/fractional.rs` implements it.
-- A **property** is one addressable value on a node: `name`, `text`, `x`, `y`, `style:<css-property>` or `attr:<attribute>`. Properties are the unit of conflict. If two agents set the same property, the later write wins. If they set different properties on the same node, both stick.
-
-`Document` in `crates/design/src/document.rs` holds the map. `Node` and `PropKey` are in `node.rs`.
-
-Next to the map, `Document` keeps a **child index**: for each parent, its children's ids sorted by `(index, id)`. Every create, delete and move updates it. Without it, listing a node's children meant scanning the whole design, so deleting a big artboard took quadratic time. You can measure it with `cargo run --release -p finite-design --example big_design`. On a 20,201-node artboard, the delete dropped from 428 ms to 13 ms. That matters because an edit holds the design's lock, so every other agent and viewer waits for it.
-
-## Ops and their inverses
-
-There are only eight ops:
-
-| Op       | What it does                                  | Its inverse                    |
-| -------- | --------------------------------------------- | ------------------------------ |
-| `create` | Inserts one node                              | `delete` that node             |
-| `delete` | Removes a node and its whole subtree          | `create` every removed node    |
-| `set`    | Sets or clears one property                   | `set` it back to the old value |
-| `move`   | Gives a node a new parent and/or index        | `move` it back                 |
-| `page`   | Sets or removes one page                      | `page` with the old page       |
-| `token`  | Sets or removes one token's value in one mode | `token` with the old value     |
-| `mode`   | Sets or removes one mode                      | `mode` with the old mode       |
-| `css`    | Sets the old shared CSS, from before tokens   | `css` with the old stylesheet  |
-
-`page`, `token`, `mode` and `css` target the design rather than a node, so `Op::id` is empty for them.
-
-**Design tokens** are the design's CSS variables, like `--brand`, which any artboard can read with `var(--brand)` (`crates/design/src/tokens.rs`). A token is a CSS custom property with one value per **mode**, like Light and Dark, and each artboard renders in one mode, as frames do in Figma. The document holds tokens by name and modes by id, next to the pages, and snapshots carry them as `tokens` and `modes`, so they're saved, sent to viewers and undone like any edit. Each `token` op changes one token's value in one mode, and each `mode` op one mode. So two agents adding tokens at once don't undo each other's, and undoing one agent's Light value leaves another's Dark value alone. A token with no values left is gone.
-
-A design without modes has one implicit mode, `mode-1` ("Default"), the way it has an implicit page. An artboard's `mode` property names its mode, and a missing mode, or one that's gone, means the first mode (`Document::mode_of`). A token without a value in a mode takes its value in the first mode, so a Dark mode needs only the values that change. `edit::set_modes` names the modes in order: the first name renames the first mode, and names past the last add modes. `delete_mode` takes that mode's values out of every token, and a design keeps at least one mode.
-
-`tokens::style` writes an artboard's tokens in its mode as one rule, `:host { --brand: …; }` in a shadow root and `:root { … }` in screenshots, sandboxed iframes and HTML export. It sits in a **cascade layer**, `finite-tokens`, after the base styles' `finite-base`. Styles outside any layer beat layered ones, so an artboard's own `<style>` or inline style that sets `--brand` wins over the token. A value that could end its declaration or the `<style>` it's in is refused: a `;`, `{`, `}` or `!` outside a string, an open bracket, string or comment, a line break, which ends a CSS string, or `</style` (`tokens::check_value`). `Document::try_apply` checks that too, so an op from an import or a journal can't get around it. Fonts come from the fonts installed where the artboard renders.
-
-Tokens replaced the **shared CSS**, one stylesheet every artboard rendered with. Classes in it let one artboard's markup depend on rules it didn't carry, and components now share repeated parts instead. The `css` op stays so journals from before tokens still replay. When a design with shared CSS loads, `Design::migrate_css` moves it once (`edit::migrate_css`). Each custom property in a top-level `:root` rule becomes a token in the first mode, up to the token limit. The rest, `@import`s included, goes into a `<style>` at the start of every artboard, inside the old `finite-shared` layer (`html::layered_style`), so artboards look as they did. The shared CSS rendered `:root` as `:host` in shadow roots, and one `<style>` now serves shadow roots and pages alike, so the rest's `:root` becomes `:is(:root, :host)`. An artboard imported from a file keeps its mode by name, the first mode included, which may not be the design's first mode. The migration commits as the `finite` actor and drops every saved undo step, since an old step could set the shared CSS again. Old `.finite` bundles and repo folders migrate the same way when they're imported.
-
-**Pages** group artboards, and the viewer shows one page at a time, so a design can keep components or drafts away from its screens. A page is a name and a fractional index, keyed by id; the document holds them next to the tokens, and snapshots carry them as `pages`. An artboard's `page` property names its page. A design without pages has one implicit page, `page-1` ("Page 1"), so older designs need no migration, and `create_page` first saves that page for real so its artboards stay on it. An artboard whose `page` is missing or names a page that's gone is on the first page (`Document::page_of`), so undoing someone's `create_page` never hides artboards. Each `page` op touches one page, so two agents adding pages at once don't undo each other's. `delete_page` deletes the page's artboards with it, and a design keeps at least one page. Placing an artboard automatically (`find_placement`, `duplicate`, `move_nodes` to the canvas, `move_to_page`) looks only at the artboards on its page. The viewer's renderer mounts only the shown page's artboards, and the Pages section of the left sidebar switches between them. Comment pins on other pages' artboards are hidden; picking one in the comments list switches to its page.
-
-`Document::apply` runs one op and returns its inverse, read from the document at that moment. This is the **command pattern**.
-
-An op that no longer makes sense is skipped. A `set` on a deleted node does nothing. So does a `create` under a missing parent, or a `move` that would put a node inside itself. Skipping instead of failing is what keeps undo safe when other agents have changed things in the meantime.
-
-## A design: the document plus everyone's history
-
-`Design` in `crates/design/src/design/` wraps the document with three more things:
-
-- **`seq`**, a counter that goes up by one for every change. It's how browsers know they're up to date.
-- **One history per actor.** An actor is whoever made a change. Today that's an agent: its `X-Finite-Agent` header if it sends one, otherwise its MCP session id. A `History` (`history.rs`) is an undo stack and a redo stack of inverse ops.
-- **Comment threads**, and a **change log** of the last 512 changes. Both are covered under Comments below.
-
-All edits go through four methods. Each returns a `Change`, or `None` if nothing changed. A change holds the seq, the actor, a label and the ops that took effect.
-
-- `commit(actor, label, ops)` applies the ops and pushes their inverse onto that actor's undo stack.
-- `transact(actor, label, now, build)` runs several edit steps as one change, all or nothing (see "Several edits as one change" below).
-- `undo(actor)` pops the actor's latest undo entry and applies it as a new change. The inverse of _that_ goes on the redo stack.
-- `redo(actor)` does the same in the other direction.
-
-Undo applies inverses as new changes. It never rolls the document back to an old snapshot, so it can't erase another agent's work. This follows Liveblocks' design for [multiplayer undo](https://liveblocks.io/blog/how-to-build-undo-redo-in-a-multiplayer-environment).
-
-Each stack keeps at most 200 steps and about 32 MB of ops (`History::LIMIT` and `History::BYTE_LIMIT`), and older steps fall off the bottom. The size estimate, `Op::size`, adds up an op's strings plus a fixed amount, so it's cheap enough to run on every step. The byte limit matters because undoing a big delete recreates every node in it. Two hundred steps that each replaced a large artboard could hold millions of nodes, in memory and in every saved snapshot. The newest step is always kept, even if it's bigger than the limit on its own, so any edit can be undone at least once.
-
-### Several edits as one change
-
-Some edits take several steps, where each step builds on the last: create an artboard, write HTML into it, then style what the HTML made. `Design::transact` runs them as a **transaction**. Its `build` closure gets a `Transaction`, reads the document with `tx.doc()` (or `tx.view()`, with instances expanded), builds ops with an edit command and applies them with `tx.apply`. They apply at once through `Document::try_apply`, so the next step sees them, and an op that doesn't apply fails the step instead of being skipped. `tx.edit` applies ops built against `tx.view()`, turning edits inside an instance into overrides first (`components::redirect`). `tx.new_id` checks ids against the staged document, so ids stay unique across every step.
-
-If `build` returns an error, the transaction applies the inverses in reverse, which puts the document back as it was, and nothing is numbered, logged or recorded. Otherwise the steps become one `Change` with the transaction's label: one seq, one entry in the change log, one undo step, and comments whose artboard went or came back are moved as after `commit`. A comment reply's change links show that label, not one per step. `Design::dry_run` stages the same way and always rolls back, returning the ops that would apply. `Design::import` is a transaction that also keeps the import's record.
-
-A an `html` op rewrite staged as one step still merges against its read mark: `tx.merge` runs `Design::merge` over the set log and then over what the transaction applied so far, counted as the actor's own latest change. The set log then records the whole transaction as one change.
-
-On the server, `DesignHandle::transact` takes the design's lock once, runs the transaction, and broadcasts and journals its change once, so nobody sees a half-done transaction. `DesignHandle::dry_run` stages under the lock and sends nothing.
-
-### Undo with two agents, step by step
-
-Say Alice and Bob are both agents on one design:
-
-1. Alice creates artboard `a`. Her undo stack: `[delete a]`.
-2. Bob creates `b` inside `a`. His undo stack: `[delete b]`.
-3. Alice colors `b` red. Her undo stack: `[delete a, set b.color = none]`.
-4. Bob undoes. `b` is deleted. Alice's red is gone with it, which is correct because the node is gone.
-5. Alice undoes. Her top entry, `set b.color = none`, targets a node that no longer exists, so it's skipped and dropped. Undo falls through to `delete a`.
-
-The test `undo_only_reverses_own_changes` in `design/mod.rs` runs exactly this.
-
-A rewrite with an `html` op keeps the nodes its HTML names by `data-id`, so it doesn't break another agent's undo either. "Rewriting HTML in place" below covers it.
-
-### One set of rules for server and browser
-
-The browser applies ops too, and it used to do that with a TypeScript copy of the rules. The copies drifted. The first test that compared them found three ways the browser disagreed. It cleared `x` when an op set it to the string `"10"`. It also accepted invalid indexes like `"V0"`, and moves to where a node already was. HTML export drifted too. Screenshots used the indented export, so `<b>Bold</b><i>Italic</i>` showed as "Bold Italic" in a screenshot but "BoldItalic" in the browser.
-
-Now there's one copy. `crates/wasm` compiles `finite-design` to WebAssembly, and the viewer loads it as `finite.wasm`.
-
-`Replica` applies ops by calling the Rust `Document::apply`. Sandboxed artboards render `html::export_for_viewer`, which is the screenshot export plus each element's node id. The renderer checks attributes with `html::is_safe_attr`, and it takes the base CSS and the content policy from `html.rs`. "The viewer" below covers how a call into WebAssembly works.
-
-To change a rule, you change the Rust code. When you run `vp test`, it rebuilds `finite.wasm` before the web tests run, so they test the code you just wrote.
-
-A **golden file** records expected results, and a test compares against it. Once the browser ran the Rust code, comparing two copies of a rule proved nothing, so each golden file now has a narrower job:
-
-- **`crates/design/fixtures/apply.json`** lists op cases: starting nodes, a list of ops, and the expected nodes and sibling order. `crates/design/tests/conformance.rs` checks the Rust rules against it, so a change that alters a result shows up as a diff. `apps/web/src/design/conformance.test.ts` runs the same cases through WebAssembly, one op at a time and as one change. It checks that the viewer's cache of nodes and sibling order ends up where the Rust side does. No Rust test can see that cache.
-- **`crates/design/fixtures/export.json`** records the HTML that screenshots render. `html.test.ts` runs it through the module. One case uses text outside ASCII, so it also checks that text survives the trip as UTF-8.
-- **`crates/design/fixtures/limits.json`** holds the comment limits: 4,000 characters for a comment or reply, and 48 for a person's name. `crates/design/tests/limits.rs` records the Rust constants, and `apps/web/src/lib/limits.test.ts` checks the web app's copies. Those copies are still TypeScript, so this file still guards a real copy. The comment box stops at the same length the server accepts. Before, a longer comment just failed to post.
-
-Two golden files are gone. The attribute cases are a plain table in `crates/design/tests/attributes.rs` now, because there's no second copy to compare. And `export.json` no longer records the base CSS and content policy, because the browser reads them from Rust.
-
-To regenerate a file after you change a rule, run its test with `FINITE_UPDATE_FIXTURES=1`:
-
-```bash
-FINITE_UPDATE_FIXTURES=1 cargo test -p finite-design --test conformance
-```
-
-The formatter skips `crates/*/fixtures`, so a regenerated file only changes where the results did.
-
-## Edit commands: from a tool call to ops
-
-Agents don't send ops. They call tools with friendlier arguments, and `crates/design/src/edit/` translates them. If you want to add a tool, you start here. Each command reads the current document, checks the request, and returns ops. It never changes the document itself.
-
-Some of the work these commands do:
-
-- An `html` op parses HTML with `html.rs`, drops anything unsafe (`on*` attributes, `javascript:` URLs, `<iframe>` and the like), and emits one `create` per node. An `attrs` op refuses the same attributes using the same rule (`html::is_safe_attr`). It also refuses names that aren't valid attribute names, because exports write names as they are, and a name like `x" onload="…` would break out of its tag.
-
-A script URL is refused anywhere in a value, not just at its start. SVG animation can set an `href` while the page runs, from a list like `<animate attributeName="href" values="0;javascript:…">`, and an artboard without a script renders in a shadow root on the app's own origin. So a check that only looked at the start of the value let that through, and a click would have run the script as the app. The viewer's renderer checks attributes again before it sets them, with the same function through WebAssembly. The end-to-end test writes that SVG and checks the attribute never reaches the page.
-
-- `css::merge_sheet` merges a patch into a `<style>` block's CSS, so an agent can change part of a stylesheet without writing it all again. A rule with the same selector (ignoring whitespace) inside the same at-rules takes the patch's declarations, `prop: unset` removes one, and an empty rule like `.x {}` removes the rule. `@keyframes` replace the ones with the same name, and `@media`, `@supports` and the other at-rules that hold rules merge recursively. It parses with `cssparser` into a tree whose pieces are the exact text they came from, so rules the patch doesn't touch keep every byte, comments included. It reports each change with old and new values, like `.bar: color: red → blue, padding: 4px → removed, margin: 0 (new)`. `css::inline_conflicts` says which of a rule's properties the inline styles of the elements it matches override, since an inline style beats a stylesheet rule.
-- `update_styles` accepts `backgroundColor` or `background-color`. When you set a shorthand like `padding`, it also clears `padding-top` and friends. Styles are stored as a map, not as ordered CSS, so a leftover longhand would otherwise win.
-- `move_nodes` and `duplicate` pick free canvas space for anything that becomes a new artboard.
-- `remove`, `move` and `duplicate` first drop ids that are inside another id in the same call, and repeats (`top_level`). Each node walks up its ancestors instead of being compared with every other id. The comparison was quadratic, and it kept repeats, so deleting 10,000 cards with 100 of them listed twice made 10,050 deletes.
-- `duplicate` puts each copy right after its original, so it asks `Document::index_after` for the next sibling's index once per copy. That used to build the whole sibling list and scan it each time. Now it's a range lookup in the child index, which is sorted. Duplicating 10,000 siblings took 24.7 seconds in a debug build. The whole test now runs in 0.4 seconds.
-
-Nodes can nest at most 256 levels deep (`MAX_DEPTH` in `document.rs`). An artboard is at depth 0, its children at 1, and so on. An `html` op and a `move` op, the only commands that can make a tree deeper, refuse anything that would pass the limit and say why. The limit exists because exports, the outline and the browser's renderer walk the tree recursively. Before it, an `html` op with 5,000 nested `<div>`s, about 50 KB, overflowed the stack and aborted the whole server, taking every design and viewer with it. Chrome's HTML parser has a similar limit and stops nesting at 512 levels.
-
-Deep HTML is also slow to parse. html5ever, the HTML parser behind `scraper`, takes time quadratic in the nesting depth: 10,000 levels took 0.13 seconds in a release build, and 100,000 took 10. Parsing doesn't need the document, so the an `html` op tool parses on Tokio's blocking pool before it takes the design's lock (`edit::parse_html`, then `edit::write_fragments` under the lock). For 3 MB of ordinary HTML, parsing took 36 ms and building the ops 8 ms, so most of that work no longer holds up other agents and viewers.
-
-Still, parsing thousands of levels would tie up a thread, so `html::parse` first runs a one-pass scan that counts start tags minus end tags. If that count passes 4,096, sixteen times the limit, it refuses the HTML without parsing it. The count can be too high, for example when a `<p>` is left open and the parser closes it at the next `<p>`. It's never too low, and that margin keeps ordinary HTML from being refused by mistake.
-
-A test in `edit/write.rs` writes 1,000,000 levels on a thread with a Tokio worker's 2 MiB stack and gets the error in well under 2 seconds. It also checks that a tree at the limit still exports on that stack in a debug build.
-
-A design also holds at most 100,000 nodes (`MAX_NODES`), and an `html` op and `duplicate` refuse edits that would pass it. When an `html` op replaces nodes, the ones it removes count against what it adds. For scale, the `big_design` example's 20,201-node artboard is already a big design. Without a limit, the largest an `html` op one MCP call can carry, 4 MB of `<i></i>`, made about 600,000 nodes. Its ops came to 92 MB of JSON, which the server journals and sends to every viewer, and an agent stuck in a loop could keep going. `cargo run --release -p finite-design --example big_design` now shows that write refused in about 0.2 seconds, most of it parsing.
-
-### Rewriting HTML in place
-
-An agent changes a section by reading it with `read` as html, editing the HTML and writing it back with an `html` op in mode `replace` or `inner`. That rewrite is a **keyed reconciliation**, like React's keyed lists: an element written with the `data-id` that `read` as html gave it keeps its node. `rewrite_in_place` and `reconcile` in `edit/write.rs` turn the rewrite into ops on the nodes already there. A changed value is a `set`, a reordered child a `move`, a new element a `create` and a missing one a `delete`. So the elements keep their ids, the comments pinned to them and every agent's undo steps on them.
-
-Before, a rewrite deleted every node and created new ones. A person's comment then pointed at a node that no longer existed, and another agent's undo said "Nothing to undo", because its step targeted a deleted node.
-
-A few rules decide what matches:
-
-- An element matches the child of the same parent with its `data-id` and tag. A tag change, such as `<button>` to `<a>`, makes a new node, since a node's kind is fixed. So does an element moved to another parent.
-- Text matches text in order, so changing a button's label is one `set`.
-- Children that kept their order keep their indexes (`keep_order` finds the longest run of them still in order), so a reorder moves only what moved.
-- When no element names a node there, the write deletes and creates, as before. So does a rewrite whose subtree holds a component's root, which is redefined by name instead (see Components).
-
-The parser keeps a `data-id` as `Fragment::source`. Inside an instance it already said which component node an element shows.
-
-#### Merging a stale rewrite
-
-Keeping ids isn't enough on its own. Say agent A reads a section, agent B rounds its button, and A writes back its copy with only the text changed. A's HTML has no `border-radius`, so a plain rewrite would clear B's. The server can't tell "A removed it" from "A never saw it" without knowing what A read.
-
-So `read` as html marks its root with a **read mark**, `data-read-at="57"`: the design's `seq` when it was read. Agents copy the HTML back with the attribute in it, which is why the mark is an attribute rather than a separate argument. an `html` op takes the oldest mark on any element in its HTML, and `Design::merge` runs a **three-way merge** on each `set` the rewrite would do, with the design at the mark as the base:
-
-- The HTML has the value the base had: A didn't change it, so B's value stays.
-- A changed it and another agent changed it since: theirs stays.
-- A changed it and A made the last change since: A's wins.
-
-Every value kept from another agent is named in the result, like "kept border-radius: 999px on button "Buy" #8679e5zm, which another agent set after you read it". The agent can set it again on purpose. Without a mark, the HTML wins, as with any other edit.
-
-Structure merges too. A child missing from the HTML is deleted only if it was under that parent at the mark. Say A reads a list with Free and Pro, B appends Enterprise, and A writes its copy back with Pro renamed. Enterprise isn't in A's HTML because it didn't exist when A read, so it stays where it is, and the result names it: "kept li #ltk7ccvx "Enterprise", which another agent added after you read it. Delete it if you meant to remove it." The same goes for an element another agent moved under that parent since the read ("moved here"). B can still undo its add. Elements A itself added or moved since follow A's HTML, and an element that was there at the read is deleted, even if someone moved it within the same parent since.
-
-The base comes from a **set log** (`SetLog` in `design/three_way.rs`): for each recent change, the old value of each property it set, and the parent before the change of each node it created, deleted or moved (none for a created node). Both come from the change's inverse. It holds the last 512 such changes, up to about 8 MB. It's kept in memory only, and loading a design or replaying its journal starts it empty. A mark older than what it holds can't be merged, so the result says the HTML replaced values others changed since the read, and that elements others added since were removed. Merging scans the log from the mark once, so it costs about as much as the changes since the read.
-
-### Finding elements with CSS selectors
-
-`crates/design/src/select.rs` matches CSS selectors against a document, so a tool can take `.card:has(> h2)` or `button:contains("Sign up")` instead of node ids. `select::parse` reads a selector list, and `select::matches` returns the elements it matches, in document order across artboards. `Scope` limits the search to one page's artboards or to the descendants of some nodes, as `querySelectorAll` on an element does. The rest of the artboard still counts there: within a card, `.card > h2` matches the card's heading.
-
-Servo's `selectors` crate does the matching, the same one `scraper` uses, so the rules are the browser's. `Matcher` builds a flat index of the scope's elements, with each one's parent, siblings and first child, and implements the crate's `Element` trait over it. Building the index is most of the cost. Reuse one `Matcher` to match many selectors against the same document, such as every rule in an artboard's stylesheets.
-
-Selectors see a design the way an agent reads its HTML. Each artboard is a root: `:root` matches artboards, and no selector reaches from one artboard to another. `#id` matches a node's id, then its `id` attribute. Node ids can start with a digit, which CSS doesn't allow in an id, so `#4kx92mab` is escaped before parsing. `[data-id]`, `[data-name]`, `[data-instance-of]`, `[data-component]` and `[style]` read the node's id, layer name, the component an instance shows, a component root's name and its inline styles, as `read` as html writes them. `:contains("text")` isn't standard CSS. It matches an element whose visible text, with its descendants', contains the text, ignoring case and runs of whitespace. Text in `<style>`, `<script>` and `<template>` isn't visible.
-
-Text nodes never match. An agent that read a text node's id can still name it, so `Matcher::text_nodes` resolves a list made only of `#id`s. As in CSS, `:has(x)` matches every ancestor of an `x` and `:has(> x)` only its parent, which is why a delete by `:has(...)` needs care.
-
-No element is hovered or focused in a design, so `parse` refuses a state like `:hover` and a pseudo-element like `::before`, and the error says to style them with a `css` op instead. `parse_loose` reads them as matching their element, to find which elements a stylesheet rule like `.btn:hover` styles. The `selectors` parser doesn't say where a selector goes wrong. When parsing fails, `select` reads longer and longer prefixes until one fails for a reason more text couldn't fix, and the error quotes the rest: `can't read "div..card" as a CSS selector (at ".card")`.
-
-`cargo run --release -p finite-design --example select` times it on a 6,991-node article. Each selector took about 1.4 to 1.6 ms, including `:has(a[href^='https'])` and `:contains(...)`. With a reused `Matcher`, it took 0.04 to 0.25 ms.
-
-## Components
-
-Agents building several screens used to copy the same top bar into each one, and a later change meant editing every copy. A **component** fixes that. It's one definition, and its **instances** follow it, each changing only the values it **overrides**. `crates/design/src/components.rs` holds the rules.
-
-A component is an ordinary subtree whose root has `component: true`. It stays where it was built, often on the first screen, and renders like any other node. An instance is an element with `instanceOf` set to the component's id. It has no children of its own, and it stores only its `overrides`:
-
-```json
-{
-  "id": "k2n0d9xa",
-  "parent": "p7f3c1mz",
-  "index": "V",
-  "type": "element",
-  "tag": "header",
-  "instanceOf": "4biyjm26",
-  "overrides": { "9qd2h0ce/text": "Settings", "style:background": "#111827" }
-}
-```
-
-An override key is a property key after the path of the node it changes. `style:background` changes the instance's own root, and `9qd2h0ce/text` changes the text of component node `9qd2h0ce`. A value of `null` in `overrides` removes a value in that instance, like a border the component has. A node's JSON leaves the three fields out when they're unset, so older snapshots load as they are. The ops are the same four. `set` takes the new keys `component`, `instanceOf` and `override:<key>`, and undo, the journal and sync work as they did. An override that removes a value is `false` in an op, because `null` clears the override.
-
-### Expanding instances
-
-Everything that reads a design sees instances **expanded**. `components::expand` returns the document with each instance's content in place, as nodes with **virtual ids**: component node `x` inside instance `I` is `I/x`. A component can hold instances of other components, so a node can be `I/n/x`: node `x`, through instance `n`, inside `I`. Real ids never contain `/`. The path after the instance's id is the same path its override keys use, so an edit to `I/x` becomes an override on `I` keyed `x/…`. When instances nest, overrides from further out win.
-
-`Design::view` keeps the expanded document until the next change, and every MCP read uses it: outlines, `read` as html, search, screenshots and the layout notes. With no instances, it's the document itself. Expanding a 28,240-node design with 99 instances of a 21-node top bar took 37 ms in a release build.
-
-Expanding stops in three cases. An instance inside its own component shows nothing the second time. It leaves out nodes past the depth limit. And it stops after `MAX_NODES` virtual nodes, since instances nested in instances multiply. The edit commands refuse an instance that would contain itself (`check_cycle`), so only raw ops can reach the first case.
-
-### Edits inside instances
-
-`DesignHandle::edit` builds every edit against the expanded document, so you can pass `I/x` to any tool, like any other node id. Then `components::redirect` rewrites the ops before they commit:
-
-- Setting text, a style or an attribute on a node inside an instance, or on the instance's root, sets an override on the instance. A value equal to what the instance would show anyway clears the override instead, so the instance goes back to following the component. That's why a `replace` op changes a brand color in the component without pinning it in every instance.
-- It refuses ops that create, delete or move nodes inside an instance, and says what to do instead: edit the component, hide the part with `display: none`, or detach the instance.
-- Deleting a component first **detaches** its instances elsewhere. Each one becomes a plain copy of what it showed, with its overrides applied, and keeps its id. Undo brings back the component and the instances.
-
-Agents can't tell from the HTML which of these happened, so every edit's result says. An override reads "Only instance #k2n0d9xa of "Top bar" #4biyjm26 changed", and an edit to a component reads "so all 3 instances show it too". `read` as html marks instances with `data-instance-of` and component roots with `data-component`.
-
-Agents mostly make components without a tool, by naming them in HTML. The first element written with `data-component="Top bar"` defines a component called "Top bar". A later element with the same name, in the same HTML or another call, becomes an instance of it. Its text, styles and attributes can differ, and the differences become its overrides, but its elements have to match. So an agent that pastes the same bar into each screen, with each screen's title, gets one component and two instances, for no extra call. `read` as html writes a component's root with its name, so HTML read back and written again means the same component.
-
-A component changes by being rewritten in place. an `html` op with `replace` or `replace-children` inside a component edits the nodes that are already there. A new element matches an old one by its `data-id`, as in any rewrite, and otherwise by the same tag and layer name, in order (`rewrite_in_place` in `edit/write.rs`). Those nodes keep their ids, so the instances' overrides still find them. Before, a rewrite made new nodes, and every instance quietly lost its own title. A screen rewritten with its `data-component` element redefines the component under the same id, so its instances keep following it.
-
-An `html` op understands that marker: `<header data-instance-of="4biyjm26"></header>` writes an instance. HTML that `read` returned for an instance can be written back too. Elements inside it carry their virtual `data-id`, and where they differ from the component, the differences become overrides. An element without one isn't in the component, so an `html` op refuses the HTML rather than drop the element. `move` with `copy: true` copies an instance as an instance. It copies a component's root as a new instance of it, so a copied screen keeps following its top bar.
-
-A `component` op in `edit` does the same with `edit::create_component` and `edit::detach_instances`: `{"op": "component", "select": "[data-name=Nav]", "name": "Top bar"}` makes the first match the component, or the match that already is one, and the other matches its instances in place. With `detach: true`, every match that's an instance becomes a plain copy, and a match that holds instances (an artboard, a frame) has every instance inside it detached, however deeply they nest (`edit::detach_all`, which takes the real document and expands it again each round, so the chain can be as deep as the document allows). Instances inside a component's own definition stay, since the component is shared and rewriting its nodes would cut the overrides of its instances elsewhere. It stages with `tx.edit` like any op, so one edit can build the screens, make the bar a component and restyle it. `data-component` and `data-instance-of` work in its `html` ops too. `read`'s overview lists the components and counts their instances, `read` with `as: "html"` carries the component notes, and an edit's result says what it did to components. A selector reaches inside an instance by its virtual id. `#k2n0d9xa/9qd2h0ce` and `#k2n0d9xa\/9qd2h0ce` are the same id: `select.rs` escapes the `/` before CSS parsing, and a slash already written `\/` stays part of the id. A stylesheet rule can't reach a part inside an instance, written `#k2n0d9xa/9qd2h0ce` or `#k2n0d9xa\/9qd2h0ce`: the css op refuses it. Style that part with a css op whose `select` is the path, which becomes an override on the instance, or edit the component. A `/` in a declaration (`16px/1.5`, a url) is left alone. `url(...)` is skipped while reading those `#` tokens, so a `/*` inside a url doesn't swallow the rest of the sheet. `[data-instance-of]` matches an instance and `[data-component]` a component root, with the values `read` as html writes.
-
-A copy of an artboard keeps its instances, so it follows the components like the original: a later component edit changes the copy too. That's wrong for a before/after snapshot, so the `artboard` op's `from` and the `move` op's `copy` take `detach: true` (`edit::duplicate_detached`), which detaches every instance in the copies in the same transaction as the copy. One undo removes both. Without it, the result says how many instances still follow their components.
-
-A `<style>` block styles only its own artboard, and that catches agents out. In the first AX runs of `screens-change`, one agent styled its top bar with classes from each artboard's `<style>`. Then it had to recolor three blocks after all. A `<style>` inside the component is part of it, so every instance carries it, and tokens reach every artboard. The `component` op names the classes a component takes from `<style>` blocks outside it and suggests a `<style>` inside it, or inline styles with tokens.
-
-### Components in the viewer
-
-The browser runs the same expansion through WebAssembly. The renderer draws an instance from `Replica.expand`, and registers each element under its virtual id, so a comment can point inside an instance. An edit to a component changes what every instance shows. So while a change applies, the Rust replica notes the instances it touched (`components::affected`). After the change's last op, `DesignView.flush` draws those instances again. Sandboxed artboards export the expanded document, so they match screenshots too.
-
-People need to know which parts follow a component, since their edits inside an instance only override it. If you hover over one, the canvas outlines the instance in dashes and names it, like "Instance of Top bar". Hovering over a component names it and counts its instances.
-
-People can make components and detach instances too. With one element selected, the Inspector shows **Make component**, or **Detach** for an instance, and ⌥⌘K and ⌥⌘B do the same, as in Figma (`Editor.componentAction` in `editing/editor.ts`). They send the `makeComponent` and `detach` user edits, so the browser shows them at once and undo reverses them like any other edit. An artboard, a component's root and a node inside an instance get neither, since an edit inside an instance only overrides it.
-
-## The server
-
-### The hub
-
-The hub lives in `crates/server/src/hub/`, in three files:
-
-- `mod.rs` has `Hub`, the registry of designs. It finds, creates, loads, unloads, saves and hands off designs.
-- `design.rs` has `DesignHandle`, one design and every way to change it.
-- `messages.rs` has what goes out on the WebSockets: `Actor`, `Presence`, `DesignSummary` and the message types.
-
-The hub holds a `DesignHandle` for every design. Each handle has:
-
-- a **mutex** around the design's state, so edits to one design run one at a time and edits to different designs never wait on each other;
-- a **save queue**: every change, comment update and rename is queued as a record, and a background task writes the queue 250 ms after the last edit.
-
-While the design is loaded, its state also holds a **broadcast channel**, which fans each change out to every open WebSocket, and the latest changes for browsers that reconnect. Each message is turned into JSON once, as reference-counted bytes (`Outgoing` in `hub/messages.rs`), so sending it to another socket copies a pointer, not the message. Before, each send copied the whole string, so a 15 MB change sent to ten viewers made ten 15 MB copies.
-
-`DesignHandle::edit` is the path almost every tool call takes:
-
-1. Lock the design.
-2. Run the edit command against the current document to get ops.
-3. `Design::commit` them. This also logs the change for comments.
-4. Broadcast the change, keep it for browsers that reconnect, and mark the design dirty.
-
-Because steps 2 and 3 happen under one lock, no other edit can sneak in between reading the document and writing to it.
-
-### Designs load and unload like rooms
-
-A multiplayer server usually treats each document as a **room**: it's loaded into memory when someone joins, and unloaded when everyone has left. Finite's hub works the same way, so memory grows with the designs in use, not with every design ever made.
-
-- **Loading:** `Hub::open` is the way in for requests. If the design's state isn't in memory, it reads the snapshot and journal and replays them. That read runs on Tokio's **blocking pool**, a separate set of threads for slow work like disk reads, so opening a large design never stalls other requests. `Hub::get` does the same on the calling thread, for tests and code that isn't async.
-- **Unloading:** every 30 seconds, the hub's sweep looks for designs to drop. A design unloads only when all of these hold:
-  - nothing is waiting to be saved;
-  - nobody is watching it;
-  - no agent has presence in it;
-  - no live MCP session has undo history in it;
-  - it hasn't been opened for five minutes.
-
-  Other undo histories don't keep a design in memory, because they come back with it from the store (see "Undo across restarts"). The sweep first asks for a full snapshot, so the store has each history as it is now, then unloads the design on its next pass.
-
-- **Peeking:** some reads don't need the design kept in memory. The design list draws a thumbnail for each card, and each thumbnail fetches the design's snapshot with `GET /api/designs/{id}`. That request uses `Hub::peek`: a loaded design is read from memory, and a cold one is read from the store and dropped again. Without it, scrolling through the list would load every design for five minutes.
-- **What stays:** the handle itself stays, with a cached `DesignSummary`. That's what the design list shows, so listing designs never loads one. The broadcast channel that feeds the design's sockets is part of the loaded state, not the handle. Its buffer is allocated up front, about 30 KB, and a design that isn't loaded has no sockets. With 20,000 stored designs and none open, a design costs about 2 KB of memory, down from 35 KB when the channel lived on the handle. `cargo run --release -p finite-server --example cold_designs` measures it.
-
-Unloading can't race with loading. The sweep holds the hub's write lock, which blocks `Hub::get`, and only unloads a handle when the hub holds the only reference to it. Anything using a design got it from `Hub::open` or `Hub::get`, so it holds a reference, and the design stays loaded until it's done. The save task holds only a weak reference, so it never keeps a design in memory.
-
-On startup, the hub reads every stored design to build the list, then drops each one, so startup never holds every design in memory either. Designs don't depend on each other, so the reading is split across one thread per core (`summaries` in `hub/mod.rs`). With 5,000 designs of about 11 KB each, a 10-core Mac starts in about 0.1 seconds instead of 0.4. `cargo run --release -p finite-server --example startup` measures it.
-
-### MCP
-
-`crates/server/src/mcp/` is the agent-facing side, served at `/mcp` over Streamable HTTP with the `rmcp` crate. It serves six tools: `designs`, `read`, `edit`, `render`, `comments` and `undo`. There is one file per tool, and the files follow the tools:
-
-- `mod.rs` builds the server (`FiniteMcp`), works out which actor is calling, resolves a design's name to its id before any tool runs, and takes the layout note for the design the call names. `tools.rs` declares the six tools, and each one calls a plain function in its own module.
-- `designs.rs` lists, creates, renames and deletes designs, and holds the rules for naming a design (`resolve_design`, `inexact_delete`), which the router's relay shares.
-- `read.rs` is `read`: an overview by page, and for a selector's matches their outline, HTML with its read mark, CSS (inline, each matching `<style>` rule, and what inline styles override), JSX, the computed values of up to 10 matches, a search (`contains`, which also searches tokens) or an export. `transfer.rs` serves the exports and `edit`'s import op. `read.md` is its description.
-- `edit/` is `edit`. `edit/ops.rs` reads an edit's ops: their kind (from `op`, an old tool name, or the fields; `Kind::named` still accepts an `html` op, `nodeIds` and the like), the fields each needs, and the work done before the design's lock, which is parsing HTML and reading and storing an import's file (`transfer::prepare`). `edit/run.rs` runs the ops inside one `DesignHandle::transact`. Each op builds against `tx.view()` with the commands in `finite_design::edit` and stages with `tx.edit`, so it sees what the ops before it did, and an `as` name resolves to the id an earlier op made (`@name`). `edit/mod.rs` takes the call's parameters, the dry run and the result. `edit.md` is the description.
-- `render.rs` is `render`: images of artboards, or with `output: "layout"` each element's box as text.
-- `comments.rs` is `comments`: list, wait, reply, pin, pass and mark for people. `undo.rs` is `undo`.
-- `selector.rs` turns the selectors agents write into the ones `finite_design::select` matches (`selector/verification.rs` checks that exhaustively). `format.rs` writes the compact outlines and the notes under screenshots, `notes.rs` the notes under edit and undo results (links that break, what an edit did to components, what was left out), `result.rs` the shared result helpers, and `layout.rs` the layout notes.
-- `watch.rs` is the layout check after an edit; see below.
-- `instructions.md` is the text agents read when they connect. It's plain Markdown, so you can edit the workflow without touching Rust. Keep it short: Claude Code keeps the first 4,096 characters of a server's instructions and silently drops the rest. A test checks that they stay under 4,000.
-
-The first op that fails fails an `edit` with "op N (kind): …. Nothing was changed.", and nobody sees anything. `dryRun` stages with `dry_run` instead. The change is labelled with `status`, or a one-line summary of the ops of about 60 characters ("Replace #3b82f6 → #f97316, CSS on .btn"; selectors as `#a, #b`, or `3 elements` when there are more), which undo and comment replies show; `status` also shows people which artboards the edit touched. An html op applies to every match, and the call is still one undo step. Mode `inner` or `replace` is the merged rewrite (`tx.merge`) on each match. With several matches, each is written on its own, so a copy whose `data-id` isn't in that match gets fresh ids. A match nested inside another is refused for `inner` and `replace`, since replacing the outer one would delete the inner. A `remove` whose matches nest inside each other is refused. `replace` also replaces in token values (`search::replace_in_tokens`), and an `import` op records its import in the transaction (`Transaction::record_import`), which the hub journals with the change. What a command does to the model, such as merging a style, copying an artboard or setting tokens, lives in `finite_design::edit`; the server only picks the command and words the result.
-
-Elements are addressed with CSS selectors, matched on the server by `finite_design::select` (see "Finding elements with CSS selectors"), on the whole design or one `page`. Every tool's `designId` also takes a design's exact name, in any case, or the start of its id: `call_tool` resolves it before the tool runs.
-
-After every edit, unless `check: false`, the edit waits for the layout check of `watch.rs`, and a late note goes on the next result. An edit measures the artboards it touched in Chrome (the first 3, and the note says when there were more) and waits up to 5 seconds; `FINITE_LAYOUT_WAIT_MS` changes that. If the browser is slower (the first call takes about 2 s, since each measurement launches Chrome), the note goes on the agent's next result for that design instead. The note reports what the edit changed: each check remembers its findings on the artboard, and the next one lists only findings that are new or about a node the edit touched, its ancestors or its descendants, and counts the rest in one line ("1 earlier note on artboard #id unchanged by this edit"). A check counts as heard when its note is taken for a result, so a note that a newer edit drops first doesn't hide its findings from the next one. `render` with `output: "layout"` and a whole-artboard shot list everything. Measurements run one at a time, and one whose artboard was edited again meanwhile is skipped. Any other edit, `undo`, `redo` and `render` drop a waiting note; a call that fails leaves it.
-
-On the real build, the six tools passed every AX run that the old ~35-tool surface passed, with 36% fewer calls on Sonnet's small-design tasks and 64% fewer on large imported pages (`e2e/ax/README.md`).
-
-`crates/server/tests/tools.rs` drives every tool and op over MCP. `tests/mcp.rs` covers what is around the tools: sessions, people working beside the agent over HTTP, and results kept within what a client can take. `e2e/ax` measures how real agents do with the tools (see its README). Every change to a tool's shape, description or result is worth a run there before and after. The tool names of the old surface followed [Paper's MCP server](https://paper.design/docs/mcp).
-
-#### Keeping tool results short
-
-Every tool's result fits in one budget of 40,000 characters, or says how to get the rest. A long list in a tool result fills the agent's context, so a list that stops short ends with a note saying how many there are. The tree is cut the same way (`OUTPUT_LIMIT` in `mcp/format.rs`), about 10,000 tokens. Claude Code cuts MCP results at 25,000 tokens by default, wherever that falls, so Finite cuts first, at the end of a line, and says how to see the rest: "… cut off after 1738 of 6001 lines. Read with select on one artboard, or a smaller depth, shows the rest."
-
-How each view stays within it:
-
-- **`read` as html:** cut HTML would be broken HTML, so a result that's too long returns the node's outline (itself cut to the budget) and asks for a read of a child instead. For a node with no children that's still too long, like an image with inline data, it says its attribute values are long. It never shortens values in the HTML it returns for writing back, because an agent that wrote the HTML back would replace the real data with the shortened text.
-- **Lists of designs and comments:** `fit` keeps as many items as fit the budget and the note says how many there are and which `offset` or `limit` shows more. Inside the pretty-printed array every line is indented two more spaces, which `fit` counts.
-- **Long values:** a value longer than 2,000 characters comes back as its first 200 and its length, because an image's inline `data:` URL can be megabytes of base64.
-
-A test in `tests/mcp.rs` builds an artboard of 3,000 cards and checks the views above stay inside the budget.
-
-#### Locks, presence and sessions
-
-Read tools (`read`, `read` as html, `render`) lock the design just long enough to copy what they need. `render` calls `screenshot::plan` under the lock, which writes each artboard it needs as a standalone HTML page. Then `screenshot::capture` renders the pages without the lock. It starts headless Chrome and drives it over the **Chrome DevTools Protocol** (CDP) (`screenshot/cdp.rs`), a WebSocket API for controlling the browser. Chrome's `--screenshot` flag can only capture the whole window, and CDP can crop. The page carries each element's node id as `data-finite-id`, so `capture` measures the element's box with `getBoundingClientRect` and passes it to `Page.captureScreenshot` as the clip. One call can take up to 10 shots: whole artboards, nodes, regions of a node, with padding. It can also hide or outline nodes, leave out backgrounds, and show content that overflows the artboard. Each capture starts its own browser, so a **semaphore** caps how many run at once: half the CPU cores, between 1 and 4. Further captures wait their turn. On a 10-core Mac, six agents asking at once got their screenshots in about 5 seconds, and at most 4 browsers ran together.
-
-A page with scripts or animations runs for 3 seconds before its capture. A static page is captured once its images and fonts load. Each image comes with text that says where the shot sits in the artboard and what the node's box is. The text also says whether the shot was cut off at the artboard's edge, and how far the content overflows the artboard.
-
-An artboard with a `<script>` is rendered the way the viewer renders it. The page `plan` writes is a bare wrapper holding a sandboxed `<iframe sandbox="allow-scripts allow-forms" srcdoc="…">`, and the artboard's page, with its content policy and the viewer's bootstrap script (`html::BOOTSTRAP`) first in its head, is the `srcdoc`. So the script gets an opaque origin, can't reach the wrapper, and has the same `localStorage` shim, which here lasts only for the capture. The frame is at (0, 0), fills the wrapper and has no border, so coordinates match an artboard without scripts. `measure` and the scene export evaluate in the frame: `open` finds it with `Page.getFrameTree` and calls `Page.createIsolatedWorld` on it. That world sees the artboard's DOM but not the page's own variables, so a script that replaces `getBoundingClientRect` can't change what is measured. A capture that reveals overflow also grows the iframe, since the frame would clip what reaches past its size. An artboard without a script loads directly. Nothing in it runs, so the sandbox would change nothing, and it needs no second frame to measure.
-
-Scripts can `fetch` and open WebSockets, and the server is shared, so a page could ask for `169.254.169.254`, `localhost` or a private address and read the answer in its screenshot. Chrome therefore can't connect to anything itself. `Browser::launch` starts an in-process proxy (`screenshot/egress.rs`) on a loopback port and runs Chrome with `--proxy-server` pointing at it and `--proxy-bypass-list=<-loopback>`, which removes the default exemption for localhost, so even loopback goes through it. `--host-resolver-rules` makes every name Chrome resolves itself fail, `--disable-quic` closes HTTP/3 and WebTransport, which a proxy can't carry, and `--force-webrtc-ip-handling-policy=disable_non_proxied_udp` keeps WebRTC from sending UDP of its own. The proxy handles `CONNECT` for `https:` and `wss:`, and `GET http://…` for `http:` images. It resolves the host itself and refuses any address that isn't globally routable (`is_global`): loopback, private, link-local including 169.254.0.0/16, CGNAT, unique-local, multicast, unspecified, documentation and benchmarking ranges, the IPv6 forms that embed one of those (IPv4-mapped, NAT64, 6to4), and broadcast. Then it connects to the address it checked, so a second lookup can't return something else (DNS rebinding). Only ports 80 and 443 are allowed. At most 128 connections run at once, a request head must arrive in 10 seconds, a connection attempt takes at most 10, and no connection lives past 2 minutes. A redirect comes back to the proxy as a new request, so each hop is checked. The proxy is stopped with the browser. Tests that serve a page from a local server name its address in `Policy::allow`, a field that exists only in test builds. `screenshot/network_tests.rs` checks that a page can't reach a local server by image, `fetch`, WebSocket, stylesheet or script, under several spellings of loopback, and that the same page reaches it once the test allows the address.
-
-A screenshot's longer side is at most 3,000 pixels (`MAX_OUTPUT_SIDE`). The Claude API refuses images over 8,000 pixels on a side, and once a request holds more than 20 images, a stricter limit applies to every image in it. An agent checking its work passes 20 screenshots quickly, and [Anthropic's vision docs](https://platform.claude.com/docs/en/build-with-claude/vision) suggest at most 3,000 pixels a side to stay under that limit everywhere. So a 1440 × 8000 artboard at scale 2 comes back at 0.375×, 540 × 3000, with a note saying so. Before, it would have been 2880 × 16000.
-
-Chrome doesn't render below a device scale of 1 here, so a smaller shot renders at 1 and shrinks with the `scale` of the capture's clip. `tests/screenshot.rs` checks cropping, padding, regions, the options and the scales against real pixels. One test captures a tall page with a black band along its bottom edge. It checks that the image is 3,000 pixels tall and that the band is in it, so the page was shrunk rather than cropped. The tests need Chrome, and without one they say so and pass.
-
-`read` as html can show part of a subtree. `html::export_with` takes a depth, can leave out styles, can shorten long values, and can start with the artboard's `<style>` blocks. When the whole subtree doesn't fit in one result, `html::export_within` binary-searches for the greatest depth that fits. Elements below that depth hold a `<!-- N child elements not shown -->` comment.
-
-`read` with `as: "computed"` asks Chrome what each match ends up with, so an agent can learn what `var(--bg)` is on a Dark artboard without a probe node. It groups the matches by artboard, writes each artboard as a page with `plan_measurement` under the lock, and `screenshot::computed` loads each page in its own browser and returns `getComputedStyle(el).getPropertyValue(name)` for each requested property, custom properties included. The page has the artboard's tokens in its mode, as screenshots do, so the values are the ones both renderers show. A page with a script waits out its settle time first. It takes at most 10 matches, and 10 properties by default (`COMPUTED` in `mcp/read.rs`). It doesn't change the design, so it never holds the lock while Chrome runs. The outline resolves `var(--token)` in its `[width × height]` brackets from the token table instead, in the artboard's mode (`resolve_vars` in `mcp/format.rs`), because that runs on every outline and needs no browser.
-
-When a shot is a whole artboard, the capture also measures every element in it, in the same pass that finds the shots' boxes (`measure` in `screenshot/mod.rs`). `Report::new` in `mcp/layout.rs` turns those boxes into findings: content cut off by the artboard's edge, the height that would fit it, and text wider or taller than its own box. The measurement also records whether an ancestor between an element and the artboard clips it (`overflow` other than visible, `clip-path`, including an `<svg>`'s own viewport), following the containing block for absolutely positioned elements. Clipped content isn't cut off by the artboard, so it isn't reported, and the taller-artboard fix is offered only for in-flow children of the artboard. Text overlap is judged on what shows: each element's box inside the artboard and the scrollers around it (`visible` on the measured box), so rows a scroller clips don't overlap what sits below it. A shot whose area differs from the node's box by less than a pixel, because it was snapped to whole pixels, doesn't print both. Agents used to find clipped footers only by looking at the image, and often didn't.
-
-**Presence** is a note that an agent is busy on some nodes. Browsers show it as a badge on the artboard. It names at most 100 nodes, and repeats count once. Every viewer gets the whole list on each update, and naming a parent covers its children. Any `edit` sets it to the artboards it touched, with its `status` as the line shown. Presence expires a minute after the agent's last edit, and an actor's undo history is dropped after six idle hours or when its MCP session ends.
-
-A session ends when its agent disconnects, or after an hour without a call (`SESSION_IDLE` in `mcp/mod.rs`). An agent that sends `X-Finite-Agent` keeps its history across sessions. The server cuts its id to 64 characters, as it does people's ids, because it stores the id with every change and reply the agent makes. Before, the server copied a header of a few KB into each of them. One that doesn't is known by its session, so its undo lasts only as long as the session.
-
-rmcp closes idle sessions after five minutes by default, which is a short pause for an agent waiting on a person. Then the client gets `404`, opens a new session, and comes back as a different actor with nothing to undo. A test in `tests/mcp.rs` pauses Tokio's clock, waits 20 minutes, and undoes. With the default, the session was already gone. The router's relay uses the same setting.
-
-Every viewer shows the names and notes agents write, so they're cut to a fixed length rather than refused (`finite_design::label`). Layer names, design names and presence notes keep 120 characters. An agent's display name keeps 48, the same as a person's. Surrounding spaces are trimmed, and an empty design name becomes "Untitled".
-
-### The web API
-
-`crates/server/src/api.rs` serves the browser:
-
-| Route                                                             | What it's for                                       |
-| ----------------------------------------------------------------- | --------------------------------------------------- |
-| `GET /api/designs?q=…&limit=…`, `POST /api/designs`               | Search designs by name, create an empty one         |
-| `GET /api/designs/{id}`                                           | One snapshot (used by thumbnails)                   |
-| `PATCH /api/designs/{id}`                                         | Rename the design (`{ "name": … }`)                 |
-| `GET /api/designs/ws`                                             | WebSocket: the 200 newest designs, then updates     |
-| `GET /api/designs/{id}/ws`                                        | WebSocket: one design's snapshot, then every change |
-| `GET /api/designs/{id}/ws?epoch=…&since=…`                        | The same socket, resuming after a reconnect         |
-| `POST …/comments`, `…/replies`, `PATCH …/comments/{cid}`          | Comment, reply, resolve                             |
-| `PATCH …/comments/{cid}/messages/last`, `DELETE …/comments/{cid}` | Edit your newest message, delete a comment          |
-| `PUT /api/designs/{id}/tokens`                                    | Name the modes and set tokens, as the person's edit |
-| `DELETE /api/designs/{id}/modes/{mode}`                           | Delete a mode and its values                        |
-| `PUT /api/designs/{id}/artboards/mode`                            | Set the mode artboards render in                    |
-| `POST /api/designs/{id}/import?format=…&name=…&strict=…`          | Import a file as new artboards                      |
-| `GET /api/designs/{id}/export?format=…&artboard=…&router=…`       | Download the design, or one artboard, as a file     |
-| `GET /api/designs/{id}/imports`, `…/imports/{iid}/original`       | The import records, and an import's exact bytes     |
-
-The messages on these sockets are Rust types on the server and Effect schemas in `apps/web/src/design/schema.ts`. Another golden file keeps those in step. `crates/server/tests/wire.rs` drives a real hub through an edit, an undo, presence, a comment, an agent reply and a rename, and records every message it broadcasts in `crates/server/fixtures/messages.json`. Then `apps/web/src/design/wire.test.ts` decodes each one with the web schemas. If you rename a field on the Rust side, `cargo test` fails until you regenerate the file, and then `vp test` fails until you update the schema.
-
-The API only answers pages that belong to it (`guard.rs`). Browsers don't apply the same-origin policy to WebSockets, so without a check, any website you visit could open `ws://127.0.0.1:4100/api/designs/ws` and read every design live. That's **cross-site WebSocket hijacking**. With **DNS rebinding**, a site can also point its own name at your machine, which makes its requests count as same-origin. So `/api` refuses a request with `403` unless its `Host`, and its `Origin` if it has one, is a host the server knows: a loopback name, a server in `FINITE_NODES`, or one in `FINITE_ALLOWED_HOSTS`. That's the same list MCP checks `Host` against, and the guard sits in front of `/mcp` too, so a web page can't start an agent session either. Clients that send no `Origin`, like `curl`, agents or another server, aren't affected. A test opens the design list's socket from `https://evil.example` and gets `403`; without the check, it got the list.
-
-When a browser opens a design's socket, the server takes the lock first. Under that lock, it subscribes the socket to the broadcast channel and builds a snapshot. That way no change can land between the snapshot and the stream. If a slow browser falls more than 1024 messages behind, it gets a fresh snapshot instead of the missed changes.
-
-## Following one edit end to end
-
-Say an agent makes a button orange:
+## Data on disk
 
 ```
-edit({ "designId": "k7jo11y14e",
-  "ops": [{ "op": "css", "select": "#4biyjm26", "css": "background-color: #ff5a1f" }] })
+$FINITE_DATA_DIR/
+  designs.json        [{ id, name, root, origin }]   origin: connected | blank | import
+  settings.json       default model, effort, speed, steer-or-queue, Show Working separately
+  projects/<id>/      blank and imported designs: a copy of apps/server/scaffold
+<root>/.finite/       meant to be committed with the project
+  design.json         { version: 1, id, router, styling, css[], wrapper?, brandDir }
+  canvases/<id>.json  one canvas: frames, text labels, comments
+  boards/<canvasId>/  the prototype components agents write, one default export per file
+  threads/<id>.json   thread metadata (ThreadMeta)
+  threads/<id>.jsonl  the thread's event log, one ThreadEvent per line
+  attachments/        files people attached to messages
+  Wrapper.tsx         optional providers every file frame renders inside
+<root>/<brandDir>     brand assets (default src/assets/brand)
 ```
 
-1. `mcp/mod.rs` works out the actor (`agent:Claude`, from the header) and calls `DesignHandle::transact` with a label made from the ops, "CSS on #4biyjm26".
-2. `edit::merge_style` normalizes the name and returns one op: `set 4biyjm26 style:background-color "#ff5a1f"`.
-3. `Design::commit` applies it, gets back `set … "#111"` as the inverse, pushes that onto Claude's undo stack, and bumps `seq` to 13. It also records the change in the change log, so Claude's next reply to a comment on this artboard can link it.
-4. The hub broadcasts this message to every browser on the design, and keeps a copy for any browser that reconnects later:
+`store/` is the only writer of these files. It writes through a temp file and a rename (an atomic write), so a reader never sees half a file, and it serializes writes per design. It also watches `.finite/` and reads back changes made outside the server, such as an agent editing a canvas file, after 100 ms of quiet.
 
-   ```json
-   {
-     "type": "change",
-     "actorName": "Claude",
-     "change": {
-       "seq": 13,
-       "actor": "agent:Claude",
-       "origin": "edit",
-       "label": "Update styles",
-       "ops": [
-         { "op": "set", "id": "4biyjm26", "key": "style:background-color", "value": "#ff5a1f" }
-       ]
-     }
-   }
-   ```
+A **connected** design is a reference to a folder that already exists. `design.connect` runs `store/detect.ts`: the folder needs a `package.json`, Vite and React Router or TanStack Router, or it's refused with code `unsupported-project` and a reason. Detection also picks the styling convention (Tailwind, CSS modules or inline styles) and the global stylesheets the entry imports. Removing a connected design forgets it and leaves the folder alone. A **blank** design copies `apps/server/scaffold` (Vite 8, React 19, TypeScript, Tailwind v4, React Router) into `projects/<id>/` and installs its dependencies with `pnpm install --ignore-workspace`, or npm when pnpm isn't on `PATH`. Until the install ends, the design's preview reports `starting` with the install's output. An **import** is a blank design plus a thread that rebuilds the source (a Figma link, a URL or attachments) in TSX.
 
-5. 250 ms later, the change is appended to the design's journal on disk.
-6. In each browser, `Replica` applies the op through WebAssembly, and `Renderer` calls `style.setProperty("background-color", "#ff5a1f")` on that one button.
+Every new design starts with three pages: **Routes**, with one frame per route the dev server reports, laid out in a grid of four columns and kept in step with the routes (`store/routes.ts`); **Brand**, for logos, images and fonts; and **Components**. A removed canvas keeps `removedAt` for 30 days, so it can be restored, and is deleted the next time the design opens after that.
 
-`designs` with `delete` permanently removes a canvas's snapshot and journal, including its pages, comments and undo history. The hub serializes deletion with saves, marks the handle gone, disconnects viewers and sends the lobby a fresh design list. Pending comment waits return a not-found error, and active searches refresh their results. Pending saves and shutdown flushes skip the deleted handle. The router keeps its cached lists current with each design update, so a deletion preserves the other servers' changes. Shared stores check the fencing token before deletion. Content-addressed blobs stay in the store because other designs may use them. Deletion cannot be undone; a `remove` op deletes an artboard.
+## The wire protocol
 
-## People edit too
+`packages/protocol/src/wire.ts` is the contract. Each tab opens one WebSocket on `/api/ws` and sends JSON requests with a `rid`. The server answers each with `{ type: "reply", rid, ok: true, value }` or `{ ok: false, reason, code? }`. `reason` is written for a person or an agent to act on, and `code` (from `RefusalCode`: `stale`, `outside-prototype`, `unsupported-style`, `not-logged-in` and others) is what the UI reacts to. Zod parses every message, so a bad one is refused with the path of the bad field, like `canvas.patch: patch.frames.0.x: expected number`.
 
-People select things on the canvas (a click, Shift-click, a selection box on the empty canvas, ⌘A), drag and resize them with snapping to what's around them, type into text with a double-click, set exact X, Y, W and H in a panel, delete, duplicate (⌘D), copy and paste (⌘C, ⌘V), group (⌘G, ⌘⇧G), restack (⌘], ⌘[, with ⌥ to the front or back), nudge with the arrow keys, and undo their own edits with ⌘Z. Space held down pans. A gesture becomes one change, made by the person's actor, `user:<id>`, with the same id their comments use. So it lands in its own undo history, and undo keeps the person's and the agents' work apart the way it keeps two agents' apart.
+The first message is `hello { user }`. `subscribe { designId }` returns the design's whole state (`DesignState`: the design, its canvases, threads, preview state and routes), and from then on the server pushes events: `canvas` (the whole canvas after any change), `thread`, `thread.event`, `preview` and `routes`. `designs` and `settings` go to every socket. The requests fall into groups:
 
-A gesture doesn't send ops. It sends **user edits**, a small closed list in `crates/design/src/user_edit.rs`: `setPosition` for artboards, `setStyles` for inline styles, `place` to move nodes before a sibling, `delete`, `duplicate`, `group`, `ungroup`, `setText`, `makeComponent`, `detach`, `setAttributes` (which also renames, hides and locks), and `createPage`, `renamePage`, `deletePage` and `moveToPage`. Each says where things end up, like "left is 132px" or "before #p9", never by how much they change. `user_edit::plan` turns them into ops with the edit commands agents use (`update_styles`, `move_before`, `set_position`, `delete`, `duplicate`, `group`, `ungroup`, `set_text`, `create_component`, `detach_instances`, `update_attributes`, `create_page`, `rename_page`, `delete_page`, `move_to_page`), then `components::redirect`, so a change inside an instance becomes an override, as it does for agents. A `place` names the sibling to go before rather than a position, so a sibling an agent adds meanwhile can't shift where the node lands, and if that sibling is gone, the node goes last.
+- Designs: `designs.list`, `design.create`, `design.connect`, `design.remove`.
+- Canvases: `canvas.create`, `rename`, `remove`, `restore` and `patch`. A `CanvasPatch` moves, resizes, adds, removes, renames or moves frames to another canvas, or sets and removes a text label.
+- Source: `source.edit`, `source.undo`, `source.redo`, `source.detach`, `tokens.get`, `tokens.set`, `components.list`.
+- Comments: `comment.add`, `reply`, `resolve`, `reopen`.
+- Threads: `thread.send`, `thread.queued` (edit or drop a queued message), `interrupt`, `snooze`, `settle`, `rename`, `history`.
+- Settings and Claude: `settings.get`, `settings.set`, `claude.status`.
+- `frame.error`: a frame's runtime error, which the page forwards for the agent's `frame_errors` tool.
 
-### One drag, end to end
+Two things don't fit a JSON socket and are plain HTTP (`http.ts`): `POST /api/designs/:id/attachments` (multipart, up to 25 MB) stores a file in `.finite/attachments/` and returns its path for `thread.send`, and `GET /api/designs/:id/export?canvasId=&frameIds=` returns a zip of the frames' TSX files and the `.finite/` files they import. `GET /api/health` answers `{ ok: true }`.
 
-1. The person presses on an element. `Editor` (`apps/web/src/design/editing/editor.ts`) updates the selection and offers the press to each gesture in `gestures/index.ts`, in order. The first that takes it runs; a press none takes is left to the camera, which pans.
-2. Each animation frame, the gesture turns the pointer into user edits, and `DesignSession.draft` shows them. The **draft** applies in the browser's replica: `crates/wasm` runs `user_edit::plan` on the tab's document and applies the ops, so what the person sees is the real CSS result, with the layout reflowing around it. Nothing is sent or saved.
-3. On release, `DesignSession.commit` makes the draft a **mutation** with the tab's **stamp** (a random id per tab and a counter) and sends `{type: "mutate", author, stamp, edits}` on the design's WebSocket. The screen doesn't change, because the draft is already showing.
-4. `DesignHandle::mutate` takes the lock, plans the same edits against the server's document, commits them and broadcasts the change with the stamp. Every tab applies it as usual. The tab that sent it sees its stamp and drops its own copy.
-5. If the mutation changes nothing, or `plan` refuses it (its node is gone), the server sends `settled {mid, seq, error}` to that tab alone. The tab applies every change up to `seq` first, then takes the mutation off and says why.
+`hub.ts` holds the sockets. It opens each design once and forwards the open design's changes, and its preview's, to the sockets subscribed to it. `handlers.ts` has one thin function per request type that calls into the modules; `packages/protocol/src/server.ts` declares those modules' interfaces (`Store`, `OpenDesign`, `Previews`, `SourceEditor`, `Agents`).
 
-A person's undo and redo go the same way, as `{type: "undo", author, stamp}`. They aren't shown ahead, since the history is on the server.
+## Previews, the plugin and the bridge
 
-### The tab's own edits, and rebasing them
+`preview/` runs one Vite dev server per open design, each in a child process (`preview/vite-host.mjs`). The child loads the project's own Vite through `createRequire(root)`, with the project's own config, and passes `@finite/vite-plugin` as an inline plugin. Vite merges inline config over the project's, so the project's files stay untouched. The child reports its URL over IPC, and `changed` when source files change. When nobody views a design for 60 seconds, its dev server stops. A crash shows as preview `error` with the tail of its log.
 
-The replica's document is the server's document with the tab's own edits on top: the mutations it sent that the server hasn't answered, then the draft. This is **client-side prediction with server reconciliation**, the model Replicache calls mutators: the same named edit runs in the browser to predict the result and on the server to decide it. When a change arrives while the tab has edits of its own, `Replica::receive` in `crates/wasm/src/replica.rs`:
+`@finite/vite-plugin` (`packages/vite-plugin/src/`) does four things:
 
-1. undoes the draft, then the pending mutations, newest first, with the inverses their ops returned, so the document is the server's again exactly;
-2. applies the server's ops, and drops the mutation the change's stamp names;
-3. plans the remaining mutations, then the draft, again on top. One that no longer plans is dropped, and a draft that no longer plans ends the gesture, with the reason, like `node "x" not found`.
+- **Stamps** every intrinsic (lowercase) JSX element in `.tsx` and `.jsx` files outside `node_modules` with `data-finite-loc="src/x.tsx:12:4"` and `data-finite-rev="<first 8 hex digits of the file's sha1>"` (`stamp.ts`). It parses with `@babel/parser` and inserts with `magic-string`, so the source map still lines up. Components and fragments aren't stamped, so an element inside `<Button>` carries `Button.tsx`'s loc: editing it edits the component everywhere it's used.
+- **Injects the bridge** into every page: through `transformIndexHtml` for a single-page app, and by rewriting the HTML response for React Router's framework mode, which renders HTML on the server (`html.ts`).
+- **Serves frames and routes.** `GET /__finite/frame?file=&export=` renders one component on its own page: the design's stylesheets, then the component inside `.finite/Wrapper.tsx` when there is one and a memory router, so a `<Link>` in a copied production component works. `GET /__finite/routes` lists the app's routes (`routes.ts`): TanStack Router's `FileRoutesByFullPath` from `routeTree.gen.ts`; React Router's framework-mode `app/routes.ts`, loaded through Vite; or, for React Router's data and declarative modes, a Babel scan of `createBrowserRouter([...])` and `<Route path>`.
+- **Lets Tailwind see `.finite/`.** In dev it appends `@source "<path to .finite>";` to the stylesheet that imports Tailwind, so classes used only in prototypes get generated (`tailwind.ts`).
 
-Each inverse runs against the document it was read from, so the rollback is exact, and the tab always ends with the server's ops, whatever ids or indexes its own prediction picked. A randomized test in `replica.rs`, `the_tab_ends_up_with_the_servers_document`, interleaves agent edits, drafts, mutations, answers and refusals in 200 orders and checks that the tab's document equals the server's whenever it has no edits of its own. With no edits of its own, which is every watching tab, `receive` is the old path. The rollback and replay patch the same few DOM nodes twice within one task, so nothing flickers.
+A frame's source is a route (`{ kind: "route", path, params? }`, loaded at that path) or a file (`{ kind: "file", file, exportName? }`, loaded through `/__finite/frame`). `Previews.frameUrl` turns either into the iframe's URL.
 
-New nodes, like a duplicate's copies or a group, get the same ids in the tab and on the server: `user_edit::new_ids` makes them from the mutation's stamp, so a person can select a copy and keep editing it before the server answers. Only when the server's document already holds an id the tab's doesn't do the two differ, and then the server's change wins as always. A snapshot replaces the tab's edits: they may be in it already, and sending them again could do them twice. A resume, which replays every change missed, acks the mutations that landed, and the tab sends the rest again.
+The **bridge** connects the page to each iframe over a `MessageChannel` (`packages/protocol/src/bridge.ts`; the iframe half is `packages/vite-plugin/src/client/bridge.ts`, the page half `apps/web/src/canvas/bridge.ts`). The iframe posts `finite:hello` to its parent, and the parent answers with `finite:connect` and the port. The parent then asks `hit(x, y)` (the stamped element under a point, which instance of its loc it is, and its stamped ancestors), `rects(locs)`, `inspect(loc, index)` (computed styles and class names for the inspector) and `layers()` (the stamped tree for the Layers panel), and sends `preview(loc, styles)` to show a style while a gesture runs. The iframe sends `size` (for frames whose height hugs their content), `updated` after HMR, `key` (so canvas shortcuts work with focus inside a frame) and `error` (runtime errors, rejections and `console.error`).
 
-### From a drag to CSS
+## Hand edits: the source editor
 
-Only the browser can lay a design out: `node.styles` holds inline styles, and `<style>` blocks, classes and the shared CSS decide the rest. So `Renderer.measure` reads the computed style and box of an element, and `editing/geometry.ts` decides what a drag means, in pure functions tested without a DOM:
+`source/` turns a hand edit into a change to the TSX. A `SourceEdit` is `style`, `text`, `reorder`, `remove`, `duplicate` or `attr`, and names the locs it touches plus the rev of each file. `rewrite.ts` parses the file with Babel, finds the opening element at each loc, checks its tag, and splices the change in with `magic-string`, so the file's formatting survives. It returns a remap of old locs to new ones, so the selection follows the element.
 
-| What's dragged                     | Edit                                                                                                                                                                                                                                                                                                                                                                       |
-| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| An artboard, by its name or itself | `setPosition`, in whole canvas pixels.                                                                                                                                                                                                                                                                                                                                     |
-| `position: absolute` or `fixed`    | `setStyles` on its insets: `right` or `bottom` when the inline style pins it by those, otherwise `left` and `top`. Start from the computed insets, add the pointer's move divided by the zoom.                                                                                                                                                                             |
-| In the flow                        | `place`. While the pointer is over the node's parent, it goes before the first sibling the pointer comes before along the parent's flow (row, column, reversed, or row by row for grids and wrapping flex). Outside the parent, the innermost flex or grid container under the pointer takes it. Over the node itself it stays put, so it can't flicker between two slots. |
-| A resize handle                    | `setStyles` with `width` and `height` in pixels, `flex-grow: 0` for a flex item that grew, and the left or top inset when the left or top edge moves. An artboard's left or top edge moves it too.                                                                                                                                                                         |
+A style edit follows the design's convention:
 
-Two limits: insets a stylesheet sets aren't visible in the inline style, so a node pinned by a class's `right` moves by `left`; and the zoom is the only scale it accounts for, so a rotated or skewed element moves along the screen's axes, not its own. The rules live in TypeScript, not Rust, because only the browser runs them: the server never sees a pointer or a computed style. The document's rules, like a shorthand clearing its longhands, stay in `user_edit::plan`.
+- **Tailwind** (`tailwind.ts`): a CSS property becomes a class. A value that equals a theme variable exactly becomes its name (`bg-ink`, `rounded-card`), and anything else an arbitrary value (`w-[312px]`). `tailwind-merge`, taught the project's theme names, drops the classes the new one replaces. It edits a literal `className`, or a literal argument of `cn`, `clsx` or `twMerge`.
+- **CSS modules**: `className={styles.card}` means editing the `.card` rule in the imported `*.module.css` with PostCSS, adding the rule if it's missing (`css.ts`).
+- **Inline**: a `style={{ … }}` prop, used only when the element has no `className` at all.
 
-Moves and resizes **snap**: an edge or centre within 6 screen pixels of an edge or centre of the node's parent or siblings (for an artboard, the page's other artboards) jumps onto it, and a red guide shows the line (`snap` in `geometry.ts`). Holding ⌘ or Ctrl places it freely. A double-click types into an element that holds nothing but text, in place and as plain text (`Renderer.editText`); Enter or a click elsewhere commits a `setText`, and Escape puts it back. The renderer draws the element's content from the document again either way, since the browser changed the DOM while the person typed. The inspector in the right sidebar (`components/inspector/`, one file per section, with the shared fields in `controls.tsx`) starts with X, Y, W and H, which make the same edits a drag would: an artboard's X and Y are its canvas position, a positioned element's are its insets, and an element in the flow shows its place but can't be moved from there.
+Anything else, like a computed class expression or styled-components, is refused with `unsupported-style` and "Ask the agent to change this", rather than an inline style that would override responsive classes. Tokens are the CSS variables in the design's `@theme` block (light) and `.dark` block (dark); `tokens.ts` reads and writes them with PostCSS.
 
-Below them, each style field reads one CSS property across the selection (`readStyle` in `editing/inspect.ts`). A value every selected element sets inline shows as itself, or as its token's name when it's a whole `var(--name)`. When the elements disagree the field says Mixed. When none of them sets it, the field shows the browser's value faintly as a placeholder (`Renderer.computedStyle`), never writing it back; inside a script artboard's iframe there's none to show. Typing sets the property on every selected element with one `setStyles` edit, so the browser shows it at once, agents get it as a change and one undo reverts it. A bare number on a length gets `px`, a token name becomes `var()`, and an empty field takes the inline style off. A text node stands for its element. No field shows CSS: a value the controls can't express, like a `calc()`, shows as a Custom chip that says what it is (`customOf`), and Advanced lists the inline declarations no control claims by name and summary (`editing/advanced.ts`). Every color's opacity is edited in its own notation, `#rrggbbaa` or `rgb(… / a)`, and a token's goes under `color-mix(in srgb, var(--x) N%, transparent)`, so it keeps its name (`editing/colors.ts`). A stroke inside is a `border`; center and outside are an `outline` at an offset of minus half its width or zero, and switching moves the parts in one edit (`editing/stroke.ts`). Shadows, filters and backdrop filters are lists split at top-level commas or spaces (`editing/lists.ts`): the eye swaps an entry for a placeholder at the same index (`0 0 0 0 transparent`, or a filter's identity) and keeps the original in `--finite-off-<property>`, aligned by index with `none` for visible entries, and removes that stash once nothing is hidden.
+Writes take a per-file lock (a mutex inside the server): read the file, compare its rev with the edit's, write atomically. A mismatch refuses with `stale` and "The file changed; try again". Undo is per actor (`history.ts`): each change stores span patches (`{ file, before, after, at }`, whole lines plus a line of context), and undo swaps `after` back to `before` at `at`, or wherever `after` appears exactly once in the file now. So one person's undo works after an agent edited a different part of the same file, and refuses when someone changed that same part since. A new change clears that actor's redo stack.
 
-The Layers section of the left sidebar (`LayersTree.tsx`) draws the shown page's artboards as a tree, from a `LayerModel` (`editing/layers.ts`) that lives outside React. The model caches what each row shows and drops only the rows a change touched, and walks only the rows that are open, so its cost follows what's on screen rather than the design's size. The list draws only the rows in view, and a row whose facts didn't change doesn't draw again. Clicking a row selects through `Editor.select`, the same selection the canvas uses: Shift picks a range, ⌘ adds or takes one, and the arrow keys move through the rows, open them and close them. A selection made on the canvas opens the rows down to it, and the row under the pointer and the layer under it on the canvas show as hovered together. An instance's rows are its component's, from `Replica.expand`, and can't be dragged.
+A prototype canvas only takes edits to files under `.finite/`. An edit to a production file from a prototype is refused with `outside-prototype`, and the page offers `source.detach`, which copies that file into `.finite/boards/<canvasId>/` and points the importer at the copy.
 
-Dragging rows moves layers (`dropAt`): a container row's top quarter drops before it, its middle into it as its last child, and its bottom quarter after it; other rows split in half. Below the last of nested layers, how far left the pointer is picks which of them it goes after. A drop that rests on a closed row opens it, and a drag near the list's edge scrolls it. The drop shows as a line in the list and an outline on the canvas around the container, and releasing sends one `place`, so the canvas moves only once, as in Figma. Dropping artboard rows on a page in the Pages list sends `moveToPage`.
+## Agents
 
-A double-click on a name renames the layer (`setAttributes` with `data-name`), and its eye and lock buttons, or ⇧⌘H and ⇧⌘L, hide and lock it. A hidden layer has the HTML `hidden` attribute, and `html::BASE_CSS` holds `[hidden] { display: none !important }`. It's an important rule in the base cascade layer, so it beats every author style, in every renderer and in exports, and showing the layer again just takes the attribute off. A locked layer has `data-locked`: a press on the canvas passes through it to what holds it (`Editor.pressable`), and a locked artboard takes none, but Layers and the inspector still select and edit it, and agents can still edit it. The Pages list adds a page (`createPage`, whose id comes from the mutation's stamp, so the tab shows it at once), renames one on a double-click and deletes the one shown; ⌘Z brings a deleted page back with its artboards.
+`agent/` runs each live thread as one `query()` of the Claude Agent SDK, which drives the `claude` CLI on `PATH` (`pathToClaudeCodeExecutable`) with the design's root as its working directory. There's no API key: the person logs in with `claude` once, and `claude.status` reports `claude auth status --json` and the models the CLI offers. The query uses Claude Code's own system prompt with `agent/instructions.ts` appended, streams partial messages (the thread's `text.delta` events), and resumes the thread's last `sessionId` on the next message. A thread idle for 10 minutes closes its query.
 
-Every inspector field previews as it's typed (`useDraftField` in `DraftField.tsx`): each key shows on the canvas through the draft, ↑ and ↓ step a number, Enter or leaving keeps it as one undo step, and Escape puts it back. Dragging a field's label scrubs its number (`ScrubLabel`), and a color field's swatch opens the browser's picker, whose colors show as they're picked. A panel edit is an `Editor.begin` draft: one is open at a time, since the replica holds one draft, and starting another, a press on the canvas or a new selection commits it. A panel's pointer gesture, like a row drag or a scrub, runs through `Editor.drive`, the same loop as canvas gestures. It captures the pointer only once the press becomes a drag, so clicks and double-clicks still reach the panel.
+Each message is a turn. `thread.send` with mode `steer` pushes the message into the running turn's input (priority `now`); `queue` holds it in `ThreadMeta.queued`, where people can edit or drop it, and sends it when the turn's `result` arrives. A change of model, effort or fast mode between turns goes through `setModel` and `applyFlagSettings`. `agent/events.ts` turns the SDK's messages into `ThreadEvent`s (`user`, `text.delta`, `text`, `tool`, `result`, `error`), which the store appends to the thread's `.jsonl` (all but `text.delta`) and broadcasts.
 
-The panels follow every edit the moment the canvas does. Every call on the replica (a snapshot, a draft frame, the tab's own edit, a server change) goes through `DesignSession.patch`, which hands the view each op and then tells `subscribeDoc` listeners what changed (`DocChange`: the touched nodes, whether the structure, pages or tokens changed). Before, the sidebars heard only about the server's changes, so they froze during a drag and lagged a round trip behind the person's own edits.
+The **permission fence** (`agent/policy.ts`) keeps agents out of production code. Reading and Bash are allowed anywhere. `Write`, `Edit`, `MultiEdit` and `NotebookEdit` are allowed under `.finite/` and the brand folder, and anywhere in the project only during a turn that called `move_to_prod`; the grant ends with the turn, and the thread settles when that turn succeeds. The fence runs twice: as `canUseTool`, and as a `PreToolUse` hook, which runs even when the person's own Claude Code settings pre-approve a tool. `AskUserQuestion` is refused, since nobody can answer the dialog. Bash can still change files; the system prompt tells the agent not to.
 
-Elements inside a sandboxed (script) artboard can't be measured or patched from the canvas, so people move and resize those artboards by their name label but not what's in them. A press inside the iframe stays the artboard's, as before.
+The **canvas tools** are an in-process MCP server named `finite` (`agent/tools.ts`, input shapes in `packages/protocol/src/tools.ts`):
 
-### Adding a gesture or an edit
+| Tool                          | What it does                                                                                      |
+| ----------------------------- | ------------------------------------------------------------------------------------------------- |
+| `read_canvas`, `open_canvas`  | Read a canvas; open a page or prototype by name (or make one) and link it to the thread.          |
+| `place_frames`                | Put TSX files on a canvas in a row, each with a title and a why label above it.                   |
+| `write_text`, `comment`       | A text label on the canvas; a comment pinned to a frame or an element in it.                      |
+| `copy_production`             | Copy one production component or route file onto the board, its imports pointing at production.   |
+| `move_to_prod`                | Allow production writes for the rest of the turn.                                                 |
+| `add_brand_asset`             | Copy a file or URL into the brand folder and list it on the Brand page.                           |
+| `spawn_thread`, `name_thread` | Start a child thread; name this one.                                                              |
+| `screenshot`, `frame_errors`  | A PNG of a frame, taken in the system Chrome with puppeteer-core; the errors its bridge reported. |
 
-A new gesture is a file in `apps/web/src/design/editing/gestures/` that implements `Gesture` (`gesture.ts`): `begin(press, ctx)` takes a press or returns `null`, and its run's `move(pointer)` returns the user edits the pointer means. List it in `gestures/index.ts`. It never touches the DOM, the document or the server.
+## The web app
 
-A new kind of edit is a variant of `UserEdit` with its arm in `plan` and `label`, a member of the `UserEdit` schema in `apps/web/src/design/schema.ts`, and an example in `UserEdit::examples`. Regenerate `crates/design/fixtures/user_edits.json` with `FINITE_UPDATE_FIXTURES=1 cargo test -p finite-design --test user_edits`; `wire.test.ts` decodes it and fails when a schema member has no example.
+`apps/web` is a Next.js static export (`output: "export"`), styled with StyleX, so there's no Next server: the Node server serves `out/` in the desktop app. A design screen is `/design/?id=<designId>` (with `&tab=prototypes` on the Prototypes tab), since a static export can't prerender a route per design.
 
-### What others see
-
-Other tabs and agents see one change per gesture, never the frames of a drag, so the journal and every undo history hold one step. An agent's edit to the node being dragged lands under the draft, and the draft plans again on top: a different property sticks, and for the same property the person's later release wins. An agent that deletes the node ends the gesture. People's changes show in the activity list under their name, and agents read the tree again before editing nodes they didn't create, as the MCP instructions say.
-
-## The viewer
-
-The browser side lives in `apps/web/src/design`. It's plain TypeScript classes, and React only hosts them. Here they are in the order a message flows through them:
-
-- **`socket.ts`** opens the WebSocket, decodes each message with the Effect schemas in `schema.ts`, pings the server to check the connection still works, and reconnects with backoff. A new connection starts with a snapshot. A reconnect asks to resume and usually gets only what it missed (see "Reconnecting without starting over" below).
-- **`DesignSession`** (`session.ts`) owns one open design. It feeds each socket message to the replica, hands every applied op to the renderer, and keeps what the page shows around the canvas: the design's name, presence badges, comments, the activity list and the connection status. It holds all of that in one immutable state object, and `DesignCanvas` re-renders when it changes. The renderer plugs in through a four-method interface (`DesignView`), so `session.test.ts` runs it in Node with a fake renderer.
-- **`Replica`** (`replica.ts`) is the browser's copy of the document. The document itself lives in the module, so `apply` runs the Rust `Document::apply`. Next to it, `Replica` keeps a read cache for the renderer: each node by id, and each parent's children in sibling order. It changes the cache only as the Rust side reports. Loading returns the sibling order, and a create or move says which sibling the node now sits before, so the cache never compares indexes.
-
-  A whole change goes into the module in one call (`applyAll`), however many ops it holds. Then the cache catches up one op at a time. The renderer patches the DOM after each op, so it sees the tree as it was right after that op.
-
-  Finding where a node goes used to be slow. The renderer asks once per created node, to find where its element goes. When the cache sorted the siblings on every call, writing N siblings cost about N² log N. A write of 10,000 cards took 1.5 seconds just for those lookups.
-
-  Now the Rust side says where each node goes. The cache finds that sibling by searching forward from where it last looked, because a write works through siblings in order. `replica.test.ts` adds 10,000 siblings in a shuffled order, deletes and moves some, and checks the order against a plain sort.
-
-- **`wasm.ts`** loads `finite.wasm` and wraps its exports, which are a plain C ABI. To call one, it writes the inputs as UTF-8 into a buffer in the module's memory. Then it calls it with their byte lengths and reads the result from an output buffer. Most inputs and results are JSON. A Rust panic aborts the call, so the wrapper reads the panic message and refuses any later call.
-
-  `wasm.test.ts` checks the boundary: long text outside ASCII, two inputs in one buffer, errors, and freeing a document. Each `Replica` owns a document in the module's memory, which isn't garbage collected, so the canvas and thumbnails free theirs when they close.
-
-  It doesn't use wasm-bindgen, the usual tool for calling Rust from JavaScript. Every call passes strings, so its generated bindings would add little. Its command-line tool must match the crate's version exactly. It also generates the JavaScript and TypeScript, so on a fresh checkout `vp check` would fail until a build ran. Here the only build output is the `.wasm` file, and the glue is one TypeScript file written by hand.
-
-  To add a call, say an edit command for when people can edit, you add an export in `crates/wasm/src/lib.rs` and a method in `wasm.ts`. The inputs are JSON, so that's all the glue a new command needs.
-
-- **`Renderer`** (`renderer.ts`) draws each artboard and patches only the DOM nodes an op touched. An artboard normally renders inside a **shadow root**, which scopes its `<style>` blocks to it and keeps the app's CSS out. An artboard that contains a `<script>` renders in a **sandboxed iframe** instead (`sandbox="allow-scripts allow-forms"`), with `html::CSP` as its content policy. Iframes can't be patched from outside, so they reload 150 ms after a burst of edits. Every reload goes through `Renderer.refresh`, which waits while the page is held (`hold`) and does the latest reload once it's let go. A design's own buttons, links and forms mustn't act while people edit it, so the renderer cancels clicks on the whole canvas unless the artboard takes input (`takesInput`: the Interact tool, or the artboard in interactive mode), and links never navigate the app. It always cancels submits.
-
-  The iframe's first script is `html::bootstrap_script`, which wraps `crates/design/src/bootstrap.js` and gives it the page's nonce, its storage and the `#finite-artboard=` prefix; the viewer decodes what the page sends in `frameMessages.ts`. The page's own scripts run in the same frame and can post to the app too, so the renderer trusts only a **private channel**: the bootstrap posts `hello` with the document's nonce, the renderer answers with a `MessageChannel` port, and the bootstrap's capturing `message` listener, registered before any other code, takes that `init` message and hides it from every later listener. Over the port the page reports its size, wheel events, keys the canvas acts on, the hosts it reached, storage writes, and a person's clicks on links. Opening a link or writing storage only ever comes from the port. A second `load` event for the same document means the page navigated itself away, and the renderer loads it again. One case needs more: `submit` doesn't cross a shadow root's boundary, and a form with a single text field and no button submits on Enter without a click. So each shadow root cancels `submit` itself. The end-to-end test presses Enter in such a form and checks that nothing navigates.
-
-- **`Camera`** (`camera.ts`) handles pan and zoom with one CSS transform on the canvas. It also converts page coordinates to canvas coordinates (`toWorld`), and gives the canvas area in view (`visibleWorld`). `animateTo` moves on a spring, zooming in log space, and `locked` stops every input from moving it, for interactive mode. `routeWheel` decides whether a wheel event scrolls a page natively or moves the camera: the renderer latches each gesture to the scroll container it starts over (`scrollsPage`).
-
-How big a design the canvas handles: `vp run bench` measures it in headless Chrome against a release server. On a Mac, a design of 90,480 nodes across 240 artboards draws in about 670 ms and pans at about 58 frames per second when fitted to the window, so every artboard is in view.
-
-**Viewport culling.** The camera tells the renderer which canvas area is on screen, plus half a viewport of margin on each side (`Renderer.setViewport`). The renderer sets `display: none` on every artboard outside it. A hidden artboard costs no layout or paint, and at 100% zoom the bench spends about a seventh of the main-thread time panning that it did before. A sandboxed artboard also has its iframe unloaded while hidden, which stops its scripts, and loads again from the latest document when the view reaches it. CSS animations in a hidden artboard stop the same way, and they start over when it's shown, because `display: none` cancels them.
-
-`Culler` (`culling.ts`) makes the decisions, and the renderer only hides and shows. It keeps an index of artboard boxes (`ArtboardIndex`, a grid of cells; a query over very many cells scans the boxes instead) to find the artboards in the area without reading the DOM. Passes run once per frame, however many camera events arrive.
-
-The box comes from the artboard's last measured size, taken while it was shown, so "fit to view" still counts hidden artboards, including those without a fixed height. A `ResizeObserver` on each shown artboard marks it for measuring again when its size changes, for example when an image loads, and so does every edit to it. An artboard that has never been measured stays drawn until the first pass measures it. A hidden artboard's height can be out of date until it's shown, because nothing lays it out. `nodeRect` for a node in a hidden artboard returns the artboard's box on the page, from the cached size and the camera, so comment pins and jump-to-comment land on the artboard instead of the origin.
-
-Running the rules in WebAssembly costs time, because the document now exists twice: in the module and in the cache. With the old TypeScript rules, that design drew in 526 ms, so it's about 115 ms slower now. Most of that is the Rust side reading 14 MB of node JSON and building its document, about 85 ms. Copying the JSON into the module takes another 25 ms.
-
-A an `html` op of 30,000 nodes went from 249 ms to 316 ms, and a 5,000-node thumbnail from 28 ms to 33 ms of main-thread time. The module adds 239 KB to the download, 94 KB gzipped. Panning didn't change. One fix along the way helped the server too. The code serde derives for tagged and flattened types reads each op twice, so `Op` and `Node` now read their fields by hand. That made parsing a change's ops a third faster.
-
-`components/DesignCanvas.tsx` wires these together and adds what's specific to the page: the comment tool, hover outlines, the zoom controls and keyboard shortcuts. `design/presenter.ts` is interactive mode. It zooms the camera onto the artboard on the canvas itself, so the page keeps its state going in and out. Each transition takes a new turn, so pressing P again, stepping or Escape cancels an older one before it wakes the wrong artboard. `presentationOf` fits the artboard into the part of the viewport no `[data-canvas-chrome]` element covers, and gives a tall one a window (`Renderer.setWindow`) that scrolls like a browser window. `components/InteractivePill.tsx` is its toolbar.
-
-### Prototype links and routes
-
-A prototype is two attributes, so ops, undo, both stores and every tool carry it with nothing new to save:
-
-- `<a href="#finite-artboard=<id>">` is a link to that artboard. It names the artboard by id, so a rename keeps it. Only `<a>` and `<area>` count, as in a browser. Flow reads the `href` the way a click does (`flow::link_target`, `artboardLinkTarget` in `html.ts` and the iframe bootstrap): the raw attribute, the exact prefix, no trimming, the id percent-decoded. So `" #finite-artboard=cart"` isn't a link, `#finite-artboard=a%62c` goes to `abc`, and a malformed escape like `%zz` stays as written and counts as a broken link.
-- `data-route="/cart"` on an artboard puts it on a route. Artboards aren't routes: a desktop and a mobile cart with the same route are one page at two widths. An artboard without a route has one made from its name (`/order-placed`), made unique with `-2`; a name with no letters or digits uses the id's. A route is `/` or segments of letters, digits and `-._~`, and a segment can't be `.` or `..`, since a browser removes those from the URL.
-
-`finite_design::flow::flow` reads both in one pass over the document and returns a `Flow`: the routes in page order, each with its screens narrowest first, every link resolved to a route, the links whose target isn't an artboard, `data-route` values that aren't a path, and routes with two or more screens of the same pixel width (`shared_widths`). It reads the design as it renders, with instances expanded (`Design::view` on the server, `components::expand` in the replica, only when the design has instances; the replica keeps the result until the document changes, in Rust and again in `Replica.flow()`, since the canvas asks on every render), so a link inside a component counts in the component and in every instance, with the instance's override of `href` applied. A link inside an instance has a virtual id (`instance/node`), and a broken one names it. It doesn't know about any router, so the app export (`transfer::app`, see [Import and export](import-export.md)) writes these routes for React Router or TanStack Router, and another router is one more adapter. `Flow::target` picks where a link goes from a screen of a given width: the screen on the target's route closest to that width, and the target itself among equally close ones. That's how a link drawn on the desktop artboard opens the mobile one from the mobile artboard.
-
-What sees it:
-
-- **Interactive mode.** The bootstrap sends a `goto` when a person clicks a link, and `DesignCanvas` asks `Replica.flowTarget` through WebAssembly which artboard to fly to. `Presenter` keeps the history Back walks and the artboard it opened on, which Restart (`R`) goes to. Both are per viewer and never become ops, so they stay out of shared edits and undo. The pill counts the shown artboard's broken links. While an artboard is shown, `Renderer.showInput` keeps the keyboard on it: the other artboards' content is `inert`, so Tab and Shift+Tab skip their links, and the label buttons get `tabindex=-1`, so they leave the Tab order but still take clicks. An `inert` subtree also drops out of hit testing, so the other artboards turn live again while `C` is held, to let a comment pin an element there. Leaving interactive mode restores both.
-- **Agents** set the attributes with any op (`attrs`, `html`). After an edit that deletes or moves nodes or sets an `href` or a `data-route`, `flow_note` in `mcp/mod.rs` appends the broken links, bad routes and shared widths to the result (an edit that sets an artboard's width counts too), and so do `undo` and `redo` in both tool sets.
-- **People** pick a target under Prototype → **Link** in the inspector, for a selected link, and type a route under **Route** for an artboard. These send the `setLink` and `setRoute` user edits (`edit::set_link` and `edit::set_route`), which refuse a target that isn't an artboard, an element that isn't a link, and a route that isn't a path. A delete that breaks links shows a notice saying undo brings the artboard back.
-
-Deleting an artboard leaves the links to it in place, as broken links. Undo recreates the artboard with its id, so they work again. `edit::duplicate` points links among the artboards it copies at the copies, so a duplicated flow runs on its own. A copied instance has no links of its own, so when one it shows goes to a copied artboard, whether the component sets it or an override does, the copy gets an `href` override (`<path>/attr:href`) that goes to the copy of that artboard. A copy of one screen keeps linking to the original targets. Copying one artboard keeps its `data-route`, which is how a mobile version starts: copy, then resize. Copying several at once drops the copies' `data-route`, so they fall back to routes made from their names instead of sharing the originals' at the same widths. Two screens of one route at the same width can't be told apart by a link, so `shared_widths` reports them and `flow_note` tells the agent to give one its own `data-route`.
-
-The design list page (`DesignGrid.tsx`) uses the lobby socket. It starts with the 200 most recently edited designs and the total, because every design at about 200 bytes each would be 20 MB for 100,000 of them. When there are more, the page says how many it shows and offers a search box, which calls `GET /api/designs?q=`. Through the router, both the search and the lobby's total cover every server. While the search runs, the page filters the designs it already has by the same rule (name contains the query, ignoring case), so typing shows matches at once. If the search fails, the page keeps those matches and says it couldn't search every design. Before, it showed the whole unfiltered list, as if the search had matched everything.
-
-Each update moves a design to the front, and the list keeps the 200 newest (`mergeLobby` in `lib/lobby.ts`). Before, every update for a design not on the list added it, so a tab left open on a busy server kept growing, and each new card's thumbnail fetched its design. Until the first list arrives, a dropped socket shows "Can't reach the Finite server. Retrying…", and a design that can't be created says so instead of silently re-enabling the button.
-
-Each card's `Thumbnail` renders a static copy of the design with scripts off. A thumbnail refetches after an agent's edit, once the edits pause for 300 ms, and at most every 2 seconds while they keep coming. In the end-to-end test, six edits 400 ms apart usually cause two fetches instead of six, and the test accepts one to three.
-
-A design with more than 5,000 nodes shows its size instead of a preview (`PREVIEW_NODES` in `Thumbnail.tsx`). A preview fetches the whole snapshot and builds every node, and while agents edit, it refetches every 2 seconds. For a 100,000-node design, that would be about 15 MB each time. The end-to-end test writes 6,001 nodes, checks that the card says so, and checks that three more edits fetch nothing.
-
-### Reconnecting without starting over
-
-Connections drop: a laptop sleeps, Wi-Fi blinks, a proxy times out. The browser reconnects with backoff (`socket.ts`). A fresh snapshot after every drop would be wasteful. It would also rebuild every artboard and reload every sandboxed one, so the canvas would flicker and animations would restart. So the socket supports **resume**, the way chat and multiplayer protocols do: the browser says where it left off, and the server sends only what it missed.
-
-1. Every snapshot message carries an `epoch`. The epoch is a random id the server picks each time it loads the design into memory.
-2. Each loaded design keeps its latest changes, with their actors' names (`Recent` in `hub/design.rs`). It keeps up to 256, and drops the oldest sooner if together they pass 4 MB of JSON, so a few huge an `html` op calls can't hold on to much memory.
-3. On reconnect, `DesignSession` opens `…/ws?epoch=<epoch>&since=<seq>`, where `seq` is the last change it applied.
-4. If the epoch matches and every change after `since` is still kept, the server answers with a `resume` message. It holds those changes, plus the current comments, presence and name, which are small enough to send whole. The browser applies the changes as if they had arrived live.
-5. Otherwise the server sends a snapshot, as for a new viewer.
-
-The epoch is what makes this safe. A server that crashed may have lost its last few unsaved changes, so after the restart it can hand out the same `seq` again for a different change. And after any reload, the kept changes are gone. A new epoch means the browser's `seq` no longer names the same state, so it gets a snapshot. The router passes the query on to the owner, so resuming works there too.
-
-### Noticing dead connections
-
-Some drops never announce themselves. A laptop that sleeps or changes networks can leave a **half-open connection**: one end still looks open, but nothing gets through and no close ever arrives. Both ends need to notice.
-
-**The server's end.** A design unloads only once nobody is subscribed to it, so one half-open socket would keep its design in memory for as long as the server runs. So every socket that faces a browser sends a WebSocket **ping** every 20 seconds (`heartbeat.rs`). Browsers answer pings with a pong by themselves, without any app code. A socket that hears nothing for 60 seconds closes.
-
-Each send also gives up after 60 seconds. A browser that stopped reading fills the connection's buffers, and then a send waits forever. The pings also keep proxies such as nginx from closing a quiet design's viewers, since nginx closes a connection that's silent for a minute by default.
-
-On a router, the router pings the browser itself and answers the server's pings, so the server's pings stop at the router. `tests/heartbeat.rs` runs with Tokio's clock paused, so a minute passes in an instant. Against a server and a router, it checks that a client that stops reading is closed and one that keeps reading stays open. Without the pings, the silent client stayed open. The test also caught a bug: the router's design list relay ended at the first frame that wasn't text. So the first ping from a server would have cut off every browser's design list.
-
-The server's pings also tell the router a server is still there. A design's socket doesn't need that, because the browser's own ping goes through to the server, and no answer means it reconnects. But the router answers the design list's pings itself, so a server that vanished without closing, like a machine that lost power, would leave the browser's list quietly missing its updates. So the router closes the list's socket when a server has sent nothing, pings included, for 60 seconds, and the browser reconnects to a fresh list.
-
-One trap if you write such a test: a paused clock jumps to the next timer whenever every task is waiting on a socket. Then the router's 5-second limit on connecting to a server runs out at once. So the tests connect with the clock running and pause it only for the long wait.
-
-**The browser's end.** After a laptop wakes up on another network, its socket can look open while nothing arrives, and the canvas just stops updating. Browsers answer the server's pings without telling the page, so the page can't use them. So the web app runs its own **heartbeat**, the way Phoenix channels and Socket.IO do:
-
-1. Every 20 seconds, `socket.ts` sends the message `{"type":"ping"}`.
-2. The server answers `{"type":"pong"}`. On a router, a design's socket passes the ping on to the server. The design list's socket answers it itself, because that list merges several servers.
-3. Any message counts as an answer. If none arrives within 10 seconds, the page drops the socket and reconnects, and the reconnect resumes as usual. It doesn't wait for the old socket's `close` event, which on a dead connection can take minutes.
-
-`socket.test.ts` drives this with a fake socket and fake timers. When the 10-second deadline was switched off, the test that expects a reconnect failed.
-
-## Comments
-
-Besides editing a design yourself, you can pin comments, and agents act on them. A comment is a thread of messages anchored to an artboard and to the element the person clicked.
-
-Here's what happened in the demo you saw:
-
-1. In comment mode, the canvas asks `Renderer.hitTest` what's under the pointer. It finds the deepest element with `elementFromPoint` inside the artboard's shadow root, and outlines it.
-
-   An artboard with a script is a sandboxed iframe, and the page can't look inside it. So the renderer asks instead. The iframe's document tags every element with its node id (`data-finite-id`), and the small runtime inside answers two questions by `postMessage`: what's at this point, and where is this node. Answers arrive a moment later, so `hitTest` returns the latest one and the renderer's `onLayout` callback tells the canvas to look again. The artboard's own scripts can post messages too, so the renderer only accepts ids of nodes in that same artboard.
-
-2. A click opens a box for the comment. It starts with "Commenting as Guest". Click the name to set your own, which `lib/user.ts` saves in the browser's local storage next to a random id. There are no accounts, so that id and name are all the server knows about you. Sending posts the comment over REST. It sends the artboard id, the node id, and the click's offset from the artboard's corner, so the pin moves with the artboard.
-
-   While the box is open, a shift-click adds another element of the same artboard to the comment, or takes one out, up to 50 (`MAX_SELECTION` in `comment.rs`, recorded in `limits.json`). The comment keeps the first element as `nodeId` and the rest as `extraNodeIds`, so comments from before keep their shape. The box keeps its focus through the shift-click, and it shows how many elements are picked. `comments` lists the extra elements under `alsoSelected`, each with its outline line but not its HTML. One element's HTML can be 2,000 characters, and 50 of them would crowd out the thread.
-
-3. The agent sees `openComments: 1` in `read`'s overview, reads the thread with `comments`, edits, and answers with `comments` and `reply`.
-4. `Design` keeps a **change log**: the last 512 changes, each with its actor, the artboards it touched, and the elements it changed. Every commit, undo and redo goes through one function (`Design::finish`) that writes to the log, so no path can skip it. When an agent replies, `Design::reply` attaches that agent's changes to the comment's artboard since the thread's previous message. A change already linked to an earlier message, on any thread, is not linked again, and the same edit is linked once. Those become the "Show what changed" buttons. The log is saved in full snapshots next to the undo histories, and journal replay adds to it, so a reply still links edits made before a restart or a crash.
-
-   Each entry keeps the outermost elements a change touched, up to 24. Finding them used to compare every touched node with every other, so committing a big write was quadratic. A write of 99,000 nodes held the design's lock for 5 seconds, all but 0.08 of it in the change log. Now a set records which nodes were touched, and each node walks up its ancestors, at most 256 of them, to check whether an outer one was touched too. The same commit takes about 0.11 seconds. `cargo run --release -p finite-design --example big_design` measures it.
-
-5. Your reply reopens a resolved comment, so you can keep steering in one thread.
-
-A resolved pin leaves the canvas at once, unless its thread is open. The server still stamps `resolvedAt` when a comment goes from open to resolved, though no viewer reads it now. With the comment tool, the right sidebar lists every comment, open first, newest first, and an Activity tab with the recent changes. Picking one centers its pin and opens the thread, even after the pin has left the canvas.
-
-Next to it, **Import** takes an `.html`, `.finite`, `.figma.json` or `.tar` file and **Export** downloads one artboard as HTML, JSX or for Figma, or the whole design as a `.finite` bundle, text files or a Vite + React app with React Router or TanStack Router (`components/Transfer.tsx`). Both go through the routes in [Import and export](import-export.md); the new artboards arrive over the WebSocket like any other change. An imported HTML file grows to fit its content, and a whole page's rules for `html`, `body` and `:root` are rewritten to select the artboard, which became both elements (see "Whole pages" there).
-
-You can edit your own message while it's the newest in its thread (`Design::edit_message`). Once an agent answers, the message is part of the record and stays as it was. `comments` marks an edited message with `edited: true`. Anyone can delete a comment with its whole thread (`Design::delete_comment`). The hub broadcasts `commentDeleted` and journals a `CommentDeleted` record. A REST answer for that comment can still arrive after the delete, so `DesignSession` remembers deleted ids and ignores late copies.
-
-**Where a comment goes.** The server **routes** each waiting comment to one agent, so people needn't say who it's for and agents don't race for it. `Comment::routed_to` picks the first agent in this list that is listening and hasn't passed on the comment:
-
-1. the agent in `takenBy`: the one that took the comment, or replied in it last, so a person's follow-up goes back to it, and a comment never goes to two agents at once;
-2. the agent a person picked (an `Agent` audience). Picking one clears `takenBy`, so the pick wins from then on;
-3. the agent that made the latest change to the comment's artboard (`ChangeLog::last_agent_on`; people's edits don't count).
-
-If none of them is listening, the comment goes to the first listening agent that asks. An agent is **listening** while it called `comments` within the presence timeout, 5 minutes. The server keeps that per design in memory (`listening` in `hub/design.rs`), so after a restart comments go to whoever asks first until agents call again. An agent that only edits never gets comments routed to it, so it can't hold up a comment it will never read. Each `comments` call **takes** the comments it returns (`DesignHandle::take_waiting`, which checks and sets `takenBy` under one lock), so a second agent waiting at the same moment doesn't get the same one. `Design::awaits` is the one rule for "should this agent act now", and the `for` field in the comment JSON says `"you"`, another agent's name, or nothing when the comment goes to whoever asks first.
-
-**Who a comment is for.** Each comment also has an **audience** (`Audience` in `comment.rs`): any agent (the default, which every comment from before has), one agent by actor id, or people only. Nobody picks it when posting. An agent that reads a note between people marks it with `forPeople: [id]`, and the thread's header holds a label showing where the comment went ("Any agent", "With Claude", "People only") that a person can open to change it. Changing it is a `PATCH` with `audience` (`Design::set_audience`), open or resolved, so a note for people can become a request for agents and back. A note for people never wakes an agent and draws as a pale `note` pin, and the comment JSON agents read says `"for": "people"`. A comment for one agent goes only to that agent while it's listening. The picker lists the agents that wrote in this design's threads, the agents listening, and the agents in presence (`lib/audience.ts`). The server sends the listening agents to viewers with presence (`listening` on the `presence`, `snapshot` and `resume` messages), when one starts listening and when one stops. It isn't an `@name` in the text, because names aren't unique and session agents' names change. The audience holds for the whole thread, so a person's reply to a note stays a note.
-
-**What an agent listens to.** Agents don't need filters, since routing already narrows what each one gets. `comments` takes `page`, `select` and `mentions: true` in list and wait mode for an agent that only wants part of a design. They're filters on that call, built into a `Listening` and rebuilt each time the wait wakes up, so artboards added mid-wait count. An agent that can't take a comment passes on it (`pass: [id]`, `Design::pass`). That puts it in `passedBy` and clears it from `takenBy`, so the comment goes to the next agent in line and stops waking this one. Otherwise its next `wait` would return at once, over and over. A person's reply, their edit of their message, or a new audience clears `passedBy`, and a new audience clears `takenBy` too. The thread shows "Passed: …" so people can see nobody has taken it. `read`'s overview counts "(N waiting for you)" next to the open comments, and asks the agent to call `comments` only when N is above zero.
-
-A thread opens up and to the right of its pin. Near the window's right edge it opens to the left, and near the top bar it hangs below the pin instead (`Popover` in `components/Comments.tsx`).
-
-If a comment or reply can't be sent, say the connection dropped, the box keeps the text and shows "Couldn't send" under it, so you can try again. The end-to-end test blocks the comments endpoint to check this, and does the same for creating a design.
-
-An agent doesn't have to check for comments on a timer. `comments` with `wait` is a **long poll**: the tool call stays open until a comment is waiting for that agent, then returns it. `Design::awaits` is the one rule for that: the comment is open, a person wrote the last message, it isn't a note for people, the agent hasn't passed on it, and it's routed to that agent or to whoever asks first. Each design has a `Notify`, a Tokio primitive that wakes every task waiting on it, and every comment update fires it. On the demo server, a waiting agent woke 30 ms after a comment was posted. The call gives up after at most 55 seconds (`wait` on `comments` is the number of seconds, at most 55, and `wait: true` is 55; without `wait` the call lists the comments at once). A longer request still waits 55, because MCP clients time out the tool call sooner, and the result says to call again to keep listening.
-
-`comments` stays within the 40,000-character budget too. A comment can hold 4,000 characters, so 40 open comments would already be 160,000. `comments` returns the oldest comments that fit, always at least one, and ends with "Showing comments 1 to 13 of 40, oldest first. Pass offset 13 for the rest." Within one comment, a thread can hold 200 messages of 4,000 characters, so agents see its first message, which is the request, and its latest 10, with `messagesNotShown` counting the rest. Comments the agent replies to stop waiting, so its next call returns the rest. A test in `tests/mcp.rs` posts 40 such comments and pages through them, checking that each comes back once, in order.
-
-There are no accounts, so anyone who can open a design can comment on it, and every comment is saved, sent to every viewer and loaded with the design. So a design holds at most 500 open comments, and a thread at most 200 messages (`MAX_OPEN` and `MAX_MESSAGES` in `comment.rs`). Reopening a resolved comment counts as opening one, by a button or by a person's reply, or the limit could be dodged by resolving and reopening. The server refuses with `422` and a reason in plain text. The web app turns that into a `Refused` error (`api/Api.ts`), and the comment box shows the reason, such as "This design has 500 open comments, the most it can have; resolve some first." Other failures still say "Couldn't send. Check the connection and try again." The end-to-end test fills a design to 500 open comments and checks that the box shows that reason.
-
-If an agent deletes an artboard that has comments, the pins don't vanish. Before the change applies, `Design` notes where the artboard is. Afterwards, every comment on it gets a `detachedAt` canvas position, and viewers pin it there. If an undo brings the artboard back, `detachedAt` is cleared and the pin follows the artboard again. `comments` marks such comments with `artboardDeleted`. Rebuilding a screen (remove it, write a new one) strands its pins that way, so the `remove` op, and a `page` op that deletes a page, list the open comments pinned inside what they delete (`comment::pinned_inside`). `comments` with `pin: [{commentId, select}]` moves a pin to an element of the rebuilt screen (`Design::repin`): it keeps its offset in the artboard, held inside the new one, and clears `detachedAt`. It bumps the comment's `rev` and broadcasts it like any comment change, so viewers redraw the pin without further work.
-
-The order of the messages matters here. A viewer draws a pin at its artboard if the artboard exists, and at `detachedAt` if not. If the delete arrived first, there'd be a moment with neither, and the pin would blink out. So the hub sends a pin that lost its artboard before the change that deletes it, and a pin that got it back after the change that restores it (`publish_with_comments` in `hub/design.rs`). The end-to-end test found this blink.
-
-Comments live beside the document, not inside it, so undo never touches them. They're saved with the design, in its snapshot and journal.
-
-Each comment carries a **revision number**, `rev`. It starts at 0 and goes up by one with every change: a reply, a resolve, an edit, or a pin moving because its artboard went or came back. A browser can get the same comment twice. The server broadcasts it on the socket, and the REST call that changed it also returns it. The two can arrive in either order, and another change can land in between. Say you reply, and an agent answers at once. The agent's reply can reach your socket before the REST answer to your own reply. So `DesignSession.upsertComment` keeps whichever copy has the higher `rev`, and drops an older copy that arrives late.
-
-All the thread rules live in `crates/design`: `comment.rs` defines the types and checks, and `Design::add_comment`, `reply`, `set_resolved`, `edit_message` and `delete_comment` apply them. The hub only takes the lock, calls one of those, and broadcasts the updated comment. That means you can test a comment rule with a plain function call, like the tests in `design/comments.rs`.
-
-## Saving and recovering
-
-Everything above happens in memory. This section covers what reaches the disk, when, and what comes back after a restart or a crash.
-
-### Storage
-
-Saving is a **write-ahead journal with compaction**, the same idea databases use. Each design has two files in `FINITE_DATA_DIR/designs/` (`crates/server/data` in dev):
-
-- `<id>.json` is the last full snapshot.
-- `<id>.log` is the journal: one JSON record per line for everything since that snapshot. A record is a change, the new state of a comment, a deleted comment's id, or the design's name and timestamps (`Record` in `crates/design/src/design/`).
-
-After a burst of edits, the save task appends the new records to the log. That costs the same for a ten-node design as for a ten-thousand-node one. In the demo, one style change appended 305 bytes instead of rewriting the 11 KB snapshot. Every 1,000 records, or once the log's changes add up to 16 MB, the task writes a fresh snapshot instead and deletes the log. That step is **compaction**.
-
-The size rule matters because one an `html` op can be tens of MB of ops, so 1,000 records alone could let a log reach gigabytes, and all of it is read back when the design loads. The size is an estimate that costs nothing: each change's JSON is already built to send to viewers, so its length is known. A hub test writes 20 changes of 1 MB each and checks that the task compacts the log. With only the count rule, the log still held all 22 records.
-
-On startup, the server loads each snapshot, replays its log with `Design::replay`, and compacts right away. Replaying is safe to repeat: changes at or below the snapshot's `seq` are skipped, and comments and meta just overwrite. So a crash at any point loses at most the last 250 ms of edits:
-
-- **Mid-append:** the log ends in a torn line. Loading stops at it, and the startup compaction drops it for good.
-- **Mid-compaction:** the new snapshot is written to a temporary file and renamed into place, so it's either all there or not at all. If the old log survives next to the new snapshot, replaying it changes nothing. A temporary file left behind is deleted the next time the store opens.
-- **Power cut:** a process crash keeps whatever the operating system had buffered, but a power cut loses it, and the disk may write things in a different order than the program did. So every write is **fsynced** (forced to the disk) before the next one depends on it. An append syncs the log. A snapshot syncs its temporary file before the rename, then syncs the folder so the rename itself is on disk, and only then deletes the old log. Without that order, a power cut could leave an empty snapshot and no log.
-
-A write can also fail without a crash, say on a full disk. Then the design stays in memory, and the save task retries with **exponential backoff**: after 1 second, then 2, 4 and so on, up to a minute between tries. The retry writes a full snapshot, which holds everything the failed append had. A new edit triggers a save sooner. A test store that fails its first two writes checks that the design reaches it with no further edits.
-
-Only one server can use a data folder at a time. The file store takes an exclusive lock on `FINITE_DATA_DIR/lock` when it opens, and a second server on the same folder exits with `another Finite server is using …`. Without the lock, two servers would each load a design and overwrite the other's edits. The operating system releases the lock when the process exits, even after a crash.
-
-A design's id becomes its file name, and ids arrive in URLs, so the file store refuses any id that isn't a design id: 1 to 64 letters, digits, `-` or `_` (`is_design_id` in `hub/mod.rs`). Every id the server makes, with `random_id`, passes. The handoff route checks too, and answers `422` instead. Before, a handoff to `PUT /api/designs/..%2F..%2Fescaped/handoff` saved the design as `escaped.json` two folders above the store, because axum decodes `%2F` into `/`. A test sends that request to a server with a real data folder. It got `201 Created` before the check and gets `422` now.
-
-A new design's id is 10 random letters and digits, and the server makes sure no design it holds has it yet (`Hub::fresh_id`). Before, it only checked that the id hashed to this server. A repeat would have replaced the older design, in memory and on disk. There are 36¹⁰ possible ids, about 3.7 × 10¹⁵. That makes a repeat rare for any one design, about 1 in 3.7 billion with a million designs already there. But by the birthday bound, the chance that some repeat happens while a server creates its first million designs is about 1 in 7,000.
-
-On Ctrl-C or SIGTERM, the server stops accepting connections and writes every loaded design as a full snapshot before it exits. SIGTERM is how Docker, systemd and the desktop app stop it. Until this was handled, the desktop app could lose the last moment of edits when it quit. The app now also waits for the server to exit, up to 5 seconds, before it quits itself.
-
-In the desktop app, Electron runs the server as a child process and acts as its **supervisor**, the way systemd's `Restart=` setting does with a rate limit. If the server stops on its own, say the system killed it to free memory, Electron starts it again on the same port. Open pages reconnect there and resume, and the journal brings back anything not yet in a snapshot. If it stops three times within a minute, a restart won't fix it, so the app shows an error and quits (`afterStop` in `apps/desktop/src/restarts.ts`). Before, a server that crashed made the app quit without a word, and one that was killed left the window saying "Retrying…" forever. Killing the app's server with `kill -9` brought a new one up on port 4100 within a second, and quitting the app afterwards still saved and stopped it.
-
-The hub saves through the `Store` trait in `store.rs`. Five methods read and write designs: `ids`, `load`, `save`, `append` and `remove`. Four more let several servers share one store: `create`, `claim`, `release` and `held` (see "A shared store"). They hand out a **fencing token** that every `save` and `append` carries. The file store keeps the defaults: a claim always succeeds, and it ignores the token, because the folder lock already keeps other servers out.
-
-**Blobs** are the files a design refers to, like images. A blob is stored under the sha256 of its bytes (`BlobHash` in `blob.rs`), so the same file is stored once however many designs use it, and a hash names the same bytes on every server. Three more `Store` methods handle them: `put_blob`, `get_blob` and `has_blob`. They take no fencing token, because a blob never changes and belongs to no design. The file store writes one the way it writes a snapshot, to a temporary file that it fsyncs, renames and then syncs the folder for, at `blobs/<first two hex digits>/<hash>` in the data folder. The Postgres store inserts a row into `finite_blobs` and ignores a repeat. A blob over 32 MB (`MAX_BLOB`) is refused, and nothing deletes blobs yet.
-
-`GET /api/designs/{id}/assets/{hash}` serves one. The route names a design only so it reaches the design's owner like every other design route; a blob belongs to no design, and the id doesn't change what comes back. It answers `404` for a blob that isn't stored and `422` for a hash that isn't 64 lowercase hex digits, the same answer a bad design id gets. The hash can never change what it names, so the response is cached for a year (`immutable`). The content type comes from the blob's first bytes (PNG, JPEG, GIF, WebP or SVG, otherwise `application/octet-stream`), not from anything the uploader said. Every answer carries `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox`, so a script inside an SVG can't run when someone opens its URL.
-
-`PUT` on the same path stores a blob, and only a handoff uses it (see "Separate folders"). The body is the raw bytes, up to `MAX_BLOB`. A body whose sha256 isn't the hash in the path gets `422`, so a handoff can't store bytes under another name.
-
-Three stores implement the trait. `FileStore` is the default. `PgStore` keeps the same snapshot and journal in Postgres, when you set `FINITE_DATABASE_URL`. `MemoryStore` is for tests. To check a new store, run `store::contract::check` on it. It's a **contract test**: the same suite of rules every store must follow, such as "the journal keeps append order" and "save clears the journal". A store that servers share must also pass `store::contract::check_shared`. Every store runs the contracts it needs in `cargo test`.
-
-### Undo across restarts
-
-Undo histories are saved, but only in full snapshots, which the server writes when it shuts down, compacts or hands a design off. So an agent that connects with an `X-Finite-Agent` header can undo after a normal restart. (An agent without one is identified by its MCP session, which ends with the restart. So when a design is restored after a restart, histories of `mcp:` actors are dropped, since nobody could use them. For the same reason, a live session's history keeps its design in memory: unloading would lose it.) The journal doesn't hold histories, but it doesn't need to. After a crash, `Design::replay` rebuilds them from the journaled changes, because each change says who made it and whether it was an edit, an undo or a redo:
-
-- **An edit** is applied, and its inverse goes on its actor's undo stack, as `Design::commit` does.
-- **An undo or redo** takes the entry the live call took: the first one from the top of the stack that still applies. That entry must produce exactly the ops in the journal. Then its reverse goes on the other stack.
-
-This works because undo is **deterministic**. The same document and the same stacks always pick the same entry and produce the same ops. A `Design` test replays a journal of edits, undos and redos by two actors, and checks that every later undo matches the live design's. If an entry ever produces other ops, say a saved history from a different timeline, replay puts it back, applies the journaled ops as they are, and drops the histories. An undo step that doesn't fit the document could undo the wrong thing, so dropping them is safer.
-
-Viewers never receive histories: `Design::snapshot` leaves them out, and only `Design::snapshot_to_save` includes them.
-
-A history expires six hours after its actor was last active, and that clock has to survive the design leaving memory. Otherwise a design reopened every few hours would keep its histories forever, and so would the store. So each saved history carries `lastUsed`, the time its actor was last active, and a restored history counts down from there.
-
-The journal doesn't record when its changes were made, so an actor with changes in the journal counts as active at load time. That's why a design with histories needs a full snapshot before it unloads. When a history expires, the server writes a full snapshot too, so the store forgets it as well. Before, the store kept expired histories, and they came back on the next load.
-
-A hub test edits as a named agent. It checks that the design unloads and comes back with its undo, and that the history expires six hours after the edit, not after the reload. When restored histories started their clocks at load time, as before, that last check failed.
+- `src/client/finite.ts` is the page's one connection: the `/api/ws` socket, which reconnects by itself and subscribes again to every design on screen; typed requests; and the live state React reads through `useSyncExternalStore` hooks (`useDesigns`, `useDesignState`, `useSettings`).
+- `src/canvas/` is the canvas. `Canvas.tsx` places frames and text labels in a pan-and-zoom camera world (`design/camera.ts`). `FrameView.tsx` is one frame's iframe, which never takes the pointer unless Interact is on; at most 12 frames keep a live iframe (`virtualize.ts`), and the rest show a name card. `editor.ts` hit-tests every press through the bridge, previews gestures through it, and sends one `source.edit` or `canvas.patch` on release. `selection.ts` is the selection store the layers, inspector, composer and ✱ menu share.
+- `src/components/` holds the screens: `DesignGrid` (the design list and its three ways to start), `DesignScreen`, `LeftSidebar` (the Design | Prototypes switch; pages, layers and tokens; or the prototype list), `ThreadList`, `Composer`, `StarMenu` (the ✱ menu on a selected frame), `ChatPanel`, `Comments`, `Settings` and `inspector/`, fed by the bridge's `inspect`. `src/design/editing/` holds the pure rules that turn a control's value into CSS.
+- `src/styles/tokens.stylex.ts` has the theme tokens, and `raised.ts` the raised look of pressable controls.
 
 ## The end-to-end test
 
-The unit tests and golden files check each side on its own. `vp run e2e` checks what a person sees. `vp run e2e:router` runs the same checks through a router in front of two servers, so relayed sockets, the merged design list and refusals passing through the router are covered too. `vp run e2e:shared` runs them through a router in front of two servers that share one Postgres. CI runs all three.
-
-`e2e:shared` takes the database from `E2E_DATABASE_URL` or `FINITE_TEST_DATABASE_URL`. Without either, it prints `SKIP` and passes. Each run keeps its tables in a new schema named `finite_e2e_…` and leaves it there, so give it a test database.
-
-It first waits until the router sees both servers. When I switched that list off in the router, this check failed, and so did the agent's first call. `vp run` never caches the task, which `vite.config.ts` sets up. A cached task only gets the variables it lists, so it wouldn't see the URL. The script lives in `e2e/run.mjs` and has three parts:
-
-1. It builds the server, `finite.wasm` and the web app. `E2E_SKIP_BUILD=1` reuses the last builds, so after a plain run, `e2e:shared` needs its own build: its servers need the `postgres` feature. Then it starts the server on a free port with a throwaway data folder.
-2. It connects an agent over MCP (`e2e/mcp.mjs`) and builds a design: one plain artboard and one with a script, so it renders in a sandbox.
-3. It opens the design in headless Chrome and drives it with the Chrome DevTools Protocol (`e2e/cdp.mjs`): it moves the mouse, clicks, types and reads the page.
-
-The checks follow the comment demo. The agent edits and undoes, and the page follows. A person hovers a button, comments on it under their own name, and the agent picks the comment up with `comments`. The agent changes the button and replies, and the person jumps to the change. Then the same happens inside the sandboxed artboard. Then a pin stays in place while its artboard is deleted and brought back. Last comes the design list. A design too big to preview shows its size instead, and the page doesn't fetch it. With 200 more designs, the list says how many it shows, and a search finds an older one. With the network blocked, creating a design and searching each say they failed. Each check prints `PASS` or `FAIL`, and the script exits with 1 if any failed. On a failure it saves a screenshot to `finite-e2e-failure.png` in the temp folder.
-
-It needs Chrome. Set `FINITE_CHROME` to its path if it isn't in the usual place. It isn't part of `vp test`, because it builds the whole app first. CI runs it after `vp run ready` (`.github/workflows/ci.yml`). With `E2E_SKIP_BUILD=1`, a run takes about 6 seconds. The end-to-end runs and `vp run bench` are tasks in `vite.config.ts` with caching off. A cached task would replay an old pass without opening a browser, and it gets only the environment variables it lists. Before, as `package.json` scripts, they never saw `E2E_SKIP_BUILD`, so CI's router run rebuilt everything.
-
-One trap is worth knowing if you add a check. Comment mode sets `pointer-events: none` on sandboxed iframes, so the page gets the mouse. But Chrome's **input routing** hit-tests the last frame it drew to choose which frame gets the mouse. Until it draws again, the moves still go to the iframe, and the page never sees them. People move the mouse all the time, so they never notice. A script that presses `c` and moves at once does, so the test waits two animation frames first.
-
-`e2e/headless.mjs` uses the same two clients for testing by hand, one command at a time. `start` builds and starts a server on a free port with a throwaway data folder, opens headless Chrome, then leaves a background process running that holds both, along with one MCP session per agent name. It writes the process's port and a random token to `state.json` in a folder under the temp directory, named for the checkout, so agents in different worktrees never share a session. Each later command, like `call`, `click` or `screenshot`, is an HTTP request to that process. It runs the commands one at a time, so two shells can't interleave their clicks. Selectors reach into shadow roots, since that's where artboards render. After 30 minutes without a command, the process stops itself, along with the server and Chrome, so a forgotten session doesn't keep them running.
-
-The requests are plain JSON over HTTP, so other languages can send them too. `e2e/finite_headless.py` is the Python client. It runs `headless.mjs state` once to learn the port and token, then sends each command directly. Every reply carries the text the CLI prints, and commands with data to hand back, like `eval`, `query` and `call`, also send it as `value`.
-
-## Running more than one server
-
-Each design lives on exactly one server at a time, its **owner**. The owner holds it in memory and saves it, so two servers never edit the same design at once. You can run several servers in two ways:
-
-- **With a shared store.** Every server keeps its designs in one Postgres database. A design can move to another server without copying anything, and the list of servers follows which ones are alive. If you can, use this one.
-- **With separate folders.** Each server keeps its designs in its own data folder, and you give every server the same fixed list. To move a design, the old owner sends it to the new one over HTTP.
-
-### Who owns a design
-
-`crates/server/src/cluster.rs` decides, the same way in both setups. It uses **rendezvous hashing** (also called highest random weight). Every server scores the design id, and the highest score wins. The answer depends only on the id and the list of servers, so any server, proxy or load balancer that has the list gets the same answer. Adding a fifth server to four moves only the designs the new server wins, about a fifth of them. Plain `hash % n` would move almost all of them.
-
-Each server then behaves like this:
-
-- **Creating:** it only picks ids it owns, so a design is always reachable on the server that made it.
-- **Wrong server:** a request for a design another server owns gets `421 Misdirected Request` with a `Finite-Owner` header naming the owner. An MCP tool call gets an error telling the agent which `/mcp` endpoint to use.
-- **Asking:** `GET /api/owner/{id}` on any server returns `{"owner": "http://…"}`, or `null` when it's that server.
-
-The hash is FNV-1a with a final mix. It's spelled out in `cluster.rs` so you can port it. A test pins one score, which a Python version reproduces exactly. With neither a shared store nor `FINITE_NODES`, there's one server, and it owns everything.
-
-### A shared store
-
-The Postgres store sits behind a cargo feature, `postgres`, which is off by default. So build the servers and the router with it:
-
-```bash
-cargo build --release -p finite-server --features postgres
-```
-
-Then point every server and the router at the same database, and tell each server the URL the others reach it at:
-
-```bash
-export FINITE_DATABASE_URL=postgres://finite@db.internal/finite
-FINITE_NODE_URL=http://10.0.0.1:4100 finite-server   # on the first machine
-FINITE_NODE_URL=http://10.0.0.2:4100 finite-server   # on the second
-finite-server router
-```
-
-The server creates its four tables on first start (`crates/server/src/postgres/mod.rs`). `finite_designs` holds each design's snapshot as JSON, plus two columns for ownership. `finite_journal` holds the journal records, one row each. `finite_nodes` holds one row per server. `finite_blobs` holds each blob's bytes, keyed by hash.
-
-The tables go in the database's default schema. In a development build, `FINITE_DATABASE_SCHEMA` names another, which Finite makes if it's missing. Each `vp run e2e:shared` uses it to get empty tables in the shared test database. A release build refuses the setting and stops, so a deployment's tables can't quietly end up somewhere its operator didn't mean.
-
-The file store stays the default, so the desktop app and a single server never need a database. They don't even compile a database client, because `vp run dev` and the desktop build leave the feature off.
-
-If you set `FINITE_DATABASE_URL` for a build without the feature, it exits with `this finite-server was built without Postgres`. It won't start on a folder of its own, because its designs would never reach the other servers. `tests/no_postgres.rs` checks the server and the router. `FINITE_NODES` and `FINITE_DATABASE_URL` don't mix either, and a server refuses to start if you set both.
-
-Three mechanisms make this safe. Each has a textbook name.
-
-**Heartbeats decide who's alive.** Each server writes the time into its row in `finite_nodes` every 2 seconds. That's its **heartbeat**. A server counts as alive while its last heartbeat is younger than the **lease**, 10 seconds by default (`FINITE_LEASE_MS`). The database's clock does the comparing, so the servers' clocks don't have to agree.
-
-Ownership is rendezvous hashing over the live servers, so when one stops heartbeating, its designs belong to the others. Each server reads the list again after every heartbeat.
-
-**A lease on each design says who may write it.** Before a server loads a design, it claims the design's lease: it writes its own URL in the `holder` column and raises the `epoch` column by one, in one statement. The claim only succeeds if nobody holds the lease, the server holds it already, or the holder's heartbeat is out of date. Otherwise the server waits for the holder to let go, for up to one lease. After that it answers `503 Service Unavailable`, and the browser or agent tries again.
-
-**The epoch is a fencing token.** The server keeps the epoch it got, and every save and append carries it. The store refuses a write whose epoch isn't the latest, in the same transaction that would change the design. That's the guard against a server that stalled, say for a long garbage collection, a full disk or `SIGSTOP`. It wakes up still believing it owns its designs, and tries to save. Without the token, its stale copy would overwrite the new owner's edits. With it, the save fails with `Fenced`, and the server drops its copy.
-
-A claim and a stale write can't both succeed, because they touch the same row: whichever runs second sees the other's change. You can read the rule in two SQL statements in `postgres/mod.rs`. `save` updates the row only `WHERE epoch = token`, and `claim` sets `epoch = epoch + 1`.
-
-Here's what happens in each case:
-
-- **A server dies.** Its heartbeat stops. Once its lease runs out, the survivors drop it from their lists, and each design it owned now hashes to one of them. The first request for a design makes its new owner claim it, which works because the holder is gone, and load it from the database. No server copies anything. The edits the dead server hadn't saved yet are lost, which is at most the last 250 ms, the same as a crash with one server.
-- **A server joins, or comes back.** The others see it on their next read, about 2 seconds later. Each one lets go of the designs the newcomer now owns. Letting go means sending the design's viewers away, saving a last snapshot, and releasing the lease. Viewers reconnect through the router and land on the new owner, which loads what was just saved. No edits are lost.
-- **A server pauses past its lease.** The others take its designs over, as if it had died. When it wakes, the store fences off every save it tries. It also knows its own lease lapsed, because it times its heartbeats. Until it renews, it counts itself out of the list, so it serves nothing and answers `421`. Then it lets go of every design it had loaded, because the copies may be out of date, and loads them again on the next request.
-- **A server shuts down cleanly.** On SIGTERM it saves every design, releases its leases and deletes its heartbeat row. The others take over on their next read, without waiting for the lease.
-
-The router follows the same heartbeats. With `FINITE_DATABASE_URL`, it reads the list of live servers every 2 seconds and sends each request to the owner on that list. For the moment when the router's list lags behind, servers' `421` answers point it to the right one, as below. When the list changes, the router closes every browser's design list socket, so the browser reconnects to a list with each design under its new owner.
-
-The tests cover each case:
-
-- `store::contract::check_shared` is the contract a shared store must pass. Both the Postgres store and the in-memory store pass it. It checks that only one server can create a given id, that nobody can take a live server's lease, and that the store refuses a write with an old token.
-- `tests/shared.rs` runs two servers in one process over the in-memory store, and over Postgres too when it's configured. It checks that two servers share designs, that a dead server's designs move with every saved edit, that a paused owner can't overwrite the new owner, and that the router follows a moved design. With the token check removed from the stores, the fencing test failed: the store kept the paused server's copy, and the new owner's edit was gone.
-- `tests/failover.rs` does the same with real processes and signals. One test sends `kill -9` to a server, and another freezes the owner with `SIGSTOP` and thaws it with `SIGCONT`. It needs Postgres. After the kill, the router served the design from the other server 1.2 seconds later, with a 1-second lease. Without the token check, the thawed server overwrote the new owner's edit here too.
-- `crates/server/tla/DesignLeases.tla` is a TLA+ model of two servers handing one design between them: the lease, the token, the save task and an MCP edit. `crates/server/tla/check.sh` runs the TLC model checker on it, which tries every order of their steps within small bounds. It checks that a stale copy never overwrites a saved edit, and that an edit an agent was told succeeded isn't lost. The second rule breaks today, in four races the `verify-design-leases` skill describes.
-
-The Postgres tests need the feature and `FINITE_TEST_DATABASE_URL`. Without the variable they print a note and pass. Each test makes its own schema, so they can run at once. CI runs them against a Postgres service (`.github/workflows/ci.yml`).
-
-To run them on a Mac, `brew install postgresql@17` and start it. Then run `FINITE_TEST_DATABASE_URL=postgres://localhost/postgres cargo test -p finite-server --features postgres`.
-
-#### Connecting with TLS
-
-Managed databases like RDS, Cloud SQL and Supabase only take TLS. You set TLS the way you would for `psql`, with `sslmode` in the URL, and Finite reads it the way libpq does (`crates/server/src/postgres/tls.rs`):
-
-| `sslmode`         | Encrypted                  | What it checks                              |
-| ----------------- | -------------------------- | ------------------------------------------- |
-| `disable`         | Never                      | Nothing                                     |
-| `allow`, `prefer` | When the server offers TLS | Nothing                                     |
-| `require`         | Always                     | Nothing, unless you give `sslrootcert`      |
-| `verify-ca`       | Always                     | That a CA you trust signed the certificate  |
-| `verify-full`     | Always                     | That, and that it names the host you dialed |
-
-`prefer` is the default, so a local Postgres without TLS works as it did. For a managed database, use `verify-full` and point `sslrootcert` at its CA file:
-
-```bash
-FINITE_DATABASE_URL='postgres://finite@db.example.com/finite?sslmode=verify-full&sslrootcert=/etc/finite/rds-ca.pem'
-```
-
-`require` stops someone from reading the traffic, but not from posing as the database, because it takes any key. That's libpq's meaning too. Without `sslrootcert`, `verify-ca` and `verify-full` trust the Mozilla list of public CAs built into Finite. That's enough for a provider that gets its keys signed by a public CA, like Let's Encrypt. RDS and Cloud SQL sign with CAs of their own, so you need their CA file. Client certificates (`sslcert`, `sslkey`) aren't supported yet.
-
-The TLS code is rustls, through `tokio-postgres-rustls`, with the `ring` crypto backend. It's all Rust, so a build needs no OpenSSL and no C compiler. `tokio-postgres` only knows three modes and no `sslrootcert`, so Finite takes both settings out of the URL and sets up the check itself.
-
-A test in `postgres/mod.rs` runs a TLS front for the test database, the way a managed Postgres looks. It has a CA of its own, and it serves as `localhost`. The test checks each mode against it. `verify-full` refuses it as `127.0.0.1`, a name it doesn't have, and `verify-ca` takes it. A failed check says why, like `invalid peer certificate: UnknownIssuer`. With plain connections, as before this change, the TLS tests failed with `no TLS implementation configured`.
-
-### Separate folders
-
-To run three servers that each keep their own data folder, give each the same list and its own position:
-
-```bash
-FINITE_NODES=http://10.0.0.1:4100,http://10.0.0.2:4100,http://10.0.0.3:4100 \
-FINITE_NODE=0 FINITE_DATA_DIR=/data/finite finite-server
-```
-
-The list doesn't change on its own, so a server that dies takes its designs with it until you bring it back.
-
-When you change the list, some designs get a new owner, but their files are still in the old owner's data folder. So on startup, each server checks its stored designs. It sends each one it no longer owns to the new owner with `PUT /api/designs/{id}/handoff`. Before the design, the old owner sends every blob its import records point at, each with `PUT /api/designs/{id}/assets/{hash}`, so the new owner never holds a record without its bytes. A blob that fails fails the whole handoff. The handoff body is the versioned snapshot (`version::SNAPSHOT.encode`), and a snapshot from a newer version than the new owner knows gets `409 Conflict` with the reason, so the old server keeps its copy. The new owner saves it before it answers `201 Created`, and only then does the old server delete its copy. A crash at any point leaves a copy on at least one server. Servers that share a store never hand off, and refuse a handoff with `409 Conflict`.
-
-If the new owner is down, the old server keeps the design and tries again every 30 seconds. If the new owner already has a design with that id, it answers `409 Conflict`. The old server then keeps its copy and logs a warning, because deleting it could lose edits the owner doesn't have. The handoff carries the whole design, undo histories included, so it takes bodies up to 256 MB. Other API routes keep axum's default limit of 2 MB, which is plenty for a comment or a new design's name. Before, the handoff had that limit too, so a design that had grown past 2 MB got `413 Payload Too Large` and could never move. One MCP call alone can add 4 MB. `tests/cluster.rs` covers a second server joining, an owner that can't be reached, and a design of more than 3 MB moving.
-
-### The router
-
-`finite-server router` is the front door. Browsers talk to it as if it were one server, and it sends each request on to the right one. It's in `crates/server/src/router.rs`.
-
-- **One design:** anything under `/api/designs/{id}` goes to the design's owner. That includes the design's WebSocket, which the router relays in both directions. A server sends a design's snapshot as one WebSocket frame. tungstenite, the WebSocket library the router uses to connect to servers, refuses frames over 16 MB by default, so a larger design couldn't open through the router. Browsers have no such limit, so the router lifts it for its connections to servers. A test opens a design of more than 18 MB through the router. With the default limit, the router dropped the connection.
-- **New designs:** `POST /api/designs` takes turns between servers. Each server picks an id it owns, so the design lands where the hash says it belongs. If the server whose turn it is refuses the connection, the next one takes the design. A refused connection never reached the server, so nothing is created twice. The relay's `designs` tool with `create` does the same when it can't open a session with a server.
-- **A server that says it's elsewhere:** when the servers change, the router's list may lag behind for a moment. That happens when you update `FINITE_NODES`, or with a shared store, when a server joins or dies. Then it sends a design that now belongs to the new server to an old one, which answers `421 Misdirected Request` with a `Finite-Owner` header. The router follows that header once, for requests and design sockets alike. The relay does the same for tool calls: the server's error carries the owner in its `_meta` (`finite/owner`), and the call didn't run, so sending it to the owner is safe. The owner comes from a server the router trusts, but it must still be a plain `http(s)://host:port` (`cluster::is_base_url`).
-- **The design list:** `GET /api/designs` asks every server and merges the answers, newest first. The list's WebSocket subscribes to every server's list and relays their updates. The router keeps each server's latest full list. A server whose socket fell behind sends its whole list again, and that replaces only its own part of the merge. Before, the router passed it on as it was, and the browser, which replaces its list on a full list, lost every other server's designs until it reconnected. A test in `tests/router.rs` uses two scripted servers, one of which resends, and checks the other's design stays. If one server drops, the router closes the socket, and the browser reconnects and gets a fresh merged list. A server that's down is left out of both, so the others' designs still show. If no server answers, `GET /api/designs` fails with `502 Bad Gateway`. It used to answer an empty list, which said there were no designs at all. A socket that's missing a server closes after 15 seconds, so the browser reconnects and the router tries that server again.
-- **A stuck server:** a server that's paused or too busy to answer still accepts connections, because the operating system queues them. The router gives each server 5 seconds (`UPSTREAM_TIMEOUT`) to connect, accept a WebSocket and send its design list, then leaves it out like a server that's down. Creating a design on a stuck server's turn answers `504 Gateway Timeout` after those 5 seconds. The router can't send that create to the next server, because the stuck one may have created the design. The next try goes to the next server. Before, one stuck server held up every browser's design list for good, and every create on its turn. A test in `tests/router.rs` puts a listener that never accepts in front as a server. Any other request the router passes on fails with `502` once the server has sent nothing for 30 seconds. That's a limit on silence, not on the whole request (reqwest's **read timeout**), so a large design still downloads however long it takes. Before, a new comment on a stuck server's design waited forever.
-
-Apart from relayed MCP sessions (below), the router keeps no state. Here's a two-server setup on one machine:
-
-```bash
-export FINITE_NODES=http://127.0.0.1:4101,http://127.0.0.1:4102
-FINITE_NODE=0 FINITE_PORT=4101 FINITE_DATA_DIR=data/a finite-server &
-FINITE_NODE=1 FINITE_PORT=4102 FINITE_DATA_DIR=data/b finite-server &
-FINITE_PORT=4100 FINITE_STATIC_DIR=apps/web/out finite-server router
-```
-
-With a shared store, the router takes `FINITE_DATABASE_URL` instead of `FINITE_NODES`, and the servers drop `FINITE_NODES` and `FINITE_NODE`. `crates/server/tests/router.rs` runs the fixed-list setup over real sockets. It checks that new designs spread across both servers, that every design's requests and WebSocket reach its owner, and that the list merges both. `vp run e2e:router` runs the whole end-to-end test through a router in front of two servers, so live edits, undo, comments and the design list are checked there in a browser too.
-
-The router relays MCP too (`crates/server/src/relay.rs`), so you can point an agent at the router's `/mcp` and reach every design. The router is an MCP server itself. For each agent session, it opens one session on each Finite server the first time it needs it, and sends each tool call to the server that owns the call's `designId`. An agent always uses the same session on a given server, so undo there works exactly as if it had connected directly. `designs` with no `create`, `rename` or `delete` asks every server at once and merges the lists, and with `create` it takes turns. `tests/router.rs` runs one agent session that creates a design on each server, then edits and undoes on both.
-
-The relay's `designs` tool does four things, told apart by its arguments, as the server tells them apart. With `create`, it takes turns between servers. With `delete`, or `designId` and `rename`, it goes to that design's owner. Otherwise it's a list, merged across servers. Every tool takes a design's exact name, or the start of its id, for `designId`, and a server resolves that only among its own designs. Routing by the name's hash would land on an arbitrary server. So before it routes a call, the relay resolves the `designId` (or the `delete`) across every server. It asks each one for the designs that match it (a `designs` list with the given text as its query) and runs the same rules as one server, `resolve_design` in `mcp/designs.rs`. Then it sends the call, with the real id, to the owner. A delete takes only an exact id or name (`inexact_delete`). An ambiguous or unknown name gets the same error one server gives. An id that a list already showed this session skips that lookup, so a call by id costs no extra requests, and an id-shaped string no server lists goes to the owner as it is, since the router may not know every server yet. The router serves its own instructions for `/mcp`, and logs a warning when a server's instructions differ from its own. `tests/router_tools.rs` runs the tools through a router in front of two servers.
-
-When a server goes down, the relay keeps going. Calls for that server's designs fail with "didn't answer". The relay sends each call **at most once**: it doesn't retry, because a call may have run before the connection broke. `designs` still lists everyone else's designs and names the missing servers after the list. A server that answers with an error counts as missing too. If none answers, the call fails rather than return an empty list. Every server offers the same tools, so the relay asks each in turn for the tool list until one answers. Before, it asked only the first server, so with that one down an agent connecting to the router got no tools at all. A test in `tests/router.rs` lists tools through a router whose first server isn't running. When the server comes back, it has forgotten its MCP sessions. rmcp's client sees the `404` and opens a new session by itself, and the relay also opens a new one if the old one closed.
-
-Each server has its own lock in the relay, so a slow server holds up only calls to that server. Opening a session, listing tools and `designs` each give a server the same 5 seconds, so a stuck server costs an agent a few seconds, not every call. Other tool calls have no limit, because a comments wait can last 55 seconds. `tests/router.rs` stops a server mid-session and restarts it on the same port, and the same agent session reaches it again.
-
-Those relayed sessions are the router's only state, and they can be shared. Give every router the same `FINITE_SESSION_DIR` (a shared volume), and any router can serve any agent's session, so the load balancer doesn't have to pin sessions. The directory holds one small file per session with what its `initialize` request said, and that's all a router needs to resume a session it has never seen (`DirSessionStore` in `relay.rs`, plugged into rmcp's `SessionStore` hook). Each file is written to a temporary file with a random name, synced and renamed into place, so it's always whole, even if two routers save the same session at once. If one still can't be read, the router treats it as no session. That gets the agent a `404`, and its client starts a new session. An error would fail every request in that session instead.
-
-Undo has to survive that move too, so the backends must see the same actor whichever router relays the call. An agent that sends `X-Finite-Agent` keeps that name. An agent that doesn't is identified by its router session id (`relay:<id>`), which every router sees the same way, and is shown under its client's name. `tests/router.rs` moves one session from one router to another mid-conversation and undoes, on the second router, an edit made through the first. With the identity switched off, that same test finds "Nothing to undo". Without a shared directory, a second router answers `404` for a session it doesn't know, and MCP clients respond by starting a new session.
-
-MCP rejects requests whose `Host` header it doesn't know, to block **DNS rebinding**: a trick where a web page gets a browser to send requests to a server on your machine. By default it only accepts `localhost`, `127.0.0.1` and `::1`. Servers and routers also accept every host in `FINITE_NODES`, and any names you list in `FINITE_ALLOWED_HOSTS`, such as `finite.example.com`. Without that, a server at `10.0.0.2` would reject the router's calls.
-
-## Limits at a glance
-
-The guide explains each limit where it applies. This is the list in one place. Most are one constant, so changing one is a one-line edit plus its test.
-
-| What                                   | Limit                                                             | Where it's set                             | Why                                                              |
-| -------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------ | ---------------------------------------------------------------- |
-| Nodes in a design                      | 100,000                                                           | `MAX_NODES` in `document.rs`               | Every node is journaled, held in memory and sent to viewers      |
-| Pages in a design                      | 100                                                               | `MAX_PAGES` in `document.rs`               | Every page shows in the sidebar and in `read`'s overview         |
-| Nesting depth                          | 256 levels                                                        | `MAX_DEPTH` in `document.rs`               | Tree walks are recursive; deeper overflowed the stack            |
-| Nodes shown by instances               | 100,000, counted with the design's own                            | `room_for` in `edit/mod.rs`, `Expander`    | Instances nested in instances multiply                           |
-| HTML nesting before parsing            | 4,096 by a quick count                                            | `html::parse`                              | html5ever is quadratic in depth                                  |
-| Undo steps per actor and stack         | 200 steps, about 32 MB                                            | `History::LIMIT`, `History::BYTE_LIMIT`    | Undoing a big delete recreates every node in it                  |
-| Undo for a named agent                 | 6 idle hours                                                      | `HISTORY_TTL` in `hub/mod.rs`              | Histories keep memory and snapshots busy                         |
-| Idle MCP session                       | 1 hour                                                            | `SESSION_IDLE` in `mcp/mod.rs`             | An unnamed agent's undo ends with its session                    |
-| Open comments per design               | 500                                                               | `MAX_OPEN` in `comment.rs`                 | Anyone who can see a design can comment                          |
-| Messages per comment thread            | 200                                                               | `MAX_MESSAGES` in `comment.rs`             | Same reason                                                      |
-| Comment length, author name            | 4,000 and 48 characters                                           | `MAX_BODY`, `MAX_NAME` in `comment.rs`     | Shared with the web app through a golden file                    |
-| Comments wait                          | 55 seconds                                                        | `MAX_WAIT_SECS` in `mcp/comments.rs`       | MCP clients time out a tool call well under two minutes          |
-| Agent id from `X-Finite-Agent`         | 64 characters                                                     | `MAX_USER_ID` in `comment.rs`              | Stored with every change and reply the agent makes               |
-| Layer, design and status names         | 120 characters                                                    | `label.rs`                                 | Every viewer shows them; cut rather than refused                 |
-| Presence                               | 100 nodes, 5 idle minutes                                         | `PRESENCE_NODES`, `PRESENCE_TTL`           | Every viewer gets the list on each update                        |
-| One tool result                        | 40,000 characters                                                 | `OUTPUT_LIMIT` in `mcp/format.rs`          | Claude Code cuts at 25,000 tokens wherever that falls            |
-| `designs` list                         | 200 entries, fewer if they don't fit one result                   | `MAX_LIMIT` in `mcp/designs.rs`            | A list is cut to the output budget                               |
-| Screenshot size                        | 3,000 pixels on the longer side                                   | `MAX_OUTPUT_SIDE` in `screenshot.rs`       | The Claude API's limit once a request has 20+ images             |
-| Browsers rendering screenshots at once | Half the cores, 1 to 4                                            | `browsers()` in `screenshot.rs`            | Each capture starts its own Chrome                               |
-| Journal before compaction              | 1,000 records or 16 MB                                            | `COMPACT_AFTER`, `COMPACT_BYTES`           | A load replays the whole journal                                 |
-| Handoff body                           | 256 MB                                                            | `HANDOFF_LIMIT` in `api.rs`                | A handoff carries a whole design; other routes keep 2 MB         |
-| Import body                            | 32 MB                                                             | `IMPORT_LIMIT` in `api.rs`                 | The file is kept whole as one blob; the router forwards up to it |
-| Blob                                   | 32 MB                                                             | `MAX_BLOB` in `blob.rs`                    | A store reads and writes a blob whole, in memory                 |
-| Server lease, with a shared store      | 10 s, renewed every 2 s                                           | `FINITE_LEASE_MS`, `Lease` in `cluster.rs` | How long a silent server keeps its designs                       |
-| Waiting for a design that's moving     | Up to one lease, then `503`                                       | `Hub::open`                                | The old owner saves a last snapshot before it lets go            |
-| Design list in the browser             | 200 newest                                                        | `LOBBY_LIMIT`, `mergeLobby`                | The rest are a search away                                       |
-| Silent WebSocket                       | Closed after 60 s; the page gives up after 10 s without an answer | `heartbeat.rs`, `socket.ts`                | Half-open connections never close on their own                   |
+`vp run e2e` (`e2e/run.mjs`) builds the web app, starts the server on a free port from 4300 with a temp data folder, and drives headless Chrome through a person's core flow: create a blank design, wait for the install and the preview, see the Home frame on the Routes page, select the `h1` inside it, set its opacity in the inspector and check the TSX file changed, undo it, and open the Prototypes tab. With `FINITE_REAL_AGENT=1` it also sends a message from the composer and waits for the local `claude` to answer. `E2E_SKIP_BUILD=1` reuses `apps/web/out`. A failure saves `$TMPDIR/finite-e2e-failure.png`. `e2e/lib.mjs` has the shared pieces, which the `finite-headless` skill's script uses too.
 
 ## Words used in the code
 
-| Word          | Meaning                                                                              |
-| ------------- | ------------------------------------------------------------------------------------ |
-| Design        | One canvas. Also called a canvas in the MCP tools.                                   |
-| Artboard      | A top-level node: a fixed-size frame placed on the canvas.                           |
-| Link          | An `<a href="#finite-artboard=<id>">`: interactive mode flies to that artboard.      |
-| Route         | An artboard's `data-route`: the URL path it shares with its other widths.            |
-| Flow          | The routes and links `flow::flow` reads from a design, with any broken links.        |
-| Node          | One element or text node.                                                            |
-| Op            | The smallest edit: `create`, `delete`, `set` or `move`.                              |
-| Change        | The ops from one commit, transaction, undo or redo, with a `seq`, actor and label.   |
-| Transaction   | Several edit steps staged under one lock and committed as one change, or not at all. |
-| Actor         | Whoever made a change: an agent, by its `X-Finite-Agent` name or its session.        |
-| Snapshot      | Everything needed to rebuild a design. Saved to disk and sent on connect.            |
-| Journal       | The records appended to `<id>.log` since the last snapshot.                          |
-| Compaction    | Writing a fresh snapshot and deleting the journal, every 1,000 records or 16 MB.     |
-| Replica       | The browser's copy of a design: the Rust document in WebAssembly, plus a cache.      |
-| WebAssembly   | A binary format browsers run. `crates/wasm` compiles the document model to it.       |
-| Golden file   | A recorded expected result that a test compares against, like `apply.json`.          |
-| Presence      | "Agent X is working on these nodes", shown as a badge.                               |
-| Hub           | The server's index of designs, with the ones in use loaded in memory.                |
-| Room          | The model for loading: a design is in memory only while someone uses it.             |
-| Long poll     | A request that stays open until there's news, like `comments` with `wait`.           |
-| Epoch         | One load of a design on a server. A viewer can resume only within the same one.      |
-| Revision      | A comment's `rev`: it goes up with each change, so the higher copy is newer.         |
-| Owner         | The one server that holds a design, picked by hashing its id over the servers.       |
-| Heartbeat     | The time a server writes to the shared store every 2 s, to show it's alive.          |
-| Lease         | How long a heartbeat, or a claim on a design, counts. 10 s by default.               |
-| Claim         | Taking a design's lease before loading it. It raises the design's fencing token.     |
-| Fencing token | The design's `epoch`. The store refuses a write with an older one.                   |
-| Fenced        | What a stale server's write gets: another server took the design over.               |
-| Router        | `finite-server router`: the front door that sends requests to each owner.            |
-| Token         | A design's CSS variable, like `--brand`, with a value per mode.                      |
-| Mode          | A set of token values, like Light or Dark. Each artboard renders in one.             |
-| Component     | A subtree marked `component`: one definition that instances show.                    |
-| Instance      | A node with `instanceOf`: it shows its component, with its own overrides.            |
-| Override      | A value one instance shows differently, keyed by path and property.                  |
-| Virtual id    | `instance/node`: a node shown inside an instance, which isn't in the document.       |
-| User edit     | One thing a person changes on the canvas (`user_edit::UserEdit`), sent in a list.    |
-| Mutation      | A gesture's user edits, sent from a tab as one undo step, with the tab's stamp.      |
-| Draft         | The edits of a gesture in progress, shown in the browser and never sent.             |
-| Stamp         | A tab's random id and counter, which marks the change its mutation made.             |
-| Detach        | Turning an instance into a plain copy of what it shows.                              |
+- **Design**: one React project Finite knows about, with a `.finite/` folder in its root. Its **origin** is connected, blank or import.
+- **Root**: the design's project folder.
+- **Canvas**: a page (Routes, Brand, Components, or one a person adds) or a prototype. It holds frames, text labels and comments.
+- **Frame**: a rectangle on a canvas that shows a route or one component file, live, in an iframe.
+- **Board**: `.finite/boards/<canvasId>/`, where a prototype's component files live.
+- **Production**: the project's own code, outside `.finite/` and the brand folder.
+- **Loc**: `"src/x.tsx:12:4"`, the position of a JSX opening element, which the plugin stamps on what it renders. **Index** is which rendered instance of a loc, when a `.map()` renders it many times.
+- **Rev**: the first 8 hex digits of a file's sha1 when Vite transformed it. An edit carries the revs it saw.
+- **Remap**: where each edited loc moved, so the selection follows the element.
+- **Convention**: how the design styles things (Tailwind, CSS modules or inline), which hand edits follow.
+- **Preview**: a design's Vite dev server, and its status (stopped, starting, ready, error).
+- **Bridge**: the `MessageChannel` between the page and one frame.
+- **Actor**: who made a change, a person or an agent. An agent's id is its thread's id. Undo is per actor.
+- **Thread**: one agent conversation, with its metadata and event log. A prototype is a thread plus the canvas it works on.
+- **Turn**: one message and the agent's work on it, ending in a `result`. **Steer** folds a message into the running turn; **queue** holds it until the turn ends.
+- **Working, Active, Snoozed, Settled**: where a thread sits in the prototype list (`threadSection` in `model.ts`). Working: the agent is running. Snoozed: a person snoozed it. Settled: a person settled it, or its move to prod finished. Active: everything else, the person's turn. Sending a message wakes a snoozed or settled thread.
+- **Fence**: the rule that agents write only prototypes and brand assets, unless the turn called `move_to_prod`.
+- **Refusal**: a request the server won't do, with a reason to show and a code to react to.
