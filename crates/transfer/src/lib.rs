@@ -47,7 +47,7 @@ use finite_design::{
 };
 
 pub use feature::{Direction, Feature, Support};
-pub use report::{Axis, Diagnostic, Score, violations};
+pub use report::{Axis, Diagnostic, Refused, Score, violations};
 
 /// A format Finite reads or writes. This enum is the registry: each
 /// variant names its codec in [`Format::codec`].
@@ -557,10 +557,14 @@ impl Imported {
             )?;
             if let Some(Op::Create { node }) = ops.first_mut() {
                 node.attrs.extend(board.attrs);
-                node.mode = board
-                    .mode
-                    .or_else(|| first_mode.clone())
-                    .and_then(|name| edit::artboard_mode(tx.doc(), &name).ok().flatten());
+                node.mode = board.mode.or_else(|| first_mode.clone()).and_then(|name| {
+                    // By name only: an id in the source means nothing here.
+                    let modes = tx.doc().mode_map();
+                    let (id, _) = modes
+                        .iter()
+                        .find(|(_, m)| m.name.eq_ignore_ascii_case(&name))?;
+                    Some(id.clone())
+                });
                 for name in unset {
                     node.styles.remove(name);
                 }
