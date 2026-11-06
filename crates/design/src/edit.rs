@@ -1895,6 +1895,8 @@ pub fn duplicate(
     let mut ops = Vec::new();
     let mut roots = Vec::new();
     let mut placer = Placer::new(doc);
+    // Each copied instance, with the instance it copies.
+    let mut instances: HashMap<NodeId, &str> = HashMap::new();
     for id in top_level(doc, ids) {
         let original = node(doc, id)?;
         let fragment = Fragment::from_document(doc, id).expect("node exists");
@@ -1905,6 +1907,27 @@ pub fn duplicate(
         let parent = original.parent.clone();
         let first = ops.len();
         roots.push(fragment.create_ops(parent.as_deref(), index, position, new_id, &mut ops));
+        if doc.has_instances() {
+            // The nodes `Fragment::from_document` copied, in the order it made them.
+            let mut copied = Vec::new();
+            let mut stack = vec![id.as_str()];
+            while let Some(at) = stack.pop() {
+                copied.push(at);
+                if doc
+                    .get(at)
+                    .is_some_and(|n| !n.is_instance() && !n.component)
+                {
+                    stack.extend(doc.children(Some(at)).iter().rev().map(|c| c.id.as_str()));
+                }
+            }
+            for (original, op) in copied.into_iter().zip(&ops[first..]) {
+                if let Op::Create { node } = op
+                    && doc.get(original).is_some_and(Node::is_instance)
+                {
+                    instances.insert(node.id.clone(), original);
+                }
+            }
+        }
         // A copied artboard goes on its original's page.
         if let Some(Op::Create { node }) = ops.get_mut(first)
             && original.is_artboard()
@@ -1935,6 +1958,24 @@ pub fn duplicate(
                 }
                 if own_routes && copied.contains(node.id.as_str()) {
                     node.attrs.remove(flow::ROUTE_ATTR);
+                }
+                // An instance shows its component's links, which aren't
+                // among the copied nodes. Override the ones that go to a
+                // copied artboard, whether the component or an override set them.
+                if let Some(&original) = instances.get(&node.id) {
+                    for link in doc.subtree(original) {
+                        let Some(copy) = flow::link_target(link).and_then(|to| copies.get(&*to))
+                        else {
+                            continue;
+                        };
+                        let path = (link.id.strip_prefix(original))
+                            .and_then(|p| p.strip_prefix(components::SEPARATOR));
+                        let key = match path {
+                            Some(path) => format!("{path}/attr:href"),
+                            None => "attr:href".to_owned(),
+                        };
+                        node.overrides.insert(key, Some(flow::link_href(copy)));
+                    }
                 }
             }
         }

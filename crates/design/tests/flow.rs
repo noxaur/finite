@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use finite_design::{
-    Design, DesignMeta, Document, Op,
+    Design, DesignMeta, Document, Op, components,
     edit::{self, InstanceValues, NewArtboard, WriteMode},
     flow::{self, Flow, SharedWidth},
     user_edit::{self, UserEdit},
@@ -283,10 +283,16 @@ fn duplicating_a_flow_links_the_copies_to_each_other() {
     assert_eq!(link.to, "cart");
 }
 
-/// The document after duplicating `ids`, and the copies' ids.
+/// The document after duplicating `ids` from the design as it renders,
+/// which is what every tool builds edits against, and the copies' ids.
 fn duplicated(design: &Design, ids: &[&str]) -> (Document, Vec<String>) {
     let ids: Vec<String> = ids.iter().map(|id| (*id).to_owned()).collect();
-    let (ops, roots) = edit::duplicate(design.doc(), &ids, &mut self::ids()).unwrap();
+    let mut n = 0;
+    let mut new_id = || {
+        n += 1;
+        format!("copy{n}")
+    };
+    let (ops, roots) = edit::duplicate(design.view(), &ids, &mut new_id).unwrap();
     let mut doc = design.doc().clone();
     for op in &ops {
         doc.apply(op).unwrap();
@@ -433,6 +439,55 @@ fn links_in_components_and_their_instances_count_with_overridden_hrefs() {
     assert_eq!(broken, [("done", at("done").as_str(), "gone")]);
     d.undo("agent", 0).unwrap();
     assert!(flow::flow(d.view()).broken.is_empty());
+}
+
+#[test]
+fn duplicating_a_flow_repoints_links_inside_instances() {
+    let (d, _, instances) = linked_component();
+    let (doc, roots) = duplicated(&d, &["home", "cart", "done"]);
+    let (home, cart, done) = (&roots[0], &roots[1], &roots[2]);
+    let flow = flow::flow(&components::expand(&doc));
+    let inside = |board: &String| -> Vec<&str> {
+        flow.links
+            .iter()
+            .filter(|l| l.element.contains('/') && &l.from == board)
+            .map(|l| l.to.as_str())
+            .collect()
+    };
+    // Home's instance overrode its link to "done" and cart's follows the
+    // component to "cart": both go to the copies. Done's goes to "gone",
+    // which wasn't copied.
+    assert_eq!(inside(home), [done.as_str()]);
+    assert_eq!(inside(cart), [cart.as_str()]);
+    assert_eq!(inside(done), ["gone"]);
+    // The originals are untouched.
+    for (board, to) in [("home", "done"), ("cart", "cart"), ("done", "gone")] {
+        let board = board.to_owned();
+        assert_eq!(inside(&board), [to]);
+    }
+    // A copy is still an instance of the same component.
+    let copy = doc
+        .children(Some(home))
+        .into_iter()
+        .find(|n| n.is_instance())
+        .unwrap();
+    assert_eq!(
+        copy.instance_of,
+        d.doc().get(&instances["home"]).unwrap().instance_of
+    );
+}
+
+#[test]
+fn a_copy_of_one_screen_keeps_its_instances_links() {
+    let (d, _, _) = linked_component();
+    let (doc, roots) = duplicated(&d, &["home"]);
+    let flow = flow::flow(&components::expand(&doc));
+    let link = flow
+        .links
+        .iter()
+        .find(|l| l.from == roots[0] && l.element.contains('/'))
+        .unwrap();
+    assert_eq!(link.to, "done");
 }
 
 #[test]
