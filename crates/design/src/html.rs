@@ -45,7 +45,7 @@ pub struct Fragment {
 
 /// Elements dropped with their whole subtree: anything that loads other
 /// documents or changes the page outside the artboard.
-const BLOCKED_TAGS: &[&str] = &[
+pub const BLOCKED_TAGS: &[&str] = &[
     "link", "meta", "base", "title", "head", "iframe", "frame", "frameset", "object", "embed",
     "noscript", "template", "slot",
 ];
@@ -102,17 +102,41 @@ pub const BASE_CSS: &str =
 /// top navigation, pointer lock and fullscreen.
 pub const CSP: &str = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https:; connect-src https: wss:; style-src 'unsafe-inline' https:; img-src https: http: data: blob:; font-src https: data:; media-src https: data: blob:; worker-src blob:; form-action 'none'; frame-src 'none'; base-uri 'none'";
 
+/// The `sandbox` of the `<iframe>` an artboard that runs scripts renders in,
+/// in the viewer and in screenshots. No `allow-same-origin`, so the page has
+/// an opaque origin and can't reach the wrapper around it; no popups, modals,
+/// top navigation or pointer lock. Forms run their submit handlers, and
+/// [`CSP`]'s `form-action` keeps them from sending anything.
+pub const SANDBOX: &str = "allow-scripts allow-forms";
+
+/// The `allow` of that `<iframe>`: the features the page may not ask for.
+pub const FRAME_PERMISSIONS: &str = "autoplay 'none'; fullscreen 'none'; camera 'none'; microphone 'none'; geolocation 'none'; display-capture 'none'";
+
 /// Runs first in every artboard that runs scripts, before the artboard's own
 /// code: a function expression that hosts call with a config, through
-/// [`bootstrap`]: `(…)({"nonce": "…", "storage": {…}})`. It holds the private channel
+/// [`bootstrap_script`]. It holds the private channel
 /// to the viewer, the design's `localStorage`, and the limits on audio, focus
 /// and fullscreen. See the file for what it does.
-pub const BOOTSTRAP: &str = include_str!("bootstrap.js");
+const BOOTSTRAP: &str = include_str!("bootstrap.js");
 
 /// [`BOOTSTRAP`] as an expression to call. The formatter ends the file
 /// with `;`, which `(…)(config)` can't hold.
-pub fn bootstrap() -> &'static str {
+fn bootstrap() -> &'static str {
     BOOTSTRAP.trim().trim_end_matches(';')
+}
+
+/// The `<script>` that starts [`BOOTSTRAP`] with `config`, an object with
+/// the page's `nonce` and `storage`. The bootstrap also gets the prefix of
+/// links to artboards ([`crate::flow::ARTBOARD_LINK`]), so it needs no copy.
+/// `<` is escaped, so stored text such as `</script>` can't end the script.
+pub fn bootstrap_script(nonce: &str, storage: &serde_json::Value) -> String {
+    let config = serde_json::json!({
+        "nonce": nonce,
+        "storage": storage,
+        "artboardLink": crate::flow::ARTBOARD_LINK,
+    });
+    let config = config.to_string().replace('<', "\\u003c");
+    format!("<script>({})({config})</script>", bootstrap())
 }
 
 /// Whether a `<script>`'s `src` may load: only from an `https:` URL.

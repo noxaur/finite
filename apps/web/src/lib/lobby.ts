@@ -1,11 +1,5 @@
 import type { DesignSummary } from "@/design/schema";
-
-/**
- * How many designs the design list shows: the server's `LOBBY_LIMIT` in
- * `crates/server/src/hub/mod.rs`. The socket starts with this many, newest
- * first, and the page offers a search for the rest.
- */
-export const LOBBY_LIMIT = 200;
+import { LOBBY_LIMIT } from "./limits";
 
 /**
  * The list after `design` changed: it moves to the front, and the list keeps

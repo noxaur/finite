@@ -29,7 +29,7 @@ use serde::Serialize;
 use crate::{Document, Node, NodeId, edit::pixel_size};
 
 /// What a link's `href` starts with when it goes to an artboard, followed
-/// by the artboard's id. The viewer reads the same prefix.
+/// by the artboard's id. The viewer's scripts read it from `html::bootstrap_script`.
 pub const ARTBOARD_LINK: &str = "#finite-artboard=";
 /// The attribute that puts an artboard on a route.
 pub const ROUTE_ATTR: &str = "data-route";
@@ -112,13 +112,19 @@ pub fn link_target(node: &Node) -> Option<Cow<'_, str>> {
     if !matches!(node.tag(), Some("a" | "area")) {
         return None;
     }
-    let rest = node.attrs.get("href")?.strip_prefix(ARTBOARD_LINK)?;
+    href_target(node.attrs.get("href")?)
+}
+
+/// The artboard a link's `href` names, by the rule [`link_target`] states.
+/// The viewer asks for it through WebAssembly when a person clicks a link.
+pub fn href_target(href: &str) -> Option<Cow<'_, str>> {
+    let rest = href.strip_prefix(ARTBOARD_LINK)?;
     Some(percent_decode(rest).map_or(Cow::Borrowed(rest), Cow::Owned))
 }
 
 /// What `decodeURIComponent` returns, or `None` where it throws: a `%` that
 /// isn't followed by two hex digits, or bytes that aren't UTF-8.
-fn percent_decode(s: &str) -> Option<String> {
+pub fn percent_decode(s: &str) -> Option<String> {
     let mut bytes = Vec::with_capacity(s.len());
     let mut rest = s.as_bytes();
     while let Some((&b, tail)) = rest.split_first() {

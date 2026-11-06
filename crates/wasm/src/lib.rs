@@ -20,7 +20,7 @@ mod replica;
 
 use std::cell::RefCell;
 
-use finite_design::html;
+use finite_design::{flow, html};
 pub use replica::Replica;
 
 thread_local! {
@@ -113,13 +113,11 @@ pub extern "C" fn replica_export(handle: u32, len: usize, ids: u32) -> i32 {
     })
 }
 
-/// [`Replica::pages`].
 #[unsafe(no_mangle)]
 pub extern "C" fn replica_pages(handle: u32) -> i32 {
     with_replica(handle, |replica| Ok(replica.pages()))
 }
 
-/// [`Replica::tokens`].
 #[unsafe(no_mangle)]
 pub extern "C" fn replica_tokens(handle: u32) -> i32 {
     with_replica(handle, |replica| Ok(replica.tokens()))
@@ -133,7 +131,6 @@ pub extern "C" fn replica_expand(handle: u32, len: usize) -> i32 {
     })
 }
 
-/// [`Replica::take_dirty`].
 #[unsafe(no_mangle)]
 pub extern "C" fn replica_take_dirty(handle: u32) -> i32 {
     with_replica(handle, |replica| Ok(replica.take_dirty()))
@@ -179,7 +176,6 @@ pub extern "C" fn replica_receive(handle: u32, len: usize, mine: u32) -> i32 {
     })
 }
 
-/// [`Replica::settle`].
 #[unsafe(no_mangle)]
 pub extern "C" fn replica_settle(handle: u32, mid: u32) -> i32 {
     with_replica(handle, |replica| Ok(replica.settle(mid.into())))
@@ -227,7 +223,6 @@ pub extern "C" fn replica_token_style(handle: u32, len: usize, shadow: u32) -> i
     })
 }
 
-/// [`Replica::flow`].
 #[unsafe(no_mangle)]
 pub extern "C" fn replica_flow(handle: u32) -> i32 {
     with_replica(handle, |replica| Ok(replica.flow()))
@@ -244,22 +239,83 @@ pub extern "C" fn replica_flow_target(handle: u32, len: usize, width: f64) -> i3
     })
 }
 
-/// [`html::BASE_CSS`], the styles every artboard renders with.
+/// The rules that need no document, as JSON (see [`Rules`]).
 #[unsafe(no_mangle)]
-pub extern "C" fn base_css() -> i32 {
-    respond(Ok(html::BASE_CSS.to_owned()))
+pub extern "C" fn rules() -> i32 {
+    respond(Ok(
+        serde_json::to_string(&Rules::default()).expect("rules serialize")
+    ))
 }
 
-/// [`html::CSP`], the content policy for artboards that run scripts.
+/// [`html::bootstrap_script`] for the nonce in the first `nonce_len` input
+/// bytes and the JSON object of page storage in the `storage_len` bytes after it.
 #[unsafe(no_mangle)]
-pub extern "C" fn csp() -> i32 {
-    respond(Ok(html::CSP.to_owned()))
+pub extern "C" fn bootstrap_script(nonce_len: usize, storage_len: usize) -> i32 {
+    respond(with_input(|input| {
+        let nonce = text(input, 0, nonce_len)?;
+        let storage = serde_json::from_str(text(input, nonce_len, storage_len)?)
+            .map_err(|e| e.to_string())?;
+        Ok(html::bootstrap_script(nonce, &storage))
+    }))
 }
 
-/// [`html::bootstrap`], the script that runs first in artboards that run scripts.
+/// [`flow::href_target`] for the `href` in the first `len` input bytes, as
+/// JSON: the artboard id, or `null` when it isn't a link to an artboard.
 #[unsafe(no_mangle)]
-pub extern "C" fn bootstrap() -> i32 {
-    respond(Ok(html::bootstrap().to_owned()))
+pub extern "C" fn artboard_target(len: usize) -> i32 {
+    respond(with_input(|input| {
+        let target = flow::href_target(text(input, 0, len)?);
+        Ok(serde_json::to_string(&target).expect("text serializes"))
+    }))
+}
+
+/// [`flow::percent_decode`] for the text in the first `len` input bytes, as
+/// JSON: the decoded text, or `null` when it's malformed.
+#[unsafe(no_mangle)]
+pub extern "C" fn percent_decode(len: usize) -> i32 {
+    respond(with_input(|input| {
+        let decoded = flow::percent_decode(text(input, 0, len)?);
+        Ok(serde_json::to_string(&decoded).expect("text serializes"))
+    }))
+}
+
+/// [`Replica::pixel_size`] for the node id in the first `len` input bytes.
+#[unsafe(no_mangle)]
+pub extern "C" fn replica_pixel_size(handle: u32, len: usize) -> i32 {
+    with_replica(handle, |replica| {
+        with_input(|input| Ok(replica.pixel_size(text(input, 0, len)?)))
+    })
+}
+
+/// What the viewer needs from `finite-design` before it has a document:
+/// the constants it renders artboards with.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Rules {
+    /// [`html::BASE_CSS`], the styles every artboard renders with.
+    base_css: &'static str,
+    base_layer: &'static str,
+    /// [`html::CSP`], the content policy for artboards that run scripts.
+    csp: &'static str,
+    sandbox: &'static str,
+    frame_permissions: &'static str,
+    /// [`html::BLOCKED_TAGS`], which the viewer never creates as elements.
+    blocked_tags: &'static [&'static str],
+    default_artboard_size: (f64, f64),
+}
+
+impl Default for Rules {
+    fn default() -> Self {
+        Self {
+            base_css: html::BASE_CSS,
+            base_layer: html::BASE_LAYER,
+            csp: html::CSP,
+            sandbox: html::SANDBOX,
+            frame_permissions: html::FRAME_PERMISSIONS,
+            blocked_tags: html::BLOCKED_TAGS,
+            default_artboard_size: html::DEFAULT_ARTBOARD_SIZE,
+        }
+    }
 }
 
 fn with_input<T>(f: impl FnOnce(&[u8]) -> T) -> T {
@@ -346,6 +402,49 @@ mod tests {
         let h = replica_new();
         let err = result(replica_apply(h, put(&["not json"])[0])).unwrap_err();
         assert!(err.contains("expected"), "{err}");
+    }
+
+    #[test]
+    fn rules_that_need_no_document() {
+        let rules: serde_json::Value = serde_json::from_str(&result(rules()).unwrap()).unwrap();
+        assert_eq!(rules["baseLayer"], html::BASE_LAYER);
+        assert_eq!(
+            rules["defaultArtboardSize"],
+            serde_json::json!([1440.0, 900.0])
+        );
+        assert!(
+            rules["blockedTags"]
+                .as_array()
+                .unwrap()
+                .contains(&"iframe".into())
+        );
+
+        let lens = put(&["#finite-artboard=a%62c"]);
+        assert_eq!(result(artboard_target(lens[0])).unwrap(), r#""abc""#);
+        let lens = put(&["#section"]);
+        assert_eq!(result(artboard_target(lens[0])).unwrap(), "null");
+        let lens = put(&["a%zz"]);
+        assert_eq!(result(percent_decode(lens[0])).unwrap(), "null");
+
+        let lens = put(&["tab", r#"{"k":"</script>"}"#]);
+        let script = result(bootstrap_script(lens[0], lens[1])).unwrap();
+        assert!(script.contains(r#""artboardLink":"#));
+        assert!(script.contains("\\u003c/script>"), "{script}");
+    }
+
+    #[test]
+    fn pixel_sizes_come_from_the_document() {
+        let h = replica_new();
+        let nodes = r#"[{"id":"a","parent":null,"index":"V","type":"element","tag":"div","styles":{"width":"300px","height":"auto"}}]"#;
+        result(replica_load(h, put(&[nodes])[0])).unwrap();
+        assert_eq!(
+            result(replica_pixel_size(h, put(&["a"])[0])).unwrap(),
+            "[300.0,null]"
+        );
+        assert_eq!(
+            result(replica_pixel_size(h, put(&["gone"])[0])).unwrap(),
+            "[null,null]"
+        );
     }
 
     #[test]

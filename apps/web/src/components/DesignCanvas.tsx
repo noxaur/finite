@@ -8,7 +8,6 @@ import { Api, Refused } from "@/api/Api";
 import { Camera, union, type View } from "@/design/camera";
 import { Editor, isTyping } from "@/design/editing/editor";
 import { LayerModel } from "@/design/editing/layers";
-import { pixelSize } from "@/design/html";
 import { Presenter, type PresenterState } from "@/design/presenter";
 import { type FrameKey, Renderer } from "@/design/renderer";
 import type { Hit } from "@/design/types";
@@ -268,7 +267,8 @@ export function DesignCanvas({ id }: { id: string }) {
         // A route's artboard at the width closest to this one's: a link
         // drawn on the desktop cart opens the mobile cart from mobile.
         const board = replica.get(from);
-        const target = (board && replica.flowTarget(link, pixelSize(board).width)) ?? link;
+        const target =
+          (board && replica.flowTarget(link, replica.pixelSize(board.id).width)) ?? link;
         const presenter = presenterRef.current;
         if (presenter && live.current.presenting === from) {
           if (!presenter.goto(target)) setNotice("That link goes to an artboard that isn’t there.");

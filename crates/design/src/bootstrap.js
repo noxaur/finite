@@ -3,7 +3,7 @@
 // oxlint-disable typescript/unbound-method, eslint/no-unused-expressions
 // Runs first in every artboard that runs scripts, before the artboard's own
 // code, in the viewer's sandboxed iframes and in screenshots. Hosts call it
-// with a config: `(BOOTSTRAP)({ nonce, storage })`.
+// with a config: `(BOOTSTRAP)({ nonce, storage, artboardLink })`.
 //
 // It talks to the viewer over a private MessagePort. The artboard's own
 // scripts run in this same frame and can post to the parent too, so the
@@ -401,15 +401,7 @@
   // Links: one to another artboard asks the viewer to go there, an external
   // one asks it to open a new tab. Only a person's click does either. A link
   // to a section of the page scrolls, like a real page. Anything else does nothing.
-  const ARTBOARD_LINK = "#finite-artboard=";
-  // A malformed escape stays as written, so the link names no artboard.
-  const decode = (s) => {
-    try {
-      return decodeURIComponent(s);
-    } catch {
-      return s;
-    }
-  };
+  const ARTBOARD_LINK = config.artboardLink;
   const onLink = (e) => {
     const a = e
       .composedPath()
@@ -420,7 +412,8 @@
     e.preventDefault();
     if (!e.isTrusted || e.type !== "click" || !using()) return;
     if (href.startsWith(ARTBOARD_LINK)) {
-      send({ type: "goto", target: decode(href.slice(ARTBOARD_LINK.length)) });
+      // The viewer reads the target out of the href (`flow::href_target`).
+      send({ type: "goto", href });
     } else if (/^https?:$/.test(a.protocol)) {
       send({ type: "open", url: a.href });
     }

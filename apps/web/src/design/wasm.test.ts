@@ -1,8 +1,9 @@
 import "./wasm.node";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vite-plus/test";
 import { Replica } from "./replica";
 import type { Node } from "./schema";
-import { designModel } from "./wasm";
+import { designModel, EXPORT_NAMES } from "./wasm";
 
 const text = (id: string, parent: string, value: string): Node => ({
   id,
@@ -26,6 +27,31 @@ const load = (nodes: ReadonlyArray<Node>) => {
 };
 
 describe("the WebAssembly boundary", () => {
+  it("has the exports wasm.ts declares, and no others", () => {
+    const module = new WebAssembly.Module(
+      readFileSync(new URL("../../../../crates/wasm/dist/finite.wasm", import.meta.url)),
+    );
+    const names = WebAssembly.Module.exports(module).map((e) => e.name);
+    expect(names.toSorted()).toEqual(Object.keys(EXPORT_NAMES).toSorted());
+  });
+
+  it("reads the rules from Rust", () => {
+    const { rules } = designModel();
+    expect(rules.baseLayer).toBe("finite-base");
+    expect(rules.defaultArtboardSize).toEqual([1440, 900]);
+    expect(rules.sandbox).toBe("allow-scripts allow-forms");
+    expect(rules.blockedTags).toContain("noscript");
+  });
+
+  it("decodes links to artboards without throwing", () => {
+    const model = designModel();
+    expect(model.artboardTarget("#finite-artboard=a%62c")).toBe("abc");
+    expect(model.artboardTarget("#finite-artboard=a%zz")).toBe("a%zz");
+    expect(model.artboardTarget("#section")).toBeNull();
+    expect(model.percentDecode("a%20b")).toBe("a b");
+    expect(model.percentDecode("a%zz")).toBeNull();
+  });
+
   it("checks attributes with the server's rules", () => {
     const safe = (name: string, value: string) => designModel().isSafeAttr(name, value);
     expect(safe("href", "https://example.com")).toBe(true);

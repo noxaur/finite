@@ -1,7 +1,7 @@
 import "./wasm.node";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vite-plus/test";
-import { artboardDocument, artboardLinkTarget, pixelSize } from "./html";
+import { artboardDocument, artboardLinkTarget } from "./html";
 import { Replica } from "./replica";
 import type { Node } from "./schema";
 import { designModel } from "./wasm";
@@ -33,9 +33,9 @@ describe("artboardDocument", () => {
   it("wraps an artboard in a page with the server's content policy and base CSS", () => {
     const r = replica([el("a", null, "div", { attrs: { class: "x" } })]);
     const page = artboardDocument(r, "a", boot);
-    expect(page).toContain(`content="${designModel().csp}"`);
-    expect(designModel().csp).toContain("default-src 'none'");
-    expect(page).toContain(designModel().baseCss);
+    expect(page).toContain(`content="${designModel().rules.csp}"`);
+    expect(designModel().rules.csp).toContain("default-src 'none'");
+    expect(page).toContain(designModel().rules.baseCss);
     // Each element carries its node id, so comments can point inside the sandbox.
     expect(page).toContain('<body><div data-finite-id="a" class="x"></div></body>');
     expect(r.exportHtml("a")).toBe('<div class="x"></div>');
@@ -46,18 +46,20 @@ describe("artboardDocument", () => {
     r.apply({ op: "token", name: "--brand", modeId: "mode-1", value: "red" });
     const page = artboardDocument(r, "a", boot);
     const tokens = page.indexOf("<style>@layer finite-tokens { :root { --brand: red; } }</style>");
-    expect(tokens).toBeGreaterThan(page.indexOf(designModel().baseCss));
+    expect(tokens).toBeGreaterThan(page.indexOf(designModel().rules.baseCss));
     expect(tokens).toBeLessThan(page.indexOf("<body>"));
   });
 
   it("runs the bootstrap first, with a config a stored </script> can't break out of", () => {
     const r = replica([el("a", null, "div")]);
     const page = artboardDocument(r, "a", { nonce: "n1", storage: { k: "</script><b>" } });
-    const script = page.indexOf(`<script>(${designModel().bootstrap})(`);
+    const script = page.indexOf("<script>(");
     expect(script).toBeGreaterThan(page.indexOf("Content-Security-Policy"));
     expect(script).toBeLessThan(page.indexOf("<style>"));
     expect(page.match(/<\/script>/g)).toHaveLength(1);
-    expect(page).toContain('{"nonce":"n1","storage":{"k":"\\u003c/script>\\u003cb>"}}');
+    expect(page).toContain('"nonce":"n1","storage":{"k":"\\u003c/script>\\u003cb>"}');
+    // The bootstrap gets the prefix of artboard links from Rust.
+    expect(page).toContain('"artboardLink":"#finite-artboard="');
     // It's code a browser can run, not just text that looks right.
     const code = page.slice(script + "<script>".length, page.indexOf("</script>"));
     // Parsing it is the point here; it never runs.
@@ -66,14 +68,18 @@ describe("artboardDocument", () => {
   });
 });
 
-describe("pixelSize", () => {
+describe("Replica.pixelSize", () => {
+  const size = (styles: Record<string, string>) =>
+    replica([el("a", null, "div", { styles })]).pixelSize("a");
+
   it("reads plain pixel sizes only", () => {
-    expect(pixelSize(el("a", null, "div", { styles: { width: "390px", height: "auto" } }))).toEqual(
-      {
-        width: 390,
-        height: null,
-      },
-    );
+    expect(size({ width: "390px", height: "auto" })).toEqual({ width: 390, height: null });
+  });
+
+  it("reads them the way the server does (edit::pixel_size)", () => {
+    expect(size({ width: "-5", height: "1e3px" })).toEqual({ width: -5, height: 1000 });
+    expect(size({ width: " 12 px " })).toEqual({ width: 12, height: null });
+    expect(replica([]).pixelSize("missing")).toEqual({ width: null, height: null });
   });
 });
 

@@ -22,7 +22,7 @@ use base64::Engine;
 use finite_design::{
     Document, NodeId, NodeKind,
     edit::pixel_size,
-    html::{self, BASE_CSS, BASE_LAYER, CSP, VIEWER_ID_ATTR},
+    html::{self, BASE_CSS, BASE_LAYER, CSP, DEFAULT_ARTBOARD_SIZE, VIEWER_ID_ATTR},
     tokens,
 };
 use finite_transfer::scene::{COMPUTED, Measure, Resolved, Scene};
@@ -38,9 +38,6 @@ mod network_tests;
 
 use egress::Policy;
 
-/// Artboards without a pixel width or height are captured at this size.
-const FALLBACK_WIDTH: f64 = 1440.0;
-const FALLBACK_HEIGHT: f64 = 900.0;
 /// The largest artboard side rendered, in CSS pixels.
 const MAX_SIDE: f64 = 8000.0;
 /// The longest side of a screenshot, in image pixels. The Claude API refuses
@@ -433,12 +430,6 @@ struct Built {
     scripted: bool,
 }
 
-/// The sandbox the web viewer puts an artboard that runs scripts in. No
-/// `allow-same-origin`, so the page has an opaque origin and can't reach the
-/// wrapper around it; no popups, modals, top navigation or pointer lock.
-const SANDBOX: &str = "allow-scripts allow-forms";
-const FRAME_PERMISSIONS: &str = "autoplay 'none'; fullscreen 'none'";
-
 /// A standalone HTML page showing just the artboard, and its size in CSS
 /// pixels. Every element carries its node id in [`VIEWER_ID_ATTR`], so
 /// shots can find it. The web viewer renders artboards that run scripts
@@ -446,7 +437,7 @@ const FRAME_PERMISSIONS: &str = "autoplay 'none'; fullscreen 'none'";
 ///
 /// An artboard with a `<script>` renders as the viewer does: the page above
 /// is the `srcdoc` of a sandboxed `<iframe>` in a bare wrapper, with the
-/// viewer's [`html::bootstrap`] running first. It then runs with the same limits,
+/// viewer's bootstrap ([`html::bootstrap_script`]) running first. It then runs with the same limits,
 /// an opaque origin and a `localStorage` that lasts only for the capture.
 /// An artboard without one loads directly, since nothing in it runs and the
 /// sandbox would change nothing, and its measurements need no second frame.
@@ -457,8 +448,12 @@ fn page_html(doc: &Document, artboard: &str, options: &Options) -> Option<Built>
     // Compact, so no whitespace is added between elements: it renders like the viewer.
     let body = html::export_for_viewer(doc, artboard)?;
     let (width, height) = pixel_size(node);
-    let width = width.unwrap_or(FALLBACK_WIDTH).clamp(1.0, MAX_SIDE);
-    let height = height.unwrap_or(FALLBACK_HEIGHT).clamp(1.0, MAX_SIDE);
+    let width = width
+        .unwrap_or(DEFAULT_ARTBOARD_SIZE.0)
+        .clamp(1.0, MAX_SIDE);
+    let height = height
+        .unwrap_or(DEFAULT_ARTBOARD_SIZE.1)
+        .clamp(1.0, MAX_SIDE);
     // Overrides come last in the body, after the artboard's own <style>s, so
     // they win ties.
     let mut overrides = String::new();
@@ -496,14 +491,8 @@ fn page_html(doc: &Document, artboard: &str, options: &Options) -> Option<Built>
         n.tag()
             .is_some_and(|tag| tag.eq_ignore_ascii_case("script"))
     });
-    // The bootstrap's config goes in as JSON; `<` can't end the script.
     let bootstrap = if scripted {
-        let config = json!({ "nonce": "screenshot", "storage": {} })
-            .to_string()
-            .replace('<', "\\u003c");
-        // A trailing `;` after the function would end the parentheses early.
-        let function = html::bootstrap();
-        format!("<script>({function})({config})</script>")
+        html::bootstrap_script("screenshot", &json!({}))
     } else {
         String::new()
     };
@@ -512,9 +501,11 @@ fn page_html(doc: &Document, artboard: &str, options: &Options) -> Option<Built>
     );
     let html = if scripted {
         format!(
-            "<!doctype html><html><head><meta charset=\"utf-8\"><style>html, body {{ margin: 0; }} iframe {{ display: block; border: 0; width: {}px; height: {}px; }}</style></head><body><iframe sandbox=\"{SANDBOX}\" allow=\"{FRAME_PERMISSIONS}\" srcdoc=\"{}\"></iframe></body></html>",
+            "<!doctype html><html><head><meta charset=\"utf-8\"><style>html, body {{ margin: 0; }} iframe {{ display: block; border: 0; width: {}px; height: {}px; }}</style></head><body><iframe sandbox=\"{}\" allow=\"{}\" srcdoc=\"{}\"></iframe></body></html>",
             width.ceil(),
             height.ceil(),
+            html::SANDBOX,
+            html::FRAME_PERMISSIONS,
             html::escape(&page, true)
         )
     } else {
