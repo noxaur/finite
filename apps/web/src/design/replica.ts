@@ -141,6 +141,7 @@ export class Replica {
   /** Where `find` last found an id, so a run of nearby edits doesn't rescan the list. */
   private lastFound = 0;
   private readonly doc: WasmDocument = designModel().newDocument();
+  private flowCache: Flow | undefined;
   seq = 0;
   /** The design's tokens and modes, which every artboard renders with. */
   tokens: TokenTable = { modes: [], tokens: {} };
@@ -148,6 +149,7 @@ export class Replica {
   pages: ReadonlyArray<PageEntry> = [];
 
   load(snapshot: Snapshot) {
+    this.flowCache = undefined;
     const order = JSON.parse(this.doc.load(JSON.stringify(snapshot.nodes))) as ReadonlyArray<
       [string | null, string[]]
     >;
@@ -199,9 +201,13 @@ export class Replica {
     return this.doc.tokenStyle(id, shadow);
   }
 
-  /** The design's routes, links and broken links. */
+  /**
+   * The design's routes, links and broken links. Reading them expands the
+   * design and walks every node, so the parsed flow stays until an op
+   * applies (`load` and `follow`), however often the canvas renders.
+   */
   flow(): Flow {
-    return JSON.parse(this.doc.flow()) as Flow;
+    return (this.flowCache ??= JSON.parse(this.doc.flow()) as Flow);
   }
 
   /**
@@ -377,6 +383,7 @@ export class Replica {
   /** Updates the cache for one op the Rust side applied. */
   private follow(op: Op, touched: Touched): Applied | null {
     if (touched === null) return null;
+    this.flowCache = undefined;
     if (touched.op !== op.op) throw new Error(`finite.wasm answered ${touched.op} for ${op.op}`);
     switch (touched.op) {
       case "create": {

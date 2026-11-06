@@ -263,6 +263,48 @@ describe("Replica", () => {
     expect(r.flow().links.map((l) => l.element)).toEqual(["pay"]);
   });
 
+  it("reads the flow once until the document changes", () => {
+    const r = new Replica();
+    const link = { ...node("go", "home"), tag: "a", attrs: { href: "#finite-artboard=cart" } };
+    const nodes = [{ ...node("home", null, "a"), name: "Home" }, link];
+    const load = (more: Node[]) =>
+      r.load({
+        meta: { id: "d", name: "D", createdAt: 0, updatedAt: 0 },
+        seq: 0,
+        nodes: [...nodes, ...more],
+        comments: [],
+      });
+    load([]);
+    expect(r.flow().broken).toHaveLength(1);
+    expect(r.flow()).toBe(r.flow());
+
+    // A snapshot.
+    load([{ ...node("cart", null, "b"), name: "Cart" }]);
+    expect(r.flow().broken).toHaveLength(0);
+
+    // A server change, applied directly or on top of the tab's own edits.
+    const first = r.flow();
+    r.apply({ op: "delete", id: "cart" });
+    expect(r.flow()).not.toBe(first);
+    expect(r.flow().broken).toHaveLength(1);
+    r.apply({ op: "create", node: { ...node("cart", null, "b"), name: "Cart" } });
+    expect(r.flow().broken).toHaveLength(0);
+
+    // A gesture's draft, its proposal, and taking it back.
+    const unlink = [{ kind: "setLink" as const, ids: ["go"], to: null }];
+    r.flow();
+    r.draft(1, unlink);
+    expect(r.flow().links).toHaveLength(0);
+    r.draft(1, null);
+    expect(r.flow().links).toHaveLength(1);
+    r.propose(2, unlink);
+    expect(r.flow().links).toHaveLength(0);
+    r.receive([{ op: "delete", id: "cart" }], null);
+    expect(r.flow().broken).toHaveLength(0);
+    r.settle(2);
+    expect(r.flow().broken).toHaveLength(1);
+  });
+
   it("lists pages and which page each artboard is on", () => {
     const r = new Replica();
     const snapshot = {
