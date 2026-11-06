@@ -7,6 +7,7 @@ import {
   type FigNode,
   type Payload,
 } from "./payload.ts";
+import { fixture } from "./fixtures.ts";
 
 const node = (overrides: Partial<FigNode> = {}): FigNode => ({
   id: "1:2",
@@ -29,7 +30,7 @@ const payload = (overrides: Partial<Payload> = {}): Payload => ({
 describe("encodePayload", () => {
   it("starts with the version, as Schema::encode does", () => {
     const json = encodePayload(payload());
-    expect(json.startsWith('{"v":1,"kind":"figma-payload"')).toBe(true);
+    expect(json.startsWith(`{"v":1,"kind":"${KIND}"`)).toBe(true);
     expect(PAYLOAD_VERSION).toBe(1);
     expect(JSON.parse(json)).toEqual({ v: 1, ...payload() });
   });
@@ -63,5 +64,13 @@ describe("decodePayload", () => {
     expect(() => decodePayload(JSON.stringify({ v: 1, kind: KIND, nodes: "x" }))).toThrow(
       "no layers",
     );
+  });
+});
+
+describe("the Rust fixture", () => {
+  it("decodes, and encodes back to the same payload", () => {
+    const decoded = decodePayload(fixture("basic"));
+    expect(decoded.nodes.length).toBeGreaterThan(0);
+    expect(JSON.parse(encodePayload(decoded))).toEqual({ v: PAYLOAD_VERSION, ...decoded });
   });
 });

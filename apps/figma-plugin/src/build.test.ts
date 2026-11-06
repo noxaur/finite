@@ -14,7 +14,8 @@ import {
   toPaints,
   type BuildHost,
 } from "./build.ts";
-import { KIND, type FigNode, type FigText, type Payload } from "./payload.ts";
+import { fixture } from "./fixtures.ts";
+import { decodePayload, KIND, type FigNode, type FigText, type Payload } from "./payload.ts";
 
 const images = new Map([["sha", "figma-hash"]]);
 
@@ -429,6 +430,15 @@ describe("build", () => {
     expect(bar?.props).toMatchObject({ layoutGrow: 1, layoutAlign: "STRETCH" });
     expect(bar?.props).not.toHaveProperty("x");
     expect(dot?.props).toMatchObject({ layoutPositioning: "ABSOLUTE", x: 5, y: 6 });
+  });
+
+  it("builds the payload the Rust side writes, with every layer and image", async () => {
+    const shared = decodePayload(fixture("basic"));
+    const { host } = fakeHost();
+    const report = await build(shared, host);
+    expect(report.frames).toBe(shared.nodes.length);
+    expect(report.layers).toBeGreaterThan(report.frames);
+    expect(report.warnings).toEqual([]);
   });
 
   it("puts new frames right of what's on the page, then selects and zooms to them", async () => {

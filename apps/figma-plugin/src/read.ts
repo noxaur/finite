@@ -65,7 +65,14 @@ export interface Read {
 }
 
 /** Layers Figma draws from paths: the payload carries them as SVG. */
-const VECTORS = new Set(["VECTOR", "BOOLEAN_OPERATION", "STAR", "LINE", "POLYGON"]);
+const VECTORS = new Set([
+  "VECTOR",
+  "BOOLEAN_OPERATION",
+  "STAR",
+  "LINE",
+  "POLYGON",
+  "REGULAR_POLYGON",
+]);
 
 /** What can stand as an artboard. A `SECTION` stands for the frames inside it. */
 const TOP_LEVEL = new Set(["FRAME", "COMPONENT", "COMPONENT_SET", "INSTANCE", "GROUP"]);
