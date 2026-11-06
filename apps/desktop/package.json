@@ -10,7 +10,7 @@
     "build": "vp pack",
     "dev": "vp pack && electron . --dev",
     "start": "electron .",
-    "package": "node scripts/stage-server.mjs && electron-builder --publish never",
+    "package": "vp run @finite/server#build && electron-builder --publish never",
     "test": "vp test"
   },
   "devDependencies": {

@@ -15,4 +15,8 @@ contextBridge.exposeInMainWorld("finite", {
     ipcRenderer.on("finite:command", handle);
     return () => void ipcRenderer.off("finite:command", handle);
   },
+  /** Opens the system folder picker; resolves to the chosen path, or `null` when cancelled. */
+  pickFolder(): Promise<string | null> {
+    return ipcRenderer.invoke("finite:pickFolder") as Promise<string | null>;
+  },
 });

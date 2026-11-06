@@ -7,7 +7,9 @@ import {
   Refused,
   type ThreadMeta,
 } from "@finite/protocol";
+import { startThread } from "./agent/index.ts";
 import type { Context, Handlers } from "./hub.ts";
+import { installOf } from "./store/index.ts";
 
 /**
  * One function per request type: thin glue from the wire to the modules in store/, preview/,
@@ -32,19 +34,21 @@ export const handlers: Handlers = {
   async subscribe({ designId }, { client, hub, modules }) {
     const open = await hub.open(designId);
     client.subscriptions.add(designId);
-    modules.previews
-      .ensure(open.design)
+    // A new blank design installs its dependencies first; its preview shows the install meanwhile.
+    const install = installOf(open);
+    (install?.done ?? Promise.resolve())
+      .then(() => modules.previews.ensure(open.design))
       .catch((error: unknown) => console.error(`preview for ${designId} failed:`, error));
     const [canvases, threads, routes] = await Promise.all([
       open.canvases(),
       open.threads(),
-      modules.previews.routes(designId).catch(() => []),
+      install ? [] : modules.previews.routes(designId).catch(() => []),
     ]);
     return {
       design: open.design,
       canvases,
       threads,
-      preview: modules.previews.state(designId),
+      preview: install?.state ?? modules.previews.state(designId),
       routes,
     };
   },
@@ -116,44 +120,18 @@ export const handlers: Handlers = {
   async "thread.send"(params, ctx) {
     const { designId, text, attachments, selection, model, effort, fast, mode } = params;
     const open = await ctx.hub.open(designId);
-    let threadId = params.threadId;
-    if (threadId === undefined) {
-      const canvasId = params.new?.canvasId;
-      const parentId = params.new?.parentId;
-      const meta = await open.createThread({
-        model,
-        fast,
-        ...(effort === undefined ? {} : { effort }),
-        ...(parentId === undefined ? {} : { parentId }),
-        canvasIds: canvasId === undefined ? [] : [canvasId],
-      });
-      threadId = meta.id;
-      if (canvasId !== undefined) {
-        const id = meta.id;
-        await open.updateCanvas(
-          canvasId,
-          (c) => ({ ...c, threadIds: [...c.threadIds, id] }),
-          ctx.by,
-        );
-      }
-    } else {
-      // Messaging a snoozed or settled thread revives it.
-      await open.updateThread(threadId, (meta) => without(meta, "snoozedUntil", "settledAt"));
-    }
-    await ctx.modules.agents.send(
-      open,
-      threadId,
-      {
-        text,
-        attachments,
-        model,
-        fast,
-        by: ctx.by,
-        ...(selection === undefined ? {} : { selection }),
-        ...(effort === undefined ? {} : { effort }),
-      },
-      mode,
-    );
+    const turn = {
+      text,
+      attachments,
+      model,
+      fast,
+      by: ctx.by,
+      ...(selection === undefined ? {} : { selection }),
+      ...(effort === undefined ? {} : { effort }),
+    };
+    // A new prototype's canvas comes from `canvas.create` first; without one the thread has none.
+    const threadId = params.threadId ?? (await startThread(open, params.new ?? {}, turn)).id;
+    await ctx.modules.agents.send(open, threadId, turn, mode);
     return { threadId };
   },
   async "thread.queued"({ designId, threadId, queuedId, text }, ctx) {

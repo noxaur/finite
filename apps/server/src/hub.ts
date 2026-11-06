@@ -65,6 +65,8 @@ export function createHub(modules: Modules, handle: Handlers = handlers): Hub {
   const clients = new Set<Client>();
   const opened = new Map<string, Promise<OpenDesign>>();
   const detach: Unsubscribe[] = [];
+  /** Stops passing one open design's changes to its subscribers. */
+  const perDesign = new Map<string, Unsubscribe>();
   let nextId = 1;
 
   const hub: Hub = {
@@ -111,12 +113,13 @@ export function createHub(modules: Modules, handle: Handlers = handlers): Hub {
       let pending = opened.get(designId);
       if (!pending) {
         pending = modules.store.open(designId).then((design) => {
-          detach.push(
+          const offs = [
             design.on((change) => hub.broadcast(designId, { ...change, designId })),
             modules.previews.on(designId, (event) =>
               hub.broadcast(designId, { ...event, designId }),
             ),
-          );
+          ];
+          perDesign.set(designId, () => offs.forEach((off) => off()));
           return design;
         });
         pending.catch(() => opened.delete(designId));
@@ -127,11 +130,25 @@ export function createHub(modules: Modules, handle: Handlers = handlers): Hub {
 
     async close() {
       for (const off of detach.splice(0)) off();
+      for (const off of perDesign.values()) off();
+      perDesign.clear();
       await Promise.all([modules.agents.close(), modules.previews.close()]);
     },
   };
 
-  detach.push(modules.store.on((list) => hub.broadcastAll({ type: "designs", list })));
+  detach.push(
+    modules.store.on((list) => {
+      // A removed design is forgotten, so opening it again asks the store (which refuses).
+      const ids = new Set(list.map((d) => d.id));
+      for (const id of opened.keys()) {
+        if (ids.has(id)) continue;
+        opened.delete(id);
+        perDesign.get(id)?.();
+        perDesign.delete(id);
+      }
+      hub.broadcastAll({ type: "designs", list });
+    }),
+  );
 
   async function receive(client: Client, data: string) {
     const parsed = parseClientMessage(data);
