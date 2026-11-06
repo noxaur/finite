@@ -98,7 +98,7 @@ export function ToolRail({
           type="button"
           onClick={() => onZoom(1.25)}
           aria-label="Zoom in"
-          {...stylex.props(styles.button, styles.text)}
+          {...stylex.props(styles.button, styles.sign)}
         >
           +
         </button>
@@ -113,7 +113,7 @@ export function ToolRail({
           type="button"
           onClick={() => onZoom(0.8)}
           aria-label="Zoom out"
-          {...stylex.props(styles.button, styles.text)}
+          {...stylex.props(styles.button, styles.sign)}
         >
           −
         </button>
@@ -149,8 +149,8 @@ const styles = stylex.create({
   button: {
     display: "grid",
     placeItems: "center",
-    width: 32,
-    height: 32,
+    width: 30,
+    height: 30,
     padding: 0,
     borderWidth: 0,
     borderRadius: radii.sm,
@@ -162,16 +162,17 @@ const styles = stylex.create({
     transform: { default: "none", ":active": "scale(.97)" },
     transition: "background-color 150ms ease, transform 120ms cubic-bezier(.23, 1, .32, 1)",
     outline: { default: "none", ":focus-visible": `2px solid ${colors.brand}` },
-    outlineOffset: -2,
+    outlineOffset: -3,
   },
   on: {
     backgroundColor: { default: colors.accent, ":hover": colors.accent },
     color: colors.onAccent,
   },
   text: { fontSize: 12, fontWeight: 500 },
+  sign: { fontSize: 14, fontWeight: 500 },
   zoom: {
     width: size.rail,
-    height: 20,
+    height: 21,
     padding: 0,
     borderWidth: 0,
     backgroundColor: "transparent",

@@ -255,7 +255,7 @@ const styles = stylex.create({
   meta: {
     display: "flex",
     flexDirection: "column",
-    gap: 2,
+    gap: 3,
     padding: space.sm,
     paddingInline: space.md,
     borderTopWidth: 1,

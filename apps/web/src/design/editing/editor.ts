@@ -10,8 +10,10 @@ import {
   moveAbsolute,
   moveArtboards,
 } from "./geometry";
+import type { Hit } from "../renderer";
 import type { EditContext, Pointer, Press, Run } from "./gesture";
 import { GESTURES } from "./gestures";
+import { toggleFlag } from "./layers";
 import { lineage, nodeOf } from "./tree";
 
 /** How far the pointer moves before a press becomes a drag, in page pixels. */
@@ -36,6 +38,31 @@ export interface EditorState {
   readonly editing: string | null;
   /** Why the last edit didn't happen, for a moment. */
   readonly notice: string | null;
+}
+
+/**
+ * One edit from a panel that shows as it's made: a field being typed into,
+ * a label being scrubbed, a color being picked. It previews through the
+ * same draft a canvas gesture uses, and commits as one undo step. After
+ * `commit` or `cancel` it does nothing, so a late blur can't send it twice.
+ */
+export interface Draft {
+  /** Shows `edits` instead of the last ones (`null`: none). Returns why they can't be made. */
+  preview(edits: ReadonlyArray<UserEdit> | null): string | null;
+  /** Sends what's shown, or `final` instead, as one undo step. */
+  commit(final?: ReadonlyArray<UserEdit>): void;
+  /** Takes the preview off the screen. */
+  cancel(): void;
+}
+
+/** A pointer gesture a panel starts with `Editor.drive`. */
+export interface PanelRun extends Run {
+  /** Whether each frame's edits show as a draft (the default), or only commit on release. */
+  readonly live?: boolean;
+  /** Runs once when the gesture ends, committed or not. */
+  end?(committed: boolean): void;
+  /** True while the panel holds the pointer another way, like a pointer lock, so losing its capture doesn't end the gesture. */
+  keep?(): boolean;
 }
 
 const idle: EditorState = {
@@ -66,13 +93,22 @@ export class Editor {
   private readonly listeners = new Set<() => void>();
   private enabled = true;
   private run: {
-    readonly run: Run;
+    readonly run: PanelRun;
     readonly press: Press;
     readonly pointerId: number;
     started: boolean;
     edits: ReadonlyArray<UserEdit> | null;
     /** The edits last shown, as JSON, so an unchanged frame skips the draft. */
     shown: string;
+    /** The panel element that takes the pointer once the press becomes a drag. */
+    capture?: HTMLElement;
+    /** Stops listening on that element. */
+    detach?: () => void;
+  } | null = null;
+  /** The panel edit being previewed, with what it last showed. */
+  private open: {
+    edits: ReadonlyArray<UserEdit> | null;
+    readonly onLost: ((reason: string) => void) | undefined;
   } | null = null;
   private frame = 0;
   private hoverFrame = 0;
@@ -98,7 +134,12 @@ export class Editor {
     // hears every element inside it, like the selection redrawn under a click.
     viewport.addEventListener(
       "pointerleave",
-      (e) => e.target === viewport && this.update({ hover: null }),
+      (e) => {
+        if (e.target !== viewport) return;
+        // A hover test still waiting would undo what a panel's row shows hovered next.
+        cancelAnimationFrame(this.hoverFrame);
+        this.update({ hover: null });
+      },
       options,
     );
     viewport.addEventListener("dblclick", (e) => this.onDoubleClick(e), options);
@@ -114,6 +155,12 @@ export class Editor {
     const unsubscribe = session.subscribe(() => this.prune());
     const unlisten = session.onDraftLost((reason) => {
       this.cancel();
+      const open = this.open;
+      if (open) {
+        this.open = null;
+        this.session.draft(null);
+        open.onLost?.(reason);
+      }
       this.say(reason);
     });
     this.abort.signal.addEventListener("abort", () => {
@@ -141,7 +188,103 @@ export class Editor {
   }
 
   select(selection: ReadonlyArray<string>) {
+    this.finishOpen();
     this.update({ selection });
+  }
+
+  /** Shows `id` as hovered, as the pointer over it on the canvas does. */
+  hover(id: string | null) {
+    if (!this.run && id !== this.current.hover) this.update({ hover: id });
+  }
+
+  /** Shows `id` outlined as where a running panel gesture drops. */
+  setTarget(id: string | null) {
+    if (id !== this.current.target) this.update({ target: id });
+  }
+
+  /**
+   * Starts a panel edit that previews until it's committed. Only one is
+   * open at a time, since the design has one draft: starting another, a
+   * press on the canvas or a new selection commits this one first.
+   */
+  begin(options: { onLost?: (reason: string) => void } = {}): Draft {
+    this.finishOpen();
+    const open = { edits: null as ReadonlyArray<UserEdit> | null, onLost: options.onLost };
+    this.open = open;
+    const live = () => this.open === open;
+    return {
+      preview: (edits) => {
+        if (!live() || this.run) return null;
+        const json = JSON.stringify(edits);
+        if (json === JSON.stringify(open.edits)) return null;
+        const outcome = this.session.draft(edits);
+        open.edits = outcome.error === null ? edits : null;
+        return outcome.error;
+      },
+      commit: (final) => {
+        if (!live()) return;
+        this.open = null;
+        const edits = final ?? open.edits;
+        if (edits && edits.length > 0) void this.commit(edits);
+        else this.session.draft(null);
+      },
+      cancel: () => {
+        if (!live()) return;
+        this.open = null;
+        this.session.draft(null);
+      },
+    };
+  }
+
+  /** Commits the open panel edit, if any. */
+  private finishOpen() {
+    const open = this.open;
+    if (!open) return;
+    this.open = null;
+    if (open.edits) void this.commit(open.edits);
+    else this.session.draft(null);
+  }
+
+  /**
+   * Runs a pointer gesture a panel started, on the element that was
+   * pressed, the way canvas gestures run: it turns into a drag after a few
+   * pixels, shows each frame's edits, commits on release and stops on
+   * Escape. Returns a function that stops it.
+   */
+  drive(e: PointerEvent, element: HTMLElement, run: PanelRun): () => void {
+    if (!this.enabled || e.button !== 0 || this.run) return () => {};
+    this.finishOpen();
+    const press: Press = {
+      x: e.clientX,
+      y: e.clientY,
+      shift: e.shiftKey,
+      free: e.metaKey || e.ctrlKey,
+      hit: null,
+      label: null,
+      handle: null,
+    };
+    // The pointer is captured once the press turns into a drag, so a click
+    // or double-click on the panel still reaches what was pressed.
+    const listen = new AbortController();
+    const { signal } = listen;
+    element.addEventListener("pointermove", (m) => this.run && this.onMove(m), { signal });
+    element.addEventListener("pointerup", (u) => this.onUp(u), { signal });
+    element.addEventListener("pointercancel", () => this.cancel(), { signal });
+    element.addEventListener("lostpointercapture", () => run.keep?.() || this.cancel(), { signal });
+    const mine = (this.run = {
+      run,
+      press,
+      pointerId: e.pointerId,
+      started: false,
+      edits: null,
+      shown: "null",
+      capture: element,
+      detach: () => listen.abort(),
+    });
+    // Stops this gesture if it's still the running one, as when the browser takes the pointer back.
+    return () => {
+      if (this.run === mine) this.cancel();
+    };
   }
 
   /** Commits `edits` as one undo step, and says why if they're refused. */
@@ -200,6 +343,7 @@ export class Editor {
 
   private onDown(e: PointerEvent) {
     if (!this.enabled || e.button !== 0 || this.run || this.space) return;
+    this.finishOpen();
     const target = e.target instanceof Element ? e.target : null;
     if (this.current.editing !== null) {
       // A press in the text being typed into places the caret.
@@ -212,7 +356,7 @@ export class Editor {
     // Pins and other controls on the canvas keep their clicks.
     if (!handle && target?.closest("[data-camera-ignore]")) return;
     const label = this.renderer.labelOf(target);
-    const hit = label ? null : this.renderer.hitTest(e.clientX, e.clientY);
+    const hit = label ? null : this.pressable(this.renderer.hitTest(e.clientX, e.clientY));
     const press: Press = {
       x: e.clientX,
       y: e.clientY,
@@ -234,6 +378,23 @@ export class Editor {
       this.run = { run, press, pointerId: e.pointerId, started: false, edits: null, shown: "null" };
       return;
     }
+  }
+
+  /**
+   * What a press on the canvas reaches: a locked layer, or one inside a
+   * locked layer, lets the press through to what holds it. A locked
+   * artboard takes no presses at all. The layers panel still selects them.
+   */
+  private pressable(hit: Hit | null): Hit | null {
+    if (!hit) return null;
+    let nodeId = hit.nodeId;
+    for (const id of lineage(this.session.replica, hit.nodeId)) {
+      const node = nodeOf(this.session.replica, id);
+      if (node?.attrs["data-locked"] === undefined) continue;
+      if (node.parent === null) return null;
+      nodeId = node.parent;
+    }
+    return nodeId === hit.nodeId ? hit : { ...hit, nodeId };
   }
 
   /**
@@ -270,7 +431,7 @@ export class Editor {
       const { clientX, clientY } = e;
       cancelAnimationFrame(this.hoverFrame);
       this.hoverFrame = requestAnimationFrame(() => {
-        const hit = this.renderer.hitTest(clientX, clientY);
+        const hit = this.pressable(this.renderer.hitTest(clientX, clientY));
         if (hit?.nodeId !== this.current.hover) this.update({ hover: hit?.nodeId ?? null });
       });
       return;
@@ -280,6 +441,7 @@ export class Editor {
     if (!running.started) {
       if (Math.hypot(pointer.x - running.press.x, pointer.y - running.press.y) < DRAG_SLOP) return;
       running.started = true;
+      running.capture?.setPointerCapture(running.pointerId);
       this.update({ dragging: true, hover: null });
     }
     // One draft per frame, however many moves arrive.
@@ -295,11 +457,13 @@ export class Editor {
     const json = JSON.stringify(edits);
     if (json !== running.shown) {
       running.shown = json;
-      const outcome = this.session.draft(edits);
-      if (outcome.error !== null) {
-        this.cancel();
-        this.say(outcome.error);
-        return;
+      if (run.live !== false) {
+        const outcome = this.session.draft(edits);
+        if (outcome.error !== null) {
+          this.cancel();
+          this.say(outcome.error);
+          return;
+        }
       }
       running.edits = edits;
     }
@@ -320,17 +484,23 @@ export class Editor {
     // The last frame's edits can't be planned, so it cancelled the gesture.
     if (this.run !== running) return;
     this.run = null;
+    running.detach?.();
     this.update({ dragging: false, target: null, guides: [], area: null });
-    if (running.edits) void this.commit(running.edits);
+    const commit = running.started && running.edits !== null;
+    running.run.end?.(commit);
+    if (commit) void this.commit(running.edits!);
   }
 
   /** Stops the running gesture and takes its draft off the screen. */
   private cancel() {
     cancelAnimationFrame(this.frame);
-    if (!this.run) return;
+    const running = this.run;
+    if (!running) return;
     this.run = null;
-    this.session.draft(null);
+    running.detach?.();
+    if (running.run.live !== false) this.session.draft(null);
     this.update({ dragging: false, target: null, guides: [], area: null });
+    running.run.end?.(false);
   }
 
   /**
@@ -356,6 +526,13 @@ export class Editor {
   }
 
   private onKey(e: KeyboardEvent) {
+    // Undo works with any tool, and from a panel's field that holds no typing of its own.
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.code === "KeyZ" || e.code === "KeyY")) {
+      if (this.run || !this.undoes(e)) return;
+      e.preventDefault();
+      this.undo(e.code === "KeyY" || e.shiftKey);
+      return;
+    }
     if (!this.enabled || isTyping(e)) return;
     if (e.code === "Space") {
       // Held, it pans; it would scroll or press a focused button otherwise.
@@ -405,14 +582,6 @@ export class Editor {
     const replica = this.session.replica;
     const some = selection.length > 0 && !this.run;
     switch (e.code) {
-      case "KeyZ":
-      case "KeyY":
-        return () => {
-          const redo = e.code === "KeyY" || e.shiftKey;
-          void (redo ? this.session.redo() : this.session.undo()).then((result) => {
-            if (result.kind === "refused") this.say(result.message);
-          });
-        };
       case "KeyA":
         return () => this.selectAll();
       case "KeyC":
@@ -425,6 +594,13 @@ export class Editor {
         return some ? () => this.duplicate(selection) : null;
       case "KeyG":
         return some ? () => (e.shiftKey ? this.ungroup(selection) : this.group(selection)) : null;
+      // ⇧⌘H hides and ⇧⌘L locks, as in Figma.
+      case "KeyH":
+      case "KeyL": {
+        if (!some || !e.shiftKey) return null;
+        const attr = e.code === "KeyH" ? "hidden" : "data-locked";
+        return () => void this.commit([toggleFlag((id) => nodeOf(replica, id), selection, attr)]);
+      }
       // ⌥⌘K makes a component and ⌥⌘B detaches an instance, as in Figma.
       case "KeyK":
       case "KeyB": {
@@ -443,6 +619,28 @@ export class Editor {
       default:
         return null;
     }
+  }
+
+  private undo(redo: boolean) {
+    this.finishOpen();
+    void (redo ? this.session.redo() : this.session.undo()).then((result) => {
+      if (result.kind === "refused") this.say(result.message);
+    });
+  }
+
+  /**
+   * Whether ⌘Z undoes the design rather than text. A field keeps it while
+   * something's typed into it, and so does a field inside an artboard. A
+   * panel's field that only has focus, like one just scrubbed or a color
+   * just picked, lets it go and loses the focus, as in Figma.
+   */
+  private undoes(e: KeyboardEvent): boolean {
+    if (!isTyping(e)) return true;
+    const target = e.composedPath()[0];
+    if (!(target instanceof HTMLInputElement) || target.getRootNode() !== document) return false;
+    if (this.open?.edits || target.value !== target.defaultValue) return false;
+    target.blur();
+    return true;
   }
 
   /** Selects everything beside what's selected, or every artboard on the page. */

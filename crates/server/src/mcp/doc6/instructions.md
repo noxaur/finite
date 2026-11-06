@@ -1,4 +1,4 @@
-Finite is a design canvas. A design holds artboards: fixed-size frames of plain HTML and CSS. People watch live, edit too, and steer you with pinned comments.
+Finite is a design canvas. A design holds artboards: fixed-size frames of plain HTML and CSS. People watch live, edit too, and steer you with pinned comments; hidden and data-locked mark layers they hid or locked.
 
 There are six tools: designs, read, edit, render, comments and undo. Load all their descriptions.
 

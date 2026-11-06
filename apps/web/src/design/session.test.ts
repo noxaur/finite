@@ -346,3 +346,36 @@ describe("a person's edits", () => {
     await expect(undone).resolves.toEqual({ kind: "landed" });
   });
 });
+
+describe("DesignSession.subscribeDoc", () => {
+  it("tells panels about the tab's own drafts and edits before the server answers", () => {
+    const { session: s } = session();
+    s.setSender(() => {});
+    s.receive(snapshot());
+    const changes: Array<{ origin: string; touched: string[]; structural: boolean }> = [];
+    s.subscribeDoc((c) =>
+      changes.push({ origin: c.origin, touched: [...c.touched], structural: c.structural }),
+    );
+    s.draft([{ kind: "setStyles", ids: ["b"], styles: { color: "red" } }]);
+    expect(changes).toEqual([{ origin: "draft", touched: ["b"], structural: false }]);
+    const version = s.state.version;
+    // The draft's own edits show already, so committing them changes nothing on screen.
+    void s.commit([{ kind: "setStyles", ids: ["b"], styles: { color: "red" } }]);
+    expect(changes).toHaveLength(1);
+    void s.commit([{ kind: "place", ids: ["b"], parent: null, before: null }]);
+    expect(changes[1]).toMatchObject({ origin: "local", structural: true });
+    expect(changes[1]!.touched).toEqual(expect.arrayContaining(["b", "a"]));
+    expect(s.state.version).toBe(version + 1);
+  });
+
+  it("adds a page at once, with the id the server will give it", () => {
+    const { session: s } = session();
+    s.setSender(() => {});
+    s.receive(snapshot());
+    let pages = false;
+    s.subscribeDoc((c) => (pages ||= c.pages));
+    void s.commit([{ kind: "createPage", name: "Flows" }]);
+    expect(pages).toBe(true);
+    expect(s.state.pages.map((p) => p.name)).toEqual(["Page 1", "Flows"]);
+  });
+});
