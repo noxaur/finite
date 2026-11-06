@@ -30,7 +30,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ActorId, Change, Document, NodeId, NodeKind, Op};
+use crate::{ActorId, Change, Document, NodeId, NodeKind, Op, actor};
 
 /// The longest comment or reply accepted, in characters.
 pub const MAX_BODY: usize = 4000;
@@ -88,11 +88,6 @@ impl Audience {
     }
 }
 
-/// Whether `id` is an agent's actor id: `agent:…` or `mcp:…`.
-pub fn is_agent(id: &str) -> bool {
-    id.starts_with("agent:") || id.starts_with("mcp:")
-}
-
 /// Checks an audience a person picked: one agent must have an agent's id.
 /// An empty name becomes the id, and a long one is clipped.
 pub(crate) fn check_audience(audience: Audience) -> Result<Audience, CommentError> {
@@ -100,7 +95,7 @@ pub(crate) fn check_audience(audience: Audience) -> Result<Audience, CommentErro
         return Ok(audience);
     };
     let rest = id.split_once(':').map(|(_, rest)| rest);
-    if !is_agent(&id)
+    if !actor::is_agent(&id)
         || rest.is_none_or(|rest| rest.is_empty() || rest.chars().count() > MAX_USER_ID)
     {
         return Err(CommentError::BadAudience);
@@ -502,7 +497,7 @@ impl ChangeLog {
         self.entries
             .iter()
             .rev()
-            .find(|e| is_agent(&e.actor) && e.artboards.contains(artboard))
+            .find(|e| actor::is_agent(&e.actor) && e.artboards.contains(artboard))
             .map(|e| e.actor.as_str())
     }
 

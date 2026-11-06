@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 
-use finite_design::{comment, label};
+use finite_design::{actor, comment, label};
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, tool::ToolCallContext},
@@ -30,7 +30,7 @@ use rmcp::{
     },
 };
 
-use crate::hub::{Actor, DesignHandle, Hub, OpenError, SESSION_ACTOR};
+use crate::hub::{Actor, DesignHandle, Hub, OpenError};
 
 /// Resolves the design a tool names, or returns the error result.
 macro_rules! design {
@@ -154,12 +154,12 @@ impl FiniteMcp {
             // The router names relayed agents separately from their identity.
             let name = header("x-finite-agent-name").unwrap_or_else(|| agent.clone());
             return Actor {
-                id: format!("agent:{agent}"),
+                id: actor::agent(&agent),
                 name: display(&name),
             };
         }
         if let Some(session) = header("mcp-session-id") {
-            let id = format!("{SESSION_ACTOR}{session}");
+            let id = actor::session(&session);
             let _ = self.session.actor.set(id.clone());
             let short: String = session.chars().take(4).collect();
             return Actor {
@@ -168,7 +168,7 @@ impl FiniteMcp {
             };
         }
         Actor {
-            id: format!("{SESSION_ACTOR}anonymous"),
+            id: actor::session("anonymous"),
             name: display(&client),
         }
     }

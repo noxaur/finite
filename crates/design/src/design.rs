@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    NodeId,
+    ActorId, NodeId, actor,
     comment::{
         self, Anchor, Audience, Author, AuthorKind, ChangeLog, ChangeRef, Comment, CommentError,
         Message, Point,
@@ -15,12 +15,6 @@ use crate::{
     node::{Node, PropKey},
     tokens::{Mode, Values},
 };
-
-/// The actor that commits [`Design::migrate_css`]. Nobody undoes it.
-pub const MIGRATION_ACTOR: &str = "finite";
-
-/// Identifies whoever made a change: an agent's MCP session today, a user's tab later.
-pub type ActorId = String;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -500,8 +494,8 @@ impl Design {
         let mut fresh = || crate::id::fresh(new_id, |id| doc.contains(id));
         let ops = edit::migrate_css(doc, &mut fresh)?;
         self.histories.clear();
-        let change = self.commit(MIGRATION_ACTOR, "Moved shared CSS into tokens", &ops, now);
-        self.forget_actor(MIGRATION_ACTOR);
+        let change = self.commit(actor::MIGRATION, "Moved shared CSS into tokens", &ops, now);
+        self.forget_actor(actor::MIGRATION);
         Ok(change)
     }
 

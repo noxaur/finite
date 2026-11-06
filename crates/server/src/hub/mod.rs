@@ -29,7 +29,7 @@ pub use design::{Busy, DesignHandle, Edited, Since};
 use design::{DesignState, Life, Save};
 pub use messages::{
     Actor, ClientMessage, DesignMessage, DesignSummary, Listener, LobbyMessage, Missed, Outgoing,
-    Presence, SESSION_ACTOR, Stamp, UserAuthor,
+    Presence, Stamp, UserAuthor,
 };
 
 /// How long an agent's "working on" indicator lasts without activity.
@@ -1449,7 +1449,7 @@ mod tests {
         let hub = Hub::new(store.clone()).unwrap();
         let id = hub.create("Test").meta.id;
         let agent = Actor {
-            id: format!("{SESSION_ACTOR}abc"),
+            id: finite_design::actor::session("abc"),
             name: "Agent".into(),
         };
         hub.get(&id)
@@ -1608,7 +1608,7 @@ mod tests {
         let hub = Hub::new(store.clone()).unwrap();
         let id = hub.create("Test").meta.id;
         let session = Actor {
-            id: format!("{SESSION_ACTOR}abc"),
+            id: finite_design::actor::session("abc"),
             name: "Claude · abc".into(),
         };
         let named = Actor {

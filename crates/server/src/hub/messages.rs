@@ -2,16 +2,11 @@
 //! messages sent on a design's WebSocket and on the design list's.
 
 use finite_design::{
-    ActorId, Change, Design, DesignMeta, NodeId, Snapshot,
+    ActorId, Change, Design, DesignMeta, NodeId, Snapshot, actor,
     comment::{self, Author, AuthorKind, Comment, Listening},
     user_edit::UserEdit,
 };
 use serde::{Deserialize, Serialize};
-
-/// The id prefix of an agent known only by its MCP session on this server.
-/// Sessions live in memory, so such an agent never comes back once its
-/// session ends or the server restarts.
-pub const SESSION_ACTOR: &str = "mcp:";
 
 /// Whoever is making a change, with a name to show in the UI.
 #[derive(Clone, Debug, Serialize)]
@@ -42,7 +37,7 @@ impl UserAuthor {
         let id: String = self.id.chars().take(comment::MAX_USER_ID).collect();
         let name = self.name.trim();
         Author {
-            id: format!("user:{id}"),
+            id: actor::user(&id),
             name: if name.is_empty() {
                 "Guest".into()
             } else {

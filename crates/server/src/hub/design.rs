@@ -21,8 +21,8 @@ use tokio::sync::{broadcast, watch};
 
 use super::{
     Actor, COMPACT_AFTER, COMPACT_BYTES, DesignMessage, DesignSummary, EVENT_BUFFER, HISTORY_TTL,
-    Listener, Missed, Outgoing, PRESENCE_TTL, Presence, RESUME_BYTES, RESUME_LIMIT, SESSION_ACTOR,
-    Stamp, UNLOAD_AFTER, node_id, now_ms, random_id,
+    Listener, Missed, Outgoing, PRESENCE_TTL, Presence, RESUME_BYTES, RESUME_LIMIT, Stamp,
+    UNLOAD_AFTER, node_id, now_ms, random_id,
 };
 use crate::store::{Claim, Store, Stored, Token};
 
@@ -158,7 +158,7 @@ impl DesignState {
         let now = now_ms();
         let actors: Vec<ActorId> = state.design.actors().map(String::from).collect();
         for actor in actors {
-            if actor.starts_with(SESSION_ACTOR) {
+            if finite_design::actor::is_session(&actor) {
                 // Restored after a restart, its session is gone, so nobody
                 // can use this history. (A design with a live session's
                 // history stays in memory; see `is_idle`.)
@@ -222,7 +222,10 @@ impl DesignState {
         self.pending.is_empty()
             && !self.needs_snapshot
             && self.presence.is_empty()
-            && !self.design.actors().any(|a| a.starts_with(SESSION_ACTOR))
+            && !self
+                .design
+                .actors()
+                .any(|a| finite_design::actor::is_session(a))
             && now.saturating_sub(self.last_used) >= UNLOAD_AFTER.as_millis() as u64
     }
 
