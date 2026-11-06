@@ -4,6 +4,7 @@
 use finite_design::{
     ActorId, Change, Design, DesignMeta, NodeId, Snapshot,
     comment::{Comment, Listening},
+    user_edit::UserEdit,
 };
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +27,39 @@ pub struct Actor {
 pub struct Stamp {
     pub client: String,
     pub mid: u64,
+}
+
+/// Who a person's tab says is acting. Users have no accounts yet, so the
+/// browser picks an id and a name, and the server marks them as users.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UserAuthor {
+    pub id: String,
+    pub name: String,
+}
+
+/// What a person's tab sends on a design's socket, besides pings
+/// ([`crate::heartbeat::PING`]). Each carries the tab's [`Stamp`], so the
+/// change it makes (or a `settled` message, when it makes none) tells the
+/// tab which of its messages it answers. One socket handles its messages in
+/// order. The web app's `ClientMessage` (`schema.ts`) mirrors this, and
+/// `fixtures/messages.json` holds one of each.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ClientMessage {
+    /// A gesture's edits, as one undo step.
+    Mutate {
+        author: UserAuthor,
+        stamp: Stamp,
+        edits: Vec<UserEdit>,
+    },
+    Undo {
+        author: UserAuthor,
+        stamp: Stamp,
+    },
+    Redo {
+        author: UserAuthor,
+        stamp: Stamp,
+    },
 }
 
 /// Shows what an actor is working on, like an agent's indicator on an artboard.

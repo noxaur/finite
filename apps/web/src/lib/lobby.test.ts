@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import type { DesignSummary } from "@/design/schema";
-import { LOBBY_LIMIT, matchesName, mergeLobby } from "./lobby";
+import { LOBBY_LIMIT } from "./limits";
+import { matchesName, mergeLobby } from "./lobby";
 
 const summary = (id: string, updatedAt: number): DesignSummary => ({
   id,

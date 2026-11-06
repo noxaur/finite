@@ -1,7 +1,8 @@
 //! Records one of every WebSocket message in `fixtures/messages.json`. The web
 //! app decodes each one with its schemas (`apps/web/src/design/wire.test.ts`),
 //! so a renamed or retyped field in the Rust types fails the web tests instead
-//! of failing silently in the browser.
+//! of failing silently in the browser. It also holds what the browser sends
+//! back, the heartbeat's strings and timings, and the design list's size limit.
 //!
 //! Ids and timestamps are replaced with fixed values so the file only changes
 //! when the format does. After changing a message type, regenerate it with
@@ -15,8 +16,8 @@ use finite_design::{
     user_edit::{Position, UserEdit},
 };
 use finite_server::{
-    Hub,
-    hub::{Actor, DesignMessage, Outgoing, Since, Stamp},
+    Hub, heartbeat,
+    hub::{Actor, ClientMessage, DesignMessage, LOBBY_LIMIT, Outgoing, Since, Stamp, UserAuthor},
     store::MemoryStore,
 };
 use serde_json::{Value, json};
@@ -249,10 +250,41 @@ async fn wire_messages_match_the_fixture() {
     design.push(serde_json::to_value(settled).unwrap());
     let mut lobby_messages = vec![first(lobby_first)];
     lobby_messages.extend(drain(&mut lobby));
+    // What the tab sends back.
+    let author = || UserAuthor {
+        id: "1".into(),
+        name: "Guest".into(),
+    };
+    let client: Vec<Value> = [
+        ClientMessage::Mutate {
+            author: author(),
+            stamp: stamp(1),
+            edits: drag.to_vec(),
+        },
+        ClientMessage::Undo {
+            author: author(),
+            stamp: stamp(2),
+        },
+        ClientMessage::Redo {
+            author: author(),
+            stamp: stamp(3),
+        },
+    ]
+    .iter()
+    .map(|m| serde_json::to_value(m).unwrap())
+    .collect();
     let mut messages = json!({
         "about": "One of each WebSocket message, recorded from crates/server/tests/wire.rs. apps/web/src/design/wire.test.ts decodes them with the web app's schemas.",
         "design": design,
         "lobby": lobby_messages,
+        "client": client,
+        "heartbeat": {
+            "ping": heartbeat::PING,
+            "pong": heartbeat::PONG,
+            "pingEveryMs": heartbeat::PING_EVERY.as_millis(),
+            "silentForMs": heartbeat::SILENT_FOR.as_millis(),
+        },
+        "lobbyLimit": LOBBY_LIMIT,
     });
     let ids = [
         (summary.meta.id.clone(), "design1"),
@@ -271,14 +303,27 @@ async fn wire_messages_match_the_fixture() {
         .collect();
     for kind in [
         "snapshot",
+        "resume",
         "change",
+        "settled",
         "presence",
+        "meta",
         "comment",
         "commentDeleted",
-        "meta",
-        "resume",
     ] {
         assert!(types.contains(&kind), "no {kind} message recorded");
+    }
+    let lobby_types: Vec<&str> = messages["lobby"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["type"].as_str().unwrap())
+        .collect();
+    for kind in ["designs", "design"] {
+        assert!(
+            lobby_types.contains(&kind),
+            "no lobby {kind} message recorded"
+        );
     }
 
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/messages.json");

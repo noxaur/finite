@@ -1,5 +1,52 @@
 {
   "about": "One of each WebSocket message, recorded from crates/server/tests/wire.rs. apps/web/src/design/wire.test.ts decodes them with the web app's schemas.",
+  "client": [
+    {
+      "author": {
+        "id": "1",
+        "name": "Guest"
+      },
+      "edits": [
+        {
+          "kind": "setPosition",
+          "moves": [
+            {
+              "id": "board",
+              "x": 40.0,
+              "y": 80.0
+            }
+          ]
+        }
+      ],
+      "stamp": {
+        "client": "tab1",
+        "mid": 1
+      },
+      "type": "mutate"
+    },
+    {
+      "author": {
+        "id": "1",
+        "name": "Guest"
+      },
+      "stamp": {
+        "client": "tab1",
+        "mid": 2
+      },
+      "type": "undo"
+    },
+    {
+      "author": {
+        "id": "1",
+        "name": "Guest"
+      },
+      "stamp": {
+        "client": "tab1",
+        "mid": 3
+      },
+      "type": "redo"
+    }
+  ],
   "design": [
     {
       "epoch": "epoch1",
@@ -1045,6 +1092,12 @@
       "type": "settled"
     }
   ],
+  "heartbeat": {
+    "ping": "{\"type\":\"ping\"}",
+    "pingEveryMs": 20000,
+    "pong": "{\"type\":\"pong\"}",
+    "silentForMs": 60000
+  },
   "lobby": [
     {
       "designs": [],
@@ -1063,5 +1116,6 @@
       },
       "type": "design"
     }
-  ]
+  ],
+  "lobbyLimit": 200
 }
