@@ -12,7 +12,7 @@ import type { Scope } from "./scope";
 export function AdvancedSection({ scope }: { scope: Scope }) {
   const rows = new Map<string, string | null>();
   for (const t of scope.targets) {
-    for (const [prop, value] of unclaimed(t.styles)) {
+    for (const [prop, value] of unclaimed(t.styles, scope.computedOf(t.id)?.position)) {
       const seen = rows.get(prop);
       rows.set(prop, seen === undefined || seen === value ? value : null);
     }

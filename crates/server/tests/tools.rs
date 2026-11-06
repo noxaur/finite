@@ -504,6 +504,63 @@ async fn every_op_runs_in_one_edit() {
 }
 
 #[tokio::test]
+async fn a_page_background_is_set_read_undone_and_cleared() {
+    let (app, _) = server();
+    let mut agent = Agent::connect(&app, "Painter").await;
+    let (id, _) = landing(&mut agent).await;
+    // With one page, background alone names it.
+    let set = edit(&mut agent, &id, json!({ "background": "#e8eef0" })).await;
+    assert!(
+        set.contains("Page \"Page 1\" now shows \"#e8eef0\" behind its artboards."),
+        "{set}"
+    );
+    let overview = agent.ok("read", json!({ "designId": id })).await;
+    assert!(
+        overview.contains("Pages: \"Page 1\" (page-1, 1 artboard, background #e8eef0)."),
+        "{overview}"
+    );
+    agent.ok("undo", json!({ "designId": id })).await;
+    let undone = agent.ok("read", json!({ "designId": id })).await;
+    assert!(!undone.contains("background"), "{undone}");
+
+    // With several, page says which; a new page can take one as it's made.
+    edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "page", "create": "Drafts", "background": "rgb(20 24 28)" }]),
+    )
+    .await;
+    let which = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "page", "background": "#000" }]),
+    )
+    .await;
+    assert!(which.contains("say which page with page"), "{which}");
+    let bad = refused(
+        &mut agent,
+        &id,
+        json!([{ "op": "page", "page": "Drafts", "background": "url(x)" }]),
+    )
+    .await;
+    assert!(bad.contains("isn't a color"), "{bad}");
+    let overview = agent.ok("read", json!({ "designId": id })).await;
+    assert!(
+        overview.contains("\"Drafts\" (") && overview.contains("background rgb(20 24 28)"),
+        "{overview}"
+    );
+    let cleared = edit(
+        &mut agent,
+        &id,
+        json!([{ "op": "page", "page": "Drafts", "background": null }]),
+    )
+    .await;
+    assert!(cleared.contains("viewer's own canvas color"), "{cleared}");
+    let overview = agent.ok("read", json!({ "designId": id })).await;
+    assert!(!overview.contains("background"), "{overview}");
+}
+
+#[tokio::test]
 async fn a_flat_op_and_old_habits_work() {
     let (app, _) = server();
     let mut agent = Agent::connect(&app, "Habits").await;

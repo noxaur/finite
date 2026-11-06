@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
+  flipsOf,
+  flipStyles,
+  isFlip,
   NO_TRANSFORM,
   originCell,
   originValue,
@@ -11,6 +14,7 @@ import {
   rotationOf,
   transformResets,
   transformStyles,
+  turned,
   withRotation,
   withSheet,
 } from "./transform";
@@ -79,7 +83,24 @@ describe("transform", () => {
     ).toEqual({ translate: "1px" });
   });
 
-  it("reads and writes the rotation Position shows", () => {
+  it("turns a quarter at a time, within -180 to 180", () => {
+    expect(turned(0, 90)).toBe(90);
+    expect(turned(135, 90)).toBe(-135);
+    expect(turned(-90, 90)).toBe(0);
+    expect(turned(90, 90)).toBe(180);
+  });
+
+  it("flips along one axis, keeping the rest of the transform", () => {
+    expect(flipStyles({}, "x")).toEqual({ scale: "-1 1" });
+    expect(flipStyles({ scale: "-1 1" }, "x")).toEqual({ scale: null });
+    expect(flipStyles({ scale: "2", rotate: "10deg" }, "y")).toEqual({ scale: "2 -2" });
+    expect(flipsOf({ scale: "-1 1" })).toEqual({ x: true, y: false });
+    expect(isFlip("-1 1")).toBe(true);
+    expect(isFlip("none")).toBe(true);
+    expect(isFlip("1.05")).toBe(false);
+  });
+
+  it("reads and writes the rotation Layout shows", () => {
     expect(rotationOf({ transform: "rotate(30deg)" })).toBe(30);
     expect(rotationOf({ rotate: "15deg" })).toBe(15);
     expect(withRotation({ transform: "translateX(4px) rotate(30deg)" }, 60)).toEqual({

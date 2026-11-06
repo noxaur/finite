@@ -278,14 +278,10 @@ function EffectRow({
           label={`${name} amount`}
           title={name}
           text={String(filter.amount)}
-          toChanges={(typed) =>
-            whenNumber(typed, (n) => to(filter.fn === "hue-rotate" ? n : Math.max(n, 0)))
-          }
+          toChanges={(typed) => whenNumber(typed, to)}
           lead={<LeadIcon name="letterSpacing" />}
-          scrub={{
-            start: filter.amount,
-            to: (n) => to(filter.fn === "hue-rotate" ? n : Math.max(n, 0)),
-          }}
+          scrub={{ start: filter.amount, to }}
+          min={filter.fn === "hue-rotate" ? undefined : 0}
           unit={shownUnit}
         />
       </Block>,
@@ -369,11 +365,13 @@ function EffectRow({
                     set(
                       withShadow({
                         ...s,
-                        [part]: `${part === "blur" ? Math.max(v, 0) : v}${n.unit || "px"}`,
+                        [part]: `${v}${n.unit || "px"}`,
                       }),
                     ),
                 }
               }
+              // Blur can't be negative; the offsets and the spread can.
+              min={part === "blur" ? 0 : undefined}
               small
               center
             />
@@ -416,13 +414,13 @@ const styles = stylex.create({
   },
   hiddenPair: { opacity: 0.6 },
   grow: { flexGrow: 1, minWidth: 0, display: "flex" },
-  label: { color: colors.muted, fontSize: 11, lineHeight: "16px", fontWeight: 500 },
+  label: { color: colors.muted, fontSize: 12, lineHeight: "15px", fontWeight: 500 },
   line: { display: "flex", alignItems: "center", gap: space.sm, minWidth: 0 },
   kind: {
     flexShrink: 0,
     whiteSpace: "nowrap",
     fontFamily: fonts.sans,
     fontSize: 14,
-    lineHeight: "20px",
+    lineHeight: "18px",
   },
 });

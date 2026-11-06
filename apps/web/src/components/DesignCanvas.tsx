@@ -19,10 +19,13 @@ import { loadDesignModel } from "@/design/wasm";
 import { mcpUrl } from "@/lib/mcp";
 import { formatOf } from "@/lib/transfer";
 import { loadPlace, savePlace } from "@/lib/place";
+import { loadSidebarsOpen, saveSidebarsOpen } from "@/lib/sidebars";
 import { pageStorage } from "@/lib/pageStorage";
+import { closeTab, tabsStore } from "@/lib/tabs";
 import { localUser } from "@/lib/user";
 import { runtime } from "@/runtime";
-import { colors, fonts, radii, size, space } from "@/styles/tokens.stylex";
+import { hideMode } from "@/styles/hideMode";
+import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import {
   CommentLayer,
   type Draft,
@@ -31,16 +34,20 @@ import {
   selectionOf,
   toggleInDraft,
 } from "./Comments";
+import { buttonStyle } from "./Button";
 import { CommentsPanel } from "./CommentsPanel";
 import { Icon } from "./Icons";
 import { Inspector } from "./inspector/Inspector";
+import { pageCanvasColor } from "./inspector/PagePanel";
 import { LayersTree } from "./LayersTree";
 import { type LeftMode, LeftSidebar } from "./LeftSidebar";
 import { ToolRail } from "./ToolRail";
+import { UserAvatar } from "./UserAvatar";
 import { EditorNotice, SelectionLayer } from "./SelectionLayer";
 import { type TokensActions, TokensPanel } from "./TokensPanel";
 import { InteractivePill } from "./InteractivePill";
-import { ExportMenu, ImportButton, ImportResultCard, type ImportState } from "./Transfer";
+import { TabBar } from "./TabBar";
+import { ExportMenu, ImportResultCard, type ImportState } from "./Transfer";
 
 /** An instance or component under the pointer: what to outline and what to call it. */
 interface Part {
@@ -75,6 +82,8 @@ const FLASH_MS = 1800;
 const CLICK_SLOP = 4;
 /** How long "Updated by …" stays in interactive mode's pill. */
 const UPDATED_MS = 1800;
+/** How long the sidebars take to slide back in: `hideMode.panel`'s 280ms. */
+const SIDEBARS_IN_MS = 280;
 /** How long a notice, like a link to a missing artboard, stays up. */
 const NOTICE_MS = 2400;
 
@@ -180,9 +189,12 @@ export function DesignCanvas({ id }: { id: string }) {
 
   // Re-rendering on every session update also moves pins with their artboards.
   const [session, setSession] = useState<SessionState>(initialSessionState);
-  const { meta, presence, listening, status, activity, comments, working, pages } = session;
+  const { meta, presence, listening, activity, comments, working, pages } = session;
   // The zoom percentage, written by the camera so zooming doesn't re-render the canvas.
-  const zoomLabelRef = useRef<HTMLButtonElement>(null);
+  const zoomLabelRef = useRef<HTMLSpanElement>(null);
+  // In hide mode the avatar lands just left of the zoom, which is as wide as its label.
+  const avatarRef = useRef<HTMLSpanElement>(null);
+  const zoomGroupRef = useRef<HTMLDivElement>(null);
   const [missing, setMissing] = useState(false);
   const model = useDesignModel();
   const [, setTick] = useState(0);
@@ -210,9 +222,36 @@ export function DesignCanvas({ id }: { id: string }) {
   const page = pages.find((p) => p.id === pickedPage) ?? pages[0];
   // The export menu and an import's result open in the same place, one at a time.
   const [panel, setPanel] = useState<"export" | "import" | null>(null);
-  // The left sidebar's pages and layers, or its tokens; and whether it's shown.
+  // The left sidebar's pages and layers, or its tokens.
   const [leftMode, setLeftMode] = useState<LeftMode>("design");
-  const [leftOpen, setLeftOpen] = useState(true);
+  // Whether both sidebars are shown; without them the canvas is in hide mode,
+  // with a few small panels floating over it. `instant` skips the slide: on
+  // load, and for ⌘\, which people press too often to wait for.
+  const [sidebars, setSidebars] = useState({ open: true, instant: true });
+  const leftOpen = sidebars.open;
+  const setLeftOpen = (open: boolean, instant = false) => {
+    setSidebars({ open, instant });
+    saveSidebarsOpen(open);
+  };
+  // Read once mounted, before the first paint: the server has no storage,
+  // and its HTML shows the sidebars.
+  useLayoutEffect(() => {
+    if (!loadSidebarsOpen()) setSidebars({ open: false, instant: true });
+  }, []);
+  // For ⌘\, whose listener is set up once.
+  const toggleSidebars = useRef(() => {});
+  toggleSidebars.current = () => setLeftOpen(!leftOpen, true);
+  // The canvas runs under the sidebars' columns in hide mode, and while they
+  // slide back in over it, so nothing on it is cut off before they arrive.
+  const [wide, setWide] = useState(false);
+  useLayoutEffect(() => {
+    if (!leftOpen) setWide(true);
+    else if (sidebars.instant) setWide(false);
+    else {
+      const timer = setTimeout(() => setWide(false), SIDEBARS_IN_MS);
+      return () => clearTimeout(timer);
+    }
+  }, [leftOpen, sidebars.instant]);
   const [imported, setImported] = useState<ImportState | null>(null);
   // Interactive mode: the artboard zoomed onto, running as a page.
   const [presented, setPresented] = useState<PresenterState | null>(null);
@@ -504,6 +543,11 @@ export function DesignCanvas({ id }: { id: string }) {
         else return false;
         return true;
       }
+      // ⌘\ (Ctrl+\) hides the sidebars or brings them back.
+      if (meta && !typing && key === "\\") {
+        toggleSidebars.current();
+        return true;
+      }
       if (typing || meta) {
         if (key === "Escape") {
           setDraft(null);
@@ -609,6 +653,11 @@ export function DesignCanvas({ id }: { id: string }) {
       setHover(null);
     }
   }, [tool, presenting, presented?.phase]);
+
+  // A deleted design's tab goes with it.
+  useEffect(() => {
+    if (missing) tabsStore.update((tabs) => closeTab(tabs, id, null).state);
+  }, [missing, id]);
 
   useEffect(() => {
     if (!notice) return;
@@ -846,6 +895,9 @@ export function DesignCanvas({ id }: { id: string }) {
     );
     setPanel("import");
   };
+  // Import and Export lost their buttons in the tab bar; the logic and the
+  // panels stay here until they get a new home.
+  void importFile;
 
   const setAudience = (commentId: string, audience: Audience) => {
     void sendComment(Api.use((api) => api.setCommentAudience(id, commentId, audience)));
@@ -913,11 +965,6 @@ export function DesignCanvas({ id }: { id: string }) {
     editorRef.current?.setEnabled(mode === "pointer" && presenting === null);
   }, [mode, presenting]);
 
-  const fitAll = () => {
-    const renderer = rendererRef.current;
-    if (renderer) cameraRef.current?.fitTo(union(renderer.artboardBounds().values()));
-  };
-
   const renameDesign = (name: string) => {
     // The new name comes back over the socket, to every viewer.
     void runtime.runPromiseExit(Api.use((api) => api.renameDesign(id, name)));
@@ -946,7 +993,20 @@ export function DesignCanvas({ id }: { id: string }) {
       camera.set({ ...v, x: v.x - (box.left - was.x), y: v.y - (box.top - was.y) });
     }
     cornerRef.current = { x: box.left, y: box.top };
-  }, [leftOpen, presenting]);
+  }, [wide, presenting]);
+  // The zoom's width, on the avatar itself, for where it lands in hide mode.
+  useLayoutEffect(() => {
+    const group = zoomGroupRef.current;
+    const avatar = avatarRef.current;
+    if (!group || !avatar) return;
+    // Its exact width, fractions too: `offsetWidth` rounds, and the avatar would land off by them.
+    const measure = () =>
+      avatar.style.setProperty("--zoom-width", `${group.getBoundingClientRect().width}px`);
+    measure();
+    const resize = new ResizeObserver(measure);
+    resize.observe(group);
+    return () => resize.disconnect();
+  }, [presenting]);
 
   if (model instanceof Error) {
     return (
@@ -971,68 +1031,33 @@ export function DesignCanvas({ id }: { id: string }) {
   }
 
   return (
-    <main
-      {...stylex.props(
-        styles.page,
-        !leftOpen && styles.leftClosed,
-        presenting !== null && styles.presenting,
-      )}
-    >
-      <header {...stylex.props(styles.titleBar, presenting !== null && styles.gone)}>
-        <button
-          type="button"
-          aria-label={leftOpen ? "Hide the left sidebar" : "Show the left sidebar"}
-          aria-pressed={leftOpen}
-          title={leftOpen ? "Hide the left sidebar" : "Show the left sidebar"}
-          onClick={() => setLeftOpen(!leftOpen)}
-          {...stylex.props(styles.tool, styles.iconTool)}
-        >
-          <Icon name="sidebar" size={16} />
-        </button>
-        <Link href="/" {...stylex.props(styles.link)}>
-          ← Designs
-        </Link>
-        {!leftOpen && <span {...stylex.props(styles.name)}>{meta?.name ?? "…"}</span>}
-        <span {...stylex.props(styles.muted)} title="Pass this to agents as designId">
-          <code {...stylex.props(styles.code)}>{id}</code>
-        </span>
-        <span {...stylex.props(styles.spacer)} />
-        <button
-          type="button"
-          disabled={!target}
-          onClick={() => actions.current.enter()}
-          {...stylex.props(styles.tool, styles.play)}
-          title={target ? "Interactive mode (P): use the page, zoomed in" : "Select an artboard"}
-        >
-          <Icon name="play" size={10} />
-          Interactive
-        </button>
-        <ImportButton
-          busy={imported?.status === "working"}
-          onFile={(file) => void importFile(file)}
-        />
-        <button
-          type="button"
-          aria-pressed={panel === "export"}
-          onClick={() => setPanel((open) => (open === "export" ? null : "export"))}
-          {...stylex.props(styles.tool)}
-          title="Download an artboard or the whole design"
-        >
-          Export
-        </button>
+    <main {...stylex.props(styles.page, presenting !== null && styles.presenting)}>
+      <TabBar
+        current={id}
+        currentName={meta?.name}
+        working={presence}
+        sidebar={{ open: leftOpen, onToggle: () => setLeftOpen(!leftOpen) }}
+        hidden={presenting !== null}
+      >
         {presence.map((p) => (
           <span key={p.actor} {...stylex.props(styles.chip)} title={p.status ?? undefined}>
+            <span aria-hidden {...stylex.props(styles.chipDot)} />
             {p.name}
           </span>
         ))}
-        <span
-          {...stylex.props(styles.dot, status === "open" ? styles.online : styles.offline)}
-          title={status === "open" ? "Live" : "Reconnecting…"}
-        />
-      </header>
+      </TabBar>
 
-      {leftOpen && !presenting && (
+      {!presenting && (
         <LeftSidebar
+          inert={!leftOpen}
+          style={[
+            styles.overCanvas,
+            styles.overRail,
+            hideMode.panel,
+            !leftOpen && hideMode.panelHidden,
+            !leftOpen && hideMode.offLeft,
+            sidebars.instant && hideMode.instant,
+          ]}
           name={meta?.name ?? null}
           onRename={renameDesign}
           mode={leftMode}
@@ -1041,8 +1066,6 @@ export function DesignCanvas({ id }: { id: string }) {
           page={page?.id ?? null}
           onPage={showPage}
           pageActions={pageActions}
-          presence={presence}
-          listening={listening}
           layers={(query, onDropPage) =>
             editorRef.current &&
             layersRef.current &&
@@ -1076,17 +1099,17 @@ export function DesignCanvas({ id }: { id: string }) {
       )}
 
       {!presenting && (
-        <ToolRail
-          mode={mode}
-          onMode={setMode}
-          zoomLabel={zoomLabelRef}
-          onZoom={(by) => cameraRef.current?.zoomBy(by)}
-          onActualSize={() => cameraRef.current?.set({ ...cameraRef.current.view, zoom: 1 })}
-          onFit={fitAll}
-        />
+        <ToolRail mode={mode} onMode={setMode} hidden={!leftOpen} instant={sidebars.instant} />
       )}
 
-      <div {...stylex.props(styles.cell)}>
+      <div
+        {...stylex.props(
+          styles.cell,
+          wide && !presenting && styles.cellWide,
+          page?.background !== undefined &&
+            styles.pageColor(pageCanvasColor(page.background, session.tokens)),
+        )}
+      >
         <div
           ref={viewportRef}
           onPointerDown={(e) => {
@@ -1245,29 +1268,104 @@ export function DesignCanvas({ id }: { id: string }) {
       </div>
 
       {!presenting && (
-        <aside data-camera-ignore aria-label="Properties" {...stylex.props(styles.right)}>
-          {tool === "comment" && replica ? (
-            <CommentsPanel
-              replica={replica}
-              comments={comments}
-              working={working}
-              openId={openId}
-              activity={activity}
-              onSelect={showComment}
-            />
-          ) : (
-            editorRef.current &&
-            rendererRef.current &&
-            replica && (
-              <Inspector
-                editor={editorRef.current}
-                session={sessionRef.current!}
-                renderer={rendererRef.current}
-                replica={replica}
-                tokens={session.tokens}
+        <aside
+          data-camera-ignore
+          aria-label="Properties"
+          {...stylex.props(styles.right, styles.overCanvas, !leftOpen && styles.rightHidden)}
+        >
+          <span
+            aria-hidden
+            {...stylex.props(
+              styles.rightFace,
+              hideMode.panel,
+              !leftOpen && hideMode.panelHidden,
+              !leftOpen && hideMode.offRight,
+              sidebars.instant && hideMode.instant,
+            )}
+          />
+          {/* In hide mode the avatar and the zoom stay, and travel into the top right
+              corner, where a small panel's face fades in around them. */}
+          <div {...stylex.props(styles.zoomRow)}>
+            <span
+              ref={avatarRef}
+              {...stylex.props(
+                styles.avatar,
+                hideMode.travel,
+                hideMode.dip,
+                !leftOpen && hideMode.travelHidden,
+                !leftOpen && hideMode.dipHidden,
+                !leftOpen && styles.avatarHidden,
+                sidebars.instant && hideMode.instant,
+              )}
+            >
+              <UserAvatar />
+            </span>
+            <div
+              ref={zoomGroupRef}
+              {...stylex.props(
+                styles.zoomGroup,
+                hideMode.travel,
+                hideMode.dip,
+                !leftOpen && hideMode.travelHidden,
+                !leftOpen && hideMode.dipHidden,
+                !leftOpen && styles.zoomGroupHidden,
+                sidebars.instant && hideMode.instant,
+              )}
+            >
+              <span
+                aria-hidden
+                {...stylex.props(
+                  styles.cornerFace,
+                  hideMode.face,
+                  !leftOpen && hideMode.faceShown,
+                  sidebars.instant && hideMode.instant,
+                )}
               />
-            )
-          )}
+              <button
+                type="button"
+                onClick={() => cameraRef.current?.set({ ...cameraRef.current.view, zoom: 1 })}
+                title="Zoom to 100% (0)"
+                {...stylex.props(...buttonStyle({ variant: "ghost", size: "small" }), styles.zoom)}
+              >
+                {/* The camera writes the percentage into this span itself. */}
+                <span ref={zoomLabelRef} />
+                <Icon name="chevronDown" size={12} />
+              </button>
+            </div>
+          </div>
+          <div
+            inert={!leftOpen}
+            {...stylex.props(
+              styles.rightBody,
+              hideMode.panel,
+              !leftOpen && hideMode.panelHidden,
+              !leftOpen && hideMode.offRight,
+              sidebars.instant && hideMode.instant,
+            )}
+          >
+            {tool === "comment" && replica ? (
+              <CommentsPanel
+                replica={replica}
+                comments={comments}
+                working={working}
+                openId={openId}
+                activity={activity}
+                onSelect={showComment}
+              />
+            ) : (
+              editorRef.current &&
+              rendererRef.current &&
+              replica && (
+                <Inspector
+                  editor={editorRef.current}
+                  session={sessionRef.current!}
+                  renderer={rendererRef.current}
+                  replica={replica}
+                  tokens={session.tokens}
+                />
+              )
+            )}
+          </div>
         </aside>
       )}
     </main>
@@ -1288,27 +1386,11 @@ const styles = stylex.create({
     fontFamily: fonts.sans,
     fontSize: 13,
   },
-  leftClosed: {
-    gridTemplateColumns: `${size.rail} minmax(0, 1fr) ${size.right}`,
-    gridTemplateAreas: '"bar bar bar" "rail canvas right"',
-  },
   // Interactive mode gives the page the whole window.
   presenting: {
     gridTemplateColumns: "minmax(0, 1fr)",
     gridTemplateRows: "minmax(0, 1fr)",
     gridTemplateAreas: '"canvas"',
-  },
-  titleBar: {
-    gridArea: "bar",
-    display: "flex",
-    alignItems: "center",
-    gap: space.sm,
-    minWidth: 0,
-    paddingInline: space.sm,
-    backgroundColor: colors.bg,
-    borderBottomWidth: 1,
-    borderBottomStyle: "solid",
-    borderBottomColor: colors.border,
   },
   cell: {
     gridArea: "canvas",
@@ -1317,16 +1399,111 @@ const styles = stylex.create({
     minHeight: 0,
     overflow: "hidden",
   },
+  // A page's own canvas color, over the theme's `colors.canvas` behind it.
+  pageColor: (color: string) => ({ backgroundColor: color }),
+  // Hide mode, and while the sidebars slide back: the canvas runs under their columns.
+  cellWide: { gridArea: "2 / 1 / 3 / 5" },
+  // The sidebars and the rail lie over the canvas while it runs under them.
+  overCanvas: { position: "relative", zIndex: 2 },
+  // The left sidebar's menus open over the rail.
+  overRail: { zIndex: 3 },
+  // The aside stays put in hide mode: its face and body slide off, its header stays.
   right: {
     gridArea: "right",
     display: "flex",
     flexDirection: "column",
     minHeight: 0,
-    overflowY: "auto",
+    overflow: "hidden",
+  },
+  // In hide mode only the corner's panel takes clicks; the canvas has the rest.
+  rightHidden: { pointerEvents: "none" },
+  // The sidebar's own background, under its content: the aside is a stacking
+  // context (`overCanvas`), and this sits at its bottom.
+  rightFace: {
+    position: "absolute",
+    inset: 0,
+    zIndex: -1,
     backgroundColor: colors.surface,
     borderLeftWidth: 1,
     borderLeftStyle: "solid",
     borderLeftColor: colors.border,
+    pointerEvents: "none",
+  },
+  // What the sidebar shows scrolls; the zoom row above it stays put.
+  rightBody: {
+    display: "flex",
+    flexDirection: "column",
+    flexGrow: 1,
+    minHeight: 0,
+    overflowY: "auto",
+    borderTopWidth: 1,
+    borderTopStyle: "solid",
+    borderTopColor: colors.border,
+  },
+  // The sidebar's header: who's signed in on the left, the zoom on the right.
+  zoomRow: {
+    position: "relative",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    flexShrink: 0,
+    height: size.lg,
+    paddingLeft: space.ms,
+    // The zoom's group has 3px of its own, for the corner panel.
+    paddingRight: `calc(${space.ms} - ${space.xs})`,
+  },
+  // Over the corner panel's face, which reaches under it in hide mode.
+  avatar: {
+    position: "relative",
+    zIndex: 1,
+    display: "flex",
+    pointerEvents: "auto",
+  },
+  /**
+   * Into the corner panel's left end, 9px in, where its 21px corners wrap the
+   * 24px circle evenly: across the sidebar but for its 9px, the panel's 9px
+   * inset, its own 24px with the 9px before it, and the zoom; and 9px down,
+   * as the 42px panel sits 9px from the top where the 42px row held it. It
+   * ends left of the zoom, so it never passes over it.
+   */
+  avatarHidden: {
+    transform: `translate(calc(${size.right} - 2 * ${space.ms} - ${size.xs} - var(--zoom-width, 0px)), ${space.ms})`,
+  },
+  // The zoom, with 9px above and below it and 3px either side: the corner panel's right end.
+  zoomGroup: {
+    position: "relative",
+    zIndex: 0,
+    display: "flex",
+    paddingBlock: space.ms,
+    paddingInline: space.xs,
+    pointerEvents: "auto",
+  },
+  // 9px in from the corner each way, where the row had it 6px from the right and at the top.
+  zoomGroupHidden: { transform: `translate(calc(-1 * ${space.xs}), ${space.ms})` },
+  /**
+   * The corner panel, 42px tall: the avatar 9px in at its left end and the zoom
+   * 3px in at its right, so the chevron ends 12px from the edge. A pill, whose
+   * 21px ends are the avatar's 12px radius and the 9px around it.
+   */
+  cornerFace: {
+    position: "absolute",
+    top: 0,
+    bottom: 0,
+    left: `calc(-1 * (${size.xs} + ${space.ms}))`,
+    right: 0,
+    zIndex: -1,
+    borderWidth: 1,
+    borderStyle: "solid",
+    borderColor: colors.border,
+    borderRadius: `calc(${size.lg} / 2)`,
+    backgroundColor: colors.surface,
+    boxShadow: shadows.raised,
+    pointerEvents: "none",
+  },
+  // A small ghost button, with the percentage in figures that don't shift as it changes.
+  zoom: {
+    fontFamily: fonts.mono,
+    fontVariantNumeric: "tabular-nums",
   },
   viewport: {
     position: "absolute",
@@ -1369,7 +1546,7 @@ const styles = stylex.create({
     paddingBlock: 1,
     borderRadius: 4,
     backgroundColor: colors.component,
-    color: "white",
+    color: colors.onComponent,
     fontSize: 11,
     lineHeight: 1.4,
     whiteSpace: "nowrap",
@@ -1388,39 +1565,49 @@ const styles = stylex.create({
     gap: space.sm,
     padding: space.xs,
     paddingInline: space.sm,
-    borderRadius: radii.sm,
+    borderRadius: radii.md,
     borderWidth: 1,
     borderStyle: "solid",
     borderColor: colors.border,
     backgroundColor: colors.surface,
+    boxShadow: shadows.raised,
   },
-  spacer: { flexGrow: 1 },
   link: {
     color: colors.muted,
     textDecoration: { default: "none", ":hover": "underline" },
   },
-  name: { fontWeight: 500 },
   muted: { margin: 0, color: colors.muted },
   code: {
     fontFamily: fonts.mono,
     fontSize: 12,
     userSelect: "all",
   },
+  /**
+   * An agent on the design: a quiet neutral chip, a small button's height, with the
+   * brand cyan only in its dot, which says it's here now.
+   */
   chip: {
-    paddingInline: 6,
-    paddingBlock: 1,
-    borderRadius: 4,
-    backgroundColor: colors.accent,
-    color: colors.onAccent,
+    display: "inline-flex",
+    alignItems: "center",
+    gap: space.sm,
+    flexShrink: 0,
+    height: size.xs,
+    paddingInline: space.sm,
+    borderRadius: radii.sm,
+    backgroundColor: colors.activeFill,
+    color: colors.text,
     fontSize: 12,
+    fontWeight: 500,
+    lineHeight: "15px",
+    whiteSpace: "nowrap",
   },
-  dot: {
+  chipDot: {
+    flexShrink: 0,
     width: 6,
     height: 6,
     borderRadius: "50%",
+    backgroundColor: colors.brand,
   },
-  online: { backgroundColor: colors.ok },
-  offline: { backgroundColor: colors.danger },
   empty: {
     position: "absolute",
     top: "50%",
@@ -1436,37 +1623,11 @@ const styles = stylex.create({
     fontSize: 15,
     fontWeight: 500,
   },
-  tool: {
-    minWidth: 27,
-    height: 24,
-    paddingInline: 6,
-    borderWidth: 0,
-    borderRadius: radii.sm,
-    backgroundColor: { default: "transparent", ":hover": colors.sunk },
-    color: "inherit",
-    font: "inherit",
-    cursor: "var(--cursor-pointer, pointer)",
-  },
-  iconTool: {
-    display: "grid",
-    placeItems: "center",
-    width: size.xs,
-    minWidth: 0,
-    padding: 0,
-    color: colors.muted,
-  },
-  play: {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 6,
-    ":disabled": { color: colors.muted, cursor: "default" },
-  },
   count: {
     marginLeft: 6,
     color: colors.muted,
     fontVariantNumeric: "tabular-nums",
   },
-  gone: { display: "none" },
   notice: {
     left: "50%",
     bottom: 63,

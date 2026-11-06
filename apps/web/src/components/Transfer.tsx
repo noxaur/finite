@@ -14,7 +14,8 @@ import {
   repoHref,
   summarize,
 } from "@/lib/transfer";
-import { colors, radii, shadows, space } from "@/styles/tokens.stylex";
+import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
+import { Button, buttonStyle } from "./Button";
 
 /** Where an import is: sending the file, done, or refused with the server's reason. */
 export type ImportState =
@@ -39,15 +40,13 @@ export function ImportButton({ busy, onFile }: { busy: boolean; onFile: (file: F
           if (file) onFile(file);
         }}
       />
-      <button
-        type="button"
+      <Button
         disabled={busy}
         onClick={() => input.current?.click()}
-        {...stylex.props(styles.tool)}
         title="Add artboards from an .html, .finite, .figma.json or .tar file"
       >
         {busy ? "Importing…" : "Import"}
-      </button>
+      </Button>
     </>
   );
 }
@@ -73,7 +72,7 @@ export function ExportMenu({
       data-camera-ignore
       role="menu"
       aria-label="Export"
-      {...stylex.props(styles.card)}
+      {...stylex.props(styles.card, styles.menu)}
       onKeyDown={(e) => {
         if (e.key === "Escape") onClose();
       }}
@@ -214,31 +213,20 @@ export function ImportResultCard({
           <a
             href={originalHref(designId, state.result.import.id)}
             download
-            {...stylex.props(styles.button, styles.download)}
+            {...stylex.props(...buttonStyle({}), styles.download)}
           >
             Download original
           </a>
         )}
-        <button type="button" onClick={onClose} {...stylex.props(styles.button)}>
+        <Button variant="brand" onClick={onClose}>
           Close
-        </button>
+        </Button>
       </div>
     </aside>
   );
 }
 
 const styles = stylex.create({
-  tool: {
-    minWidth: 27,
-    height: 24,
-    paddingInline: 6,
-    borderWidth: 0,
-    borderRadius: 4,
-    backgroundColor: { default: "transparent", ":hover": colors.bg },
-    color: "inherit",
-    font: "inherit",
-    cursor: { default: "var(--cursor-pointer, pointer)", ":disabled": "default" },
-  },
   card: {
     position: "absolute",
     top: 51,
@@ -249,25 +237,37 @@ const styles = stylex.create({
     gap: space.sm,
     margin: 0,
     padding: space.sm,
-    borderRadius: radii.sm,
+    borderRadius: radii.lg,
     borderWidth: 1,
     borderStyle: "solid",
     borderColor: colors.border,
     backgroundColor: colors.surface,
     boxShadow: shadows.raised,
   },
+  /** Packed like the app menu (`Menu.tsx`): rows edge to edge, 3px in from a 6px-radius edge. */
+  menu: { gap: 0, padding: space.xs, borderRadius: radii.md },
   result: { width: 360 },
+  /** A menu row, the size of the app menu's (`Menu.tsx`). */
   item: {
-    padding: space.xs,
+    display: "flex",
+    alignItems: "center",
+    height: size.sm,
+    flexShrink: 0,
     paddingInline: space.sm,
-    borderRadius: 4,
-    backgroundColor: { default: "transparent", ":hover": colors.bg },
+    borderRadius: radii.sm,
+    fontFamily: fonts.sans,
+    fontSize: 12,
+    fontWeight: 500,
+    lineHeight: "15px",
+    backgroundColor: { default: "transparent", ":hover": colors.hoverFill },
     color: "inherit",
     textDecoration: "none",
   },
   note: {
     margin: 0,
+    marginTop: space.xs,
     paddingTop: space.sm,
+    paddingBottom: space.xs,
     paddingInline: space.sm,
     borderTopWidth: 1,
     borderTopStyle: "solid",
@@ -290,22 +290,6 @@ const styles = stylex.create({
     display: "flex",
     justifyContent: "flex-end",
     gap: space.xs,
-  },
-  button: {
-    display: "inline-flex",
-    alignItems: "center",
-    height: 27,
-    paddingInline: space.sm,
-    boxSizing: "border-box",
-    borderWidth: 1,
-    borderStyle: "solid",
-    borderColor: colors.border,
-    borderRadius: radii.sm,
-    backgroundColor: { default: "transparent", ":hover": colors.bg },
-    color: "inherit",
-    font: "inherit",
-    textDecoration: "none",
-    cursor: "var(--cursor-pointer, pointer)",
   },
   download: { marginRight: "auto" },
 });

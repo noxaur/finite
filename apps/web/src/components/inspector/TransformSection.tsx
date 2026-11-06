@@ -4,6 +4,7 @@ import * as stylex from "@stylexjs/stylex";
 import { useState } from "react";
 import { bare, parseInput, tokenOf } from "@/design/editing/inspect";
 import {
+  isFlip,
   originCell,
   originValue,
   readTransform,
@@ -42,11 +43,12 @@ function agreed<T>(all: ReadonlyArray<T>): T | null {
 const round = (n: number) => roundTo(n, 2);
 
 /**
- * Move, scale, flip, skew and origin, written as the individual
- * `translate` and `scale` properties, with `transform` only for a skew. A
- * `transform` an agent wrote moves into them on the first edit; one the
- * controls can't say is a Custom row with Reset. Rotation is in Position,
- * through the same reader. Collapsed behind "+" until something's set.
+ * Move, scale, skew and origin, written as the individual `translate` and
+ * `scale` properties, with `transform` only for a skew. A `transform` an
+ * agent wrote moves into them on the first edit; one the controls can't
+ * say is a Custom row with Reset. Rotation and flips are in Layout,
+ * through the same reader, so a flip alone doesn't open this. Collapsed
+ * behind "+" until something's set.
  */
 export function TransformSection({ scope }: { scope: Scope }) {
   const [adding, setAdding] = useState(false);
@@ -56,12 +58,15 @@ export function TransformSection({ scope }: { scope: Scope }) {
   const stylesOf = (t: Node) => withSheet(t.styles, sheetOf(t));
   const readings = scope.targets.map((t) => readTransform(stylesOf(t)));
   const drawn = (v: string | undefined) => v !== undefined && v !== "none";
+  // A scale that only mirrors is Layout's flip, so this stays closed for it.
+  const scaled = (v: string | undefined) => v !== undefined && !isFlip(v);
   const has = scope.targets.some((t) => {
     const sheet = sheetOf(t);
     return (
-      OWN.some((p) => t.styles[p] !== undefined) ||
+      OWN.some((p) => p !== "scale" && t.styles[p] !== undefined) ||
+      scaled(t.styles.scale) ||
       drawn(sheet.translate) ||
-      drawn(sheet.scale) ||
+      scaled(sheet.scale) ||
       drawn(sheet.transform)
     );
   });
@@ -88,8 +93,6 @@ export function TransformSection({ scope }: { scope: Scope }) {
       ...(c.scaleY !== undefined && { scaleY: Math.sign(value.scaleY || 1) * n("scaleY")! }),
       ...(c.skewX !== undefined && { skewX: n("skewX") ?? 0 }),
       ...(c.skewY !== undefined && { skewY: n("skewY") ?? 0 }),
-      ...(c.flip === "x" && { scaleX: -value.scaleX }),
-      ...(c.flip === "y" && { scaleY: -value.scaleY }),
     };
     return transformStyles(t.styles, next, sheetOf(t));
   });
@@ -141,7 +144,6 @@ export function TransformSection({ scope }: { scope: Scope }) {
     return v === null ? null : String(round(Math.abs(v) * 100));
   };
   const factor = (v: number) => String(Math.max(v, 0) / 100);
-  const flipped = (v: number | null) => v !== null && v < 0;
 
   return (
     <Section
@@ -154,7 +156,12 @@ export function TransformSection({ scope }: { scope: Scope }) {
             setAdding(false);
             scope.commitEach((t) => {
               const out: Record<string, string | null> = {};
-              for (const p of OWN) if (t.styles[p] !== undefined) out[p] = null;
+              // A flip is Layout's, so it stays.
+              for (const p of OWN) {
+                if (t.styles[p] !== undefined && !(p === "scale" && isFlip(t.styles[p]))) {
+                  out[p] = null;
+                }
+              }
               return out;
             });
           }}
@@ -216,20 +223,6 @@ export function TransformSection({ scope }: { scope: Scope }) {
             {part("scaleY", "H", "Scale height", percent("scaleY"), factor, "%")}
           </>
         )}
-      </Line>
-      <Line icon="flipH" label="Flip">
-        <Toggle
-          icon="flipH"
-          title="Flip horizontally"
-          pressed={flipped(sx)}
-          onClick={() => fields.commit({ flip: "x" })}
-        />
-        <Toggle
-          icon="flipV"
-          title="Flip vertically"
-          pressed={flipped(sy)}
-          onClick={() => fields.commit({ flip: "y" })}
-        />
       </Line>
       {!custom && (
         <Line icon="skew" label="Skew">
@@ -302,6 +295,6 @@ const styles = stylex.create({
     width: 63,
     color: colors.muted,
     fontSize: 12,
-    lineHeight: "16px",
+    lineHeight: "15px",
   },
 });

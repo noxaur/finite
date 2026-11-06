@@ -31,7 +31,7 @@ export type Applied =
   | { readonly op: "move"; readonly node: Node; readonly from: string | null }
   /** A token or mode changed; `Replica.tokens` has the new table. */
   | { readonly op: "tokens" }
-  /** A page was added, renamed, reordered or removed; `Replica.pages` has the new list. */
+  /** A page was added, renamed, recolored, reordered or removed; `Replica.pages` has the new list. */
   | { readonly op: "page" };
 
 /** The design's tokens: its modes in order, and each token's values by mode id. */
@@ -44,6 +44,8 @@ export interface TokenTable {
 export interface PageEntry {
   readonly id: string;
   readonly name: string;
+  /** The canvas color behind the page's artboards, when the page sets one. */
+  readonly background?: string;
 }
 
 /**
@@ -111,6 +113,9 @@ type Touched =
   | { readonly op: "token" }
   | { readonly op: "mode" }
   | { readonly op: "page" }
+  | { readonly op: "pageName" }
+  | { readonly op: "pageBackground" }
+  | { readonly op: "firstPage" }
   | null;
 
 /**
@@ -426,6 +431,9 @@ export class Replica {
         this.tokens = JSON.parse(this.doc.tokens()) as TokenTable;
         return { op: "tokens" };
       case "page":
+      case "pageName":
+      case "pageBackground":
+      case "firstPage":
         this.pages = JSON.parse(this.doc.pages()) as PageEntry[];
         return { op: "page" };
     }

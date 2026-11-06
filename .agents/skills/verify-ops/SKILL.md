@@ -7,8 +7,8 @@ description: Exhaustively check that every op's inverse puts the document back e
 
 Undo, redo, transaction rollback, `dry_run` and crash replay all rely on one rule: applying an op hands back ops that put the document back exactly as it was. `crates/design/tests/ops_exhaustive.rs` checks that rule against the real `Document::try_apply`, and checks that a restarted server rebuilds the same undo and redo stacks. It runs every input within small bounds instead of sampling.
 
-- **`every_op_undoes_exactly`.** Starting from an empty document, it visits every document reachable in up to 3 ops from a list of 245 ops (34,818 documents), and tries all 245 ops on each one (8.5M checks). After each op, the tree is well formed: every parent exists and can hold children, there are no cycles, and the child and instance indexes match the nodes. An op that's skipped or rejected leaves the document unchanged. An op that reports a change really changes something. Every inverse op applies, the inverse restores the document exactly, and the inverse's own inverse brings the change back. If this breaks, an agent's undo leaves the design different from before its edit, a failed transaction leaves part of itself behind, or undo silently does nothing.
-- **`undo_survives_a_restart`.** It runs every sequence of up to 6 steps, where each step is one of 2 actors making one of 9 edits, undoing, or redoing (208,666 sequences that change something). It saves a snapshot before each step and journals each change, as the server does. Then it restarts from every snapshot and replays the journal after it, with both going through JSON as the stores write them. The rebuilt design must have the same document, seq, and undo and redo stacks as the live one. If this breaks, the first undo after a restart reverses the wrong change, or an agent finds it can no longer undo at all.
+- **`every_op_undoes_exactly`.** Starting from an empty document, it visits every document reachable in up to 3 ops from a list of 254 ops (37,785 documents), and tries all 254 ops on each one (9.6M checks). After each op, the tree is well formed: every parent exists and can hold children, there are no cycles, and the child and instance indexes match the nodes. An op that's skipped or rejected leaves the document unchanged. An op that reports a change really changes something. Every inverse op applies, the inverse restores the document exactly, and the inverse's own inverse brings the change back. If this breaks, an agent's undo leaves the design different from before its edit, a failed transaction leaves part of itself behind, or undo silently does nothing.
+- **`undo_survives_a_restart`.** It runs every sequence of up to 6 steps, where each step is one of 2 actors making one of 11 edits, undoing, or redoing (2,263,276 sequences that change something). It saves a snapshot before each step and journals each change, as the server does. Then it restarts from every snapshot and replays the journal after it, with both going through JSON as the stores write them. The rebuilt design must have the same document, seq, and undo and redo stacks as the live one. If this breaks, the first undo after a restart reverses the wrong change, or an agent finds it can no longer undo at all.
 
 The code today passes the second check and breaks the first in two known ways, listed under "Known findings". The test expects them and fails if either one disappears.
 
@@ -34,7 +34,7 @@ If the diff touches a function in the table, read the check's op lists (`ops()` 
 ## Run it
 
 ```sh
-python3 .agents/skills/verify-ops/check.py              # both checks, about 80 seconds
+python3 .agents/skills/verify-ops/check.py              # both checks, about 7 minutes
 python3 .agents/skills/verify-ops/check.py --mutations  # also proves each check can fail, about 3 minutes in all
 ```
 

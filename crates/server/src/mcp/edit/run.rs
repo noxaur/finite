@@ -1500,6 +1500,8 @@ fn tokens(tx: &mut Transaction<'_>, f: &Fields) -> Result<String> {
 }
 
 fn page(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<(String, Option<NodeId>)> {
+    // Present and null clears it, so it can't go through `text` alone.
+    let background = f.contains_key("background").then(|| text(f, "background"));
     let create = text(f, "create").or_else(|| {
         (f.get("rename").is_none() && f.get("remove").is_none())
             .then(|| text(f, "name"))
@@ -1510,12 +1512,14 @@ fn page(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<(String, Op
         let id = id::fresh(&mut node_id, |id| doc.page(id).is_some());
         let ops = edit::create_page(doc, id.clone(), &name).map_err(|e| e.to_string())?;
         stage(tx, ops)?;
-        return Ok((
-            format!(
-                "Created page {name:?} (pageId {id:?}). Put artboards on it with an artboard op's page, or {{\"op\": \"move\", \"select\": \"#k3x9a2bq\", \"page\": {name:?}}}."
-            ),
-            Some(id),
-        ));
+        let mut text = format!(
+            "Created page {name:?} (pageId {id:?}). Put artboards on it with an artboard op's page, or {{\"op\": \"move\", \"select\": \"#k3x9a2bq\", \"page\": {name:?}}}."
+        );
+        if let Some(background) = background {
+            text.push(' ');
+            text.push_str(&page_background(tx, &id, background.as_deref())?);
+        }
+        return Ok((text, Some(id)));
     }
     if let Some(old) = text(f, "rename") {
         let Some(name) = text(f, "name") else {
@@ -1525,7 +1529,12 @@ fn page(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<(String, Op
         let id = page_id(doc, &old, refs)?;
         let ops = edit::rename_page(doc, &id, &name).map_err(|e| e.to_string())?;
         stage(tx, ops)?;
-        return Ok((format!("Renamed page {old:?} to {name:?}."), Some(id)));
+        let mut text = format!("Renamed page {old:?} to {name:?}.");
+        if let Some(background) = background {
+            text.push(' ');
+            text.push_str(&page_background(tx, &id, background.as_deref())?);
+        }
+        return Ok((text, Some(id)));
     }
     if let Some(gone) = text(f, "remove").or_else(|| text(f, "delete")) {
         let doc = tx.view();
@@ -1545,10 +1554,43 @@ fn page(tx: &mut Transaction<'_>, f: &Fields, refs: &Refs) -> Result<(String, Op
         }
         return Ok((text, None));
     }
+    if let Some(background) = background {
+        let doc = tx.view();
+        let pages = doc.pages();
+        let id = match text(f, "page") {
+            Some(given) => page_id(doc, &given, refs)?,
+            None if pages.len() == 1 => pages[0].0.to_owned(),
+            None => {
+                let names: Vec<String> =
+                    pages.iter().map(|(_, p)| format!("{:?}", p.name)).collect();
+                return Err(format!(
+                    "say which page with page, like {{\"op\": \"page\", \"page\": {}, \"background\": \"#e8eef0\"}}. Pages: {}.",
+                    names[0],
+                    names.join(", ")
+                ));
+            }
+        };
+        return Ok((page_background(tx, &id, background.as_deref())?, Some(id)));
+    }
     Err(format!(
-        "\"page\" takes create, rename (with name) or remove, like {}, {{\"op\": \"page\", \"rename\": \"Drafts\", \"name\": \"Archive\"}} or {{\"op\": \"page\", \"remove\": \"Drafts\"}}",
+        "\"page\" takes create, rename (with name), remove or background, like {}, {{\"op\": \"page\", \"rename\": \"Drafts\", \"name\": \"Archive\"}}, {{\"op\": \"page\", \"remove\": \"Drafts\"}} or {{\"op\": \"page\", \"page\": \"Drafts\", \"background\": \"#e8eef0\"}}",
         Kind::Page.example()
     ))
+}
+
+/// Sets or, with `None`, clears the canvas color behind page `id`'s artboards.
+fn page_background(tx: &mut Transaction<'_>, id: &str, background: Option<&str>) -> Result<String> {
+    let doc = tx.view();
+    let name = doc.page(id).map(|p| p.name.clone()).unwrap_or_default();
+    let ops = edit::set_page_background(doc, id, background).map_err(|e| e.to_string())?;
+    stage(tx, ops)?;
+    Ok(match background {
+        Some(color) => format!(
+            "Page {name:?} now shows {:?} behind its artboards.",
+            color.trim()
+        ),
+        None => format!("Page {name:?} shows the viewer's own canvas color again."),
+    })
 }
 
 fn import(tx: &mut Transaction<'_>, step: Step, refs: &Refs) -> Result<(String, Option<NodeId>)> {

@@ -266,7 +266,7 @@ export class WasmDocument {
     return this.io.withArg(id, (e, len) => e.replica_export(this.handle, len, ids ? 1 : 0));
   }
 
-  /** JSON: the pages in order, as `{id, name}`, with the implicit first page when there are none. */
+  /** JSON: the pages in order, as `{id, name, background?}`, with the implicit first page when there are none. */
   pages(): string {
     return this.io.text((e) => e.replica_pages(this.handle));
   }

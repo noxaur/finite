@@ -84,6 +84,7 @@ Browser
                               picker would. Hidden inputs work too.
   key <key>                   Press a key: Enter, Escape, c, Shift+1, Meta+z.
   viewport <width> <height>   Resize the page.
+  theme <light|dark>          Show the page in the light or dark color scheme.
   console [--all]             Console messages and errors since the last call.
 
 CSS selectors reach inside shadow roots, where artboards render, so
@@ -665,6 +666,14 @@ async function daemon(dir, options) {
         mobile: false,
       });
       return `Viewport ${w}×${h}`;
+    },
+    async theme({ args: [scheme] }) {
+      if (scheme !== "light" && scheme !== "dark") throw new Error("usage: theme <light|dark>");
+      await page.send("Emulation.setEmulatedMedia", {
+        features: [{ name: "prefers-color-scheme", value: scheme }],
+      });
+      await settle(page);
+      return `Theme ${scheme}`;
     },
     async console({ flags: { all } }) {
       const list = all ? entries : entries.slice(shown);

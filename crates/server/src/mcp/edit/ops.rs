@@ -244,7 +244,7 @@ fn kind_of(fields: &Fields) -> Result<Kind, String> {
         Kind::Import
     } else if has("set") && !has("select") {
         Kind::Tokens
-    } else if has("create") || has("rename") {
+    } else if has("create") || has("rename") || (has("background") && !has("select")) {
         Kind::Page
     } else if has("find") {
         Kind::Replace
@@ -471,7 +471,7 @@ fn step_phrase(step: &Step) -> String {
             bit(&text(f, "replace").unwrap_or_default())
         ),
         Kind::Page => {
-            let name = ["create", "rename", "remove", "name"]
+            let name = ["create", "rename", "remove", "name", "page"]
                 .iter()
                 .find_map(|k| text(f, k))
                 .unwrap_or_default();

@@ -4,15 +4,11 @@ import * as stylex from "@stylexjs/stylex";
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { Draft, Editor } from "@/design/editing/editor";
-import { roundTo } from "@/design/editing/units";
 import type { UserEdit } from "@/design/schema";
 import { colors, cursors, motion } from "@/styles/tokens.stylex";
+import { clampedText, numberOf, scrubber, steppedText, tidy } from "./scrub";
 
-/** A number with its unit, like `12px` or `-0.5em`; `null` for anything else. */
-export function numberOf(text: string): { value: number; unit: string } | null {
-  const m = text.trim().match(/^(-?\d*\.?\d+)([a-z%]*)$/i);
-  return m ? { value: parseFloat(m[1]!), unit: m[2]! } : null;
-}
+export { numberOf };
 
 /** What `to` makes of the number `typed` starts with, or `null` when it doesn't start with one. */
 export function whenNumber<T>(typed: string, to: (n: number) => T): T | null {
@@ -20,21 +16,22 @@ export function whenNumber<T>(typed: string, to: (n: number) => T): T | null {
   return Number.isFinite(n) ? to(n) : null;
 }
 
-/** `n` without float noise: 0.1 + 0.2 shows as 0.3. */
-const tidy = (n: number) => String(roundTo(n, 3));
-
 /**
  * A text field that edits the design as it's typed: each key previews on
  * the canvas and in the panels, ↑ and ↓ step a number (Shift by 10), Enter
  * or leaving keeps it as one undo step, and Escape puts it back. `toEdits`
- * turns what's typed into edits, or `null` to show nothing.
+ * turns what's typed into edits, or `null` to show nothing; it's asked
+ * once more with `done` on Enter or leaving, for what a half-typed value
+ * would misread, like `#1f3a` on the way to `#1f3a44`. A number typed or
+ * stepped past `min` or `max` is held to it.
  */
 export function useDraftField(
   editor: Editor,
   shown: string,
-  toEdits: (text: string) => ReadonlyArray<UserEdit> | null,
+  toEdits: (text: string, done: boolean) => ReadonlyArray<UserEdit> | null,
   /** What ↑ and ↓ step when the field is empty, like the browser's value. */
   fallback = "",
+  { min, max }: { min?: number | undefined; max?: number | undefined } = {},
 ) {
   const [typing, setTyping] = useState<string | null>(null);
   const draft = useRef<Draft | null>(null);
@@ -51,14 +48,18 @@ export function useDraftField(
         setTyping(null);
       },
     });
-    draft.current.preview(latest.current(text));
+    // What's typed stays as typed; the design gets it held to the limits.
+    draft.current.preview(latest.current(clampedText(text, min, max), false));
   };
   const finish = (keep: boolean) => {
     const open = draft.current;
     draft.current = null;
     setTyping(null);
-    if (keep) open?.commit();
-    else open?.cancel();
+    if (!keep) return open?.cancel();
+    // What's typed, read as finished; nothing readable keeps what was last shown.
+    const final = typing === null ? null : latest.current(clampedText(typing, min, max), true);
+    if (final) open?.preview(final);
+    open?.commit();
   };
   return {
     typing: typing !== null,
@@ -80,7 +81,7 @@ export function useDraftField(
           if (!n) return;
           e.preventDefault();
           const by = (e.key === "ArrowUp" ? 1 : -1) * (e.shiftKey ? 10 : 1);
-          show(`${tidy(n.value + by)}${n.unit}`);
+          show(steppedText(n, by, min, max));
         }
       },
     },
@@ -124,8 +125,8 @@ function ScrubCursor({ x, y, held }: { x: number; y: number; held: boolean }) {
       {...stylex.props(styles.cursor)}
       style={{ left: x - 12, top: y - 12 }}
     >
-      {half("M10.5 6.5 3.5 12l7 5.5Z", -1)}
-      {half("M13.5 6.5l7 5.5-7 5.5Z", 1)}
+      {half("M10.25 6.5 3.5 12l6.75 5.5Z", -1)}
+      {half("M13.75 6.5l6.75 5.5-6.75 5.5Z", 1)}
     </span>,
     document.body,
   );
@@ -133,9 +134,10 @@ function ScrubCursor({ x, y, held }: { x: number; y: number; held: boolean }) {
 
 /**
  * A field's label that scrubs its number: drag left or right to change it
- * (Shift by 10 a pixel), and the design follows each frame as one undo
- * step. `start` is the number to scrub from, `step` how much a pixel moves
- * it, and `toEdits` the edits for a value.
+ * (Shift by 10, Alt by a tenth where `step` has decimals), and the design
+ * follows each frame as one undo step. `start` is the number to scrub from,
+ * `step` how much `PX_PER_STEP` of travel moves it, `min` and `max` where it
+ * stops, and `toEdits` the edits for a value.
  *
  * Once a press turns into a drag, the pointer is locked and the change
  * follows how far the mouse moves, so the cursor can't run off the screen;
@@ -146,6 +148,8 @@ export function ScrubLabel({
   editor,
   start,
   step = 1,
+  min,
+  max,
   toEdits,
   children,
   style,
@@ -153,6 +157,8 @@ export function ScrubLabel({
   editor: Editor;
   start: number | null;
   step?: number;
+  min?: number | undefined;
+  max?: number | undefined;
   toEdits: (value: number) => ReadonlyArray<UserEdit> | null;
   children: ReactNode;
   style?: stylex.StyleXStyles;
@@ -175,6 +181,8 @@ export function ScrubLabel({
           const label = e.currentTarget;
           const from = e.clientX;
           let travel = 0;
+          const scrub = scrubber(start);
+          let fine = false;
           let locked = false;
           let holding = false;
           const end = new AbortController();
@@ -183,6 +191,7 @@ export function ScrubLabel({
           window.addEventListener(
             "pointermove",
             (m) => {
+              fine = m.altKey && step < 1;
               travel =
                 document.pointerLockElement === label ? travel + m.movementX : m.clientX - from;
             },
@@ -226,7 +235,7 @@ export function ScrubLabel({
                   refused,
                 );
               }
-              const value = start + Math.round(travel) * step * (p.shift ? 10 : 1);
+              const value = scrub(travel, { step, shift: p.shift, fine, min, max });
               return value === start ? null : toEdits(Number(tidy(value)));
             },
             end: done,

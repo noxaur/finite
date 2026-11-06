@@ -100,6 +100,12 @@ pub enum UserEdit {
         id: String,
         name: String,
     },
+    /// Sets the canvas color behind a page's artboards, or clears it when
+    /// `background` is `None`.
+    SetPageBackground {
+        id: String,
+        background: Option<String>,
+    },
     /// Deletes a page and every artboard on it.
     DeletePage {
         id: String,
@@ -226,6 +232,9 @@ pub fn plan(
                 edit::create_page(view, id, name)?
             }
             UserEdit::RenamePage { id, name } => edit::rename_page(view, id, name)?,
+            UserEdit::SetPageBackground { id, background } => {
+                edit::set_page_background(view, id, background.as_deref())?
+            }
             UserEdit::DeletePage { id } => edit::delete_page(view, id)?,
             UserEdit::MoveToPage { ids, page } => edit::move_to_page(view, ids, page)?,
         });
@@ -250,6 +259,7 @@ pub fn label(edits: &[UserEdit]) -> &'static str {
         UserEdit::SetAttributes { attrs, .. } => attributes_label(attrs),
         UserEdit::CreatePage { .. } => "Add page",
         UserEdit::RenamePage { .. } => "Rename page",
+        UserEdit::SetPageBackground { .. } => "Change page background",
         UserEdit::DeletePage { .. } => "Delete page",
         UserEdit::MoveToPage { .. } => "Move to page",
     });
@@ -292,9 +302,10 @@ impl UserEdit {
             | Self::SetLink { ids, .. }
             | Self::SetAttributes { ids, .. }
             | Self::MoveToPage { ids, .. } => Box::new(ids.iter()),
-            Self::CreatePage { .. } | Self::RenamePage { .. } | Self::DeletePage { .. } => {
-                Box::new(std::iter::empty())
-            }
+            Self::CreatePage { .. }
+            | Self::RenamePage { .. }
+            | Self::SetPageBackground { .. }
+            | Self::DeletePage { .. } => Box::new(std::iter::empty()),
             Self::SetText { id, .. }
             | Self::MakeComponent { id, .. }
             | Self::SetRoute { id, .. } => Box::new(std::iter::once(id)),

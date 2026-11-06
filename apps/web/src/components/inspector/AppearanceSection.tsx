@@ -121,6 +121,8 @@ function OpacityField({ scope, reading }: { scope: Scope; reading: Reading }) {
       }}
       lead="Opacity"
       scrub={{ start: percent ?? (raw === undefined ? 100 : null), to: (n) => to(n) }}
+      min={0}
+      max={100}
       unit={token ? "" : "%"}
     />
   );

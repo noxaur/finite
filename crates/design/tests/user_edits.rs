@@ -351,6 +351,10 @@ fn examples() -> Vec<UserEdit> {
             id: "page".into(),
             name: "Drafts".into(),
         },
+        UserEdit::SetPageBackground {
+            id: "page".into(),
+            background: Some("#e8eef0".into()),
+        },
         UserEdit::DeletePage { id: "page".into() },
         UserEdit::MoveToPage {
             ids: vec!["board".into()],

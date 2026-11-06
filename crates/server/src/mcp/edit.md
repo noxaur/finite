@@ -20,6 +20,7 @@ CSS variables every artboard can use as var(--brand). An artboard's mode picks w
 {"op": "component", "select": "[data-name=Nav]", "name": "Top bar"}
 The first match defines it; the rest become instances. Edit it to change them all. In html, data-component="Top bar" on each copy does the same.
 {"op": "page", "create": "Drafts"}
+{"op": "page", "page": "Drafts", "background": "#e8eef0"} colors the canvas behind a page's artboards; null clears it.
 {"op": "import", "name": "landing.html", "content": "<!doctype html>…"}
 .html, .finite or .figma.json, as artboards.
 

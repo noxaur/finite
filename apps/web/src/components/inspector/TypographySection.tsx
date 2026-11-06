@@ -288,6 +288,7 @@ function TextDetails({ scope, align }: { scope: Scope; align: string | undefined
               start: lines ?? 0,
               to: (n) => ({ lines: n >= 1 ? String(Math.round(n)) : null }),
             }}
+            min={0}
           />
         </Block>
       </Labeled>
@@ -367,6 +368,7 @@ function LineHeightField({ scope }: { scope: Scope }) {
       }}
       lead="Line"
       scrub={token || custom ? null : { start, step: unit === "" ? 0.05 : 1, to }}
+      min={0}
     />
   );
 }

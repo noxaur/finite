@@ -602,6 +602,8 @@ function GradientControls({
             toChanges={(typed) =>
               whenNumber(typed, (n) => set(moved(i, Math.min(100, Math.max(0, n)))))
             }
+            min={0}
+            max={100}
             unit="%"
             short
           />
@@ -699,7 +701,7 @@ const styles = stylex.create({
       bottom: 6,
       left: -6,
       width: 3,
-      borderRadius: 1,
+      borderRadius: 1.5,
       backgroundColor: colors.brand,
     },
   },
@@ -725,7 +727,7 @@ const styles = stylex.create({
     height: size.xs,
     marginInline: 6,
     borderRadius: radii.xs,
-    boxShadow: shadows.edge,
+    boxShadow: `${shadows.field}, inset 0 0 0 1px ${colors.border}`,
     cursor: "copy",
   },
   stop: {
@@ -739,8 +741,15 @@ const styles = stylex.create({
     borderStyle: "solid",
     borderColor: colors.surface,
     borderRadius: radii.xs,
-    boxShadow: shadows.raised,
+    boxShadow: {
+      default: shadows.control,
+      ":hover": shadows.controlHover,
+      ":active": shadows.controlPressed,
+    },
     cursor: "ew-resize",
   },
-  stopOn: { borderColor: colors.brand },
+  stopOn: {
+    borderColor: colors.brand,
+    boxShadow: { default: shadows.controlBrand, ":active": shadows.controlBrandPressed },
+  },
 });

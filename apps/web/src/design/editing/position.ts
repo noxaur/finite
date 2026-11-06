@@ -1,25 +1,37 @@
+import { pinOf } from "./geometry";
+import { parts } from "./lists";
 import { parseAngle } from "./units";
 
 /** How an element is positioned: in the flow, or moved by its insets. */
 export type PositionKind = "static" | "relative" | "absolute" | "fixed" | "sticky";
 
+/**
+ * What the position menu offers, in order. `relative` still reads, as an
+ * element in the flow that its insets nudge, but it isn't offered: the
+ * inspector writes it only on a container, so X and Y measure from it.
+ */
 export const POSITIONS: ReadonlyArray<readonly [PositionKind, string]> = [
   ["static", "In flow"],
-  ["relative", "Relative"],
   ["absolute", "Absolute"],
   ["fixed", "Fixed"],
   ["sticky", "Sticky"],
 ];
 
+const KINDS: ReadonlySet<string> = new Set(["static", "relative", "absolute", "fixed", "sticky"]);
+
+/** Whether an element of `kind` is placed by its insets: out of the flow, or stuck by one. */
+export const isPlaced = (kind: string | null | undefined) =>
+  kind === "absolute" || kind === "fixed" || kind === "sticky";
+
 const INSETS = ["inset", "top", "right", "bottom", "left"] as const;
 
 /** Inline properties the Position section reads and writes. */
-export const POSITION_PROPS = [...INSETS, "position", "z-index", "rotate"] as const;
+export const POSITION_PROPS = [...INSETS, "position", "rotate"] as const;
 
 /** A computed or inline `position` as one of the kinds; `null` for anything else. */
 export function positionKindOf(raw: string | undefined): PositionKind | null {
   const v = raw?.trim() ?? "static";
-  return POSITIONS.some(([k]) => k === v) ? (v as PositionKind) : null;
+  return KINDS.has(v) ? (v as PositionKind) : null;
 }
 
 /**
@@ -47,6 +59,183 @@ export function positionStyles(
     out.top = "0px";
   }
   return out;
+}
+
+/**
+ * The parents that need `position: relative` when their children become
+ * `kind`, so an absolute child's X and Y measure from its parent, as in a
+ * design tool, not from some container further out. Only a static parent
+ * needs it, and not one that's itself among the targets.
+ */
+export function containersFor(
+  kind: PositionKind,
+  targets: ReadonlyArray<{ readonly id: string; readonly parent: string | null }>,
+  positionOf: (id: string) => string | undefined,
+): string[] {
+  if (kind !== "absolute") return [];
+  const ids = new Set(targets.map((t) => t.id));
+  const parents = new Set<string>();
+  for (const t of targets) {
+    if (t.parent === null || ids.has(t.parent)) continue;
+    if ((positionOf(t.parent) ?? "static") === "static") parents.add(t.parent);
+  }
+  return [...parents];
+}
+
+/** Which insets pin an absolute or fixed element on one axis, as `pinOf` in geometry reads them. */
+export type Constraint = "near" | "far" | "both";
+
+export type ConstraintAxis = "x" | "y";
+
+const EDGES = {
+  x: { near: "left", far: "right", size: "width" },
+  y: { near: "top", far: "bottom", size: "height" },
+} as const;
+
+/** How `styles` pin the element on `axis`. */
+export const constraintOf = (styles: Readonly<Record<string, string>>, axis: ConstraintAxis) =>
+  pinOf({ styles }, EDGES[axis].near, EDGES[axis].far);
+
+/** What each constraint is called, by axis. */
+export const CONSTRAINTS: Readonly<
+  Record<ConstraintAxis, ReadonlyArray<readonly [Constraint, string]>>
+> = {
+  x: [
+    ["near", "Left"],
+    ["far", "Right"],
+    ["both", "Left & right"],
+  ],
+  y: [
+    ["near", "Top"],
+    ["far", "Bottom"],
+    ["both", "Top & bottom"],
+  ],
+};
+
+/** Where the element is now, in CSS pixels: its two insets on the axis and its size. */
+export interface AxisBox {
+  readonly near: number;
+  readonly far: number;
+  readonly size: number;
+}
+
+type Edge = "top" | "right" | "bottom" | "left";
+
+/** The inset shorthands, each with the edges its values set, as `margin` reads them. */
+const SHORTHANDS: ReadonlyArray<readonly [string, ReadonlyArray<Edge>]> = [
+  ["inset", ["top", "right", "bottom", "left"]],
+  // Logical insets, in a left-to-right, top-to-bottom writing mode.
+  ["inset-block", ["top", "bottom"]],
+  ["inset-inline", ["left", "right"]],
+];
+
+/** A value the browser fills in later, like `var(--edges)`, which may stand for several values. */
+const SUBSTITUTED = /\b(?:var|env|attr)\(/i;
+
+/**
+ * The edges that `styles`' inset shorthands set, as longhands. A later
+ * shorthand in `SHORTHANDS` wins over `inset`, and an edge the element
+ * sets on its own wins over both. A shorthand with a `var()` in it can't
+ * be split, so its edges get the distances they resolve to, `resolved`.
+ */
+function shorthandEdges(
+  styles: Readonly<Record<string, string>>,
+  resolved: (edge: Edge) => string,
+): Partial<Record<Edge, string>> {
+  const edges: Partial<Record<Edge, string>> = {};
+  for (const [shorthand, sides] of SHORTHANDS) {
+    const raw = styles[shorthand];
+    if (raw === undefined) continue;
+    if (SUBSTITUTED.test(raw)) {
+      for (const side of sides) edges[side] = resolved(side);
+      continue;
+    }
+    const values = parts(raw);
+    if (values.length === 0) continue;
+    // Like `margin`: a missing value repeats the one across from it.
+    sides.forEach((side, i) => {
+      edges[side] = values[i] ?? (i === 3 ? values[1] : undefined) ?? values[0]!;
+    });
+  }
+  for (const side of Object.keys(edges) as Edge[]) {
+    if (styles[side] !== undefined) delete edges[side];
+  }
+  return edges;
+}
+
+/**
+ * The styles that pin an absolute or fixed element on `axis` by
+ * `constraint`, keeping it where it is: each inset it pins by gets the
+ * distance it has now, and one it no longer pins by becomes `auto`, which
+ * also overrides one a stylesheet sets. Pinned by both, its insets size
+ * it, so its own size comes off; leaving that, it gets the size it has.
+ * An `inset`, `inset-block` or `inset-inline` shorthand becomes the
+ * longhands it sets first, so it can't pin the edge that was let go; one
+ * that uses `var()` gives the other axis's edges `across`, the distances
+ * they have now.
+ */
+export function constraintStyles(
+  axis: ConstraintAxis,
+  constraint: Constraint,
+  styles: Readonly<Record<string, string>>,
+  box: AxisBox,
+  across: Pick<AxisBox, "near" | "far">,
+): Record<string, string | null> {
+  const { near, far, size } = EDGES[axis];
+  const px = (n: number) => `${Math.round(n)}px`;
+  const out: Record<string, string | null> = {};
+  for (const [shorthand] of SHORTHANDS) if (styles[shorthand] !== undefined) out[shorthand] = null;
+  const other = EDGES[axis === "x" ? "y" : "x"];
+  const expanded = shorthandEdges(styles, (edge) =>
+    px(
+      edge === near
+        ? box.near
+        : edge === far
+          ? box.far
+          : edge === other.near
+            ? across.near
+            : across.far,
+    ),
+  );
+  Object.assign(out, expanded);
+  const own: Readonly<Record<string, string>> = { ...styles, ...expanded };
+  const set = (p: string) => own[p] !== undefined && own[p] !== "auto";
+  out[near] = constraint === "far" ? "auto" : px(box.near);
+  out[far] = constraint === "near" ? "auto" : px(box.far);
+  if (constraint === "both") {
+    if (styles[size] !== undefined) out[size] = null;
+  } else if (set(near) && set(far) && styles[size] === undefined) out[size] = px(box.size);
+  return out;
+}
+
+/** The edges a sticky element can stick by, in the order they're offered. */
+export const STICKY_EDGES = [
+  ["top", "Top"],
+  ["bottom", "Bottom"],
+  ["left", "Left"],
+  ["right", "Right"],
+] as const;
+
+export type StickyEdge = (typeof STICKY_EDGES)[number][0];
+
+/** The edge a sticky element sticks by: the first inset it sets, or the top. */
+export function stickyEdgeOf(styles: Readonly<Record<string, string>>): StickyEdge {
+  const set = STICKY_EDGES.find(([e]) => styles[e] !== undefined && styles[e] !== "auto");
+  return set?.[0] ?? "top";
+}
+
+/** The styles that move a sticky element's distance from edge `from` to `to`. */
+export function stickyEdgeStyles(
+  from: StickyEdge,
+  to: StickyEdge,
+  styles: Readonly<Record<string, string>>,
+): Record<string, string | null> {
+  if (from === to) return {};
+  const distance = styles[from];
+  return {
+    ...(distance !== undefined && { [from]: null }),
+    [to]: distance === undefined || distance === "auto" ? "0px" : distance,
+  };
 }
 
 /**

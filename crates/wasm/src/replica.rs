@@ -47,13 +47,23 @@ enum Applied<'a> {
     Mode,
     /// A page changed. The viewer reads [`Replica::pages`].
     Page,
+    /// A page was renamed. The viewer reads [`Replica::pages`].
+    PageName,
+    /// A page's background changed. The viewer reads [`Replica::pages`].
+    PageBackground,
+    /// The implicit first page went into the page map or came out again.
+    /// The viewer reads [`Replica::pages`].
+    FirstPage,
 }
 
-/// An id and name, as the viewer lists pages and modes.
+/// An id and name, as the viewer lists pages and modes, with a page's
+/// canvas `background` when it has one.
 #[derive(Serialize)]
 struct Listed<'a> {
     id: &'a str,
     name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    background: Option<&'a str>,
 }
 
 #[derive(Debug, Default)]
@@ -350,8 +360,9 @@ impl Replica {
         serde_json::to_string(&size.unwrap_or((None, None))).expect("a size serializes")
     }
 
-    /// The design's pages in order, as a JSON array of `{id, name}`. Never
-    /// empty: a design without pages has its implicit first page.
+    /// The design's pages in order, as a JSON array of `{id, name}`, with
+    /// `background` when the page has one. Never empty: a design without
+    /// pages has its implicit first page.
     pub fn pages(&self) -> String {
         let pages: Vec<Listed> = self
             .doc
@@ -360,6 +371,7 @@ impl Replica {
             .map(|(id, page)| Listed {
                 id,
                 name: &page.name,
+                background: page.background.as_deref(),
             })
             .collect();
         serde_json::to_string(&pages).expect("pages serialize")
@@ -381,6 +393,7 @@ impl Replica {
             .map(|(id, mode)| Listed {
                 id,
                 name: &mode.name,
+                background: None,
             })
             .collect();
         serde_json::to_string(&Tokens {
@@ -543,6 +556,9 @@ fn describe<'a>(doc: &'a Document, op: &'a Op, inverse: &'a [Op]) -> Applied<'a>
         Op::Token { .. } => Applied::Token,
         Op::Mode { .. } => Applied::Mode,
         Op::Page { .. } => Applied::Page,
+        Op::PageName { .. } => Applied::PageName,
+        Op::PageBackground { .. } => Applied::PageBackground,
+        Op::FirstPage { .. } => Applied::FirstPage,
     }
 }
 
@@ -666,6 +682,34 @@ mod tests {
         assert_eq!(results[0], json!({ "op": "page" }));
         assert_eq!(results[1], Value::Null);
         assert_eq!(results[2], json!({ "op": "page" }));
+    }
+
+    #[test]
+    fn page_name_and_background_results_say_what_changed() {
+        let mut r = replica();
+        let results = apply(
+            &mut r,
+            json!([
+                { "op": "pageName", "id": "page-1", "name": "Home" },
+                { "op": "firstPage", "explicit": true },
+                { "op": "pageBackground", "id": "page-1", "background": "#000" },
+                { "op": "pageName", "id": "page-1", "name": "Home" },
+                { "op": "pageName", "id": "page-1", "name": "Home" },
+                { "op": "firstPage", "explicit": true },
+            ]),
+        );
+        // The implicit first page isn't in the page map until `firstPage`.
+        assert_eq!(results[0], Value::Null);
+        assert_eq!(results[1], json!({ "op": "firstPage" }));
+        assert_eq!(results[2], json!({ "op": "pageBackground" }));
+        assert_eq!(results[3], json!({ "op": "pageName" }));
+        assert_eq!(results[4], Value::Null);
+        assert_eq!(results[5], Value::Null);
+        let listed = serde_json::from_str::<Value>(&r.pages()).unwrap();
+        assert_eq!(
+            listed,
+            json!([{ "id": "page-1", "name": "Home", "background": "#000" }])
+        );
     }
 
     #[test]

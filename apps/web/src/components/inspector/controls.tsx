@@ -4,6 +4,7 @@ import * as stylex from "@stylexjs/stylex";
 import { Children, type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { alphaOf, hexOf, opaque, paintedHex, resolveVars, setAlpha } from "@/design/editing/colors";
+import { isHexLike, typedHex } from "@/design/editing/hsv";
 import type { Editor } from "@/design/editing/editor";
 import {
   bare,
@@ -15,7 +16,10 @@ import {
   tokenOf,
 } from "@/design/editing/inspect";
 import { isColor } from "@/lib/tokens";
+import { raised } from "@/styles/raised";
 import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
+import { IconButton, Strip, StripItem } from "../Button";
+import { type ColorEdit, type ColorPick, ColorPicker } from "../ColorPicker";
 import { numberOf, ScrubLabel, useDraftField } from "../DraftField";
 import type { IconName } from "@/lib/icons";
 import { Icon } from "../Icons";
@@ -77,28 +81,23 @@ export function Toggle({
   icon: IconName;
   title: string;
   pressed?: boolean;
-  /** On in a second way, in the brand color. */
+  /** On in a second way, with the active fill. */
   accent?: boolean;
   disabled?: boolean;
   onClick: () => void;
 }) {
   return (
-    <button
-      type="button"
-      title={title}
-      aria-label={title}
-      aria-pressed={pressed}
+    <IconButton
+      icon={icon}
+      label={title}
+      variant="ghost"
+      size="small"
+      pressed={pressed}
+      // Still focusable, so its tooltip can say why it's off.
       aria-disabled={disabled}
       onClick={disabled ? undefined : onClick}
-      {...stylex.props(
-        styles.iconButton,
-        pressed && styles.iconButtonOn,
-        accent && styles.iconButtonAccent,
-        disabled && styles.iconButtonOff,
-      )}
-    >
-      <Icon name={icon} size={16} />
-    </button>
+      style={[disabled && styles.toggleOff, accent && styles.toggleAccent]}
+    />
   );
 }
 
@@ -113,6 +112,10 @@ const UNITLESS = new Set([
   "flex-grow",
   "flex-shrink",
 ]);
+
+/** Properties CSS gives no meaning below zero, which typing, stepping and scrubbing stop at. */
+const NON_NEGATIVE =
+  /^(?:(?:min-|max-)?(?:width|height)|font-size|line-height|(?:row-|column-)?gap|padding(?:-.+)?|border(?:-.+)?-radius|border(?:-.+)?-width|outline-width|flex-(?:grow|shrink)|opacity)$/;
 
 /** Which kind of token each property takes, for the ◇ picker. */
 const TOKEN_KINDS: Readonly<Record<string, TokenKind>> = {
@@ -156,9 +159,14 @@ export function StyleField({
   custom = customOf,
   also,
   axis,
+  min = NON_NEGATIVE.test(prop) ? 0 : undefined,
+  max,
 }: {
   scope: Scope;
   prop: string;
+  /** The number's limits; a property that can't be negative stops at 0. */
+  min?: number | undefined;
+  max?: number | undefined;
   /** Reads and writes both of these longhands as one value, like a box's left and right. */
   axis?: readonly [string, string];
   title: string;
@@ -300,8 +308,10 @@ export function StyleField({
       scrub={{
         start: why ? null : (n?.value ?? (raw === undefined ? 0 : null)),
         step,
-        to: (v) => set(`${Math.max(v, prop === "opacity" ? 0 : -1e6)}${unitOf}`),
+        to: (v) => set(`${v}${unitOf}`),
       }}
+      min={min}
+      max={max}
       small={small}
       grow={grow}
       center={center}
@@ -409,15 +419,26 @@ export function ColorField({
             }
           : undefined
       }
-      toChanges={(typed) => toChanges(keep(parseInput("color", typed)))}
+      // A hex is read only once it's whole: `#1f3a` on the way to `#1f3a44` isn't a color with 67% opacity.
+      toChanges={(typed, done) =>
+        isHexLike(typed) && typedHex(typed, done) === null
+          ? null
+          : toChanges(keep(parseInput("color", typed)))
+      }
       lead={
         swatchButton ? (
           swatchButton(isColor(resolved) ? resolved : undefined)
         ) : (
           <ColorSwatch
             scope={scope}
+            title={label}
             swatch={isColor(resolved) ? resolved : undefined}
             toChanges={(c) => toChanges(keep(c))}
+            alpha={hasAlpha ? alpha : undefined}
+            toAlpha={raw === undefined ? undefined : (a) => toChanges(setAlpha(raw, a))}
+            // The picker's colors carry their opacity, so 100% stays 100%.
+            toColor={toChanges}
+            token={token}
           />
         )
       }
@@ -458,7 +479,7 @@ export function CustomChip({
   onReset?: (() => void) | undefined;
 }) {
   return (
-    <span {...stylex.props(styles.custom)}>
+    <span {...stylex.props(raised.control, styles.custom)}>
       <button
         type="button"
         title={title}
@@ -559,6 +580,8 @@ export function Field({
   toChanges,
   lead,
   scrub,
+  min,
+  max,
   after,
   unit,
   small = false,
@@ -567,6 +590,7 @@ export function Field({
   short = false,
   fit = false,
   grow = false,
+  disabled = false,
 }: {
   scope: Scope;
   label: string;
@@ -575,9 +599,13 @@ export function Field({
   placeholder?: string;
   token?: boolean;
   custom?: { readonly title: string; readonly onReset: () => void } | undefined;
-  toChanges: (typed: string) => Changes | null;
+  /** `done` is true on Enter or leaving: see `useDraftField`. */
+  toChanges: (typed: string, done: boolean) => Changes | null;
   lead?: ReactNode;
   scrub?: { start: number | null; step?: number; to: (value: number) => Changes } | null;
+  /** The number's limits, which typing, stepping and scrubbing stop at. */
+  min?: number | undefined;
+  max?: number | undefined;
   after?: ReactNode;
   /** Shown after the value, like `px`. */
   unit?: string;
@@ -591,19 +619,23 @@ export function Field({
   fit?: boolean;
   /** A small field that still takes the room left in its row, to the row's right edge. */
   grow?: boolean;
+  /** Read-only and dimmed, like X and Y with no one box to measure. */
+  disabled?: boolean;
 }) {
   const id = useId();
   const [replacing, setReplacing] = useState(false);
   const field = useDraftField(
     scope.editor,
     custom ? "" : text,
-    (typed) => {
-      const changes = toChanges(typed);
+    (typed, done) => {
+      const changes = toChanges(typed, done);
       return changes ? scope.edits(changes) : null;
     },
     placeholder,
+    { min, max },
   );
-  const chip = custom && !replacing;
+  // The chip never takes the input's place while something's typed in it.
+  const chip = custom && !replacing && !field.typing;
   // Words, like Auto or No limit, read in the UI font; numbers, hex and token names stay mono.
   const words = /^[a-z]/i.test(field.props.value || placeholder);
   return (
@@ -625,6 +657,8 @@ export function Field({
             editor={scope.editor}
             start={scrub.start}
             step={scrub.step ?? 1}
+            min={min}
+            max={max}
             toEdits={(v) => scope.edits(scrub.to(v))}
             style={styles.lead}
           >
@@ -648,6 +682,7 @@ export function Field({
           placeholder={placeholder}
           // Only when the Custom chip was clicked to type over it.
           autoFocus={replacing}
+          disabled={disabled}
           {...field.props}
           onBlur={() => {
             field.props.onBlur();
@@ -671,6 +706,8 @@ export function Field({
               editor={scope.editor}
               start={scrub.start}
               step={scrub.step ?? 1}
+              min={min}
+              max={max}
               toEdits={(v) => scope.edits(scrub.to(v))}
               style={styles.unit}
             >
@@ -686,73 +723,117 @@ export function Field({
   );
 }
 
-/** A color's swatch, which opens the browser's picker; each color picked shows at once. */
+/**
+ * A color's swatch, which opens the color picker. Each gesture in it shows
+ * at once and lands as one undo step. With `alpha`, the picker has an
+ * opacity slider, and `toAlpha` changes only the opacity, so a token or
+ * another notation keeps its name.
+ */
 export function ColorSwatch({
   scope,
   swatch,
   toChanges,
+  alpha,
+  toAlpha,
+  toColor,
+  token = null,
+  title = "Color",
 }: {
   scope: Scope;
   swatch: string | undefined;
   toChanges: (color: string) => Changes;
+  /** The color's opacity, 0 to 100; the picker shows no opacity without it. */
+  alpha?: number | undefined;
+  toAlpha?: ((alpha: number) => Changes) | undefined;
+  /** The styles for a color the picker sends with its own opacity, which `toChanges` might change; `toChanges` without it. */
+  toColor?: ((color: string) => Changes) | undefined;
+  /** The token the color uses, shown picked among the design's tokens. */
+  token?: string | null;
+  title?: string;
 }) {
+  const [button, setButton] = useState<HTMLButtonElement | null>(null);
+  const [open, setOpen] = useState(false);
   const draft = useRef<ReturnType<Editor["begin"]> | null>(null);
-  const ref = useRef<HTMLInputElement>(null);
-  // The picker closing fires `change`; React's onChange is every `input`.
-  useEffect(() => {
-    const input = ref.current;
-    if (!input) return;
-    const keep = () => {
+  const changesOf = (pick: ColorPick) =>
+    pick.part === "alpha" && toAlpha
+      ? toAlpha(pick.alpha)
+      : (toColor ?? toChanges)(pick.alpha < 100 ? setAlpha(pick.hex, pick.alpha) : pick.hex);
+  const edit: ColorEdit = {
+    preview: (pick) => {
+      draft.current ??= scope.editor.begin({ onLost: () => (draft.current = null) });
+      draft.current.preview(scope.edits(changesOf(pick)));
+    },
+    commit: () => {
       draft.current?.commit();
       draft.current = null;
-    };
-    input.addEventListener("change", keep);
-    return () => {
-      input.removeEventListener("change", keep);
-      keep();
-    };
-  }, []);
+    },
+    cancel: () => {
+      draft.current?.cancel();
+      draft.current = null;
+    },
+  };
+  const tokens = open ? matchingTokens(scope, "color") : [];
   return (
-    <span {...stylex.props(styles.swatch)} style={{ background: swatch ?? "transparent" }}>
-      <input
-        ref={ref}
-        type="color"
+    <>
+      <button
+        ref={setButton}
+        type="button"
         aria-label="Pick a color"
+        aria-haspopup="dialog"
+        aria-expanded={open}
         tabIndex={-1}
-        value={paintedHex(swatch) ?? "#000000"}
-        onChange={(e) => {
-          draft.current ??= scope.editor.begin({ onLost: () => (draft.current = null) });
-          draft.current.preview(scope.edits(toChanges(e.target.value)));
-        }}
-        onBlur={() => {
-          draft.current?.commit();
-          draft.current = null;
-        }}
-        {...stylex.props(styles.picker)}
+        onClick={() => setOpen((was) => !was)}
+        {...stylex.props(styles.swatch, styles.swatchButton, open && styles.swatchOpen)}
+        style={{ background: swatch ?? "transparent" }}
       />
-    </span>
+      {open && button && (
+        <ColorPicker
+          anchor={button}
+          title={title}
+          color={swatch}
+          alpha={alpha ?? 100}
+          hasAlpha={alpha !== undefined}
+          edit={edit}
+          tokens={{
+            list: tokens,
+            current: token,
+            onPick: (name) => scope.commit(toChanges(`var(${name})`)),
+          }}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </>
   );
 }
 
 /** The browser's eyedropper, where it has one: picks a color from anywhere on the screen. */
-export function EyeDropperButton({ onPick }: { onPick: (color: string) => void }) {
+export function EyeDropperButton({
+  onPick,
+  standalone = false,
+}: {
+  onPick: (color: string) => void;
+  /** A raised button of its own, as in the color picker, instead of the field's quiet one. */
+  standalone?: boolean;
+}) {
   type Dropper = { open(): Promise<{ sRGBHex: string }> };
   const Ctor = (globalThis as { EyeDropper?: new () => Dropper }).EyeDropper;
   if (!Ctor) return null;
+  const label = "Pick a color from the screen";
+  const pick = () =>
+    new Ctor().open().then(
+      (r) => onPick(r.sRGBHex),
+      () => {},
+    );
+  if (standalone) return <IconButton icon="eyedropper" label={label} onClick={pick} />;
   return (
     <button
       type="button"
-      title="Pick a color from the screen"
-      aria-label="Pick a color from the screen"
-      onClick={() =>
-        new Ctor().open().then(
-          (r) => onPick(r.sRGBHex),
-          () => {},
-        )
-      }
-      {...stylex.props(styles.fieldButton)}
+      title={label}
+      aria-label={label}
+      onClick={pick}
+      {...stylex.props(styles.fieldButton, raised.ghost, styles.ghostFaint)}
     >
-      <Icon name="eyedropper" size={14} />
+      <Icon name="eyedropper" size={15} />
     </button>
   );
 }
@@ -767,10 +848,16 @@ export function AlphaChip({
   alpha: number;
   toChanges: (alpha: number) => Changes;
 }) {
-  const field = useDraftField(scope.editor, `${alpha}%`, (typed) => {
-    const n = parseFloat(typed);
-    return Number.isFinite(n) ? scope.edits(toChanges(n)) : null;
-  });
+  const field = useDraftField(
+    scope.editor,
+    `${alpha}%`,
+    (typed) => {
+      const n = parseFloat(typed);
+      return Number.isFinite(n) ? scope.edits(toChanges(n)) : null;
+    },
+    "",
+    { min: 0, max: 100 },
+  );
   return (
     <input
       aria-label="Opacity"
@@ -869,26 +956,42 @@ export function Popup({
   const button = useRef<HTMLButtonElement>(null);
   return (
     <>
-      <button
-        ref={button}
-        type="button"
-        title={title}
-        aria-label={title}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={() => setOpen((o) => !o)}
-        {...(children
-          ? stylex.props(styles.coverButton)
-          : stylex.props(
-              big ? styles.iconButton : styles.fieldButton,
-              open && styles.iconButtonOn,
-            ))}
-      >
-        {children}
-        <span {...stylex.props(icon === "chevronDown" && open && styles.chevronOpen)}>
-          <Icon name={icon} size={big ? 16 : icon === "chevronDown" ? 12 : 14} />
-        </span>
-      </button>
+      {big ? (
+        <IconButton
+          ref={button}
+          icon={icon}
+          label={title}
+          variant="ghost"
+          size="small"
+          expanded={open}
+          aria-haspopup="menu"
+          onClick={() => setOpen((o) => !o)}
+        />
+      ) : (
+        <button
+          ref={button}
+          type="button"
+          title={title}
+          aria-label={title}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          onClick={() => setOpen((o) => !o)}
+          {...(children
+            ? stylex.props(styles.coverButton)
+            : stylex.props(
+                styles.fieldButton,
+                raised.ghost,
+                styles.ghostFaint,
+                open && raised.on,
+                open && styles.on,
+              ))}
+        >
+          {children}
+          <span {...stylex.props(icon === "chevronDown" && open && styles.chevronOpen)}>
+            <Icon name={icon} size={icon === "chevronDown" ? 12 : 15} />
+          </span>
+        </button>
+      )}
       {open && button.current && (
         // Under the field the button sits in, right-aligned with it.
         <Menu
@@ -1024,27 +1127,20 @@ export function Segments<T extends string>({
   if (open.length < 2) return null;
   const why: string | undefined = Object.values<string | undefined>(blocked ?? {})[0];
   return (
-    <div role="radiogroup" aria-label={label} title={why} {...stylex.props(styles.segments)}>
+    <Strip role="radiogroup" aria-label={label} title={why} style={styles.segments}>
       {open.map(([option, icon, name, short]) => (
-        <button
+        <StripItem
           key={option}
-          type="button"
-          role="radio"
-          aria-checked={value === option}
+          picked={value === option}
+          icon={icon ?? undefined}
           aria-label={name}
           title={name}
           onClick={() => value !== option && onPick(option)}
-          {...stylex.props(
-            styles.segment,
-            !icon && styles.segmentWord,
-            value === option && styles.segmentOn,
-            value === option && !icon && styles.segmentWordOn,
-          )}
         >
-          {icon ? <Icon name={icon} size={14} /> : (short ?? name)}
-        </button>
+          {icon ? null : (short ?? name)}
+        </StripItem>
       ))}
-    </div>
+    </Strip>
   );
 }
 
@@ -1076,7 +1172,7 @@ export function PointGrid({
               aria-label={name}
               title={name}
               onClick={() => !on && onPick(x, y)}
-              {...stylex.props(styles.pointCell)}
+              {...stylex.props(stylex.defaultMarker(), styles.pointCell, on && raised.control)}
             >
               <span {...stylex.props(styles.pointDot, on && styles.pointDotOn)} />
             </button>
@@ -1112,8 +1208,15 @@ export function GeometryField({
     const edit = latest.current(field, n);
     return edit ? [edit] : null;
   };
-  const input = useDraftField(editor, String(Math.round(value)), (text) =>
-    toEdits(parseFloat(text)),
+  const min = field === "w" || field === "h" ? 0 : undefined;
+  const input = useDraftField(
+    editor,
+    String(Math.round(value)),
+    (text) => toEdits(parseFloat(text)),
+    "",
+    {
+      min,
+    },
   );
   const label = { x: "X position", y: "Y position", w: "Width", h: "Height" }[field];
   return (
@@ -1121,7 +1224,8 @@ export function GeometryField({
       <ScrubLabel
         editor={editor}
         start={disabled ? null : Math.round(value)}
-        toEdits={(n) => toEdits(field === "w" || field === "h" ? Math.max(n, 0) : n)}
+        min={min}
+        toEdits={toEdits}
         style={styles.lead}
       >
         {field.toUpperCase()}
@@ -1217,7 +1321,12 @@ export function ExpandButton({
       aria-label={title}
       aria-expanded={open}
       onClick={onClick}
-      {...stylex.props(styles.fieldButton, open && styles.expandOpen)}
+      {...stylex.props(
+        styles.fieldButton,
+        raised.ghost,
+        styles.ghostFaint,
+        open && styles.expandOpen,
+      )}
     >
       <Icon name="chevronDown" size={12} />
     </button>
@@ -1256,9 +1365,15 @@ export function EyeButton({ hidden, onClick }: { hidden: boolean; onClick: () =>
       aria-label={title}
       aria-pressed={hidden}
       onClick={onClick}
-      {...stylex.props(styles.eye, hidden && styles.eyeOff)}
+      {...stylex.props(
+        styles.fieldButton,
+        styles.eye,
+        raised.ghost,
+        styles.ghostFaint,
+        hidden && styles.eyeOff,
+      )}
     >
-      <Icon name={hidden ? "eyeOff" : "eye"} size={14} />
+      <Icon name={hidden ? "eyeOff" : "eye"} size={15} />
     </button>
   );
 }
@@ -1446,7 +1561,7 @@ export function CellGrid({
               aria-label={name}
               title={name}
               onClick={() => onPick(x, y)}
-              {...stylex.props(styles.cell)}
+              {...stylex.props(stylex.defaultMarker(), styles.cell, on && raised.control)}
             >
               <span {...stylex.props(styles.cellDot, on && styles.cellDotOn)} />
             </button>
@@ -1459,6 +1574,18 @@ export function CellGrid({
 
 /** The room a row keeps on its right for its button: the button and a gap. */
 const ACTION = `calc(${size.xs} + ${space.sm})`;
+
+/**
+ * The one size of what sits inside a field, like its ▾, eye, eyedropper, Custom chip and
+ * opacity: the field's height less 3px above and below, so its corners nest in the field's.
+ */
+const IN_FIELD = `calc(${size.sm} - 2 * ${space.xs})`;
+
+/** `IN_FIELD` for what other panels put inside their fields, like a grid's track chips. */
+export const inField = stylex.create({
+  square: { width: IN_FIELD, height: IN_FIELD },
+  height: { height: IN_FIELD },
+});
 
 const styles = stylex.create({
   section: {
@@ -1513,26 +1640,20 @@ const styles = stylex.create({
   },
   /** Lines up a block that isn't a row with the rows' fields. */
   inset: { marginRight: ACTION },
-  iconButton: {
-    position: "relative",
-    display: "grid",
-    placeItems: "center",
-    flexShrink: 0,
-    width: size.xs,
-    height: size.xs,
-    padding: 0,
-    borderWidth: 0,
-    borderRadius: radii.xs,
-    backgroundColor: { default: "transparent", ":hover": colors.surface },
-    color: { default: colors.muted, ":hover": colors.text },
-    cursor: "var(--cursor-pointer, pointer)",
-  },
-  iconButtonAccent: { color: colors.brandText },
-  iconButtonOff: { opacity: 0.4, cursor: "default" },
-  iconButtonOn: {
-    backgroundColor: colors.sunk,
-    boxShadow: shadows.inset,
+  /** A `raised.ghost` inside a field, quieter than the field's text. */
+  ghostFaint: { color: { default: colors.faint, ":hover": colors.text } },
+  /** A toggle that's on, with `raised.on`'s face. */
+  on: { color: colors.text },
+  /** On in a second way: the active fill, which holds under the pointer. */
+  toggleAccent: {
+    backgroundColor: { default: colors.activeFill, ":hover": colors.activeFill },
     color: colors.text,
+  },
+  /** Off, but still shows whether it's on: dimmed, with no hover fill. */
+  toggleOff: {
+    opacity: 0.4,
+    backgroundColor: { default: "transparent", ":hover": "transparent" },
+    cursor: "default",
   },
   field: {
     position: "relative",
@@ -1547,9 +1668,9 @@ const styles = stylex.create({
     borderRadius: radii.sm,
     backgroundColor: colors.sunk,
     boxShadow: {
-      default: "none",
-      ":hover": `inset 0 0 0 1px ${colors.border}`,
-      ":focus-within": `inset 0 0 0 1px ${colors.borderStrong}`,
+      default: shadows.field,
+      ":hover": `inset 0 0 0 1px ${colors.border}, ${shadows.field}`,
+      ":focus-within": `inset 0 0 0 1px ${colors.brand}, ${shadows.field}`,
     },
     color: colors.text,
     fontFamily: fonts.mono,
@@ -1593,19 +1714,16 @@ const styles = stylex.create({
     display: "grid",
     placeItems: "center",
     flexShrink: 0,
-    width: 21,
-    height: 21,
+    width: IN_FIELD,
+    height: IN_FIELD,
     padding: 0,
-    borderWidth: 0,
     borderRadius: radii.xs,
-    backgroundColor: { default: "transparent", ":hover": colors.surface },
-    color: { default: colors.faint, ":hover": colors.text },
     cursor: "var(--cursor-pointer, pointer)",
   },
   chip: {
     flexShrink: 0,
     width: 39,
-    height: 21,
+    height: IN_FIELD,
     marginRight: -3,
     padding: 0,
     borderWidth: 0,
@@ -1616,6 +1734,7 @@ const styles = stylex.create({
     fontSize: 11,
     textAlign: "center",
     outline: "none",
+    boxShadow: { default: "none", ":focus": `inset 0 0 0 1px ${colors.brand}` },
   },
   swatch: {
     position: "relative",
@@ -1628,16 +1747,9 @@ const styles = stylex.create({
     borderRadius: radii.xs,
     boxShadow: shadows.edge,
   },
-  picker: {
-    position: "absolute",
-    inset: 0,
-    width: "100%",
-    height: "100%",
-    padding: 0,
-    borderWidth: 0,
-    opacity: 0,
-    cursor: "var(--cursor-pointer, pointer)",
-  },
+  swatchButton: { cursor: "var(--cursor-pointer, pointer)" },
+  /** The swatch whose picker is open. */
+  swatchOpen: { outline: `1px solid ${colors.brand}`, outlineOffset: 1 },
   input: {
     flexGrow: 1,
     minWidth: 0,
@@ -1722,7 +1834,7 @@ const styles = stylex.create({
   choiceButtonBox: { gap: space.sm, paddingInline: space.sm },
   choiceButtonSmall: {
     flexGrow: 0,
-    boxShadow: { default: "none", ":focus-visible": `inset 0 0 0 1px ${colors.borderStrong}` },
+    boxShadow: { default: "none", ":focus-visible": `inset 0 0 0 1px ${colors.brand}` },
   },
   choiceText: {
     flexGrow: 1,
@@ -1752,9 +1864,8 @@ const styles = stylex.create({
     flexShrink: 0,
     display: "inline-flex",
     alignItems: "center",
-    height: 21,
+    height: IN_FIELD,
     borderRadius: radii.xs,
-    backgroundColor: colors.surface,
     color: colors.muted,
   },
   customLabel: {
@@ -1764,8 +1875,9 @@ const styles = stylex.create({
     backgroundColor: "transparent",
     color: "inherit",
     fontFamily: fonts.sans,
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: 500,
+    lineHeight: "15px",
     cursor: { default: "var(--cursor-pointer, pointer)", ":disabled": "default" },
   },
   customReset: {
@@ -1813,24 +1925,17 @@ const styles = stylex.create({
       backgroundColor: colors.brand,
     },
   },
-  eye: {
-    display: "grid",
-    placeItems: "center",
-    flexShrink: 0,
-    width: 21,
-    height: 21,
-    padding: 0,
-    marginLeft: -3,
-    borderWidth: 0,
-    borderRadius: radii.xs,
-    backgroundColor: { default: "transparent", ":hover": colors.surface },
-    color: { default: colors.faint, ":hover": colors.text },
-    cursor: "var(--cursor-pointer, pointer)",
-  },
-  eyeOff: { color: colors.muted },
+  /** At the start of a row's body, 3px in from its edge like the accessories at its end. */
+  eye: { marginLeft: -3 },
+  eyeOff: { color: { default: colors.muted, ":hover": colors.text } },
   expandOpen: { rotate: "180deg", color: colors.text },
   rowBody: { cursor: "default", userSelect: "none" },
-  rowBodyOpen: { boxShadow: `inset 0 0 0 1px ${colors.border}` },
+  rowBodyOpen: {
+    boxShadow: {
+      default: `inset 0 0 0 1px ${colors.border}, ${shadows.field}`,
+      ":focus-within": `inset 0 0 0 1px ${colors.brand}, ${shadows.field}`,
+    },
+  },
   rowBodyHidden: { color: colors.faint },
   rowName: {
     flexGrow: 1,
@@ -1857,29 +1962,8 @@ const styles = stylex.create({
   stack: { display: "flex", flexDirection: "column", gap: space.sm, minWidth: 0 },
   stackLoose: { display: "flex", flexDirection: "column", gap: space.sm, minWidth: 0 },
   alignRow: { display: "grid", gridTemplateColumns: "84px 1fr", gap: space.sm },
-  segments: {
-    flexGrow: 1,
-    display: "flex",
-    padding: space.px,
-    borderRadius: radii.sm,
-    backgroundColor: colors.sunk,
-  },
-  segment: {
-    flexGrow: 1,
-    flexBasis: 0,
-    display: "grid",
-    placeItems: "center",
-    height: `calc(${size.sm} - ${space.px} * 2)`,
-    padding: 0,
-    borderWidth: 0,
-    borderRadius: radii.xs,
-    backgroundColor: "transparent",
-    color: { default: colors.muted, ":hover": colors.text },
-    font: "inherit",
-    fontSize: 12,
-    fontWeight: 500,
-    cursor: "var(--cursor-pointer, pointer)",
-  },
+  /** A strip at a field's height: the segments fill it, with no padding. */
+  segments: { flexGrow: 1 },
   pointGrid: {
     flexShrink: 0,
     display: "grid",
@@ -1888,8 +1972,10 @@ const styles = stylex.create({
     width: 57,
     height: 57,
     padding: space.xs,
-    borderRadius: radii.sm,
+    // The items inside sit 3px in, at 3px radius, so the corners stay concentric.
+    borderRadius: radii.md,
     backgroundColor: colors.sunk,
+    boxShadow: shadows.field,
   },
   pointCell: {
     display: "grid",
@@ -1897,22 +1983,20 @@ const styles = stylex.create({
     padding: 0,
     borderWidth: 0,
     borderRadius: radii.xs,
-    backgroundColor: { default: "transparent", ":hover": colors.surface },
+    backgroundColor: "transparent",
     cursor: "var(--cursor-pointer, pointer)",
   },
-  pointDot: { width: 3, height: 3, borderRadius: "50%", backgroundColor: colors.faint },
+  pointDot: {
+    width: 3,
+    height: 3,
+    borderRadius: "50%",
+    // The dot under the pointer darkens, so hover never looks like the raised cell that's picked.
+    backgroundColor: { default: colors.faint, [stylex.when.ancestor(":hover")]: colors.text },
+  },
   pointDotOn: {
     width: 6,
     height: 6,
-    backgroundColor: colors.brand,
-  },
-  /** Words alone carry a quieter segment than icons do. */
-  segmentWord: { fontWeight: 400 },
-  segmentWordOn: { fontWeight: 500 },
-  segmentOn: {
-    backgroundColor: colors.surface,
-    boxShadow: shadows.inset,
-    color: colors.text,
+    backgroundColor: colors.text,
   },
   popover: {
     position: "fixed",
@@ -1921,11 +2005,11 @@ const styles = stylex.create({
     flexDirection: "column",
     gap: space.sm,
     width: 312,
-    padding: space.ms,
+    padding: space.sm,
     borderWidth: 1,
     borderStyle: "solid",
     borderColor: colors.border,
-    borderRadius: radii.md,
+    borderRadius: radii.lg,
     backgroundColor: colors.surface,
     boxShadow: shadows.raised,
     color: colors.text,
@@ -1939,8 +2023,10 @@ const styles = stylex.create({
     width: 63,
     height: 63,
     padding: space.xs,
-    borderRadius: radii.sm,
+    // The items inside sit 3px in, at 3px radius, so the corners stay concentric.
+    borderRadius: radii.md,
     backgroundColor: colors.sunk,
+    boxShadow: shadows.field,
   },
   cell: {
     display: "grid",
@@ -1948,9 +2034,15 @@ const styles = stylex.create({
     padding: 0,
     borderWidth: 0,
     borderRadius: radii.xs,
-    backgroundColor: { default: "transparent", ":hover": colors.surface },
+    backgroundColor: "transparent",
     cursor: "var(--cursor-pointer, pointer)",
   },
-  cellDot: { width: 3, height: 3, borderRadius: "50%", backgroundColor: colors.faint },
-  cellDotOn: { width: 6, height: 6, backgroundColor: colors.brand },
+  cellDot: {
+    width: 3,
+    height: 3,
+    borderRadius: "50%",
+    // The dot under the pointer darkens, so hover never looks like the raised cell that's picked.
+    backgroundColor: { default: colors.faint, [stylex.when.ancestor(":hover")]: colors.text },
+  },
+  cellDotOn: { width: 6, height: 6, backgroundColor: colors.text },
 });

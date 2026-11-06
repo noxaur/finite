@@ -412,14 +412,18 @@ fn overview(
         count(doc.tokens().len(), "token"),
     )];
     let pages = doc.pages();
-    if pages.len() > 1 || page.is_some() {
+    if pages.len() > 1 || page.is_some() || pages.iter().any(|(_, p)| p.background.is_some()) {
         let listed: Vec<String> = pages
             .iter()
             .map(|(id, p)| {
                 format!(
-                    "{:?} ({id}, {})",
+                    "{:?} ({id}, {}{})",
                     p.name,
-                    count(doc.artboards_on(id).len(), "artboard")
+                    count(doc.artboards_on(id).len(), "artboard"),
+                    p.background
+                        .as_deref()
+                        .map(|b| format!(", background {b}"))
+                        .unwrap_or_default()
                 )
             })
             .collect();

@@ -1267,7 +1267,7 @@ export class Renderer {
     play.ariaLabel = `Preview ${labelOf(node)}`;
     play.className = stylex.props(styles.play).className ?? "";
     // Its own filter id, since the unfocused artboards' buttons are hidden.
-    play.innerHTML = iconMarkup("play", 10, node.id);
+    play.innerHTML = iconMarkup("play", 10);
     play.hidden = node.id !== this.focused || !this.options.onPreview;
     // So pressing it neither pans the canvas nor places a comment.
     play.dataset.cameraIgnore = "";
@@ -1276,7 +1276,7 @@ export class Renderer {
     });
     const network = document.createElement("span");
     network.className = stylex.props(styles.network).className ?? "";
-    network.innerHTML = iconMarkup("wifi", 10, `net-${node.id}`);
+    network.innerHTML = iconMarkup("wifi", 10);
     network.hidden = true;
     const pin = document.createElement("button");
     pin.type = "button";
@@ -1670,7 +1670,7 @@ const styles = stylex.create({
     position: "absolute",
     left: 0,
     top: 0,
-    boxShadow: "0 1px 3px rgba(0, 0, 0, 0.12), 0 0 0 1px rgba(0, 0, 0, 0.06)",
+    boxShadow: `0 1px 3px color-mix(in srgb, ${colors.ink} 12%, transparent), 0 0 0 1px color-mix(in srgb, ${colors.ink} 8%, transparent)`,
   },
   working: {
     outline: `calc(2px * var(--inv-zoom, 1)) solid ${colors.accent}`,
@@ -1752,8 +1752,8 @@ const styles = stylex.create({
     borderRadius: 4,
     fontSize: 11,
     lineHeight: 1,
-    backgroundColor: { default: "transparent", ":is([aria-pressed=true])": colors.accent },
-    color: { default: colors.muted, ":is([aria-pressed=true])": colors.onAccent },
+    backgroundColor: { default: "transparent", ":is([aria-pressed=true])": colors.activeFill },
+    color: { default: colors.muted, ":is([aria-pressed=true])": colors.text },
     cursor: "var(--cursor-pointer, pointer)",
   },
 });

@@ -1,11 +1,15 @@
 "use client";
 
 import * as stylex from "@stylexjs/stylex";
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
+import { setAlpha } from "@/design/editing/colors";
 import type { TokenTable } from "@/design/replica";
 import type { Node } from "@/design/schema";
 import { aliasOf, bezierOf, displayName, hexOf, isColor, resolveToken } from "@/lib/tokens";
+import { strip } from "@/styles/raised";
 import { colors, fonts, motion, radii, shadows, size, space } from "@/styles/tokens.stylex";
+import { Button, buttonStyle, IconButton, Strip, StripAction, StripItem } from "./Button";
+import { type ColorPick, ColorPicker } from "./ColorPicker";
 import { Icon } from "./Icons";
 import { Dropdown } from "./Menu";
 
@@ -142,72 +146,94 @@ export function TokensPanel({
   return (
     <section data-camera-ignore aria-label="Tokens" {...stylex.props(styles.panel)}>
       <div {...stylex.props(styles.head)}>
-        <span {...stylex.props(styles.label)}>Mode</span>
-        <div role="tablist" aria-label="Modes" {...stylex.props(styles.modes)}>
-          {modes.map((m) =>
-            renaming === m.id ? (
+        <span {...stylex.props(styles.label, styles.headLabel)}>Mode</span>
+        {modes.length === 1 ? (
+          // One mode is nothing to choose between: its name, and + to add another.
+          <>
+            {renaming === modes[0]!.id ? (
               <input
-                key={m.id}
-                aria-label={`Mode name, ${m.name}`}
-                defaultValue={m.name}
+                aria-label={`Mode name, ${modes[0]!.name}`}
+                defaultValue={modes[0]!.name}
                 autoFocus
                 onBlur={(e) => {
                   setRenaming(null);
-                  renameMode(m.id, e.target.value);
+                  renameMode(modes[0]!.id, e.target.value);
                 }}
                 onKeyDown={onEnter}
-                {...stylex.props(styles.input, styles.mode, styles.modeOn)}
+                {...stylex.props(styles.input, styles.sans, styles.onlyMode)}
               />
             ) : (
-              <button
-                key={m.id}
-                type="button"
-                role="tab"
-                aria-selected={m.id === mode?.id}
-                onClick={() => setPicked(m.id)}
-                onDoubleClick={() => setRenaming(m.id)}
+              <span
                 title="Double-click to rename"
-                {...stylex.props(styles.mode, m.id === mode?.id && styles.modeOn)}
+                onDoubleClick={() => setRenaming(modes[0]!.id)}
+                {...stylex.props(styles.onlyMode, styles.onlyModeName)}
               >
-                {m.name}
-              </button>
-            ),
-          )}
-        </div>
-        <button
-          type="button"
-          aria-label="Add a mode"
-          title="Add a mode"
-          onClick={addMode}
-          {...stylex.props(styles.iconButton)}
-        >
-          <Icon name="plus" size={14} />
-        </button>
-        {mode && modes.length > 1 && (
-          <button
-            type="button"
-            aria-label={`Delete mode ${mode.name}`}
-            title="Delete this mode and its values"
-            onClick={() => {
-              setPicked(null);
-              void run(actions.deleteMode(mode.id));
-            }}
-            {...stylex.props(styles.iconButton)}
+                {modes[0]!.name}
+              </span>
+            )}
+            <IconButton variant="ghost" icon="plus" label="Add a mode" onClick={addMode} />
+          </>
+        ) : (
+          <Strip
+            role="tablist"
+            aria-label="Modes"
+            style={styles.modeStrip}
+            actions={
+              <>
+                <StripAction icon="plus" label="Add a mode" onClick={addMode} />
+                {mode && modes.length > 1 && (
+                  <StripAction
+                    icon="minus"
+                    label={`Delete mode ${mode.name}`}
+                    title="Delete this mode and its values"
+                    onClick={() => {
+                      setPicked(null);
+                      void run(actions.deleteMode(mode.id));
+                    }}
+                  />
+                )}
+              </>
+            }
           >
-            <Icon name="minus" size={14} />
-          </button>
+            {modes.map((m) =>
+              renaming === m.id ? (
+                <input
+                  key={m.id}
+                  aria-label={`Mode name, ${m.name}`}
+                  defaultValue={m.name}
+                  autoFocus
+                  onBlur={(e) => {
+                    setRenaming(null);
+                    renameMode(m.id, e.target.value);
+                  }}
+                  onKeyDown={onEnter}
+                  {...stylex.props(strip.item, styles.mode, styles.modeField)}
+                />
+              ) : (
+                <StripItem
+                  key={m.id}
+                  picked={m.id === mode?.id}
+                  onClick={() => setPicked(m.id)}
+                  onDoubleClick={() => setRenaming(m.id)}
+                  title="Double-click to rename"
+                  style={styles.mode}
+                >
+                  {m.name}
+                </StripItem>
+              ),
+            )}
+          </Strip>
         )}
       </div>
 
       {adding === null ? (
-        <button
-          type="button"
+        <Button
+          icon="plus"
           onClick={() => setAdding({ name: "", value: "" })}
-          {...stylex.props(styles.create)}
+          style={styles.create}
         >
-          <Icon name="plus" size={14} />
           Create token
-        </button>
+        </Button>
       ) : (
         <form
           aria-label="Add a token"
@@ -231,15 +257,15 @@ export function TokensPanel({
           />
           <input
             aria-label="New token value"
-            placeholder="#3478ba"
+            placeholder="#95ced7"
             value={adding.value}
             spellCheck={false}
             onChange={(e) => setAdding({ ...adding, value: e.target.value })}
             {...stylex.props(styles.input, styles.field)}
           />
-          <button type="submit" {...stylex.props(styles.addButton)}>
+          <Button type="submit" variant="brand">
             Add
-          </button>
+          </Button>
         </form>
       )}
       {failed && (
@@ -330,15 +356,15 @@ export function TokensPanel({
                           {...stylex.props(styles.input, styles.value)}
                         />
                       )}
-                      <button
-                        type="button"
-                        aria-label={`Delete ${name}`}
+                      <IconButton
+                        size="small"
+                        variant="ghost"
+                        icon="close"
+                        label={`Delete ${name}`}
                         title="Delete this token"
                         onClick={() => void run(actions.save({ tokens: { [name]: null } }))}
-                        {...stylex.props(styles.iconButton, styles.delete)}
-                      >
-                        <Icon name="close" size={12} />
-                      </button>
+                        style={styles.delete}
+                      />
                     </div>
                   );
                 })}
@@ -357,7 +383,7 @@ export function TokensPanel({
                   value={modeOf(board)}
                   options={modes.map((m) => [m.id, m.name] as const)}
                   onPick={(id) => void run(actions.setArtboardMode(board.id, id))}
-                  style={styles.select}
+                  style={[...buttonStyle({ size: "small" }), styles.select]}
                 >
                   <span {...stylex.props(styles.selectText)}>
                     {modes.find((m) => m.id === modeOf(board))?.name}
@@ -373,7 +399,7 @@ export function TokensPanel({
   );
 }
 
-/** A color token's swatch. Clicking it opens the system color picker, which saves when it closes. */
+/** A color token's swatch. Clicking it opens the color picker, which saves when it closes. */
 function ColorSwatch({
   name,
   color,
@@ -383,41 +409,54 @@ function ColorSwatch({
   color: string;
   onPick: (color: string) => void;
 }) {
-  const input = useRef<HTMLInputElement>(null);
-  const parsed = typeof document === "undefined" ? undefined : hexOf(color);
+  const [button, setButton] = useState<HTMLButtonElement | null>(null);
+  const [open, setOpen] = useState(false);
+  // What the picker shows until it closes: a token is saved once, not on every drag.
+  const [picked, setPicked] = useState<string | null>(null);
+  // The last gesture kept, which Escape goes back to.
+  const kept = useRef<string | null>(null);
+  const parsed = typeof document === "undefined" ? undefined : hexOf(picked ?? color);
   const hex = parsed?.hex ?? "#000000";
-  const alpha = parsed?.alpha ?? 1;
-  const pick = useRef(onPick);
-  pick.current = onPick;
-  // React's onChange fires on every drag of the picker; the native change event
-  // fires once, when the picker closes, so a pick is one edit. The input is
-  // uncontrolled, since React would reset a controlled one before that event.
-  useEffect(() => {
-    const el = input.current;
-    if (!el) return;
-    const onChange = () => {
-      if (el.value === hex) return;
-      const a = Math.round(alpha * 255);
-      pick.current(a < 255 ? `${el.value}${a.toString(16).padStart(2, "0")}` : el.value);
-    };
-    el.addEventListener("change", onChange);
-    return () => el.removeEventListener("change", onChange);
-  }, [hex, alpha]);
+  const alpha = Math.round((parsed?.alpha ?? 1) * 100);
+  const toColor = (pick: ColorPick) =>
+    pick.alpha < 100 ? setAlpha(pick.hex, pick.alpha) : pick.hex;
+  const close = () => {
+    setOpen(false);
+    setPicked(null);
+    kept.current = null;
+    if (picked !== null && picked !== color) onPick(picked);
+  };
   return (
-    <label
-      title="Pick a color"
-      {...stylex.props(styles.swatch, styles.pickable)}
-      style={{ background: color }}
-    >
-      <input
-        ref={input}
-        type="color"
+    <>
+      <button
+        ref={setButton}
+        type="button"
+        title="Pick a color"
         aria-label={`Pick a color for ${name}`}
-        key={hex}
-        defaultValue={hex}
-        {...stylex.props(styles.hidden)}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        onClick={() => (open ? close() : setOpen(true))}
+        {...stylex.props(styles.swatch, styles.pickable, open && styles.swatchOpen)}
+        style={{ background: picked ?? color }}
       />
-    </label>
+      {open && button && (
+        <ColorPicker
+          anchor={button}
+          title={`Color for ${name}`}
+          color={hex}
+          alpha={alpha}
+          edit={{
+            preview: (pick) => setPicked(toColor(pick)),
+            commit: (pick) => {
+              kept.current = toColor(pick);
+              setPicked(kept.current);
+            },
+            cancel: () => setPicked(kept.current),
+          }}
+          onClose={close}
+        />
+      )}
+    </>
   );
 }
 
@@ -528,14 +567,17 @@ const styles = stylex.create({
     borderTopStyle: "solid",
     borderTopColor: colors.borderSoft,
   },
+  /** The Mode row: a regular strip with 6px above and below, like the title bar's buttons. */
   head: {
     display: "flex",
     alignItems: "center",
     gap: space.sm,
-    height: size.lg,
     flexShrink: 0,
+    paddingBlock: space.sm,
     paddingInline: space.ms,
   },
+  /** The row is already inset, so its label lines up with the rows' labels without its own. */
+  headLabel: { paddingInline: 0 },
   label: {
     display: "flex",
     alignItems: "center",
@@ -563,62 +605,34 @@ const styles = stylex.create({
     transition: `transform ${motion.base} ${motion.out}`,
   },
   chevronOpen: { transform: "rotate(90deg)" },
-  modes: {
-    display: "flex",
-    flexGrow: 1,
-    minWidth: 0,
-    padding: space.px,
-    borderRadius: radii.sm,
-    backgroundColor: colors.sunk,
-    overflowX: "auto",
-  },
-  mode: {
-    flexGrow: 1,
-    height: size.xs,
-    paddingInline: space.sm,
-    borderWidth: 0,
-    borderRadius: radii.xs,
-    backgroundColor: "transparent",
-    color: { default: colors.muted, ":hover": colors.text },
-    font: "inherit",
-    fontSize: 12,
-    fontWeight: 500,
-    whiteSpace: "nowrap",
-    cursor: "var(--cursor-pointer, pointer)",
-  },
-  modeOn: { backgroundColor: colors.surface, boxShadow: shadows.inset, color: colors.text },
-  iconButton: {
-    display: "grid",
-    placeItems: "center",
-    width: size.xs,
-    height: size.xs,
-    flexShrink: 0,
-    padding: 0,
-    borderWidth: 0,
-    borderRadius: radii.xs,
-    backgroundColor: { default: "transparent", ":hover": colors.sunk },
-    color: { default: colors.muted, ":hover": colors.text },
-    cursor: "var(--cursor-pointer, pointer)",
-  },
-  delete: { color: { default: colors.faint, ":hover": colors.danger } },
-  create: {
+  /** Mode: the mode tabs, then + and −, all in one strip; the open mode is pressed in. */
+  modeStrip: { flexGrow: 1, flexShrink: 1, minWidth: 0 },
+  /** The only mode's name, or the field that renames it: as tall as the strip it stands in for. */
+  onlyMode: { flexGrow: 1, minWidth: 0, height: size.sm },
+  onlyModeName: {
     display: "flex",
     alignItems: "center",
-    gap: space.sm,
-    flexShrink: 0,
-    height: size.sm,
-    marginInline: space.ms,
-    marginBottom: space.sm,
-    paddingInline: space.sm,
-    borderWidth: 0,
-    borderRadius: radii.sm,
-    backgroundColor: { default: "transparent", ":hover": colors.bg },
+    paddingInline: space.xs,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
     color: colors.text,
-    font: "inherit",
-    fontSize: 14,
+    fontFamily: fonts.sans,
+    fontSize: 12,
     fontWeight: 500,
-    cursor: "var(--cursor-pointer, pointer)",
+    lineHeight: "15px",
   },
+  mode: { flexShrink: 0, flexBasis: "auto", minWidth: 60, maxWidth: 120 },
+  modeField: {
+    cursor: "text",
+    backgroundColor: colors.surface,
+    boxShadow: shadows.field,
+    color: colors.text,
+  },
+  /** A row's delete button: a ghost, fainter than the row until it's under the pointer. */
+  delete: { color: { default: colors.faint, ":hover": colors.danger } },
+  create: { alignSelf: "flex-start", marginInline: space.ms, marginBottom: space.sm },
+
   add: {
     display: "grid",
     gridTemplateColumns: "1fr 1fr auto",
@@ -627,24 +641,15 @@ const styles = stylex.create({
     marginInline: space.ms,
     marginBottom: space.sm,
   },
+  /** A sunk field. */
   field: {
     height: size.sm,
     paddingInline: space.sm,
     borderRadius: radii.sm,
     backgroundColor: colors.sunk,
+    boxShadow: shadows.field,
   },
-  addButton: {
-    height: size.sm,
-    paddingInline: space.ms,
-    borderWidth: 0,
-    borderRadius: radii.sm,
-    backgroundColor: { default: colors.brand, ":hover": colors.brandText },
-    color: colors.surface,
-    font: "inherit",
-    fontSize: 12,
-    fontWeight: 500,
-    cursor: "var(--cursor-pointer, pointer)",
-  },
+
   failed: { margin: 0, paddingInline: space.ms, color: colors.danger, fontSize: 12 },
   muted: { margin: 0, paddingInline: space.ms, color: colors.muted, fontSize: 12 },
   scroll: { flexGrow: 1, minHeight: 0, overflowY: "auto", paddingBottom: space.sm },
@@ -659,9 +664,12 @@ const styles = stylex.create({
     alignItems: "center",
     gap: space.sm,
     height: size.sm,
-    paddingInline: space.ms,
-    paddingRight: space.xs,
-    backgroundColor: { default: "transparent", ":hover": colors.bg },
+    // Inset and rounded, as the rows in Layers and Pages; the content stays 9px in.
+    marginInline: space.sm,
+    paddingLeft: space.xs,
+    paddingRight: 0,
+    borderRadius: radii.sm,
+    backgroundColor: { default: "transparent", ":hover": colors.hoverFill },
   },
   swatch: {
     width: 12,
@@ -671,17 +679,9 @@ const styles = stylex.create({
     boxShadow: shadows.edge,
   },
   noSwatch: { boxShadow: "none", backgroundColor: colors.sunk },
-  pickable: { position: "relative", cursor: "var(--cursor-pointer, pointer)" },
-  hidden: {
-    position: "absolute",
-    inset: 0,
-    width: "100%",
-    height: "100%",
-    padding: 0,
-    borderWidth: 0,
-    opacity: 0,
-    cursor: "inherit",
-  },
+  pickable: { padding: 0, borderWidth: 0, cursor: "var(--cursor-pointer, pointer)" },
+  /** The swatch whose picker is open. */
+  swatchOpen: { outline: `1px solid ${colors.brand}`, outlineOffset: 1 },
   frame: {
     display: "grid",
     placeItems: "center",
@@ -702,16 +702,16 @@ const styles = stylex.create({
   corner: {
     width: 12,
     height: 12,
-    marginTop: 4,
-    marginLeft: 4,
+    marginTop: 3,
+    marginLeft: 3,
     borderTopWidth: 1.5,
     borderLeftWidth: 1.5,
     borderTopStyle: "solid",
     borderLeftStyle: "solid",
     borderColor: colors.muted,
   },
-  card: { width: 8, height: 8, borderRadius: 1, backgroundColor: colors.surface },
-  bar: { height: 4, borderRadius: 1, backgroundColor: colors.muted },
+  card: { width: 9, height: 9, borderRadius: 1, backgroundColor: colors.surface },
+  bar: { height: 3, borderRadius: 1, backgroundColor: colors.muted },
   count: { color: colors.faint, fontWeight: 400 },
   pill: {
     position: "relative",
@@ -721,20 +721,27 @@ const styles = stylex.create({
     flexGrow: 1,
     flexBasis: 0,
     minWidth: 0,
-    height: 20,
-    paddingInline: space.xs,
+    height: size.xs,
+    paddingInline: space.sm,
     borderRadius: radii.sm,
-    backgroundColor: { default: colors.sunk, ":hover": colors.brandWash },
+    backgroundColor: colors.sunk,
+    backgroundImage: {
+      default: "none",
+      ":hover": `linear-gradient(${colors.hoverFill}, ${colors.hoverFill})`,
+    },
     color: colors.text,
     fontSize: 12,
+    outline: { default: "none", ":focus-within": `1px solid ${colors.brand}` },
   },
+
   dot: {
-    width: 10,
-    height: 10,
+    width: 9,
+    height: 9,
     flexShrink: 0,
     borderRadius: radii.xs,
     boxShadow: shadows.edge,
   },
+
   pillName: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   pillSelect: {
     position: "absolute",
@@ -744,16 +751,21 @@ const styles = stylex.create({
     font: "inherit",
     cursor: "var(--cursor-pointer, pointer)",
   },
+  /** Plain text in a row; it sinks into a field, ringed in the brand, while it's typed in. */
   input: {
     minWidth: 0,
+    paddingInline: space.xs,
     borderWidth: 0,
-    backgroundColor: "transparent",
+    borderRadius: radii.sm,
+    backgroundColor: { default: "transparent", ":focus": colors.sunk },
+    boxShadow: { default: "none", ":focus": shadows.field },
     color: colors.text,
     fontFamily: fonts.mono,
     fontSize: 12,
-    outline: { default: "none", ":focus-visible": `1px solid ${colors.brand}` },
+    outline: { default: "none", ":focus": `1px solid ${colors.brand}` },
     "::placeholder": { color: colors.faint },
   },
+
   sans: { fontFamily: fonts.sans },
   name: { flexGrow: 1, flexBasis: 0, height: size.xs },
   value: { flexGrow: 1, flexBasis: 0, height: size.xs, color: colors.muted },
@@ -765,21 +777,8 @@ const styles = stylex.create({
     whiteSpace: "nowrap",
     fontSize: 14,
   },
-  select: {
-    display: "flex",
-    alignItems: "center",
-    gap: space.xs,
-    height: size.xs,
-    paddingInline: space.sm,
-    borderRadius: radii.xs,
-    backgroundColor: colors.sunk,
-    boxShadow: {
-      default: "none",
-      ":hover": `inset 0 0 0 1px ${colors.border}`,
-      ":focus-visible": `inset 0 0 0 1px ${colors.borderStrong}`,
-    },
-    color: colors.text,
-    fontSize: 12,
-  },
+  /** An artboard's mode picker: a small button, its chevron close to its label. */
+  select: { gap: space.xs },
+
   selectText: { color: colors.text },
 });

@@ -8,8 +8,8 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use finite_design::{
-    Applied, Design, DesignMeta, Document, Node, NodeKind, Op, Page, PropKey, Record, fractional,
-    tokens::Mode,
+    Applied, Design, DesignMeta, Document, FIRST_PAGE, Node, NodeKind, Op, Page, PropKey, Record,
+    fractional, tokens::Mode,
 };
 use serde_json::{Value, json};
 
@@ -82,10 +82,17 @@ fn ops() -> Vec<Op> {
         Some(Page {
             name: "P".into(),
             index: "V".into(),
+            background: None,
+        }),
+        Some(Page {
+            name: "P".into(),
+            index: "V".into(),
+            background: Some("#e8eef0".into()),
         }),
         Some(Page {
             name: "P".into(),
             index: "0".into(),
+            background: None,
         }),
         None,
     ] {
@@ -93,6 +100,23 @@ fn ops() -> Vec<Op> {
             id: "p".into(),
             page,
         });
+    }
+    // The implicit first page goes into the page map and comes out again.
+    for explicit in [true, false] {
+        ops.push(Op::FirstPage { explicit });
+    }
+    // On `p` and the first page once they're in the page map.
+    for id in ["p", FIRST_PAGE] {
+        ops.push(Op::PageName {
+            id: id.into(),
+            name: "Q".into(),
+        });
+        for background in [Some("#000"), None] {
+            ops.push(Op::PageBackground {
+                id: id.into(),
+                background: background.map(str::to_owned),
+            });
+        }
     }
     for mode in [
         Some(Mode {
@@ -383,8 +407,9 @@ const ACTORS: [&str; 2] = ["alice", "bob"];
 /// Steps in the longest sequence `undo_survives_a_restart` tries.
 const STEPS: usize = 6;
 
-/// Edits as the edit commands build them: valid indexes, `f64` positions.
-fn edits() -> Vec<Op> {
+/// Edits as the edit commands build them: valid indexes, `f64` positions,
+/// and the first page put in the page map before a page op that needs it.
+fn edits() -> Vec<Vec<Op>> {
     let create = |id: &str, parent: Option<&str>, index: &str| Op::Create {
         node: Node {
             parent: parent.map(str::to_owned),
@@ -402,7 +427,8 @@ fn edits() -> Vec<Op> {
         parent: parent.map(str::to_owned),
         index: index.into(),
     };
-    vec![
+    let first_page = |op: Op| vec![Op::FirstPage { explicit: true }, op];
+    let mut edits: Vec<Vec<Op>> = [
         create("a", None, "V"),
         create("b", Some("a"), "V"),
         create("b", None, "W"),
@@ -413,6 +439,28 @@ fn edits() -> Vec<Op> {
         to(None, "W"),
         to(Some("a"), "V"),
     ]
+    .map(|op| vec![op])
+    .into();
+    edits.extend([
+        // As `edit::create_page` adds a second page.
+        first_page(Op::Page {
+            id: "p".into(),
+            page: Some(Page {
+                name: "P".into(),
+                index: "W".into(),
+                background: Some("#e8eef0".into()),
+            }),
+        }),
+        first_page(Op::PageName {
+            id: FIRST_PAGE.into(),
+            name: "Home".into(),
+        }),
+        first_page(Op::PageBackground {
+            id: FIRST_PAGE.into(),
+            background: Some("#000".into()),
+        }),
+    ]);
+    edits
 }
 
 /// Each actor's undo and redo stacks as saved, without the clock.
@@ -439,7 +487,7 @@ fn restored(design: &Design) -> (String, u64, Vec<Value>) {
 /// Runs `steps` live, saving a snapshot before the first and the journal
 /// records after it, as the server does. Returns `None` when a step changes
 /// nothing, since a shorter sequence already covers it.
-fn run(steps: &[Step], edits: &[Op]) -> Option<(Design, Vec<String>, Vec<String>)> {
+fn run(steps: &[Step], edits: &[Vec<Op>]) -> Option<(Design, Vec<String>, Vec<String>)> {
     let mut design = Design::new(DesignMeta {
         id: "d".into(),
         name: "Test".into(),
@@ -452,8 +500,8 @@ fn run(steps: &[Step], edits: &[Op]) -> Option<(Design, Vec<String>, Vec<String>
         let now = now as u64 + 1;
         let change = match *step {
             Step::Edit(actor, i) => {
-                let op = &edits[i];
-                design.commit(actor, &format!("{op:?}"), std::slice::from_ref(op), now)
+                let ops = &edits[i];
+                design.commit(actor, &format!("{ops:?}"), ops, now)
             }
             Step::Undo(actor) => design.undo(actor, now),
             Step::Redo(actor) => design.redo(actor, now),

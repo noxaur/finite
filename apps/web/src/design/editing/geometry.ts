@@ -66,7 +66,7 @@ export function moveArtboards(
  * `bottom`) when only that is set, or the near one. Computed insets are all
  * resolved to pixels, so they can't say which ones a stylesheet set.
  */
-function pinOf(node: Node, near: "left" | "top", far: "right" | "bottom") {
+export function pinOf(node: Pick<Node, "styles">, near: "left" | "top", far: "right" | "bottom") {
   const set = (key: string) => node.styles[key] !== undefined && node.styles[key] !== "auto";
   if (set(near) && set(far)) return "both";
   return set(far) ? "far" : "near";

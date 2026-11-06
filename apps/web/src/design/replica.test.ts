@@ -333,5 +333,16 @@ describe("Replica", () => {
     expect(r.apply({ op: "page", id: "kit", page: null })).toEqual({ op: "page" });
     expect(r.pages.map((p) => p.id)).toEqual(["page-1"]);
     expect(r.pageOf(r.get("b")!)).toBe("page-1");
+
+    // Renaming and recoloring change one field each.
+    expect(r.apply({ op: "firstPage", explicit: true })).toBeNull();
+    expect(r.apply({ op: "pageBackground", id: "page-1", background: "#000" })).toEqual({
+      op: "page",
+    });
+    expect(r.apply({ op: "pageName", id: "page-1", name: "Home" })).toEqual({ op: "page" });
+    expect(r.apply({ op: "pageBackground", id: "page-1", background: null })).toEqual({
+      op: "page",
+    });
+    expect(r.pages).toEqual([{ id: "page-1", name: "Home" }]);
   });
 });

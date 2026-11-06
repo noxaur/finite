@@ -43,6 +43,8 @@ export const Page = Schema.Struct({
   name: Schema.String,
   /** Fractional index: pages sort by this string. */
   index: Schema.String,
+  /** The canvas color behind the page's artboards. Absent, the theme's canvas color shows. */
+  background: Schema.optionalKey(Schema.String),
 });
 export type Page = typeof Page.Type;
 
@@ -98,6 +100,16 @@ export const Op = Schema.Union([
     id: Schema.String,
     page: Schema.NullOr(Page),
   }),
+  /** Renames a page and leaves its other fields alone. */
+  Schema.Struct({ op: Schema.Literal("pageName"), id: Schema.String, name: Schema.String }),
+  /** Sets a page's canvas color, or clears it when `background` is `null`. */
+  Schema.Struct({
+    op: Schema.Literal("pageBackground"),
+    id: Schema.String,
+    background: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  }),
+  /** Puts the implicit first page in the page map (`explicit`), or takes it out while it's unchanged. */
+  Schema.Struct({ op: Schema.Literal("firstPage"), explicit: Schema.Boolean }),
 ]);
 export type Op = typeof Op.Type;
 
@@ -165,6 +177,12 @@ export const UserEdit = Schema.Union([
   /** Adds a page after the others. */
   Schema.Struct({ kind: Schema.Literal("createPage"), name: Schema.String }),
   Schema.Struct({ kind: Schema.Literal("renamePage"), id: Schema.String, name: Schema.String }),
+  /** Sets the canvas color behind a page's artboards; `null` goes back to the theme's. */
+  Schema.Struct({
+    kind: Schema.Literal("setPageBackground"),
+    id: Schema.String,
+    background: Schema.NullOr(Schema.String),
+  }),
   /** Deletes a page and every artboard on it. */
   Schema.Struct({ kind: Schema.Literal("deletePage"), id: Schema.String }),
   /** Moves artboards to another page, into free space there. */

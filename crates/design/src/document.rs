@@ -47,14 +47,33 @@ pub enum Op {
         #[serde(default)]
         css: Option<String>,
     },
-    /// Creates, renames or reorders one page, or removes it when `page` is
-    /// `None`. Removing a page leaves its artboards, which fall back to the
-    /// first page.
+    /// Creates or replaces one page, or removes it when `page` is `None`.
+    /// Removing a page leaves its artboards, which fall back to the first
+    /// page. Edits rename and recolor a page with [`Op::PageName`] and
+    /// [`Op::PageBackground`], which change one field, and make the
+    /// implicit first page a real one with [`Op::FirstPage`].
     Page {
         id: String,
         #[serde(default)]
         page: Option<Page>,
     },
+    /// Renames one page in the page map and leaves its other fields alone,
+    /// so undoing a rename can't undo another actor's background.
+    PageName { id: String, name: String },
+    /// Sets the canvas color behind one page in the page map, or clears it
+    /// when `background` is `None`. It leaves the page's other fields
+    /// alone, so undoing it can't undo another actor's rename.
+    PageBackground {
+        id: String,
+        #[serde(default)]
+        background: Option<String>,
+    },
+    /// With `explicit`, puts the implicit first page in a design without
+    /// pages into the page map, as it is. Without, takes [`FIRST_PAGE`]
+    /// out again when it's the only page and still as it started. Anything
+    /// else is no change, so undoing it never takes away a change another
+    /// actor made to the first page since.
+    FirstPage { explicit: bool },
     /// Sets one token's value in one mode, or removes it when `value` is
     /// `None` (see [`crate::tokens`]). A token without values is gone. One
     /// mode at a time, so undoing one agent's Light value leaves another's
@@ -87,6 +106,10 @@ pub struct Page {
     pub name: String,
     /// Fractional index among pages (see [`crate::fractional`]).
     pub index: String,
+    /// The color of the canvas behind the page's artboards, as a CSS
+    /// color. `None` leaves the viewer's own canvas color.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<String>,
 }
 
 /// The implicit first mode.
@@ -102,6 +125,7 @@ pub const FIRST_PAGE: &str = "page-1";
 static IMPLICIT_PAGE: std::sync::LazyLock<Page> = std::sync::LazyLock::new(|| Page {
     name: "Page 1".into(),
     index: "V".into(),
+    background: None,
 });
 
 /// Reads an op field by field. A derived `Deserialize` for an internally
@@ -119,6 +143,9 @@ impl<'de> Deserialize<'de> for Op {
             Move,
             Css,
             Page,
+            PageName,
+            PageBackground,
+            FirstPage,
             Token,
             Mode,
         }
@@ -136,6 +163,9 @@ impl<'de> Deserialize<'de> for Op {
             css: Option<String>,
             #[serde(default)]
             page: Option<Page>,
+            #[serde(default)]
+            background: Option<String>,
+            explicit: Option<bool>,
             name: Option<String>,
             #[serde(rename = "modeId")]
             mode_id: Option<String>,
@@ -165,6 +195,17 @@ impl<'de> Deserialize<'de> for Op {
             Kind::Page => Op::Page {
                 id: wire.id.ok_or_else(|| need("id"))?,
                 page: wire.page,
+            },
+            Kind::PageName => Op::PageName {
+                id: wire.id.ok_or_else(|| need("id"))?,
+                name: wire.name.ok_or_else(|| need("name"))?,
+            },
+            Kind::PageBackground => Op::PageBackground {
+                id: wire.id.ok_or_else(|| need("id"))?,
+                background: wire.background,
+            },
+            Kind::FirstPage => Op::FirstPage {
+                explicit: wire.explicit.ok_or_else(|| need("explicit"))?,
             },
             Kind::Token => Op::Token {
                 name: wire.name.ok_or_else(|| need("name"))?,
@@ -219,7 +260,15 @@ impl Op {
             Op::Move { id, index, .. } => BASE + id.len() + index.len(),
             Op::Css { css } => BASE + css.as_ref().map_or(0, String::len),
             Op::Page { id, page } => {
-                BASE + id.len() + page.as_ref().map_or(0, |p| p.name.len() + p.index.len())
+                BASE + id.len()
+                    + page.as_ref().map_or(0, |p| {
+                        p.name.len() + p.index.len() + p.background.as_ref().map_or(0, String::len)
+                    })
+            }
+            Op::PageName { id, name } => BASE + id.len() + name.len(),
+            Op::FirstPage { .. } => BASE,
+            Op::PageBackground { id, background } => {
+                BASE + id.len() + background.as_ref().map_or(0, String::len)
             }
             Op::Token {
                 name,
@@ -233,13 +282,19 @@ impl Op {
     }
 
     /// The node this op creates, deletes or changes. Empty for the ops that
-    /// change the design rather than a node: [`Op::Css`], [`Op::Page`],
+    /// change the design rather than a node: [`Op::Css`], the page ops,
     /// [`Op::Token`] and [`Op::Mode`].
     pub fn id(&self) -> &str {
         match self {
             Op::Create { node } => &node.id,
             Op::Delete { id } | Op::Set { id, .. } | Op::Move { id, .. } => id,
-            Op::Css { .. } | Op::Page { .. } | Op::Token { .. } | Op::Mode { .. } => "",
+            Op::Css { .. }
+            | Op::Page { .. }
+            | Op::PageName { .. }
+            | Op::PageBackground { .. }
+            | Op::FirstPage { .. }
+            | Op::Token { .. }
+            | Op::Mode { .. } => "",
         }
     }
 }
@@ -872,6 +927,42 @@ impl Document {
                     id: id.clone(),
                     page: previous,
                 }]))
+            }
+            Op::PageName { id, name } => {
+                let page = (self.pages.get_mut(id)).ok_or_else(|| Rejected::Missing(id.clone()))?;
+                if page.name == *name {
+                    return Ok(Unchanged);
+                }
+                let previous = std::mem::replace(&mut page.name, name.clone());
+                Ok(Changed(vec![Op::PageName {
+                    id: id.clone(),
+                    name: previous,
+                }]))
+            }
+            Op::PageBackground { id, background } => {
+                let page = (self.pages.get_mut(id)).ok_or_else(|| Rejected::Missing(id.clone()))?;
+                if page.background == *background {
+                    return Ok(Unchanged);
+                }
+                let previous = std::mem::replace(&mut page.background, background.clone());
+                Ok(Changed(vec![Op::PageBackground {
+                    id: id.clone(),
+                    background: previous,
+                }]))
+            }
+            Op::FirstPage { explicit: true } => {
+                if !self.pages.is_empty() {
+                    return Ok(Unchanged);
+                }
+                self.pages.insert(FIRST_PAGE.into(), IMPLICIT_PAGE.clone());
+                Ok(Changed(vec![Op::FirstPage { explicit: false }]))
+            }
+            Op::FirstPage { explicit: false } => {
+                if self.pages.len() != 1 || self.pages.get(FIRST_PAGE) != Some(&*IMPLICIT_PAGE) {
+                    return Ok(Unchanged);
+                }
+                self.pages.clear();
+                Ok(Changed(vec![Op::FirstPage { explicit: true }]))
             }
         }
     }

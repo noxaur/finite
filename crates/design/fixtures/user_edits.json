@@ -120,6 +120,11 @@
     "name": "Drafts"
   },
   {
+    "background": "#e8eef0",
+    "id": "page",
+    "kind": "setPageBackground"
+  },
+  {
     "id": "page",
     "kind": "deletePage"
   },

@@ -11,3 +11,14 @@ html,
 body {
   margin: 0;
 }
+
+/* The desktop app's title bar is the page's tab bar (TabBar.tsx): it drags
+   the window, and what's in it stays clickable. Browsers ignore these. */
+[data-app-region="drag"] {
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+[data-app-region="drag"] :is(button, a, input, select, [role="tablist"]) {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}

@@ -1,194 +1,203 @@
 "use client";
 
 import * as stylex from "@stylexjs/stylex";
-import type { Ref } from "react";
+import type { ReactElement } from "react";
 import { PIN_PATH } from "@/lib/cursors";
-import {
-  colors,
-  fonts,
-  motion,
-  outlines,
-  radii,
-  shadows,
-  size,
-  space,
-} from "@/styles/tokens.stylex";
+import { hideMode } from "@/styles/hideMode";
+import { colors, radii, shadows, size, space } from "@/styles/tokens.stylex";
+import { IconButton } from "./Button";
 import type { Mode } from "./Comments";
 
 /**
- * The tools, down the left edge of the canvas, and the zoom below them.
- * The camera writes the zoom percentage into `zoomLabel` itself, so
- * zooming doesn't re-render the canvas.
+ * The tools, down the left edge of the canvas. Shown with the sidebars, the
+ * rail is a column of the window. In hide mode (`hidden`), the column slides
+ * off with the left sidebar and the tools travel, as they are, to the middle
+ * of the canvas's left edge, where a panel's face fades in around them; they
+ * travel back when the sidebars return. It's one element throughout, so
+ * focus, hover and a toggle mid-way all carry over. `instant` skips the motion.
  */
 export function ToolRail({
   mode,
   onMode,
-  zoomLabel,
-  onZoom,
-  onActualSize,
-  onFit,
+  hidden = false,
+  instant = false,
 }: {
   mode: Mode;
   onMode: (mode: Mode) => void;
-  zoomLabel: Ref<HTMLButtonElement>;
-  onZoom: (by: number) => void;
-  onActualSize: () => void;
-  onFit: () => void;
+  hidden?: boolean;
+  instant?: boolean;
 }) {
-  const tool = (m: Mode) => ({
-    type: "button" as const,
-    "aria-pressed": mode === m,
-    onClick: () => onMode(m),
-    ...stylex.props(styles.button, mode === m && styles.on),
-  });
+  const tool = (m: Mode, label: string, title: string, icon: ReactElement) => (
+    <IconButton
+      variant="ghost"
+      icon={icon}
+      label={label}
+      title={title}
+      picked={mode === m}
+      aria-pressed={mode === m}
+      onClick={(e) => {
+        onMode(m);
+        // A pointer click leaves focus on the button, and the next V/I/C key press would
+        // make `:focus-visible` match and draw the ring. `detail` is 0 for Enter and Space.
+        if (e.detail > 0) e.currentTarget.blur();
+      }}
+    />
+  );
   return (
-    <nav data-camera-ignore aria-label="Tools" {...stylex.props(styles.rail)}>
-      {/* The rail renders before any pins, so it carries its own wobble filter. */}
-      <svg width="0" height="0" style={{ position: "absolute" }} aria-hidden="true">
-        <filter id="tool-wob" x="-20%" y="-20%" width="140%" height="140%">
-          <feTurbulence type="fractalNoise" baseFrequency="0.045" numOctaves="1" seed="3" />
-          <feDisplacementMap
-            in="SourceGraphic"
-            scale="3"
-            xChannelSelector="R"
-            yChannelSelector="G"
-          />
-        </filter>
-      </svg>
+    <nav
+      data-camera-ignore
+      aria-label="Tools"
+      {...stylex.props(styles.rail, hidden && styles.railHidden)}
+    >
+      <span
+        aria-hidden
+        {...stylex.props(
+          styles.column,
+          hideMode.panel,
+          hidden && hideMode.panelHidden,
+          hidden && hideMode.offLeft,
+          instant && hideMode.instant,
+        )}
+      />
+      {/* Moves across, and down by half the rail's height; the tools come up by half their own. */}
       <div
-        role="toolbar"
-        aria-label="Tool"
-        aria-orientation="vertical"
-        {...stylex.props(styles.group)}
+        {...stylex.props(
+          styles.mover,
+          hideMode.travel,
+          hideMode.dip,
+          hidden && hideMode.travelHidden,
+          hidden && hideMode.dipHidden,
+          hidden && styles.moverHidden,
+          instant && hideMode.instant,
+        )}
       >
-        <button {...tool("pointer")} title="Pointer (V)">
-          <svg width="18" height="18" viewBox="0 0 24 24" overflow="visible" aria-hidden="true">
-            <path
-              d="M6 3.5 18.5 12l-5.6 1.3-2.9 5.7z"
-              fill="currentColor"
-              stroke="currentColor"
-              strokeWidth="1.8"
-              strokeLinejoin="round"
-              filter="url(#tool-wob)"
-            />
-          </svg>
-        </button>
-        <button {...tool("interact")} title="Interact (I): click, type and scroll in pages">
+        <div
+          role="toolbar"
+          aria-label="Tool"
+          aria-orientation="vertical"
+          {...stylex.props(
+            styles.tools,
+            hideMode.travel,
+            hidden && hideMode.travelHidden,
+            hidden && styles.toolsHidden,
+            instant && hideMode.instant,
+          )}
+        >
+          <span
+            aria-hidden
+            {...stylex.props(
+              styles.face,
+              hideMode.face,
+              hidden && hideMode.faceShown,
+              instant && hideMode.instant,
+            )}
+          />
+          {tool(
+            "pointer",
+            "Pointer",
+            "Pointer (V)",
+            <svg width="15" height="15" viewBox="0 0 24 24" overflow="visible" aria-hidden="true">
+              <path
+                d="M5.6 5.6l13.6 4.8-6.4 2.4-2.4 6.4z"
+                fill="currentColor"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinejoin="round"
+              />
+            </svg>,
+          )}
           {/* An outlined pointer with a click's rays: the pointer, using the page. */}
-          <svg width="18" height="18" viewBox="0 0 24 24" overflow="visible" aria-hidden="true">
-            <path
-              d="M8.6 7.6c3 1.9 5.9 3.9 8.9 5.9-1.5.4-2.9.7-4.3 1.1-.7 1.4-1.4 2.8-2.2 4.2-.8-3.7-1.6-7.4-2.4-11.2z M6.2 3.4l.9 2 M3.4 6.9l2.1.5 M10.2 2.7l-.3 2.1"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.9"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              filter="url(#tool-wob)"
-            />
-          </svg>
-        </button>
-        <button {...tool("comment")} title="Comment (C)">
+          {tool(
+            "interact",
+            "Interact",
+            "Interact (I): click, type and scroll in pages",
+            <svg width="15" height="15" viewBox="0 0 24 24" overflow="visible" aria-hidden="true">
+              <path
+                d="M8 8l12 4.4-5.6 2-2 5.6zM8 2.4v2.4M2.4 8h2.4M4 4l1.7 1.7"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>,
+          )}
           {/* The pin's own outline, so the tool looks like what it places. */}
-          <svg width="20" height="18" viewBox="0 0 40 36" overflow="visible" aria-hidden="true">
-            <path
-              d={PIN_PATH}
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="3.2"
-              strokeLinejoin="round"
-              filter="url(#tool-wob)"
-            />
-          </svg>
-        </button>
-      </div>
-      <span {...stylex.props(styles.spacer)} />
-      <div role="group" aria-label="Zoom" {...stylex.props(styles.group)}>
-        <button
-          type="button"
-          onClick={() => onZoom(1.25)}
-          aria-label="Zoom in"
-          {...stylex.props(styles.button, styles.sign)}
-        >
-          +
-        </button>
-        <button
-          type="button"
-          ref={zoomLabel}
-          onClick={onActualSize}
-          title="Zoom to 100% (0)"
-          {...stylex.props(styles.zoom)}
-        />
-        <button
-          type="button"
-          onClick={() => onZoom(0.8)}
-          aria-label="Zoom out"
-          {...stylex.props(styles.button, styles.sign)}
-        >
-          −
-        </button>
-        <button
-          type="button"
-          onClick={onFit}
-          title="Zoom to fit (Shift+1)"
-          {...stylex.props(styles.button, styles.text)}
-        >
-          Fit
-        </button>
+          {tool(
+            "comment",
+            "Comment",
+            "Comment (C)",
+            <svg width="15" height="15" viewBox="-2 -4 44 44" overflow="visible" aria-hidden="true">
+              <path
+                d={PIN_PATH}
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.9"
+                strokeLinejoin="round"
+              />
+            </svg>,
+          )}
+        </div>
       </div>
     </nav>
   );
 }
 
 const styles = stylex.create({
+  // Its own stacking layer over the canvas, which runs under it in hide mode.
   rail: {
     gridArea: "rail",
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    gap: space.sm,
+    position: "relative",
+    zIndex: 2,
     minHeight: 0,
-    paddingBlock: space.sm,
+  },
+  // In hide mode only the tools take clicks; the canvas has the rest.
+  railHidden: { pointerEvents: "none" },
+  // The docked rail's look: a column with a line on its right.
+  // Under the tools: the rail is a stacking context, and this sits at its bottom.
+  column: {
+    position: "absolute",
+    inset: 0,
+    zIndex: -1,
+    pointerEvents: "none",
     backgroundColor: colors.surface,
     borderRightWidth: 1,
     borderRightStyle: "solid",
     borderRightColor: colors.border,
   },
-  group: { display: "flex", flexDirection: "column", alignItems: "center", gap: space.xs },
-  spacer: { flexGrow: 1 },
-  button: {
-    display: "grid",
-    placeItems: "center",
-    width: 30,
-    height: 30,
-    padding: 0,
-    borderWidth: 0,
-    borderRadius: radii.sm,
-    backgroundColor: { default: "transparent", ":hover": colors.bg },
-    boxShadow: { default: "none", ":active": shadows.inset },
-    color: colors.text,
-    font: "inherit",
-    cursor: "var(--cursor-pointer, pointer)",
-    transform: { default: "none", ":active": "scale(.97)" },
-    transition: `background-color ${motion.fast} ease, transform 120ms ${motion.out}`,
-    outline: { default: "none", ":focus-visible": outlines.focus },
-    outlineOffset: -3,
+  mover: {
+    position: "absolute",
+    inset: 0,
+    pointerEvents: "none",
   },
-  on: {
-    backgroundColor: { default: colors.accent, ":hover": colors.accent },
-    color: colors.onAccent,
-  },
-  text: { fontSize: 12, fontWeight: 500 },
-  sign: { fontSize: 14, fontWeight: 500 },
-  zoom: {
+  // To 9px from the canvas's left edge, and half the rail's height down.
+  moverHidden: { transform: `translate(calc(${space.ms} - ${size.left}), 50%)` },
+  /** The 27px tools, 6px from the rail's edges and 6px apart. */
+  tools: {
+    position: "relative",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: space.sm,
     width: size.rail,
-    height: 21,
-    padding: 0,
-    borderWidth: 0,
-    backgroundColor: "transparent",
-    color: { default: colors.muted, ":hover": colors.text },
-    fontFamily: fonts.mono,
-    fontSize: 11,
-    fontVariantNumeric: "tabular-nums",
-    cursor: "var(--cursor-pointer, pointer)",
+    padding: space.sm,
+    boxSizing: "border-box",
+    pointerEvents: "auto",
+    // A stacking context, so the face can sit under the tools.
+    zIndex: 0,
+  },
+  toolsHidden: { transform: "translateY(-50%)" },
+  /** The floating panel's face: its 9px corners are the tools' 3px plus the 6px around them. */
+  face: {
+    position: "absolute",
+    inset: 0,
+    borderWidth: 1,
+    borderStyle: "solid",
+    borderColor: colors.border,
+    borderRadius: radii.lg,
+    backgroundColor: colors.surface,
+    boxShadow: shadows.raised,
+    pointerEvents: "none",
+    zIndex: -1,
   },
 });

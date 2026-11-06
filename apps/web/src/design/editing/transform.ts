@@ -320,6 +320,37 @@ export function withRotation(
   return transformStyles(styles, { ...value, rotate: degrees }, sheet);
 }
 
+/** A rotation `by` degrees on from `degrees`, kept within -180 to 180: a quarter turn on from 135 is -135. */
+export function turned(degrees: number, by: number): number {
+  const n = (((degrees + by) % 360) + 360) % 360;
+  return round(n > 180 ? n - 360 : n);
+}
+
+/** Whether a `scale` only mirrors, each axis at 1 or -1, like a flip; `none` is one too. */
+export function isFlip(scale: string | undefined): boolean {
+  const s = parseScale(scale);
+  return s !== null && Math.abs(s[0]) === 1 && Math.abs(s[1]) === 1;
+}
+
+/** Whether `styles` draw the element mirrored along x and y; `null` when the controls can't say. */
+export function flipsOf(styles: TransformStyles): { x: boolean; y: boolean } | null {
+  const { value } = readTransform(styles);
+  return value ? { x: value.scaleX < 0, y: value.scaleY < 0 } : null;
+}
+
+/** The styles that mirror an element along `axis`, keeping the rest of its transform. */
+export function flipStyles(
+  styles: TransformStyles,
+  axis: "x" | "y",
+  sheet: TransformStyles = {},
+): Record<string, string | null> {
+  const { value } = readTransform(withSheet(styles, sheet));
+  if (!value) return {};
+  const next =
+    axis === "x" ? { ...value, scaleX: -value.scaleX } : { ...value, scaleY: -value.scaleY };
+  return transformStyles(styles, next, sheet);
+}
+
 /** Which cell of a 3×3 grid `transform-origin` names, or `null` when it's off the grid. */
 export function originCell(v: string | undefined): { x: number; y: number } | null {
   const all = parts(v ?? "");
