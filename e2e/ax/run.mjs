@@ -40,7 +40,7 @@ const { values: opts } = parseArgs({
     surface: { type: "string" },
     parallel: { type: "string", default: "4" },
     "no-feedback": { type: "boolean", default: false },
-    // KEY=VALUE for the server, like FINITE_MCP_EXTRA=search. Repeatable.
+    // KEY=VALUE for the server, like RUST_LOG=debug. Repeatable.
     env: { type: "string", multiple: true, default: [] },
   },
 });

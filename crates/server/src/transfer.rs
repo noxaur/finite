@@ -16,7 +16,7 @@ use finite_transfer::{
 };
 
 use crate::{
-    hub::{Actor, Hub, OpenError, now_ms, random_id},
+    hub::{Actor, Hub, OpenError, node_id, now_ms, random_id},
     screenshot,
     store::Store,
 };
@@ -245,7 +245,7 @@ impl Prepared {
             file_name: self.file_name,
             received_at: now_ms(),
         };
-        let (import, placed) = self.imported.place(tx, receipt, &mut || random_id(8))?;
+        let (import, placed) = self.imported.place(tx, receipt, &mut node_id)?;
         tx.record_import(import.clone());
         Ok(ImportResult {
             import,

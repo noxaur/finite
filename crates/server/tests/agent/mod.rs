@@ -17,29 +17,16 @@ use tower::ServiceExt;
 
 pub struct Agent {
     app: Router,
-    /// The endpoint: `/mcp`, or `/mcp/classic`.
-    path: &'static str,
     pub name: &'static str,
     session: Option<String>,
     next_id: u64,
 }
 
 impl Agent {
-    /// Connects to today's tools at `/mcp/classic`, which most tests drive.
+    /// Connects to `/mcp`.
     pub async fn connect(app: &Router, name: &'static str) -> Self {
-        Self::connect_at(app, name, "/mcp/classic").await
-    }
-
-    /// Connects to `/mcp`, which serves the doc6 tools by default.
-    pub async fn connect_doc6(app: &Router, name: &'static str) -> Self {
-        Self::connect_at(app, name, "/mcp").await
-    }
-
-    /// Connects to the MCP endpoint at `path`.
-    pub async fn connect_at(app: &Router, name: &'static str, path: &'static str) -> Self {
         let mut agent = Self {
             app: app.clone(),
-            path,
             name,
             session: None,
             next_id: 1,
@@ -56,7 +43,7 @@ impl Agent {
 
     fn request(&self, body: Value) -> Request<Body> {
         // rmcp checks Host to block DNS rebinding, so send what a local client would.
-        let mut req = Request::post(self.path)
+        let mut req = Request::post("/mcp")
             .header(header::HOST, "127.0.0.1:4100")
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::ACCEPT, "application/json, text/event-stream");
@@ -127,6 +114,36 @@ impl Agent {
         let (text, error) = self.call(tool, args).await;
         assert!(!error, "{tool} failed: {text}");
         text
+    }
+
+    /// Creates a design and returns its id.
+    pub async fn design(&mut self, name: &str) -> String {
+        let created = self.ok("designs", json!({ "create": name })).await;
+        created
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .find(|w| w.len() == 10)
+            .expect("a design id")
+            .to_owned()
+    }
+
+    /// Runs `ops` as one edit without the layout check, which needs a browser.
+    pub async fn edit(&mut self, design: &str, ops: Value) -> String {
+        self.ok(
+            "edit",
+            json!({ "designId": design, "ops": ops, "check": false }),
+        )
+        .await
+    }
+
+    /// Makes an artboard and returns its id.
+    pub async fn artboard(&mut self, design: &str, name: &str, width: u32, height: u32) -> String {
+        let made = self
+            .edit(
+                design,
+                json!([{ "op": "artboard", "name": name, "width": width, "height": height }]),
+            )
+            .await;
+        id_after(&made, "Created artboard")
     }
 }
 

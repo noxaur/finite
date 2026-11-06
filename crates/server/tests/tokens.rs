@@ -10,63 +10,43 @@ use finite_server::{
     Hub, app,
     store::{MemoryStore, Store},
 };
-use serde_json::{Value, json};
-
-fn design_id(created: &str) -> String {
-    created
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .find(|w| w.len() == 10)
-        .expect("a design id")
-        .to_owned()
-}
+use serde_json::json;
 
 #[tokio::test]
 async fn an_agent_sets_tokens_in_two_modes_and_undoes_them() {
     let app = test_app();
     let mut agent = Agent::connect(&app, "Alice").await;
-    let design = design_id(&agent.ok("create_design", json!({ "name": "Flow" })).await);
+    let design = agent.design("Flow").await;
 
     let saved = agent
-        .ok(
-            "set_tokens",
-            json!({ "designId": design, "modes": ["Light", "Dark"],
-                    "tokens": { "--brand": "#f97316", "--bg": { "Light": "#fff", "Dark": "#111" } } }),
+        .edit(
+            &design,
+            json!([{ "op": "tokens", "modes": ["Light", "Dark"],
+                     "set": { "--brand": "#f97316", "--bg": { "Light": "#fff", "Dark": "#111" } } }]),
         )
         .await;
-    assert!(saved.contains("Saved 2 tokens"), "{saved}");
-    assert!(saved.contains("in modes Light, Dark"), "{saved}");
+    assert!(saved.contains("2 tokens"), "{saved}");
+    assert!(saved.contains("Light, Dark"), "{saved}");
 
     let board = agent
-        .ok(
-            "create_artboard",
-            json!({ "designId": design, "name": "Night", "width": 390, "height": 844, "mode": "dark",
-                    "html": "<button style=\"background: var(--brand)\">Go</button>" }),
+        .edit(
+            &design,
+            json!([{ "op": "artboard", "name": "Night", "width": 390, "height": 844, "mode": "dark",
+                     "html": "<button style=\"background: var(--brand)\">Go</button>" }]),
         )
         .await;
     let board = id_after(&board, "Created artboard");
-    let info = agent
-        .ok("get_basic_info", json!({ "designId": design }))
-        .await;
-    assert!(info.contains("\"tokenCount\": 2"), "{info}");
-    assert!(info.contains("\"mode\": \"Dark\""), "{info}");
+    let overview = agent.ok("read", json!({ "designId": design })).await;
+    assert!(overview.contains("2 tokens"), "{overview}");
 
-    // get_tokens reads back the way set_tokens takes them.
-    let tokens: Value =
-        serde_json::from_str(&agent.ok("get_tokens", json!({ "designId": design })).await).unwrap();
-    assert_eq!(
-        tokens,
-        json!({
-            "modes": ["Light", "Dark"],
-            "tokens": { "--bg": { "Light": "#fff", "Dark": "#111" }, "--brand": "#f97316" },
-            "artboardModes": { "Dark": [board] },
-        })
+    // The css view lists the tokens the way the tokens op takes them.
+    let sheets = agent
+        .ok("read", json!({ "designId": design, "as": "css" }))
+        .await;
+    assert!(
+        sheets.contains("--bg") && sheets.contains("#111") && sheets.contains("--brand"),
+        "{sheets}"
     );
-
-    // get_html says the artboard reads values it leaves out.
-    let html = agent
-        .ok("get_html", json!({ "designId": design, "nodeId": board }))
-        .await;
-    assert!(html.contains("2 tokens (get_tokens)"), "{html}");
 
     for (bad, why) in [
         (json!({ "--brand": "red; color: blue" }), "outside a string"),
@@ -77,14 +57,19 @@ async fn an_agent_sets_tokens_in_two_modes_and_undoes_them() {
         ),
     ] {
         let (error, failed) = agent
-            .call("set_tokens", json!({ "designId": design, "tokens": bad }))
+            .call(
+                "edit",
+                json!({ "designId": design, "check": false,
+                        "ops": [{ "op": "tokens", "set": bad }] }),
+            )
             .await;
         assert!(failed && error.contains(why), "{error}");
     }
     let (error, failed) = agent
         .call(
-            "set_artboard_mode",
-            json!({ "designId": design, "artboardIds": [board], "mode": "Sepia" }),
+            "edit",
+            json!({ "designId": design, "check": false,
+                    "ops": [{ "op": "move", "select": format!("#{board}"), "mode": "Sepia" }] }),
         )
         .await;
     assert!(
@@ -95,10 +80,11 @@ async fn an_agent_sets_tokens_in_two_modes_and_undoes_them() {
     // They're edits like any other, so undo takes them back.
     agent.ok("undo", json!({ "designId": design })).await;
     let undone = agent.ok("undo", json!({ "designId": design })).await;
-    assert_eq!(undone, "Undid: Set tokens");
-    let tokens: Value =
-        serde_json::from_str(&agent.ok("get_tokens", json!({ "designId": design })).await).unwrap();
-    assert_eq!(tokens, json!({ "modes": ["Default"], "tokens": {} }));
+    assert!(undone.contains("Undid"), "{undone}");
+    let sheets = agent
+        .ok("read", json!({ "designId": design, "as": "css" }))
+        .await;
+    assert!(sheets.contains("no tokens"), "{sheets}");
 }
 
 /// A design saved with shared CSS gets tokens the first time it loads, and
@@ -118,6 +104,7 @@ async fn shared_css_becomes_tokens_when_a_design_loads() {
         position: None,
         page: None,
         styles: Default::default(),
+        ..Default::default()
     };
     let mut ops = finite_design::edit::create_artboard(old.doc(), "home".into(), spec).unwrap();
     ops.push(Op::Css {
@@ -130,13 +117,16 @@ async fn shared_css_becomes_tokens_when_a_design_loads() {
     let app = app(Hub::new(store.clone()).unwrap(), None);
     let mut agent = Agent::connect(&app, "Alice").await;
     let tokens = agent
-        .ok("get_tokens", json!({ "designId": "oldcss0001" }))
+        .ok("read", json!({ "designId": "oldcss0001", "as": "css" }))
         .await;
-    assert!(tokens.contains("\"--ink\": \"#111\""), "{tokens}");
+    assert!(
+        tokens.contains("--ink") && tokens.contains("#111"),
+        "{tokens}"
+    );
     let html = agent
         .ok(
-            "get_html",
-            json!({ "designId": "oldcss0001", "nodeId": "home" }),
+            "read",
+            json!({ "designId": "oldcss0001", "select": "#home", "as": "html" }),
         )
         .await;
     assert!(html.contains(".btn { color: var(--ink) }"), "{html}");

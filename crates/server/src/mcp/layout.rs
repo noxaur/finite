@@ -113,12 +113,7 @@ impl<'a> Report<'a> {
     /// isn't cut off by the artboard, so it isn't counted. Growing the
     /// artboard is suggested only for what is a direct child of it, in the
     /// flow: that's the content a taller artboard makes room for.
-    pub(super) fn new(
-        doc: &Document,
-        artboard: &str,
-        boxes: &'a [ElementBox],
-        surface: super::Surface,
-    ) -> Self {
+    pub(super) fn new(doc: &Document, artboard: &str, boxes: &'a [ElementBox]) -> Self {
         use std::collections::{HashMap, HashSet};
         let by_id: HashMap<&str, &ElementBox> = boxes.iter().map(|b| (b.id.as_str(), b)).collect();
         let Some(board) = by_id.get(artboard) else {
@@ -181,16 +176,7 @@ impl<'a> Report<'a> {
                 if let Some(height) = fits {
                     let _ = write!(
                         text,
-                        " If it should all show, make the artboard taller with {}.",
-                        if surface.doc6() {
-                            format!(
-                                "{{\"op\": \"css\", \"css\": \"#{artboard} {{ height: {height:.0}px }}\"}}"
-                            )
-                        } else {
-                            format!(
-                                "update_styles {{\"updates\": [{{\"nodeIds\": [\"{artboard}\"], \"styles\": {{\"height\": \"{height:.0}px\"}}}}]}}"
-                            )
-                        }
+                        " If it should all show, make the artboard taller with {{\"op\": \"css\", \"css\": \"#{artboard} {{ height: {height:.0}px }}\"}}."
                     );
                 }
             }
@@ -406,13 +392,8 @@ impl<'a> Texts<'a> {
 
 /// The layout check on `boxes`: content cut off at the artboard's edges and
 /// text that runs past its box, or a line saying there's none.
-pub(super) fn layout_notes(
-    doc: &Document,
-    artboard: &str,
-    boxes: &[ElementBox],
-    surface: super::Surface,
-) -> String {
-    let report = Report::new(doc, artboard, boxes, surface);
+pub(super) fn layout_notes(doc: &Document, artboard: &str, boxes: &[ElementBox]) -> String {
+    let report = Report::new(doc, artboard, boxes);
     let kept: Vec<&Found> = report.found.iter().collect();
     let notes = report.text(doc, &Named::new(&kept));
     if notes.is_empty() {

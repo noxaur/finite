@@ -15,10 +15,9 @@ use axum::{
 };
 use finite_design::{
     Document, Op, Snapshot,
-    comment::{self, Anchor, Audience, Author, AuthorKind, Comment, CommentError},
+    comment::{Anchor, Audience, Comment, CommentError},
     edit::{self, EditError},
     import::ImportRecord,
-    user_edit::UserEdit,
     version::{self, VersionError},
 };
 use serde::{Deserialize, Serialize};
@@ -28,10 +27,9 @@ use crate::blob::{self, BlobHash};
 use crate::cluster::Place;
 use crate::heartbeat::{self, Heartbeat};
 use crate::hub::{
-    Actor, AdoptError, DesignHandle, DesignSummary, Hub, LOBBY_LIMIT, OpenError, Outgoing, Since,
-    Stamp, is_design_id,
+    Actor, AdoptError, ClientMessage, DesignHandle, DesignSummary, Hub, LOBBY_LIMIT, OpenError,
+    Outgoing, Since, UserAuthor, is_design_id, node_id,
 };
-use crate::mcp::{TokenValue, token_ops};
 use crate::transfer::{self, ImportRequest, ImportResult, TransferError};
 
 /// The largest design another server can hand off. axum's default of 2 MB
@@ -372,30 +370,6 @@ async fn put_asset(
     .map_err(|e| ApiError::Unavailable(e.to_string()))?
 }
 
-/// Who is commenting. Users have no accounts yet, so the browser picks an id
-/// and a name, and the server marks them as users.
-#[derive(Clone, Deserialize)]
-struct UserAuthor {
-    id: String,
-    name: String,
-}
-
-impl UserAuthor {
-    fn into_author(self) -> Author {
-        let id: String = self.id.chars().take(comment::MAX_USER_ID).collect();
-        let name = self.name.trim();
-        Author {
-            id: format!("user:{id}"),
-            name: if name.is_empty() {
-                "Guest".into()
-            } else {
-                name.chars().take(comment::MAX_NAME).collect()
-            },
-            kind: AuthorKind::User,
-        }
-    }
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateComment {
@@ -544,17 +518,17 @@ struct SetTokens {
     #[serde(default)]
     modes: Option<Vec<String>>,
     #[serde(default)]
-    tokens: BTreeMap<String, Option<TokenValue>>,
+    tokens: BTreeMap<String, edit::TokenChange>,
 }
 
-/// Names the modes and sets tokens, as `set_tokens` does for an agent.
+/// Names the modes and sets tokens, as an agent's tokens op does.
 async fn set_tokens(
     State(hub): State<Arc<Hub>>,
     Path(id): Path<String>,
     Json(body): Json<SetTokens>,
 ) -> Result<Json<Changed>, ApiError> {
     person_edit(&hub, &id, body.author, "Set tokens", |doc| {
-        token_ops(doc, body.modes.as_deref(), &body.tokens)
+        edit::edit_tokens(doc, body.modes.as_deref(), &body.tokens, &mut node_id)
     })
     .await
 }
@@ -755,30 +729,6 @@ async fn lobby_socket(State(hub): State<Arc<Hub>>, ws: WebSocketUpgrade) -> Resp
 struct ResumeQuery {
     epoch: Option<String>,
     since: Option<u64>,
-}
-
-/// What a person's tab sends on a design's socket, besides pings. Each
-/// message names the person, as comments do, and carries the tab's stamp,
-/// so the change it makes (or a `settled` message, when it makes none)
-/// tells the tab which of its messages it answers. One socket handles its
-/// messages in order.
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-enum ClientMessage {
-    /// A gesture's edits, as one undo step.
-    Mutate {
-        author: UserAuthor,
-        stamp: Stamp,
-        edits: Vec<UserEdit>,
-    },
-    Undo {
-        author: UserAuthor,
-        stamp: Stamp,
-    },
-    Redo {
-        author: UserAuthor,
-        stamp: Stamp,
-    },
 }
 
 /// The longest client id a tab's stamp can carry. Tabs make 12 characters.

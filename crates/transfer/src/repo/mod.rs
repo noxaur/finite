@@ -1027,6 +1027,7 @@ mod tests {
                 position: None,
                 page: page.map(str::to_owned),
                 styles: BTreeMap::new(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1076,6 +1077,7 @@ mod tests {
                 position: None,
                 page: None,
                 styles: BTreeMap::new(),
+                ..Default::default()
             },
             fragments,
             &mut || {

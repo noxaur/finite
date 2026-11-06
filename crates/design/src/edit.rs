@@ -10,11 +10,13 @@ use std::{
 use serde_json::Value;
 
 use crate::{
+    Transaction,
     components::{self, Overrides},
+    css,
     document::{Document, FIRST_PAGE, MAX_DEPTH, MAX_NODES, MAX_PAGES, Op, Page},
     flow, fractional,
     html::{self, Fragment},
-    label,
+    id, label,
     node::{Node, NodeId, NodeKind, PropKey},
     tokens::{self, MAX_MODES, Mode, Values},
 };
@@ -60,7 +62,7 @@ fn element<'a>(doc: &'a Document, id: &str) -> Result<&'a Node> {
 fn page<'a>(doc: &'a Document, id: &str) -> Result<&'a Page> {
     doc.page(id).ok_or_else(|| {
         EditError(format!(
-            "page {id:?} not found. get_basic_info lists the pages."
+            "page {id:?} not found. read with no select lists the pages."
         ))
     })
 }
@@ -127,6 +129,7 @@ impl<'a> Placer<'a> {
     }
 }
 
+#[derive(Default)]
 pub struct NewArtboard {
     pub name: String,
     pub width: f64,
@@ -136,6 +139,10 @@ pub struct NewArtboard {
     /// The page to put it on. `None`: the first page.
     pub page: Option<String>,
     pub styles: BTreeMap<String, String>,
+    /// The artboard's `class`, so its `<style>` rules can reach it.
+    pub class: Option<String>,
+    /// The mode it renders in, by the mode's name or id ([`artboard_mode`]).
+    pub mode: Option<String>,
 }
 
 /// Styles every new artboard starts with. Agent-provided styles override them.
@@ -177,18 +184,30 @@ pub fn create_artboard(doc: &Document, id: NodeId, spec: NewArtboard) -> Result<
         .map_or_else(|| "auto".to_owned(), |h| format!("{h}px"));
     styles.insert("height".into(), height);
     let index = doc.insertion_indexes(None, None, 1).remove(0);
-    Ok(vec![Op::Create {
-        node: Node {
-            parent: None,
-            index,
-            name: Some(label::clip(&spec.name, label::LAYER_NAME)),
-            x: Some(x),
-            y: Some(y),
-            page: spec.page,
-            styles,
-            ..Node::element(id, "div")
-        },
-    }])
+    let mode = match &spec.mode {
+        Some(key) => artboard_mode(doc, key)?,
+        None => None,
+    };
+    let mut node = Node {
+        parent: None,
+        index,
+        name: Some(label::clip(&spec.name, label::LAYER_NAME)),
+        x: Some(x),
+        y: Some(y),
+        page: spec.page,
+        styles,
+        mode,
+        ..Node::element(id, "div")
+    };
+    if let Some(class) = spec
+        .class
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    {
+        node.attrs.insert("class".into(), class.to_owned());
+    }
+    Ok(vec![Op::Create { node }])
 }
 
 /// [`create_artboard`], with `fragments` written into it, as one change.
@@ -317,7 +336,7 @@ pub fn write_fragments(
         }
         WriteMode::Replace => {
             let Some(parent) = target_node.parent.clone() else {
-                return err("can't replace an artboard; use mode \"replace-children\" instead");
+                return err("can't replace an artboard; use mode \"inner\" instead");
             };
             let next = doc
                 .children(Some(&parent))
@@ -685,7 +704,7 @@ fn prepare(
             if left_out > 0 {
                 return err(format!(
                     "the HTML for an instance of {:?} #{component} has {left_out} element{} the component doesn't have. \
-                     An instance shows its component's content: elements inside it need the data-id get_html gave them. \
+                     An instance shows its component's content: elements inside it need the data-id read with as: \"html\" gave them. \
                      Add new content to the component, or write it outside the instance.",
                     node.display_name(),
                     if left_out == 1 { "" } else { "s" }
@@ -1076,7 +1095,7 @@ pub fn update_attributes(
             let lower = name.to_ascii_lowercase();
             if lower == "style" {
                 return err(format!(
-                    "#{id}: style isn't an attribute; use update_styles to change inline styles"
+                    "#{id}: style isn't an attribute; change inline styles with a css op, like {{\"op\": \"css\", \"select\": \"#{id}\", \"css\": \"color: red\"}}"
                 ));
             }
             if lower.starts_with("on") {
@@ -1255,8 +1274,10 @@ pub fn set_position(doc: &Document, id: &str, x: f64, y: f64) -> Result<Vec<Op>>
     ])
 }
 
-/// How one token changes in [`set_tokens`].
-#[derive(Clone, Debug, PartialEq)]
+/// How one token changes in [`set_tokens`]. As JSON, a string is `All`, an
+/// object is `Modes` and null is `Delete`.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[serde(untagged)]
 pub enum TokenChange {
     /// One value in every mode.
     All(String),
@@ -2009,7 +2030,7 @@ pub fn create_component(
     if components::is_virtual(id) {
         let instance = components::split(id).map_or(id, |(root, _)| root);
         return err(format!(
-            "#{id} is inside an instance; make a component from the component's own nodes, or detach_instance #{instance} first"
+            "#{id} is inside an instance; make a component from the component's own nodes, or detach the instance first with {{\"op\": \"component\", \"select\": \"#{instance}\", \"detach\": true}}"
         ));
     }
     let node = element(doc, id)?;
@@ -2047,7 +2068,7 @@ pub fn create_component(
         let overrides = components::overrides_to_match(&scratch, id, other).map_err(|why| {
             EditError(format!(
                 "#{other} isn't built like #{id}, so it can't become an instance of it without losing something: {why}. \
-                 Make it match first, or leave it out and replace it with insert_instance."
+                 Make it match first, or leave it out and write an instance in its place: <div data-instance-of=\"{id}\"></div>."
             ))
         })?;
         components::check_cycle(&scratch, id, target.parent.as_deref())?;
@@ -2160,7 +2181,7 @@ fn instance_overrides(
                     .map(str::to_owned)
                     .ok_or_else(|| {
                         EditError(format!(
-                            "component #{component} has no node {id:?}; use the ids get_html shows for it"
+                            "component #{component} has no node {id:?}; use the ids read with as: \"html\" shows for it"
                         ))
                     })?
             }
@@ -2225,7 +2246,7 @@ pub fn detach_instances(
         if components::is_virtual(id) {
             let (root, _) = components::split(id).expect("a virtual id has a root");
             return err(format!(
-                "#{id} is inside instance #{root}; detach #{root}, or the nested instance from the component it's in"
+                "#{id} is inside instance #{root}; detach #{root} with {{\"op\": \"component\", \"select\": \"#{root}\", \"detach\": true}}, or detach the nested instance from the component it's in"
             ));
         }
         ops.extend(components::detach(doc, id, new_id)?);
@@ -2336,6 +2357,220 @@ pub fn duplicate_detached(
     Ok((ops, roots))
 }
 
+/// The first id in the selectors of `css`'s rules that names a part inside
+/// an instance, like `#inst/part` or `#inst\/part`. A stylesheet rule never
+/// reaches such a part, since the part only exists in the instance's
+/// expansion. A `/` in a value, a `url(...)`, a string or a comment is not
+/// that selector. An id with a `/` outside any instance is the author's own.
+pub fn instance_path_in_rules(doc: &Document, css: &str) -> Result<Option<NodeId>> {
+    let rules = css::patch_rules(css).map_err(|e| EditError(e.to_string()))?;
+    for rule in &rules {
+        for id in css::selector_ids(&rule.selector) {
+            let in_instance = components::split(&id)
+                .and_then(|(root, _)| doc.get(root))
+                .is_some_and(|root| root.instance_of.is_some());
+            if in_instance {
+                return Ok(Some(id));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// A `css` patch merged into an artboard's `<style>`.
+pub struct StyleMerge {
+    pub ops: Vec<Op>,
+    /// The `<style>` element that holds the rules afterwards.
+    pub sheet: NodeId,
+    /// Whether the artboard had no `<style>`, so `ops` add one.
+    pub created: bool,
+    /// What changed in an existing sheet. `ops` is empty and `created` false
+    /// when it already had the rules.
+    pub changes: Vec<css::SheetChange>,
+}
+
+/// Merges the rules of `patch` into the first `<style>` under `board`,
+/// keeping what the patch doesn't touch, or adds a `<style>` at the start of
+/// the artboard when it has none.
+pub fn merge_style(
+    doc: &Document,
+    board: &str,
+    patch: &str,
+    new_id: &mut impl FnMut() -> NodeId,
+) -> Result<StyleMerge> {
+    let css_err = |e: css::CssError| EditError(e.to_string());
+    let sheet = doc
+        .subtree(board)
+        .into_iter()
+        .find(|n| n.tag().is_some_and(|t| t.eq_ignore_ascii_case("style")))
+        .map(|n| n.id.clone());
+    let Some(sheet) = sheet else {
+        let (next, _) = css::merge_sheet("", patch).map_err(css_err)?;
+        let fragments = parse_html(&format!("<style>{next}</style>"))?;
+        let (ops, roots) =
+            write_fragments(doc, board, fragments, WriteMode::Append, Some(0), new_id)?;
+        return Ok(StyleMerge {
+            ops,
+            sheet: roots.first().cloned().unwrap_or_default(),
+            created: true,
+            changes: Vec::new(),
+        });
+    };
+    let existing: String = doc
+        .children(Some(&sheet))
+        .iter()
+        .filter_map(|c| c.text.as_deref())
+        .collect();
+    let (next, changes) = css::merge_sheet(&existing, patch).map_err(css_err)?;
+    let ops = if next == existing {
+        Vec::new()
+    } else {
+        set_text(doc, &sheet, &next, new_id)?
+    };
+    Ok(StyleMerge {
+        ops,
+        sheet,
+        created: false,
+        changes,
+    })
+}
+
+/// How a copy of an artboard differs from the original.
+#[derive(Default)]
+pub struct ArtboardCopy {
+    pub name: Option<String>,
+    /// Styles to set on the copy; `None` removes one.
+    pub styles: BTreeMap<String, Option<String>>,
+    /// The page to put the copy on.
+    pub page: Option<String>,
+    /// Where to put the copy; an axis left out keeps the copy's own.
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+    /// The mode it renders in, by name or id.
+    pub mode: Option<String>,
+    /// Turn the copy's instances into plain elements, so later edits to
+    /// their components don't change it.
+    pub detach: bool,
+    /// Content to write into the copy, after the rest.
+    pub fragments: Vec<Fragment>,
+}
+
+/// What [`copy_artboard`] made.
+pub struct Copied {
+    pub id: NodeId,
+    /// Instances in the copy that still follow their components.
+    pub following: usize,
+    /// Instances that were detached in the copy.
+    pub detached: usize,
+}
+
+/// Copies the artboard `src` and changes the copy as `copy` says, staging
+/// each step in `tx` so the next sees it.
+pub fn copy_artboard(
+    tx: &mut Transaction<'_>,
+    src: &str,
+    copy: ArtboardCopy,
+    new_id: &mut impl FnMut() -> NodeId,
+) -> Result<Copied> {
+    if !node(tx.view(), src)?.is_artboard() {
+        return err(format!("node {src:?} isn't an artboard"));
+    }
+    let (ops, roots) = {
+        let t = &*tx;
+        duplicate(t.view(), &[src.to_owned()], &mut || t.new_id(&mut *new_id))?
+    };
+    tx.edit(ops, new_id)?;
+    let Some(id) = roots.first().cloned() else {
+        return err("the copy made nothing");
+    };
+    let ids = std::slice::from_ref(&id);
+    let (mut following, mut detached) = (0, 0);
+    if copy.detach {
+        let ops = {
+            let t = &*tx;
+            detach_all(t.doc(), &roots, true, &mut || t.new_id(&mut *new_id))?
+        };
+        detached = detached_count(&ops);
+        tx.edit(ops, new_id)?;
+    } else {
+        following = instances_in(tx.view(), &roots, true).len();
+    }
+    if let Some(name) = &copy.name {
+        let ops = rename(tx.view(), &id, Some(name))?;
+        tx.edit(ops, new_id)?;
+    }
+    if !copy.styles.is_empty() {
+        let ops = update_styles(tx.view(), ids, &copy.styles)?;
+        tx.edit(ops, new_id)?;
+    }
+    if let Some(page) = &copy.page {
+        let ops = move_to_page(tx.view(), ids, page)?;
+        tx.edit(ops, new_id)?;
+    }
+    if copy.x.is_some() || copy.y.is_some() {
+        let own = node(tx.view(), &id)?;
+        let (x, y) = (
+            copy.x.or(own.x).unwrap_or(0.0),
+            copy.y.or(own.y).unwrap_or(0.0),
+        );
+        let ops = set_position(tx.view(), &id, x, y)?;
+        tx.edit(ops, new_id)?;
+    }
+    if let Some(mode) = &copy.mode {
+        let ops = set_artboard_mode(tx.view(), ids, Some(mode))?;
+        tx.edit(ops, new_id)?;
+    }
+    if !copy.fragments.is_empty() {
+        let ops = {
+            let t = &*tx;
+            write_fragments(
+                t.view(),
+                &id,
+                copy.fragments,
+                WriteMode::Append,
+                None,
+                &mut || t.new_id(&mut *new_id),
+            )?
+            .0
+        };
+        tx.edit(ops, new_id)?;
+    }
+    Ok(Copied {
+        id,
+        following,
+        detached,
+    })
+}
+
+/// The ops for naming the design's modes and setting tokens in one edit,
+/// as the viewer's token panel and an agent's `tokens` op do: `modes` names
+/// the modes in order ([`set_modes`]), then each token is set, changed or
+/// deleted ([`set_tokens`]). `new_id` makes ids for added modes.
+pub fn edit_tokens(
+    doc: &Document,
+    modes: Option<&[String]>,
+    tokens: &BTreeMap<String, TokenChange>,
+    new_id: &mut impl FnMut() -> String,
+) -> Result<Vec<Op>> {
+    let (mut ops, list) = match modes {
+        Some(names) => {
+            let mut mode_id = || {
+                id::fresh(&mut || format!("mode-{}", new_id()), |id| {
+                    doc.mode_map().contains_key(id)
+                })
+            };
+            set_modes(doc, names, &mut mode_id)?
+        }
+        None => (Vec::new(), mode_list(doc)),
+    };
+    let changes: Vec<(String, TokenChange)> = tokens
+        .iter()
+        .map(|(name, change)| (name.clone(), change.clone()))
+        .collect();
+    ops.extend(set_tokens(doc, &list, &changes)?);
+    Ok(ops)
+}
+
 /// Refuses an edit that would leave the design with more than [`MAX_NODES`].
 fn room_for(doc: &Document, removed: usize, added: usize) -> Result<()> {
     let total = doc.len().saturating_sub(removed) + added;
@@ -2370,6 +2605,7 @@ mod tests {
                 position: None,
                 page: None,
                 styles: BTreeMap::from([("backgroundColor".into(), "#000".into())]),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -2632,6 +2868,7 @@ mod tests {
                 position: None,
                 page: None,
                 styles: BTreeMap::from([("background".into(), "#fef3c7".into())]),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -2661,6 +2898,7 @@ mod tests {
             position: None,
             page: None,
             styles: BTreeMap::new(),
+            ..Default::default()
         };
         doc.apply_all(&create_artboard(&doc, "a".into(), spec(None)).unwrap());
         let board = doc.get("a").unwrap();
@@ -2828,7 +3066,7 @@ mod tests {
             style
                 .0
                 .contains(&format!("#{board}: style isn't an attribute"))
-                && style.0.contains("update_styles"),
+                && style.0.contains("\"op\": \"css\""),
             "{style}"
         );
     }

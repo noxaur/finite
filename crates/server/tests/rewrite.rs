@@ -4,7 +4,7 @@
 
 mod agent;
 
-use agent::{Agent, id_after, test_app};
+use agent::{Agent, test_app};
 use axum::{
     Router,
     body::Body,
@@ -28,33 +28,29 @@ async fn api(app: &Router, request: Request<Body>) -> Value {
     serde_json::from_slice(&body).unwrap()
 }
 
+async fn read_html(agent: &mut Agent, design: &str, select: &str) -> String {
+    agent
+        .ok(
+            "read",
+            json!({ "designId": design, "select": select, "as": "html" }),
+        )
+        .await
+}
+
 #[tokio::test]
 async fn a_stale_rewrite_keeps_ids_pins_and_other_agents_work() {
     let app = test_app();
     let mut a = Agent::connect(&app, "Alice").await;
     let mut b = Agent::connect(&app, "Bob").await;
-    let created = a.ok("create_design", json!({ "name": "Plan" })).await;
-    let design: String = created
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .find(|w| w.len() == 10)
-        .unwrap()
-        .to_owned();
-    let board = a
-        .ok(
-            "create_artboard",
-            json!({ "designId": design, "name": "Page", "width": 600, "height": 400 }),
-        )
-        .await;
-    let board = id_after(&board, "Created artboard");
-    a.ok(
-        "write_html",
-        json!({ "designId": design, "targetId": board,
-                "html": "<section data-name=\"Plan\"><h2>Pro</h2><button data-name=\"Buy\" style=\"color: white\">Buy</button></section>" }),
+    let design = a.design("Plan").await;
+    let board = a.artboard(&design, "Page", 600, 400).await;
+    a.edit(
+        &design,
+        json!([{ "op": "html", "select": format!("#{board}"),
+                 "html": "<section data-name=\"Plan\"><h2>Pro</h2><button data-name=\"Buy\" style=\"color: white\">Buy</button></section>" }]),
     )
     .await;
-    let html = a
-        .ok("get_html", json!({ "designId": design, "nodeId": board }))
-        .await;
+    let html = read_html(&mut a, &design, &format!("#{board}")).await;
     let (section, button) = (id_of(&html, "section"), id_of(&html, "button"));
 
     // A person pins a comment on the button.
@@ -69,14 +65,11 @@ async fn a_stale_rewrite_keeps_ids_pins_and_other_agents_work() {
     api(&app, req).await;
 
     // A reads the section, then B rounds the button.
-    let read = a
-        .ok("get_html", json!({ "designId": design, "nodeId": section }))
-        .await;
+    let read = read_html(&mut a, &design, &format!("#{section}")).await;
     assert!(read.contains("data-read-at=\""), "{read}");
-    b.ok(
-        "update_styles",
-        json!({ "designId": design,
-                "updates": [{ "nodeIds": [button], "styles": { "border-radius": "999px" } }] }),
+    b.edit(
+        &design,
+        json!([{ "op": "css", "select": format!("#{button}"), "css": "border-radius: 999px" }]),
     )
     .await;
 
@@ -87,9 +80,9 @@ async fn a_stale_rewrite_keeps_ids_pins_and_other_agents_work() {
         .unwrap()
         .replace(">Buy<", ">Upgrade<");
     let wrote = a
-        .ok(
-            "write_html",
-            json!({ "designId": design, "targetId": section, "mode": "replace", "html": stale }),
+        .edit(
+            &design,
+            json!([{ "op": "html", "select": format!("#{section}"), "mode": "replace", "html": stale }]),
         )
         .await;
     assert!(wrote.contains("in place"), "{wrote}");
@@ -100,9 +93,7 @@ async fn a_stale_rewrite_keeps_ids_pins_and_other_agents_work() {
         "{wrote}"
     );
 
-    let after = a
-        .ok("get_html", json!({ "designId": design, "nodeId": section }))
-        .await;
+    let after = read_html(&mut a, &design, &format!("#{section}")).await;
     assert_eq!(id_of(&after, "button"), button, "{after}");
     assert!(after.contains("border-radius: 999px"), "{after}");
     assert!(after.contains(">Upgrade<"), "{after}");
@@ -113,11 +104,9 @@ async fn a_stale_rewrite_keeps_ids_pins_and_other_agents_work() {
     let snapshot = api(&app, req).await;
     assert_eq!(snapshot["comments"][0]["nodeId"], button.as_str());
 
-    let undone = b.ok("undo", json!({ "designId": design })).await;
-    assert!(undone.contains("Update styles"), "{undone}");
-    let after = a
-        .ok("get_html", json!({ "designId": design, "nodeId": section }))
-        .await;
+    // B undoes its own edit, and A's rewrite stays.
+    b.ok("undo", json!({ "designId": design })).await;
+    let after = read_html(&mut a, &design, &format!("#{section}")).await;
     assert!(!after.contains("border-radius"), "{after}");
     assert!(after.contains(">Upgrade<"), "{after}");
 }
@@ -127,38 +116,25 @@ async fn a_stale_rewrite_keeps_an_element_another_agent_added() {
     let app = test_app();
     let mut a = Agent::connect(&app, "Alice").await;
     let mut b = Agent::connect(&app, "Bob").await;
-    let created = a.ok("create_design", json!({ "name": "Plans" })).await;
-    let design: String = created
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .find(|w| w.len() == 10)
-        .unwrap()
-        .to_owned();
-    let board = a
-        .ok(
-            "create_artboard",
-            json!({ "designId": design, "name": "Page", "width": 600, "height": 400 }),
-        )
-        .await;
-    let board = id_after(&board, "Created artboard");
-    a.ok(
-        "write_html",
-        json!({ "designId": design, "targetId": board,
-                "html": "<ul data-name=\"Plans\"><li>Free</li><li>Pro</li></ul>" }),
+    let design = a.design("Plans").await;
+    let board = a.artboard(&design, "Page", 600, 400).await;
+    a.edit(
+        &design,
+        json!([{ "op": "html", "select": format!("#{board}"),
+                 "html": "<ul data-name=\"Plans\"><li>Free</li><li>Pro</li></ul>" }]),
     )
     .await;
-    let list = a
-        .ok("get_html", json!({ "designId": design, "nodeId": board }))
-        .await;
-    let list = id_of(&list, "ul");
+    let list = id_of(
+        &read_html(&mut a, &design, &format!("#{board}")).await,
+        "ul",
+    );
 
     // A reads the list, then B adds a plan.
-    let read = a
-        .ok("get_html", json!({ "designId": design, "nodeId": list }))
-        .await;
+    let read = read_html(&mut a, &design, &format!("#{list}")).await;
     let added = b
-        .ok(
-            "write_html",
-            json!({ "designId": design, "targetId": list, "html": "<li>Enterprise</li>" }),
+        .edit(
+            &design,
+            json!([{ "op": "html", "select": format!("#{list}"), "html": "<li>Enterprise</li>" }]),
         )
         .await;
     // "li #<id> "Enterprise"" in its outline.
@@ -178,14 +154,12 @@ async fn a_stale_rewrite_keeps_an_element_another_agent_added() {
         .unwrap()
         .replace(">Pro<", ">Pro+<");
     let wrote = a
-        .ok(
-            "write_html",
-            json!({ "designId": design, "targetId": list, "mode": "replace", "html": stale }),
+        .edit(
+            &design,
+            json!([{ "op": "html", "select": format!("#{list}"), "mode": "replace", "html": stale }]),
         )
         .await;
-    let after = a
-        .ok("get_html", json!({ "designId": design, "nodeId": list }))
-        .await;
+    let after = read_html(&mut a, &design, &format!("#{list}")).await;
     assert!(after.contains(">Pro+<"), "{after}");
     assert!(
         after.contains(&format!("data-id=\"{enterprise}\">Enterprise<")),
@@ -198,11 +172,8 @@ async fn a_stale_rewrite_keeps_an_element_another_agent_added() {
         "{wrote}"
     );
 
-    let undone = b.ok("undo", json!({ "designId": design })).await;
-    assert!(undone.contains("Write HTML"), "{undone}");
-    let after = a
-        .ok("get_html", json!({ "designId": design, "nodeId": list }))
-        .await;
+    b.ok("undo", json!({ "designId": design })).await;
+    let after = read_html(&mut a, &design, &format!("#{list}")).await;
     assert!(!after.contains("Enterprise"), "{after}");
     assert!(after.contains(">Pro+<"), "{after}");
 }

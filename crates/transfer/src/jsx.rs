@@ -676,6 +676,7 @@ mod tests {
             position: None,
             page: None,
             styles: Default::default(),
+            ..Default::default()
         };
         let mut n = 0;
         let mut new_id = move || {

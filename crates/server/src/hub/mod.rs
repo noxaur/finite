@@ -83,7 +83,7 @@ pub fn is_design_id(id: &str) -> bool {
 
 /// A short random id: lowercase letters and digits.
 pub fn random_id(len: usize) -> String {
-    const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    const ALPHABET: &[u8] = finite_design::id::ALPHABET;
     let mut out = String::with_capacity(len);
     while out.len() < len {
         for byte in uuid::Uuid::new_v4().into_bytes() {
@@ -94,6 +94,12 @@ pub fn random_id(len: usize) -> String {
         }
     }
     out
+}
+
+/// A random id of the shape nodes, pages and modes have
+/// ([`finite_design::id`]). Pass it to `id::fresh` with a check for ids in use.
+pub fn node_id() -> String {
+    random_id(finite_design::id::LEN)
 }
 
 /// Every design, plus the design list's subscribers.
@@ -446,7 +452,7 @@ impl Hub {
         } else {
             name
         };
-        let candidates = std::iter::repeat_with(|| random_id(10));
+        let candidates = std::iter::repeat_with(|| random_id(finite_design::id::DESIGN_LEN));
         // The store refuses an id another server already used.
         for id in self.fresh_ids(&cluster, candidates).take(100) {
             let design = Design::new(DesignMeta {
@@ -1104,6 +1110,7 @@ mod tests {
                     position: None,
                     page: None,
                     styles: BTreeMap::new(),
+                    ..Default::default()
                 };
                 Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
             })
@@ -1170,6 +1177,7 @@ mod tests {
                             position: None,
                             page: None,
                             styles: BTreeMap::new(),
+                            ..Default::default()
                         };
                         edit::create_artboard(doc, "board".into(), spec)?
                     } else {
@@ -1326,6 +1334,7 @@ mod tests {
                     position: None,
                     page: None,
                     styles: BTreeMap::new(),
+                    ..Default::default()
                 };
                 Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
             })
@@ -1392,6 +1401,7 @@ mod tests {
                     position: None,
                     page: None,
                     styles: BTreeMap::new(),
+                    ..Default::default()
                 };
                 Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
             })
@@ -1452,6 +1462,7 @@ mod tests {
                     position: None,
                     page: None,
                     styles: BTreeMap::new(),
+                    ..Default::default()
                 };
                 Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
             })
@@ -1515,6 +1526,7 @@ mod tests {
                     position: None,
                     page: None,
                     styles: BTreeMap::new(),
+                    ..Default::default()
                 };
                 Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
             })
@@ -1572,6 +1584,7 @@ mod tests {
                     position: None,
                     page: None,
                     styles: BTreeMap::new(),
+                    ..Default::default()
                 };
                 Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
             })
@@ -1613,6 +1626,7 @@ mod tests {
                         position: None,
                         page: None,
                         styles: BTreeMap::new(),
+                        ..Default::default()
                     };
                     Ok((edit::create_artboard(doc, board.into(), spec)?, ()))
                 })
@@ -1651,6 +1665,7 @@ mod tests {
                     position: None,
                     page: None,
                     styles: BTreeMap::new(),
+                    ..Default::default()
                 };
                 Ok((edit::create_artboard(doc, "board".into(), spec)?, ()))
             })

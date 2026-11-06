@@ -837,3 +837,199 @@ fn merge_decls(into: &mut Decls, patch: Decls) -> Vec<DeclChange> {
     }
     changes
 }
+
+fn ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
+}
+
+/// `url(` at `i`, and not the tail of a longer name such as `noturl(`.
+fn at_url(bytes: &[u8], i: usize) -> bool {
+    if i > 0 && ident_byte(bytes[i - 1]) {
+        return false;
+    }
+    let Some(head) = bytes.get(i..i + 4) else {
+        return false;
+    };
+    head[3] == b'('
+        && head[0].eq_ignore_ascii_case(&b'u')
+        && head[1].eq_ignore_ascii_case(&b'r')
+        && head[2].eq_ignore_ascii_case(&b'l')
+}
+
+/// The index just past the `url(...)` that starts at `start`.
+fn skip_url(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 4;
+    while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
+        i += 1;
+    }
+    if matches!(bytes.get(i), Some(b'"' | b'\'')) {
+        let quote = bytes[i];
+        i += 1;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' {
+                i += 2;
+                continue;
+            }
+            if bytes[i] == quote {
+                i += 1;
+                break;
+            }
+            i += 1;
+        }
+        while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
+            i += 1;
+        }
+        if bytes.get(i) == Some(&b')') {
+            i += 1;
+        }
+        return i;
+    }
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b')' {
+            return i + 1;
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+/// The end of the attribute selector that opens at `i` (a `[`), past any
+/// quoted value and escape inside it.
+fn skip_attribute(bytes: &[u8], mut i: usize) -> usize {
+    let mut quote = None;
+    i += 1;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' {
+            i += 2;
+            continue;
+        }
+        match quote {
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None if b == b'"' || b == b'\'' => quote = Some(b),
+            None if b == b']' => return i + 1,
+            None => {}
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+/// The character a CSS escape starting at `i` (a `\\`) stands for, and where
+/// the escape ends: up to six hex digits and one whitespace, or one char.
+fn css_escape(source: &str, i: usize) -> (char, usize) {
+    let rest = &source[i + 1..];
+    let hex: String = rest
+        .chars()
+        .take_while(char::is_ascii_hexdigit)
+        .take(6)
+        .collect();
+    if hex.is_empty() {
+        return match rest.chars().next() {
+            Some(c) => (c, i + 1 + c.len_utf8()),
+            None => ('\\', i + 1),
+        };
+    }
+    let mut end = i + 1 + hex.len();
+    if source[end..].starts_with(|c: char| c.is_ascii_whitespace()) {
+        end += 1;
+    }
+    let ch = u32::from_str_radix(&hex, 16)
+        .ok()
+        .and_then(char::from_u32)
+        .unwrap_or('\u{fffd}');
+    (ch, end)
+}
+
+/// Ids named by `#` tokens in the selector `source`, outside strings, comments and
+/// `url(...)`. `\/` reads as `/`, so `#inst/part` and `#inst\/part` are one id.
+pub fn selector_ids(source: &str) -> Vec<String> {
+    let bytes = source.as_bytes();
+    let mut out = Vec::new();
+    let mut quote = None;
+    let mut comment = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if comment {
+            if b == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                comment = false;
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(q) = quote {
+            if b == b'\\' {
+                i += 2;
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        // `url(https://cdn.example/*)` is a url token, not a comment. A
+        // `/*` inside it must not swallow the rest of the sheet, and a `#`
+        // in a url is a fragment, not a selector.
+        if at_url(bytes, i) {
+            i = skip_url(bytes, i);
+            continue;
+        }
+        if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            comment = true;
+            i += 2;
+            continue;
+        }
+        if b == b'"' || b == b'\'' {
+            quote = Some(b);
+            i += 1;
+            continue;
+        }
+        // `[href=\#a\/b]` matches an attribute's value, not an id.
+        if b == b'[' {
+            i = skip_attribute(bytes, i);
+            continue;
+        }
+        if b != b'#' {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let mut id = String::new();
+        while i < bytes.len() {
+            let c = bytes[i];
+            if c == b'\\' {
+                // `\/`, `\2f ` and `\00002F` all read as `/`.
+                let (ch, next) = css_escape(source, i);
+                id.push(ch);
+                i = next;
+                continue;
+            }
+            if ident_byte(c) {
+                id.push(c as char);
+                i += 1;
+                continue;
+            }
+            // A slash continues the id only when another id character follows,
+            // so `16px/1.5` and a trailing `/` stay out of it.
+            if c == b'/' && bytes.get(i + 1).is_some_and(|n| ident_byte(*n)) {
+                id.push('/');
+                i += 1;
+                continue;
+            }
+            break;
+        }
+        if !id.is_empty() {
+            out.push(id);
+        }
+    }
+    out
+}

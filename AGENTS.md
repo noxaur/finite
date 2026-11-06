@@ -25,7 +25,7 @@ These are the things we can't compromise on. They make us what we are today and 
 The most common defect in this repo is a feature that works on the path you tested and is missing everywhere else. Before you call a change done, walk this list and say which entries applied:
 
 - **Agent and person.** Agents edit through MCP tools and people watch in the viewer, so a feature needs both halves. A new tool needs the viewer to render its result, and a new viewer behavior needs a tool or a comment that can trigger it. Put the logic in `edit.rs` so every tool shares it.
-- **Tools.** A change to one tool often applies to its neighbors. Check `write_html`, `update_styles`, `set_attributes`, `replace_values`, `duplicate_nodes`, `move_nodes` and `import_design`, and update `instructions.md` and the tool descriptions so agents learn about it.
+- **Tools.** A change to one tool often applies to its neighbors. Check the `edit` ops (`crates/server/src/mcp/edit/`), `read` and `render`, and update `instructions.md`, `edit.md`, `read.md` and the tool descriptions so agents learn about it.
 - **Both renderers.** Artboards render in a shadow root, or in a sandboxed iframe when they contain a `<script>`. The screenshot renderer is a third path. Test a plain artboard and a script artboard.
 - **Wasm.** The server and the browser run the same document model. A new call needs an export in `crates/wasm/src/lib.rs` and a method in `apps/web/src/design/wasm.ts`.
 - **Undo and live edits.** Every op returns its inverse, and several agents edit at once. Check that undo, redo and a concurrent edit still work, and that comments, which sit outside the document, stay untouched.
@@ -42,7 +42,7 @@ Read `docs/how-finite-works.md` before you change the document model, the server
 - `crates/design/`: the document model, with no I/O. `node.rs` (nodes and properties), `document.rs` (the node map, ops and limits), `design.rs` (the document plus every actor's history and comments), `history.rs` (undo stacks), `edit.rs` (edit commands), `css.rs` (merging a patch into a stylesheet), `html.rs` (HTML in and out, and what's unsafe), `search.rs`, `select.rs` (CSS selectors), `comment.rs`, `fractional.rs` (sibling order), `label.rs` and `user_edit.rs` (the edits people make in the browser). Add a tool's logic in `edit.rs`, not in the server.
 - `crates/wasm/`: the document model as `finite.wasm`, with a plain C ABI for the viewer. A new call is an export in `src/lib.rs` and a method in `apps/web/src/design/wasm.ts`.
 - `crates/server/`: the axum server.
-  - `mcp/`: the tools. `mod.rs` defines them, `params.rs` holds their arguments, `format.rs` writes outlines and layout notes, `search.rs` and `tokens.rs` hold search and design tokens. `instructions.md` is what agents read when they connect; keep it under 4,000 characters.
+  - `mcp/`: the six tools, one module each. `tools.rs` declares them, `edit/` runs an edit's ops, `read.rs`, `render.rs`, `comments.rs`, `undo.rs` and `designs.rs` are the others, and `format.rs` and `notes.rs` write outlines and notes. `instructions.md` is what agents read when they connect; keep it under 4,000 characters.
   - `hub/`: the designs in memory. `mod.rs` loads, unloads and saves them, `design.rs` has `DesignHandle`, `messages.rs` has the WebSocket messages.
   - `api.rs`: REST and WebSockets for the web app. `guard.rs` keeps other websites out, and `heartbeat.rs` pings the sockets.
   - `store.rs` and `postgres/`: the folder store and the shared Postgres store.

@@ -37,6 +37,7 @@ fn design(boards: &[(&str, Option<&str>, &str)]) -> Design {
             position: None,
             page: page.map(Into::into),
             styles: BTreeMap::new(),
+            ..Default::default()
         };
         let ops = edit::create_artboard(design.doc(), id.into(), spec).unwrap();
         design.commit("agent", "Artboard", &ops, 0).unwrap();

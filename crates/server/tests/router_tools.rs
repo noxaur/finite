@@ -1,4 +1,4 @@
-//! The doc6 tools through the router, in front of two servers. doc6 takes a
+//! The six tools through the router, in front of two servers. A tool takes a
 //! design's name, or the start of its id, for its id, and each server knows
 //! only its own designs, so the relay resolves them across both.
 
@@ -23,15 +23,9 @@ async fn listen() -> (TcpListener, String) {
     (listener, url)
 }
 
-/// Two doc6 servers and a router in front of them, and an agent connected
-/// to the router at `path`. Returns the agent, the servers' hubs and the
-/// cluster. The surface is read from the environment, and every test here
-/// wants doc6, so the first one to start sets it.
-async fn deployment(path: &str) -> (Client, Vec<Arc<Hub>>, Cluster) {
-    static SURFACE: std::sync::Once = std::sync::Once::new();
-    // SAFETY: every test calls this before anything reads the environment,
-    // and only the first sets it, while the others wait on the Once.
-    SURFACE.call_once(|| unsafe { std::env::set_var("FINITE_MCP_SURFACE", "doc6") });
+/// Two servers and a router in front of them, and an agent connected to the
+/// router. Returns the agent, the servers' hubs and the cluster.
+async fn deployment() -> (Client, Vec<Arc<Hub>>, Cluster) {
     let (a, a_url) = listen().await;
     let (b, b_url) = listen().await;
     let nodes = vec![a_url, b_url];
@@ -50,7 +44,7 @@ async fn deployment(path: &str) -> (Client, Vec<Arc<Hub>>, Cluster) {
         http::HeaderName::from_static("x-finite-agent"),
         http::HeaderValue::from_static("Alice"),
     );
-    let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}{path}"))
+    let config = StreamableHttpClientTransportConfig::with_uri(format!("{front_url}/mcp"))
         .custom_headers(headers);
     let client = ().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
     (client, hubs, Cluster::new(nodes, 0).unwrap())
@@ -111,7 +105,7 @@ async fn boards(hubs: &[Arc<Hub>], cluster: &Cluster, id: &str) -> Vec<String> {
 
 #[tokio::test]
 async fn designs_lists_both_servers_and_creates_take_turns() {
-    let (client, _, cluster) = deployment("/mcp").await;
+    let (client, _, cluster) = deployment().await;
     let tools = client.list_all_tools().await.unwrap();
     assert!(tools.iter().any(|t| t.name == "designs"));
     let info = client.peer_info().unwrap();
@@ -138,7 +132,7 @@ async fn designs_lists_both_servers_and_creates_take_turns() {
 
 #[tokio::test]
 async fn names_and_prefixes_reach_the_server_that_owns_the_design() {
-    let (client, hubs, cluster) = deployment("/mcp").await;
+    let (client, hubs, cluster) = deployment().await;
     let ids = create(&client, &["Alpha site", "Beta site"]).await;
     for (id, name) in ids.iter().zip(["alpha SITE", "Beta site"]) {
         let made = ok(
@@ -178,8 +172,29 @@ async fn names_and_prefixes_reach_the_server_that_owns_the_design() {
 }
 
 #[tokio::test]
+async fn a_name_resolves_when_newer_designs_crowd_the_list() {
+    let (client, _hubs, _cluster) = deployment().await;
+    let ids = create(&client, &["Needle"]).await;
+    let long = format!("Needle {}", "x".repeat(110));
+    let crowd: Vec<String> = (0..400).map(|i| format!("{long} {i}")).collect();
+    let crowd: Vec<&str> = crowd.iter().map(String::as_str).collect();
+    create(&client, &crowd).await;
+    let made = ok(
+        &client,
+        "edit",
+        json!({ "designId": "Needle", "check": false,
+                "op": "artboard", "name": "Found", "width": 400, "height": 300 }),
+    )
+    .await;
+    assert!(made.contains("Created artboard"), "{made}");
+    let read = ok(&client, "read", json!({ "designId": ids[0] })).await;
+    assert!(read.contains("Found"), "{read}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_name_on_both_servers_is_ambiguous() {
-    let (client, _, cluster) = deployment("/mcp").await;
+    let (client, _, cluster) = deployment().await;
     let ids = create(&client, &["Twin", "Twin"]).await;
     assert_ne!(cluster.owner(&ids[0]), cluster.owner(&ids[1]));
     let error = refused(&client, "read", json!({ "designId": "twin" })).await;
@@ -198,7 +213,7 @@ async fn a_name_on_both_servers_is_ambiguous() {
 
 #[tokio::test]
 async fn delete_takes_an_exact_name_on_either_server_and_refuses_a_prefix() {
-    let (client, hubs, cluster) = deployment("/mcp").await;
+    let (client, hubs, cluster) = deployment().await;
     let ids = create(&client, &["Keep me", "Drop me"]).await;
     // The design on the second server, which a call routed to the first
     // server, or by the name's hash, could miss.
@@ -229,7 +244,7 @@ async fn delete_takes_an_exact_name_on_either_server_and_refuses_a_prefix() {
 
 #[tokio::test]
 async fn an_edit_on_the_second_server_is_one_undo_step_there() {
-    let (client, hubs, cluster) = deployment("/mcp").await;
+    let (client, hubs, cluster) = deployment().await;
     let ids = create(&client, &["One", "Two"]).await;
     let (id, name) = if cluster.owner(&ids[1]) == Some(1) {
         (&ids[1], "Two")
@@ -254,38 +269,5 @@ async fn an_edit_on_the_second_server_is_one_undo_step_there() {
     assert!(boards(&hubs, &cluster, id).await.is_empty());
     let none = ok(&client, "undo", json!({ "designId": name })).await;
     assert_eq!(none, "Nothing to undo.");
-    client.cancel().await.unwrap();
-}
-
-/// Scripts keep today's tools at `/mcp/classic`, whatever `/mcp` serves.
-#[tokio::test]
-async fn mcp_classic_still_serves_todays_tools() {
-    let (client, _, cluster) = deployment("/mcp/classic").await;
-    let tools = client.list_all_tools().await.unwrap();
-    assert!(tools.iter().any(|t| t.name == "write_html"));
-    assert!(!tools.iter().any(|t| t.name == "designs"));
-    let info = client.peer_info().unwrap();
-    assert!(
-        info.instructions
-            .as_deref()
-            .is_some_and(|i| i.contains("list_designs"))
-    );
-    let mut ids = Vec::new();
-    for name in ["First", "Second"] {
-        let created = ok(&client, "create_design", json!({ "name": name })).await;
-        ids.push(
-            created
-                .split(|c: char| !c.is_ascii_alphanumeric())
-                .find(|w| w.len() == 10)
-                .unwrap()
-                .to_owned(),
-        );
-    }
-    let mut owners: Vec<usize> = ids.iter().map(|id| cluster.owner(id).unwrap()).collect();
-    owners.sort();
-    assert_eq!(owners, [0, 1]);
-    for id in &ids {
-        ok(&client, "get_basic_info", json!({ "designId": id })).await;
-    }
     client.cancel().await.unwrap();
 }

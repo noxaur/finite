@@ -137,11 +137,7 @@ fn build(
         ))
         .merge(
             Router::new()
-                .nest_service(
-                    "/mcp/classic",
-                    crate::relay::service(members.clone(), sessions.clone(), "/mcp/classic"),
-                )
-                .nest_service("/mcp", crate::relay::service(members, sessions, "/mcp"))
+                .nest_service("/mcp", crate::relay::service(members, sessions))
                 .layer(axum::middleware::from_fn_with_state(
                     allowed,
                     crate::guard::known_hosts,

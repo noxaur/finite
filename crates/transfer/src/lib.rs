@@ -547,6 +547,7 @@ impl Imported {
                 position: board.position,
                 page,
                 styles: board.styles,
+                ..Default::default()
             };
             let (mut ops, _) = edit::create_artboard_with(
                 tx.doc(),

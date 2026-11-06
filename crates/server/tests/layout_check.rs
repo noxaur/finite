@@ -1,7 +1,7 @@
-//! The layout check on a doc6 edit's result, with a wait that fits a loaded
+//! The layout check on an edit result, with a wait that fits a loaded
 //! machine. Its own process, since `FINITE_LAYOUT_WAIT_MS` is read once and
-//! the doc6 tests, run together, queue their Chrome measurements behind one
-//! another: one waiting 5 seconds (the doc6 floor) then misses its note.
+//! the tool tests, run together, queue their Chrome measurements behind one
+//! another: one waiting 5 seconds (the floor) then misses its note.
 //! A clean check and the overlap note are only said if the edit waited for
 //! them, so the test must outwait the queue.
 
@@ -54,7 +54,7 @@ async fn render_and_the_layout_check_after_an_edit() {
     // (8 seconds), so a slow Chrome start cannot outlast the wait.
     unsafe { std::env::set_var("FINITE_LAYOUT_WAIT_MS", "15000") };
     let app = test_app();
-    let mut agent = Agent::connect_doc6(&app, "Checker").await;
+    let mut agent = Agent::connect(&app, "Checker").await;
     let (id, board) = landing(&mut agent).await;
     let (probe, _) = agent
         .call("render", json!({ "designId": id, "output": "layout" }))
@@ -122,7 +122,7 @@ async fn render_and_the_layout_check_after_an_edit() {
         checked.contains(&format!(
             "{{\"op\": \"css\", \"css\": \"#{board} {{ height:"
         )),
-        "the fix is a doc6 op: {checked}"
+        "the fix is a css op: {checked}"
     );
     assert!(!checked.contains("update_styles"), "{checked}");
     let (shot, error) = agent

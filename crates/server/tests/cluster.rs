@@ -179,6 +179,7 @@ async fn large_designs_move_too() {
         position: None,
         page: None,
         styles: Default::default(),
+        ..Default::default()
     };
     design
         .edit(&agent, "Add page", |doc| {

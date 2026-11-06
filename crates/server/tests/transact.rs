@@ -69,6 +69,7 @@ async fn board(hub: &Arc<Hub>) -> (String, Arc<DesignHandle>) {
         position: None,
         page: None,
         styles: BTreeMap::new(),
+        ..Default::default()
     };
     handle
         .edit(&agent("setup"), "Create artboard", |doc| {

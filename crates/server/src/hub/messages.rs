@@ -3,7 +3,7 @@
 
 use finite_design::{
     ActorId, Change, Design, DesignMeta, NodeId, Snapshot,
-    comment::{Comment, Listening},
+    comment::{self, Author, AuthorKind, Comment, Listening},
     user_edit::UserEdit,
 };
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,22 @@ pub struct Stamp {
 pub struct UserAuthor {
     pub id: String,
     pub name: String,
+}
+
+impl UserAuthor {
+    pub fn into_author(self) -> Author {
+        let id: String = self.id.chars().take(comment::MAX_USER_ID).collect();
+        let name = self.name.trim();
+        Author {
+            id: format!("user:{id}"),
+            name: if name.is_empty() {
+                "Guest".into()
+            } else {
+                name.chars().take(comment::MAX_NAME).collect()
+            },
+            kind: AuthorKind::User,
+        }
+    }
 }
 
 /// What a person's tab sends on a design's socket, besides pings
