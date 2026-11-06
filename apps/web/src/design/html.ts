@@ -42,3 +42,22 @@ export function pixelSize(node: Node): { width: number | null; height: number | 
   };
   return { width: px(node.styles.width), height: px(node.styles.height) };
 }
+
+/** What the `href` of a link to another artboard starts with, followed by the artboard's id. */
+const ARTBOARD_LINK = "#finite-artboard=";
+
+/**
+ * The artboard a link's `href` names, or null when it isn't a link to one.
+ * The rule is a click's, and `flow::link_target` follows it: the raw
+ * attribute, the exact prefix, no trimming, the rest percent-decoded. A
+ * malformed escape stays as written, so it names no artboard.
+ */
+export function artboardLinkTarget(href: string): string | null {
+  if (!href.startsWith(ARTBOARD_LINK)) return null;
+  const id = href.slice(ARTBOARD_LINK.length);
+  try {
+    return decodeURIComponent(id);
+  } catch {
+    return id;
+  }
+}

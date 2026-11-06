@@ -17,6 +17,7 @@ import {
   shown,
 } from "@/design/editing/inspect";
 import { nodeOf } from "@/design/editing/tree";
+import { artboardLinkTarget } from "@/design/html";
 import type { Renderer } from "@/design/renderer";
 import type { Replica, TokenTable } from "@/design/replica";
 import type { Node, UserEdit } from "@/design/schema";
@@ -247,7 +248,6 @@ export function Inspector({
 
 /** Whether `node` is a link, which can go to an artboard in interactive mode. */
 const isLink = (node: Node) => node.tag === "a" || node.tag === "area";
-const ARTBOARD_LINK = "#finite-artboard=";
 
 /**
  * Where a link goes (`href="#finite-artboard=<id>"`), or the route an
@@ -266,8 +266,8 @@ function PrototypeFields({
   const [typing, setTyping] = useState<string | null>(null);
   const putBack = useRef(false);
   if (node.parent !== null) {
-    const href = node.attrs.href?.trim() ?? "";
-    const to = href.startsWith(ARTBOARD_LINK) ? href.slice(ARTBOARD_LINK.length).trim() : "";
+    const href = node.attrs.href ?? "";
+    const to = artboardLinkTarget(href) ?? "";
     const here = replica.artboardOf(node.id)?.id;
     const boards = replica.artboards().filter((b) => b.id !== here);
     return (

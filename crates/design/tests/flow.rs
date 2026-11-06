@@ -78,7 +78,7 @@ fn shop() -> Design {
         "cart",
         "Cart",
         1440.0,
-        r##"<a href=" #finite-artboard=done ">Pay</a>"##,
+        r##"<a href="#finite-artboard=done">Pay</a>"##,
     );
     screen(&mut d, "done", "Done", 1440.0, "<p>Thanks</p>");
     screen(
@@ -210,6 +210,44 @@ fn a_link_to_a_node_inside_an_artboard_is_broken() {
     let flow = flow::flow(d.doc());
     assert_eq!(flow.broken.len(), 1);
     assert!(flow.broken[0].not_artboard);
+}
+
+#[test]
+fn a_link_reads_its_href_the_way_a_click_does() {
+    let mut d = design();
+    screen(&mut d, "abc", "Abc", 390.0, "");
+    // Each link, the `to` it should name (`None` when it isn't a link), and
+    // whether it resolves to the artboard.
+    let cases: [(&str, Option<&str>, bool); 7] = [
+        ("#finite-artboard=abc", Some("abc"), true),
+        // Percent-escapes are decoded, as the click handlers do.
+        ("#finite-artboard=a%62c", Some("abc"), true),
+        ("#finite-artboard=a%2fb", Some("a/b"), false),
+        // Nothing is trimmed: a click tests the raw attribute.
+        (" #finite-artboard=abc", None, false),
+        ("#finite-artboard=abc ", Some("abc "), false),
+        // A malformed escape or invalid UTF-8 would throw in the handlers.
+        ("#finite-artboard=a%zzc", Some("a%zzc"), false),
+        ("#finite-artboard=%ff", Some("%ff"), false),
+    ];
+    let html: String = cases
+        .iter()
+        .map(|(href, ..)| format!(r#"<a href="{href}">x</a>"#))
+        .collect();
+    screen(&mut d, "home", "Home", 390.0, &html);
+    let flow = flow::flow(d.doc());
+    let seen: Vec<(&str, bool)> = flow
+        .links
+        .iter()
+        .map(|l| (l.to.as_str(), true))
+        .chain(flow.broken.iter().map(|b| (b.to.as_str(), false)))
+        .collect();
+    for (_, to, resolves) in cases {
+        if let Some(to) = to {
+            assert!(seen.contains(&(to, resolves)), "{to:?} in {seen:?}");
+        }
+    }
+    assert_eq!(seen.len(), cases.iter().filter(|c| c.1.is_some()).count());
 }
 
 #[test]

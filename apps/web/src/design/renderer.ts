@@ -2,7 +2,7 @@ import * as stylex from "@stylexjs/stylex";
 import { iconMarkup } from "@/components/Icons";
 import { colors } from "@/styles/tokens.stylex";
 import { Culler, pageBox } from "./culling";
-import { artboardDocument, BASE_LAYER, pixelSize } from "./html";
+import { artboardDocument, artboardLinkTarget, BASE_LAYER, pixelSize } from "./html";
 import { type Outset, strokeOutset } from "./outset";
 import type { Applied, Replica } from "./replica";
 import type { Node } from "./schema";
@@ -41,9 +41,6 @@ export interface PageStorage {
   /** Applies a change. Returns false if it doesn't fit. */
   write(change: StorageChange): boolean;
 }
-
-/** The link that sends a page to another artboard: `#finite-artboard=<id>`. */
-export const ARTBOARD_LINK = "#finite-artboard=";
 
 /** How many pages people used with the Interact tool keep running while out of view. */
 const KEEP_USED = 4;
@@ -1096,8 +1093,9 @@ export class Renderer {
     if (!link) return;
     e.preventDefault();
     const href = link.getAttribute("href") ?? "";
-    if (href.startsWith(ARTBOARD_LINK)) {
-      this.options.onGoto?.(id, decodeURIComponent(href.slice(ARTBOARD_LINK.length)));
+    const to = artboardLinkTarget(href);
+    if (to !== null) {
+      this.options.onGoto?.(id, to);
     } else if (href.startsWith("#")) {
       const root = link.getRootNode();
       const target =

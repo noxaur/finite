@@ -19,7 +19,10 @@
 //! instance's overrides of `href` applied. An instance's links have virtual
 //! ids (`instance/node`), so a broken one names the instance that shows it.
 
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, HashSet},
+};
 
 use serde::Serialize;
 
@@ -101,16 +104,37 @@ pub struct BadRoute {
 }
 
 /// The artboard `node` links to, when it's a link (`<a>` or `<area>`)
-/// whose `href` starts with [`ARTBOARD_LINK`].
-pub fn link_target(node: &Node) -> Option<&str> {
+/// whose `href` starts with [`ARTBOARD_LINK`]. It reads the attribute the
+/// way the viewer's click handlers do: the exact prefix, no trimming, and
+/// the rest percent-decoded. A malformed escape stays as written, so the
+/// link names no artboard and counts as broken.
+pub fn link_target(node: &Node) -> Option<Cow<'_, str>> {
     if !matches!(node.tag(), Some("a" | "area")) {
         return None;
     }
-    node.attrs
-        .get("href")?
-        .trim()
-        .strip_prefix(ARTBOARD_LINK)
-        .map(str::trim)
+    let rest = node.attrs.get("href")?.strip_prefix(ARTBOARD_LINK)?;
+    Some(percent_decode(rest).map_or(Cow::Borrowed(rest), Cow::Owned))
+}
+
+/// What `decodeURIComponent` returns, or `None` where it throws: a `%` that
+/// isn't followed by two hex digits, or bytes that aren't UTF-8.
+fn percent_decode(s: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(s.len());
+    let mut rest = s.as_bytes();
+    while let Some((&b, tail)) = rest.split_first() {
+        rest = tail;
+        if b != b'%' {
+            bytes.push(b);
+            continue;
+        }
+        let (hex, tail) = rest.split_at_checked(2)?;
+        if !hex.iter().all(u8::is_ascii_hexdigit) {
+            return None;
+        }
+        bytes.push(u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?);
+        rest = tail;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 /// The `href` of a link to artboard `id`.
@@ -228,18 +252,18 @@ pub fn flow(doc: &Document) -> Flow {
                 let Some(to) = link_target(node) else {
                     continue;
                 };
-                match route_of.get(to) {
+                match route_of.get(&*to) {
                     Some(route) => links.push(Link {
                         element: node.id.clone(),
                         from: board.id.clone(),
-                        to: to.to_owned(),
+                        to: to.into_owned(),
                         route: route.clone(),
                     }),
                     None => broken.push(Broken {
                         element: node.id.clone(),
                         from: board.id.clone(),
-                        to: to.to_owned(),
-                        not_artboard: doc.contains(to),
+                        not_artboard: doc.contains(&to),
+                        to: to.into_owned(),
                     }),
                 }
             }

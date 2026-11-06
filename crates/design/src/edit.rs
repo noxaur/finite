@@ -1929,7 +1929,7 @@ pub fn duplicate(
         let copied: HashSet<&str> = copies.values().copied().collect();
         for op in &mut ops {
             if let Op::Create { node } = op {
-                if let Some(copy) = flow::link_target(node).and_then(|to| copies.get(to)) {
+                if let Some(copy) = flow::link_target(node).and_then(|to| copies.get(&*to)) {
                     let href = flow::link_href(copy);
                     node.attrs.insert("href".to_owned(), href);
                 }

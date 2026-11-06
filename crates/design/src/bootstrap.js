@@ -402,6 +402,14 @@
   // one asks it to open a new tab. Only a person's click does either. A link
   // to a section of the page scrolls, like a real page. Anything else does nothing.
   const ARTBOARD_LINK = "#finite-artboard=";
+  // A malformed escape stays as written, so the link names no artboard.
+  const decode = (s) => {
+    try {
+      return decodeURIComponent(s);
+    } catch {
+      return s;
+    }
+  };
   const onLink = (e) => {
     const a = e
       .composedPath()
@@ -412,7 +420,7 @@
     e.preventDefault();
     if (!e.isTrusted || e.type !== "click" || !using()) return;
     if (href.startsWith(ARTBOARD_LINK)) {
-      send({ type: "goto", target: decodeURIComponent(href.slice(ARTBOARD_LINK.length)) });
+      send({ type: "goto", target: decode(href.slice(ARTBOARD_LINK.length)) });
     } else if (/^https?:$/.test(a.protocol)) {
       send({ type: "open", url: a.href });
     }
