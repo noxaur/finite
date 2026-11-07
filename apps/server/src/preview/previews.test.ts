@@ -277,6 +277,23 @@ describe("Next.js previews", () => {
       .toContain("mark.png");
   }, 30_000);
 
+  test("drops the brand assets from the brand board when the brand folder is renamed away", async () => {
+    // The watcher reports the folder itself, not the files that moved with it.
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const root = roots["next-app"];
+    fs.mkdirSync(path.join(root, "assets/brand"), { recursive: true });
+    fs.writeFileSync(path.join(root, "assets/brand/gone.png"), Buffer.from([0x89, 0x50]));
+    const runtime = () => fs.readFileSync(path.join(root, ".finite/runtime/brand.ts"), "utf8");
+    await expect.poll(runtime, { timeout: 10_000 }).toContain("gone.png");
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    fs.renameSync(path.join(root, "assets/brand"), path.join(root, "assets/brand-old"));
+    try {
+      await expect.poll(runtime, { timeout: 10_000 }).not.toContain("gone.png");
+    } finally {
+      fs.renameSync(path.join(root, "assets/brand-old"), path.join(root, "assets/brand"));
+    }
+  }, 30_000);
+
   test("refuses a frame file outside the design, and never imports one it wasn't given", async () => {
     const page = await get(`${urls["next-pages"]}/__finite/frame?file=../../etc/passwd`);
     expect(page.status).toBe(400);
