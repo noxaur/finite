@@ -99,6 +99,8 @@ export function createPreviews(options: PreviewsOptions): Previews {
   const listeners = new Map<string, Set<(event: PreviewEvent) => void>>();
   const errors = new Map<string, Map<string, FrameError[]>>();
   const idleTimers = new Map<string, NodeJS.Timeout>();
+  /** Designs whose run is stopping to start again; a stop meanwhile cancels the start. */
+  const restarting = new Set<string>();
   const workspaces = createWorkspaces({ startTimeoutMs });
 
   const emit = (designId: string, event: PreviewEvent) => {
@@ -313,8 +315,10 @@ export function createPreviews(options: PreviewsOptions): Previews {
     const idle = idleTimers.has(design.id);
     const release = run.release ?? (() => {});
     run.release = undefined;
-    await stopRun(design.id);
-    if (idle || runs.has(design.id)) return release();
+    const stopped = stopRun(design.id);
+    restarting.add(design.id);
+    await stopped;
+    if (!restarting.delete(design.id) || idle || runs.has(design.id)) return release();
     start(design, release);
   }
 
@@ -340,6 +344,7 @@ export function createPreviews(options: PreviewsOptions): Previews {
 
   async function stopRun(designId: string): Promise<void> {
     cancelIdle(designId);
+    restarting.delete(designId);
     const run = runs.get(designId);
     if (!run) return;
     setState(designId, run, { status: "stopped" });
@@ -411,6 +416,7 @@ export function createPreviews(options: PreviewsOptions): Previews {
     errors: (designId, frameId) => errors.get(designId)?.get(frameId) ?? [],
 
     async close() {
+      restarting.clear();
       await Promise.all([...runs.keys()].map(stopRun));
       await workspaces.close();
     },

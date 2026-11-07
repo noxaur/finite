@@ -158,8 +158,24 @@ describe("a finite.json workspace", () => {
     expect(fs.readFileSync(path.join(root, "setup-runs.txt"), "utf8")).toBe("ran\nran\n");
   }, 240_000);
 
+  test("a stop during a restart keeps the preview stopped", async () => {
+    // Stops it as the restart's stop begins, while the old dev server is still exiting.
+    let stopping: Promise<void> | undefined;
+    const off = previews.on("web-a", (event) => {
+      if (event.type !== "preview" || event.status !== "stopped" || stopping) return;
+      stopping = Promise.resolve().then(() => previews.stop("web-a"));
+    });
+    const config = JSON.parse(fs.readFileSync(file(), "utf8"));
+    config.apps.web.env = { VITE_GREETING: "again" };
+    fs.writeFileSync(file(), JSON.stringify(config));
+    await expect.poll(() => stopping !== undefined, { timeout: 10_000 }).toBe(true);
+    off();
+    await stopping;
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    expect(previews.state("web-a")).toEqual({ status: "stopped" });
+  }, 30_000);
+
   test("stops the api when the last preview that needs it stops", async () => {
-    await previews.stop("web-a");
     expect(await answers(`http://127.0.0.1:${port}/health`)).toBe("ok");
     await previews.stop("web-b");
     await expect
@@ -304,6 +320,59 @@ describe("finite.json changes", () => {
     expect(pids("a")).toHaveLength(2);
     expect(alive(pids("a")[1]!)).toBe(true);
     third.release();
+  });
+
+  test("starts a changed service only once the old one's process group is gone", async () => {
+    const port = await freePort();
+    // The shell exits on SIGTERM at once; the server it started holds the port a while longer.
+    const server = `require('http').createServer((q, r) => r.end(process.env.MODE)).listen(${port}, '127.0.0.1'); process.on('SIGTERM', () => setTimeout(() => process.exit(), 700))`;
+    const config = {
+      apps: { app: { path: "app", needs: ["api"] } },
+      services: { api: { run: `node -e "${server}"; true`, ready: port, env: { MODE: "old" } } },
+    };
+    const root = tinyWorkspace(config);
+    const design = workspaceDesign("lingering", root, "app", "app");
+    const workspaces = createWorkspaces({ startTimeoutMs: 5_000 });
+    cleanups.push(() => workspaces.close());
+    const first = await workspaces.prepare(design, () => {});
+    expect(await answers(`http://127.0.0.1:${port}/`)).toBe("old");
+    config.services.api.env.MODE = "new";
+    fs.writeFileSync(path.join(root, "finite.json"), JSON.stringify(config));
+    const second = await workspaces.prepare(design, () => {});
+    first.release();
+    expect(await answers(`http://127.0.0.1:${port}/`)).toBe("new");
+    second.release();
+  });
+
+  test("runs a setup again when finite.json goes back to it", async () => {
+    const mode = (name: string) => `echo ${name} > mode`;
+    const config = { setup: [mode("a")], apps: { app: { path: "app" } } };
+    const root = tinyWorkspace(config);
+    const design = workspaceDesign("revert", root, "app", "app");
+    const workspaces = createWorkspaces({ startTimeoutMs: 1_000 });
+    cleanups.push(() => workspaces.close());
+    for (const name of ["a", "b", "a"]) {
+      config.setup = [mode(name)];
+      fs.writeFileSync(path.join(root, "finite.json"), JSON.stringify(config));
+      await workspaces.prepare(design, () => {});
+      expect(lines(path.join(root, "mode"))).toEqual([name]);
+    }
+  });
+
+  test("a setup waiting for the one before it doesn't start after close", async () => {
+    const config = { setup: ["sleep 1"], apps: { app: { path: "app" } } };
+    const root = tinyWorkspace(config);
+    const workspaces = createWorkspaces({ startTimeoutMs: 1_000 });
+    const first = workspaces.prepare(workspaceDesign("one", root, "app", "app"), () => {});
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    config.setup = ["touch queued"];
+    fs.writeFileSync(path.join(root, "finite.json"), JSON.stringify(config));
+    const second = workspaces.prepare(workspaceDesign("two", root, "app", "app"), () => {});
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await workspaces.close();
+    await expect(first).rejects.toThrow();
+    await expect(second).rejects.toThrow(/shutting down/);
+    expect(fs.existsSync(path.join(root, "queued"))).toBe(false);
   });
 
   test("refuses the version of an invalid finite.json", async () => {

@@ -14,7 +14,13 @@ const KILL_AFTER_MS = 5_000;
 const POLL_MS = 200;
 
 /** A run of setup commands, shared by every design waiting on it. */
-type Job = { log: string; listeners: Set<(chunk: string) => void>; done: Promise<void> };
+type Job = {
+  /** The commands and env it runs. */
+  key: string;
+  log: string;
+  listeners: Set<(chunk: string) => void>;
+  done: Promise<void>;
+};
 
 /** A running service, shared by the previews that need it. */
 type Service = {
@@ -62,23 +68,24 @@ process.on("exit", () => {
 
 /** Setup commands and services from `finite.json`, for previews of a workspace's apps. */
 export function createWorkspaces(options: { startTimeoutMs: number }): Workspaces {
+  /** The latest setup run per workspace, or per app; a changed setup waits for the one before. */
   const jobs = new Map<string, Job>();
-  /** The last setup run per workspace, or per app, so a changed setup waits for the one before. */
-  const lastJobs = new Map<string, Promise<void>>();
   const services = new Map<string, Service>();
+  let closed = false;
 
   function setup(scope: string, commands: string[], cwd: string, env: Record<string, string>) {
-    const key = `${scope}\0${JSON.stringify([commands, env])}`;
-    const existing = jobs.get(key);
-    if (existing) return existing;
-    const job: Job = { log: "", listeners: new Set(), done: Promise.resolve() };
+    const key = JSON.stringify([commands, env]);
+    const existing = jobs.get(scope);
+    if (existing?.key === key) return existing;
+    const job: Job = { key, log: "", listeners: new Set(), done: Promise.resolve() };
     const write = (chunk: string) => {
       job.log = (job.log + chunk).slice(-LOG_TAIL);
       for (const fn of job.listeners) fn(chunk);
     };
-    const before = lastJobs.get(scope)?.catch(() => {});
+    const before = existing?.done.catch(() => {});
     job.done = (async () => {
       await before;
+      if (closed) throw new Refused("Finite is shutting down.");
       for (const command of commands) {
         write(`$ ${command}\n`);
         const child = run(command, cwd, env);
@@ -93,9 +100,10 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
       }
     })();
     // A failed setup runs again on the next try.
-    job.done.catch(() => jobs.delete(key));
-    jobs.set(key, job);
-    lastJobs.set(scope, job.done);
+    job.done.catch(() => {
+      if (jobs.get(scope) === job) jobs.delete(scope);
+    });
+    jobs.set(scope, job);
     return job;
   }
 
@@ -232,8 +240,8 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
     },
 
     async close() {
+      closed = true;
       jobs.clear();
-      lastJobs.clear();
       services.clear();
       await Promise.all([...groups].map(stop));
     },
@@ -295,13 +303,17 @@ function killGroup(child: ChildProcess, signal: NodeJS.Signals | 0): boolean {
   }
 }
 
-/** SIGTERM to the group, then SIGKILL after 5s if anything in it is still running. */
+/**
+ * SIGTERM to the group, then SIGKILL after 5s if anything in it is still running. Resolves once
+ * the whole group is gone, since the shell can exit before what it started, which may still hold
+ * a port.
+ */
 async function stop(child: ChildProcess): Promise<void> {
   if (!child.pid) return;
   const kill = setTimeout(() => killGroup(child, "SIGKILL"), KILL_AFTER_MS);
   if (killGroup(child, "SIGTERM")) await exited(child);
-  // The shell can exit before what it started; the timer finishes those off.
-  if (!killGroup(child, 0)) clearTimeout(kill);
+  while (killGroup(child, 0)) await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+  clearTimeout(kill);
 }
 
 /** A URL answers with a status below 500; a port accepts a TCP connection on 127.0.0.1. */
