@@ -1,8 +1,15 @@
 import { Refused } from "@finite/protocol";
 import { extendTailwindMerge } from "tailwind-merge";
 
-/** CSS custom properties from the project's `@theme`, e.g. `{ "--color-primary": "#95ced7" }`. */
+/**
+ * CSS custom properties from the project's `@theme`, e.g. `{ "--color-primary": "#95ced7" }`. A
+ * Tailwind v3 theme is flattened into the same names (`tailwind3.ts`), with a few more
+ * namespaces (`--width`, `--z-index`, …) for scales v4 replaced with any number.
+ */
 export type Theme = Record<string, string>;
+
+/** v3 classes come only from the config's scales; v4 adds its defaults and `--spacing` steps. */
+export type TailwindVersion = 3 | 4;
 
 /** The parts of Tailwind v4's default theme a hand edit can land on exactly. */
 const DEFAULTS: Theme = {
@@ -79,38 +86,38 @@ function scale(namespace: string, values: Record<string, string>): Theme {
   return Object.fromEntries(Object.entries(values).map(([k, v]) => [`${namespace}-${k}`, v]));
 }
 
-type ToClass = (value: string, theme: Theme) => string;
+type ToClass = (value: string, theme: Theme, v3: boolean) => string;
 
 /** Turns a CSS value into the closest class: a theme name when one matches exactly, else an arbitrary value. */
 const PROPS: Record<string, { toClass: ToClass; sample: string }> = {
-  width: size("w", true),
-  height: size("h", false),
-  "min-width": size("min-w", true),
-  "max-width": size("max-w", true),
-  "min-height": size("min-h", false),
-  "max-height": size("max-h", false),
-  padding: spacing("p"),
-  "padding-top": spacing("pt"),
-  "padding-right": spacing("pr"),
-  "padding-bottom": spacing("pb"),
-  "padding-left": spacing("pl"),
-  "padding-inline": spacing("px"),
-  "padding-block": spacing("py"),
-  margin: spacing("m", true),
-  "margin-top": spacing("mt", true),
-  "margin-right": spacing("mr", true),
-  "margin-bottom": spacing("mb", true),
-  "margin-left": spacing("ml", true),
-  "margin-inline": spacing("mx", true),
-  "margin-block": spacing("my", true),
-  gap: spacing("gap"),
-  "row-gap": spacing("gap-y"),
-  "column-gap": spacing("gap-x"),
-  top: spacing("top", true),
-  right: spacing("right", true),
-  bottom: spacing("bottom", true),
-  left: spacing("left", true),
-  inset: spacing("inset", true),
+  width: size("w", true, "--width"),
+  height: size("h", false, "--height"),
+  "min-width": size("min-w", true, "--min-width"),
+  "max-width": size("max-w", true, "--container"),
+  "min-height": size("min-h", false, "--min-height"),
+  "max-height": size("max-h", false, "--max-height"),
+  padding: spacing("p", false, "--padding"),
+  "padding-top": spacing("pt", false, "--padding"),
+  "padding-right": spacing("pr", false, "--padding"),
+  "padding-bottom": spacing("pb", false, "--padding"),
+  "padding-left": spacing("pl", false, "--padding"),
+  "padding-inline": spacing("px", false, "--padding"),
+  "padding-block": spacing("py", false, "--padding"),
+  margin: spacing("m", true, "--margin"),
+  "margin-top": spacing("mt", true, "--margin"),
+  "margin-right": spacing("mr", true, "--margin"),
+  "margin-bottom": spacing("mb", true, "--margin"),
+  "margin-left": spacing("ml", true, "--margin"),
+  "margin-inline": spacing("mx", true, "--margin"),
+  "margin-block": spacing("my", true, "--margin"),
+  gap: spacing("gap", false, "--gap"),
+  "row-gap": spacing("gap-y", false, "--gap"),
+  "column-gap": spacing("gap-x", false, "--gap"),
+  top: spacing("top", true, "--inset"),
+  right: spacing("right", true, "--inset"),
+  bottom: spacing("bottom", true, "--inset"),
+  left: spacing("left", true, "--inset"),
+  inset: spacing("inset", true, "--inset"),
   display: keywords({
     block: "block",
     "inline-block": "inline-block",
@@ -189,14 +196,15 @@ const PROPS: Record<string, { toClass: ToClass; sample: string }> = {
   }),
   "z-index": {
     sample: "1",
-    toClass: (v) =>
-      v === "auto"
-        ? "z-auto"
-        : /^-?\d+$/.test(v)
-          ? v.startsWith("-")
-            ? `-z-${v.slice(1)}`
-            : `z-${v}`
-          : `z-${arbitrary(v)}`,
+    toClass(v, theme, v3) {
+      if (v === "auto") return "z-auto";
+      const negative = v.startsWith("-");
+      const abs = negative ? v.slice(1) : v;
+      // v4 takes any integer; v3 only its zIndex scale.
+      const name = v3 ? themeName(theme, "--z-index", abs) : /^\d+$/.test(abs) ? abs : undefined;
+      if (name === undefined) return `z-${arbitrary(v)}`;
+      return negative ? `-z-${name}` : `z-${name}`;
+    },
   },
   "border-width": borderWidth("border"),
   "border-top-width": borderWidth("border-t"),
@@ -229,14 +237,12 @@ const PROPS: Record<string, { toClass: ToClass; sample: string }> = {
   ),
   "line-height": {
     sample: "1px",
-    toClass(v, theme) {
-      if (v === "1") return "leading-none";
-      return themed(
-        "leading",
-        "--leading",
-        "1px",
-        (x) => spacingStep(x, theme) ?? arbitrary(x),
-      ).toClass(v, theme);
+    toClass(v, theme, v3) {
+      // v3 writes `none` only from its lineHeight scale, like every other name.
+      if (v === "1" && !v3) return "leading-none";
+      return themed("leading", "--leading", "1px", (x) =>
+        v3 ? arbitrary(x) : (spacingStep(x, theme) ?? arbitrary(x)),
+      ).toClass(v, theme, v3);
     },
   },
   "letter-spacing": themed("tracking", "--tracking", "1px", arbitrary),
@@ -250,17 +256,26 @@ const PROPS: Record<string, { toClass: ToClass; sample: string }> = {
   }),
   opacity: {
     sample: "0.5",
-    toClass(v) {
+    toClass(v, theme, v3) {
       const n = v.endsWith("%") ? Number(v.slice(0, -1)) : Number(v) * 100;
-      return Number.isInteger(n) && n >= 0 && n <= 100 ? `opacity-${n}` : `opacity-${arbitrary(v)}`;
+      // v4 takes any percent; v3 only its opacity scale.
+      const name = v3
+        ? themeName(theme, "--opacity", v.endsWith("%") ? String(n / 100) : v)
+        : Number.isInteger(n) && n >= 0 && n <= 100
+          ? String(n)
+          : undefined;
+      return name === undefined ? `opacity-${arbitrary(v)}` : `opacity-${name}`;
     },
   },
   "box-shadow": {
     sample: "none",
-    toClass: (v, theme) =>
-      v === "none"
+    // v3 compiles `shadow-[none]` as a shadow colour, so a scale without `none` gets the hint.
+    toClass: (v, theme, v3) =>
+      v === "none" && !v3
         ? "shadow-none"
-        : themed("shadow", "--shadow", "none", arbitrary).toClass(v, theme),
+        : themed("shadow", "--shadow", "none", (x) =>
+            x === "none" ? "[shadow:none]" : arbitrary(x),
+          ).toClass(v, theme, v3),
   },
   overflow: keywords(overflow("overflow")),
   "overflow-x": keywords(overflow("overflow-x")),
@@ -275,15 +290,18 @@ export function editClasses(
   classes: string,
   styles: Record<string, string | null>,
   theme: Theme,
+  version: TailwindVersion = 4,
 ): string {
   const merge = merger(theme);
+  const all = full(theme, version);
+  const v3 = version === 3;
   let out = classes;
   for (const [prop, value] of Object.entries(styles)) {
     const spec = propSpec(prop);
     out =
       value === null
-        ? without(merge, out, spec.toClass(spec.sample, full(theme)))
-        : merge(out, spec.toClass(value.trim(), full(theme)));
+        ? without(merge, out, spec.toClass(spec.sample, all, v3))
+        : merge(out, spec.toClass(value.trim(), all, v3));
   }
   return out;
 }
@@ -293,12 +311,14 @@ export function stripClasses(
   classes: string,
   styles: Record<string, string | null>,
   theme: Theme,
+  version: TailwindVersion = 4,
 ): string {
   const merge = merger(theme);
+  const all = full(theme, version);
   let out = classes;
   for (const [prop, value] of Object.entries(styles)) {
     const spec = propSpec(prop);
-    out = without(merge, out, spec.toClass(value?.trim() ?? spec.sample, full(theme)));
+    out = without(merge, out, spec.toClass(value?.trim() ?? spec.sample, all, version === 3));
   }
   return out;
 }
@@ -333,14 +353,39 @@ function merger(theme: Theme): (...classes: string[]) => string {
           (k) =>
             k.startsWith(`${ns}-`) &&
             !k.includes("--", 2) &&
+            k !== `${ns}-DEFAULT` &&
             !(ns === "--font" && k.startsWith("--font-weight-")),
         )
         .map((k) => k.slice(ns.length + 1));
+    // v3's size scales (`w-card` from `theme.extend.width`) join spacing, which every size
+    // group reads.
+    const sizes = [
+      "--spacing",
+      "--padding",
+      "--margin",
+      "--gap",
+      "--width",
+      "--height",
+      "--min-width",
+      "--min-height",
+      "--max-height",
+      "--inset",
+    ];
     merge = extendTailwindMerge({
       extend: {
+        classGroups: {
+          z: [{ z: names("--z-index") }],
+          opacity: [{ opacity: names("--opacity") }],
+          ...Object.fromEntries(
+            ["", "-x", "-y", "-s", "-e", "-t", "-r", "-b", "-l"].map((side) => [
+              `border-w${side}`,
+              [{ [`border${side}`]: names("--border-width") }],
+            ]),
+          ),
+        },
         theme: {
           color: names("--color"),
-          spacing: names("--spacing"),
+          spacing: [...new Set(sizes.flatMap(names))],
           container: names("--container"),
           text: names("--text"),
           font: names("--font"),
@@ -361,8 +406,13 @@ export function kebab(prop: string): string {
   return prop.startsWith("--") ? prop : prop.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`);
 }
 
-function full(theme: Theme): Theme {
-  return { ...DEFAULTS, ...theme };
+function full(theme: Theme, version: TailwindVersion): Theme {
+  return version === 3 ? theme : { ...DEFAULTS, ...theme };
+}
+
+/** `rounded-lg`, or the bare `rounded` for a v3 `DEFAULT`. */
+function named(prefix: string, name: string): string {
+  return name === "DEFAULT" ? prefix : `${prefix}-${name}`;
 }
 
 function arbitrary(value: string): string {
@@ -431,12 +481,28 @@ function spacingStep(value: string, theme: Theme): string | undefined {
   return Number.isInteger(steps * 4) ? String(steps) : undefined;
 }
 
-function spacing(prefix: string, negative = false, extra: Record<string, string> = {}) {
+/**
+ * v4 spacing is `--spacing` names, then any quarter step of `--spacing` (`p-13`). v3 has no
+ * multiplier: only the names in the property's own scale `ns` (`--padding` for `p`, `--inset`
+ * for `top`), with `-` for negatives.
+ */
+function spacing(
+  prefix: string,
+  negative = false,
+  ns = "--spacing",
+  extra: Record<string, string> = {},
+) {
   const keys: Record<string, string> = { auto: "auto", "1px": "px", ...extra };
   return {
     sample: "1px",
-    toClass(value: string, theme: Theme): string {
+    toClass(value: string, theme: Theme, v3: boolean): string {
       const v = value.trim();
+      if (v3) {
+        const name = themeName(theme, ns, v);
+        if (name) return `${prefix}-${name}`;
+        const abs = negative && v.startsWith("-") ? themeName(theme, ns, v.slice(1)) : undefined;
+        return abs && abs !== "0" ? `-${prefix}-${abs}` : `${prefix}-${arbitrary(v)}`;
+      }
       if (keys[v]) return `${prefix}-${keys[v]}`;
       const name = themeName(theme, "--spacing", v);
       if (name) return `${prefix}-${name}`;
@@ -451,8 +517,9 @@ function spacing(prefix: string, negative = false, extra: Record<string, string>
   };
 }
 
-function size(prefix: string, horizontal: boolean) {
-  const base = spacing(prefix, false, {
+/** v4 sizes are spacing plus keywords; v3 sizes are the property's own scale (`theme.width`). */
+function size(prefix: string, horizontal: boolean, ns: string) {
+  const base = spacing(prefix, false, "--spacing", {
     "100%": "full",
     "50%": "1/2",
     "25%": "1/4",
@@ -466,12 +533,13 @@ function size(prefix: string, horizontal: boolean) {
   });
   return {
     sample: base.sample,
-    toClass(value: string, theme: Theme): string {
-      if (prefix === "max-w") {
-        const name = themeName(theme, "--container", value);
+    toClass(value: string, theme: Theme, v3: boolean): string {
+      if (v3 || prefix === "max-w") {
+        const name = themeName(theme, ns, value);
         if (name) return `${prefix}-${name}`;
+        if (v3) return `${prefix}-${arbitrary(value)}`;
       }
-      return base.toClass(value, theme);
+      return base.toClass(value, theme, v3);
     },
   };
 }
@@ -488,10 +556,11 @@ function color(prefix: string) {
   };
   return {
     sample: "#000001",
-    toClass(value: string, theme: Theme): string {
+    toClass(value: string, theme: Theme, v3: boolean): string {
       const name = themeName(theme, "--color", value);
       if (name) return `${prefix}-${name}`;
-      const key = keys[normalize(value)];
+      // A v3 theme that replaces `colors` may have no `white`.
+      const key = v3 ? undefined : keys[normalize(value)];
       return key ? `${prefix}-${key}` : `${prefix}-${arbitrary(value)}`;
     },
   };
@@ -505,9 +574,9 @@ function themed(
 ) {
   return {
     sample,
-    toClass(value: string, theme: Theme): string {
+    toClass(value: string, theme: Theme, _v3?: boolean): string {
       const name = themeName(theme, namespace, value);
-      return `${prefix}-${name ?? fallback(value)}`;
+      return named(prefix, name ?? fallback(value));
     },
   };
 }
@@ -515,7 +584,8 @@ function themed(
 function radius(prefix: string) {
   return {
     sample: "1px",
-    toClass(value: string, theme: Theme): string {
+    toClass(value: string, theme: Theme, v3: boolean): string {
+      if (v3) return themed(prefix, "--radius", "1px", arbitrary).toClass(value, theme);
       const n = px(value);
       if (n === 0) return `${prefix}-none`;
       if ((n !== undefined && n >= 9999) || value.trim() === "50%") return `${prefix}-full`;
@@ -527,7 +597,12 @@ function radius(prefix: string) {
 function borderWidth(prefix: string) {
   return {
     sample: "3px",
-    toClass(value: string): string {
+    toClass(value: string, theme: Theme, v3: boolean): string {
+      if (v3) {
+        // v3 only has its borderWidth scale; `DEFAULT` (1px) is the bare `border`.
+        const name = themeName(theme, "--border-width", value);
+        return name ? named(prefix, name) : `${prefix}-${arbitrary(value)}`;
+      }
       const n = px(value);
       if (n === 1) return prefix;
       if (n !== undefined && Number.isInteger(n) && n >= 0) return `${prefix}-${n}`;

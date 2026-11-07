@@ -6,7 +6,12 @@ import path from "node:path";
 import { allowsOrigin } from "../client/bridge.ts";
 import { frameFile, PAGE_FILL, readFrameConfig } from "../frame.ts";
 import { bridgeScript, streamIntoHtml } from "../html.ts";
-import { importsTailwind } from "../tailwind.ts";
+import {
+  finiteConfigFile,
+  hasTailwindDirectives,
+  importsTailwind,
+  writeFiniteConfig,
+} from "../tailwind.ts";
 import type { NextSettings } from "./adapter.ts";
 import { nextRoutes, pageExtension } from "./routes.ts";
 
@@ -52,11 +57,14 @@ export function finiteNext(options: FiniteNextOptions) {
   let mount: string | undefined;
   let mountCode = "";
 
-  /** Each stylesheet that imports Tailwind, and Finite's copy that adds `.finite/` as a source. */
+  /** Each stylesheet that imports Tailwind v4, and Finite's copy that adds `.finite/` as a source. */
   const sheets: Record<string, string> = {};
+  /** Each Tailwind v3 stylesheet, and Finite's config that adds `.finite/` to `content`. */
+  const configs: Record<string, string> = {};
   for (const css of config.css) {
-    if (fs.existsSync(at(css)) && importsTailwind(fs.readFileSync(at(css), "utf8")))
-      sheets[at(css)] = at(`${RUNTIME}/css/${css}`);
+    const code = fs.existsSync(at(css)) ? fs.readFileSync(at(css), "utf8") : "";
+    if (importsTailwind(code)) sheets[at(css)] = at(`${RUNTIME}/css/${css}`);
+    else if (hasTailwindDirectives(code)) configs[at(css)] = finiteConfigFile(root, at(css));
   }
 
   /** The files the frame registry imports, starting with those of the last run. */
@@ -156,6 +164,7 @@ export function finiteNext(options: FiniteNextOptions) {
     root,
     distDir: DIST_DIR,
     sheets,
+    configs,
     /**
      * The file frame route, relative to the root, once prepared. Never `import()`ed from a query:
      * frames come only from the registry's literal imports.
@@ -207,6 +216,9 @@ export function finiteNext(options: FiniteNextOptions) {
             "",
           ].join("\n"),
         );
+      }
+      for (const sheet of Object.keys(configs)) {
+        writeFiniteConfig(root, sheet, fs.readFileSync(sheet, "utf8"));
       }
       writeRegistry();
       writeBrand();

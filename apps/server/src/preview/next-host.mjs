@@ -66,6 +66,7 @@ try {
     root: finite.root,
     distDir: finite.distDir,
     sheets: finite.sheets,
+    configs: finite.configs,
   });
 
   const server = http.createServer();

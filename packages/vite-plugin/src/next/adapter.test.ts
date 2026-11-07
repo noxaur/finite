@@ -6,6 +6,7 @@ const OPTIONS: AdapterOptions = {
   root: "/project",
   distDir: ".finite/runtime/next",
   sheets: {},
+  configs: {},
 };
 
 afterEach(() => {

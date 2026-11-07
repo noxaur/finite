@@ -17,11 +17,13 @@ import {
   type Parsed,
 } from "./jsx.ts";
 import { stylexEdit, varRefs } from "./stylex.ts";
-import { editClasses, kebab, stripClasses, type Theme } from "./tailwind.ts";
+import { editClasses, kebab, stripClasses, type TailwindVersion, type Theme } from "./tailwind.ts";
 import { useVariables, variableRefs, type VariableHome } from "./tokens.ts";
 
 export type RewriteContext = {
   theme: Theme;
+  /** Tailwind's major version (default 4); v3 writes only the config's scales. */
+  tailwind?: TailwindVersion;
   /** Other files an edit may change (the `*.module.{css,scss,sass,less}` files this file imports), by root-relative path. */
   files: Record<string, string>;
   /** The file that defines each Sass `$var` and Less `@var` token (`variableSheets`). */
@@ -279,18 +281,22 @@ function style(s: StepCtx, el: t.JSXElement, styles: Record<string, string | nul
   if (s.convention === "inline" || s.convention === "css-modules") return inline(s, el, styles);
 
   if (!cls) {
-    const classes = editClasses("", styles, s.ctx.theme);
+    const classes = editClasses("", styles, s.ctx.theme, s.ctx.tailwind);
     if (classes !== "") s.ms.appendLeft(attributeInsertAt(el), ` className="${classes}"`);
     return;
   }
   const value = cls.value;
   if (value?.type === "StringLiteral")
-    return setLiteral(s, value, editClasses(value.value, styles, s.ctx.theme));
+    return setLiteral(s, value, editClasses(value.value, styles, s.ctx.theme, s.ctx.tailwind));
   if (value?.type === "JSXExpressionContainer") {
     const expr = value.expression;
     const lit = literal(expr);
     if (lit !== undefined)
-      return setLiteral(s, expr as t.StringLiteral, editClasses(lit, styles, s.ctx.theme));
+      return setLiteral(
+        s,
+        expr as t.StringLiteral,
+        editClasses(lit, styles, s.ctx.theme, s.ctx.tailwind),
+      );
     if (
       expr.type === "CallExpression" &&
       expr.callee.type === "Identifier" &&
@@ -300,8 +306,12 @@ function style(s: StepCtx, el: t.JSXElement, styles: Record<string, string | nul
       const last = args.at(-1);
       if (last) {
         for (const arg of args.slice(0, -1))
-          setLiteral(s, arg, stripClasses(literal(arg)!, styles, s.ctx.theme));
-        return setLiteral(s, last, editClasses(literal(last)!, styles, s.ctx.theme));
+          setLiteral(s, arg, stripClasses(literal(arg)!, styles, s.ctx.theme, s.ctx.tailwind));
+        return setLiteral(
+          s,
+          last,
+          editClasses(literal(last)!, styles, s.ctx.theme, s.ctx.tailwind),
+        );
       }
     }
   }

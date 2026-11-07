@@ -36,6 +36,8 @@ import {
 import { parseModule } from "./jsx.ts";
 import { editFiles, rewrite } from "./rewrite.ts";
 import { isStylexVar, mentionsVar, readVars, writeVar } from "./stylex.ts";
+import type { TailwindVersion, Theme } from "./tailwind.ts";
+import { configTheme, tailwind3Config } from "./tailwind3.ts";
 import {
   hasToken,
   isVariable,
@@ -91,6 +93,16 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
       }
     }
     return out;
+  }
+
+  /** The theme hand edits match values to: `tailwind.config.*` on v3, else the sheets' `@theme`. */
+  async function tailwindTheme(
+    design: Design,
+  ): Promise<{ theme: Theme; tailwind: TailwindVersion }> {
+    const all = await sheets(design);
+    const config = await tailwind3Config(design.root, all);
+    if (config) return { theme: await configTheme(design.root, config), tailwind: 3 };
+    return { theme: lightTheme(readTokens(all)), tailwind: 4 };
   }
 
   /**
@@ -224,8 +236,10 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
         modules = [...new Set(modules)];
         guardPrototype(design.root, canvas, modules);
       }
-      const theme =
-        design.styling === "tailwind" ? lightTheme(readTokens(await sheets(design))) : {};
+      const { theme, tailwind } =
+        design.styling === "tailwind"
+          ? await tailwindTheme(design)
+          : { theme: {}, tailwind: 4 as const };
       const variables = edits.some((e) => e.kind === "style" && variableRefs(e.styles).length > 0)
         ? variableSheets(await sheets(design))
         : {};
@@ -244,6 +258,7 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
           if (code === undefined) throw new Refused(`${file} doesn't exist`, "not-found");
           const result = rewrite(code, file, edits, design.styling, {
             theme,
+            tailwind,
             files: extra,
             variables,
             stylexVars: stylex,
@@ -306,6 +321,13 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
         return allTokens(design);
       }
       const all = await sheets(design);
+      const config =
+        design.styling === "tailwind" ? await tailwind3Config(design.root, all) : undefined;
+      if (config && !isVariable(prop) && !all.some((s) => hasToken(s.file, s.css, prop, mode)))
+        throw new Refused(
+          `This design uses Tailwind v3, whose theme lives in ${path.basename(config)}, so a new token there wouldn't make a class. Add it to theme.extend in ${path.basename(config)}, or ask the agent to.`,
+          "invalid",
+        );
       const globals = all.filter((s) => !s.partial);
       const target = isVariable(prop)
         ? variableHome(prop, all)
