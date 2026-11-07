@@ -218,7 +218,8 @@ export async function openDesign(design: Design): Promise<OpenedDesign> {
     },
 
     async canvases() {
-      return [...canvases.values()];
+      // A canvas a git pull adds may be older than the ones already here.
+      return [...canvases.values()].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
     },
 
     createCanvas({ kind, name, threadId }, _by) {
@@ -236,6 +237,11 @@ export async function openDesign(design: Design): Promise<OpenedDesign> {
           frames: [],
           texts: [],
           comments: [],
+          // Strictly after every other canvas, so pages made in the same millisecond keep their order.
+          createdAt: Math.max(
+            Date.now(),
+            ...[...canvases.values()].map((c) => (c.createdAt ?? 0) + 1),
+          ),
           updatedAt: Date.now(),
         });
       });

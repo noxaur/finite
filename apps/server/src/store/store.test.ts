@@ -292,6 +292,21 @@ describe("connect", () => {
     await expect(fs.stat(path.join(root, "package.json"))).resolves.toBeTruthy();
     await expect(store.open(entry.id)).rejects.toMatchObject({ code: "not-found" });
   });
+
+  it("lists pages in the order they were made on connect, reconnect and reopen", async () => {
+    const { dataDir, store, root, entry, open } = await connected();
+    const names = (canvases: Canvas[]) => canvases.map((c) => c.name);
+    const added = ["One", "Two", "Three", "Four", "Five"];
+    for (const name of added) await open.createCanvas({ kind: "page", name }, by);
+    const pages = ["Routes", "Brand", "Components", ...added];
+    expect(names(await open.canvases())).toEqual(pages);
+    await store.remove(entry.id);
+    const again = await store.connect(root);
+    expect(names(await (await store.open(again.id)).canvases())).toEqual(pages);
+    await store.close();
+    const reopened = newStore(dataDir);
+    expect(names(await (await reopened.open(again.id)).canvases())).toEqual(pages);
+  });
 });
 
 describe("workspaces", () => {
@@ -588,9 +603,34 @@ describe("canvases", () => {
     const [routes] = (await open.canvases()).filter((c) => c.name === "Routes");
     const seen = new Promise<DesignChange>((resolve) => open.on(resolve));
     const file = path.join(root, ".finite/canvases", `${routes!.id}.json`);
-    await fs.writeFile(file, JSON.stringify({ ...routes, name: "Pages" }));
+    // On macOS fs.watch starts its FSEvents stream asynchronously and drops writes made before it
+    // is live, which a busy machine stretches past the first write. Write until the watcher sees one.
+    let pulling = fs.writeFile(file, JSON.stringify({ ...routes, name: "Pages" }));
+    await pulling;
+    const again = setInterval(() => {
+      pulling = fs.writeFile(file, JSON.stringify({ ...routes, name: "Pages" }));
+    }, 250);
+    cleanup.push(async () => {
+      clearInterval(again);
+      await pulling;
+    });
     expect(await seen).toMatchObject({ type: "canvas", canvas: { id: routes!.id, name: "Pages" } });
     expect((await open.canvases()).find((c) => c.id === routes!.id)?.name).toBe("Pages");
+  });
+
+  it("lists a page a git pull adds by when it was made, not when it arrived", async () => {
+    const { root, open } = await connected();
+    const [routes] = await open.canvases();
+    const seen = new Promise<DesignChange>((resolve) => open.on(resolve));
+    const pulled: Canvas = { ...routes!, id: "pulled", name: "Pulled", createdAt: 0, frames: [] };
+    await fs.writeFile(path.join(root, ".finite/canvases/pulled.json"), JSON.stringify(pulled));
+    await seen;
+    expect((await open.canvases()).map((c) => c.name)).toEqual([
+      "Pulled",
+      "Routes",
+      "Brand",
+      "Components",
+    ]);
   });
 });
 

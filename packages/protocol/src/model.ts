@@ -210,7 +210,10 @@ export type Comment = z.infer<typeof Comment>;
 export const CanvasKind = z.enum(["page", "prototype"]);
 export type CanvasKind = z.infer<typeof CanvasKind>;
 
-/** `<root>/.finite/canvases/<id>.json`. A removed canvas keeps `removedAt` for 30 days, then goes. */
+/**
+ * `<root>/.finite/canvases/<id>.json`. A removed canvas keeps `removedAt` for 30 days, then goes.
+ * Canvases list in `createdAt` order; files written before it existed have none and come first.
+ */
 export const Canvas = z.object({
   id: Id,
   kind: CanvasKind,
@@ -219,6 +222,7 @@ export const Canvas = z.object({
   frames: z.array(Frame),
   texts: z.array(TextLabel),
   comments: z.array(Comment),
+  createdAt: z.number().optional(),
   updatedAt: z.number(),
   removedAt: z.number().optional(),
 });

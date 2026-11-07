@@ -51,7 +51,7 @@ $FINITE_DATA_DIR/
 <root>/.finite/       meant to be committed with the project
   design.json         { version: 1, id, router, styling, css[], wrapper?, brandDir }   router: react-router | tanstack | next-app | next-pages | none (a setup design)
   runtime/            generated files for Next.js and Tailwind v3 designs, ignored by git (see Previews)
-  canvases/<id>.json  one canvas: frames, text labels, comments
+  canvases/<id>.json  one canvas: frames, text labels, comments; listed by createdAt
   boards/<canvasId>/  the prototype components agents write, one default export per file
   threads/<id>.json   thread metadata (ThreadMeta)
   threads/<id>.jsonl  the thread's event log, one ThreadEvent per line
@@ -150,7 +150,7 @@ An invalid file is refused with code `invalid-config` and one sentence per probl
 
 `design.connect { path }` reads `finite.json` first. When `path` is the workspace root, Finite connects every app it lists, one design each, with detection run on the app folder, and returns the first. When `path` is in an app's folder, it connects that app. Each such design's row in `designs.json` gets `workspace` (the absolute folder holding `finite.json`) and `app` (its name there). A design that opens for the first time in a server run, or whose folder is connected again, looks its `finite.json` up again: it gets `workspace` and `app` when a `finite.json` written since lists it, and loses them when none does. An invalid `finite.json` keeps the fields as they are, and the preview reports the problems. The design's `root` is still the app folder, where `.finite/`, routes, the preview and hand edits live.
 
-Without a `finite.json`, detection runs as before. When it refuses a folder that has a `package.json`, like a monorepo root or an app missing a dependency, Finite connects it as a **setup design**: root and workspace are the folder, `router: "none"`, inline styling, no stylesheets, brand folder `assets/brand`, and `setup: true` on its row. Its preview never starts; it reports `needs-setup`. The connect dialog then asks `design.setup`, which starts the setup thread, the way an import starts its thread.
+Without a `finite.json`, detection runs as before. When it refuses a folder that has a `package.json`, like a monorepo root or an app missing a dependency, Finite connects it as a **setup design**: root and workspace are the folder, `router: "none"`, inline styling, no stylesheets, brand folder `assets/brand`, and `setup: true` on its row. Its preview never starts; it reports `needs-setup`, with a log that gives detection's reason (run again each time the design opens, like `… doesn't use Vite or Next.js (no vite or next in package.json).`) and says to finish the setup thread. The design screen shows that reason above "Set up with Claude". The connect dialog then asks `design.setup`, which starts the setup thread, the way an import starts its thread.
 
 ### The setup thread
 
