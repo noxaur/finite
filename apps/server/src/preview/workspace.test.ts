@@ -193,6 +193,26 @@ describe("finite.json failures", () => {
     await expect(previews.ensure(design)).rejects.toThrow(/setup hasn't finished/);
     expect(previews.state("setup")).toMatchObject({ status: "needs-setup" });
   });
+
+  test("a setup design's preview says why detection refuses its folder, read again on open", async () => {
+    const root = tinyWorkspace({ apps: { app: { path: "app" } } });
+    const design = { ...workspaceDesign("setup-why", root, "app", "app"), setup: true };
+    const first = previews.ensure(design);
+    // Never "starting", even while detection runs.
+    expect(previews.state("setup-why")).toEqual({ status: "needs-setup" });
+    await expect(first).rejects.toThrow(/setup hasn't finished/);
+    expect(previews.state("setup-why").log).toBe(
+      `${path.join(root, "app")} doesn't use Vite or Next.js (no vite or next in package.json). ` +
+        "Finite supports Next.js apps (App Router or Pages Router) and Vite apps that use React Router (react-router or react-router-dom) or TanStack Router (@tanstack/react-router).\n\n" +
+        "Its finite.json setup hasn't finished. Finish the setup thread, which writes finite.json and calls finish_setup, then open the design again.",
+    );
+    fs.writeFileSync(
+      path.join(root, "app/package.json"),
+      JSON.stringify({ devDependencies: { vite: "8" } }),
+    );
+    await expect(previews.ensure(design)).rejects.toThrow(/no supported router/);
+    expect(previews.state("setup-why").log).toMatch(/^\S+ has no supported router/);
+  });
 });
 
 describe("finite.json services", () => {

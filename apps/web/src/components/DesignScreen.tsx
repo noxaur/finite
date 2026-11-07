@@ -386,9 +386,13 @@ function Preview({
         ? "The dev server stopped"
         : "Starting the dev server…";
   let log = installing ? installing.log : state?.log?.trim();
-  // A failed preview's log starts with what went wrong and what to do, then the output.
+  // A setup design's log is its reason. A failed preview's starts with what went wrong and what
+  // to do, then the output.
   let reason: string | undefined;
-  if (!installing && failed && log?.includes("\n\n")) {
+  if (needsSetup) {
+    reason = log;
+    log = undefined;
+  } else if (!installing && failed && log?.includes("\n\n")) {
     reason = log.slice(0, log.indexOf("\n\n"));
     log = log.slice(reason.length);
   }
@@ -396,7 +400,7 @@ function Preview({
   return (
     <div role="status" {...stylex.props(styles.preview)}>
       <p {...stylex.props(styles.previewTitle)}>{title}</p>
-      {reason && <p {...stylex.props(styles.previewReason)}>{reason}</p>}
+      {reason && <p {...stylex.props(styles.reason)}>{reason}</p>}
       {tail && <pre {...stylex.props(styles.log)}>{tail}</pre>}
       {!installing && (failed || needsSetup) && (
         <div {...stylex.props(styles.previewActions)}>
@@ -501,7 +505,15 @@ const styles = stylex.create({
     marginTop: space.ms,
   },
   previewNote: { fontSize: 12, color: colors.muted },
-  previewReason: { marginTop: space.sm, marginBottom: 0, fontSize: 12, whiteSpace: "pre-wrap" },
+  reason: {
+    marginTop: space.sm,
+    marginBottom: 0,
+    fontSize: 12,
+    lineHeight: "17px",
+    color: colors.muted,
+    whiteSpace: "pre-line",
+    overflowWrap: "anywhere",
+  },
   log: {
     marginTop: space.sm,
     marginBottom: 0,
