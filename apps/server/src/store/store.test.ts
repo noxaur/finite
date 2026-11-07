@@ -576,8 +576,19 @@ describe("canvases", () => {
     const [routes] = (await open.canvases()).filter((c) => c.name === "Routes");
     const seen = new Promise<DesignChange>((resolve) => open.on(resolve));
     const file = path.join(root, ".finite/canvases", `${routes!.id}.json`);
-    await fs.writeFile(file, JSON.stringify({ ...routes, name: "Pages" }));
-    expect(await seen).toMatchObject({ type: "canvas", canvas: { id: routes!.id, name: "Pages" } });
+    // On macOS fs.watch starts its FSEvents stream asynchronously and drops writes made before it
+    // is live, which a busy machine stretches past the first write. Write until the watcher sees one.
+    const pull = () => fs.writeFile(file, JSON.stringify({ ...routes, name: "Pages" }));
+    await pull();
+    const again = setInterval(() => void pull(), 250);
+    try {
+      expect(await seen).toMatchObject({
+        type: "canvas",
+        canvas: { id: routes!.id, name: "Pages" },
+      });
+    } finally {
+      clearInterval(again);
+    }
     expect((await open.canvases()).find((c) => c.id === routes!.id)?.name).toBe("Pages");
   });
 });
