@@ -51,7 +51,7 @@ $FINITE_DATA_DIR/
 <root>/.finite/       meant to be committed with the project
   design.json         { version: 1, id, router, styling, css[], wrapper?, brandDir }   router: react-router | tanstack | next-app | next-pages | none (a setup design)
   runtime/            generated files for Next.js and Tailwind v3 designs, ignored by git (see Previews)
-  canvases/<id>.json  one canvas: frames, text labels, comments
+  canvases/<id>.json  one canvas: frames, text labels, comments; listed by createdAt
   boards/<canvasId>/  the prototype components agents write, one default export per file
   threads/<id>.json   thread metadata (ThreadMeta)
   threads/<id>.jsonl  the thread's event log, one ThreadEvent per line

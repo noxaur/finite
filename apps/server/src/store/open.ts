@@ -103,6 +103,7 @@ export async function openDesign(design: Design): Promise<OpenedDesign> {
   }
 
   const now = Date.now();
+  const loaded: Canvas[] = [];
   for (const name of await fsp.readdir(canvasDir)) {
     if (!name.endsWith(".json")) continue;
     const file = path.join(canvasDir, name);
@@ -112,8 +113,10 @@ export async function openDesign(design: Design): Promise<OpenedDesign> {
       await fsp.rm(file, { force: true });
       continue;
     }
-    canvases.set(canvas.id, canvas);
+    loaded.push(canvas);
   }
+  loaded.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+  for (const canvas of loaded) canvases.set(canvas.id, canvas);
   for (const name of await fsp.readdir(threadDir)) {
     if (!name.endsWith(".json")) continue;
     const file = path.join(threadDir, name);
@@ -236,6 +239,11 @@ export async function openDesign(design: Design): Promise<OpenedDesign> {
           frames: [],
           texts: [],
           comments: [],
+          // Strictly after every other canvas, so pages made in the same millisecond keep their order.
+          createdAt: Math.max(
+            Date.now(),
+            ...[...canvases.values()].map((c) => (c.createdAt ?? 0) + 1),
+          ),
           updatedAt: Date.now(),
         });
       });

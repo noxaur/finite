@@ -292,6 +292,21 @@ describe("connect", () => {
     await expect(fs.stat(path.join(root, "package.json"))).resolves.toBeTruthy();
     await expect(store.open(entry.id)).rejects.toMatchObject({ code: "not-found" });
   });
+
+  it("lists pages in the order they were made on connect, reconnect and reopen", async () => {
+    const { dataDir, store, root, entry, open } = await connected();
+    const names = (canvases: Canvas[]) => canvases.map((c) => c.name);
+    const added = ["One", "Two", "Three", "Four", "Five"];
+    for (const name of added) await open.createCanvas({ kind: "page", name }, by);
+    const pages = ["Routes", "Brand", "Components", ...added];
+    expect(names(await open.canvases())).toEqual(pages);
+    await store.remove(entry.id);
+    const again = await store.connect(root);
+    expect(names(await (await store.open(again.id)).canvases())).toEqual(pages);
+    await store.close();
+    const reopened = newStore(dataDir);
+    expect(names(await (await reopened.open(again.id)).canvases())).toEqual(pages);
+  });
 });
 
 describe("workspaces", () => {
