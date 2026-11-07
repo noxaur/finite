@@ -17,7 +17,7 @@ import {
 
 export { scanRoutes, routeParams } from "./routes.ts";
 export { stamp, rev } from "./stamp.ts";
-export { finiteNext } from "./next/index.ts";
+export { finiteNext, nextBundler } from "./next/index.ts";
 
 export type FiniteOptions = {
   /** The design root, where `.finite/` lives. */

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "next-webpack",
+  "router": "next-app",
+  "styling": "tailwind",
+  "css": ["app/globals.css"],
+  "brandDir": "assets/brand"
+}
