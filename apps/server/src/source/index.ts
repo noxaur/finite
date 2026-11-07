@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   Refused,
@@ -9,6 +9,7 @@ import {
   type Remap,
   type Route,
   type SourceEditor,
+  type Token,
 } from "@finite/protocol";
 import { listComponents } from "./components.ts";
 import {
@@ -34,6 +35,7 @@ import {
 } from "./imports.ts";
 import { parseModule } from "./jsx.ts";
 import { editFiles, rewrite } from "./rewrite.ts";
+import { isStylexVar, readVars, varRefs, writeVar } from "./stylex.ts";
 import {
   hasToken,
   isVariable,
@@ -89,6 +91,46 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
       }
     }
     return out;
+  }
+
+  /**
+   * A StyleX design's `defineVars` tokens, from its `*.stylex.ts` (or `.js`, `.tsx`…) files under
+   * `src/` and `app/`, with the file that defines each token and each group. The first file to
+   * define a group wins.
+   */
+  async function stylexVars(design: Design): Promise<{
+    tokens: Token[];
+    homes: Record<string, string>;
+    groups: Map<string, string>;
+  }> {
+    const tokens: Token[] = [];
+    const homes: Record<string, string> = {};
+    const groups = new Map<string, string>();
+    if (design.styling !== "stylex") return { tokens, homes, groups };
+    for (const dir of ["src", "app"]) {
+      const entries = await readdir(inRoot(design.root, dir), { recursive: true }).catch(() => []);
+      for (const entry of entries.sort((a, b) => a.localeCompare(b))) {
+        const file = `${dir}/${entry.split(path.sep).join("/")}`;
+        if (!/\.stylex\.[cm]?[jt]sx?$/.test(file) || file.includes("node_modules/")) continue;
+        let read: ReturnType<typeof readVars>;
+        try {
+          read = readVars(file, (await readText(inRoot(design.root, file))) ?? "");
+        } catch {
+          continue; // a file that doesn't parse has no tokens to show
+        }
+        for (const group of read.groups) if (!groups.has(group)) groups.set(group, file);
+        for (const token of read.tokens) {
+          if (groups.get(token.name.split(".")[0]!) !== file) continue;
+          homes[token.name] = file;
+          tokens.push(token);
+        }
+      }
+    }
+    return { tokens, homes, groups };
+  }
+
+  async function allTokens(design: Design): Promise<Token[]> {
+    return [...readTokens(await sheets(design)), ...(await stylexVars(design)).tokens];
   }
 
   /** Reads `files`, lets `change` produce new contents, writes what changed. All under the files' locks. */
@@ -187,6 +229,9 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
       const variables = edits.some((e) => e.kind === "style" && variableRefs(e.styles).length > 0)
         ? variableSheets(await sheets(design))
         : {};
+      const stylex = edits.some((e) => e.kind === "style" && varRefs(e.styles).length > 0)
+        ? (await stylexVars(design)).homes
+        : {};
 
       const remap: Remap = {};
       const patches = await transact(design.root, [...files, ...modules], (contents) => {
@@ -201,6 +246,7 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
             theme,
             files: extra,
             variables,
+            stylexVars: stylex,
           });
           if (result instanceof Refused) throw result;
           out.set(file, result.code);
@@ -237,12 +283,28 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
       return { file: copy };
     },
 
-    async tokens(design) {
-      return readTokens(await sheets(design));
-    },
+    tokens: allTokens,
 
     async setToken(design, { name, mode, value }) {
       const prop = tokenName(name);
+      if (isStylexVar(prop)) {
+        const [group, key] = prop.split(".") as [string, string];
+        const { groups } = await stylexVars(design);
+        const file = groups.get(group);
+        if (!file)
+          throw new Refused(
+            design.styling !== "stylex"
+              ? `${prop} is a StyleX token, but this design isn't styled with StyleX. Use a CSS custom property (--${key}) instead.`
+              : groups.size === 0
+                ? `${prop} is a StyleX token, but this design has no stylex.defineVars yet. Add a src/tokens.stylex.ts with export const ${group} = stylex.defineVars({ … }), or ask the agent.`
+                : `This design has no defineVars named ${group}. Add it to ${[...groups.keys()].map((g) => `${g}.${key}`).join(" or ")}, or ask the agent to add a ${group} group.`,
+            "invalid",
+          );
+        await transact(design.root, [file], (contents) => {
+          return new Map([[file, writeVar(file, contents.get(file) ?? "", prop, mode, value)]]);
+        });
+        return allTokens(design);
+      }
       const all = await sheets(design);
       const globals = all.filter((s) => !s.partial);
       const target = isVariable(prop)
@@ -273,7 +335,7 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
           ],
         ]);
       });
-      return readTokens(await sheets(design));
+      return allTokens(design);
     },
 
     components: (design) => listComponents(design.root),

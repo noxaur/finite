@@ -2,6 +2,7 @@ import { Refused, type SourceEdit } from "@finite/protocol";
 import { describe, expect, it } from "vite-plus/test";
 import { rev } from "./files.ts";
 import { rewrite } from "./rewrite.ts";
+import { readVars, writeVar } from "./stylex.ts";
 
 const FILE = "src/Card.tsx";
 
@@ -322,5 +323,188 @@ export const List = () => (
     const locs = [first.remap[`${FILE}:14:4`]!, first.remap[`${FILE}:15:4`]!];
     const second = ok(run(first.code, locs, "li", { padding: null }));
     expect(second.code).toBe(list);
+  });
+});
+
+describe("defineVars tokens", () => {
+  const VARS = `import * as stylex from "@stylexjs/stylex";
+
+export const colors = stylex.defineVars({
+  brand: "#95ced7",
+  ink: {
+    default: "#1d2a2e",
+    "@media (prefers-color-scheme: dark)": "#e3f1f3",
+  },
+  typed: stylex.types.color("#000"),
+  alias: brand,
+  "line-soft": \`#c8d3d6\`,
+});
+
+const local = stylex.defineVars({ hidden: "1px" });
+`;
+  const F = "src/tokens.stylex.ts";
+
+  it("reads plain and conditional values and skips values built from code", () => {
+    expect(readVars(F, VARS)).toEqual({
+      groups: ["colors"],
+      tokens: [
+        { name: "colors.brand", light: "#95ced7" },
+        { name: "colors.ink", light: "#1d2a2e", dark: "#e3f1f3" },
+        { name: "colors.line-soft", light: "#c8d3d6" },
+      ],
+    });
+    const named = `import { defineVars as dv } from "@stylexjs/stylex";\nexport const space = dv({ gap: 8 });\n`;
+    expect(readVars(F, named).tokens).toEqual([{ name: "space.gap", light: "8" }]);
+  });
+
+  it("sets a light value and keeps the other branches", () => {
+    expect(writeVar(F, VARS, "colors.brand", "light", "#000")).toBe(
+      VARS.replace(`brand: "#95ced7"`, `brand: "#000"`),
+    );
+    expect(writeVar(F, VARS, "colors.ink", "light", "#111")).toBe(
+      VARS.replace(`default: "#1d2a2e"`, `default: "#111"`),
+    );
+    expect(writeVar(F, VARS, "colors.ink", "dark", "#fff")).toBe(
+      VARS.replace(`dark)": "#e3f1f3"`, `dark)": "#fff"`),
+    );
+  });
+
+  it("adds the dark branch to a plain value, and clearing it makes the value plain again", () => {
+    const dark = writeVar(F, VARS, "colors.brand", "dark", "#1a6f7b");
+    expect(dark).toBe(
+      VARS.replace(
+        `brand: "#95ced7",`,
+        `brand: {\n    default: "#95ced7",\n    "@media (prefers-color-scheme: dark)": "#1a6f7b",\n  },`,
+      ),
+    );
+    expect(readVars(F, dark).tokens[0]).toEqual({
+      name: "colors.brand",
+      light: "#95ced7",
+      dark: "#1a6f7b",
+    });
+    expect(writeVar(F, dark, "colors.brand", "dark", null)).toBe(VARS);
+    const inline = `import * as stylex from "@stylexjs/stylex";\nexport const c = stylex.defineVars({ a: "1px" });\n`;
+    expect(writeVar(F, inline, "c.a", "dark", "2px")).toBe(
+      inline.replace(
+        `a: "1px"`,
+        `a: { default: "1px", "@media (prefers-color-scheme: dark)": "2px" }`,
+      ),
+    );
+  });
+
+  it("adds a new token after the group's others and removes one", () => {
+    expect(writeVar(F, VARS, "colors.accent", "light", "#f0c")).toBe(
+      VARS.replace("`#c8d3d6`,\n", '`#c8d3d6`,\n  accent: "#f0c",\n'),
+    );
+    expect(writeVar(F, VARS, "colors.brand", "light", null)).toBe(
+      VARS.replace(`  brand: "#95ced7",\n`, ""),
+    );
+  });
+
+  it("refuses what it can't write", () => {
+    expect(() => writeVar(F, VARS, "colors.accent", "dark", "#000")).toThrow(
+      /Set its Light value first/,
+    );
+    expect(() => writeVar(F, VARS, "colors.ink", "light", null)).toThrow(
+      /Clear its Dark value first/,
+    );
+    expect(() => writeVar(F, VARS, "colors.typed", "light", "#fff")).toThrow(/built from code/);
+    expect(() => writeVar(F, VARS, "space.gap", "light", "1px")).toThrow(
+      /no defineVars named space/,
+    );
+  });
+});
+
+describe("picking a defineVars token", () => {
+  const VARS = {
+    "colors.brand": "src/tokens.stylex.ts",
+    "colors.line-soft": "src/tokens.stylex.ts",
+  };
+  const pick = (
+    code: string,
+    styles: Record<string, string | null>,
+    at = L(17, 4),
+    tag = "div",
+  ) => {
+    const edit: SourceEdit = {
+      kind: "style",
+      locs: [at],
+      tag,
+      styles,
+      revs: { [FILE]: rev(code) },
+    };
+    return rewrite(code, FILE, [edit], "stylex", { theme: {}, files: {}, stylexVars: VARS });
+  };
+
+  it("writes the member expression and imports the group after the other imports", () => {
+    const out = ok(pick(CARD, { color: "colors.brand", margin: "colors.line-soft" }));
+    expect(out.code).toBe(
+      CARD.replace(
+        `import * as stylex from "@stylexjs/stylex";\n`,
+        `import * as stylex from "@stylexjs/stylex";\nimport { colors } from "./tokens.stylex";\n`,
+      )
+        .replace(`default: "black"`, "default: colors.brand")
+        .replace(
+          `":hover": "blue",\n    },\n`,
+          `":hover": "blue",\n    },\n    margin: colors["line-soft"],\n`,
+        ),
+    );
+    // The import and the new margin moved the div down two lines.
+    expect(out.remap[L(17, 4)]).toBe(L(19, 4));
+    // Picking again reuses the import.
+    const again = ok(pick(out.code, { padding: "colors.brand" }, L(19, 4))).code;
+    expect(again.match(/tokens\.stylex/g)).toHaveLength(1);
+    expect(again).toContain("padding: colors.brand,");
+  });
+
+  it("uses the local name of an aliased import and refuses a name taken by something else", () => {
+    const aliased = CARD.replace(
+      `\n\nconst styles`,
+      `\nimport { colors as c } from "./tokens.stylex";\n\nconst styles`,
+    );
+    expect(ok(pick(aliased, { padding: "colors.brand" }, L(18, 4))).code).toContain(
+      "padding: c.brand,",
+    );
+    const taken = CARD.replace(`\n\nconst styles`, `\nconst colors = ["red"];\n\nconst styles`);
+    expect(refused(pick(taken, { color: "colors.brand" }, L(18, 4)))).toContain(
+      "already has something named colors",
+    );
+  });
+
+  it("refuses a token it doesn't know and one on an element without a spread", () => {
+    const unknown = pick(CARD, { color: "colors.nope" });
+    expect(unknown).toMatchObject({ code: "not-found" });
+    const p = pick(CARD, { color: "colors.brand" }, L(19), "p");
+    expect(p).toBeInstanceOf(Refused);
+    expect(p).toMatchObject({
+      code: "unsupported-style",
+      message: expect.stringContaining("no stylex.props spread"),
+    });
+  });
+
+  it("refuses a token on a Tailwind, CSS-modules or inline element", () => {
+    const code = `export const A = () => <div className="p-2">x</div>;\n`;
+    for (const convention of ["tailwind", "css-modules", "inline"] as const) {
+      const edit: SourceEdit = {
+        kind: "style",
+        locs: [`${FILE}:1:23`],
+        tag: "div",
+        styles: { color: "colors.brand" },
+        revs: { [FILE]: rev(code) },
+      };
+      const result = rewrite(code, FILE, [edit], convention, {
+        theme: {},
+        files: {},
+        stylexVars: VARS,
+      });
+      expect(result).toMatchObject({
+        code: "unsupported-style",
+        message: expect.stringContaining("is a StyleX token"),
+      });
+    }
+  });
+
+  it("still writes a custom property pick as a string", () => {
+    expect(ok(pick(CARD, { padding: "var(--gap)" })).code).toContain(`padding: "var(--gap)",`);
   });
 });

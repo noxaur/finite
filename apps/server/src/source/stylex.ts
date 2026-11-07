@@ -1,16 +1,21 @@
 import type * as t from "@babel/types";
-import { Refused } from "@finite/protocol";
-import { walk } from "./jsx.ts";
+import { Refused, type Token, type TokenMode } from "@finite/protocol";
+import { candidates, isRelative, resolveSpec, specTo } from "./imports.ts";
+import { parseModule, walk } from "./jsx.ts";
 import { kebab } from "./tailwind.ts";
 
 const SOURCES = new Set(["@stylexjs/stylex", "stylex"]);
 const ASK = "Ask the agent to change this";
 
-/** How a file names StyleX: its namespace imports, named `props` and `create`, and its `create` objects. */
+/**
+ * How a file names StyleX: its namespace imports, named `props`, `create` and `defineVars`, and its
+ * `create` objects.
+ */
 type Bindings = {
   namespaces: Set<string>;
   props: Set<string>;
   create: Set<string>;
+  defineVars: Set<string>;
   /** Local name → the module it's imported from, for every non-StyleX import. */
   imported: Map<string, string>;
   /** `const <name> = create(<arg>)` at the top level. */
@@ -22,14 +27,18 @@ type Ref = { sheet: string; key: string; call: boolean; nested: boolean; member:
 
 /**
  * The overwrite that sets `styles` on the `stylex.create` entry that `el`'s `stylex.props` spread
- * resolves to, or `undefined` when the element has no spread.
+ * resolves to, or `undefined` when the element has no spread. A value that names a `defineVars`
+ * token (`colors.brand`, from `vars`, token name → its `*.stylex.ts` file) is written as that
+ * member expression, with `import`, the import to add when the file doesn't import its group yet.
  */
 export function stylexEdit(
   code: string,
   ast: t.File,
   el: t.JSXElement,
   styles: Record<string, string | null>,
-): { start: number; end: number; text: string } | undefined {
+  file: string,
+  vars: Record<string, string>,
+): { start: number; end: number; text: string; import?: { at: number; text: string } } | undefined {
   const b = bindings(ast);
   const spreads: t.Node[][] = [];
   for (const attr of el.openingElement.attributes) {
@@ -104,10 +113,13 @@ export function stylexEdit(
     }
   }
 
+  const used = useVars(code, ast, file, styles, vars);
+  const valueText = (v: string | null) =>
+    v === null ? "null" : (used.refs[v] ?? JSON.stringify(v));
   const existing = new Set(keys(entry));
   const added = [...wanted]
     .filter(([k, v]) => v !== null && !existing.has(k))
-    .map(([k, v]) => `${key(k)}: ${JSON.stringify(v)}`);
+    .map(([k, v]) => `${key(k)}: ${valueText(v)}`);
   const text = rebuild(
     code,
     entry,
@@ -117,9 +129,9 @@ export function stylexEdit(
       const value = p.value;
       const around = (inner: string) =>
         `${code.slice(p.start!, value.start!)}${inner}${code.slice(value.end!, p.end!)}`;
-      if (value.type !== "ObjectExpression") return v === null ? null : around(JSON.stringify(v));
+      if (value.type !== "ObjectExpression") return v === null ? null : around(valueText(v));
       // A conditional value ({ default, ":hover", "@media …" }): set `default`, keep the rest.
-      const literal = v === null ? "null" : JSON.stringify(v);
+      const literal = valueText(v);
       const hasDefault = keys(value).includes("default");
       return around(
         rebuild(
@@ -139,7 +151,12 @@ export function stylexEdit(
     },
     added,
   );
-  return { start: entry.start!, end: entry.end!, text };
+  return {
+    start: entry.start!,
+    end: entry.end!,
+    text,
+    ...(used.import && { import: used.import }),
+  };
 }
 
 function refuse(why: string): Refused {
@@ -151,6 +168,7 @@ function bindings(ast: t.File): Bindings {
     namespaces: new Set(),
     props: new Set(),
     create: new Set(),
+    defineVars: new Set(),
     imported: new Map(),
     sheets: new Map(),
   };
@@ -164,6 +182,7 @@ function bindings(ast: t.File): Bindings {
         const name = spec.imported.type === "Identifier" ? spec.imported.name : spec.imported.value;
         if (name === "props") b.props.add(spec.local.name);
         if (name === "create") b.create.add(spec.local.name);
+        if (name === "defineVars") b.defineVars.add(spec.local.name);
       }
     }
   }
@@ -183,7 +202,7 @@ function bindings(ast: t.File): Bindings {
 }
 
 /** True when `callee` is StyleX's `fn`: `stylex.fn` through a namespace import, or a named import. */
-function calls(b: Bindings, callee: t.Node, fn: "props" | "create"): boolean {
+function calls(b: Bindings, callee: t.Node, fn: "props" | "create" | "defineVars"): boolean {
   if (callee.type === "Identifier") return b[fn].has(callee.name);
   return (
     callee.type === "MemberExpression" &&
@@ -389,4 +408,258 @@ function rebuild(
 function indentAt(code: string, offset: number): string {
   const lineStart = code.lastIndexOf("\n", offset - 1) + 1;
   return /^[ \t]*/.exec(code.slice(lineStart))![0];
+}
+
+// `defineVars` tokens
+
+/** A whole value that names a `defineVars` token, `<group>.<key>`. No CSS value has this shape. */
+const VAR_REF = /^([A-Za-z_$][\w$]*)\.([A-Za-z_][\w-]*)$/;
+
+/** Whether a token name is a StyleX `defineVars` variable, `<group>.<key>`. */
+export const isStylexVar = (name: string) => VAR_REF.test(name);
+
+/** The values in `styles` that name a `defineVars` token, like `colors.brand`. */
+export function varRefs(styles: Record<string, string | null>): string[] {
+  return [
+    ...new Set(Object.values(styles).filter((v): v is string => v !== null && isStylexVar(v))),
+  ];
+}
+
+/**
+ * The member expression each token `styles` names is written as, and the import to add for the
+ * groups `file` doesn't import yet: `import { colors } from "../tokens.stylex";` after the other
+ * imports. A group imported under another local name is used by that name; a group whose name is
+ * taken by something else refuses.
+ */
+function useVars(
+  code: string,
+  ast: t.File,
+  file: string,
+  styles: Record<string, string | null>,
+  vars: Record<string, string>,
+): { refs: Record<string, string>; import?: { at: number; text: string } } {
+  const refs: Record<string, string> = {};
+  const missing = new Map<string, Set<string>>();
+  for (const ref of varRefs(styles)) {
+    const home = vars[ref];
+    if (!home)
+      throw new Refused(
+        `${ref} isn't a StyleX token in this design's *.stylex.ts files. Add it under Tokens first, or ask the agent.`,
+        "not-found",
+      );
+    const [group, k] = ref.split(".") as [string, string];
+    let local = importedAs(ast, file, group, home);
+    if (local === undefined) {
+      if (bound(ast, group))
+        throw refuse(
+          `${file} already has something named ${group} that isn't imported from ${home}, so Finite can't import the StyleX token ${ref}`,
+        );
+      local = group;
+      missing.set(home, (missing.get(home) ?? new Set()).add(group));
+    }
+    refs[ref] = /^[A-Za-z_$][\w$]*$/.test(k) ? `${local}.${k}` : `${local}[${JSON.stringify(k)}]`;
+  }
+  if (missing.size === 0) return { refs };
+  const imports = ast.program.body.filter((s) => s.type === "ImportDeclaration");
+  const last = imports.at(-1);
+  const quote = last ? code[last.source.start!] : '"';
+  const semi = last ? code.slice(last.start!, last.end!).endsWith(";") : true;
+  const lines = [...missing].map(
+    ([home, groups]) =>
+      `import { ${[...groups].join(", ")} } from ${quote}${specTo(file, home, false)}${quote}${semi ? ";" : ""}`,
+  );
+  if (last) return { refs, import: { at: last.end!, text: lines.map((l) => `\n${l}`).join("") } };
+  return { refs, import: { at: ast.program.body[0]?.start ?? 0, text: `${lines.join("\n")}\n\n` } };
+}
+
+/** The local name `file` imports `group` from `home` under, if it does. */
+function importedAs(ast: t.File, file: string, group: string, home: string): string | undefined {
+  for (const stmt of ast.program.body) {
+    if (stmt.type !== "ImportDeclaration" || stmt.importKind === "type") continue;
+    const spec = stmt.source.value;
+    if (!isRelative(spec) || !candidates(resolveSpec(file, spec)).includes(home)) continue;
+    for (const s of stmt.specifiers) {
+      if (s.type !== "ImportSpecifier" || s.importKind === "type") continue;
+      const name = s.imported.type === "Identifier" ? s.imported.name : s.imported.value;
+      if (name === group) return s.local.name;
+    }
+  }
+  return undefined;
+}
+
+/** Whether the module's top level binds `name`: an import, a variable, a function, a class or an enum. */
+function bound(ast: t.File, name: string): boolean {
+  return ast.program.body.some((stmt) => {
+    if (stmt.type === "ImportDeclaration")
+      return stmt.specifiers.some((s) => s.local.name === name);
+    const decl =
+      stmt.type === "ExportNamedDeclaration" || stmt.type === "ExportDefaultDeclaration"
+        ? stmt.declaration
+        : stmt;
+    if (decl?.type === "VariableDeclaration")
+      return decl.declarations.some((d) => binds(d.id, name));
+    if (
+      decl?.type === "FunctionDeclaration" ||
+      decl?.type === "ClassDeclaration" ||
+      decl?.type === "TSEnumDeclaration"
+    )
+      return decl.id?.name === name;
+    return false;
+  });
+}
+
+const DARK = /^@media\s*\(\s*prefers-color-scheme\s*:\s*dark\s*\)$/;
+const DARK_KEY = JSON.stringify("@media (prefers-color-scheme: dark)");
+
+/** The `export const <group> = stylex.defineVars({…})` objects at the top level, by group. */
+function defineVars(ast: t.File): Map<string, t.ObjectExpression> {
+  const b = bindings(ast);
+  const out = new Map<string, t.ObjectExpression>();
+  for (const stmt of ast.program.body) {
+    if (stmt.type !== "ExportNamedDeclaration") continue;
+    if (stmt.declaration?.type !== "VariableDeclaration") continue;
+    for (const d of stmt.declaration.declarations) {
+      const arg = d.init?.type === "CallExpression" ? d.init.arguments[0] : undefined;
+      if (
+        d.id.type === "Identifier" &&
+        d.init?.type === "CallExpression" &&
+        calls(b, d.init.callee, "defineVars") &&
+        arg?.type === "ObjectExpression"
+      )
+        out.set(d.id.name, arg);
+    }
+  }
+  return out;
+}
+
+/** A plain, non-computed key, or `undefined` for a spread, a method or a computed key. */
+function propKey(p: t.Node): string | undefined {
+  return p.type === "ObjectProperty" && !p.computed ? keyName(p.key) : undefined;
+}
+
+/** A value written as a literal: a string, a number or a template without `${}`. */
+function literalOf(node: t.Node): string | undefined {
+  if (node.type === "StringLiteral") return node.value;
+  if (node.type === "NumericLiteral") return String(node.value);
+  if (node.type === "TemplateLiteral" && node.expressions.length === 0)
+    return node.quasis[0]!.value.cooked ?? undefined;
+  return undefined;
+}
+
+/**
+ * A `*.stylex.ts` file's `defineVars` groups and their tokens, named `<group>.<key>`. Light is a
+ * literal value or a conditional value's `default`, dark its `@media (prefers-color-scheme: dark)`
+ * branch. Values built from code are left out.
+ */
+export function readVars(file: string, code: string): { groups: string[]; tokens: Token[] } {
+  const groups = defineVars(parseModule(code, file));
+  const tokens: Token[] = [];
+  for (const [group, obj] of groups) {
+    for (const p of obj.properties) {
+      const k = propKey(p);
+      if (k === undefined || !isStylexVar(`${group}.${k}`)) continue;
+      const value = (p as t.ObjectProperty).value;
+      const token: Token = { name: `${group}.${k}` };
+      const light = literalOf(value);
+      if (light !== undefined) token.light = light;
+      else if (value.type === "ObjectExpression") {
+        for (const q of value.properties) {
+          const qk = propKey(q);
+          const v = qk === undefined ? undefined : literalOf((q as t.ObjectProperty).value);
+          if (v === undefined) continue;
+          if (qk === "default") token.light = v;
+          else if (DARK.test(qk!)) token.dark = v;
+        }
+      }
+      if (token.light !== undefined || token.dark !== undefined) tokens.push(token);
+    }
+  }
+  return { groups: [...groups.keys()], tokens };
+}
+
+/**
+ * Sets (or with `null`, removes) one `defineVars` token's value in one mode, keeping its other
+ * branches. A dark value turns a plain value into `{ default, "@media (prefers-color-scheme: dark)" }`,
+ * and removing it turns that back into the plain value. A new token goes after the group's others.
+ */
+export function writeVar(
+  file: string,
+  code: string,
+  name: string,
+  mode: TokenMode,
+  value: string | null,
+): string {
+  const [group, k] = name.split(".") as [string, string];
+  const obj = defineVars(parseModule(code, file)).get(group);
+  if (!obj) throw new Refused(`${file} has no defineVars named ${group}`, "not-found");
+  const splice = (node: t.Node, text: string) =>
+    code.slice(0, node.start!) + text + code.slice(node.end!);
+  const literal = value === null ? "null" : JSON.stringify(value);
+  const prop = obj.properties.find((p) => propKey(p) === k) as t.ObjectProperty | undefined;
+  const top = (edit: string | null) =>
+    splice(
+      obj,
+      rebuild(code, obj, (p) => (p === prop ? edit : undefined), []),
+    );
+  if (!prop) {
+    if (value === null) return code;
+    if (mode === "dark")
+      throw new Refused(
+        `${name} doesn't exist yet. Set its Light value first: a StyleX variable needs a default.`,
+        "invalid",
+      );
+    const keyText = /^[A-Za-z_$][\w$]*$/.test(k) ? k : JSON.stringify(k);
+    return splice(
+      obj,
+      rebuild(code, obj, () => undefined, [`${keyText}: ${literal}`]),
+    );
+  }
+  const v = prop.value;
+  const head = code.slice(prop.start!, v.start!);
+  if (literalOf(v) !== undefined) {
+    if (mode === "light") return top(value === null ? null : `${head}${literal}`);
+    if (value === null) return code;
+    const branches = [`default: ${code.slice(v.start!, v.end!)}`, `${DARK_KEY}: ${literal}`];
+    const indent = indentAt(code, prop.start!);
+    const text = code.slice(obj.start!, obj.end!).includes("\n")
+      ? `{\n${branches.map((b) => `${indent}  ${b},`).join("\n")}\n${indent}}`
+      : `{ ${branches.join(", ")} }`;
+    return splice(v, text);
+  }
+  if (v.type !== "ObjectExpression" || v.properties.some((q) => propKey(q) === undefined))
+    throw refuse(`${name} is built from code, so Finite can't edit it by hand`);
+  const isBranch = (q: t.Node) =>
+    mode === "light" ? propKey(q) === "default" : DARK.test(propKey(q)!);
+  const branch = v.properties.find(isBranch) as t.ObjectProperty | undefined;
+  if (branch?.value.type === "ObjectExpression")
+    throw refuse(
+      `${name} has a nested ${mode === "light" ? "default" : "dark"} value, so Finite can't tell which to edit`,
+    );
+  const rest = v.properties.filter((q) => q !== branch) as t.ObjectProperty[];
+  if (value === null) {
+    if (!branch) return code;
+    if (mode === "light" && rest.length > 0)
+      throw new Refused(
+        `${name} needs a default while it has other values, since StyleX requires one. Clear its Dark value first.`,
+        "invalid",
+      );
+    if (rest.length === 0) return top(null);
+    // Only the default left: back to a plain value.
+    if (rest.length === 1 && propKey(rest[0]!) === "default")
+      return splice(v, code.slice(rest[0]!.value.start!, rest[0]!.value.end!));
+  }
+  return splice(
+    v,
+    rebuild(
+      code,
+      v,
+      (q) =>
+        q !== branch
+          ? undefined
+          : value === null
+            ? null
+            : `${code.slice(q.start!, q.value.start!)}${literal}`,
+      branch || value === null ? [] : [`${mode === "light" ? "default" : DARK_KEY}: ${literal}`],
+    ),
+  );
 }
