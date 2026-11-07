@@ -513,10 +513,11 @@ describe("agents", () => {
     await agents.interrupt(open, thread.id);
     expect(q.interrupt).toHaveBeenCalled();
     expect((await meta(thread.id)).running).toBe(false);
-    await new Promise((r) => setTimeout(r, 20));
+    await vi.waitFor(async () =>
+      expect((await open.history(thread.id)).map((e) => e.type)).toEqual(["user", "result"]),
+    );
     expect(q.sent).toHaveLength(1);
     expect((await meta(thread.id)).queued).toHaveLength(1);
-    expect((await open.history(thread.id)).map((e) => e.type)).toEqual(["user", "result"]);
   });
 
   it("closes an idle session and resumes it on the next message", async () => {
