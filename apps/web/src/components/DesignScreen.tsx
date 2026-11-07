@@ -389,14 +389,23 @@ function Preview({
         : failed
           ? "The dev server stopped"
           : "Starting the dev server…";
-  const log = installing ? installing.log : state?.log;
+  let log = installing ? installing.log : state?.log?.trim();
+  // A setup design's log is its reason. A failed preview's starts with what went wrong and what
+  // to do, then the output.
+  let reason: string | undefined;
+  if (needsSetup) {
+    reason = log;
+    log = undefined;
+  } else if (!installing && failed && log?.includes("\n\n")) {
+    reason = log.slice(0, log.indexOf("\n\n"));
+    log = log.slice(reason.length);
+  }
   const tail = log?.trim().split("\n").slice(-6).join("\n");
   return (
     <div role="status" {...stylex.props(styles.preview)}>
       <p {...stylex.props(styles.previewTitle)}>{title}</p>
-      {needsSetup
-        ? log && <p {...stylex.props(styles.reason)}>{log.trim()}</p>
-        : tail && <pre {...stylex.props(styles.log)}>{tail}</pre>}
+      {reason && <p {...stylex.props(styles.reason)}>{reason}</p>}
+      {tail && <pre {...stylex.props(styles.log)}>{tail}</pre>}
       {!installing && (failed || needsSetup) && (
         <div {...stylex.props(styles.previewActions)}>
           <span {...stylex.props(styles.previewNote)}>

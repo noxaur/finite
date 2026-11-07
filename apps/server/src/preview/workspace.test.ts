@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
@@ -157,6 +158,24 @@ describe("a finite.json workspace", () => {
     // The workspace's setup env changed, so it ran again, once for both designs.
     expect(fs.readFileSync(path.join(root, "setup-runs.txt"), "utf8")).toBe("ran\nran\n");
   }, 240_000);
+
+  test("errors every preview when the api exits, and ensure starts it again", async () => {
+    const pid = execSync(`lsof -t -iTCP:${port} -sTCP:LISTEN`, { encoding: "utf8" }).trim();
+    process.kill(Number(pid), "SIGKILL");
+    for (const id of ["web-a", "web-b"]) {
+      await expect.poll(() => previews.state(id).status, { timeout: 10_000 }).toBe("error");
+    }
+    const { log } = previews.state("web-b");
+    expect(log).toMatch(
+      /^Service "api" .* exited \((code \d+|SIG\w+)\) after it was ready\. Fix it, or change services\.api in finite\.json/,
+    );
+    expect(log).toContain("api listening on");
+    await Promise.all([
+      previews.ensure(workspaceDesign("web-a", root, "web", "apps/web")),
+      previews.ensure(workspaceDesign("web-b", root, "web", "apps/web")),
+    ]);
+    expect(await answers(`http://127.0.0.1:${port}/health`)).toBe("ok");
+  }, 120_000);
 
   test("a stop during a restart keeps the preview stopped", async () => {
     // Stops it as the restart's stop begins, while the old dev server is still exiting.
