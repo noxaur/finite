@@ -37,9 +37,14 @@ try {
   }
   const { finiteNext } = await import(pathToFileURL(plugin).href);
   finite = finiteNext({ root, allowedHosts });
-  finite.prepare();
 
-  // Next calls the adapter's `modifyConfig` on the config it loads.
+  // Next calls the adapter's `modifyConfig` on the config it loads, which hands Finite the
+  // resolved config before Next scans the routes, so the mount is there when it does.
+  let configured = false;
+  globalThis.FINITE_NEXT_CONFIGURE = (settings) => {
+    finite.prepare(settings);
+    configured = true;
+  };
   process.env.NEXT_ADAPTER_PATH = adapter;
   // A project's own `adapterPath` wins over the variable. Send Next's import of that adapter to
   // Finite's, which wraps it (adapter.ts).
@@ -87,7 +92,7 @@ try {
   });
   await app.prepare();
   // This version of Next loaded the adapter some other way than the hook above expects.
-  if (!globalThis.FINITE_NEXT_ADAPTED) {
+  if (!configured) {
     throw new Error(
       "Next.js didn't run Finite's adapter, which Finite needs to stamp the project's JSX. This version of Next may load adapterPath in a way Finite doesn't know yet.",
     );
@@ -127,8 +132,8 @@ try {
     const brandDir = finite.brandDir();
     const brandPath = brandDir && path.join(finite.root, brandDir);
     const brand = brandPath && (file === brandPath || file.startsWith(brandPath + path.sep));
-    if (!SOURCE.test(file) && !brand) return;
-    if (file === path.join(finite.root, finite.mount)) return;
+    if (!SOURCE.test(file) && !brand && !finite.isPage(file)) return;
+    if (finite.mount && file === path.join(finite.root, finite.mount)) return;
     clearTimeout(timer);
     timer = setTimeout(() => {
       finite.sync();
@@ -144,7 +149,9 @@ try {
   process.on("SIGTERM", close);
   process.on("SIGINT", close);
 
-  send({ type: "ready", url: `http://${host.includes(":") ? `[${host}]` : host}:${port}` });
+  // Frames load under the basePath, as the project's own pages do.
+  const origin = `http://${host.includes(":") ? `[${host}]` : host}:${port}`;
+  send({ type: "ready", url: origin + finite.basePath });
 } catch (error) {
   finite?.close();
   console.error(error?.stack ?? String(error));

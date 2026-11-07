@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "vite-plus/test";
+import { NEXT_PAGE_EXTENSIONS as DEFAULT } from "./adapter.ts";
 import { nextRoutes } from "./routes.ts";
 
 const FIXTURES = fileURLToPath(new URL("../../../../apps/server/fixtures/", import.meta.url));
@@ -24,7 +25,7 @@ function project(files: string[]): string {
 
 describe("nextRoutes", () => {
   test("reads the App Router fixture's pages", async () => {
-    expect(await nextRoutes(path.join(FIXTURES, "next-app"))).toEqual([
+    expect(await nextRoutes(path.join(FIXTURES, "next-app"), DEFAULT)).toEqual([
       { path: "/", file: "app/page.tsx", params: [] },
       { path: "/pricing", file: "app/(marketing)/pricing/page.tsx", params: [] },
       { path: "/about", file: "app/about/page.tsx", params: [] },
@@ -35,7 +36,7 @@ describe("nextRoutes", () => {
   });
 
   test("reads the Pages Router fixture's pages under src/", async () => {
-    expect(await nextRoutes(path.join(FIXTURES, "next-pages"))).toEqual([
+    expect(await nextRoutes(path.join(FIXTURES, "next-pages"), DEFAULT)).toEqual([
       { path: "/about", file: "src/pages/about.tsx", params: [] },
       { path: "/", file: "src/pages/index.tsx", params: [] },
       { path: "/posts/[id]", file: "src/pages/posts/[id].tsx", params: ["id"] },
@@ -57,7 +58,7 @@ describe("nextRoutes", () => {
       "app/team/page.module.css",
       "app/team/page.tsx",
     ]);
-    expect((await nextRoutes(root)).map((route) => route.path)).toEqual([
+    expect((await nextRoutes(root, [...DEFAULT, "mdx"])).map((route) => route.path)).toEqual([
       "/",
       "/_private",
       "/photo/[id]",
@@ -74,9 +75,31 @@ describe("nextRoutes", () => {
       "pages/api/hello.ts",
       "src/app/ignored/page.tsx",
     ]);
-    expect(await nextRoutes(root)).toEqual([
+    expect(await nextRoutes(root, DEFAULT)).toEqual([
       { path: "/", file: "app/page.tsx", params: [] },
       { path: "/legacy", file: "pages/legacy/index.jsx", params: [] },
+    ]);
+  });
+
+  test("takes only files with one of the config's pageExtensions as pages", async () => {
+    const root = project([
+      "pages/index.page.tsx",
+      "pages/_app.page.tsx",
+      "pages/about.page.tsx",
+      "pages/about.test.tsx",
+      "pages/posts/[id].page.tsx",
+      "pages/posts/Card.tsx",
+      "pages/notes.mdx",
+      "app/page.tsx",
+      "app/shop/page.page.tsx",
+      "app/team/page",
+    ]);
+    expect(await nextRoutes(root, ["page.tsx", "mdx"])).toEqual([
+      { path: "/shop", file: "app/shop/page.page.tsx", params: [] },
+      { path: "/about", file: "pages/about.page.tsx", params: [] },
+      { path: "/", file: "pages/index.page.tsx", params: [] },
+      { path: "/notes", file: "pages/notes.mdx", params: [] },
+      { path: "/posts/[id]", file: "pages/posts/[id].page.tsx", params: ["id"] },
     ]);
   });
 });

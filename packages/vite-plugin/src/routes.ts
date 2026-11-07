@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Route, Router } from "@finite/protocol";
 import { type AstNode, parseModule, walk } from "./ast.ts";
+import { NEXT_PAGE_EXTENSIONS } from "./next/adapter.ts";
 import { nextRoutes } from "./next/routes.ts";
 
 /** Loads a module through Vite (`server.ssrLoadModule`), for route configs that are code. */
@@ -23,7 +24,10 @@ export async function scanRoutes(
   load: LoadModule,
 ): Promise<Route[]> {
   if (router === "none") return [];
-  if (router === "next-app" || router === "next-pages") return nextRoutes(root);
+  // A Next.js app previews on `next dev`, which reads its pageExtensions; under Vite, the defaults.
+  if (router === "next-app" || router === "next-pages") {
+    return nextRoutes(root, NEXT_PAGE_EXTENSIONS);
+  }
   if (router !== "react-router") {
     const tanstack = tanstackRoutes(root);
     if (tanstack || router === "tanstack") return tanstack ?? [];

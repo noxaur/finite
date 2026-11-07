@@ -6,7 +6,8 @@
  * A project's own `adapterPath` wins over the variable, so `next-host.mjs` sends Next's import of
  * that adapter here instead, with its URL in `?adapter=`. This adapter then wraps the project's:
  * the project's `modifyConfig` runs first, Finite's changes go on top, and its other hooks pass
- * through.
+ * through. It hands the settings Finite follows, as the project's `modifyConfig` left them, to
+ * `FINITE_NEXT_CONFIGURE`, before Next scans the routes.
  */
 
 export type AdapterOptions = {
@@ -19,15 +20,28 @@ export type AdapterOptions = {
   sheets: Record<string, string>;
 };
 
+/** What Finite follows in the project's config, as Next resolved it. */
+export type NextSettings = {
+  /** `""`, or the prefix of every URL, such as `/docs`. */
+  basePath: string;
+  /** The extensions of page, layout and route files, without the dot. */
+  pageExtensions: string[];
+};
+
 type Rule = Record<string, unknown>;
 type Context = { phase?: string };
 type Config = {
+  basePath?: string;
+  pageExtensions?: string[];
   distDir?: string;
   compress?: boolean;
   devIndicators?: unknown;
   output?: string;
   turbopack?: { rules?: Record<string, unknown> };
 };
+
+/** Next's default `pageExtensions`. */
+export const NEXT_PAGE_EXTENSIONS = ["tsx", "ts", "jsx", "js"];
 
 /** The files that may hold JSX. Next compiles JSX in `.js` too. */
 const GLOBS = ["*.tsx", "*.jsx", "*.js"];
@@ -40,8 +54,11 @@ export type Adapter = {
 };
 
 declare global {
-  /** Set once Finite's adapter ran, which `next-host.mjs` checks. */
-  var FINITE_NEXT_ADAPTED: boolean | undefined;
+  /**
+   * Set by `next-host.mjs`, and called with the resolved config. Never called means Finite's
+   * adapter didn't run, which `next-host.mjs` checks.
+   */
+  var FINITE_NEXT_CONFIGURE: ((settings: NextSettings) => void) | undefined;
 }
 
 /** Finite's adapter around a project's own, or around none. */
@@ -65,7 +82,10 @@ export default wrap(project?.default ?? project);
 export function modifyConfig(config: Config, context?: Context): Config {
   const options = JSON.parse(process.env.FINITE_NEXT ?? "null") as AdapterOptions | null;
   if (!options) return config;
-  globalThis.FINITE_NEXT_ADAPTED = true;
+  globalThis.FINITE_NEXT_CONFIGURE?.({
+    basePath: config.basePath ?? "",
+    pageExtensions: config.pageExtensions ?? NEXT_PAGE_EXTENSIONS,
+  });
   const ours: Rule = {
     condition: { not: "foreign" },
     loaders: [{ loader: options.loader, options: { root: options.root, sheets: options.sheets } }],

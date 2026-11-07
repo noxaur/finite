@@ -1,13 +1,12 @@
 "use client";
 
 import * as stylex from "@stylexjs/stylex";
-import type { Frame } from "@finite/protocol";
+import { type Frame, frameHref } from "@finite/protocol";
 import { useEffect, useRef } from "react";
 import { colors, radii, space } from "@/styles/tokens.stylex";
 import { connectFrame } from "./bridge";
 import { finite } from "@/client/finite";
 import type { CanvasEditor } from "./editor";
-import { frameSrc } from "./frameSrc";
 
 /**
  * One frame's body on the canvas: the live iframe when it's mounted, else a quiet card with its
@@ -36,7 +35,7 @@ export function FrameView({
   editor: CanvasEditor;
 }) {
   const ref = useRef<HTMLIFrameElement>(null);
-  const src = previewUrl ? frameSrc(previewUrl, frame.source) : undefined;
+  const src = previewUrl ? frameHref(previewUrl, frame.source) : undefined;
   const hug = frame.hug ?? false;
 
   useEffect(() => {
