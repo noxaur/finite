@@ -5,7 +5,7 @@ import type { Token, TokenMode } from "@finite/protocol";
 import { useEffect, useRef, useState } from "react";
 import { finite } from "@/client/finite";
 import { setAlpha } from "@/design/editing/colors";
-import { displayName, hexOf, isColor, isVariable } from "@/lib/tokens";
+import { displayName, hexOf, isColor, isStylexVar, isVariable } from "@/lib/tokens";
 import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import { IconButton } from "./Button";
 import { type ColorPick, ColorPicker } from "./ColorPicker";
@@ -13,18 +13,19 @@ import { type ColorPick, ColorPicker } from "./ColorPicker";
 const MODES: readonly TokenMode[] = ["light", "dark"];
 
 /**
- * A token name as the stylesheet wants it: `--brand`, whether or not it was typed with the dashes,
- * or a Sass `$brand` or Less `@brand` as typed.
+ * A token name as the design wants it: `--brand`, whether or not it was typed with the dashes, or
+ * a Sass `$brand`, Less `@brand` or StyleX `colors.brand` as typed.
  */
 export const tokenName = (typed: string) => {
   const t = typed.trim();
-  return t.startsWith("--") || isVariable(t) ? t : `--${t}`;
+  return t.startsWith("--") || isVariable(t) || isStylexVar(t) ? t : `--${t}`;
 };
 
 /**
  * The design's tokens, at the bottom of the left sidebar: the CSS custom properties in its
- * `@theme` (Light) and `.dark` (Dark) blocks, and the Sass `$vars` and Less `@vars` of its global
- * sheets (Light only), each value editable in place. Colors get a swatch that opens the color
+ * `@theme` (Light) and `.dark` (Dark) blocks, the Sass `$vars` and Less `@vars` of its global
+ * sheets (Light only), and a StyleX design's `defineVars` (`colors.brand`), each value editable in
+ * place. Colors get a swatch that opens the color
  * picker. Clearing a value takes the token out of that mode.
  */
 export function TokensSection({ designId }: { designId: string }) {

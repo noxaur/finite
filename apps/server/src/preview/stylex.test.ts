@@ -42,7 +42,7 @@ async function get(pathname: string, accept = "*/*") {
 describe("a StyleX project's preview", () => {
   test("stamps the file as it is on disk, before StyleX compiles it", async () => {
     for (const [file, loc] of [
-      ["src/components/Card.tsx", "27:4"],
+      ["src/components/Card.tsx", "28:4"],
       [".finite/boards/demo/Hero.tsx", "16:4"],
     ]) {
       const module = await get(`/${file}`);
@@ -55,6 +55,9 @@ describe("a StyleX project's preview", () => {
     const css = await get("/virtual:stylex.css", "text/css");
     expect(css).toContain("padding: 16px");
     expect(css).toContain("padding: 32px");
+    // Card's border uses a defineVars token from src/tokens.stylex.ts.
+    expect(css).toContain("#c8d3d6");
+    expect(css).toMatch(/border-color: ?var\(--/);
   });
 
   test("gives file frames StyleX's stylesheet", async () => {

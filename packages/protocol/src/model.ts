@@ -395,8 +395,9 @@ export const TokenMode = z.enum(["light", "dark"]);
 export type TokenMode = z.infer<typeof TokenMode>;
 
 /**
- * A CSS custom property from the design's `@theme` (light) and `.dark` (dark) blocks, or a
- * top-level Sass `$name` or Less `@name` from its global sheets, which has a light value only.
+ * A CSS custom property from the design's `@theme` (light) and `.dark` (dark) blocks, a top-level
+ * Sass `$name` or Less `@name` from its global sheets, which has a light value only, or a StyleX
+ * design's `defineVars` key, named `<group>.<key>`.
  */
 export const Token = z.object({
   name: z.string(),

@@ -497,6 +497,164 @@ describe("SourceEditor with Sass and Less variable tokens", () => {
   });
 });
 
+describe("SourceEditor with StyleX defineVars tokens", () => {
+  const VARS = `import * as stylex from "@stylexjs/stylex";
+
+export const colors = stylex.defineVars({
+  brand: "#95ced7",
+});
+`;
+  const HOME = `import { create, props } from "@stylexjs/stylex";
+import { Card } from "../components/Card.tsx";
+
+const styles = create({
+  main: {
+    gap: "8px",
+  },
+  heading: {
+    fontSize: "24px",
+  },
+});
+
+export default function Home() {
+  return (
+    <main {...props(styles.main)}>
+      <h1 {...props(styles.heading)}>Welcome home</h1>
+      <p>Body</p>
+    </main>
+  );
+}
+`;
+  const sx = () => design("stylex");
+  const pickH1 = async (styles: Record<string, string | null>) =>
+    edit("src/pages/Home.tsx", {
+      kind: "style",
+      locs: ["src/pages/Home.tsx:16:6"],
+      tag: "h1",
+      styles,
+    });
+
+  beforeEach(async () => {
+    await put("src/index.css", `:root {\n  --ink: #111;\n}\n`);
+    await put("src/tokens.stylex.ts", VARS);
+    await put("src/pages/Home.tsx", HOME);
+  });
+
+  it("lists defineVars next to the custom properties and edits them on the Tokens page", async () => {
+    const source = createSourceEditor();
+    expect(await source.tokens(sx())).toEqual([
+      { name: "--ink", light: "#111" },
+      { name: "colors.brand", light: "#95ced7" },
+    ]);
+    // Only a StyleX design reads them.
+    expect(await source.tokens(design("inline"))).toEqual([{ name: "--ink", light: "#111" }]);
+    await source.setToken(sx(), { name: "colors.brand", mode: "dark", value: "#1a6f7b" });
+    expect(
+      await source.setToken(sx(), { name: "colors.accent", mode: "light", value: "#f0c" }),
+    ).toEqual([
+      { name: "--ink", light: "#111" },
+      { name: "colors.brand", light: "#95ced7", dark: "#1a6f7b" },
+      { name: "colors.accent", light: "#f0c" },
+    ]);
+    expect(await get("src/tokens.stylex.ts")).toBe(
+      VARS.replace(
+        `brand: "#95ced7",`,
+        `brand: {\n    default: "#95ced7",\n    "@media (prefers-color-scheme: dark)": "#1a6f7b",\n  },\n  accent: "#f0c",`,
+      ),
+    );
+    // Custom properties still go in the stylesheet.
+    await source.setToken(sx(), { name: "--line", mode: "light", value: "#ccc" });
+    expect(await get("src/index.css")).toBe(`:root {\n  --ink: #111;\n  --line: #ccc;\n}\n`);
+  });
+
+  it("refuses a token for a group no defineVars has, or when there's none", async () => {
+    const source = createSourceEditor();
+    await expect(
+      source.setToken(sx(), { name: "space.lg", mode: "light", value: "24px" }),
+    ).rejects.toMatchObject({
+      code: "invalid",
+      message: expect.stringContaining("Add it to colors.lg"),
+    });
+    await rm(path.join(root, "src/tokens.stylex.ts"));
+    await expect(
+      source.setToken(sx(), { name: "colors.brand", mode: "light", value: "#000" }),
+    ).rejects.toMatchObject({
+      code: "invalid",
+      message: expect.stringContaining("no stylex.defineVars yet"),
+    });
+  });
+
+  it("writes a picked token and its import, and undo and redo work around another actor's edit", async () => {
+    const source = createSourceEditor();
+    const picked = HOME.replace(
+      `import { Card } from "../components/Card.tsx";\n`,
+      `import { Card } from "../components/Card.tsx";\nimport { colors } from "../tokens.stylex";\n`,
+    ).replace(`fontSize: "24px",\n`, `fontSize: "24px",\n    color: colors.brand,\n`);
+    const result = await source.apply(
+      open(sx()),
+      [await pickH1({ color: "colors.brand" })],
+      ana,
+      page,
+    );
+    expect(await get("src/pages/Home.tsx")).toBe(picked);
+    const p = result.remap["src/pages/Home.tsx:17:6"]!;
+    expect(p).toBe("src/pages/Home.tsx:19:6");
+    await source.apply(
+      open(sx()),
+      [await edit("src/pages/Home.tsx", { kind: "text", loc: p, tag: "p", text: "Other" })],
+      bo,
+      page,
+    );
+    await source.undo(open(sx()), ana);
+    expect(await get("src/pages/Home.tsx")).toBe(HOME.replace("Body", "Other"));
+    await source.redo(open(sx()), ana);
+    expect(await get("src/pages/Home.tsx")).toBe(picked.replace("Body", "Other"));
+    await source.undo(open(sx()), bo);
+    expect(await get("src/pages/Home.tsx")).toBe(picked);
+  });
+
+  it("imports a token into a prototype from production, and still writes a custom property", async () => {
+    const file = ".finite/boards/c1/Home.tsx";
+    await put(file, HOME);
+    const source = createSourceEditor();
+    await source.apply(
+      open(sx()),
+      [
+        await edit(file, {
+          kind: "style",
+          locs: [`${file}:16:6`],
+          tag: "h1",
+          styles: { color: "colors.brand", borderColor: "var(--ink)" },
+        }),
+      ],
+      ana,
+      proto,
+    );
+    const code = await get(file);
+    expect(code).toContain(`import { colors } from "../../../src/tokens.stylex";\n`);
+    expect(code).toContain(`color: colors.brand,\n    borderColor: "var(--ink)",\n`);
+  });
+
+  it("refuses a token on an element without a stylex.props spread, and leaves the file alone", async () => {
+    await expect(
+      createSourceEditor().apply(
+        open(sx()),
+        [
+          await edit("src/pages/Home.tsx", {
+            kind: "style",
+            locs: ["src/pages/Home.tsx:17:6"],
+            tag: "p",
+            styles: { color: "colors.brand" },
+          }),
+        ],
+        ana,
+        page,
+      ),
+    ).rejects.toMatchObject({ code: "unsupported-style" });
+    expect(await get("src/pages/Home.tsx")).toBe(HOME);
+  });
+});
+
 describe("SourceEditor undo and redo", () => {
   const d = () => design();
   const styleH1 = () =>
