@@ -1,11 +1,14 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Actor, Canvas, DesignChange, Frame } from "@finite/protocol";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 import { BRAND_BOARD, brandBoard, ensureBrandBoard } from "./brand.ts";
+import { detectProject } from "./detect.ts";
 import { createStore, DEFAULT_SETTINGS, type FileStore } from "./index.ts";
 import { INTERRUPTED_BY_RESTART, REMOVED_KEEP_MS } from "./open.ts";
+import { routeFrameName } from "./routes.ts";
 
 const by: Actor = { kind: "person", id: "u1", name: "Per" };
 const cleanup: (() => Promise<void>)[] = [];
@@ -59,6 +62,20 @@ async function connected(files: Record<string, string> = {}) {
   const entry = await store.connect(root);
   return { dataDir, store, root, entry, open: await store.open(entry.id) };
 }
+
+describe("routeFrameName", () => {
+  it("keeps the dots of Next catch-all segments", () => {
+    expect(routeFrameName("/docs/[...slug]")).toBe("Docs / [...slug]");
+    expect(routeFrameName("/shop/[[...slug]]")).toBe("Shop / [[...slug]]");
+    expect(routeFrameName("/blog/[slug]", { slug: "1" })).toBe("Blog / [slug] · slug=1");
+  });
+
+  it("still words out plain segments", () => {
+    expect(routeFrameName("/")).toBe("Home");
+    expect(routeFrameName("/sign-up")).toBe("Sign up");
+    expect(routeFrameName("/users/:userId", { userId: "1" })).toBe("Users · userId=1");
+  });
+});
 
 describe("settings", () => {
   it("starts with the defaults and keeps what's set", async () => {
@@ -196,6 +213,43 @@ describe("connect", () => {
     expect((await store.open((await store.connect(sassOnly)).id)).design.styling).toBe(
       "css-modules",
     );
+  });
+
+  it("detects Next.js's App Router and Pages Router, without Vite", async () => {
+    const fixtures = fileURLToPath(new URL("../../fixtures/", import.meta.url));
+    expect(await detectProject(path.join(fixtures, "next-app"))).toEqual({
+      name: "fixture-next-app",
+      router: "next-app",
+      styling: "tailwind",
+      css: ["app/globals.css"],
+      brandDir: "assets/brand",
+    });
+    expect(await detectProject(path.join(fixtures, "next-pages"))).toEqual({
+      name: "fixture-next-pages",
+      router: "next-pages",
+      styling: "css-modules",
+      css: ["src/styles/globals.css"],
+      brandDir: "src/assets/brand",
+    });
+    // Root folders win over src/, as in Next; a project with both routers is an App Router one.
+    const both = await project(
+      { next: "^16" },
+      {
+        "pages/_app.tsx": 'import "../styles/site.css";',
+        "src/app/layout.tsx": 'import "./ignored.css";',
+      },
+    );
+    expect(await detectProject(both)).toMatchObject({
+      router: "next-pages",
+      styling: "inline",
+      css: ["styles/site.css"],
+    });
+    await fs.mkdir(path.join(both, "app"));
+    expect(await detectProject(both)).toMatchObject({ router: "next-app" });
+    await expect(detectProject(await project({ next: "^16" }))).rejects.toMatchObject({
+      code: "unsupported-project",
+      message: expect.stringContaining("no app/ or pages/ folder"),
+    });
   });
 
   it("renames a design and bumps updatedAt on any change", async () => {

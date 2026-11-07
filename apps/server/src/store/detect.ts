@@ -4,7 +4,7 @@ import { Refused, type Router, type Styling } from "@finite/protocol";
 import { exists, readJson } from "./files.ts";
 
 const SUPPORTED =
-  "Finite supports Vite apps that use React Router (react-router or react-router-dom) or TanStack Router (@tanstack/react-router).";
+  "Finite supports Next.js apps (App Router or Pages Router) and Vite apps that use React Router (react-router or react-router-dom) or TanStack Router (@tanstack/react-router).";
 
 export type Detected = {
   name: string;
@@ -29,19 +29,10 @@ export async function detectProject(root: string): Promise<Detected> {
   if (!pkg || typeof pkg !== "object") throw refuse(`${root} has no package.json.`);
   const deps = { ...asRecord(pkg.dependencies), ...asRecord(pkg.devDependencies) };
 
-  if (!("vite" in deps)) {
-    throw refuse(`${root} doesn't use Vite (no vite in package.json).`);
-  }
-  const router: Detected["router"] | undefined =
-    "@tanstack/react-router" in deps
-      ? "tanstack"
-      : "react-router" in deps || "react-router-dom" in deps
-        ? "react-router"
-        : undefined;
-  if (!router) throw refuse(`${root} has no supported router in package.json.`);
-
-  const srcDir = (await exists(path.join(root, "src"))) ? "src" : "app";
-  const sources = await sourceFiles(root, srcDir);
+  const hasSrc = await exists(path.join(root, "src"));
+  const layout = "next" in deps ? await nextLayout(root, hasSrc) : viteLayout(deps, hasSrc);
+  if (typeof layout === "string") throw refuse(`${root} ${layout}`);
+  const sources = await sourceFiles(root, layout.scanDir);
   const tailwindCss = sources.css.filter((f) => /@import\s+["']tailwindcss["']/.test(f.text));
   const styling = detectStyling(
     "tailwindcss" in deps || tailwindCss.length > 0,
@@ -51,11 +42,56 @@ export async function detectProject(root: string): Promise<Detected> {
 
   return {
     name: typeof pkg.name === "string" && pkg.name ? pkg.name : path.basename(root),
-    router,
+    router: layout.router,
     styling,
-    css: tailwindCss.length ? tailwindCss.map((f) => f.path) : entryCss(sources.code),
-    brandDir: `${srcDir}/assets/brand`,
+    css: tailwindCss.length
+      ? tailwindCss.map((f) => f.path)
+      : entryCss(sources.code, layout.entries),
+    brandDir: layout.brandDir,
   };
+}
+
+type Layout = {
+  router: Detected["router"];
+  /** The folder the styling scan reads, relative to the root. */
+  scanDir: string;
+  /** The files whose stylesheet imports are the global CSS; the first that exists wins. */
+  entries: string[];
+  brandDir: string;
+};
+
+/** A Next.js app's router. As in Next, `app/` or `pages/` at the root win over `src/`. */
+async function nextLayout(root: string, hasSrc: boolean): Promise<Layout | string> {
+  const atRoot = (await exists(path.join(root, "app"))) || (await exists(path.join(root, "pages")));
+  const base = atRoot ? "" : "src";
+  const app = path.posix.join(base, "app");
+  const pages = path.posix.join(base, "pages");
+  const router = (await exists(path.join(root, app)))
+    ? "next-app"
+    : (await exists(path.join(root, pages)))
+      ? "next-pages"
+      : undefined;
+  if (!router) return "uses Next.js but has no app/ or pages/ folder.";
+  return {
+    router,
+    scanDir: base,
+    entries: [`${app}/layout.tsx`, `${app}/layout.jsx`, `${pages}/_app.tsx`, `${pages}/_app.jsx`],
+    // Without src/, brand assets sit at the root rather than among the routes in app/.
+    brandDir: hasSrc ? "src/assets/brand" : "assets/brand",
+  };
+}
+
+function viteLayout(deps: Record<string, unknown>, hasSrc: boolean): Layout | string {
+  if (!("vite" in deps)) return "doesn't use Vite or Next.js (no vite or next in package.json).";
+  const router =
+    "@tanstack/react-router" in deps
+      ? "tanstack"
+      : "react-router" in deps || "react-router-dom" in deps
+        ? "react-router"
+        : undefined;
+  if (!router) return "has no supported router in package.json.";
+  const srcDir = hasSrc ? "src" : "app";
+  return { router, scanDir: srcDir, entries: VITE_ENTRIES, brandDir: `${srcDir}/assets/brand` };
 }
 
 /**
@@ -148,7 +184,7 @@ function stripComments(source: string): string {
   return out;
 }
 
-const ENTRIES = [
+const VITE_ENTRIES = [
   "src/main.tsx",
   "src/main.jsx",
   "src/index.tsx",
@@ -158,10 +194,10 @@ const ENTRIES = [
   "app/root.jsx",
 ];
 
-/** The global stylesheets the app's entry imports, relative to the root. */
-function entryCss(code: SourceFile[]): string[] {
+/** The global stylesheets the app's first existing entry imports, relative to the root. */
+function entryCss(code: SourceFile[], entries: string[]): string[] {
   const css: string[] = [];
-  for (const entry of ENTRIES) {
+  for (const entry of entries) {
     const file = code.find((f) => f.path === entry);
     if (!file) continue;
     for (const match of file.text.matchAll(
@@ -177,7 +213,7 @@ function entryCss(code: SourceFile[]): string[] {
 
 type SourceFile = { path: string; text: string };
 
-const SKIP = new Set(["node_modules", "dist", "build", ".finite", ".git"]);
+const SKIP = new Set(["node_modules", "dist", "build", ".finite", ".git", ".next"]);
 const MAX_FILES = 2_000;
 
 /** The code and CSS files under `dir`, paths relative to the root (posix). */

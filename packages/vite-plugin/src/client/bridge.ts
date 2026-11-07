@@ -11,7 +11,10 @@ const LOC = "data-finite-loc";
 const REV = "data-finite-rev";
 const MAX_PENDING = 100;
 const MAX_MESSAGE = 4_000;
-/** React Refresh applies an update a moment after Vite's `vite:afterUpdate`. */
+/**
+ * How long `updated` waits: React Refresh applies an update a moment after Vite's
+ * `vite:afterUpdate`, and under Next the DOM must go quiet.
+ */
 const SETTLE_MS = 50;
 /** The plugin's default for `allowedHosts`, the same loopback names the Finite server allows. */
 export const LOOPBACK_HOSTS: readonly string[] = ["localhost", "127.0.0.1", "::1"];
@@ -330,6 +333,39 @@ function reportError(kind: "error" | "rejection" | "console", message: string, s
   );
 }
 
+/**
+ * The update signal without Vite's HMR events (Next.js): a stamped element got a new rev, stamped
+ * elements were added, or a stylesheet in the head changed, then quiet for `SETTLE_MS`. Style
+ * attributes are left out, since previews write them.
+ */
+function watchUpdates(updated: () => void): void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stampedNode = (node: Node) =>
+    node instanceof Element && (node.hasAttribute(LOC) || node.querySelector(`[${LOC}]`) !== null);
+  const observer = new MutationObserver((records) => {
+    const relevant = records.some(
+      (record) =>
+        record.type === "attributes" ||
+        !document.body?.contains(record.target) ||
+        Array.from(record.addedNodes).some(stampedNode),
+    );
+    if (!relevant) return;
+    clearTimeout(timer);
+    timer = setTimeout(updated, SETTLE_MS);
+  });
+  const observe = () => {
+    observer.observe(document.head, { childList: true, subtree: true, characterData: true });
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: [REV],
+    });
+  };
+  if (document.body) observe();
+  else document.addEventListener("DOMContentLoaded", observe);
+}
+
 function start(): void {
   window.addEventListener("error", (event) => {
     reportError("error", event.message || text(event.error), (event.error as Error)?.stack);
@@ -379,15 +415,18 @@ function start(): void {
   if (document.body) observer.observe(document.body);
   else document.addEventListener("DOMContentLoaded", () => observer.observe(document.body));
 
-  import.meta.hot?.on("vite:afterUpdate", () => {
+  const updated = () => {
     clearPreviews();
-    setTimeout(() => {
-      requestAnimationFrame(() => {
-        post({ type: "updated" });
-        scheduleSize();
-      });
-    }, SETTLE_MS);
-  });
+    requestAnimationFrame(() => {
+      post({ type: "updated" });
+      scheduleSize();
+    });
+  };
+  if (import.meta.hot) {
+    import.meta.hot.on("vite:afterUpdate", () => setTimeout(updated, SETTLE_MS));
+  } else {
+    watchUpdates(updated);
+  }
 
   window.parent.postMessage({ type: HELLO }, "*");
 }

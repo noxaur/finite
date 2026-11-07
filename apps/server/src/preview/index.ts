@@ -1,5 +1,6 @@
 import { type ChildProcess, fork } from "node:child_process";
 import fs from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   type Design,
@@ -28,12 +29,18 @@ export type PreviewsOptions = {
   allowedHosts?: readonly string[];
 };
 
-const HOST_SCRIPT = fileURLToPath(new URL("./vite-host.mjs", import.meta.url));
-/** The plugin bundled beside the server (`vp pack`, in the desktop app), else its source. */
-const BUNDLED_PLUGIN = fileURLToPath(new URL("./vite-plugin.mjs", import.meta.url));
-const DEFAULT_PLUGIN = fs.existsSync(BUNDLED_PLUGIN)
-  ? BUNDLED_PLUGIN
-  : fileURLToPath(new URL("../../../../packages/vite-plugin/src/index.ts", import.meta.url));
+const VITE_HOST = fileURLToPath(new URL("./vite-host.mjs", import.meta.url));
+const NEXT_HOST = fileURLToPath(new URL("./next-host.mjs", import.meta.url));
+/** A plugin file bundled beside the server (`vp pack`, in the desktop app), else its source. */
+const pluginFile = (bundled: string, source: string) => {
+  const file = fileURLToPath(new URL(`./${bundled}`, import.meta.url));
+  if (fs.existsSync(file)) return file;
+  return fileURLToPath(new URL(`../../../../packages/vite-plugin/src/${source}`, import.meta.url));
+};
+const DEFAULT_PLUGIN = pluginFile("vite-plugin.mjs", "index.ts");
+/** Next loads these two by path: the adapter that edits its config, and the stamping loader. */
+const NEXT_ADAPTER = pluginFile("next-adapter.mjs", "next/adapter.ts");
+const NEXT_LOADER = pluginFile("next-loader.mjs", "next/loader.ts");
 const LOG_TAIL = 4_000;
 const KILL_AFTER_MS = 5_000;
 const MAX_ERRORS_PER_FRAME = 50;
@@ -50,7 +57,21 @@ type Run = {
   sentRoutes: string | undefined;
 };
 
-/** One Vite dev server per open design, each in a child process running `vite-host.mjs`. */
+/** Whether a design previews on `next dev` rather than Vite: its router, else its package.json. */
+function usesNext(design: Design): boolean {
+  if (design.router === "next-app" || design.router === "next-pages") return true;
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(design.root, "package.json"), "utf8"));
+    return Boolean(pkg.dependencies?.next ?? pkg.devDependencies?.next);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * One dev server per open design, each in a child process running `vite-host.mjs`, or
+ * `next-host.mjs` for Next.js.
+ */
 export function createPreviews(options: PreviewsOptions): Previews {
   const graceMs = options.graceMs ?? 60_000;
   const startTimeoutMs = options.startTimeoutMs ?? 60_000;
@@ -73,7 +94,7 @@ export function createPreviews(options: PreviewsOptions): Previews {
   };
 
   function start(design: Design): Run {
-    const child = fork(HOST_SCRIPT, [], {
+    const child = fork(usesNext(design) ? NEXT_HOST : VITE_HOST, [], {
       cwd: design.root,
       execArgv: [],
       env: {
@@ -82,6 +103,8 @@ export function createPreviews(options: PreviewsOptions): Previews {
           root: design.root,
           host: options.host,
           plugin,
+          adapter: NEXT_ADAPTER,
+          loader: NEXT_LOADER,
           allowedHosts: options.allowedHosts ?? allowedHosts(undefined),
         }),
       },

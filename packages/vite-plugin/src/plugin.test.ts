@@ -30,10 +30,11 @@ function project(files: Record<string, string>): string {
 const noLoad = () => Promise.reject(new Error("no module loading here"));
 
 describe("routes", () => {
-  test("reads params from both routers' syntax", () => {
+  test("reads params from every router's syntax", () => {
     expect(routeParams("/users/:id/:tab?")).toEqual(["id", "tab"]);
     expect(routeParams("/files/*")).toEqual(["*"]);
     expect(routeParams("/posts/$postId/{-$lang}/$")).toEqual(["postId", "lang", "_splat"]);
+    expect(routeParams("/blog/[slug]/[...rest]/[[...tail]]")).toEqual(["slug", "rest", "tail"]);
   });
 
   test("finds routes in a routes array imported into createBrowserRouter", async () => {

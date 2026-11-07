@@ -32,11 +32,22 @@ function detectRouter(root: string): Router {
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
     const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+    if (deps.next) return nextRouter(root);
     if (deps["@tanstack/react-router"]) return "tanstack";
     if (deps["react-router"] || deps["react-router-dom"]) return "react-router";
   } catch {
     // No package.json: no router.
   }
+  return "none";
+}
+
+/** As in Next, `app/` or `pages/` at the root win over `src/app/` and `src/pages/`. */
+function nextRouter(root: string): Router {
+  const isDir = (dir: string) =>
+    fs.statSync(path.join(root, dir), { throwIfNoEntry: false })?.isDirectory();
+  const base = isDir("app") || isDir("pages") ? "" : "src/";
+  if (isDir(`${base}app`)) return "next-app";
+  if (isDir(`${base}pages`)) return "next-pages";
   return "none";
 }
 
@@ -62,20 +73,12 @@ export function frameFile(
 export const PAGE_BACKGROUND = "#f7f9fa";
 
 /**
- * A file frame's page. Like a Figma frame it has a fill: the background the design's CSS gives
+ * A file frame's fill. Like a Figma frame it has one: the background the design's CSS gives
  * `html` or `body`, else `PAGE_BACKGROUND`. The default rule switches off whenever the design's
- * stylesheets (which Vite adds and updates as `<style>`s in the head) paint either one.
+ * stylesheets (which the dev server adds and updates in the head) paint either one. It goes in the
+ * head: Next's file frames get it injected there.
  */
-export function frameHtml(entry: string): string {
-  return `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <style id="finite-page">html { background: ${PAGE_BACKGROUND}; }</style>
-  </head>
-  <body>
-    <div id="root"></div>
+export const PAGE_FILL = `<style id="finite-page">html { background: ${PAGE_BACKGROUND}; }</style>
     <script>
       (() => {
         const page = document.getElementById("finite-page");
@@ -84,14 +87,28 @@ export function frameHtml(entry: string): string {
           return s.backgroundImage === "none" && ["transparent", "rgba(0, 0, 0, 0)"].includes(s.backgroundColor);
         };
         const check = () => {
+          if (!document.body) return;
           page.disabled = true;
           page.disabled = !(clear(document.documentElement) && clear(document.body));
         };
         new MutationObserver(check).observe(document.head, { childList: true, subtree: true, characterData: true });
+        addEventListener("DOMContentLoaded", check);
         addEventListener("load", check);
         check();
       })();
-    </script>
+    </script>`;
+
+/** A file frame's page under Vite, with the fill. */
+export function frameHtml(entry: string): string {
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    ${PAGE_FILL}
+  </head>
+  <body>
+    <div id="root"></div>
     <script type="module" src="${escapeAttr(entry)}"></script>
   </body>
 </html>

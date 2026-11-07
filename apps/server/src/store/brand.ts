@@ -43,16 +43,21 @@ export async function ensureBrandBoard(open: OpenDesign, by: Actor): Promise<Can
   return page;
 }
 
-/** The board's TSX. Globs are written relative to the board, so they work whatever Vite's root is. */
-export function brandBoard(design: Pick<Design, "brandDir" | "css">): string {
+/**
+ * The board's TSX. Under Vite it finds the files with `import.meta.glob`, written relative to the
+ * board so they work whatever Vite's root is. Next has no glob, so there the preview writes the
+ * same two maps to `.finite/runtime/brand.ts` and keeps them up to date.
+ */
+export function brandBoard(design: Pick<Design, "brandDir" | "css" | "router">): string {
   const fromBoard = (file: string) =>
     path.posix.relative(path.posix.dirname(BRAND_BOARD), path.posix.normalize(file));
   const brand = `${fromBoard(design.brandDir.replace(/\/+$/, ""))}/**/*`;
   const sheets = design.css.map(fromBoard);
-  return `${MARKER}
-// Shows every file in ${design.brandDir}/ and the colors and fonts in the design's CSS.
-import type { CSSProperties, ReactNode } from "react";
-
+  const next = design.router === "next-app" || design.router === "next-pages";
+  const sources = next
+    ? `import { files, sheets } from ${JSON.stringify(fromBoard(".finite/runtime/brand"))};
+`
+    : `
 const files = import.meta.glob(${JSON.stringify(brand)}, {
   eager: true,
   query: "?url",
@@ -63,7 +68,11 @@ const sheets = import.meta.glob(${JSON.stringify(sheets.length ? sheets : ["./no
   query: "?raw",
   import: "default",
 }) as Record<string, string>;
-
+`;
+  return `${MARKER}
+// Shows every file in ${design.brandDir}/ and the colors and fonts in the design's CSS.
+import type { CSSProperties, ReactNode } from "react";
+${sources}
 const IMAGE = /\\.(svg|png|jpe?g|webp|gif|avif|ico)$/i;
 const FONT = /\\.(woff2?|ttf|otf)$/i;
 
