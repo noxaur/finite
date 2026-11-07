@@ -21,6 +21,8 @@
     "fflate": "catalog:",
     "magic-string": "catalog:",
     "postcss": "catalog:",
+    "postcss-less": "catalog:",
+    "postcss-scss": "catalog:",
     "puppeteer-core": "catalog:",
     "tailwind-merge": "catalog:",
     "ws": "catalog:",
@@ -28,8 +30,11 @@
   },
   "devDependencies": {
     "@types/busboy": "catalog:",
+    "@types/less": "catalog:",
     "@types/node": "catalog:",
     "@types/ws": "catalog:",
+    "less": "catalog:",
+    "sass": "catalog:",
     "typescript": "catalog:",
     "vite-plus": "catalog:"
   }

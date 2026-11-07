@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "sass",
+  "router": "react-router",
+  "styling": "css-modules",
+  "css": ["src/styles/global.scss"],
+  "brandDir": "src/assets/brand"
+}

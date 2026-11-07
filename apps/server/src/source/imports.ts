@@ -4,6 +4,7 @@ import MagicString from "magic-string";
 import { parseModule, walk } from "./jsx.ts";
 
 const EXTENSIONS = [".tsx", ".ts", ".jsx", ".js"];
+const STYLE_EXTENSIONS = [".css", ".scss", ".sass", ".less"];
 
 /** Every module specifier in the file: imports, re-exports and `import()`. */
 export function specifiers(ast: t.File): t.StringLiteral[] {
@@ -46,7 +47,7 @@ export function candidates(target: string): string[] {
     const base = target.slice(0, -ext.length);
     out.push(`${base}.tsx`, `${base}.ts`);
   }
-  if (!EXTENSIONS.includes(ext) && ext !== ".css") {
+  if (!EXTENSIONS.includes(ext) && !STYLE_EXTENSIONS.includes(ext)) {
     for (const e of EXTENSIONS) out.push(`${target}${e}`);
     for (const e of EXTENSIONS) out.push(`${target}/index${e}`);
   }
@@ -102,11 +103,13 @@ export function retarget(
   return found ? ms.toString() : undefined;
 }
 
-/** Local names bound to a default or namespace import of a `*.module.css` file, and the file. */
+/** Local names bound to a default or namespace import of a `*.module.{css,scss,sass,less}` file, and the file. */
+const MODULE_SHEET = /\.module\.(css|scss|sass|less)$/;
+
 export function cssModules(ast: t.File, file: string): Map<string, string> {
   const out = new Map<string, string>();
   for (const node of ast.program.body) {
-    if (node.type !== "ImportDeclaration" || !node.source.value.endsWith(".module.css")) continue;
+    if (node.type !== "ImportDeclaration" || !MODULE_SHEET.test(node.source.value)) continue;
     if (!isRelative(node.source.value)) continue;
     for (const spec of node.specifiers) {
       if (spec.type === "ImportDefaultSpecifier" || spec.type === "ImportNamespaceSpecifier") {
@@ -115,4 +118,58 @@ export function cssModules(ast: t.File, file: string): Map<string, string> {
     }
   }
   return out;
+}
+
+// Comments go; strings and unquoted `url(...)` stay, since `//` can appear inside them.
+const KEEP = String.raw`("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|url\(\s*[^"')\s][^)]*\))`;
+const CSS_COMMENTS = new RegExp(String.raw`${KEEP}|/\*[\s\S]*?\*/`, "gi");
+const DIALECT_COMMENTS = new RegExp(String.raw`${KEEP}|/\*[\s\S]*?\*/|//[^\n]*`, "gi");
+const NAMES = /"([^"]*)"|'([^']*)'|url\(\s*([^"')\s][^)]*?)\s*\)/g;
+
+/** The stylesheet's `@import`, `@use`, `@forward` and `url()` specifiers, with comments ignored. */
+export function sheetSpecifiers(file: string, code: string): string[] {
+  const ext = path.posix.extname(file);
+  const dialect = ext === ".scss" || ext === ".sass" || ext === ".less";
+  const plain = code.replace(
+    dialect ? DIALECT_COMMENTS : CSS_COMMENTS,
+    (_, keep?: string) => keep ?? "",
+  );
+  const specs: string[] = [];
+  if (dialect) {
+    // Sass and Less look for a bare `@use "tokens"` next to the sheet, so it reads as `./tokens`.
+    const end = ext === ".sass" ? String.raw`\n` : ";{}";
+    for (const m of plain.matchAll(new RegExp(`@(import|use|forward)\\s+([^${end}]*)`, "g"))) {
+      const names = [...m[2]!.matchAll(NAMES)].map((n) => n[1] ?? n[2] ?? n[3]!);
+      for (const spec of m[1] === "import" ? names : names.slice(0, 1)) {
+        if (/^(\/(?!\/)|\.{1,2}\/)/.test(spec)) specs.push(spec);
+        else if (!/^([a-z][\w+.-]*:|\/\/|~)|[#@]\{/i.test(spec)) specs.push(`./${spec}`);
+      }
+    }
+  } else {
+    for (const m of plain.matchAll(/@import\s+(?:url\(\s*)?["']([^"']+)["']/g)) specs.push(m[1]!);
+  }
+  for (const m of plain.matchAll(/url\(\s*["']?([^"')]+)["']?\s*\)/g)) specs.push(m[1]!);
+  return specs;
+}
+
+/**
+ * The files an import from `fromFile` could mean. In Sass `@use "a/b"` is `a/b.scss`, the partial
+ * `a/_b.scss`, or `a/b/index` (`_index`); Less adds `.less`. No load paths, only the sheet's folder.
+ */
+export function importCandidates(fromFile: string, target: string): string[] {
+  const ext = path.posix.extname(fromFile);
+  const sass = ext === ".scss" || ext === ".sass";
+  if (!sass && ext !== ".less") return candidates(target);
+  const partial = (file: string) =>
+    path.posix.join(path.posix.dirname(file), `_${path.posix.basename(file)}`);
+  if (!sass) return path.posix.extname(target) === ".less" ? [target] : [target, `${target}.less`];
+  if (STYLE_EXTENSIONS.includes(path.posix.extname(target))) return [target, partial(target)];
+  const exts = [".scss", ".sass", ".css"];
+  return [
+    target,
+    ...exts.map((e) => `${target}${e}`),
+    ...exts.map((e) => partial(`${target}${e}`)),
+    ...exts.map((e) => `${target}/index${e}`),
+    ...exts.map((e) => `${target}/_index${e}`),
+  ];
 }

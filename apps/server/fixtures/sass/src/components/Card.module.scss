@@ -1,0 +1,28 @@
+@use "../styles/tokens" as t;
+
+$accent: #2a7f8e; // darker brand
+
+// The card itself.
+.card {
+  display: grid;
+  gap: t.$gap;
+  padding: t.$gap * 2;
+  border: 2px solid var(--ink);
+  border-radius: t.$radius;
+  background: var(--brand);
+
+  &:hover {
+    background: #b7e0e6;
+  }
+
+  // Only defined here, inside .card: Finite refuses to edit it by hand.
+  .note {
+    margin: 0;
+    font-size: 14px;
+  }
+}
+
+.title {
+  margin: 0; // reset
+  color: $accent;
+}

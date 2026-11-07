@@ -258,6 +258,98 @@ describe("SourceEditor.apply", () => {
   });
 });
 
+describe("SourceEditor with Sass and Less modules", () => {
+  const CARD = (ext: string) =>
+    `import s from "./Card.module.${ext}";\nexport const Card = () => (\n  <div className={s.card}>\n    <h2 className={s.title}>x</h2>\n  </div>\n);\n`;
+  const SCSS = `$ink: #111;\n\n// The card.\n.card {\n  color: $ink;\n  &:hover {\n    color: red;\n  }\n}\n\n.title {\n  font-size: 12px; // small\n}\n`;
+  const styleCard = (
+    styles: Record<string, string | null>,
+    loc = "src/Card.tsx:3:2",
+    tag = "div",
+  ) => edit("src/Card.tsx", { kind: "style", locs: [loc], tag, styles });
+  const d = () => design("css-modules");
+
+  it("edits a .module.scss rule, and undo and redo survive another actor's edit in the same sheet", async () => {
+    await put("src/Card.tsx", CARD("scss"));
+    await put("src/Card.module.scss", SCSS);
+    const source = createSourceEditor();
+    await source.apply(open(d()), [await styleCard({ color: "blue" })], ana, page);
+    const anaEdit = SCSS.replace("color: $ink;", "color: blue;");
+    expect(await get("src/Card.module.scss")).toBe(anaEdit);
+
+    await source.apply(
+      open(d()),
+      [await styleCard({ fontSize: "20px" }, "src/Card.tsx:4:4", "h2")],
+      bo,
+      page,
+    );
+    const both = anaEdit.replace("font-size: 12px; // small", "font-size: 20px; // small");
+    expect(await get("src/Card.module.scss")).toBe(both);
+
+    await source.undo(open(d()), ana);
+    expect(await get("src/Card.module.scss")).toBe(SCSS.replace("12px", "20px"));
+    await source.redo(open(d()), ana);
+    expect(await get("src/Card.module.scss")).toBe(both);
+    await source.undo(open(d()), bo);
+    expect(await get("src/Card.module.scss")).toBe(anaEdit);
+  });
+
+  it("edits a .module.less rule", async () => {
+    await put("src/Card.tsx", CARD("less"));
+    const less = `@ink: #111;\n.bold() {\n  font-weight: bold;\n}\n.card {\n  .bold();\n  color: @ink; // ink\n}\n`;
+    await put("src/Card.module.less", less);
+    const source = createSourceEditor();
+    await source.apply(open(d()), [await styleCard({ color: "blue", margin: "4px" })], ana, page);
+    expect(await get("src/Card.module.less")).toBe(
+      less.replace("color: @ink; // ink\n", "color: blue; // ink\n  margin: 4px;\n"),
+    );
+    await source.undo(open(d()), ana);
+    expect(await get("src/Card.module.less")).toBe(less);
+  });
+
+  it("refuses a class that only exists nested, and leaves the sheet alone", async () => {
+    await put("src/Card.tsx", CARD("scss"));
+    const nested = `.list {\n  .card {\n    color: red;\n  }\n}\n`;
+    await put("src/Card.module.scss", nested);
+    await expect(
+      createSourceEditor().apply(open(d()), [await styleCard({ color: "blue" })], ana, page),
+    ).rejects.toMatchObject({
+      code: "unsupported-style",
+      message: expect.stringContaining(".card"),
+    });
+    expect(await get("src/Card.module.scss")).toBe(nested);
+  });
+
+  it("refuses an indented .module.sass import and says what to do", async () => {
+    await put("src/Card.tsx", CARD("sass"));
+    const sass = `.card\n  color: red\n`;
+    await put("src/Card.module.sass", sass);
+    await expect(
+      createSourceEditor().apply(open(d()), [await styleCard({ color: "blue" })], ana, page),
+    ).rejects.toMatchObject({
+      code: "unsupported-style",
+      message: expect.stringMatching(/Card\.module\.sass is indented Sass.*Ask the agent.*\.scss/),
+    });
+    expect(await get("src/Card.module.sass")).toBe(sass);
+  });
+
+  it("keeps tokens in the global .scss sheet's :root, not @theme", async () => {
+    const css = `@use "./vars";\n\n.page {\n  margin: 0;\n}\n`;
+    await put("src/global.scss", css);
+    const source = createSourceEditor();
+    const scss = { ...d(), css: ["src/global.scss"] };
+    expect(await source.tokens(scss)).toEqual([]);
+    expect(await source.setToken(scss, { name: "ink", mode: "light", value: "#111" })).toEqual([
+      { name: "--ink", light: "#111" },
+    ]);
+    expect(await get("src/global.scss")).toBe(
+      `@use "./vars";\n\n:root {\n  --ink: #111;\n}\n\n.page {\n  margin: 0;\n}\n`,
+    );
+    await source.setToken(scss, { name: "ink", mode: "light", value: "#222" });
+    expect(await get("src/global.scss")).toContain("--ink: #222;");
+  });
+});
+
 describe("SourceEditor undo and redo", () => {
   const d = () => design();
   const styleH1 = () =>
@@ -495,6 +587,74 @@ export function Card() {
     ]);
     expect(new TextDecoder().decode(files.find((f) => f.path.endsWith("mark.svg"))!.data)).toBe(
       "<svg/>",
+    );
+  });
+});
+
+describe("exportFrames with Sass and Less", () => {
+  const frame = (file: string) => ({
+    id: file,
+    name: "Home",
+    x: 0,
+    y: 0,
+    width: 100,
+    height: 100,
+    source: { kind: "file" as const, file },
+  });
+
+  it("follows @use, @forward and @import through partials, indexes and comments", async () => {
+    await put(
+      ".finite/boards/c1/Home.tsx",
+      `import s from "./home.module.scss";\nimport "./theme.less";\nexport default () => <div className={s.a} />;\n`,
+    );
+    await put(
+      ".finite/boards/c1/home.module.scss",
+      `@use "sass:math";\n@use "tokens" as t;\n@use "lib";\n@use "../../../src/styles/shared.scss";\n@import "plain", "./second.scss";\n// @use "commented";\n/* @import "block"; */\n.a { background: url("../../../src/bg.png"); content: "// not a comment"; }\n.b { background: url(//cdn.example.com/x.png); }\n@import "~pkg/x"; @import "https://x/y.css";\n`,
+    );
+    await put(".finite/boards/c1/_tokens.scss", `@forward "colors";\n$ink: #111;\n`);
+    await put(".finite/boards/c1/_colors.scss", `$red: red;\n`);
+    await put(".finite/boards/c1/lib/_index.scss", `@use "inner";\n`);
+    await put(".finite/boards/c1/lib/_inner.scss", `.inner {}\n`);
+    await put(".finite/boards/c1/plain.css", `.plain {}\n`);
+    await put(".finite/boards/c1/second.scss", `.second {}\n`);
+    await put(".finite/boards/c1/commented.scss", `.nope {}\n`);
+    await put(".finite/boards/c1/block.scss", `.nope {}\n`);
+    await put("src/styles/shared.scss", `.shared {}\n`);
+    await put("src/bg.png", "png");
+    await put(
+      ".finite/boards/c1/theme.less",
+      `// @import "commented";\n@import (reference) "mixins";\n@import (css, optional) url("legacy.css");\n@import "./vars.less", "more";\n@import "@{themes}/dark";\n.t { background: url('./img/a.svg'); }\n`,
+    );
+    await put(".finite/boards/c1/mixins.less", `.m() {}\n`);
+    await put(".finite/boards/c1/legacy.css", `.legacy {}\n`);
+    await put(".finite/boards/c1/vars.less", `@v: 1;\n`);
+    await put(".finite/boards/c1/more.less", `.more {}\n`);
+    await put(".finite/boards/c1/img/a.svg", `<svg/>`);
+    await put(".finite/boards/c1/unused.scss", `.unused {}\n`);
+    await put("package.json", `{"name":"d"}`);
+    const files = await createSourceEditor().exportFrames(open(design()), "c1", [
+      frame(".finite/boards/c1/Home.tsx"),
+    ]);
+    expect(files.map((f) => f.path).sort()).toEqual(
+      [
+        ".finite/boards/c1/Home.tsx",
+        ".finite/boards/c1/_colors.scss",
+        ".finite/boards/c1/_tokens.scss",
+        ".finite/boards/c1/home.module.scss",
+        ".finite/boards/c1/img/a.svg",
+        ".finite/boards/c1/legacy.css",
+        ".finite/boards/c1/lib/_index.scss",
+        ".finite/boards/c1/lib/_inner.scss",
+        ".finite/boards/c1/mixins.less",
+        ".finite/boards/c1/more.less",
+        ".finite/boards/c1/plain.css",
+        ".finite/boards/c1/second.scss",
+        ".finite/boards/c1/theme.less",
+        ".finite/boards/c1/vars.less",
+        "package.json",
+        "src/bg.png",
+        "src/styles/shared.scss",
+      ].sort(),
     );
   });
 });

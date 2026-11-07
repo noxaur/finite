@@ -191,7 +191,14 @@ export function copyFixture(name, dest) {
   });
   const result = spawnSync(
     "pnpm",
-    ["install", "--prefer-offline", "--ignore-workspace", "--no-lockfile", "--reporter=silent"],
+    [
+      "install",
+      "--prefer-offline",
+      "--ignore-workspace",
+      "--no-lockfile",
+      "--reporter=silent",
+      "--config.strict-dep-builds=false",
+    ],
     { cwd: dest, stdio: "inherit", timeout: 300_000 },
   );
   if (result.status !== 0) throw new Error(`pnpm install failed in ${dest}`);

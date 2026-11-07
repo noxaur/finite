@@ -83,7 +83,7 @@ function entryCss(code: SourceFile[]): string[] {
     const file = code.find((f) => f.path === entry);
     if (!file) continue;
     for (const match of file.text.matchAll(
-      /import\s+(?:[\w*{}\s,]+from\s+)?["'](\.{1,2}\/[^"'?]+\.css)(?:\?url)?["']/g,
+      /import\s+(?:[\w*{}\s,]+from\s+)?["'](\.{1,2}\/[^"'?]+\.(?:css|scss|less))(?:\?url)?["']/g,
     )) {
       if (match[1]!.includes(".module.")) continue;
       css.push(path.posix.normalize(path.posix.join(path.posix.dirname(entry), match[1]!)));
@@ -114,10 +114,10 @@ async function sourceFiles(
       if (SKIP.has(entry.name)) continue;
       const child = path.posix.join(rel, entry.name);
       if (entry.isDirectory()) queue.push(child);
-      else if (/\.(tsx|jsx|ts|js)$/.test(entry.name) || entry.name.endsWith(".css")) {
+      else if (/\.(tsx|jsx|ts|js|css|scss|less)$/.test(entry.name)) {
         seen++;
         const text = await fs.readFile(path.join(root, child), "utf8");
-        (entry.name.endsWith(".css") ? css : code).push({ path: child, text });
+        (/\.(css|scss|less)$/.test(entry.name) ? css : code).push({ path: child, text });
       }
     }
   }
