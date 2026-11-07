@@ -1,9 +1,9 @@
 /**
  * The URL path a route frame loads: `routePath` with its dynamic segments filled from `params`.
  *
- * Understands React Router (`:id`, optional `:id?`, splat `*`) and TanStack Router (`$id`,
- * `{$id}`, optional `{-$id}`, splat `$` filled by `_splat`). Values are percent-encoded, except a
- * splat's slashes. An unfilled optional segment is dropped; an unfilled required one stays as
+ * Understands React Router (`:id`, optional `:id?`, splat `*`), TanStack Router (`$id`, `{$id}`,
+ * optional `{-$id}`, splat `$` filled by `_splat`) and Next.js (`[id]`, catch-all `[...slug]`,
+ * optional catch-all `[[...slug]]`). Values are percent-encoded, except a splat's slashes. An unfilled optional segment is dropped; an unfilled required one stays as
  * written, so the app's own 404 shows rather than a wrong page.
  */
 export function routeHref(routePath: string, params: Readonly<Record<string, string>>): string {
@@ -27,6 +27,10 @@ function parseSegment(
   if (colon) return { name: colon[1]!, optional: colon[2] === "?", splat: false };
   const braced = /^\{(-)?\$([^}]+)\}$/.exec(segment);
   if (braced) return { name: braced[2]!, optional: braced[1] === "-", splat: false };
+  const optionalCatchAll = /^\[\[\.\.\.([^\]]+)\]\]$/.exec(segment);
+  if (optionalCatchAll) return { name: optionalCatchAll[1]!, optional: true, splat: true };
+  const bracket = /^\[(\.\.\.)?([^\]]+)\]$/.exec(segment);
+  if (bracket) return { name: bracket[2]!, optional: false, splat: Boolean(bracket[1]) };
   const dollar = /^\$(.+)$/.exec(segment);
   if (dollar) return { name: dollar[1]!, optional: false, splat: false };
   return undefined;

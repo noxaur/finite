@@ -36,7 +36,8 @@ export type Rect = z.infer<typeof Rect>;
 
 export const DesignOrigin = z.enum(["connected", "blank", "import"]);
 export type DesignOrigin = z.infer<typeof DesignOrigin>;
-export const Router = z.enum(["react-router", "tanstack", "none"]);
+/** `next-app` is Next.js's App Router (`app/`), `next-pages` its Pages Router (`pages/`). */
+export const Router = z.enum(["react-router", "tanstack", "next-app", "next-pages", "none"]);
 export type Router = z.infer<typeof Router>;
 export const Styling = z.enum(["tailwind", "css-modules", "inline", "stylex"]);
 export type Styling = z.infer<typeof Styling>;
@@ -323,7 +324,7 @@ export const Route = z.object({
   path: z.string(),
   /** The route module, relative to the root, when the router names one. */
   file: z.string().optional(),
-  /** Dynamic segments (`:id`, `$id`) a frame must fill in. */
+  /** Dynamic segments (`:id`, `$id`, `[id]`) a frame must fill in. */
   params: z.array(z.string()),
 });
 export type Route = z.infer<typeof Route>;

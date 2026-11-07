@@ -22,6 +22,16 @@ describe("routeHref", () => {
     expect(routeHref("/users/:id", {})).toBe("/users/:id");
   });
 
+  it("fills Next.js dynamic and catch-all segments", () => {
+    expect(routeHref("/blog/[slug]", { slug: "hello world" })).toBe("/blog/hello%20world");
+    expect(routeHref("/docs/[...slug]", { slug: "a/b c" })).toBe("/docs/a/b%20c");
+    expect(routeHref("/shop/[[...slug]]", { slug: "shoes/red" })).toBe("/shop/shoes/red");
+    expect(routeHref("/shop/[[...slug]]", {})).toBe("/shop");
+    expect(routeHref("/[[...slug]]", {})).toBe("/");
+    expect(routeHref("/docs/[...slug]", {})).toBe("/docs/[...slug]");
+    expect(routeHref("/blog/[slug]", {})).toBe("/blog/[slug]");
+  });
+
   it("adds the leading slash", () => {
     expect(routeHref("about", {})).toBe("/about");
     expect(routeHref("/", {})).toBe("/");

@@ -61,7 +61,7 @@ export function DesignGrid() {
         <StartButton
           icon="folder"
           label="Connect a codebase"
-          note="A React Router or TanStack app"
+          note="A Next.js, React Router or TanStack app"
           on={start === "connect"}
           onClick={() => setStart(start === "connect" ? null : "connect")}
         />
