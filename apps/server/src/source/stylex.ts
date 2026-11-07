@@ -1,7 +1,7 @@
 import type * as t from "@babel/types";
 import { Refused, type Token, type TokenMode } from "@finite/protocol";
 import { candidates, isRelative, resolveSpec, specTo } from "./imports.ts";
-import { parseModule, walk } from "./jsx.ts";
+import { attribute, attributeInsertAt, parseModule, tagName, walk } from "./jsx.ts";
 import { kebab } from "./tailwind.ts";
 
 const SOURCES = new Set(["@stylexjs/stylex", "stylex"]);
@@ -25,12 +25,17 @@ type Bindings = {
 /** A `name.key` or `name.key(...)` argument of `props`; `sheet` is the root of `name`. */
 type Ref = { sheet: string; key: string; call: boolean; nested: boolean; member: t.Node };
 
+/** Replaces `code.slice(start, end)` with `text`; `start === end` inserts. */
+export type Patch = { start: number; end: number; text: string };
+
 /**
- * The overwrite that sets `styles` on the `stylex.create` entry that `el`'s `stylex.props` spread
- * resolves to, or `undefined` when the element has no spread. A value that names a `defineVars`
- * token (`colors.brand`, from `vars`, token name → its `*.stylex.ts` file) is written as that
- * member expression, with `import`, the import to add when the file doesn't import its group yet.
- * A token inside a longer value is written as a template literal, `${colors.brand}` in its place.
+ * The patches that set `styles` on the `stylex.create` entry that `el`'s `stylex.props` spread
+ * resolves to. An element with no attribute that styles it gets a new entry and a spread.
+ * `undefined` when it has a `style`, a `className` or a spread Finite can't read, but no
+ * `props` spread. A value that names a `defineVars` token (`colors.brand`, from `vars`, token
+ * name → its `*.stylex.ts` file) is written as that member expression, importing its group when
+ * the file doesn't yet. A token inside a longer value is written as a template literal,
+ * `${colors.brand}` in its place.
  */
 export function stylexEdit(
   code: string,
@@ -39,7 +44,7 @@ export function stylexEdit(
   styles: Record<string, string | null>,
   file: string,
   vars: Record<string, string>,
-): { start: number; end: number; text: string; import?: { at: number; text: string } } | undefined {
+): Patch[] | undefined {
   const b = bindings(ast);
   const spreads: t.Node[][] = [];
   for (const attr of el.openingElement.attributes) {
@@ -60,7 +65,14 @@ export function stylexEdit(
       spreads.push([attr.value.expression]);
     }
   }
-  if (spreads.length === 0) return undefined;
+  if (spreads.length === 0) {
+    const plain = el.openingElement.attributes.every(
+      (a) =>
+        a.type === "JSXAttribute" &&
+        !(a.name.type === "JSXIdentifier" && ["style", "className"].includes(a.name.name)),
+    );
+    return plain ? newEntry(code, ast, b, el, styles, file, vars) : undefined;
+  }
   if (spreads.length > 1)
     throw refuse(
       "This element spreads stylex.props more than once, so Finite can't tell which to edit",
@@ -114,7 +126,7 @@ export function stylexEdit(
     }
   }
 
-  const used = useVars(code, ast, file, styles, vars);
+  const used = useVars(ast, file, styles, vars, freeNames(ast));
   const valueText = (v: string | null) => (v === null ? "null" : used.text(v));
   const existing = new Set(keys(entry));
   const added = [...wanted]
@@ -151,12 +163,117 @@ export function stylexEdit(
     },
     added,
   );
-  return {
-    start: entry.start!,
-    end: entry.end!,
-    text,
-    ...(used.import && { import: used.import }),
-  };
+  return [{ start: entry.start!, end: entry.end!, text }, ...head(code, ast, used.imports)];
+}
+
+/**
+ * Adds `styles` as a new entry of the file's `stylex.create` object, and a spread of it to `el`.
+ * A file without one gets `const styles = stylex.create({…})` after its imports, and a file
+ * that doesn't import StyleX's `props` (or `create`) gets `import * as stylex`. Both names are
+ * numbered (`styles2`, `stylex2`) when the module already binds them.
+ */
+function newEntry(
+  code: string,
+  ast: t.File,
+  b: Bindings,
+  el: t.JSXElement,
+  styles: Record<string, string | null>,
+  file: string,
+  vars: Record<string, string>,
+): Patch[] {
+  const free = freeNames(ast);
+  const used = useVars(ast, file, styles, vars, free);
+  const body = Object.entries(styles).flatMap(([k, v]) =>
+    v === null ? [] : [`${key(kebab(k))}: ${used.text(v)}`],
+  );
+  if (body.length === 0) return [];
+
+  const sheets = [...b.sheets].filter(([, s]) => s.type === "ObjectExpression");
+  const [sheetName, sheet] = (sheets.find(([n]) => n === "styles") ??
+    sheets[0] ?? [free("styles")]) as [string, t.ObjectExpression | undefined];
+  if (!sheet && b.sheets.size > 0)
+    throw refuse(
+      `${[...b.sheets.keys()][0]} is built from code, so Finite can't add a style to it`,
+    );
+
+  const named = b.namespaces.size === 0;
+  const addImport = named && (b.props.size === 0 || (!sheet && b.create.size === 0));
+  const namespace = addImport ? free("stylex") : [...b.namespaces][0];
+  const fn = (name: "props" | "create") =>
+    named && b[name].size > 0 ? [...b[name]][0]! : `${namespace}.${name}`;
+  const props = fn("props");
+  for (const name of [sheetName, props.split(".")[0]!])
+    if (shadowed(ast, el, name))
+      throw refuse(
+        `A parameter or local named ${name} hides the module-level one, so Finite can't add a StyleX style here`,
+      );
+
+  const taken = new Set(
+    sheet?.properties.flatMap((p) =>
+      p.type !== "SpreadElement" && !p.computed ? [keyName(p.key) ?? ""] : [],
+    ),
+  );
+  const name = entryName(el, taken);
+  const entry = (indent: string | undefined) =>
+    indent === undefined
+      ? `${name}: { ${body.join(", ")} }`
+      : `${name}: {\n${body.map((l) => `${indent}  ${l},`).join("\n")}\n${indent}}`;
+
+  const patches = head(
+    code,
+    ast,
+    [
+      ...(addImport ? [{ names: `* as ${namespace}`, from: "@stylexjs/stylex" }] : []),
+      ...used.imports,
+    ],
+    sheet ? undefined : `const ${sheetName} = ${fn("create")}({\n  ${entry("  ")},\n});`,
+  );
+  if (sheet) {
+    const multiline = code.slice(sheet.start!, sheet.end!).includes("\n");
+    const indent = sheet.properties[0]
+      ? indentAt(code, sheet.properties[0].start!)
+      : `${indentAt(code, sheet.start!)}  `;
+    const text = rebuild(code, sheet, () => undefined, [entry(multiline ? indent : undefined)]);
+    patches.push({ start: sheet.start!, end: sheet.end!, text });
+  }
+  const at = attributeInsertAt(el);
+  patches.push({ start: at, end: at, text: ` {...${props}(${sheetName}.${name})}` });
+  return patches;
+}
+
+/** Keys hand-written StyleX uses for an element by its tag. */
+const TAG_KEYS: Record<string, string> = {
+  h1: "heading",
+  h2: "heading",
+  h3: "heading",
+  h4: "heading",
+  h5: "heading",
+  h6: "heading",
+  p: "text",
+  a: "link",
+  img: "image",
+  ul: "list",
+  ol: "list",
+  li: "item",
+};
+
+/** A key named after the element's `id` or `role`, else its tag, that `taken` doesn't have yet. */
+function entryName(el: t.JSXElement, taken: Set<string>): string {
+  const camel = (s: string) =>
+    s
+      .replace(/[^A-Za-z0-9]+(.)?/g, (_, c: string | undefined) => c?.toUpperCase() ?? "")
+      .replace(/^[^A-Za-z]+/, "")
+      .replace(/^./, (c) => c.toLowerCase());
+  const hint = ["id", "role"]
+    .map((n) => attribute(el, n)?.value)
+    .find((v): v is t.StringLiteral => v?.type === "StringLiteral" && camel(v.value) !== "");
+  const tag = tagName(el.openingElement.name);
+  const base = hint
+    ? camel(hint.value)
+    : (TAG_KEYS[tag] ?? (camel(tag.split(".").at(-1)!) || "box"));
+  let name = base;
+  for (let i = 2; taken.has(name); i++) name = `${base}${i}`;
+  return name;
 }
 
 function refuse(why: string): Refused {
@@ -173,9 +290,10 @@ function bindings(ast: t.File): Bindings {
     sheets: new Map(),
   };
   for (const stmt of ast.program.body) {
-    if (stmt.type !== "ImportDeclaration") continue;
+    if (stmt.type !== "ImportDeclaration" || stmt.importKind === "type") continue;
     const stylex = SOURCES.has(stmt.source.value);
     for (const spec of stmt.specifiers) {
+      if (spec.type === "ImportSpecifier" && spec.importKind === "type") continue;
       if (!stylex) b.imported.set(spec.local.name, stmt.source.value);
       else if (spec.type === "ImportNamespaceSpecifier") b.namespaces.add(spec.local.name);
       else if (spec.type === "ImportSpecifier") {
@@ -199,6 +317,47 @@ function bindings(ast: t.File): Bindings {
     }
   }
   return b;
+}
+
+/** Whether the module's top level binds `name`: an import (types too), a variable, a function, a class, an enum or a namespace with values. */
+function declared(ast: t.File, name: string): boolean {
+  return ast.program.body.some((stmt) => {
+    if (stmt.type === "ImportDeclaration")
+      return stmt.specifiers.some((s) => s.local.name === name);
+    const decl =
+      stmt.type === "ExportNamedDeclaration" || stmt.type === "ExportDefaultDeclaration"
+        ? stmt.declaration
+        : stmt;
+    if (decl?.type === "VariableDeclaration")
+      return decl.declarations.some((d) => binds(d.id, name));
+    if (decl?.type === "TSModuleDeclaration") {
+      let id: t.Node = decl.id;
+      while (id.type === "TSQualifiedName") id = id.left;
+      return id.type === "Identifier" && id.name === name && hasValues(decl);
+    }
+    return (
+      (decl?.type === "FunctionDeclaration" ||
+        decl?.type === "ClassDeclaration" ||
+        decl?.type === "TSEnumDeclaration") &&
+      decl.id?.name === name
+    );
+  });
+}
+
+/** Whether a namespace declares anything at runtime, which a body of only types and interfaces doesn't. */
+function hasValues(mod: t.TSModuleDeclaration): boolean {
+  return mod.body.body.some((stmt) => {
+    const decl =
+      stmt.type === "ExportNamedDeclaration" || stmt.type === "ExportDefaultDeclaration"
+        ? stmt.declaration
+        : stmt;
+    if (decl?.type === "TSModuleDeclaration") return hasValues(decl);
+    return (
+      decl != null &&
+      decl.type !== "TSInterfaceDeclaration" &&
+      decl.type !== "TSTypeAliasDeclaration"
+    );
+  });
 }
 
 /** True when `callee` is StyleX's `fn`: `stylex.fn` through a namespace import, or a named import. */
@@ -446,20 +605,21 @@ export function varRefs(styles: Record<string, string | null>): string[] {
 
 /**
  * `text` writes a value of `styles`: a whole token as its member expression, a value with known
- * tokens inside as a template literal, anything else as a string. `import` is the import to add
- * for the groups `file` doesn't import yet: `import { colors } from "../tokens.stylex";` after the
- * other imports. A group imported under another local name is used by that name; a group whose
- * name is taken by something else refuses.
+ * tokens inside as a template literal, anything else as a string. `imports` are the groups `file`
+ * doesn't import yet, `{ colors } from "../tokens.stylex"`. A group imported under another local
+ * name is used by that name; a group whose name is taken by something else is imported under a
+ * free one (`colors as colors2`).
  */
 function useVars(
-  code: string,
   ast: t.File,
   file: string,
   styles: Record<string, string | null>,
   vars: Record<string, string>,
-): { text: (value: string) => string; import?: { at: number; text: string } } {
+  free: (base: string) => string,
+): { text: (value: string) => string; imports: Import[] } {
   const refs: Record<string, string> = {};
-  const missing = new Map<string, Set<string>>();
+  /** Home file → group → the local name to import it as. */
+  const missing = new Map<string, Map<string, string>>();
   const inside = (value: string) =>
     isStylexVar(value)
       ? []
@@ -475,14 +635,10 @@ function useVars(
         "not-found",
       );
     const [group, k] = ref.split(".") as [string, string];
-    let local = importedAs(ast, file, group, home);
+    let local = importedAs(ast, file, group, home) ?? missing.get(home)?.get(group);
     if (local === undefined) {
-      if (bound(ast, group))
-        throw refuse(
-          `${file} already has something named ${group} that isn't imported from ${home}, so Finite can't import the StyleX token ${ref}`,
-        );
-      local = group;
-      missing.set(home, (missing.get(home) ?? new Set()).add(group));
+      local = free(group);
+      missing.set(home, (missing.get(home) ?? new Map()).set(group, local));
     }
     refs[ref] = /^[A-Za-z_$][\w$]*$/.test(k) ? `${local}.${k}` : `${local}[${JSON.stringify(k)}]`;
   }
@@ -500,17 +656,49 @@ function useVars(
     }
     return `\`${out}${escape(value.slice(at))}\``;
   };
-  if (missing.size === 0) return { text };
-  const imports = ast.program.body.filter((s) => s.type === "ImportDeclaration");
-  const last = imports.at(-1);
+  const imports = [...missing].map(([home, groups]) => ({
+    names: `{ ${[...groups].map(([g, local]) => (g === local ? g : `${g} as ${local}`)).join(", ")} }`,
+    from: specTo(file, home, false),
+  }));
+  return { text, imports };
+}
+
+/** An import to add: `import <names> from "<from>"`. */
+type Import = { names: string; from: string };
+
+/**
+ * The patch that adds `imports`, in the quotes and semicolons of the file's last import, after its
+ * imports (or its directives), then `decl` after a blank line. A file with neither gets them
+ * before its first statement.
+ */
+function head(code: string, ast: t.File, imports: Import[], decl?: string): Patch[] {
+  if (imports.length === 0 && decl === undefined) return [];
+  const last = ast.program.body.filter((s) => s.type === "ImportDeclaration").at(-1);
   const quote = last ? code[last.source.start!] : '"';
-  const semi = last ? code.slice(last.start!, last.end!).endsWith(";") : true;
-  const lines = [...missing].map(
-    ([home, groups]) =>
-      `import { ${[...groups].join(", ")} } from ${quote}${specTo(file, home, false)}${quote}${semi ? ";" : ""}`,
-  );
-  if (last) return { text, import: { at: last.end!, text: lines.map((l) => `\n${l}`).join("") } };
-  return { text, import: { at: ast.program.body[0]?.start ?? 0, text: `${lines.join("\n")}\n\n` } };
+  const semi = !last || code.slice(last.start!, last.end!).endsWith(";") ? ";" : "";
+  const lines = imports.map((i) => `import ${i.names} from ${quote}${i.from}${quote}${semi}`);
+  const after = last?.end ?? ast.program.directives.at(-1)?.end;
+  if (after == null) {
+    const at = ast.program.body[0]?.start ?? 0;
+    const blocks = [lines.join("\n"), decl].filter((b) => b);
+    return [{ start: at, end: at, text: blocks.map((b) => `${b}\n\n`).join("") }];
+  }
+  const text = `${lines.map((l) => `\n${l}`).join("")}${decl === undefined ? "" : `\n\n${decl}`}`;
+  return [{ start: after, end: after, text }];
+}
+
+/**
+ * A `free(base)` that returns `base`, numbered (`base2`) when the module's top level already binds
+ * it or an earlier call returned it.
+ */
+function freeNames(ast: t.File): (base: string) => string {
+  const given = new Set<string>();
+  return (base) => {
+    let name = base;
+    for (let i = 2; declared(ast, name) || given.has(name); i++) name = `${base}${i}`;
+    given.add(name);
+    return name;
+  };
 }
 
 /** The local name `file` imports `group` from `home` under, if it does. */
@@ -526,27 +714,6 @@ function importedAs(ast: t.File, file: string, group: string, home: string): str
     }
   }
   return undefined;
-}
-
-/** Whether the module's top level binds `name`: an import, a variable, a function, a class or an enum. */
-function bound(ast: t.File, name: string): boolean {
-  return ast.program.body.some((stmt) => {
-    if (stmt.type === "ImportDeclaration")
-      return stmt.specifiers.some((s) => s.local.name === name);
-    const decl =
-      stmt.type === "ExportNamedDeclaration" || stmt.type === "ExportDefaultDeclaration"
-        ? stmt.declaration
-        : stmt;
-    if (decl?.type === "VariableDeclaration")
-      return decl.declarations.some((d) => binds(d.id, name));
-    if (
-      decl?.type === "FunctionDeclaration" ||
-      decl?.type === "ClassDeclaration" ||
-      decl?.type === "TSEnumDeclaration"
-    )
-      return decl.id?.name === name;
-    return false;
-  });
 }
 
 const DARK = /^@media\s*\(\s*prefers-color-scheme\s*:\s*dark\s*\)$/;

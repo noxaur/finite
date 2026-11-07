@@ -106,6 +106,19 @@ describe("frames", () => {
     expect(code).toContain(`createMemoryRouter([{ path: "*", Component: element }])`);
   });
 
+  test("runs React Router's HMR preamble and gives its runtime a data router in framework mode", () => {
+    const config = { router: "react-router" as const, css: [], wrapper: undefined };
+    const input = {
+      file: "app/routes/home.tsx",
+      exportName: "default",
+      routerPackage: "react-router",
+    };
+    const code = frameEntry(config, { ...input, framework: true });
+    expect(code.indexOf(`import "virtual:react-router/inject-hmr-runtime";`)).toBe(0);
+    expect(code).toContain("window.__reactRouterDataRouter ??=");
+    expect(frameEntry(config, input)).not.toContain("__reactRouter");
+  });
+
   test("the file frame page has a light fill unless the design paints its own", () => {
     const html = frameHtml("/entry");
     expect(html).toContain(

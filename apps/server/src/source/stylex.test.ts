@@ -284,10 +284,199 @@ export const Box = () => <section {...sx(styles.box)} />;
     expect(refused(run(code, [DIV], "div", { padding: "4px" }))).toContain("more than once");
   });
 
-  it("gives an element without a props spread an inline style", () => {
-    expect(ok(run(CARD, [L(19)], "p", { color: "red" })).code).toBe(
-      CARD.replace("<p>Body</p>", `<p style={{ color: "red" }}>Body</p>`),
+  it("adds a create entry and a spread to an element without one, and remaps what moved", () => {
+    const out = ok(run(CARD, [L(19)], "p", { color: "red", gap: null }));
+    expect(out.code).toBe(
+      CARD.replace(
+        `  title: { fontSize: "20px" },\n`,
+        `  title: { fontSize: "20px" },\n  text: {\n    color: "red",\n  },\n`,
+      ).replace("<p>Body</p>", "<p {...stylex.props(styles.text)}>Body</p>"),
     );
+    expect(out.remap).toEqual({ [L(17, 4)]: L(20, 4), [L(18)]: L(21), [L(19)]: L(22) });
+  });
+
+  it("keeps an inline style for an element with style, className or a spread it can't read", () => {
+    for (const p of [`<p style={{ margin: 0 }}>`, `<p className="x">`, `<p {...rest}>`]) {
+      const code = CARD.replace("<p>", p);
+      const out = ok(run(code, [L(19)], "p", { color: "red" })).code;
+      expect(out).toContain(`style={{`);
+      expect(out).toContain(`color: "red"`);
+      expect(out).not.toContain("styles.text");
+    }
+  });
+
+  it("does nothing when every style is removed", () => {
+    expect(ok(run(CARD, [L(19)], "p", { color: null })).code).toBe(CARD);
+  });
+
+  it("uses the file's named imports, and the namespace when props isn't one", () => {
+    const named = `import { create as make, props as sx } from "@stylexjs/stylex";
+
+const styles = make({ box: { margin: "0" } });
+
+export const Box = () => <section {...sx(styles.box)}><p>Hi</p></section>;
+`;
+    expect(ok(run(named, [`${FILE}:5:54`], "p", { color: "red" })).code).toBe(
+      named
+        .replace(`{ box: { margin: "0" } }`, `{ box: { margin: "0" }, text: { color: "red" } }`)
+        .replace("<p>", "<p {...sx(styles.text)}>"),
+    );
+    const createOnly = `import { create } from "@stylexjs/stylex";
+
+const styles = create({});
+
+export const Box = () => <p>Hi</p>;
+`;
+    expect(ok(run(createOnly, [`${FILE}:5:25`], "p", { color: "red" })).code).toBe(
+      createOnly
+        .replace(
+          `import { create } from "@stylexjs/stylex";`,
+          `import { create } from "@stylexjs/stylex";\nimport * as stylex from "@stylexjs/stylex";`,
+        )
+        .replace(`create({})`, `create({ text: { color: "red" } })`)
+        .replace("<p>", "<p {...stylex.props(styles.text)}>"),
+    );
+  });
+
+  it("adds a create object after the imports, and the import when the file has none", () => {
+    const bare = `import { Link } from "react-router";
+
+export function Hero() {
+  return <section>Hi</section>;
+}
+`;
+    const sheet = `const styles = stylex.create({\n  section: {\n    padding: "8px",\n  },\n});`;
+    expect(ok(run(bare, [`${FILE}:4:9`], "section", { padding: "8px" })).code).toBe(
+      bare
+        .replace(
+          `from "react-router";\n`,
+          `from "react-router";\nimport * as stylex from "@stylexjs/stylex";\n\n${sheet}\n`,
+        )
+        .replace("<section>", "<section {...stylex.props(styles.section)}>"),
+    );
+    const none = `export default () => <section>Hi</section>;\n`;
+    expect(ok(run(none, [`${FILE}:1:21`], "section", { padding: "8px" })).code).toBe(
+      `import * as stylex from "@stylexjs/stylex";\n\n${sheet}\n\n` +
+        none.replace("<section>", "<section {...stylex.props(styles.section)}>"),
+    );
+    const imported = `import * as sx from "@stylexjs/stylex";\n\n${none}`;
+    expect(ok(run(imported, [`${FILE}:3:21`], "section", { padding: "8px" })).code).toBe(
+      imported
+        .replace(`\n\n`, `\n\n${sheet.replace("stylex.create", "sx.create")}\n\n`)
+        .replace("<section>", "<section {...sx.props(styles.section)}>"),
+    );
+  });
+
+  it("imports the namespace when the file names props but not create", () => {
+    const code = `import { props } from "@stylexjs/stylex";\n\nexport const A = () => <p>Hi</p>;\n`;
+    expect(ok(run(code, [`${FILE}:3:23`], "p", { color: "red" })).code).toBe(
+      `import { props } from "@stylexjs/stylex";\nimport * as stylex from "@stylexjs/stylex";\n\n` +
+        `const styles = stylex.create({\n  text: {\n    color: "red",\n  },\n});\n\n` +
+        `export const A = () => <p {...props(styles.text)}>Hi</p>;\n`,
+    );
+  });
+
+  it("picks free names for the namespace and the sheet, and ignores type-only imports", () => {
+    const bare = `export const A = () => <p>Hi</p>;\n`;
+    for (const [head, namespace, sheet] of [
+      [`import { stylex } from "./helpers";`, "stylex2", "styles"],
+      [`import type * as stylex from "@stylexjs/stylex";`, "stylex2", "styles"],
+      [`import { type props } from "@stylexjs/stylex";`, "stylex", "styles"],
+      [`import type { Styles as styles } from "./types";`, "stylex", "styles2"],
+      [
+        `import * as stylex from "stylex";\nfunction styles() {}\nclass styles2 {}`,
+        "stylex",
+        "styles3",
+      ],
+      [`const stylex = 1, { styles } = {};`, "stylex2", "styles2"],
+      [`enum styles { A }`, "stylex", "styles2"],
+      [`export const enum styles { A }`, "stylex", "styles2"],
+      [`namespace stylex { export const a = 1; }`, "stylex2", "styles"],
+      [`declare namespace styles { const a: number; }`, "stylex", "styles2"],
+      [`namespace styles.inner { export const a = 1; }`, "stylex", "styles2"],
+      [`namespace styles { export interface A {} export type B = 1; }`, "stylex", "styles"],
+    ]) {
+      const code = `${head}\n\n${bare}`;
+      const line = code.split("\n").length - 1;
+      const out = ok(run(code, [`${FILE}:${line}:23`], "p", { color: "red" })).code;
+      expect(out).toContain(`const ${sheet} = ${namespace}.create({`);
+      expect(out).toContain(`<p {...${namespace}.props(${sheet}.text)}>`);
+      expect(out.includes(`import * as ${namespace} from "@stylexjs/stylex";`)).toBe(
+        !code.includes(`* as ${namespace} from "stylex"`),
+      );
+    }
+  });
+
+  it("names the entry after the element's id or role, else its tag, without reusing a key", () => {
+    const code = card("styles.card", `card: { padding: "16px" }, heading: {}, `).replace(
+      "<div {...stylex.props(styles.card)}>Body</div>",
+      `<div {...stylex.props(styles.card)}><h1>A</h1><b id="price-tag">B</b><i role="note">C</i><Link.Item>D</Link.Item></div>`,
+    );
+    const at = (tag: string) => {
+      const i = code.indexOf(`<${tag}`);
+      return `${FILE}:${code.slice(0, i).split("\n").length}:${i - code.lastIndexOf("\n", i) - 1}`;
+    };
+    const named = (tag: string, loc = at(tag)) =>
+      /stylex\.props\(styles\.(\w+)\)\}>[A-D]</.exec(
+        ok(run(code, [loc], tag.split(" ")[0]!, { color: "red" })).code,
+      )![1];
+    expect(named("h1")).toBe("heading2");
+    expect(named("b")).toBe("priceTag");
+    expect(named("i")).toBe("note");
+    expect(named("Link.Item")).toBe("item");
+  });
+
+  it("refuses a new entry when a local hides the sheet or StyleX's namespace", () => {
+    const code = CARD.replace(
+      "export function Card({ active, style }",
+      "export function Card({ active, style, styles }",
+    );
+    expect(refused(run(code, [L(19)], "p", { color: "red" }))).toContain(
+      "A parameter or local named styles hides the module-level one",
+    );
+  });
+
+  it("refuses a new entry in a create object built from code", () => {
+    const code = `import * as stylex from "@stylexjs/stylex";\n\nconst styles = stylex.create(base);\n\nexport const A = () => <p>Hi</p>;\n`;
+    expect(refused(run(code, [`${FILE}:5:23`], "p", { color: "red" }))).toContain(
+      "styles is built from code",
+    );
+  });
+
+  it("gives each element of a batch its own new entry", () => {
+    const list = `import * as stylex from "@stylexjs/stylex";
+
+const styles = stylex.create({
+  list: {
+    margin: "0",
+  },
+});
+
+export const List = () => (
+  <ul {...stylex.props(styles.list)}>
+    <li>A</li>
+    <li>B</li>
+  </ul>
+);
+`;
+    const first = ok(run(list, [`${FILE}:11:4`, `${FILE}:12:4`], "li", { padding: "4px" }));
+    expect(first.code).toBe(
+      list
+        .replace(
+          `  },\n});`,
+          `  },\n  item: {\n    padding: "4px",\n  },\n  item2: {\n    padding: "4px",\n  },\n});`,
+        )
+        .replace("<li>A", "<li {...stylex.props(styles.item)}>A")
+        .replace("<li>B", "<li {...stylex.props(styles.item2)}>B"),
+    );
+    expect(first.remap).toEqual({
+      [`${FILE}:10:2`]: `${FILE}:16:2`,
+      [`${FILE}:11:4`]: `${FILE}:17:4`,
+      [`${FILE}:12:4`]: `${FILE}:18:4`,
+    });
+    const locs = [first.remap[`${FILE}:11:4`]!, first.remap[`${FILE}:12:4`]!];
+    const second = ok(run(first.code, locs, "li", { padding: "8px" }));
+    expect(second.code).toBe(first.code.replaceAll(`padding: "4px"`, `padding: "8px"`));
   });
 
   it("edits every element of a batch, then edits again through the remap", () => {
@@ -471,7 +660,7 @@ describe("picking a defineVars token", () => {
     expect(again).toContain("padding: colors.brand,");
   });
 
-  it("uses the local name of an aliased import and refuses a name taken by something else", () => {
+  it("uses the local name of an aliased import and a free name when the group's is taken", () => {
     const aliased = CARD.replace(
       `\n\nconst styles`,
       `\nimport { colors as c } from "./tokens.stylex";\n\nconst styles`,
@@ -480,20 +669,56 @@ describe("picking a defineVars token", () => {
       "padding: c.brand,",
     );
     const taken = CARD.replace(`\n\nconst styles`, `\nconst colors = ["red"];\n\nconst styles`);
-    expect(refused(pick(taken, { color: "colors.brand" }, L(18, 4)))).toContain(
-      "already has something named colors",
-    );
+    const renamed = ok(pick(taken, { color: "colors.brand" }, L(18, 4))).code;
+    expect(renamed).toContain(`import { colors as colors2 } from "./tokens.stylex";\n`);
+    expect(renamed).toContain("default: colors2.brand,");
   });
 
-  it("refuses a token it doesn't know and one on an element without a spread", () => {
-    const unknown = pick(CARD, { color: "colors.nope" });
-    expect(unknown).toMatchObject({ code: "not-found" });
-    const p = pick(CARD, { color: "colors.brand" }, L(19), "p");
-    expect(p).toBeInstanceOf(Refused);
-    expect(p).toMatchObject({
+  it("refuses a token it doesn't know, and one on an element with a style but no spread", () => {
+    expect(pick(CARD, { color: "colors.nope" })).toMatchObject({ code: "not-found" });
+    const styled = CARD.replace("<p>", `<p style={{ margin: 0 }}>`);
+    expect(pick(styled, { color: "colors.brand" }, L(19), "p")).toMatchObject({
       code: "unsupported-style",
       message: expect.stringContaining("no stylex.props spread"),
     });
+  });
+
+  it("gives a bare element a new entry with the token and imports the group once", () => {
+    const out = ok(pick(CARD, { color: "colors.brand", margin: "calc(colors.brand)" }, L(19), "p"));
+    expect(out.code).toBe(
+      CARD.replace(
+        `import * as stylex from "@stylexjs/stylex";\n`,
+        `import * as stylex from "@stylexjs/stylex";\nimport { colors } from "./tokens.stylex";\n`,
+      )
+        .replace(
+          `title: { fontSize: "20px" },\n`,
+          'title: { fontSize: "20px" },\n  text: {\n    color: colors.brand,\n    margin: `calc(${colors.brand})`,\n  },\n',
+        )
+        .replace("<p>", "<p {...stylex.props(styles.text)}>"),
+    );
+    expect(out.remap[L(19)]).toBe(L(24));
+  });
+
+  it("adds the StyleX import and the token import together, in the file's style and under free names", () => {
+    const code = `import { useState } from 'react'\n\nenum stylex { A }\nconst colors = 1\n\nexport const A = () => <p>{useState(colors)[0]}</p>\n`;
+    const edit: SourceEdit = {
+      kind: "style",
+      locs: [`${FILE}:6:23`],
+      tag: "p",
+      styles: { color: "colors.brand" },
+      revs: { [FILE]: rev(code) },
+    };
+    const out = ok(
+      rewrite(code, FILE, [edit], "stylex", { theme: {}, files: {}, stylexVars: VARS }),
+    ).code;
+    expect(out).toBe(
+      code
+        .replace(
+          `from 'react'\n`,
+          `from 'react'\nimport * as stylex2 from '@stylexjs/stylex'\nimport { colors as colors2 } from './tokens.stylex'\n\nconst styles = stylex2.create({\n  text: {\n    color: colors2.brand,\n  },\n});\n`,
+        )
+        .replace("<p>", "<p {...stylex2.props(styles.text)}>"),
+    );
   });
 
   it("refuses a token on a Tailwind, CSS-modules or inline element", () => {

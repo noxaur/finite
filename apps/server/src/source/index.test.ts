@@ -695,22 +695,34 @@ export default function Home() {
     expect(code).toContain(`color: colors.brand,\n    borderColor: "var(--ink)",\n`);
   });
 
-  it("refuses a token on an element without a stylex.props spread, and leaves the file alone", async () => {
-    await expect(
-      createSourceEditor().apply(
-        open(sx()),
-        [
-          await edit("src/pages/Home.tsx", {
-            kind: "style",
-            locs: ["src/pages/Home.tsx:17:6"],
-            tag: "p",
-            styles: { color: "colors.brand" },
-          }),
-        ],
-        ana,
-        page,
-      ),
-    ).rejects.toMatchObject({ code: "unsupported-style" });
+  it("gives an element without a stylex.props spread a new entry with the token, and undo restores the file", async () => {
+    const source = createSourceEditor();
+    const result = await source.apply(
+      open(sx()),
+      [
+        await edit("src/pages/Home.tsx", {
+          kind: "style",
+          locs: ["src/pages/Home.tsx:17:6"],
+          tag: "p",
+          styles: { color: "colors.brand" },
+        }),
+      ],
+      ana,
+      page,
+    );
+    expect(await get("src/pages/Home.tsx")).toBe(
+      HOME.replace(
+        `import { Card } from "../components/Card.tsx";\n`,
+        `import { Card } from "../components/Card.tsx";\nimport { colors } from "../tokens.stylex";\n`,
+      )
+        .replace(
+          `fontSize: "24px",\n  },\n`,
+          `fontSize: "24px",\n  },\n  text: {\n    color: colors.brand,\n  },\n`,
+        )
+        .replace("<p>", "<p {...props(styles.text)}>"),
+    );
+    expect(result.remap["src/pages/Home.tsx:17:6"]).toBe("src/pages/Home.tsx:21:6");
+    await source.undo(open(sx()), ana);
     expect(await get("src/pages/Home.tsx")).toBe(HOME);
   });
 });
@@ -826,6 +838,61 @@ export function Card() {
     expect(await get("src/Card.tsx")).toBe(padded("Two"));
     await source.undo(sx, bo);
     expect(await get("src/Card.tsx")).toBe(padded("One"));
+  });
+
+  it("refuses to undo a new StyleX entry after another actor's edit between the entry and the element", async () => {
+    const card = `import * as stylex from "@stylexjs/stylex";
+
+const styles = stylex.create({
+  card: {
+    color: "red",
+  },
+});
+
+export function Card() {
+  return (
+    <div {...stylex.props(styles.card)}>
+      <h2>Title</h2>
+      <span>By Ana</span>
+      <p>One</p>
+    </div>
+  );
+}
+`;
+    const styledP = (text: string) =>
+      card
+        .replace(`  },\n});`, `  },\n  text: {\n    padding: "8px",\n  },\n});`)
+        .replace("<p>", "<p {...stylex.props(styles.text)}>")
+        .replace("Title", text);
+    await put("src/Card.tsx", card);
+    const source = createSourceEditor();
+    const sx = open(design("stylex"));
+    const styled = await source.apply(
+      sx,
+      [
+        await edit("src/Card.tsx", {
+          kind: "style",
+          locs: ["src/Card.tsx:14:6"],
+          tag: "p",
+          styles: { padding: "8px" },
+        }),
+      ],
+      ana,
+      page,
+    );
+    expect(await get("src/Card.tsx")).toBe(styledP("Title"));
+    const h2 = styled.remap["src/Card.tsx:12:6"]!;
+    expect(h2).toBe("src/Card.tsx:15:6");
+    await source.apply(
+      sx,
+      [await edit("src/Card.tsx", { kind: "text", loc: h2, tag: "h2", text: "Heading" })],
+      bo,
+      page,
+    );
+    const afterBo = await get("src/Card.tsx");
+    expect(afterBo).toBe(styledP("Heading"));
+    await expect(source.undo(sx, ana)).rejects.toMatchObject({ code: "stale" });
+    expect(await get("src/Card.tsx")).toBe(afterBo);
   });
 
   it("a new edit clears the redo stack", async () => {

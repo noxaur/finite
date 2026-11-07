@@ -35,8 +35,6 @@ const BRIDGE_URL = "/@finite/bridge";
 const FRAME_URL = "/@finite/frame";
 const BRIDGE_ID = "\0finite:bridge";
 const FRAME_ID = "\0finite:frame";
-/** React Router framework mode's React Refresh preamble, which its route modules check for. */
-const REACT_ROUTER_PREAMBLE = "virtual:react-router/inject-hmr-runtime";
 
 /** Stamps `data-finite-loc`/`data-finite-rev`, injects the bridge, serves frames and routes. */
 export function finite(options: FiniteOptions): Plugin[] {
@@ -52,7 +50,7 @@ export function finite(options: FiniteOptions): Plugin[] {
     }
   };
   let base = "/";
-  let preamble: string | undefined;
+  let framework = false;
 
   const stamping: Plugin = {
     name: "finite:stamp",
@@ -132,8 +130,7 @@ export function finite(options: FiniteOptions): Plugin[] {
     },
     configResolved(config) {
       base = config.base;
-      const framework = config.plugins.some((p) => p.name === "react-router:inject-hmr-runtime");
-      preamble = framework ? REACT_ROUTER_PREAMBLE : undefined;
+      framework = config.plugins.some((p) => p.name === "react-router:inject-hmr-runtime");
     },
     resolveId(id) {
       if (id === BRIDGE_URL) return BRIDGE_ID;
@@ -153,7 +150,7 @@ export function finite(options: FiniteOptions): Plugin[] {
         file: checked.file,
         exportName: query.get("export") || "default",
         routerPackage,
-        preamble,
+        framework,
       });
     },
     transformIndexHtml: {
