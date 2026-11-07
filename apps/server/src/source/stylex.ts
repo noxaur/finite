@@ -232,32 +232,72 @@ function conditional(node: t.Node): Ref[] {
   return r ? [r] : [];
 }
 
-/** True when a function around `el` binds `name` as a parameter or a local, hiding the module's. */
+/**
+ * True when a function around `el` binds `name` as a parameter or a local, hiding the module's. A
+ * `let`, `const` or class declaration counts only when its block encloses `el`; `var` and function
+ * declarations are scoped to the whole function.
+ */
 function shadowed(ast: t.File, el: t.JSXElement, name: string): boolean {
   const parents = new Map<t.Node, t.Node | undefined>();
   walk(ast, (node, parent) => void parents.set(node, parent));
+  const above = new Set<t.Node>();
+  for (let n = parents.get(el); n; n = parents.get(n)) above.add(n);
   const functionOf = (node: t.Node | undefined) => {
     while (node && !FUNCTIONS.has(node.type)) node = parents.get(node);
     return node as t.Function | undefined;
+  };
+  /** Whether the block a declaration sits in contains `el`. */
+  const reaches = (declaration: t.Node) => {
+    let block = parents.get(declaration);
+    while (block && !BLOCKS.has(block.type)) block = parents.get(block);
+    return block !== undefined && above.has(block);
   };
   for (let fn = functionOf(parents.get(el)); fn; fn = functionOf(parents.get(fn))) {
     if (fn.params.some((p) => binds(p, name))) return true;
     let found = false;
     walk(fn.body, (node) => {
-      const id =
-        node.type === "VariableDeclarator"
-          ? node.id
-          : node.type === "FunctionDeclaration" || node.type === "ClassDeclaration"
-            ? node.id
-            : undefined;
-      if (id && functionOf(parents.get(node)) === fn && binds(id, name)) found = true;
+      let id: t.Node | null | undefined;
+      let scoped = false;
+      if (node.type === "VariableDeclarator") {
+        id = node.id;
+        const declaration = parents.get(node);
+        scoped = declaration?.type === "VariableDeclaration" && declaration.kind !== "var";
+        if (scoped) node = declaration!;
+      } else if (node.type === "ClassDeclaration") {
+        id = node.id;
+        scoped = true;
+      } else if (node.type === "FunctionDeclaration") id = node.id;
+      if (
+        id &&
+        functionOf(parents.get(node)) === fn &&
+        binds(id, name) &&
+        (!scoped || reaches(node))
+      )
+        found = true;
     });
     if (found) return true;
   }
   return false;
 }
 
-const FUNCTIONS = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
+const FUNCTIONS = new Set([
+  "FunctionDeclaration",
+  "FunctionExpression",
+  "ArrowFunctionExpression",
+  "ObjectMethod",
+  "ClassMethod",
+  "ClassPrivateMethod",
+]);
+
+/** The nodes that scope a `let`, `const` or class declaration. */
+const BLOCKS = new Set([
+  "BlockStatement",
+  "ForStatement",
+  "ForInStatement",
+  "ForOfStatement",
+  "SwitchStatement",
+  "StaticBlock",
+]);
 
 /** Whether a parameter or declaration pattern introduces `name`. */
 function binds(pattern: t.Node, name: string): boolean {

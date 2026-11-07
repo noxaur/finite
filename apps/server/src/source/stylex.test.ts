@@ -164,6 +164,50 @@ describe("stylex styles", () => {
     }
   });
 
+  it("refuses when a method parameter shadows the module-level sheet", () => {
+    const body = `return <div {...stylex.props(styles.card)} />;`;
+    const methods = [
+      `export const Card = { render(styles: any) { ${body} } };`,
+      `export class Card { render(styles: any) { ${body} } }`,
+      `export class Card { #render(styles: any) { ${body} } }`,
+      `export class Card { static render(styles: any) { ${body} } }`,
+    ];
+    for (const method of methods) {
+      const code = card("styles.card").replace(/export function Card[\s\S]*$/, `${method}\n`);
+      const message = refused(run(code, [divAt(code)], "div", { padding: "4px" }));
+      expect(message).toContain("not the module-level stylex.create object");
+    }
+  });
+
+  it("only counts a let, const or class declaration whose block encloses the element", () => {
+    const signature =
+      "export function Card({ active, style }: { active: boolean; style?: stylex.StyleXStyles }) {";
+    const edited = (code: string) => ok(run(code, [divAt(code)], "div", { padding: "4px" })).code;
+    for (const decl of [
+      "const styles = {};",
+      "let styles = {};",
+      "class styles {}",
+      "const { styles } = {} as any;",
+    ]) {
+      const code = card("styles.card").replace(
+        signature,
+        `${signature}\n  if (active) { ${decl} }`,
+      );
+      expect(edited(code)).toBe(code.replace(`padding: "16px"`, `padding: "4px"`));
+    }
+    const wrapped = card("styles.card")
+      .replace("return <div", "{\n    const styles = {} as any;\n    return <div")
+      .replace("</div>;", "</div>;\n  }");
+    refused(run(wrapped, [divAt(wrapped)], "div", { padding: "4px" }));
+    for (const decl of ["var styles = {};", "function styles() {}"]) {
+      const code = card("styles.card").replace(
+        signature,
+        `${signature}\n  if (active) { ${decl} }`,
+      );
+      refused(run(code, [divAt(code)], "div", { padding: "4px" }));
+    }
+  });
+
   it("edits the module-level sheet when only a sibling function binds its name", () => {
     const code = card("styles.card").replace(
       "export function Card(",

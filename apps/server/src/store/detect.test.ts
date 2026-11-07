@@ -56,6 +56,19 @@ export const A = () => <div />;
     expect(await styling(stylex, { "src/A.tsx": commented })).toBe("inline");
   });
 
+  it("counts a props call after a // or /* inside a string or template literal", async () => {
+    const withAttr = (attr: string) => `import * as sx from "@stylexjs/stylex";
+const s = sx.create({ a: { color: "red" } });
+export const A = () => <div ${attr} {...sx.props(s.a)} />;
+`;
+    for (const attr of [
+      `data-url="//cdn.example.com"`,
+      `data-url={\`https://x.test/\${1}\`}`,
+      `data-url={'/* not a comment'}`,
+    ])
+      expect(await styling(stylex, { "src/A.tsx": withAttr(attr) })).toBe("stylex");
+  });
+
   it("doesn't pick StyleX without the dependency", async () => {
     expect(await styling(rr, { "src/A.tsx": NAMESPACE })).toBe("inline");
   });

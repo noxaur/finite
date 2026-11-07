@@ -81,7 +81,7 @@ function detectStyling(tailwind: boolean, stylex: boolean, code: SourceFile[]): 
 
 /** True when the file imports `@stylexjs/stylex` and calls its `props` outside comments, under any local name. */
 function callsStylexProps(source: string): boolean {
-  const text = source.replace(/\/\*[\s\S]*?\*\/|(?<!:)\/\/.*/g, "");
+  const text = stripComments(source);
   const names: string[] = [];
   for (const m of text.matchAll(/import\s+([^;'"]*?)\s*from\s*["']@stylexjs\/stylex["']/g)) {
     const ns = /\*\s*as\s+([\w$]+)/.exec(m[1]!)?.[1];
@@ -95,6 +95,57 @@ function callsStylexProps(source: string): boolean {
     // Not `obj.props(`, but `{...props(` is a call.
     new RegExp(`(?<![\\w$])(?<![\\w$)\\]]\\.)${name.replace(/[.$]/g, "\\$&")}\\s*\\(`).test(text),
   );
+}
+
+/**
+ * `source` without its line and block comments. Strings and template literals are copied as they
+ * are, so a `//` in a URL doesn't hide the code after it. A `//` after a `:` isn't a comment, as in
+ * JSX text such as `http://example.com`.
+ */
+function stripComments(source: string): string {
+  let out = "";
+  let i = 0;
+  let inTemplate = false;
+  // For each open `${`, how many `{` are open inside it.
+  const braces: number[] = [];
+  while (i < source.length) {
+    const c = source[i]!;
+    let len = 1;
+    if (inTemplate) {
+      if (c === "\\") len = 2;
+      else if (c === "`") inTemplate = false;
+      else if (source.startsWith("${", i)) {
+        braces.push(0);
+        inTemplate = false;
+        len = 2;
+      }
+    } else if (c === "`") {
+      inTemplate = true;
+    } else if (c === '"' || c === "'") {
+      // An unterminated quote ends with its line, as in JSX text such as `don't`.
+      while (i + len < source.length && source[i + len] !== c && source[i + len] !== "\n")
+        len += source[i + len] === "\\" ? 2 : 1;
+      len++;
+    } else if (source.startsWith("//", i) && source[i - 1] !== ":") {
+      const eol = source.indexOf("\n", i);
+      i = eol === -1 ? source.length : eol;
+      continue;
+    } else if (source.startsWith("/*", i)) {
+      const end = source.indexOf("*/", i + 2);
+      i = end === -1 ? source.length : end + 2;
+      continue;
+    } else if (c === "{" && braces.length > 0) {
+      braces[braces.length - 1]!++;
+    } else if (c === "}" && braces.length > 0) {
+      if (braces[braces.length - 1] === 0) {
+        braces.pop();
+        inTemplate = true;
+      } else braces[braces.length - 1]!--;
+    }
+    out += source.slice(i, i + len);
+    i += len;
+  }
+  return out;
 }
 
 const ENTRIES = [

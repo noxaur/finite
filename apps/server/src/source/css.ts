@@ -145,12 +145,13 @@ export function setDecls(container: Container, styles: Record<string, string | n
 
 type RuleLike = { mixin?: boolean };
 
-/** A Sass `@include` or a Less mixin call such as `.pill(8px);`. */
+/** A Sass `@include`, a Less mixin call such as `.pill(8px);` or a Less detached-ruleset call such as `@ink();`. */
 function isMixinCall(node: ChildNode): boolean {
-  return (
-    (node.type === "atrule" && (node as AtRule).name === "include") ||
-    (node as RuleLike).mixin === true
-  );
+  if (node.type === "atrule") {
+    const { name, params, nodes } = node as AtRule;
+    return name === "include" || (!nodes && /^\(.*\)$/s.test(params));
+  }
+  return (node as RuleLike).mixin === true;
 }
 
 /** Raws for a new block, so it prints `sel {` … `}` on its own lines. */
