@@ -33,7 +33,10 @@ export async function detectProject(root: string): Promise<Detected> {
   const layout = "next" in deps ? await nextLayout(root, hasSrc) : viteLayout(deps, hasSrc);
   if (typeof layout === "string") throw refuse(`${root} ${layout}`);
   const sources = await sourceFiles(root, layout.scanDir);
-  const tailwindCss = sources.css.filter((f) => /@import\s+["']tailwindcss["']/.test(f.text));
+  // `@import "tailwindcss"` on v4, `@tailwind` directives on v3.
+  const tailwindCss = sources.css.filter((f) =>
+    /@import\s+["']tailwindcss["']|@tailwind\s+(base|components|utilities)\b/.test(f.text),
+  );
   const styling = detectStyling(
     "tailwindcss" in deps || tailwindCss.length > 0,
     "@stylexjs/stylex" in deps,

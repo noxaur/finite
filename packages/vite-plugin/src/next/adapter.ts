@@ -12,6 +12,8 @@ export type AdapterOptions = {
   distDir: string;
   /** Stylesheets to import in place of others, absolute, as the loader takes them. */
   sheets: Record<string, string>;
+  /** Tailwind v3 stylesheets and the config each should use, absolute, as the loader takes them. */
+  configs: Record<string, string>;
 };
 
 type Rule = Record<string, unknown>;
@@ -39,11 +41,18 @@ export function modifyConfig(config: Config, context?: { phase?: string }): Conf
   globalThis.FINITE_NEXT_ADAPTED = true;
   const ours: Rule = {
     condition: { not: "foreign" },
-    loaders: [{ loader: options.loader, options: { root: options.root, sheets: options.sheets } }],
+    loaders: [
+      {
+        loader: options.loader,
+        options: { root: options.root, sheets: options.sheets, configs: options.configs },
+      },
+    ],
   };
   const rules = { ...config.turbopack?.rules };
-  // All matching rules run, in order: ours first, so it sees the file as it is on disk.
-  for (const glob of GLOBS) rules[glob] = [ours, ...asRules(rules[glob])];
+  // All matching rules run, in order: ours first, so it sees the file as it is on disk. Turbopack
+  // runs PostCSS after the loaders on a stylesheet, so Tailwind v3 sees the `@config` it adds.
+  const globs = Object.keys(options.configs).length > 0 ? [...GLOBS, "*.css"] : GLOBS;
+  for (const glob of globs) rules[glob] = [ours, ...asRules(rules[glob])];
   // `output: "export"` forbids the Pages Router mount's getServerSideProps, and the preview is a
   // dev server, which never exports.
   const { output, ...rest } = config;

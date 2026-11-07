@@ -34,6 +34,8 @@ import {
 } from "./imports.ts";
 import { parseModule } from "./jsx.ts";
 import { editFiles, rewrite } from "./rewrite.ts";
+import type { TailwindVersion, Theme } from "./tailwind.ts";
+import { configTheme, tailwind3Config } from "./tailwind3.ts";
 import { hasToken, lightTheme, readTokens, tokenName, writeToken } from "./tokens.ts";
 
 export { rewrite } from "./rewrite.ts";
@@ -59,6 +61,15 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
       if (css !== undefined) out.push({ file, css });
     }
     return out;
+  }
+
+  /** The theme hand edits match values to: `tailwind.config.*` on v3, else the sheets' `@theme`. */
+  async function tailwindTheme(
+    design: Design,
+  ): Promise<{ theme: Theme; tailwind: TailwindVersion }> {
+    const config = await tailwind3Config(design.root);
+    if (config) return { theme: await configTheme(design.root, config), tailwind: 3 };
+    return { theme: lightTheme(readTokens(await sheets(design))), tailwind: 4 };
   }
 
   /** Reads `files`, lets `change` produce new contents, writes what changed. All under the files' locks. */
@@ -152,8 +163,10 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
         modules = [...new Set(modules)];
         guardPrototype(design.root, canvas, modules);
       }
-      const theme =
-        design.styling === "tailwind" ? lightTheme(readTokens(await sheets(design))) : {};
+      const { theme, tailwind } =
+        design.styling === "tailwind"
+          ? await tailwindTheme(design)
+          : { theme: {}, tailwind: 4 as const };
 
       const remap: Remap = {};
       const patches = await transact(design.root, [...files, ...modules], (contents) => {
@@ -164,7 +177,11 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
         for (const file of files) {
           const code = contents.get(file);
           if (code === undefined) throw new Refused(`${file} doesn't exist`, "not-found");
-          const result = rewrite(code, file, edits, design.styling, { theme, files: extra });
+          const result = rewrite(code, file, edits, design.styling, {
+            theme,
+            tailwind,
+            files: extra,
+          });
           if (result instanceof Refused) throw result;
           out.set(file, result.code);
           Object.assign(remap, result.remap);
@@ -207,6 +224,12 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
     async setToken(design, { name, mode, value }) {
       const prop = tokenName(name);
       const all = await sheets(design);
+      const config = design.styling === "tailwind" ? await tailwind3Config(design.root) : undefined;
+      if (config && !all.some((s) => hasToken(s.file, s.css, prop, mode)))
+        throw new Refused(
+          `This design uses Tailwind v3, whose theme lives in ${path.basename(config)}, so a new token there wouldn't make a class. Add it to theme.extend in ${path.basename(config)}, or ask the agent to.`,
+          "invalid",
+        );
       const target =
         all.find((s) => hasToken(s.file, s.css, prop, mode)) ??
         (design.styling === "tailwind"

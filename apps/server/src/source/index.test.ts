@@ -93,6 +93,43 @@ describe("SourceEditor.apply", () => {
     expect(await get("src/App.tsx")).toContain(`<p className="text-brand">One</p>`);
   });
 
+  it("matches a Tailwind v3 config's theme and refuses new tokens there", async () => {
+    await put("src/App.tsx", APP);
+    await put("src/index.css", `@tailwind base;\n:root { --ink: #111; }\n`);
+    // A stand-in tailwindcss v3: the child loads the config with require and resolves it here.
+    await put(
+      "node_modules/tailwindcss/package.json",
+      `{ "name": "tailwindcss", "version": "3.4.19" }`,
+    );
+    await put("node_modules/tailwindcss/resolveConfig.js", `module.exports = (c) => c;\n`);
+    await put(
+      "tailwind.config.cjs",
+      `module.exports = { theme: { colors: { brand: { DEFAULT: "#95ced7" } }, borderRadius: { DEFAULT: "4px" } } };\n`,
+    );
+    const source = createSourceEditor();
+    await source.apply(
+      open(design()),
+      [
+        await edit("src/App.tsx", {
+          kind: "style",
+          locs: ["src/App.tsx:7:6"],
+          tag: "p",
+          styles: { color: "#95ced7", borderRadius: "4px", padding: "52px" },
+        }),
+      ],
+      ana,
+      page,
+    );
+    expect(await get("src/App.tsx")).toContain(
+      `<p className="text-brand rounded p-[52px]">One</p>`,
+    );
+    await expect(
+      source.setToken(design(), { name: "--color-new", mode: "light", value: "red" }),
+    ).rejects.toThrow("theme.extend in tailwind.config.cjs");
+    await source.setToken(design(), { name: "--ink", mode: "light", value: "#222" });
+    expect(await get("src/index.css")).toContain("--ink: #222");
+  });
+
   it("refuses a stale rev", async () => {
     await put("src/App.tsx", APP);
     const source = createSourceEditor();

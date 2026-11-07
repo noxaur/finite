@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
@@ -136,6 +137,42 @@ describe("tailwind", () => {
       `@source "./.finite";`,
     );
     expect(addFiniteSource(`body { color: red }`, "/p/app.css", "/p")).toBeNull();
+  });
+
+  test("points a Tailwind v3 stylesheet at a config that adds .finite to the project's content", () => {
+    const root = fs.realpathSync(
+      project({
+        "tailwind.config.cjs": `module.exports = { content: { relative: true, files: ["./src/**/*.tsx", "!./src/old/**"] }, theme: { extend: { colors: { brand: "#95ced7" } } } };`,
+        "src/index.css": "@tailwind base;\n@tailwind utilities;\n",
+        "src/named.css": `@config "../tailwind.config.cjs";\n@tailwind utilities;\n`,
+      }),
+    );
+    const tailwind = finite({ root, allowedHosts: [] }).find(
+      (p) => p.name === "finite:tailwind-source",
+    )!;
+    const load = (file: string) =>
+      (tailwind.load as (id: string) => { code: string } | null)(path.join(root, file))!.code;
+    const configFile = ".finite/runtime/css/src/index.css.tailwind.config.cjs";
+    expect(load("src/index.css")).toBe(
+      `@config "../.finite/runtime/css/src/index.css.tailwind.config.cjs";\n@tailwind base;\n@tailwind utilities;\n`,
+    );
+    expect(load("src/named.css")).toBe(
+      `@config "../.finite/runtime/css/src/named.css.tailwind.config.cjs";\n\n@tailwind utilities;\n`,
+    );
+    expect(fs.readFileSync(path.join(root, ".finite/runtime/.gitignore"), "utf8")).toBe("*\n");
+    const config = createRequire(import.meta.url)(path.join(root, configFile));
+    expect(config).toEqual({
+      content: {
+        relative: true,
+        files: [
+          path.join(root, "src/**/*.tsx"),
+          `!${path.join(root, "src/old/**")}`,
+          path.join(root, ".finite/**/*.{tsx,jsx,ts,js}"),
+          `!${path.join(root, ".finite/runtime/**")}`,
+        ],
+      },
+      theme: { extend: { colors: { brand: "#95ced7" } } },
+    });
   });
 });
 
