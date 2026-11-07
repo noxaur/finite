@@ -454,6 +454,8 @@ export function createStore(options: StoreOptions): FileStore {
       );
     },
 
+    relink: (id) => run(async () => relink(await entry(id))),
+
     async settings() {
       const raw = await readJson(settingsFile).catch(() => undefined);
       const saved = Settings.partial().safeParse(raw);

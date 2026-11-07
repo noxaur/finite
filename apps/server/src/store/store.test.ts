@@ -424,6 +424,18 @@ describe("workspaces", () => {
     expect((await last.designs())[0]).not.toHaveProperty("workspace");
   });
 
+  it("relinks an open design when its finite.json renames its app", async () => {
+    const { store, root, entry, open } = await connected();
+    const file = path.join(root, "finite.json");
+    await fs.writeFile(file, JSON.stringify({ apps: { shop: { path: "." } } }));
+    await store.connect(root);
+    await fs.writeFile(file, JSON.stringify({ apps: { store: { path: "." } } }));
+    expect(await store.relink(entry.id)).toMatchObject({ workspace: root, app: "store" });
+    expect(open.design).toMatchObject({ workspace: root, app: "store" });
+    await fs.writeFile(file, "{");
+    expect(await store.relink(entry.id)).toMatchObject({ app: "store" });
+  });
+
   it("turns a setup design into the app at its own path", async () => {
     const store = newStore(await tempDir());
     const root = await project({ react: "^19" });

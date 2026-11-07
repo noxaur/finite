@@ -24,20 +24,32 @@ type Service = {
   refs: number;
   ready: Promise<void>;
   log: string;
+  /** Its definition when it started, to tell when finite.json changed it. */
+  spec: string;
+  /** Set once Finite stops it. */
+  stopped: Promise<void> | undefined;
 };
 
 export type Workspaces = {
   /**
-   * Runs the workspace's and the app's `setup` (once per finite.json version), then starts the
-   * services the app needs. Streams setup output to `onOutput`. Resolves with the env finite.json
-   * gives the dev server and a `release` for the services, to call when the preview stops. Once
-   * `wanted` returns false (the preview stopped), it starts no more services and refuses.
+   * Runs the workspace's and the app's `setup` (once per server run, and again when its commands
+   * or env change), then starts the services the app needs. A service finite.json changed since it
+   * started stops first. Streams setup output to `onOutput`. Resolves with the env finite.json
+   * gives the dev server, a `release` for the services, to call when the preview stops, and the
+   * app's `version`. Once `wanted` returns false (the preview stopped), it starts no more services
+   * and refuses.
    */
   prepare(
     design: Design,
     onOutput: (chunk: string) => void,
     wanted?: () => boolean,
-  ): Promise<{ env: Record<string, string>; release: () => void }>;
+  ): Promise<{ env: Record<string, string>; release: () => void; version: string }>;
+  /**
+   * Everything in finite.json that a design's preview runs with, except `routes`: when it differs
+   * from `prepare`'s, the preview needs a restart. Refuses (`invalid-config`) while finite.json is
+   * invalid.
+   */
+  version(design: Design): Promise<string>;
   /** Stops every service and setup command. */
   close(): Promise<void>;
 };
@@ -51,9 +63,12 @@ process.on("exit", () => {
 /** Setup commands and services from `finite.json`, for previews of a workspace's apps. */
 export function createWorkspaces(options: { startTimeoutMs: number }): Workspaces {
   const jobs = new Map<string, Job>();
+  /** The last setup run per workspace, or per app, so a changed setup waits for the one before. */
+  const lastJobs = new Map<string, Promise<void>>();
   const services = new Map<string, Service>();
 
-  function setup(key: string, commands: string[], cwd: string, env: Record<string, string>) {
+  function setup(scope: string, commands: string[], cwd: string, env: Record<string, string>) {
+    const key = `${scope}\0${JSON.stringify([commands, env])}`;
     const existing = jobs.get(key);
     if (existing) return existing;
     const job: Job = { log: "", listeners: new Set(), done: Promise.resolve() };
@@ -61,7 +76,9 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
       job.log = (job.log + chunk).slice(-LOG_TAIL);
       for (const fn of job.listeners) fn(chunk);
     };
+    const before = lastJobs.get(scope)?.catch(() => {});
     job.done = (async () => {
+      await before;
       for (const command of commands) {
         write(`$ ${command}\n`);
         const child = run(command, cwd, env);
@@ -78,6 +95,7 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
     // A failed setup runs again on the next try.
     job.done.catch(() => jobs.delete(key));
     jobs.set(key, job);
+    lastJobs.set(scope, job.done);
     return job;
   }
 
@@ -91,7 +109,11 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
     }
   }
 
-  function startService(workspace: Workspace, spec: WorkspaceService): Service {
+  function startService(
+    workspace: Workspace,
+    spec: WorkspaceService,
+    after: Promise<void> | undefined,
+  ): Service {
     const key = `${workspace.root}\0${spec.name}`;
     const service: Service = {
       name: spec.name,
@@ -99,6 +121,8 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
       refs: 0,
       ready: Promise.resolve(),
       log: "",
+      spec: specOf(workspace, spec.name),
+      stopped: undefined,
     };
     const where = `Service "${spec.name}" (\`${spec.run}\` in ${spec.dir})`;
     const failed = (reason: string) =>
@@ -106,6 +130,8 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
         `${where} ${reason}. Fix it, or change services.${spec.name} in finite.json, then open the design again.${service.log ? `\n\nIts output:\n${service.log}` : ""}`,
       );
     service.ready = (async () => {
+      // The version finite.json changed is still stopping, and may hold the port.
+      await after;
       if (spec.ready !== undefined && (await answers(spec.ready))) return;
       const child = run(spec.run, spec.dir, envFor(workspace, { service: spec.name }));
       service.child = child;
@@ -136,9 +162,25 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
 
   function release(service: Service) {
     service.refs -= 1;
-    if (service.refs > 0) return;
+    if (service.refs <= 0) void retire(service);
+  }
+
+  function retire(service: Service): Promise<void> {
     for (const [key, value] of services) if (value === service) services.delete(key);
-    if (service.child) void stop(service.child);
+    service.stopped ??= service.child ? stop(service.child) : Promise.resolve();
+    return service.stopped;
+  }
+
+  async function read(design: Design) {
+    const workspace = await readWorkspace(design.workspace!);
+    const app = workspace.apps[design.app!];
+    if (!app) {
+      throw new Refused(
+        `${workspace.file} has no app "${design.app}" any more. Add it back under apps, or connect the app again.`,
+        "not-found",
+      );
+    }
+    return { workspace, app };
   }
 
   return {
@@ -147,25 +189,17 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
       const check = () => {
         if (!wanted()) throw new Refused("The design's preview was stopped before it was ready.");
       };
-      if (!design.workspace || !design.app) return { env: {}, release: () => {} };
-      const workspace = await readWorkspace(design.workspace);
-      const app = workspace.apps[design.app];
-      if (!app) {
-        throw new Refused(
-          `${workspace.file} has no app "${design.app}" any more. Add it back under apps, or connect the app again.`,
-          "not-found",
-        );
-      }
+      if (!design.workspace || !design.app) return { env: {}, release: () => {}, version: "" };
+      const { workspace, app } = await read(design);
       const env = envFor(workspace, { app: app.name });
       if (workspace.setup?.length) {
         check();
-        const key = `${workspace.root}\0${workspace.hash}`;
-        await follow(setup(key, workspace.setup, workspace.root, workspace.env ?? {}), onOutput);
+        const scope = workspace.root;
+        await follow(setup(scope, workspace.setup, workspace.root, workspace.env ?? {}), onOutput);
       }
       if (app.setup?.length) {
         check();
-        const key = `${workspace.root}\0${app.name}\0${workspace.hash}`;
-        await follow(setup(key, app.setup, app.dir, env), onOutput);
+        await follow(setup(`${workspace.root}\0${app.name}`, app.setup, app.dir, env), onOutput);
       }
 
       const held: Service[] = [];
@@ -173,9 +207,13 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
       try {
         for (const name of servicesFor(workspace, app.name)) {
           check();
-          const service =
-            services.get(`${workspace.root}\0${name}`) ??
-            startService(workspace, workspace.services[name]!);
+          let service = services.get(`${workspace.root}\0${name}`);
+          let after: Promise<void> | undefined;
+          if (service && service.spec !== specOf(workspace, name)) {
+            after = retire(service);
+            service = undefined;
+          }
+          service ??= startService(workspace, workspace.services[name]!, after);
           service.refs += 1;
           held.push(service);
           await service.ready;
@@ -184,15 +222,43 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
         releaseAll();
         throw error;
       }
-      return { env, release: releaseAll };
+      return { env, release: releaseAll, version: versionOf(workspace, app.name) };
+    },
+
+    async version(design) {
+      if (!design.workspace || !design.app) return "";
+      const { workspace, app } = await read(design);
+      return versionOf(workspace, app.name);
     },
 
     async close() {
       jobs.clear();
+      lastJobs.clear();
       services.clear();
       await Promise.all([...groups].map(stop));
     },
   };
+}
+
+/** A service as it runs: its command, folder, readiness check, needs and env. */
+function specOf(workspace: Workspace, name: string): string {
+  const { run, dir, ready, needs } = workspace.services[name]!;
+  return JSON.stringify({ run, dir, ready, needs, env: envFor(workspace, { service: name }) });
+}
+
+/** What an app's preview runs with: setup, the app's folder, env and needs, and its services. */
+function versionOf(workspace: Workspace, appName: string): string {
+  const { dir, setup, needs } = workspace.apps[appName]!;
+  return JSON.stringify({
+    root: workspace.root,
+    app: appName,
+    setup: [workspace.setup, workspace.env],
+    dir,
+    appSetup: setup,
+    needs,
+    env: envFor(workspace, { app: appName }),
+    services: servicesFor(workspace, appName).map((name) => specOf(workspace, name)),
+  });
 }
 
 /** A shell command in its own process group, so stopping it stops everything it started. */

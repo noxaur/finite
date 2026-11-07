@@ -51,6 +51,11 @@ export interface Store {
   /** Forgets the design. A connected root stays on disk; a setup design's `.finite/` is deleted. */
   remove(id: string): Promise<void>;
   open(id: string): Promise<OpenDesign>;
+  /**
+   * Looks the design's `finite.json` up again, giving it `workspace` and `app` when one lists it
+   * and taking them away when none does. An invalid `finite.json` leaves the design as it is.
+   */
+  relink(id: string): Promise<DesignEntry>;
   settings(): Promise<Settings>;
   setSettings(patch: Partial<Settings>): Promise<Settings>;
   /** The design list changed. */

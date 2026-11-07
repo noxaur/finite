@@ -140,7 +140,7 @@ The schema is `FiniteJson` in `packages/protocol/src/model.ts`, and `store/works
 - `setup`: shell commands run in order in the workspace root before any app's dev server starts. An app's own `setup` runs in its folder after.
 - `apps` (at least one): `path` is relative to the workspace root, and `"."` is the root itself (a single app that needs a service). Each path must hold a `package.json`, and no two apps share one.
 - `services`: a long-running `run` command, in `cwd` (default the root). `ready` is a URL, ready when a GET answers below 500, or a port, ready when a TCP connect to 127.0.0.1 succeeds. Without `ready`, a service is ready once spawned.
-- `routes` (in an app): values for dynamic segments, keyed by the route path exactly as the router reports it (`:id`, `$id`, `[id]`). The value is one params object, or an array of them for one Routes page frame each, like `"routes": { "/users/:userId": { "userId": "42" }, "/posts/$slug": [{ "slug": "hello" }, { "slug": "draft" }], "/internal/preview": {} }`. Those params replace the sample `"1"`. A path the router doesn't report is added as a custom route frame, which is never marked `gone` while it's listed. The preview watches the workspace folder for `finite.json` changes and sends the routes again, so an edit to `routes` shows on the Routes page while the dev server runs. Values are strings, keys are the path's segment names as `routeHref` reads them (a splat is `*` or `_splat`), and every required segment needs a value, so `apps.web.routes./users/:userId: no param "id" in this path; its params are userId.`
+- `routes` (in an app): values for dynamic segments, keyed by the route path exactly as the router reports it (`:id`, `$id`, `[id]`). The value is one params object, or an array of them for one Routes page frame each, like `"routes": { "/users/:userId": { "userId": "42" }, "/posts/$slug": [{ "slug": "hello" }, { "slug": "draft" }], "/internal/preview": {} }`. Those params replace the sample `"1"`. A path the router doesn't report is added as a custom route frame, which is never marked `gone` while it's listed. An edit to `routes` shows on the Routes page while the dev server runs, without a restart (see "Editing finite.json while a preview runs"). Values are strings, keys are the path's segment names as `routeHref` reads them (a splat is `*` or `_splat`), and every required segment needs a value, so `apps.web.routes./users/:userId: no param "id" in this path; its params are userId.`
 - `env`: added to every setup command, service and dev server. Process env loses to finite.json's `env`, which loses to an app's or service's own `env`.
 - Names are lowercase letters, digits and hyphens. Every `needs` must name a service, and services can't need each other in a cycle.
 
@@ -162,13 +162,23 @@ Without a `finite.json`, detection runs as before. When it refuses a folder that
 
 `Previews.ensure` on a design with a `workspace` (`preview/workspace.ts`) does three things before the dev server:
 
-1. Runs the workspace's `setup`, then the app's, once per server run and again whenever `finite.json`'s text changes (its sha1). Designs of one workspace share the run. While it runs, the preview is `starting` with the output in `log`; a failing command makes it `error` with the command, its exit code and output.
-2. Starts the services the app needs, transitively, each after the ones it needs, and waits for `ready` up to the start timeout. Every design of the workspace shares a service, counted by reference. It stops (SIGTERM to its process group, SIGKILL after 5 s) when the last preview that needs it stops. A service that's already answering on its `ready` before Finite starts it, because the person runs it themselves, is used as is.
+1. Runs the workspace's `setup`, then the app's, once per server run and again whenever its commands or the env they get change. Designs of one workspace share the run, and a changed setup waits for the workspace's (or the app's) setup before it to end, so two never run in one folder at once. While it runs, the preview is `starting` with the output in `log`; a failing command makes it `error` with the command, its exit code and output.
+2. Starts the services the app needs, transitively, each after the ones it needs, and waits for `ready` up to the start timeout. Every design of the workspace shares a service, counted by reference. A service whose `run`, `cwd`, `ready`, `needs` or env changed since it started is stopped first, and the new one starts once the old one has exited. It stops (SIGTERM to its process group, SIGKILL after 5 s) when the last preview that needs it stops. A service that's already answering on its `ready` before Finite starts it, because the person runs it themselves, is used as is.
 3. Starts the dev server child as before, with the merged env.
 
 A preview stopped during these steps (by `Previews.stop` or removing the design) starts nothing after the step it's on and lets go of the services it holds. A setup command other designs share runs to its end; `Previews.close` kills it.
 
 Commands run through the user's shell (`spawn(cmd, { shell: true })`) with the server's `PATH`.
+
+### Editing finite.json while a preview runs
+
+Once its dev server is ready, a workspace design's preview watches the workspace folder (an atomic write replaces the file) and reloads `finite.json` on every change, one reload at a time. A reload first asks the store to relink the design (`Store.relink`), so its `workspace` and `app` follow a renamed or removed app. Then it compares the app's version (`Workspaces.version`: the workspace's `setup` and `env`, the app's folder, `setup`, `needs` and env, and the definition of every service it needs) with the one the preview started with:
+
+- The same version, as after a `routes`-only edit: the preview sends the routes again and the Routes page syncs. Nothing restarts.
+- A different version: the preview restarts. It stops the dev server, runs `Previews.ensure`'s three steps again (so a changed setup runs, and a changed service restarts), and lets go of the old run's services only after the new run holds its own, so a service both need keeps running. A service no version needs any more stops with its last reference. A design nobody views (in its idle grace period) only stops. Other designs of the workspace restart only when their own version changed.
+- An invalid `finite.json`: nothing stops. The preview stays `ready` with the refusal in its `log`, which the page shows over the canvas, and the log clears when the file is valid again.
+
+The preview also reloads once when its dev server becomes ready, for an edit made while it started.
 
 ### Agents in a workspace
 
