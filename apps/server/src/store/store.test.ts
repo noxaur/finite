@@ -595,6 +595,21 @@ describe("canvases", () => {
     expect(await seen).toMatchObject({ type: "canvas", canvas: { id: routes!.id, name: "Pages" } });
     expect((await open.canvases()).find((c) => c.id === routes!.id)?.name).toBe("Pages");
   });
+
+  it("lists a page a git pull adds by when it was made, not when it arrived", async () => {
+    const { root, open } = await connected();
+    const [routes] = await open.canvases();
+    const seen = new Promise<DesignChange>((resolve) => open.on(resolve));
+    const pulled: Canvas = { ...routes!, id: "pulled", name: "Pulled", createdAt: 0, frames: [] };
+    await fs.writeFile(path.join(root, ".finite/canvases/pulled.json"), JSON.stringify(pulled));
+    await seen;
+    expect((await open.canvases()).map((c) => c.name)).toEqual([
+      "Pulled",
+      "Routes",
+      "Brand",
+      "Components",
+    ]);
+  });
 });
 
 describe("threads", () => {

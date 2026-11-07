@@ -149,6 +149,20 @@ describe("finite client", () => {
     expect(f.design("d").state?.preview).toEqual({ status: "ready", url: "http://p" });
     ws.push({ type: "install", designId: "d", install: { status: "running", log: "pnpm…" } });
     expect(f.design("d").state?.install).toEqual({ status: "running", log: "pnpm…" });
+    const page = (id: string, createdAt: number) => ({
+      id,
+      kind: "page" as const,
+      name: id,
+      threadIds: [],
+      frames: [],
+      texts: [],
+      comments: [],
+      createdAt,
+      updatedAt: createdAt,
+    });
+    ws.push({ type: "canvas", designId: "d", canvas: page("newer", 2) });
+    ws.push({ type: "canvas", designId: "d", canvas: page("older", 1) });
+    expect(f.design("d").state?.canvases.map((c) => c.id)).toEqual(["older", "newer"]);
 
     ws.close();
     expect(f.status()).toBe("closed");

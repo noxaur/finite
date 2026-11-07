@@ -103,7 +103,6 @@ export async function openDesign(design: Design): Promise<OpenedDesign> {
   }
 
   const now = Date.now();
-  const loaded: Canvas[] = [];
   for (const name of await fsp.readdir(canvasDir)) {
     if (!name.endsWith(".json")) continue;
     const file = path.join(canvasDir, name);
@@ -113,10 +112,8 @@ export async function openDesign(design: Design): Promise<OpenedDesign> {
       await fsp.rm(file, { force: true });
       continue;
     }
-    loaded.push(canvas);
+    canvases.set(canvas.id, canvas);
   }
-  loaded.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
-  for (const canvas of loaded) canvases.set(canvas.id, canvas);
   for (const name of await fsp.readdir(threadDir)) {
     if (!name.endsWith(".json")) continue;
     const file = path.join(threadDir, name);
@@ -221,7 +218,8 @@ export async function openDesign(design: Design): Promise<OpenedDesign> {
     },
 
     async canvases() {
-      return [...canvases.values()];
+      // A canvas a git pull adds may be older than the ones already here.
+      return [...canvases.values()].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
     },
 
     createCanvas({ kind, name, threadId }, _by) {

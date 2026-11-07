@@ -62,7 +62,12 @@ type DesignEvent = EventOf<"canvas" | "thread" | "preview" | "routes" | "install
 function reduceDesign(state: DesignState, event: DesignEvent): DesignState {
   switch (event.type) {
     case "canvas":
-      return { ...state, canvases: upsert(state.canvases, event.canvas) };
+      return {
+        ...state,
+        canvases: upsert(state.canvases, event.canvas).sort(
+          (a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0),
+        ),
+      };
     case "thread":
       return { ...state, threads: upsert(state.threads, event.meta) };
     case "preview": {
