@@ -25,7 +25,7 @@ Server (/api/ws, packages/protocol/src/wire.ts)
   watch <designId> [--for <s>] [--until <event type>]   subscribe and print events as JSON lines
   send <designId> <text> [--thread <id>] [--canvas <id>] [--for <s>]   thread.send, then print
                                            the thread's events until its result or error
-  fixture <rr-spa|rr-framework|tanstack> [dest]          temp copy, installed; prints the path
+  fixture <rr-spa|rr-framework|tanstack|stylex> [dest]   temp copy, installed; prints the path
 
 Page (puppeteer selectors: css, ::-p-text(Create), ::-p-aria(Send))
   open [path]                              navigate (default /); /design/?id=<designId>
@@ -244,7 +244,7 @@ const commands = {
 
   async fixture() {
     const [name, dest] = args;
-    if (!name) throw new Error("fixture needs a name: rr-spa, rr-framework or tanstack");
+    if (!name) throw new Error("fixture needs a name: rr-spa, rr-framework, tanstack or stylex");
     if (dest) fs.mkdirSync(dest, { recursive: true });
     print(lib.copyFixture(name, dest));
   },

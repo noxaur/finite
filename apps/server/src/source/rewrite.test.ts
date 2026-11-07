@@ -49,7 +49,7 @@ function refused(result: ReturnType<typeof run>) {
   return { reason: result.message, code: result.code };
 }
 
-const conventions: Styling[] = ["tailwind", "css-modules", "inline"];
+const conventions: Styling[] = ["tailwind", "css-modules", "inline", "stylex"];
 
 describe.each(conventions)("structural edits (%s)", (convention) => {
   it("replaces plain text children", () => {

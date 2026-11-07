@@ -43,7 +43,11 @@ export async function detectProject(root: string): Promise<Detected> {
   const srcDir = (await exists(path.join(root, "src"))) ? "src" : "app";
   const sources = await sourceFiles(root, srcDir);
   const tailwindCss = sources.css.filter((f) => /@import\s+["']tailwindcss["']/.test(f.text));
-  const styling = detectStyling("tailwindcss" in deps || tailwindCss.length > 0, sources.code);
+  const styling = detectStyling(
+    "tailwindcss" in deps || tailwindCss.length > 0,
+    "@stylexjs/stylex" in deps,
+    sources.code,
+  );
 
   return {
     name: typeof pkg.name === "string" && pkg.name ? pkg.name : path.basename(root),
@@ -54,8 +58,17 @@ export async function detectProject(root: string): Promise<Detected> {
   };
 }
 
-/** Tailwind if the project has it; CSS modules if more files import them than use class strings. */
-function detectStyling(tailwind: boolean, code: SourceFile[]): Styling {
+/**
+ * StyleX if it's a dependency and at least as many files call its `props` as use class strings;
+ * then Tailwind if the project has it; CSS modules if more files import them than use class
+ * strings; else inline.
+ */
+function detectStyling(tailwind: boolean, stylex: boolean, code: SourceFile[]): Styling {
+  if (stylex) {
+    const props = code.filter((f) => callsStylexProps(f.text)).length;
+    const classes = code.filter((f) => /className=["'{`]/.test(f.text)).length;
+    if (props > 0 && props >= classes) return "stylex";
+  }
   if (tailwind) return "tailwind";
   let modules = 0;
   let classStrings = 0;
@@ -64,6 +77,23 @@ function detectStyling(tailwind: boolean, code: SourceFile[]): Styling {
     else if (/className=["'{`]/.test(file.text)) classStrings++;
   }
   return modules > 0 && modules >= classStrings ? "css-modules" : "inline";
+}
+
+/** True when the file imports `@stylexjs/stylex` and calls its `props`, under any local name. */
+function callsStylexProps(text: string): boolean {
+  const names: string[] = [];
+  for (const m of text.matchAll(/import\s+([^;'"]*?)\s*from\s*["']@stylexjs\/stylex["']/g)) {
+    const ns = /\*\s*as\s+([\w$]+)/.exec(m[1]!)?.[1];
+    if (ns) names.push(`${ns}.props`);
+    for (const spec of /\{([^}]*)\}/.exec(m[1]!)?.[1]?.split(",") ?? []) {
+      const named = /^\s*props(?:\s+as\s+([\w$]+))?\s*$/.exec(spec);
+      if (named) names.push(named[1] ?? "props");
+    }
+  }
+  return names.some((name) =>
+    // Not `obj.props(`, but `{...props(` is a call.
+    new RegExp(`(?<![\\w$])(?<![\\w$)\\]]\\.)${name.replace(/[.$]/g, "\\$&")}\\s*\\(`).test(text),
+  );
 }
 
 const ENTRIES = [
