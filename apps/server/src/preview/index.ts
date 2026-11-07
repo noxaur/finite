@@ -15,6 +15,7 @@ import {
   type Unsubscribe,
 } from "@finite/protocol";
 import { allowedHosts } from "../guard.ts";
+import { createWorkspaces } from "./workspace.ts";
 
 export type PreviewsOptions = {
   /** The host each design's Vite dev server binds, the same one Finite listens on. */
@@ -44,9 +45,11 @@ const NEXT_LOADER = pluginFile("next-loader.mjs", "next/loader.ts");
 const LOG_TAIL = 4_000;
 const KILL_AFTER_MS = 5_000;
 const MAX_ERRORS_PER_FRAME = 50;
+const PROGRESS_MS = 300;
 
 type Run = {
-  child: ChildProcess;
+  /** Unset until a workspace design's setup and services are done, and for a setup design. */
+  child: ChildProcess | undefined;
   state: PreviewState;
   ready: Promise<{ url: string }>;
   log: string;
@@ -55,6 +58,10 @@ type Run = {
   cancel: (reason: string) => void;
   /** The last routes sent to listeners, to send only changes. */
   sentRoutes: string | undefined;
+  /** Lets go of the finite.json services the run holds. */
+  release: (() => void) | undefined;
+  /** Pending throttled `starting` event while setup output streams in. */
+  progress: NodeJS.Timeout | undefined;
 };
 
 /** Whether a design previews on `next dev` rather than Vite: its router, else its package.json. */
@@ -80,11 +87,14 @@ export function createPreviews(options: PreviewsOptions): Previews {
   const listeners = new Map<string, Set<(event: PreviewEvent) => void>>();
   const errors = new Map<string, Map<string, FrameError[]>>();
   const idleTimers = new Map<string, NodeJS.Timeout>();
+  const workspaces = createWorkspaces({ startTimeoutMs });
 
   const emit = (designId: string, event: PreviewEvent) => {
     for (const fn of listeners.get(designId) ?? []) fn(event);
   };
   const setState = (designId: string, run: Run, state: PreviewState) => {
+    clearTimeout(run.progress);
+    run.progress = undefined;
     run.state = state;
     if (runs.get(designId) === run) emit(designId, { type: "preview", ...state });
   };
@@ -93,12 +103,90 @@ export function createPreviews(options: PreviewsOptions): Previews {
     idleTimers.delete(designId);
   };
 
+  const releaseRun = (run: Run) => {
+    run.release?.();
+    run.release = undefined;
+  };
+
   function start(design: Design): Run {
+    let resolveReady!: (value: { url: string }) => void;
+    let rejectReady!: (error: Error) => void;
+    const ready = new Promise<{ url: string }>((resolve, reject) => {
+      resolveReady = resolve;
+      rejectReady = reject;
+    });
+    ready.catch(() => {});
+    const run: Run = {
+      child: undefined,
+      state: { status: "starting" },
+      ready,
+      log: "",
+      routes: undefined,
+      cancel: (reason) => rejectReady(new Refused(reason)),
+      sentRoutes: undefined,
+      release: undefined,
+      progress: undefined,
+    };
+    runs.set(design.id, run);
+
+    if (design.setup) {
+      const reason =
+        "This folder isn't set up for Finite yet: its finite.json setup hasn't finished. Finish the setup thread, which writes finite.json and calls finish_setup, then open the design again.";
+      run.state = { status: "needs-setup", log: reason };
+      emit(design.id, { type: "preview", ...run.state });
+      rejectReady(new Refused(reason));
+      return run;
+    }
+    emit(design.id, { type: "preview", ...run.state });
+    if (!design.workspace) {
+      startHost(design, run, {}, resolveReady, rejectReady);
+      return run;
+    }
+
+    // Setup output shows in `starting`, at most every PROGRESS_MS.
+    const onOutput = (chunk: string) => {
+      run.log = (run.log + chunk).slice(-LOG_TAIL);
+      if (run.progress || run.state.status !== "starting") return;
+      run.progress = setTimeout(() => {
+        run.progress = undefined;
+        if (run.state.status === "starting") {
+          setState(design.id, run, { status: "starting", log: run.log });
+        }
+      }, PROGRESS_MS);
+    };
+    workspaces.prepare(design, onOutput).then(
+      ({ env, release }) => {
+        if (runs.get(design.id) !== run) return release();
+        run.release = release;
+        run.log = "";
+        startHost(design, run, env, resolveReady, rejectReady);
+      },
+      (error: Error) => {
+        rejectReady(error);
+        if (runs.get(design.id) !== run) return;
+        setState(design.id, run, {
+          status: "error",
+          log: `${error.message}\n\n${run.log}`.trim(),
+        });
+      },
+    );
+    return run;
+  }
+
+  /** Forks the dev server child for a started run. */
+  function startHost(
+    design: Design,
+    run: Run,
+    env: Record<string, string>,
+    resolveReady: (value: { url: string }) => void,
+    rejectReady: (error: Error) => void,
+  ) {
     const child = fork(usesNext(design) ? NEXT_HOST : VITE_HOST, [], {
       cwd: design.root,
       execArgv: [],
       env: {
         ...process.env,
+        ...env,
         FINITE_PREVIEW: JSON.stringify({
           root: design.root,
           host: options.host,
@@ -110,24 +198,7 @@ export function createPreviews(options: PreviewsOptions): Previews {
       },
       stdio: ["ignore", "pipe", "pipe", "ipc"],
     });
-    let resolveReady!: (value: { url: string }) => void;
-    let rejectReady!: (error: Error) => void;
-    const ready = new Promise<{ url: string }>((resolve, reject) => {
-      resolveReady = resolve;
-      rejectReady = reject;
-    });
-    ready.catch(() => {});
-    const run: Run = {
-      child,
-      state: { status: "starting" },
-      ready,
-      log: "",
-      routes: undefined,
-      cancel: (reason) => rejectReady(new Refused(reason)),
-      sentRoutes: undefined,
-    };
-    runs.set(design.id, run);
-    emit(design.id, { type: "preview", ...run.state });
+    run.child = child;
 
     const append = (chunk: Buffer) => {
       run.log = (run.log + chunk.toString("utf8")).slice(-LOG_TAIL);
@@ -138,6 +209,7 @@ export function createPreviews(options: PreviewsOptions): Previews {
     const fail = (reason: string) => {
       clearTimeout(timeout);
       rejectReady(new Refused(`The design's dev server didn't start: ${reason}`));
+      releaseRun(run);
       if (run.state.status !== "error") {
         setState(design.id, run, { status: "error", log: `${reason}\n\n${run.log}`.trim() });
       }
@@ -165,7 +237,6 @@ export function createPreviews(options: PreviewsOptions): Previews {
       fail(`it exited (${signal ?? `code ${code}`})`);
     });
     child.on("error", (error) => fail(error.message));
-    return run;
   }
 
   async function fetchRoutes(run: Run): Promise<Route[]> {
@@ -195,8 +266,9 @@ export function createPreviews(options: PreviewsOptions): Previews {
     setState(designId, run, { status: "stopped" });
     runs.delete(designId);
     run.cancel("The design's preview was stopped before it was ready.");
+    releaseRun(run);
     const { child } = run;
-    if (child.exitCode !== null || child.signalCode !== null) return;
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
     await new Promise<void>((resolve) => {
       const kill = setTimeout(() => child.kill("SIGKILL"), KILL_AFTER_MS);
       child.once("exit", () => {
@@ -211,7 +283,9 @@ export function createPreviews(options: PreviewsOptions): Previews {
     async ensure(design) {
       cancelIdle(design.id);
       const run = runs.get(design.id);
-      if (run && run.state.status !== "error") return run.ready;
+      if (run && run.state.status !== "error" && run.state.status !== "needs-setup") {
+        return run.ready;
+      }
       if (run) await stopRun(design.id);
       return start(design).ready;
     },
@@ -259,6 +333,7 @@ export function createPreviews(options: PreviewsOptions): Previews {
 
     async close() {
       await Promise.all([...runs.keys()].map(stopRun));
+      await workspaces.close();
     },
   };
 }

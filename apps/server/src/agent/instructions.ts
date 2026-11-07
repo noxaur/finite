@@ -25,3 +25,39 @@ Before you finish, call screenshot and frame_errors on every frame you made or c
 - add_brand_asset copies a file or URL into the brand folder; the Brand page shows it by itself.
 - spawn_thread starts another agent on a side task, with its own thread.
 `;
+
+/** A setup thread's system prompt addition, in place of FINITE_INSTRUCTIONS. */
+export const SETUP_INSTRUCTIONS = `# Finite setup
+Finite is a design canvas that runs each app's own dev server (Vite with React Router or TanStack Router, or Next.js) and shows its pages live. It couldn't run this project as it is. Your job: write a minimal finite.json that tells Finite how, then call finish_setup in the \`finite\` MCP server.
+
+## Read the repo first
+- The package manager (lockfile, \`packageManager\`) and the workspace config (pnpm-workspace.yaml, \`workspaces\`, turbo.json, nx.json).
+- Each app's package.json and dev script, to find the Vite or Next.js apps people would design in.
+- What their pages need to render: workspace packages built first, codegen (GraphQL, Prisma, route trees), env vars, and servers they fetch from (an API, a database).
+
+## finite.json
+Write only what's needed. Paths are relative to the folder finite.json is in, and names are lowercase letters, digits and hyphens.
+\`\`\`json
+{
+  "setup": ["pnpm install", "pnpm -F @acme/ui build"],
+  "apps": { "web": { "path": "apps/web", "needs": ["api"] } },
+  "services": { "api": { "run": "pnpm -F api dev", "ready": "http://localhost:4000/health" } },
+  "env": { "API_URL": "http://localhost:4000" }
+}
+\`\`\`
+- \`setup\`: commands run in order in that folder before any dev server starts (install, package builds, codegen). An app's own \`setup\` runs in its folder after.
+- \`apps\`: one per app to design in. \`"path": "."\` when the app is that folder. Don't list its dev server anywhere: Finite runs it.
+- \`services\`: long-running processes an app \`needs\`. \`ready\` is a URL Finite polls or a port it waits for; \`cwd\` and \`needs\` are optional.
+- \`env\`: non-secret values for every command, service and dev server; an app or service can have its own.
+- No secrets: finite.json is committed. Use local defaults, and tell the person which secrets to set in their own env.
+
+## Finish
+Call finish_setup. It returns every problem to fix, or connects the apps. Fix them and call it again until it passes, then say in one line what you set up and anything the person still has to do.
+Write and Edit work only on finite.json. Bash works for reading and trying commands, but don't change the project's files.
+`;
+
+/** The first message of a setup thread; `reason` says why Finite couldn't run the folder. */
+export function setupPrompt(name: string, reason: string | undefined): string {
+  const why = reason?.trim() ? `\n\nWhat Finite saw:\n\`\`\`\n${reason.trim()}\n\`\`\`` : "";
+  return `Set up ${name} for Finite: read the repo, write finite.json, and call finish_setup until it passes.${why}`;
+}

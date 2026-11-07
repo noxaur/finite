@@ -52,6 +52,12 @@ export const DesignEntry = z.object({
   updatedAt: z.number().default(0),
   /** Set while a new design's dependencies install. Never stored. */
   installing: z.boolean().optional(),
+  /** The absolute folder holding the `finite.json` that lists this design's app. */
+  workspace: z.string().optional(),
+  /** The app's name in that `finite.json`. */
+  app: z.string().optional(),
+  /** A folder Finite couldn't run yet, waiting for its setup thread to write `finite.json`. */
+  setup: z.boolean().optional(),
 });
 export type DesignEntry = z.infer<typeof DesignEntry>;
 
@@ -77,6 +83,53 @@ export const Design = DesignEntry.omit({ updatedAt: true, installing: true }).ex
   brandDir: z.string(),
 });
 export type Design = z.infer<typeof Design>;
+
+// Workspaces
+
+/** An app or service name in `finite.json`. */
+const WorkspaceName = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9-]*$/, "a name is lowercase letters, digits and hyphens");
+const Env = z.record(z.string(), z.string());
+
+/** An app in `finite.json`: one design. `path` is relative to the workspace root (`"."` allowed). */
+export const FiniteApp = z.strictObject({
+  path: z.string().min(1),
+  /** Commands run in the app folder after the workspace `setup`. */
+  setup: z.array(z.string()).optional(),
+  /** The services its dev server needs. */
+  needs: z.array(z.string()).optional(),
+  env: Env.optional(),
+});
+export type FiniteApp = z.infer<typeof FiniteApp>;
+
+/**
+ * A long-running process an app needs. `ready` is a URL (ready when a GET answers below 500) or a
+ * port (ready when a TCP connect to 127.0.0.1 succeeds); without it, ready once spawned.
+ */
+export const FiniteService = z.strictObject({
+  run: z.string().min(1),
+  /** Relative to the workspace root (default the root). */
+  cwd: z.string().optional(),
+  ready: z.union([z.string().min(1), z.number().int().min(1).max(65535)]).optional(),
+  needs: z.array(z.string()).optional(),
+  env: Env.optional(),
+});
+export type FiniteService = z.infer<typeof FiniteService>;
+
+/** `<workspace>/finite.json`, committed with the project: commands and non-secret env only. */
+export const FiniteJson = z.strictObject({
+  $schema: z.string().optional(),
+  /** Commands run in order in the workspace root before any app's dev server starts. */
+  setup: z.array(z.string()).optional(),
+  /** Added to every setup command, service and dev server. */
+  env: Env.optional(),
+  apps: z
+    .record(WorkspaceName, FiniteApp)
+    .refine((apps) => Object.keys(apps).length > 0, "list at least one app"),
+  services: z.record(WorkspaceName, FiniteService).optional(),
+});
+export type FiniteJson = z.infer<typeof FiniteJson>;
 
 // Canvases
 
@@ -228,6 +281,8 @@ export const ThreadMeta = z.object({
   fast: z.boolean(),
   queued: z.array(Queued),
   sessionId: z.string().optional(),
+  /** A setup thread: it writes the workspace's `finite.json` and ends with `finish_setup`. */
+  setup: z.boolean().optional(),
   createdAt: z.number(),
   updatedAt: z.number(),
 });
@@ -329,7 +384,8 @@ export const Route = z.object({
 });
 export type Route = z.infer<typeof Route>;
 
-export const PreviewStatus = z.enum(["stopped", "starting", "ready", "error"]);
+/** `needs-setup`: a setup design, which has no preview until its `finite.json` is written. */
+export const PreviewStatus = z.enum(["stopped", "starting", "ready", "error", "needs-setup"]);
 export type PreviewStatus = z.infer<typeof PreviewStatus>;
 
 export const PreviewState = z.object({
@@ -423,6 +479,8 @@ export const RefusalCode = z.enum([
   "outside-prototype",
   "unsupported-style",
   "unsupported-project",
+  /** A `finite.json` that doesn't parse or validate; the reason lists every problem. */
+  "invalid-config",
   "not-logged-in",
   "not-implemented",
 ]);

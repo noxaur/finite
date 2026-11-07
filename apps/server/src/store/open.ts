@@ -29,6 +29,11 @@ const WATCH_DEBOUNCE_MS = 100;
 export type OpenedDesign = OpenDesign & {
   /** Sends a change to every listener. The store also uses it for install progress. */
   emit(change: DesignChange): void;
+  /**
+   * Replaces the design's fields in place (same root), after setup rewrote its row or config, so
+   * everyone holding `design` sees the change.
+   */
+  setDesign(next: Design): void;
   close(): void;
 };
 
@@ -206,6 +211,11 @@ export async function openDesign(design: Design): Promise<OpenedDesign> {
   const open: OpenedDesign = {
     design,
     emit,
+
+    setDesign(next) {
+      for (const key of Object.keys(design)) delete (design as Record<string, unknown>)[key];
+      Object.assign(design, next);
+    },
 
     async canvases() {
       return [...canvases.values()];

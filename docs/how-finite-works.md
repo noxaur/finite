@@ -20,7 +20,7 @@ apps/server (Node 22, node:http + ws)
    └─ agent/    one Claude Agent SDK query per live thread
                      │ spawns
                      ▼
-               the local `claude` CLI, cwd = the design's root
+               the local `claude` CLI, cwd = the design's workspace, else its root
 
 iframes ──────────▶ each design's own dev server (another port, same host)
 ```
@@ -45,11 +45,11 @@ The guard (`guard.ts`) checks `Host` and `Origin` on every request and upgrade. 
 
 ```
 $FINITE_DATA_DIR/
-  designs.json        [{ id, name, root, origin }]   origin: connected | blank | import
+  designs.json        [{ id, name, root, origin, workspace?, app?, setup? }]   origin: connected | blank | import
   settings.json       default model, effort, speed, steer-or-queue, Show Working separately
   projects/<id>/      blank and imported designs: a copy of apps/server/scaffold
 <root>/.finite/       meant to be committed with the project
-  design.json         { version: 1, id, router, styling, css[], wrapper?, brandDir }   router: react-router | tanstack | next-app | next-pages
+  design.json         { version: 1, id, router, styling, css[], wrapper?, brandDir }   router: react-router | tanstack | next-app | next-pages | none (a setup design)
   runtime/            Next.js designs only: generated files, ignored by git (see Previews)
   canvases/<id>.json  one canvas: frames, text labels, comments
   boards/<canvasId>/  the prototype components agents write, one default export per file
@@ -62,7 +62,7 @@ $FINITE_DATA_DIR/
 
 `store/` is the only writer of these files. It writes through a temp file and a rename (an atomic write), so a reader never sees half a file, and it serializes writes per design. It also watches `.finite/` and reads back changes made outside the server, such as an agent editing a canvas file, after 100 ms of quiet.
 
-A **connected** design is a reference to a folder that already exists. `design.connect` runs `store/detect.ts`: the folder needs a `package.json` and either `next` (a Next.js app) or Vite with React Router or TanStack Router, or it's refused with code `unsupported-project` and a reason. For a Next.js app, the router is `next-app` when there is an `app/` folder and `next-pages` when there is only `pages/`, so `app/` wins when both exist. As in Next, `app/` or `pages/` at the root win over `src/app/` and `src/pages/`. The global stylesheets come from `app/layout` or `pages/_app`, and the brand folder is `src/assets/brand`, or `assets/brand` when the project has no `src/`. Detection also picks the styling convention (StyleX, Tailwind, CSS modules or inline styles) and the global stylesheets (`.css`, `.scss` or `.less`) the entry imports. StyleX wins when `@stylexjs/stylex` is a dependency and at least as many files call its `props` as use `className` strings. A design keeps the `styling` stored in `.finite/design.json`, and connecting it again doesn't detect it again, so edit that field to switch a design's convention. Removing a connected design forgets it and leaves the folder alone. A **blank** design copies `apps/server/scaffold` (Vite 8, React 19, TypeScript, Tailwind v4, React Router) into `projects/<id>/` and installs its dependencies with `pnpm install --ignore-workspace`, or npm when pnpm isn't on `PATH`. Until the install ends, the design's preview reports `starting` with the install's output. An **import** is a blank design plus a thread that rebuilds the source (a Figma link, a URL or attachments) in TSX.
+A **connected** design is a reference to a folder that already exists. `design.connect` runs `store/detect.ts`: the folder needs a `package.json` and either `next` (a Next.js app) or Vite with React Router or TanStack Router, or it's refused with code `unsupported-project` and a reason. For a Next.js app, the router is `next-app` when there is an `app/` folder and `next-pages` when there is only `pages/`, so `app/` wins when both exist. As in Next, `app/` or `pages/` at the root win over `src/app/` and `src/pages/`. The global stylesheets come from `app/layout` or `pages/_app`, and the brand folder is `src/assets/brand`, or `assets/brand` when the project has no `src/`. Detection also picks the styling convention (StyleX, Tailwind, CSS modules or inline styles) and the global stylesheets (`.css`, `.scss` or `.less`) the entry imports. StyleX wins when `@stylexjs/stylex` is a dependency and at least as many files call its `props` as use `className` strings. A design keeps the `styling` stored in `.finite/design.json`, and connecting it again doesn't detect it again, so edit that field to switch a design's convention. A `finite.json` at or above the folder comes first, and a folder with a `package.json` that detection refuses becomes a setup design instead of a refusal (see "Workspaces and finite.json"). Removing a connected design forgets it and leaves the folder alone. A **blank** design copies `apps/server/scaffold` (Vite 8, React 19, TypeScript, Tailwind v4, React Router) into `projects/<id>/` and installs its dependencies with `pnpm install --ignore-workspace`, or npm when pnpm isn't on `PATH`. Until the install ends, the design's preview reports `starting` with the install's output. An **import** is a blank design plus a thread that rebuilds the source (a Figma link, a URL or attachments) in TSX.
 
 Every new design starts with three pages: **Routes**, with one frame per route the dev server reports, laid out in a grid of four columns and kept in step with the routes (`store/routes.ts`); **Brand**, for logos, images and fonts; and **Components**. A removed canvas keeps `removedAt` for 30 days, so it can be restored, and is deleted the next time the design opens after that.
 
@@ -72,7 +72,7 @@ Every new design starts with three pages: **Routes**, with one frame per route t
 
 The first message is `hello { user }`. `subscribe { designId }` returns the design's whole state (`DesignState`: the design, its canvases, threads, preview state and routes), and from then on the server pushes events: `canvas` (the whole canvas after any change), `thread`, `thread.event`, `preview` and `routes`. `designs` and `settings` go to every socket. The requests fall into groups:
 
-- Designs: `designs.list`, `design.create`, `design.connect`, `design.remove`.
+- Designs: `designs.list`, `design.create`, `design.connect`, `design.setup` (start a setup thread), `design.remove`. `setup.done { designId, next }` tells a design's subscribers which design to show once its setup passed.
 - Canvases: `canvas.create`, `rename`, `remove`, `restore` and `patch`. A `CanvasPatch` moves, resizes, adds, removes, renames or moves frames to another canvas, or sets and removes a text label.
 - Source: `source.edit`, `source.undo`, `source.redo`, `source.detach`, `tokens.get`, `tokens.set`, `components.list`.
 - Comments: `comment.add`, `reply`, `resolve`, `reopen`.
@@ -116,6 +116,61 @@ A frame's source is a route (`{ kind: "route", path, params? }`, loaded at that 
 
 The **bridge** connects the page to each iframe over a `MessageChannel` (`packages/protocol/src/bridge.ts`; the iframe half is `packages/vite-plugin/src/client/bridge.ts`, the page half `apps/web/src/canvas/bridge.ts`). The iframe posts `finite:hello` to its parent, and the parent answers with `finite:connect` and the port. The bridge takes the port, and the dev server answers cross-origin requests, only from an origin whose host is a loopback name or one in `FINITE_ALLOWED_HOSTS` (a bare name allows any port, so `next dev` on 5310 connects too), the same rule the guard applies. The parent then asks `hit(x, y)` (the stamped element under a point, which instance of its loc it is, and its stamped ancestors), `rects(locs)`, `inspect(loc, index)` (computed styles and class names for the inspector) and `layers()` (the stamped tree for the Layers panel), and sends `preview(loc, styles)` to show a style while a gesture runs. The iframe sends `size` (for frames whose height hugs their content), `updated` after HMR (under Next.js, after a DOM change), `key` (so canvas shortcuts work with focus inside a frame) and `error` (runtime errors, rejections and `console.error`).
 
+## Workspaces and finite.json
+
+A design is one app, but many apps don't run with just their dev server. A monorepo root has no app of its own, and an app may need a workspace package built first, generated code, or an API running. `finite.json`, committed at the repository root, tells Finite how to run them. It holds commands and non-secret env only, and Finite never writes it itself: a setup thread's agent does.
+
+```json
+{
+  "setup": ["pnpm install", "pnpm -F @acme/ui build"],
+  "apps": {
+    "web": { "path": "apps/web", "needs": ["api"] },
+    "docs": { "path": "apps/docs" }
+  },
+  "services": {
+    "db": { "run": "docker compose up db", "ready": 5432 },
+    "api": { "run": "pnpm -F api dev", "ready": "http://localhost:4000/health", "needs": ["db"] }
+  },
+  "env": { "API_URL": "http://localhost:4000" }
+}
+```
+
+The schema is `FiniteJson` in `packages/protocol/src/model.ts`, and `store/workspace.ts` reads and checks it:
+
+- `setup`: shell commands run in order in the workspace root before any app's dev server starts. An app's own `setup` runs in its folder after.
+- `apps` (at least one): `path` is relative to the workspace root, and `"."` is the root itself (a single app that needs a service). Each path must hold a `package.json`, and no two apps share one.
+- `services`: a long-running `run` command, in `cwd` (default the root). `ready` is a URL, ready when a GET answers below 500, or a port, ready when a TCP connect to 127.0.0.1 succeeds. Without `ready`, a service is ready once spawned.
+- `env`: added to every setup command, service and dev server. Process env loses to finite.json's `env`, which loses to an app's or service's own `env`.
+- Names are lowercase letters, digits and hyphens. Every `needs` must name a service, and services can't need each other in a cycle.
+
+An invalid file is refused with code `invalid-config` and one sentence per problem, naming its key path, like `apps.web.needs: there's no service "api". Add it under services, or remove it from needs.` Finite finds a design's `finite.json` by walking up from the app folder to the nearest folder that has one, stopping at the folder that holds `.git`.
+
+### Connect
+
+`design.connect { path }` reads `finite.json` first. When `path` is the workspace root, Finite connects every app it lists, one design each, with detection run on the app folder, and returns the first. When `path` is in an app's folder, it connects that app. Each such design's row in `designs.json` gets `workspace` (the absolute folder holding `finite.json`) and `app` (its name there). The design's `root` is still the app folder, where `.finite/`, routes, the preview and hand edits live.
+
+Without a `finite.json`, detection runs as before. When it refuses a folder that has a `package.json`, like a monorepo root or an app missing a dependency, Finite connects it as a **setup design**: root and workspace are the folder, `router: "none"`, inline styling, no stylesheets, brand folder `assets/brand`, and `setup: true` on its row. Its preview never starts; it reports `needs-setup`. The connect dialog then asks `design.setup`, which starts the setup thread, the way an import starts its thread.
+
+### The setup thread
+
+`design.setup { designId }` starts a thread with `setup: true` in its `ThreadMeta`. Its first message says why Finite can't run the folder: detection's reason for a setup design, the preview's log for a design whose preview failed. Its system prompt is `SETUP_INSTRUCTIONS` instead of the usual one: read the package manager, the workspace config, the dev scripts and what the pages need (built packages, codegen, servers), write a minimal `finite.json` with no secrets, then call `finish_setup` and fix what it reports until it passes. The fence lets a setup thread write that one `finite.json`: the setup design's workspace, else the nearest `finite.json` above the design, else the repository root.
+
+`finish_setup` validates `finite.json` and returns every problem, or connects every app in it. A setup design whose folder is one of the apps (`"path": "."`) becomes that app: Finite detects it again, rewrites `.finite/design.json` and clears `setup`. Otherwise the apps replace it: the page moves to the first app, and when the thread's turn ends Finite removes the setup design's row and the `.finite/` folder it made. A design that was already connected can be set up again from its failed preview, through "Set up with Claude"; its row gets `workspace` and `app`. Either way the store emits `setup.done { designId, next }`, the page navigates to `next` (or fetches the design again when `next` is itself), and the tool restarts `next`'s preview and waits for it. So the agent sees whether setup, services and the dev server really run, with the log when they don't.
+
+### Running a preview
+
+`Previews.ensure` on a design with a `workspace` (`preview/workspace.ts`) does three things before the dev server:
+
+1. Runs the workspace's `setup`, then the app's, once per server run and again whenever `finite.json`'s text changes (its sha1). Designs of one workspace share the run. While it runs, the preview is `starting` with the output in `log`; a failing command makes it `error` with the command, its exit code and output.
+2. Starts the services the app needs, transitively, each after the ones it needs, and waits for `ready` up to the start timeout. Every design of the workspace shares a service, counted by reference. It stops (SIGTERM to its process group, SIGKILL after 5 s) when the last preview that needs it stops. A service that's already answering on its `ready` before Finite starts it, because the person runs it themselves, is used as is.
+3. Starts the dev server child as before, with the merged env.
+
+Commands run through the user's shell (`spawn(cmd, { shell: true })`) with the server's `PATH`.
+
+### Agents in a workspace
+
+An agent on a workspace design runs with the workspace root as its working directory. Its prototypes and brand assets still go under the app's `.finite/` and brand folder, but `move_to_prod` lets it write anywhere in the workspace, so it can change shared packages. Relative paths in the fence and the canvas tools are taken from the workspace root too, so `apps/web/src/Card.tsx` and `src/Card.tsx` both name the app's file.
+
 ## Hand edits: the source editor
 
 `source/` turns a hand edit into a change to the TSX. A `SourceEdit` is `style`, `text`, `reorder`, `remove`, `duplicate` or `attr`, and names the locs it touches plus the rev of each file. `rewrite.ts` parses the file with Babel, finds the opening element at each loc, checks its tag, and splices the change in with `magic-string`, so the file's formatting survives. It returns a remap of old locs to new ones, so the selection follows the element.
@@ -135,11 +190,11 @@ A prototype canvas only takes edits to files under `.finite/`. An edit to a prod
 
 ## Agents
 
-`agent/` runs each live thread as one `query()` of the Claude Agent SDK, which drives the `claude` CLI on `PATH` (`pathToClaudeCodeExecutable`) with the design's root as its working directory. There's no API key: the person logs in with `claude` once, and `claude.status` reports `claude auth status --json` and the models the CLI offers. The query uses Claude Code's own system prompt with `agent/instructions.ts` appended, streams partial messages (the thread's `text.delta` events), and resumes the thread's last `sessionId` on the next message. A thread idle for 10 minutes closes its query.
+`agent/` runs each live thread as one `query()` of the Claude Agent SDK, which drives the `claude` CLI on `PATH` (`pathToClaudeCodeExecutable`) with the design's workspace, or else its root, as its working directory. There's no API key: the person logs in with `claude` once, and `claude.status` reports `claude auth status --json` and the models the CLI offers. The query uses Claude Code's own system prompt with `agent/instructions.ts` appended, streams partial messages (the thread's `text.delta` events), and resumes the thread's last `sessionId` on the next message. A thread idle for 10 minutes closes its query.
 
 Each message is a turn. `thread.send` with mode `steer` pushes the message into the running turn's input (priority `now`); `queue` holds it in `ThreadMeta.queued`, where people can edit or drop it, and sends it when the turn's `result` arrives. A change of model, effort or fast mode between turns goes through `setModel` and `applyFlagSettings`. `agent/events.ts` turns the SDK's messages into `ThreadEvent`s (`user`, `text.delta`, `text`, `tool`, `result`, `error`), which the store appends to the thread's `.jsonl` (all but `text.delta`) and broadcasts.
 
-The **permission fence** (`agent/policy.ts`) keeps agents out of production code. Reading and Bash are allowed anywhere. `Write`, `Edit`, `MultiEdit` and `NotebookEdit` are allowed under `.finite/` and the brand folder, and anywhere in the project only during a turn that called `move_to_prod`; the grant ends with the turn, and the thread settles when that turn succeeds. The fence runs twice: as `canUseTool`, and as a `PreToolUse` hook, which runs even when the person's own Claude Code settings pre-approve a tool. `AskUserQuestion` is refused, since nobody can answer the dialog. Bash can still change files; the system prompt tells the agent not to.
+The **permission fence** (`agent/policy.ts`) keeps agents out of production code. Reading and Bash are allowed anywhere. `Write`, `Edit`, `MultiEdit` and `NotebookEdit` are allowed under `.finite/` and the brand folder, `finite.json` in a setup thread, and anywhere in the project (the whole workspace, for a workspace design) only during a turn that called `move_to_prod`; the grant ends with the turn, and the thread settles when that turn succeeds. The fence runs twice: as `canUseTool`, and as a `PreToolUse` hook, which runs even when the person's own Claude Code settings pre-approve a tool. `AskUserQuestion` is refused, since nobody can answer the dialog. Bash can still change files; the system prompt tells the agent not to.
 
 The **canvas tools** are an in-process MCP server named `finite` (`agent/tools.ts`, input shapes in `packages/protocol/src/tools.ts`):
 
@@ -153,6 +208,7 @@ The **canvas tools** are an in-process MCP server named `finite` (`agent/tools.t
 | `add_brand_asset`             | Copy a file or URL into the brand folder and list it on the Brand page.                           |
 | `spawn_thread`, `name_thread` | Start a child thread; name this one.                                                              |
 | `screenshot`, `frame_errors`  | A PNG of a frame, taken in the system Chrome with puppeteer-core; the errors its bridge reported. |
+| `finish_setup`                | Check `finite.json` and connect its apps, then start the next design's preview and report it.     |
 
 ## The web app
 
@@ -179,11 +235,14 @@ The **canvas tools** are an in-process MCP server named `finite` (`agent/tools.t
 - **Rev**: the first 8 hex digits of a file's sha1 when Vite transformed it. An edit carries the revs it saw.
 - **Remap**: where each edited loc moved, so the selection follows the element.
 - **Convention**: how the design styles things (Tailwind, CSS modules, StyleX or inline), which hand edits follow.
-- **Preview**: a design's dev server (Vite or Next.js), and its status (stopped, starting, ready, error).
+- **Preview**: a design's dev server (Vite or Next.js), and its status (stopped, starting, ready, error, needs-setup).
+- **Workspace**: the folder holding `finite.json`, usually the repository root, and the apps and services it lists. A workspace design's `root` is its app's folder inside it.
+- **Service**: a long-running process from `finite.json`, like an API or a database, that an app's preview needs. Previews of one workspace share it.
+- **Setup design**: a folder Finite couldn't run yet (`setup: true`), with no preview, whose setup thread writes `finite.json` and calls `finish_setup`. The apps it lists replace it, or it becomes the one at its own path.
 - **Bridge**: the `MessageChannel` between the page and one frame.
 - **Actor**: who made a change, a person or an agent. An agent's id is its thread's id. Undo is per actor.
 - **Thread**: one agent conversation, with its metadata and event log. A prototype is a thread plus the canvas it works on.
 - **Turn**: one message and the agent's work on it, ending in a `result`. **Steer** folds a message into the running turn; **queue** holds it until the turn ends.
 - **Working, Active, Snoozed, Settled**: where a thread sits in the prototype list (`threadSection` in `model.ts`). Working: the agent is running. Snoozed: a person snoozed it. Settled: a person settled it, or its move to prod finished. Active: everything else, the person's turn. Sending a message wakes a snoozed or settled thread.
-- **Fence**: the rule that agents write only prototypes and brand assets, unless the turn called `move_to_prod`.
+- **Fence**: the rule that agents write only prototypes and brand assets (and a setup thread `finite.json`), unless the turn called `move_to_prod`.
 - **Refusal**: a request the server won't do, with a reason to show and a code to react to.

@@ -57,6 +57,7 @@ export const canvasTools = {
   name_thread: { title: z.string().min(1) },
   screenshot: { frameId: z.string() },
   frame_errors: { frameId: z.string() },
+  finish_setup: {},
 } as const satisfies Record<string, z.ZodRawShape>;
 
 export type CanvasToolName = keyof typeof canvasTools;

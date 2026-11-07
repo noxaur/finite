@@ -18,6 +18,14 @@ import { readJson, serial, toJson, writeAtomic } from "./files.ts";
 import { type Install, install } from "./install.ts";
 import { type OpenedDesign, openDesign } from "./open.ts";
 import { ROUTES_PAGE, routeFrames } from "./routes.ts";
+import {
+  appFor,
+  configRoot,
+  findWorkspace,
+  readWorkspace,
+  type Workspace,
+  type WorkspaceApp,
+} from "./workspace.ts";
 
 export type StoreOptions = {
   /** `$FINITE_DATA_DIR`: designs.json, settings.json, projects/. */
@@ -38,6 +46,18 @@ export const DEFAULT_SETTINGS: Settings = {
   fast: false,
   sendMode: "steer",
   showWorkingSeparately: true,
+};
+
+/** What a new connected design starts with: its name and `.finite/design.json` fields. */
+type Found = Omit<DesignConfig, "version" | "id"> & { name: string };
+
+/** A setup design's config: nothing to run yet, until its `finite.json` names the apps. */
+const SETUP_CONFIG: Found = {
+  name: "",
+  router: "none",
+  styling: "inline",
+  css: [],
+  brandDir: "assets/brand",
 };
 
 /** How long a design's `updatedAt` bumps collect before designs.json is written. */
@@ -199,6 +219,76 @@ export function createStore(options: StoreOptions): FileStore {
     await design.createCanvas({ kind: "page", name: "Components" }, by);
   }
 
+  /**
+   * Connects `root` as a new design with this config (a `.finite/design.json` already there keeps
+   * its id and fields) and makes its pages.
+   */
+  async function connectFolder(
+    root: string,
+    detected: Found,
+    extra: Pick<DesignEntry, "workspace" | "app" | "setup"> = {},
+  ): Promise<DesignEntry> {
+    const rows = await list();
+    const configFile = path.join(root, ".finite", "design.json");
+    const existing = DesignConfig.safeParse(await readJson(configFile).catch(() => undefined));
+    const id = existing.success ? existing.data.id : randomUUID();
+    const clash = rows.find((d) => d.id === id);
+    if (clash) {
+      throw new Refused(
+        `${clash.root} is already connected as this design (it's another copy of the same project). Remove "${clash.name}" first, then connect ${root}.`,
+        "invalid",
+      );
+    }
+    const { name, ...rest } = detected;
+    if (!existing.success || extra.setup) {
+      await writeAtomic(configFile, toJson({ version: 1, id, ...rest } satisfies DesignConfig));
+    }
+    const row: DesignEntry = {
+      id,
+      name: name || path.basename(root),
+      root,
+      origin: "connected",
+      updatedAt: Date.now(),
+      ...extra,
+    };
+    await saveList([...rows, row]);
+    // Routes come from the dev server once it runs; until then the Routes page is empty.
+    await addPages(await open(id), []);
+    return row;
+  }
+
+  /**
+   * One `finite.json` app as a design: connected now, or the design already in its folder, linked
+   * to the workspace. A setup design in that folder is detected again and stops being one.
+   */
+  async function connectApp(workspace: Workspace, app: WorkspaceApp): Promise<DesignEntry> {
+    const extra = { workspace: workspace.root, app: app.name };
+    const rows = await list();
+    const same = rows.find((d) => d.root === app.dir);
+    if (!same) return connectFolder(app.dir, await detectProject(app.dir), extra);
+    if (same.workspace === workspace.root && same.app === app.name && !same.setup) return same;
+
+    const configFile = path.join(app.dir, ".finite", "design.json");
+    let config = DesignConfig.parse(await readJson(configFile));
+    let name = same.name;
+    if (same.setup) {
+      const { name: detectedName, ...detected } = await detectProject(app.dir);
+      config = { version: 1, id: same.id, ...detected };
+      await writeAtomic(configFile, toJson(config));
+      name = detectedName;
+    }
+    const { setup: _setup, ...base } = same;
+    const next: DesignEntry = { ...base, ...extra, name };
+    await saveList(rows.map((d) => (d.id === same.id ? next : d)));
+    const pending = opened.get(same.id);
+    if (pending) {
+      const { version: _version, id: _id, ...rest } = config;
+      const { updatedAt: _at, installing: _installing, ...fields } = next;
+      (await pending).setDesign({ ...fields, ...rest });
+    }
+    return next;
+  }
+
   const store: FileStore = {
     designs: () => run(async () => shown(await list())),
 
@@ -231,36 +321,65 @@ export function createStore(options: StoreOptions): FileStore {
     connect(input) {
       return run(async () => {
         const root = path.resolve(input);
-        const rows = await list();
-        const same = rows.find((d) => d.root === root);
+        const same = (await list()).find((d) => d.root === root);
         if (same) return same;
 
-        const detected = await detectProject(root);
-        const configFile = path.join(root, ".finite", "design.json");
-        const existing = DesignConfig.safeParse(await readJson(configFile).catch(() => undefined));
-        const id = existing.success ? existing.data.id : randomUUID();
-        const clash = rows.find((d) => d.id === id);
-        if (clash) {
+        const found = await findWorkspace(root);
+        if (found) {
+          const workspace = await readWorkspace(found.root);
+          if (root === workspace.root) {
+            const rows: DesignEntry[] = [];
+            for (const app of Object.values(workspace.apps)) {
+              rows.push(await connectApp(workspace, app));
+            }
+            return rows[0]!;
+          }
+          const app = appFor(workspace, root);
+          if (app) return connectApp(workspace, app);
+        }
+        try {
+          return await connectFolder(root, await detectProject(root));
+        } catch (error) {
+          // A monorepo root, or an app that needs more than its dev server: an agent sets it up.
+          // A folder without a package.json isn't a JavaScript project, so there's nothing to set up.
+          const pkg = await fsp.stat(path.join(root, "package.json")).catch(() => undefined);
+          if (
+            !(error instanceof Refused) ||
+            error.code !== "unsupported-project" ||
+            !pkg?.isFile()
+          ) {
+            throw error;
+          }
+          return connectFolder(root, SETUP_CONFIG, { workspace: root, setup: true });
+        }
+      });
+    },
+
+    finishSetup(id) {
+      return run(async () => {
+        const row = await entry(id);
+        const found = row.workspace ? { root: row.workspace } : await findWorkspace(row.root);
+        if (!found) {
           throw new Refused(
-            `${clash.root} is already connected as this design (it's another copy of the same project). Remove "${clash.name}" first, then connect ${root}.`,
-            "invalid",
+            `There's no finite.json at ${await configRoot(row.root)} or above ${row.root}. Write it, then call finish_setup again.`,
+            "not-found",
           );
         }
-        if (!existing.success) {
-          const { name: _name, ...rest } = detected;
-          await writeAtomic(configFile, toJson({ version: 1, id, ...rest } satisfies DesignConfig));
+        const workspace = await readWorkspace(found.root);
+        const apps = Object.values(workspace.apps);
+        const self = apps.find((app) => app.dir === row.root);
+        if (!row.setup && !self) {
+          const at = path.relative(workspace.root, row.root) || ".";
+          throw new Refused(
+            `${workspace.file} lists no app in ${row.root}, this design's folder. Add one under apps with "path": "${at}".`,
+            "invalid-config",
+          );
         }
-        const row: DesignEntry = {
-          id,
-          name: detected.name,
-          root,
-          origin: "connected",
-          updatedAt: Date.now(),
-        };
-        await saveList([...rows, row]);
-        // Routes come from the dev server once it runs; until then the Routes page is empty.
-        await addPages(await open(id), []);
-        return row;
+        const rows: DesignEntry[] = [];
+        for (const app of apps) rows.push(await connectApp(workspace, app));
+        const next = self ? rows[apps.indexOf(self)]! : rows[0]!;
+        void opened.get(id)?.then((open) => open.emit({ type: "setup.done", next: next.id }));
+        return { apps: rows, next, replaced: !!row.setup && !self };
       });
     },
 
@@ -280,6 +399,9 @@ export function createStore(options: StoreOptions): FileStore {
         const was = opened.get(id);
         opened.delete(id);
         (await was?.catch(() => undefined))?.close();
+        // A setup design's .finite/ is Finite's own, made when it was connected.
+        if (row.setup)
+          await fsp.rm(path.join(row.root, ".finite"), { recursive: true, force: true });
         // A blank or imported design's folder goes to the trash, never straight to deletion.
         const projects = path.join(dataDir, "projects") + path.sep;
         if (row.origin !== "connected" && row.root.startsWith(projects)) {

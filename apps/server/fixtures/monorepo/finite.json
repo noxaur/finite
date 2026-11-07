@@ -1,0 +1,10 @@
+{
+  "setup": ["pnpm install", "pnpm -F @fixture/ui build"],
+  "env": { "API_PORT": "4319" },
+  "apps": {
+    "web": { "path": "apps/web", "needs": ["api"] }
+  },
+  "services": {
+    "api": { "run": "pnpm -F @fixture/api start", "ready": "http://127.0.0.1:4319/health" }
+  }
+}

@@ -178,6 +178,25 @@ export function DesignScreen({ id }: { id: string }) {
     a.click();
   };
 
+  // A setup thread in this design opens instead of starting a second one.
+  const setupThread = threads.find((t) => t.setup && t.running);
+  const setUp = async () => {
+    const threadId =
+      setupThread?.id ?? (await finite.request("design.setup", { designId: id })).threadId;
+    go({ tab: "design", thread: threadId, canvas: place.canvas });
+  };
+
+  // When setup turned this design into other ones (a monorepo's apps), the screen follows.
+  useEffect(
+    () =>
+      finite.on("setup.done", (event) => {
+        if (event.designId === id && event.next !== id) {
+          router.push(`/design/?id=${encodeURIComponent(event.next)}`);
+        }
+      }),
+    [id, router],
+  );
+
   // A thread without a canvas talks in the side panel; a canvas thread does when History is on.
   const chat: ThreadMeta | null =
     thread && (thread.canvasIds.length === 0 || history) ? thread : null;
@@ -267,7 +286,14 @@ export function DesignScreen({ id }: { id: string }) {
             canvas={canvas}
             mode={place.tab === "design" ? "design" : "prototypes"}
           />
-          <Preview state={state?.preview} install={state?.install} />
+          <Preview
+            state={state?.preview}
+            install={state?.install}
+            setupThread={setupThread ?? null}
+            onSetup={() =>
+              void setUp().catch((e: unknown) => toast(e instanceof Error ? e.message : String(e)))
+            }
+          />
           {place.tab === "prototypes" && !thread && (
             <div {...stylex.props(styles.hello)}>
               <p {...stylex.props(styles.helloTitle)}>Describe something to prototype</p>
@@ -329,32 +355,54 @@ export function DesignScreen({ id }: { id: string }) {
   );
 }
 
-/** While a new design's dependencies install, its dev server starts, or either fails. */
+/**
+ * While a new design's dependencies install, its dev server starts, or either fails. A failed
+ * preview, or a folder Finite can't run yet, offers a setup thread that writes its finite.json.
+ */
 function Preview({
   state,
   install,
+  setupThread,
+  onSetup,
 }: {
   state: PreviewState | undefined;
   install: InstallState | undefined;
+  setupThread: ThreadMeta | null;
+  onSetup: () => void;
 }) {
   const installing = install && install.status !== "done" ? install : undefined;
   if (!installing && (!state || state.status === "ready" || state.status === "stopped")) {
     return null;
   }
   const failed = installing ? installing.status === "error" : state?.status === "error";
+  const needsSetup = !installing && state?.status === "needs-setup";
   const title = installing
     ? failed
       ? "Installing dependencies failed"
       : "Installing dependencies…"
-    : failed
-      ? "The dev server stopped"
-      : "Starting the dev server…";
+    : needsSetup
+      ? "Finite can’t run this folder yet"
+      : failed
+        ? "The dev server stopped"
+        : "Starting the dev server…";
   const log = installing ? installing.log : state?.log;
   const tail = log?.trim().split("\n").slice(-6).join("\n");
   return (
     <div role="status" {...stylex.props(styles.preview)}>
       <p {...stylex.props(styles.previewTitle)}>{title}</p>
       {tail && <pre {...stylex.props(styles.log)}>{tail}</pre>}
+      {!installing && (failed || needsSetup) && (
+        <div {...stylex.props(styles.previewActions)}>
+          <span {...stylex.props(styles.previewNote)}>
+            {setupThread
+              ? "Claude is writing finite.json."
+              : "Claude can write a finite.json that tells Finite how to run it."}
+          </span>
+          <Button size="small" variant="brand" onClick={onSetup}>
+            {setupThread ? "Open setup thread" : "Set up with Claude"}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -438,6 +486,14 @@ const styles = stylex.create({
     boxShadow: shadows.raised,
   },
   previewTitle: { margin: 0, fontSize: 13, fontWeight: 500 },
+  previewActions: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: space.md,
+    marginTop: space.ms,
+  },
+  previewNote: { fontSize: 12, color: colors.muted },
   log: {
     marginTop: space.sm,
     marginBottom: 0,

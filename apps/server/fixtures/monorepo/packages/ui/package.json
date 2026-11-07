@@ -1,0 +1,20 @@
+{
+  "name": "@fixture/ui",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "node build.js"
+  },
+  "devDependencies": {
+    "react": "19.3.1"
+  },
+  "peerDependencies": {
+    "react": "19.3.1"
+  }
+}

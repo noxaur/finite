@@ -12,8 +12,10 @@ import {
 import {
   type Actor,
   type Agents,
+  type Design,
   type Frame,
   type OpenDesign,
+  type PreviewState,
   type Previews,
   Refused,
   type Selection,
@@ -25,7 +27,9 @@ import {
 } from "@finite/protocol";
 import { createLocks, fileLocks, type Locked } from "../source/files.ts";
 import { createEventMapper } from "./events.ts";
-import { FINITE_INSTRUCTIONS } from "./instructions.ts";
+import { detectProject } from "../store/detect.ts";
+import { configRoot, WORKSPACE_FILE } from "../store/workspace.ts";
+import { FINITE_INSTRUCTIONS, SETUP_INSTRUCTIONS } from "./instructions.ts";
 import { userMessage } from "./message.ts";
 import { policy } from "./policy.ts";
 import { createScreenshots, type Screenshots } from "./screenshot.ts";
@@ -64,6 +68,7 @@ export const WRITE_LOCK_MS = 30_000;
 export const STEER_GRACE_MS = 3_000;
 const WRITE_TOOLS = "Write|Edit|MultiEdit|NotebookEdit";
 export const DEFAULT_TITLE = "New prototype";
+export const SETUP_TITLE = "Set up Finite";
 /** Claude Code's built-in tools a Finite agent gets; the rest (subagents, plans, cron, worktrees) only cost tokens. */
 export const BUILT_IN_TOOLS = [
   "Read",
@@ -118,6 +123,34 @@ export async function startThread(
     );
   }
   return meta;
+}
+
+/** Why Finite can't run the design yet, for a setup thread's first message. */
+export async function setupReason(
+  design: Design,
+  preview: PreviewState,
+): Promise<string | undefined> {
+  if (design.setup) {
+    return detectProject(design.root).then(
+      () => undefined,
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
+  }
+  return preview.status === "error" ? preview.log : undefined;
+}
+
+/** Creates a setup thread, which writes `finite.json` and calls finish_setup. Send it its prompt next. */
+export function startSetup(
+  open: OpenDesign,
+  turn: Pick<Turn, "model" | "effort" | "fast">,
+): Promise<ThreadMeta> {
+  return open.createThread({
+    title: SETUP_TITLE,
+    setup: true,
+    model: turn.model,
+    fast: turn.fast,
+    ...(turn.effort === undefined ? {} : { effort: turn.effort }),
+  });
 }
 
 /**
@@ -196,6 +229,8 @@ type Live = {
   running: boolean;
   /** move_to_prod was called this turn. */
   prodWrite: boolean;
+  /** finish_setup replaced this setup design with the apps: it's removed when the turn ends. */
+  replaced: boolean;
   interrupted: boolean;
   closing: boolean;
   /** The session reported its id (so resuming worked). */
@@ -261,6 +296,10 @@ export function createAgents(options: AgentsOptions): Agents {
     if (!bin) throw new Refused(NOT_INSTALLED, "not-logged-in");
     const { root, brandDir } = open.design;
     const realRoot = realpath(root);
+    const cwd = open.design.workspace ?? root;
+    const configFile = thread.setup
+      ? path.join(open.design.workspace ?? (await configRoot(root)), WORKSPACE_FILE)
+      : undefined;
     const input = inbox<SDKUserMessage>();
     const live: Live = {
       threadId: thread.id,
@@ -272,6 +311,7 @@ export function createAgents(options: AgentsOptions): Agents {
       fast: turn.fast,
       running: false,
       prodWrite: false,
+      replaced: false,
       interrupted: false,
       closing: false,
       started: false,
@@ -283,7 +323,14 @@ export function createAgents(options: AgentsOptions): Agents {
       betweenTurns: false,
     };
     const fence = (name: string, toolInput: Record<string, unknown>) =>
-      policy(name, toolInput, { root, realRoot, brandDir, prodWrite: live.prodWrite });
+      policy(name, toolInput, {
+        root,
+        realRoot,
+        brandDir,
+        prodWrite: live.prodWrite,
+        ...(cwd === root ? {} : { workspace: cwd }),
+        ...(configFile === undefined ? {} : { configFile }),
+      });
     // A PreToolUse hook runs even when the person's own settings pre-approve a tool, so the
     // write fence holds whatever their allow rules say; canUseTool answers everything else.
     // An allowed write then holds the file's lock until PostToolUse, so a SourceEditor edit can't
@@ -325,7 +372,7 @@ export function createAgents(options: AgentsOptions): Agents {
       file: string,
       signal: AbortSignal,
     ): Promise<void> {
-      const release = await locks.acquire([path.resolve(root, file)]);
+      const release = await locks.acquire([path.resolve(cwd, file)]);
       // The session shut (or the hook was cancelled) while this waited: nothing will report it done.
       if (live.closing || signal.aborted) return release();
       const timer = setTimeout(() => done(), writeLockMs);
@@ -347,18 +394,21 @@ export function createAgents(options: AgentsOptions): Agents {
       screenshots,
       grantProdWrite: () => (live.prodWrite = true),
       spawn: (prompt, canvasId) => spawn(open, thread.id, prompt, canvasId),
+      finishSetup: () => finishSetup(live),
     });
     live.query = query({
       prompt: input,
       options: {
         pathToClaudeCodeExecutable: bin,
-        cwd: root,
+        cwd,
         ...(thread.sessionId === undefined ? {} : { resume: thread.sessionId }),
         includePartialMessages: true,
         systemPrompt: {
           type: "preset",
           preset: "claude_code",
-          append: `${FINITE_INSTRUCTIONS}\n${context(open, thread)}`,
+          append: thread.setup
+            ? `${SETUP_INSTRUCTIONS}\n## This thread\nWrite finite.json at ${configFile}.`
+            : `${FINITE_INSTRUCTIONS}\n${context(open, thread)}`,
         },
         // Only the project's own settings and CLAUDE.md: the person's global ~/.claude config
         // (their CLAUDE.md, skills, plugins, hooks) is about their own work, not this design.
@@ -510,7 +560,48 @@ export function createAgents(options: AgentsOptions): Agents {
       updatedAt: Date.now(),
       ...(settle ? { settledAt: Date.now() } : {}),
     }));
+    if (live.replaced) {
+      // The apps took over: the setup design, this thread with it, goes once its turn is done.
+      shut(live);
+      await options.previews.stop(open.design.id).catch(() => {});
+      await options.store.remove(open.design.id).catch((error: unknown) => {
+        console.error(`removing setup design ${open.design.id} failed:`, error);
+      });
+      return;
+    }
     armIdle(live);
+  }
+
+  /**
+   * finish_setup: connects finite.json's apps (or says what to fix), then starts the preview of
+   * the design to show next, so the agent sees whether setup, services and the dev server run.
+   */
+  async function finishSetup(live: Live): Promise<object> {
+    const { apps, next, replaced } = await options.store.finishSetup(live.open.design.id);
+    if (replaced) live.replaced = true;
+    const design = (await options.store.open(next.id)).design;
+    const connected = apps.map((a) => ({ designId: a.id, app: a.app, root: a.root }));
+    const after = replaced
+      ? `The page now shows ${next.name}. This setup thread closes when your turn ends.`
+      : "finite.json is in use.";
+    await options.previews.stop(next.id);
+    try {
+      const { url } = await options.previews.ensure(design);
+      return {
+        connected,
+        preview: `${next.name} runs at ${url}.`,
+        next: `${after} Say what you set up.`,
+      };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      const log = options.previews.state(next.id).log?.trim().split("\n").slice(-30).join("\n");
+      return {
+        connected,
+        preview: `${next.name} didn't start: ${reason}`,
+        ...(log ? { log } : {}),
+        next: `${after} Fix finite.json (or say what the person must do) and call finish_setup again.`,
+      };
+    }
   }
 
   function armIdle(live: Live): void {
@@ -715,13 +806,22 @@ export function createAgents(options: AgentsOptions): Agents {
 
 /** What this session's agent should know about where it is. */
 function context(open: OpenDesign, thread: ThreadMeta): string {
+  const { root, workspace, brandDir, styling } = open.design;
+  // The agent works from the workspace root, so the app's own folders are under its path.
+  const app = workspace === undefined ? "" : path.relative(workspace, root);
+  const at = (dir: string) => (app ? `${app}/${dir}` : dir);
   const lines = [
     `## This thread`,
-    `Thread id: ${thread.id}. Brand folder: ${open.design.brandDir}/. Styling: ${open.design.styling}.`,
+    `Thread id: ${thread.id}. Brand folder: ${at(brandDir)}/. Styling: ${styling}.`,
   ];
+  if (app) {
+    lines.push(
+      `You're in the workspace ${workspace}; this design is the app in ${app}/. Canvas tools take paths relative to either.`,
+    );
+  }
   const canvasId = thread.canvasIds.at(-1);
   if (canvasId) {
-    lines.push(`Your canvas: ${canvasId}. Write its frames in ${boardDir(canvasId)}/.`);
+    lines.push(`Your canvas: ${canvasId}. Write its frames in ${at(boardDir(canvasId))}/.`);
   } else {
     lines.push("This thread has no canvas. open_canvas makes or opens one when you need it.");
   }
