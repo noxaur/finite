@@ -269,10 +269,13 @@ const PROPS: Record<string, { toClass: ToClass; sample: string }> = {
   },
   "box-shadow": {
     sample: "none",
+    // v3 compiles `shadow-[none]` as a shadow colour, so a scale without `none` gets the hint.
     toClass: (v, theme, v3) =>
       v === "none" && !v3
         ? "shadow-none"
-        : themed("shadow", "--shadow", "none", arbitrary).toClass(v, theme, v3),
+        : themed("shadow", "--shadow", "none", (x) =>
+            x === "none" ? "[shadow:none]" : arbitrary(x),
+          ).toClass(v, theme, v3),
   },
   overflow: keywords(overflow("overflow")),
   "overflow-x": keywords(overflow("overflow-x")),

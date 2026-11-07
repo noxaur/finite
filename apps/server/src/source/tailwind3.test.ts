@@ -143,7 +143,13 @@ describe("editClasses on Tailwind v3", () => {
     expect(editClasses("", { borderRadius: "9999px" }, bare, 3)).toBe("rounded-[9999px]");
     expect(editClasses("", { padding: "1px", margin: "auto" }, bare, 3)).toBe("p-[1px] m-[auto]");
     expect(editClasses("", { lineHeight: "1", boxShadow: "none" }, bare, 3)).toBe(
-      "leading-[1] shadow-[none]",
+      "leading-[1] shadow-[shadow:none]",
+    );
+    const card = v3Theme({ boxShadow: { card: "0 2px 4px black" } });
+    expect(editClasses("shadow-card", { boxShadow: "none" }, card, 3)).toBe("shadow-[shadow:none]");
+    expect(editClasses("flex shadow-card", { boxShadow: null }, card, 3)).toBe("flex");
+    expect(editClasses("shadow-[shadow:none]", { boxShadow: "0 2px 4px black" }, card, 3)).toBe(
+      "shadow-card",
     );
     expect(editClasses("", { lineHeight: "1", boxShadow: "none" }, theme, 3)).toBe(
       "leading-none shadow-none",
