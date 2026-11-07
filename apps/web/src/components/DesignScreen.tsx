@@ -390,7 +390,9 @@ function Preview({
   return (
     <div role="status" {...stylex.props(styles.preview)}>
       <p {...stylex.props(styles.previewTitle)}>{title}</p>
-      {tail && <pre {...stylex.props(styles.log)}>{tail}</pre>}
+      {needsSetup
+        ? log && <p {...stylex.props(styles.reason)}>{log.trim()}</p>
+        : tail && <pre {...stylex.props(styles.log)}>{tail}</pre>}
       {!installing && (failed || needsSetup) && (
         <div {...stylex.props(styles.previewActions)}>
           <span {...stylex.props(styles.previewNote)}>
@@ -494,6 +496,15 @@ const styles = stylex.create({
     marginTop: space.ms,
   },
   previewNote: { fontSize: 12, color: colors.muted },
+  reason: {
+    marginTop: space.sm,
+    marginBottom: 0,
+    fontSize: 12,
+    lineHeight: "17px",
+    color: colors.muted,
+    whiteSpace: "pre-line",
+    overflowWrap: "anywhere",
+  },
   log: {
     marginTop: space.sm,
     marginBottom: 0,

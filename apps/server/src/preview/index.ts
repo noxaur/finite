@@ -15,6 +15,7 @@ import {
   type Unsubscribe,
 } from "@finite/protocol";
 import { allowedHosts } from "../guard.ts";
+import { detectProject } from "../store/detect.ts";
 import { WORKSPACE_FILE } from "../store/workspace.ts";
 import { createWorkspaces } from "./workspace.ts";
 
@@ -101,6 +102,17 @@ export function createPreviews(options: PreviewsOptions): Previews {
     run.state = state;
     if (runs.get(designId) === run) emit(designId, { type: "preview", ...state });
   };
+  /** A setup design's state: why detection refuses its folder, and what finishes the setup. */
+  const setupNeeded = (
+    designId: string,
+    run: Run,
+    rejectReady: (error: Error) => void,
+    why: string | undefined,
+  ) => {
+    const reason = `${why ?? "This folder isn't set up for Finite yet."}\n\nIts finite.json setup hasn't finished. Finish the setup thread, which writes finite.json and calls finish_setup, then open the design again.`;
+    rejectReady(new Refused(reason));
+    if (runs.get(designId) === run) setState(designId, run, { status: "needs-setup", log: reason });
+  };
   const cancelIdle = (designId: string) => {
     clearTimeout(idleTimers.get(designId));
     idleTimers.delete(designId);
@@ -136,11 +148,18 @@ export function createPreviews(options: PreviewsOptions): Previews {
     runs.set(design.id, run);
 
     if (design.setup) {
-      const reason =
-        "This folder isn't set up for Finite yet: its finite.json setup hasn't finished. Finish the setup thread, which writes finite.json and calls finish_setup, then open the design again.";
-      run.state = { status: "needs-setup", log: reason };
-      emit(design.id, { type: "preview", ...run.state });
-      rejectReady(new Refused(reason));
+      // Detection runs again on each open, so the reason follows the folder as it changes.
+      run.state = { status: "needs-setup" };
+      void detectProject(design.root).then(
+        () => setupNeeded(design.id, run, rejectReady, undefined),
+        (error: unknown) =>
+          setupNeeded(
+            design.id,
+            run,
+            rejectReady,
+            error instanceof Error ? error.message : String(error),
+          ),
+      );
       return run;
     }
     emit(design.id, { type: "preview", ...run.state });
@@ -310,9 +329,10 @@ export function createPreviews(options: PreviewsOptions): Previews {
     async ensure(design) {
       cancelIdle(design.id);
       const run = runs.get(design.id);
-      if (run && run.state.status !== "error" && run.state.status !== "needs-setup") {
-        return run.ready;
-      }
+      // A failed preview starts again, and a setup design detects again once its last detection ended.
+      const done =
+        run?.state.status === "error" || (run?.state.status === "needs-setup" && run.state.log);
+      if (run && !done) return run.ready;
       if (run) await stopRun(design.id);
       return start(design).ready;
     },
