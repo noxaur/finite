@@ -34,3 +34,20 @@ export function TimeAgo({ at }: { at: number }) {
   );
   return <>{timeAgo(at)}</>;
 }
+
+/** The clock, refreshed with the labels: for lists that sort or label by time. */
+export function useNow(): number {
+  const v = useSyncExternalStore(
+    subscribe,
+    () => version,
+    () => -1,
+  );
+  // The version stands for the time; Date.now() is read once per refresh.
+  return v < 0 ? 0 : nowAt(v);
+}
+
+let stamped = { version: -2, at: 0 };
+function nowAt(v: number) {
+  if (stamped.version !== v) stamped = { version: v, at: Date.now() };
+  return stamped.at;
+}

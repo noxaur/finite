@@ -81,9 +81,21 @@ export function cornerOf(value: string): readonly [string, string] {
   return [h, v];
 }
 
+const tidy = ([t, r, b, l]: readonly string[]) =>
+  r === l ? (t === b ? (t === r ? t! : `${t} ${r}`) : `${t} ${r} ${b}`) : `${t} ${r} ${b} ${l}`;
+
 /** An ellipse as one `border-radius`, each half in the fewest values. */
 export function ellipseText({ h, v }: Ellipse): string {
-  const tidy = ([t, r, b, l]: readonly string[]) =>
-    r === l ? (t === b ? (t === r ? t! : `${t} ${r}`) : `${t} ${r} ${b}`) : `${t} ${r} ${b} ${l}`;
   return `${tidy(h)} / ${tidy(v)}`;
+}
+
+/**
+ * One `border-radius` from the four corner longhands the browser computes (top left, top right,
+ * bottom right, bottom left), for a radius a class sets: `14px` when they match.
+ */
+export function radiusOf(corners: readonly [string, string, string, string]): string {
+  const pairs = corners.map(cornerOf);
+  const h = pairs.map((p) => p[0]);
+  const v = pairs.map((p) => p[1]);
+  return h.every((x, i) => x === v[i]) ? tidy(h) : ellipseText({ h, v } as unknown as Ellipse);
 }

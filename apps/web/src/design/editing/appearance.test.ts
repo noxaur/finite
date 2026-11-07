@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
-import { cornerOf, ellipseOf, ellipseText, opacityPercent, opacityValue } from "./appearance";
+import {
+  cornerOf,
+  ellipseOf,
+  ellipseText,
+  opacityPercent,
+  opacityValue,
+  radiusOf,
+} from "./appearance";
 
 describe("appearance", () => {
   it("reads opacity as a percentage and writes it back from 0 to 1", () => {
@@ -17,5 +24,13 @@ describe("appearance", () => {
     expect(ellipseText({ ...e, v: ["8px", "20px", "8px", "8px"] })).toBe("16px / 8px 20px 8px 8px");
     expect(cornerOf("10px 4px")).toEqual(["10px", "4px"]);
     expect(cornerOf("6px")).toEqual(["6px", "6px"]);
+  });
+});
+
+describe("a class's radius read back from the corners", () => {
+  it("is one value when the corners match, else each corner or the ellipse", () => {
+    expect(radiusOf(["14px", "14px", "14px", "14px"])).toBe("14px");
+    expect(radiusOf(["8px", "0px", "8px", "0px"])).toBe("8px 0px");
+    expect(radiusOf(["8px 4px", "8px 4px", "8px 4px", "8px 4px"])).toBe("8px / 4px");
   });
 });

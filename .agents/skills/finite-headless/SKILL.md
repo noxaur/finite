@@ -1,95 +1,49 @@
 ---
 name: finite-headless
-description: Run Finite headless and drive it from the shell, to see a change working in the real app. Starts the Rust server and headless Chrome, calls MCP tools as one or more agents, and clicks, types, reads and screenshots the page, from the shell or from Python. Use when asked to run, try, test or screenshot Finite, to reproduce a bug in the canvas or the design list, or to check what a person sees after an agent's edit.
+description: Run Finite headless and drive it from the shell, to see a change working in the real app. Starts the Node server, the web app and headless Chrome, sends requests and thread messages over /api/ws, connects fixture codebases, and clicks, types, evaluates and screenshots the page and the design frames inside it. Use when asked to run, try, test or screenshot Finite, or to reproduce a bug in the canvas, the design list, the inspector or a thread.
 ---
 
-# Test Finite headless
+# Run Finite headless
 
-`node e2e/headless.mjs` starts Finite with an empty data folder and opens it in headless Chrome. Then each command does one thing to that running app: call an MCP tool, click, type, read the page or take a screenshot. A background process holds the server, the page and the MCP sessions between commands, so state carries over the way it would for a person and an agent working side by side.
+`scripts/finite.mjs` starts a private Finite in the background, then each call does one thing to it: a request on `/api/ws`, a thread message, a click, a key, an `eval` or a screenshot. State carries over between calls, the way it would for a person and an agent working side by side. `vp run e2e` (`e2e/run.mjs`) is the fixed regression run; this is for exploring. Add a check to `e2e/run.mjs` when a behavior should stay fixed.
 
-It differs from `vp run e2e`, which runs a fixed script of checks and exits. Use this tool to explore, reproduce a bug or check a change. Then add a check to `e2e/run.mjs` if the behavior should stay fixed.
+```bash
+f() { node .agents/skills/finite-headless/scripts/finite.mjs "$@" --session mine; }
+```
+
+Shell functions don't survive between tool calls: repeat the `f()` line at the start of each call. Run `f` with no command for every command and flag.
 
 ## Start, work, stop
 
 ```bash
-node e2e/headless.mjs start              # builds first; --no-build reuses the last builds
-node e2e/headless.mjs call designs '{"create":"Test"}'
-node e2e/headless.mjs call edit '{"designId":"<id>","ops":[{"op":"artboard","name":"Page","width":800,"height":500,"html":"<button>Go</button>"}]}'
-node e2e/headless.mjs call edit @input.json
-node e2e/headless.mjs design <designId>  # opens it and waits for the artboards to render
-node e2e/headless.mjs screenshot         # prints a PNG path: Read it to see the page
-node e2e/headless.mjs stop               # stops the server and Chrome, and deletes the data
+f start                       # builds apps/web/out, then server + Chrome; prints the URL
+f start --no-build            # reuses apps/web/out (rebuild after changing apps/web)
+f start --web dev             # next dev with hot reload instead (one per checkout: .next/dev/lock)
+f call design.create '{"name":"Test","kind":"blank"}'
+f watch <designId> --until routes --for 120   # subscribe; prints design.state, then events
+f open "/design/?id=<designId>"
+f shot .verify/<run>/01-canvas.png            # Read the PNG to see it
+f stop                        # kills server, its Vite children and Chrome; deletes the data
 ```
 
-Run `node e2e/headless.mjs help` for every command. Rebuild after you change code: `stop`, then `start`. The Rust server and the web app's static export are both built by `start`, so a change to either needs a restart. `start --no-build` takes under a second. A build with nothing to do takes about 4 seconds, and longer after a change.
+- **Ports and data.** The server runs `node apps/server/src/main.ts` on the first free port from 4300, with `FINITE_DATA_DIR` in `$TMPDIR/finite-headless/<session>/data`. It never takes 4100 or 5310: the user's desktop app or `vp run dev` may hold them, with their real designs. Drive only a session you started.
+- **Static vs dev.** `static` serves the web export from the server's own origin. `dev` runs `next dev` with `FINITE_API_URL` pointing at the server. A server change needs `stop` and `start` either way.
+- **Logs.** `f logs server` (and `f logs web` in dev). `f console` prints page errors and console output caught while a command was attached.
 
-A session stops itself after 30 idle minutes (`--idle <minutes>`). Each checkout has its own session in the temp folder. To run a second one beside it, pass `--session <name>` to every command.
+## The server
 
-## Reading the page
+`call <type> '<json>'` sends one request from `packages/protocol/src/wire.ts` (`requests` lists every type and its params) and prints the reply value or the refusal's reason. `@file.json` reads the params from a file.
 
-- `snapshot` prints the accessibility tree: headings, buttons and their names, alerts, text. It's the quickest way to see what a person would see. Pass `--selector main` to narrow it.
-- `query <css>` lists every match with its position and size, and marks the ones inside an artboard or out of view. Use it to pick a click target.
-- `text` prints the visible text, artboards included.
-- `screenshot [file] [--selector <css>]` saves a PNG. Read the file to look at it.
-- `console` prints what the page logged since the last call, with exceptions and failed requests. Check it after anything that should have worked.
-- `logs` prints the server's last lines (`-n 200` for more).
+- `watch <designId>` subscribes: preview status (`starting` while a blank design installs, then `ready` with the Vite URL), `routes`, `canvas`, `thread` and `thread.event`.
+- `send <designId> "<text>"` starts a thread (`--thread <id>` continues one, `--canvas <id>` puts it on a prototype canvas) and streams its events until `result` or `error`. It runs the real local `claude` CLI on the user's subscription, so keep prompts small.
+- `fixture rr-spa` (or `rr-framework`, `tanstack`) copies `apps/server/fixtures/<name>` to a temp folder, installs it and prints the path. Then `f call design.connect '{"path":"<path>"}'` makes a connected design.
 
-## Pointing at things
+## The page
 
-Artboards render inside shadow roots, and these commands reach into them. So `query button` lists the design's buttons after the app's toolbar buttons. To search one artboard, use `[data-artboard="<artboardId>"] >>> button`. `click`, `hover`, `text`, `snapshot` and `screenshot` take the first match, or `--nth <i>` as `query` numbers them. In `eval` and `wait`, `$deep(css)` and `$$deep(css)` find elements the same way.
+Selectors are puppeteer's: CSS, `::-p-text(Create blank design)`, `::-p-aria(Send)`. Prefer the app's `aria-label`s and titles to coordinates.
 
-An artboard with a `<script>` renders in a sandboxed iframe that selectors can't reach. Find the iframe's position with `query "[data-artboard] iframe"`, then `click <x> <y>`.
-
-`click <css> --shift` holds Shift, as when you add elements to a comment. `upload <css> <file>` picks a file in a file input, hidden ones included, the way the OS file picker hands one over. Use it for the Import button, whose picker headless Chrome can't show.
-
-If a target is out of view, `click` says so. Press `key Shift+1` to fit every artboard on screen, or use `viewport <w> <h>` to resize.
-
-## The canvas's keys
-
-`key c` switches to the comment tool and `key v` to the pointer. `Escape` closes a comment box, `Shift+1` fits the view, and `=` and `-` zoom.
-
-A comment round trip:
-
-```bash
-node e2e/headless.mjs key c
-node e2e/headless.mjs click '[data-artboard] >>> button'
-node e2e/headless.mjs click textarea
-node e2e/headless.mjs type "Make it orange"
-node e2e/headless.mjs key Enter
-node e2e/headless.mjs call comments '{"designId":"<id>","wait":5}'
-```
-
-Page commands run one at a time, but `call` doesn't wait for them. So you can start `call comments` with `wait` in the background first, then post the comment, and check that the agent gets it while it waits.
-
-## Several agents
-
-Each `--agent <name>` on `call` opens a separate MCP session with that name, sent as `X-Finite-Agent`. So `--agent Alice` and `--agent Bob` have separate undo histories and show as separate presence badges. Without `--agent`, calls go out as "Agent". `call`'s input is JSON inline, `@file`, or `-` for stdin. Images a tool returns, like `render`'s, are saved as PNG files and their paths printed.
-
-## From Python
-
-`e2e/finite_headless.py` drives the same session from Python, with only the standard library. It's handy when a test needs loops, threads or assertions on the results. Each method sends one command and returns data: `eval` and `wait` return the JavaScript value, `query` a list of dicts, `screenshot` a `Path`, and `call` the tool's text.
-
-```python
-import sys
-sys.path.insert(0, "e2e")
-from finite_headless import Finite, design_id, id_after
-
-with Finite.start(build=False) as finite:  # stops the session when the block ends
-    design = design_id(finite.call("designs", create="Test"))
-    made = finite.call("edit", designId=design, ops=[{"op": "artboard", "name": "Page", "width": 800, "height": 500, "html": "<button>Go</button>"}])
-    board = id_after(made, '"Page"')
-    finite.design(design)
-    assert finite.query(f'[data-artboard="{board}"] >>> button')[0]["text"] == "Go"
-```
-
-`Finite.connect()` attaches to a session you started from the shell, and leaves it running. A failed command raises `HeadlessError`, and a tool error raises `ToolError`, with the same message the CLI prints. `call_full` also returns the paths of any images, like `render`'s. To test `comments` with `wait`, call it from a thread, then post the comment from the main thread.
-
-## Against `vp run dev`
-
-To test with hot reload instead of a static build, run `vp run dev` yourself, then attach:
-
-```bash
-node e2e/headless.mjs start --url http://localhost:5310 --server http://127.0.0.1:4100
-```
-
-`--server` is where MCP and `api` go, because the Next dev server only proxies `/api`. In this mode `stop` leaves the dev server running, `logs` has nothing to show, and the designs live in `crates/server/data`.
+- **Frames.** Each frame is `iframe[data-frame-id="<frameId>"]`, loaded from the design's own Vite server. Its elements carry `data-finite-loc="src/x.tsx:12:4"` (the JSX in the source) and `data-finite-rev`. `--frame <frameId>` runs `eval`, `click` and `wait` inside it.
+- **Selecting.** Frames take no pointer events: the canvas hit-tests through the bridge. To select an element, `click <x> <y>` on its spot in the page, then check `[data-selected]`. `eval` inside the frame gives the element's rect, and the iframe's rect in the page gives the offset and the zoom.
+- **Inspector.** It's collapsed by default: `click 'button[aria-label="Show inspector"]'`. Its fields are `input[aria-label="Layer opacity"]`, `"Corner radius"`, `"Width"` and so on. `click` one, `key Meta+a`, `type 50`, `key Enter`, then read the TSX file under the design's root to see the edit.
+- **Tabs.** `click '[role=tab]::-p-text(Prototypes)'` and `::-p-text(Design)`. The composer is `[aria-label=Message]`.
+- **Keys.** `key Meta+z` and `key Meta+Shift+z` undo and redo hand edits. Blur inputs first (`eval 'document.activeElement.blur()'`), or the field gets the key.

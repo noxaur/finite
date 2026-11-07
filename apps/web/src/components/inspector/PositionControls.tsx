@@ -27,7 +27,7 @@ import {
   withRotation,
   withSheet,
 } from "@/design/editing/transform";
-import type { Node, UserEdit } from "@/design/schema";
+import type { StyleEdit as UserEdit, Target as Node } from "./styleEditor";
 import { IconButton, Strip, StripAction } from "../Button";
 import { numberOf } from "../DraftField";
 import type { IconName } from "@/lib/icons";

@@ -5,15 +5,17 @@ import {
   app,
   BrowserWindow,
   dialog,
+  ipcMain,
   Menu,
   type MenuItemConstructorOptions,
   session,
   shell,
 } from "electron";
 import { afterStop } from "./restarts.js";
+import { loginShellPath } from "./shellPath.js";
 import { keepUpToDate, offerMoveToApplications } from "./updates.js";
 
-// `electron . --dev` loads the Next.js dev server; the Rust server runs separately via `vp run dev`.
+// `electron . --dev` loads the Next.js dev server; the Node server runs separately via `vp run dev`.
 const isDev = process.argv.includes("--dev");
 const DEV_URL = "http://localhost:5310";
 
@@ -27,23 +29,29 @@ let quitting = false;
 /** When the server last stopped on its own; see `afterStop`. */
 let stops: number[] = [];
 
-/** Locates the Rust binary and built frontend: app resources when packaged, the repo otherwise. */
+/**
+ * Locates the server's entry and the built frontend. Packaged, the server is the bundle
+ * `vp run @finite/server#build` makes (copied to resources/server by electron-builder.yml);
+ * from the repo it's the TypeScript source, which Electron's Node runs by stripping types.
+ */
 function resources() {
-  const exe = process.platform === "win32" ? "finite-server.exe" : "finite-server";
   if (app.isPackaged) {
     return {
-      serverBin: path.join(process.resourcesPath, exe),
+      serverEntry: path.join(process.resourcesPath, "server/dist/main.mjs"),
       staticDir: path.join(process.resourcesPath, "web"),
     };
   }
   const root = path.resolve(__dirname, "../../..");
   return {
-    serverBin: path.join(root, "target/release", exe),
+    serverEntry: path.join(root, "apps/server/src/main.ts"),
     staticDir: path.join(root, "apps/web/out"),
   };
 }
 
-/** Agents connect to `http://127.0.0.1:<port>/mcp`, so keep the port stable when it's free. */
+/** The login shell's PATH, so the server finds `claude`, `pnpm` and `node` as a terminal would. */
+let shellPath: Promise<string> | undefined;
+
+/** A stable port keeps the page's origin, and so its local storage, the same between launches. */
 const PREFERRED_PORT = 4100;
 
 function freePort(port = PREFERRED_PORT): Promise<number> {
@@ -76,9 +84,8 @@ async function waitFor(url: string, timeoutMs = 15_000): Promise<void> {
 }
 
 /**
- * Starts the Rust server as a sidecar. It serves both `/api` and the frontend
- * on one origin. A second server would find the data folder locked and exit,
- * so a new window reuses the first one.
+ * Starts the Node server as a sidecar. It serves both `/api` and the frontend
+ * on one origin, so a new window reuses the first one.
  */
 function serverOrigin(): Promise<string> {
   origin ??= startServer();
@@ -86,8 +93,8 @@ function serverOrigin(): Promise<string> {
 }
 
 async function startServer(): Promise<string> {
-  const port = await freePort();
-  spawnServer(port);
+  const [port, PATH] = await Promise.all([freePort(), (shellPath ??= loginShellPath())]);
+  spawnServer(port, PATH);
   const url = `http://127.0.0.1:${port}`;
   await waitFor(`${url}/api/health`);
   return url;
@@ -96,13 +103,16 @@ async function startServer(): Promise<string> {
 /**
  * Runs the server on `port`. If it stops on its own, say it crashed or the
  * system killed it, it starts again on the same port: open pages reconnect
- * there and resume, and the journal brings back the latest edits.
+ * there and resume; every change is already saved to disk.
  */
-function spawnServer(port: number) {
-  const { serverBin, staticDir } = resources();
-  server = spawn(serverBin, [], {
+function spawnServer(port: number, PATH: string) {
+  const { serverEntry, staticDir } = resources();
+  // Electron's own binary, run as plain Node: no second runtime to ship.
+  server = spawn(process.execPath, [serverEntry], {
     env: {
       ...process.env,
+      PATH,
+      ELECTRON_RUN_AS_NODE: "1",
       FINITE_PORT: String(port),
       FINITE_STATIC_DIR: staticDir,
       FINITE_DATA_DIR: path.join(app.getPath("userData"), "data"),
@@ -115,8 +125,8 @@ function spawnServer(port: number) {
     const next = afterStop(stops, Date.now());
     stops = next.stops;
     if (next.restart) {
-      console.error(`finite-server stopped (code ${code}, signal ${signal}); restarting it`);
-      spawnServer(port);
+      console.error(`Finite's server stopped (code ${code}, signal ${signal}); restarting it`);
+      spawnServer(port, PATH);
       return;
     }
     dialog.showErrorBox(
@@ -126,6 +136,16 @@ function spawnServer(port: number) {
     app.quit();
   });
 }
+
+/** Asks for a folder to connect as a design: its path, or `null` when the person cancels. */
+ipcMain.handle("finite:pickFolder", async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const options = { properties: ["openDirectory" as const] };
+  const result = win
+    ? await dialog.showOpenDialog(win, options)
+    : await dialog.showOpenDialog(options);
+  return result.canceled ? null : (result.filePaths[0] ?? null);
+});
 
 /** What the menu asks the page to do; mirror changes in apps/web/src/global.d.ts and preload.ts. */
 type FiniteCommand = "closeTab" | "nextTab" | "previousTab";

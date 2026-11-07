@@ -10,7 +10,7 @@ import {
   sizeModeOf,
   sizeModeStyles,
 } from "@/design/editing/sizing";
-import type { Node } from "@/design/schema";
+import type { Target as Node } from "./styleEditor";
 import type { MenuItem } from "../Menu";
 import {
   Block,

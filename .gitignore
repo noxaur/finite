@@ -32,22 +32,11 @@ dist-ssr
 # AI agent worktrees
 .claude/worktrees/
 
-# Rust
-target
-
-# Python, from importing e2e/finite_headless.py
-__pycache__/
-
-# Designs saved by a local dev server
-crates/server/data
-
-# Desktop packaging: the staged server and electron-builder's output
-apps/desktop/server
+# Desktop packaging: electron-builder's output
 apps/desktop/release
-e2e/ax/results
-
-# cargo-sweep stamp written by `vp run dev`
-sweep.timestamp
 
 # Evidence from .agents/skills/verify-finite runs
 .verify/
+
+# Designs saved by the Node dev server (FINITE_DATA_DIR default)
+.finite-data

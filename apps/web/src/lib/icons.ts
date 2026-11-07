@@ -101,7 +101,19 @@ export type IconName =
   | "clock"
   | "delay"
   | "angle"
-  | "arrowUp";
+  | "arrowUp"
+  | "gear"
+  | "filter"
+  | "compose"
+  | "paperclip"
+  | "stop"
+  | "history"
+  | "folder"
+  | "download"
+  | "spark"
+  | "trash"
+  | "more"
+  | "pencil";
 
 const path = (d: string, extra = "") => `<path d="${d}"${extra}/>`;
 const rect = (x: number, y: number, w: number, h: number, r: number, extra = "") =>
@@ -280,6 +292,40 @@ const SHAPES: Record<IconName, string | ((s: number) => string)> = {
   angle: path("M4.8 19.2h14.4M4.8 19.2 15.2 6.4M12.8 19.2a8 8 0 0 0-2.95-6.21"),
   // A shaft on the center pixel column, under a head that meets it at its tip: send.
   arrowUp: path("M12 19.2V5.6M6.4 11.2 12 5.6l5.6 5.6"),
+  // A ring of six teeth around a hub.
+  gear:
+    circle(12, 12, 2.8) +
+    path(
+      "M10.4 3.2h3.2l.6 2.5 1.8 1 2.4-.8 1.6 2.8-1.8 1.7v2.2l1.8 1.7-1.6 2.8-2.4-.8-1.8 1-.6 2.5h-3.2l-.6-2.5-1.8-1-2.4.8-1.6-2.8 1.8-1.7v-2.2L3.6 8.7l1.6-2.8 2.4.8 1.8-1z",
+    ),
+  // Three lines, each shorter: narrow the list.
+  filter: path("M4 7.2h16M7.2 12h9.6M10.4 16.8h3.2"),
+  // A square with a pen across its corner: write something new.
+  compose: path(
+    "M11.2 4.8H7.2a2.4 2.4 0 0 0-2.4 2.4v9.6a2.4 2.4 0 0 0 2.4 2.4h9.6a2.4 2.4 0 0 0 2.4-2.4v-4M17.6 4.4a1.7 1.7 0 0 1 2.4 2.4l-7.2 7.2-3.2.8.8-3.2z",
+  ),
+  paperclip: path(
+    "M18.4 11.2l-6.6 6.6a4 4 0 0 1-5.6-5.6l7-7a2.7 2.7 0 0 1 3.8 3.8l-6.9 6.9a1.3 1.3 0 0 1-1.9-1.9l6.2-6.2",
+  ),
+  stop: rect(7.2, 7.2, 9.6, 9.6, 1.6, FILL),
+  // A speech bubble with lines in it.
+  history:
+    path(
+      "M4.8 6.4a2.4 2.4 0 0 1 2.4-2.4h9.6a2.4 2.4 0 0 1 2.4 2.4v8a2.4 2.4 0 0 1-2.4 2.4H10.4L6.4 20v-3.2a1.6 1.6 0 0 1-1.6-1.6z",
+    ) + path("M8.8 8.8h6.4M8.8 12h4"),
+  folder: path(
+    "M3.2 7.2a2.4 2.4 0 0 1 2.4-2.4h3.6l2 2.4h7.2a2.4 2.4 0 0 1 2.4 2.4v7.2a2.4 2.4 0 0 1-2.4 2.4H5.6a2.4 2.4 0 0 1-2.4-2.4z",
+  ),
+  download: path("M12 4v11.2M7.2 10.4 12 15.2l4.8-4.8M4.8 19.2h14.4"),
+  // Eight rays from the center: the ✱ that opens the selection's actions.
+  spark: path("M12 4v16M4 12h16M6.4 6.4l11.2 11.2M17.6 6.4 6.4 17.6"),
+  // Three dots in a row: more actions.
+  more: dot(6, 12, 1.3) + dot(12, 12, 1.3) + dot(18, 12, 1.3),
+  // A pencil, tip down-left: rename or edit.
+  pencil: path("M15.6 4.8l3.6 3.6L8.4 19.2H4.8v-3.6zM13.2 7.2l3.6 3.6"),
+  trash: path(
+    "M4.8 7.2h14.4M9.6 7.2V5.6a1.6 1.6 0 0 1 1.6-1.6h1.6a1.6 1.6 0 0 1 1.6 1.6v1.6M6.4 7.2l.8 11.2a1.6 1.6 0 0 0 1.6 1.6h6.4a1.6 1.6 0 0 0 1.6-1.6l.8-11.2",
+  ),
 };
 
 export const ICON_NAMES = Object.keys(SHAPES) as readonly IconName[];

@@ -8,6 +8,7 @@ import { type Hsv, hexOfHsv, hsvOf, hueHex, parseHex, typedHex } from "@/design/
 import { displayName } from "@/lib/tokens";
 import { colors, fonts, motion, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import { EyeDropperButton } from "./inspector/controls";
+import { popupHost, targetNode } from "./portal";
 
 /**
  * A color the picker sends: `#rrggbb` and its opacity as a percentage.
@@ -173,7 +174,7 @@ export function ColorPicker({
 
   useEffect(() => {
     const away = (e: PointerEvent) => {
-      const target = e.target as Node | null;
+      const target = targetNode(e.target);
       if (!panel.current?.contains(target) && !latest.current.anchor.contains(target)) {
         latest.current.onClose();
       }
@@ -481,7 +482,7 @@ export function ColorPicker({
         <TokenSwatches tokens={tokens} onPick={(name) => tokens.onPick(name)} />
       )}
     </div>,
-    document.body,
+    popupHost(anchor),
   );
 }
 

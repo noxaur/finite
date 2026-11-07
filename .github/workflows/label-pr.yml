@@ -35,17 +35,17 @@ jobs:
             const SCOPES = [
               ['web', /^apps\/web\//],
               ['desktop', /^apps\/desktop\//],
-              ['server', /^crates\/server\//],
-              ['design', /^crates\/design\//],
-              ['wasm', /^crates\/wasm\//],
+              ['server', /^apps\/server\//],
+              ['protocol', /^packages\/protocol\//],
+              ['preview', /^packages\/vite-plugin\//],
               ['e2e', /^e2e\//],
               ['docs', /^(docs\/|[^/]+\.md$)/],
               ['ci', /^\.github\//],
-              ['build', /^(\.claude\/|\.vite-hooks\/|Cargo\.toml|package\.json|pnpm-workspace\.yaml|tsconfig\.json|vite\.config\.ts|\.[^/]+$)/],
+              ['build', /^(\.claude\/|\.vite-hooks\/|package\.json|pnpm-workspace\.yaml|tsconfig\.json|vite\.config\.ts|\.[^/]+$)/],
             ]
             const SCOPE_COLOR = 'c5def5'
             const MAX_SCOPES = 4
-            const IGNORED_FOR_SIZE = /(^|\/)(Cargo\.lock|pnpm-lock\.yaml)$/
+            const IGNORED_FOR_SIZE = /(^|\/)pnpm-lock\.yaml$/
 
             const VOUCHED = ['OWNER', 'MEMBER', 'COLLABORATOR']
 

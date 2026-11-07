@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "tanstack",
+  "router": "tanstack",
+  "styling": "inline",
+  "css": [],
+  "brandDir": "src/assets/brand"
+}

@@ -1,167 +1,301 @@
 "use client";
 
 import * as stylex from "@stylexjs/stylex";
-import { useEffect, useState } from "react";
-import type { Editor } from "@/design/editing/editor";
+import type { Frame, Inspection, Token } from "@finite/protocol";
+import { useEffect, useMemo, useState } from "react";
+import { bridgeOf } from "@/canvas/bridge";
+import { finite } from "@/client/finite";
+import { type CanvasEditor, useActiveEditor, useEditorState } from "@/canvas/editor";
+import { baseName, fileOf } from "@/canvas/gestures";
+import { keyOf, type SelectionItem, useSelection } from "@/canvas/selection";
+import { radiusOf } from "@/design/editing/appearance";
 import { routeStyles } from "@/design/editing/inspect";
-import { iconOf } from "@/design/editing/layers";
-import { nodeOf } from "@/design/editing/tree";
-import type { Renderer } from "@/design/renderer";
-import type { Replica, TokenTable } from "@/design/replica";
-import type { Node, UserEdit } from "@/design/schema";
-import type { DesignSession } from "@/design/session";
-import { colors, size, space } from "@/styles/tokens.stylex";
+import type { TokenTable } from "@/design/types";
+import { colors, fonts, size, space } from "@/styles/tokens.stylex";
+import { IconButton } from "../Button";
 import { Icon } from "../Icons";
-import { useRedrawOnChange } from "../SelectionLayer";
-import { Toggle } from "./controls";
 import { AppearanceSection } from "./AppearanceSection";
-import { AdvancedSection } from "./AdvancedSection";
 import { EffectsSection } from "./EffectsSection";
 import { FillSection } from "./FillSection";
 import { geometryOf } from "./geometry";
 import { LayoutSection } from "./LayoutSection";
-import { PagePanel } from "./PagePanel";
-import { PrototypeSection } from "./PrototypeSection";
 import { RadiusSection } from "./RadiusSection";
 import type { Changes, Scope } from "./scope";
 import { StrokeSection } from "./StrokeSection";
-import { TransformSection } from "./TransformSection";
-import { TransitionsSection } from "./TransitionsSection";
+import { createStyleEditor, type StyleEdit, type Target } from "./styleEditor";
 import { TypographySection } from "./TypographySection";
+import { GeometryFrameFields } from "./FrameFields";
 
-function kindOf(node: Node): string {
-  if (node.parent === null) return "Artboard";
-  if (node.component) return "Component";
-  if (node.instanceOf !== undefined) return "Instance";
-  if (node.type === "text") return "Text";
-  return node.tag ?? "Element";
+/** The design's tokens as the fields read them: a Light and a Dark mode. */
+export function tokenTable(tokens: readonly Token[]): TokenTable {
+  const table: Record<string, Record<string, string>> = {};
+  for (const t of tokens) {
+    table[t.name] = {
+      ...(t.light === undefined ? {} : { light: t.light }),
+      ...(t.dark === undefined ? {} : { dark: t.dark }),
+    };
+  }
+  return {
+    modes: [
+      { id: "light", name: "Light" },
+      { id: "dark", name: "Dark" },
+    ],
+    tokens: table,
+  };
 }
+
+const CORNERS = [
+  "borderTopLeftRadius",
+  "borderTopRightRadius",
+  "borderBottomRightRadius",
+  "borderBottomLeftRadius",
+] as const;
+
+const camel = (prop: string) => prop.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
+
+/** A `CSSStyleDeclaration` the fields can read, from what the bridge measured (camelCase keys). */
+function declaration(computed: Readonly<Record<string, string>>): CSSStyleDeclaration {
+  const own = (prop: string) => computed[prop] ?? computed[camel(prop)] ?? "";
+  // The bridge measures the corners; the radius field reads them as one, like `rounded-card`.
+  const read = (prop: string) => {
+    if (prop !== "border-radius" && prop !== "borderRadius") return own(prop);
+    const corners = CORNERS.map(own) as [string, string, string, string];
+    return own(prop) || (corners.every(Boolean) ? radiusOf(corners) : "");
+  };
+  // Fields read it both ways: `getPropertyValue("flex-direction")` and `.flexDirection`.
+  return new Proxy({} as CSSStyleDeclaration, {
+    get: (_, key) =>
+      key === "getPropertyValue" ? read : typeof key === "string" ? read(key) : undefined,
+  });
+}
+
+type Inspected = { item: SelectionItem & { loc: string }; inspection: Inspection };
+
+/** What the bridge says about each selected element, measured again after every frame update. */
+function useInspections(items: readonly SelectionItem[], updates: number): Inspected[] | null {
+  const [found, setFound] = useState<Inspected[] | null>(null);
+  const key = items.map(keyOf).join(" ");
+  useEffect(() => {
+    let live = true;
+    const els = items.filter((i): i is SelectionItem & { loc: string } => i.loc !== undefined);
+    void Promise.all(
+      els.map(async (item) => {
+        const inspection = await bridgeOf(item.frameId)
+          ?.inspect(item.loc, item.index ?? 0)
+          .catch(() => null);
+        return inspection ? { item, inspection } : null;
+      }),
+    ).then((all) => {
+      if (live) setFound(all.filter((x): x is Inspected => x !== null));
+    });
+    return () => {
+      live = false;
+    };
+    // `items` is keyed by `key`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, updates]);
+  return found;
+}
+
+function useTokens(designId: string | undefined): TokenTable {
+  const [tokens, setTokens] = useState<readonly Token[]>([]);
+  useEffect(() => {
+    if (!designId) return;
+    let live = true;
+    void finite
+      .request("tokens.get", { designId })
+      .then((t) => live && setTokens(t))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [designId]);
+  return useMemo(() => tokenTable(tokens), [tokens]);
+}
+
 /**
- * The selection's styles, down the right side. Each field shows the inline
- * style every selected element shares, the token it uses, or, faintly,
- * what the browser draws when none of them sets one. Typing into a field
- * shows on the canvas with each key and sets it on the whole selection as
- * one edit when it's kept, so one undo takes it back; agents see it like
- * any other change. Dragging a field's icon or letter scrubs its number,
- * and ↑ and ↓ step it. The ◇ button picks one of the design's tokens. X,
- * Y, W and H move and resize the one selected element the way dragging
- * does. The fields follow every change as it's made, a drag on the canvas
- * included.
+ * The selection's styles, down the right side, collapsed by default. It reads what the browser
+ * draws (through the frame's bridge) and writes CSS properties as `style` source edits, which
+ * the server turns into the design's convention (Tailwind classes, a CSS module rule, or inline
+ * styles). Typing previews in the frame on each key and is kept as one edit. A selected frame
+ * shows its place and size on the canvas.
  */
 export function Inspector({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const editor = useActiveEditor();
+  const state = useEditorState(editor);
+  const selection = useSelection();
+  const inspected = useInspections(selection, state?.updates ?? 0);
+  const tokens = useTokens(editor?.designId);
+
+  if (!open) {
+    return (
+      <div {...stylex.props(styles.closed)}>
+        <IconButton
+          size="small"
+          variant="ghost"
+          icon="sidebar"
+          label="Show inspector"
+          onClick={() => onOpenChange(true)}
+        />
+      </div>
+    );
+  }
+  const frames = selection.filter((s) => s.loc === undefined);
+  const header = (title: string, kind?: string) => (
+    <header {...stylex.props(styles.top)}>
+      <span {...stylex.props(styles.topIcon)}>
+        <Icon name={kind === "Frame" ? "artboard" : "box"} size={15} />
+      </span>
+      <span {...stylex.props(styles.topName)}>{title}</span>
+      {kind && <span {...stylex.props(styles.tag)}>{kind}</span>}
+      <IconButton
+        size="small"
+        variant="ghost"
+        icon="sidebar"
+        label="Hide inspector"
+        onClick={() => onOpenChange(false)}
+      />
+    </header>
+  );
+
+  let body = <p {...stylex.props(styles.empty)}>Select a frame or an element to see its styles.</p>;
+  let title = "Inspector";
+  let kind: string | undefined;
+  const frame = frames.length === 1 && editor ? editor.frame(frames[0]!.frameId) : undefined;
+  if (editor && frame && selection.length === 1) {
+    title = frame.name;
+    kind = "Frame";
+    body = <FramePanel editor={editor} frame={frame} />;
+  } else if (editor && inspected && inspected.length > 0) {
+    const panel = <ElementPanel editor={editor} inspected={inspected} tokens={tokens} />;
+    const [first] = inspected;
+    title = inspected.length === 1 ? `<${first!.inspection.tag}>` : `${inspected.length} layers`;
+    kind = inspected.length === 1 ? baseName(fileOf(first!.item.loc)) : undefined;
+    body = (
+      <>
+        {state?.label && <p {...stylex.props(styles.label)}>{state.label}</p>}
+        {panel}
+      </>
+    );
+  }
+  return (
+    <div role="group" aria-label="Inspector" {...stylex.props(styles.panel)}>
+      {header(title, kind)}
+      <div {...stylex.props(styles.scroll)}>{body}</div>
+    </div>
+  );
+}
+
+function FramePanel({ editor, frame }: { editor: CanvasEditor; frame: Frame }) {
+  return <GeometryFrameFields editor={editor} frame={frame} />;
+}
+
+function ElementPanel({
   editor,
-  session,
-  renderer,
-  replica,
+  inspected,
   tokens,
 }: {
-  editor: Editor;
-  session: DesignSession;
-  renderer: Renderer;
-  replica: Replica;
+  editor: CanvasEditor;
+  inspected: Inspected[];
   tokens: TokenTable;
 }) {
-  useRedrawOnChange(session);
-  const [state, setState] = useState(editor.state);
-  useEffect(() => {
-    setState(editor.state);
-    return editor.subscribe(() => setState(editor.state));
-  }, [editor]);
-
-  const selected = state.selection
-    .map((id) => nodeOf(replica, id))
-    .filter((n): n is Node => n !== undefined);
-  if (selected.length === 0) {
-    const shown = replica.pages.length > 0 ? renderer.shownPage() : null;
-    const page = replica.pages.find((p) => p.id === shown);
-    return page ? <PagePanel editor={editor} page={page} tokens={tokens} /> : null;
-  }
-  const targets = [
-    ...new Map(
-      selected
-        .map((n) => (n.type === "text" && n.parent !== null ? nodeOf(replica, n.parent) : n))
-        .filter((n): n is Node => n !== undefined)
-        .map((n) => [n.id, n]),
-    ).values(),
-  ];
-  const [first] = targets;
-  if (!first) return null;
-  const board = replica.artboardOf(first.id);
-  const editsEach = (changes: (target: Node) => Changes): UserEdit[] => {
+  const byId = new Map(inspected.map((x) => [keyOf(x.item), x]));
+  const styleEditor = useMemo(
+    () =>
+      createStyleEditor(
+        (id) => {
+          const x = byId.get(id);
+          return x && { frameId: x.item.frameId, loc: x.item.loc };
+        },
+        (groups) => editor.styleEdits(groups),
+      ),
+    // A new selection makes a new editor; within one, the locs stay put.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [editor, inspected.map((x) => keyOf(x.item)).join(" ")],
+  );
+  const targets: Target[] = inspected.map((x) => ({
+    id: keyOf(x.item),
+    parent: `${keyOf(x.item)}^`,
+    styles: {},
+  }));
+  const computedOf = (id: string) => {
+    if (id.endsWith("^")) {
+      const p = byId.get(id.slice(0, -1))?.inspection.parent;
+      return p ? declaration({ display: p.display, "flex-direction": p.flexDirection }) : null;
+    }
+    const x = byId.get(id);
+    return x ? declaration(x.inspection.computed) : null;
+  };
+  const editsEach = (changes: (target: Target) => Changes): StyleEdit[] => {
     // Targets that write the same styles share one edit.
-    const byStyles = new Map<string, { ids: string[]; styles: Changes }>();
+    const groups = new Map<string, { ids: string[]; styles: Changes }>();
     for (const t of targets) {
       const routed = routeStyles(t.styles, changes(t));
       const key = JSON.stringify(routed);
-      const group = byStyles.get(key);
+      const group = groups.get(key);
       if (group) group.ids.push(t.id);
-      else byStyles.set(key, { ids: [t.id], styles: routed });
+      else groups.set(key, { ids: [t.id], styles: routed });
     }
-    return [...byStyles.values()].map((g) => ({ kind: "setStyles", ...g }));
+    return [...groups.values()].map((g) => ({ kind: "setStyles", ...g }));
   };
   const edits = (changes: Changes) => editsEach(() => changes);
+  const [first] = targets;
   const scope: Scope = {
     targets,
-    // A text layer: a text node, or an element that holds only text, like a heading.
-    text: targets.every((t) => {
-      const kids = replica.children(t.id);
-      return kids.length > 0 && kids.every((k) => k.type === "text");
-    }),
-    computed: renderer.computedStyle(first.id),
-    computedOf: (id) => renderer.computedStyle(id),
+    text: inspected.every((x) => x.inspection.text !== undefined),
+    computed: first ? computedOf(first.id) : null,
+    computedOf,
     tokens,
-    mode: board ? replica.modeOf(board) : "",
-    editor,
+    mode: "light",
+    editor: styleEditor,
     edits,
     editsEach,
-    commit: (changes) => void editor.commit(edits(changes)),
-    commitEach: (changes) => void editor.commit(editsEach(changes)),
+    commit: (changes) => void styleEditor.commit(edits(changes)),
+    commitEach: (changes) => void styleEditor.commit(editsEach(changes)),
   };
-  const action = selected.length === 1 ? editor.componentAction(first.id) : null;
-  const one = selected.length === 1 ? selected[0] : undefined;
-  const geometry = one ? geometryOf(one, renderer, replica) : null;
-  // Ids change with the selection, so every field starts fresh for a new one.
+  const one = inspected.length === 1 ? inspected[0] : undefined;
+  const rect = one && editor.state.rects[keyOf(one.item)];
+  const geometry = one && first && rect ? geometryOf(first, rect) : null;
+  // Fields start fresh for a new selection.
   const key = targets.map((t) => t.id).join(" ");
-
   return (
-    <div key={key} role="group" aria-label="Inspector" {...stylex.props(styles.panel)}>
-      <header {...stylex.props(styles.top)}>
-        <span {...stylex.props(styles.topIcon)}>
-          <Icon name={one ? iconOf(one) : "box"} size={15} />
-        </span>
-        <span {...stylex.props(styles.topName)}>
-          {one ? (one.name ?? one.text ?? one.tag ?? "Layer") : `${selected.length} layers`}
-        </span>
-        {one && <span {...stylex.props(styles.tag)}>{kindOf(one)}</span>}
-        {action && (
-          <Toggle
-            icon={action === "make" ? "component" : "unlink"}
-            title={action === "make" ? "Make component (⌥⌘K)" : "Detach instance (⌥⌘B)"}
-            onClick={() => editor.toggleComponent(first.id)}
-          />
-        )}
-      </header>
-      <LayoutSection scope={scope} editor={editor} geometry={geometry} />
+    <div key={key}>
+      <LayoutSection scope={scope} editor={styleEditor} geometry={geometry} />
       <FillSection scope={scope} />
       <StrokeSection scope={scope} />
       <RadiusSection scope={scope} />
       <AppearanceSection scope={scope} />
       <EffectsSection scope={scope} />
       <TypographySection scope={scope} />
-      <TransformSection scope={scope} />
-      <TransitionsSection scope={scope} />
-      <AdvancedSection scope={scope} />
-      <PrototypeSection node={one} editor={editor} replica={replica} />
     </div>
   );
 }
 
 const styles = stylex.create({
+  closed: {
+    display: "flex",
+    justifyContent: "flex-end",
+    padding: space.xs,
+  },
   panel: {
     display: "flex",
+    fontFamily: fonts.sans,
     flexDirection: "column",
+    width: size.right,
     minHeight: 0,
+    height: "100%",
+    backgroundColor: colors.surface,
+    borderLeftWidth: 1,
+    borderLeftStyle: "solid",
+    borderLeftColor: colors.border,
   },
+  scroll: { flexGrow: 1, minHeight: 0, overflowY: "auto" },
   top: {
     display: "flex",
     alignItems: "center",
@@ -189,5 +323,21 @@ const styles = stylex.create({
     color: colors.faint,
     fontSize: 12,
     lineHeight: "15px",
+  },
+  label: {
+    margin: 0,
+    paddingInline: space.ms,
+    paddingBlock: space.sm,
+    color: colors.muted,
+    fontSize: 12,
+    borderBottomWidth: 1,
+    borderBottomStyle: "solid",
+    borderBottomColor: colors.borderSoft,
+  },
+  empty: {
+    margin: 0,
+    padding: space.ms,
+    color: colors.faint,
+    fontSize: 13,
   },
 });

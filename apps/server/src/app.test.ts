@@ -1,0 +1,139 @@
+import {
+  type Agents,
+  type DesignEntry,
+  Refused,
+  type ServerMessage,
+  type Store,
+} from "@finite/protocol";
+import { afterEach, describe, expect, it } from "vite-plus/test";
+import WebSocket from "ws";
+import { createAgents } from "./agent/index.ts";
+import { type RunningServer, startServer } from "./app.ts";
+import { allowedHosts } from "./guard.ts";
+import { createPreviews } from "./preview/index.ts";
+import { createSourceEditor } from "./source/index.ts";
+import { createStore } from "./store/index.ts";
+
+const designs: DesignEntry[] = [
+  { id: "d1", name: "Shop", root: "/tmp/shop", origin: "connected", updatedAt: 1 },
+];
+
+let running: RunningServer | undefined;
+afterEach(async () => {
+  await running?.close();
+  running = undefined;
+});
+
+async function start(store: Partial<Store> = {}, agents: Partial<Agents> = {}) {
+  const base = createStore({ dataDir: "/nonexistent" });
+  const fake: Store = { ...base, designs: async () => designs, ...store };
+  const previews = createPreviews({ host: "127.0.0.1" });
+  const source = createSourceEditor();
+  running = await startServer({
+    port: 0,
+    host: "127.0.0.1",
+    allowedHosts: allowedHosts(undefined),
+    modules: {
+      store: fake,
+      previews,
+      source,
+      agents: { ...createAgents({ store: fake, previews, source }), ...agents },
+    },
+  });
+  return running.url.replace("http", "ws") + "/api/ws";
+}
+
+function connect(url: string, origin = "http://localhost:5310") {
+  const ws = new WebSocket(url, { origin });
+  const inbox: ServerMessage[] = [];
+  const waiting: ((m: ServerMessage) => void)[] = [];
+  ws.on("message", (data) => {
+    const message = JSON.parse((data as Buffer).toString("utf8")) as ServerMessage;
+    const next = waiting.shift();
+    if (next) next(message);
+    else inbox.push(message);
+  });
+  const opened = new Promise<void>((resolve, reject) => {
+    ws.once("open", () => resolve());
+    ws.once("error", reject);
+    ws.once("unexpected-response", (_req, res) => reject(new Error(`HTTP ${res.statusCode}`)));
+  });
+  const next = () =>
+    new Promise<ServerMessage>((resolve) => {
+      const queued = inbox.shift();
+      if (queued) resolve(queued);
+      else waiting.push(resolve);
+    });
+  const request = async (message: object) => {
+    ws.send(JSON.stringify(message));
+    return next();
+  };
+  return { ws, opened, request, next };
+}
+
+describe("hub", () => {
+  it("answers hello and designs.list", async () => {
+    const client = connect(await start());
+    await client.opened;
+    expect(
+      await client.request({ type: "hello", rid: "1", user: { id: "u", name: "Per" } }),
+    ).toEqual({
+      type: "reply",
+      rid: "1",
+      ok: true,
+      value: { version: 1, user: { id: "u", name: "Per" } },
+    });
+    expect(await client.request({ type: "designs.list", rid: "2" })).toEqual({
+      type: "reply",
+      rid: "2",
+      ok: true,
+      value: designs,
+    });
+    client.ws.close();
+  });
+
+  it("refuses a bad message with a readable reason", async () => {
+    const client = connect(await start());
+    await client.opened;
+    await client.request({ type: "hello", rid: "1", user: { id: "u", name: "Per" } });
+    expect(await client.request({ type: "design.connect", rid: "2", path: 42 })).toMatchObject({
+      rid: "2",
+      ok: false,
+      code: "invalid",
+      reason: expect.stringMatching(/^design\.connect: path: .*string/),
+    });
+    client.ws.close();
+  });
+
+  it("passes a module's refusal through", async () => {
+    const status = async () => {
+      throw new Refused("Claude Code is busy; try again.", "not-implemented");
+    };
+    const client = connect(await start({}, { status }));
+    await client.opened;
+    await client.request({ type: "hello", rid: "1", user: { id: "u", name: "Per" } });
+    expect(await client.request({ type: "claude.status", rid: "2" })).toEqual({
+      type: "reply",
+      rid: "2",
+      ok: false,
+      reason: "Claude Code is busy; try again.",
+      code: "not-implemented",
+    });
+    client.ws.close();
+  });
+
+  it("broadcasts design list changes to every client", async () => {
+    let emit: ((list: DesignEntry[]) => void) | undefined;
+    const client = connect(await start({ on: (fn) => ((emit = fn), () => {}) }));
+    await client.opened;
+    await client.request({ type: "hello", rid: "1", user: { id: "u", name: "Per" } });
+    emit?.(designs);
+    expect(await client.next()).toEqual({ type: "designs", list: designs });
+    client.ws.close();
+  });
+
+  it("refuses a socket from another site", async () => {
+    const client = connect(await start(), "https://evil.example");
+    await expect(client.opened).rejects.toThrow("HTTP 403");
+  });
+});

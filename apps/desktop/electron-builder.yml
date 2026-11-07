@@ -19,9 +19,14 @@ files:
   - dist/**
   - package.json
 extraResources:
-  # Staged per architecture by scripts/stage-server.mjs; main.ts finds them here.
-  - from: server/${arch}
-    to: .
+  # The Node server, bundled by `vp run @finite/server#build`, and the blank design
+  # template it copies. Electron's own Node runs it (main.ts), so it's the same on
+  # every architecture.
+  - from: ../server/dist
+    to: server/dist
+  - from: ../server/scaffold
+    to: server/scaffold
+    filter: ["**/*", "!node_modules/**", "!dist/**"]
   - from: ../web/out
     to: web
 

@@ -7,6 +7,8 @@ interface FiniteBridge {
   readonly versions: { readonly electron: string; readonly chrome: string };
   /** Calls `listener` with each menu command; returns a function that stops it. Older builds lack it. */
   readonly onCommand?: (listener: (command: FiniteCommand) => void) => () => void;
+  /** Opens the system folder picker; resolves to the chosen folder, or null when cancelled. */
+  readonly pickFolder?: () => Promise<string | null>;
 }
 
 interface Window {

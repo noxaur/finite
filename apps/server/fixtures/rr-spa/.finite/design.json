@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "rr-spa",
+  "router": "react-router",
+  "styling": "tailwind",
+  "css": ["src/index.css"],
+  "brandDir": "src/assets/brand"
+}

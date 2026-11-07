@@ -73,6 +73,10 @@ export const colors = stylex.defineVars({
   hover: "#3a9fb0",
   ok: { default: "#15803d", [DARK]: "#4ade80" },
   danger: { default: "#b8341f", [DARK]: "#f0806c" },
+  /** Claude's asterisk mark, next to the model's name in the composer. */
+  claude: "#d97757",
+  /** The floating composer's card: a step darker than the canvas around it. */
+  composer: { default: slate[0], [DARK]: "#17191b" },
   /** Components and their instances on the canvas. */
   component: { default: "#7c3aed", [DARK]: "#a78bfa" },
   /** Text on a `component` fill. */

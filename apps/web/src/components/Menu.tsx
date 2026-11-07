@@ -6,6 +6,7 @@ import { createPortal } from "react-dom";
 import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import type { IconName } from "@/lib/icons";
 import { Icon } from "./Icons";
+import { popupHost } from "./portal";
 import { useDismiss } from "./useDismiss";
 
 export interface MenuItem {
@@ -183,7 +184,7 @@ export function Menu({
         ),
       )}
     </div>,
-    document.body,
+    popupHost(anchor),
   );
 }
 

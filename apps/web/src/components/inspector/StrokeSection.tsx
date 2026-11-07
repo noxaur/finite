@@ -17,7 +17,7 @@ import {
   sideStyle,
   strokeProp,
 } from "@/design/editing/stroke";
-import type { Node } from "@/design/schema";
+import type { Target as Node } from "./styleEditor";
 import { numberOf } from "../DraftField";
 import {
   Block,

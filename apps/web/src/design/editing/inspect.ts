@@ -1,7 +1,6 @@
 import { parts } from "./lists";
 import { FLEX_PARTS, flexParts } from "./sizing";
 import { outlinePart } from "./stroke";
-import type { Node } from "../schema";
 
 /**
  * What one style field shows for the selection. Only inline styles are the
@@ -29,7 +28,7 @@ export function tokenOf(raw: string): string | null {
  * value on the first node, when none of them sets it.
  */
 export function readStyle(
-  nodes: ReadonlyArray<Pick<Node, "styles">>,
+  nodes: ReadonlyArray<{ readonly styles: Readonly<Record<string, string>> }>,
   prop: string,
   computed: string | null,
 ): Reading {

@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+/* Brand tokens. Tailwind turns each one into utilities: bg-ink, text-accent, font-display… */
+@theme {
+  --color-paper: #f4f1ea;
+  --color-ink: #1d1f22;
+  --color-muted: #6b6f76;
+  --color-accent: #d9572b;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Fraunces", ui-serif, Georgia, serif;
+  --radius-card: 14px;
+}
+
+body {
+  @apply bg-paper text-ink font-sans antialiased;
+}

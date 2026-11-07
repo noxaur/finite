@@ -1,9 +1,13 @@
-import type { Editor } from "@/design/editing/editor";
 import { type Reading, readStyle, tokenOf } from "@/design/editing/inspect";
-import type { TokenTable } from "@/design/replica";
-import type { Node, UserEdit } from "@/design/schema";
+import type { TokenTable } from "@/design/types";
 import { rotationOf, type TransformStyles, withSheet } from "@/design/editing/transform";
 import { isColor, resolveToken } from "@/lib/tokens";
+import type { Draft, StyleEditor, StyleEdit, Target } from "./styleEditor";
+
+export type { Draft, StyleEdit, Target };
+export type Editor = StyleEditor;
+export type Node = Target;
+export type UserEdit = StyleEdit;
 
 export type Changes = Readonly<Record<string, string | null>>;
 

@@ -8,6 +8,7 @@
     "test": "vp test"
   },
   "dependencies": {
+    "@finite/protocol": "workspace:*",
     "@stylexjs/stylex": "catalog:",
     "effect": "catalog:",
     "next": "catalog:",
@@ -20,7 +21,6 @@
     "@types/node": "catalog:",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
-    "typescript": "catalog:",
-    "wasm": "workspace:*"
+    "typescript": "catalog:"
   }
 }

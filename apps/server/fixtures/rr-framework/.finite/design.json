@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "rr-framework",
+  "router": "react-router",
+  "styling": "inline",
+  "css": [],
+  "brandDir": "app/assets/brand"
+}

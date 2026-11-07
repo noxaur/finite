@@ -33,7 +33,7 @@ import {
 import { tokenOf } from "@/design/editing/inspect";
 import { moveEntry, stashOf } from "@/design/editing/lists";
 import { roundTo } from "@/design/editing/units";
-import type { Node } from "@/design/schema";
+import type { Target as Node } from "./styleEditor";
 import { colors, outlines, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import type { IconName } from "@/lib/icons";
 import {

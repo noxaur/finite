@@ -10,19 +10,8 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import type { DesignSummary } from "@/design/schema";
-import { connectLobby } from "@/design/socket";
-import {
-  changedSince,
-  closeTab,
-  markSeen,
-  openTab,
-  pruneTabs,
-  renameTab,
-  stepTab,
-  type Tab,
-  tabsStore,
-} from "@/lib/tabs";
+import { useDesigns } from "@/client/finite";
+import { closeTab, openTab, pruneTabs, renameTab, stepTab, type Tab, tabsStore } from "@/lib/tabs";
 import { raised } from "@/styles/raised";
 import { colors, fonts, motion, radii, size, space } from "@/styles/tokens.stylex";
 import { IconButton } from "./Button";
@@ -30,12 +19,6 @@ import { Icon } from "./Icons";
 
 const designHref = (id: string) => `/design/?id=${id}`;
 
-/**
- * The designs this page knows, from the design list's socket. Kept between
- * mounts: switching tabs remounts the canvas and this bar with it, and the
- * dots shouldn't blink while the socket reconnects.
- */
-let known = new Map<string, DesignSummary>();
 /** Where the strip was scrolled, so a remount doesn't move the tabs under the pointer. */
 let stripScroll = 0;
 
@@ -59,7 +42,9 @@ function useHistoryEnds(): { back: boolean; forward: boolean } {
   useEffect(() => {
     const nav = (window as { navigation?: HistoryNavigation }).navigation;
     if (!nav || typeof nav.canGoBack !== "boolean") return;
-    const update = () => setEnds({ back: nav.canGoBack, forward: nav.canGoForward });
+    // Next pushes history inside an insertion effect, where React allows no updates: wait for it.
+    const update = () =>
+      queueMicrotask(() => setEnds({ back: nav.canGoBack, forward: nav.canGoForward }));
     update();
     nav.addEventListener("currententrychange", update);
     return () => nav.removeEventListener("currententrychange", update);
@@ -74,8 +59,6 @@ export interface TabBarProps {
   readonly currentName?: string | null | undefined;
   /** Agents working on it right now: they put a spinner on its tab. */
   readonly working?: ReadonlyArray<{ readonly name: string; readonly status: string | null }>;
-  /** The sidebars' toggle, for hide mode, where there are sidebars. */
-  readonly sidebar?: { readonly open: boolean; readonly onToggle: () => void };
   /** Hides the bar while it stays mounted, as in interactive mode. */
   readonly hidden?: boolean;
   /** The design's own actions, at the bar's right end. */
@@ -87,19 +70,12 @@ export interface TabBarProps {
  * open design, and the design's actions on the right. In the macOS app it's
  * the title bar too: the window buttons sit at its left and it drags the window.
  */
-export function TabBar({
-  current,
-  currentName,
-  working = [],
-  sidebar,
-  hidden,
-  children,
-}: TabBarProps) {
+export function TabBar({ current, currentName, working = [], hidden, children }: TabBarProps) {
   const router = useRouter();
   const state = useSyncExternalStore(tabsStore.subscribe, tabsStore.get, tabsStore.getServer);
   const macApp = useSyncExternalStore(noSubscribe, inMacApp, () => false);
   const ends = useHistoryEnds();
-  const [summaries, setSummaries] = useState(known);
+  const designs = useDesigns();
   const stripRef = useRef<HTMLDivElement>(null);
   const [overflow, setOverflow] = useState({ start: false, end: false });
 
@@ -110,50 +86,21 @@ export function TabBar({
   // Opening a design opens its tab, or focuses it; a new name renames it.
   useEffect(() => {
     if (!current) return;
-    const name = currentName ?? known.get(current)?.name;
-    tabsStore.update((s) => openTab(s, current, name));
-  }, [current, currentName]);
+    const name = currentName ?? designs?.find((d) => d.id === current)?.name;
+    tabsStore.update((s) => openTab(s, current, name ?? undefined));
+  }, [current, currentName, designs]);
 
-  // The design list's socket names the other tabs, says which designs
-  // changed, and resends the whole list when one is deleted.
-  useEffect(
-    () =>
-      connectLobby({
-        onMessage: (message) => {
-          let next: Map<string, DesignSummary>;
-          if (message.type === "designs") {
-            next = new Map(message.designs.map((d) => [d.id, d]));
-            // Only a complete list says a design is gone: with more designs
-            // than it holds, a missing one may just be older.
-            if (message.total <= message.designs.length) {
-              const active = live.current.current;
-              const gone = active !== null && !next.has(active);
-              tabsStore.update((s) => pruneTabs(s, (id) => next.has(id)));
-              if (gone) live.current.router.replace("/");
-            }
-          } else {
-            next = new Map(known).set(message.design.id, message.design);
-          }
-          known = next;
-          setSummaries(next);
-          tabsStore.update((s) =>
-            s.tabs.reduce((acc, tab) => {
-              const name = next.get(tab.id)?.name;
-              return name === undefined ? acc : renameTab(acc, tab.id, name);
-            }, s),
-          );
-        },
-      }),
-    [],
-  );
-
-  // What's on screen counts as seen, up to its latest change.
-  const currentUpdated = current ? summaries.get(current)?.updatedAt : undefined;
+  // The design list names the tabs and closes those of designs that are gone.
   useEffect(() => {
-    if (current && currentUpdated !== undefined) {
-      tabsStore.update((s) => markSeen(s, current, currentUpdated));
-    }
-  }, [current, currentUpdated]);
+    if (!designs) return;
+    const byId = new Map(designs.map((d) => [d.id, d]));
+    const active = live.current.current;
+    tabsStore.update((s) => {
+      const kept = pruneTabs(s, (id) => byId.has(id));
+      return kept.tabs.reduce((acc, tab) => renameTab(acc, tab.id, byId.get(tab.id)!.name), kept);
+    });
+    if (active !== null && !byId.has(active)) live.current.router.replace("/");
+  }, [designs]);
 
   const go = (id: string | null) => {
     if (id === current) return;
@@ -249,7 +196,7 @@ export function TabBar({
       data-app-region="drag"
       {...stylex.props(
         styles.bar,
-        !sidebar ? styles.noSidebar : sidebar.open ? styles.sidebarOpen : styles.sidebarClosed,
+        styles.columns,
         current === null && styles.sticky,
         hidden && styles.hidden,
       )}
@@ -273,22 +220,6 @@ export function TabBar({
           onClick={() => router.forward()}
         />
       </div>
-      {/* Over the tool rail. */}
-      {sidebar && (
-        <div {...stylex.props(styles.column, styles.rail)}>
-          <IconButton
-            icon="sidebar"
-            label={sidebar.open ? "Hide sidebars" : "Show sidebars"}
-            title={sidebar.open ? "Hide sidebars (⌘\\)" : "Show sidebars (⌘\\)"}
-            variant="ghost"
-            size="small"
-            // Flat in both states: the sidebar itself shows whether it's open.
-            aria-pressed={sidebar.open}
-            onClick={sidebar.onToggle}
-          />
-        </div>
-      )}
-
       {/* Over the canvas and the right sidebar. */}
       <div {...stylex.props(styles.main)}>
         <div
@@ -318,10 +249,7 @@ export function TabBar({
               active={tab.id === current}
               busy={tab.id === current && busy}
               busyLabel={busyLabel}
-              changed={
-                tab.id !== current &&
-                changedSince(state, tab.id, summaries.get(tab.id)?.updatedAt ?? -Infinity)
-              }
+              changed={false}
               onSelect={() => go(tab.id)}
               onClose={() => close(tab.id)}
               onKeyDown={(e) => onTabKey(e, at)}
@@ -455,10 +383,7 @@ const styles = stylex.create({
     fontFamily: fonts.sans,
     userSelect: "none",
   },
-  sidebarOpen: { gridTemplateColumns: `${size.left} ${size.rail} minmax(0, 1fr)` },
-  // With the sidebar hidden, history keeps just the room it needs.
-  sidebarClosed: { gridTemplateColumns: `auto ${size.rail} minmax(0, 1fr)` },
-  noSidebar: { gridTemplateColumns: `${size.left} minmax(0, 1fr)` },
+  columns: { gridTemplateColumns: `${size.left} minmax(0, 1fr)` },
   // Over the designs list, which scrolls under it.
   sticky: { position: "sticky", top: 0, zIndex: 1 },
   hidden: { display: "none" },
@@ -478,7 +403,6 @@ const styles = stylex.create({
     paddingRight: space.sm,
   },
   macApp: { paddingLeft: MAC_BUTTONS },
-  rail: { justifyContent: "center" },
   main: {
     display: "flex",
     alignItems: "center",

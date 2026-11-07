@@ -1,4 +1,4 @@
-import type { TokenTable } from "@/design/replica";
+import type { TokenTable } from "@/design/types";
 import { tokenOf } from "../design/editing/inspect";
 
 /** A token's value in `mode`, following whole-value `var(--x)` aliases, as the browser would. */

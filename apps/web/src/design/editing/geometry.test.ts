@@ -1,29 +1,16 @@
 import { describe, expect, it } from "vite-plus/test";
-import type { Node } from "../schema";
 import {
   type Facts,
+  type Node,
   flowOf,
   moveAbsolute,
-  moveArtboards,
   moveEdges,
   resize,
   slotBefore,
   snap,
 } from "./geometry";
 
-const node = (styles: Record<string, string> = {}): Node => ({
-  id: "n",
-  parent: "board",
-  index: "V",
-  type: "element",
-  tag: "div",
-  name: null,
-  text: null,
-  x: null,
-  y: null,
-  styles,
-  attrs: {},
-});
+const node = (styles: Record<string, string> = {}): Node => ({ id: "n", styles });
 
 const facts = (patch: Partial<Facts> = {}): Facts => ({
   position: "absolute",
@@ -37,13 +24,6 @@ const facts = (patch: Partial<Facts> = {}): Facts => ({
 });
 
 describe("moving", () => {
-  it("moves artboards to whole pixels", () => {
-    expect(moveArtboards([{ id: "a", x: 10, y: 10 }], { x: 4.6, y: -2.2 })).toEqual({
-      kind: "setPosition",
-      moves: [{ id: "a", x: 15, y: 8 }],
-    });
-  });
-
   it("moves a positioned element by left and top", () => {
     expect(moveAbsolute(node(), facts(), { x: 5, y: -5 })).toEqual({
       kind: "setStyles",

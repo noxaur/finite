@@ -1,15 +1,15 @@
 # Finite
 
-Finite is a design canvas that agents edit and people steer.
+Finite is a design canvas for real React projects, which agents edit and people steer.
 
 ## What makes Finite special?
 
 These are the things we can't compromise on. They make us what we are today and tomorrow.
 
-- Built for agents: agents do most of the editing, so every tool, result and error is written for an agent to read. People can select, move, resize and delete things on the canvas too. Measure a change with an AX run (`e2e/ax`) instead of guessing whether it helps.
-- Live and shared: several agents and people edit at once and see every change live. One actor's edit or undo never wipes out another's work.
-- Fast: an edit holds the design's lock, so a slow edit makes every agent and viewer wait. Performance is a core feature. Measure it (`vp run bench`, the `examples/` in each crate), and do not trade it for convenience.
-- Plain HTML and CSS: designs are ordinary HTML and CSS that agents already know, not a custom format.
+- Real React projects: a design is an ordinary React and TypeScript codebase, not a custom format. Frames are live pages of the project's own Vite dev server, and every hand edit writes TSX in the project's own convention (Tailwind, CSS modules or inline styles). The project's files are the truth; Finite's own state is JSON in `.finite/`.
+- Built for agents: agents do most of the work, through the person's local Claude Code CLI with Finite's canvas tools. Every tool result, refusal and error is written for an agent or a person to read, and says what to do instead. People select, move, resize and restyle on the canvas too.
+- Live and shared: several people and threads work on one design at once and see every change live. One actor's edit or undo never wipes out another's work.
+- Fast: the canvas holds many live iframes and stays smooth while agents work. Performance is a core feature. Measure it, and don't trade it for convenience.
 
 ## General principles
 
@@ -24,37 +24,38 @@ These are the things we can't compromise on. They make us what we are today and 
 
 The most common defect in this repo is a feature that works on the path you tested and is missing everywhere else. Before you call a change done, walk this list and say which entries applied:
 
-- **Agent and person.** Agents edit through MCP tools and people watch in the viewer, so a feature needs both halves. A new tool needs the viewer to render its result, and a new viewer behavior needs a tool or a comment that can trigger it. Put the logic in `edit/` so every tool shares it.
-- **Tools.** A change to one tool often applies to its neighbors. Check the `edit` ops (`crates/server/src/mcp/edit/`), `read` and `render`, and update `instructions.md`, `edit.md`, `read.md` and the tool descriptions so agents learn about it.
-- **Both renderers.** Artboards render in a shadow root, or in a sandboxed iframe when they contain a `<script>`. The screenshot renderer is a third path. Test a plain artboard and a script artboard.
-- **Wasm.** The server and the browser run the same document model. A new call needs an export in `crates/wasm/src/lib.rs` and a method in `apps/web/src/design/wasm.ts`.
-- **Undo and live edits.** Every op returns its inverse, and several agents edit at once. Check that undo, redo and a concurrent edit still work, and that comments, which sit outside the document, stay untouched.
-- **Both stores and many servers.** The folder store and the Postgres store both save snapshots and journals. With several servers, `cluster.rs` and `router.rs` send each request to the design's owner. A feature that reads or writes designs must work for each.
-- **Reverse states.** If you added a way in, add the way out and the way to see it. Delete needs restore, and resolve needs reopen. A one-way door is a bug.
+- **Agent and person.** Agents work through threads and canvas tools, people through the page, so a feature needs both halves. A new thing a person can do usually needs a tool or an instruction so an agent can do it too (`apps/server/src/agent/tools.ts`, `instructions.ts`), and what an agent makes must show in the page without a reload.
+- **Both tabs.** The Design tab (pages, layers, tokens, inspector) and the Prototypes tab (thread list, composer, prototype canvases) share the canvas. A canvas change must work on a page and on a prototype, where hand edits outside `.finite/` are refused with `outside-prototype`.
+- **Connected and blank designs.** A blank design starts from `apps/server/scaffold`; a connected one is whatever the person has. Test both. A connected root is the person's own code: Finite never deletes it.
+- **The three router adapters.** Routes come from TanStack Router's route tree, React Router's framework-mode `routes.ts`, or a scan of React Router's data and declarative modes (`packages/vite-plugin/src/routes.ts`). The fixtures `rr-spa`, `rr-framework` and `tanstack` in `apps/server/fixtures` cover each.
+- **Every styling convention.** A hand edit has a Tailwind, a CSS-modules and an inline path (`apps/server/src/source/`). Change one and check the others, and the `unsupported-style` refusal.
+- **Undo and concurrent edits.** Undo is per actor and works by span patches. Check undo, redo, and an edit by someone else in the same file in between.
+- **Reverse states.** If you added a way in, add the way out and the way to see it. Remove needs restore, resolve needs reopen, snooze and settle need a way to wake. A one-way door is a bug.
+- **The protocol.** A new request or event goes in `packages/protocol/src/wire.ts`, a handler in `apps/server/src/handlers.ts`, and the client side in `apps/web/src/client/finite.ts`.
 - **Docs.** Check whether the change makes `docs/how-finite-works.md` or the README inaccurate.
 
 ## How it works
 
-Read `docs/how-finite-works.md` before you change the document model, the server or the viewer. An agent calls an MCP tool at `/mcp` (`crates/server/src/mcp/`). The tool runs an edit command (`crates/design/src/edit/`), which reads the document and returns ops but never changes it. `DesignHandle::edit` (`hub/design.rs`) locks the design, commits the ops through `Design::commit`, broadcasts the change to every WebSocket and queues it for saving. Applying an op returns its inverse, and undo applies that inverse as a new change, so each agent undoes only its own work. `store.rs` saves a snapshot plus an append-only journal for each design. The browser runs the same Rust document model compiled to WebAssembly (`crates/wasm`): `socket.ts` receives the change, `DesignSession` feeds it to the `Replica`, and the `Renderer` patches only the DOM nodes each op touched. Artboards render in a shadow root, or in a sandboxed iframe when they contain a `<script>`. Comments are stored with the design but aren't part of the document, so undo never touches them. A person's drag sends a `UserEdit` list over the design's socket; `user_edit::plan` turns it into ops on the server, and the browser runs the same function through WebAssembly to show the edit before the server confirms it (`crates/wasm/src/replica.rs`). With several servers, `cluster.rs` picks each design's owner by rendezvous hashing and `router.rs` sends each request to it.
+Read `docs/how-finite-works.md` before you change the server, the plugin or the canvas. The page opens one WebSocket on `/api/ws` and speaks the protocol in `packages/protocol/src/wire.ts`. `apps/server/src/hub.ts` routes each request to a handler in `handlers.ts`, which calls one of four modules: `store/` (the designs registry and each design's `.finite/` folder, written atomically), `preview/` (one Vite dev server per open design, in a child process, with `@finite/vite-plugin`), `source/` (hand edits to TSX, tokens, per-actor undo) and `agent/` (one Claude Agent SDK query per live thread, running the local `claude` CLI with the canvas tools and the write fence). Frames are iframes of the design's dev server. The plugin stamps every JSX element with `data-finite-loc` and `data-finite-rev`, and the page reaches into a frame only through the bridge, a `MessageChannel`: it hit-tests a press, inspects the element, and sends a `source.edit` naming the loc and the file's rev. The server refuses the edit with `stale` if the file changed since, else rewrites the TSX, and Vite's HMR updates every viewer's frame.
 
 ## Code map
 
-- `crates/design/`: the document model, with no I/O. `node.rs` (nodes and properties), `document.rs` (the node map, ops and limits), `design/` (the document plus every actor's history, in `mod.rs`; `comments.rs` has the comment rules and `three_way.rs` the merge of rewritten HTML), `history.rs` (undo stacks), `edit/` (edit commands, one module each for HTML writing, styles, attributes, tokens, pages, the tree and components), `css.rs` (merging a patch into a stylesheet), `html.rs` (HTML in and out, and what's unsafe), `search.rs`, `select.rs` (CSS selectors), `comment.rs`, `fractional.rs` (sibling order), `label.rs` and `user_edit.rs` (the edits people make in the browser). Add a tool's logic in `edit/`, not in the server.
-- `crates/wasm/`: the document model as `finite.wasm`, with a plain C ABI for the viewer. A new call is an export in `src/lib.rs` and a method in `apps/web/src/design/wasm.ts`.
-- `crates/server/`: the axum server.
-  - `mcp/`: the six tools, one module each. `tools.rs` declares them, `edit/` runs an edit's ops, `read.rs`, `render.rs`, `comments.rs`, `undo.rs` and `designs.rs` are the others, and `format.rs` and `notes.rs` write outlines and notes. `instructions.md` is what agents read when they connect; keep it under 4,000 characters.
-  - `hub/`: the designs in memory. `mod.rs` loads, unloads and saves them, `design.rs` has `DesignHandle`, `messages.rs` has the WebSocket messages.
-  - `api.rs`: REST and WebSockets for the web app. `guard.rs` keeps other websites out, and `heartbeat.rs` pings the sockets.
-  - `store.rs` and `postgres/`: the folder store and the shared Postgres store.
-  - `cluster.rs`, `router.rs` and `relay.rs`: running more than one server.
-  - `screenshot/`: renders artboards with headless Chrome over CDP.
-- `apps/web/`: the Next.js app, styled with StyleX. `src/design/` is the viewer (socket, session, replica, renderer, camera) and `src/design/editing/` how people edit it (the editor, gestures and the drag-to-CSS rules), `src/components/` the React parts (design grid, canvas, comments, tokens), `src/api/` the Effect HTTP client and `src/styles/tokens.stylex.ts` the theme tokens.
-- `apps/desktop/`: the Electron app that starts the server and shows the web app, with restarts and updates.
-- `e2e/`: `run.mjs` is the end-to-end test, `bench.mjs` the canvas benchmark, `headless.mjs` and `finite_headless.py` drive Finite by hand, and `ax/` runs real agents against the tools.
+- `packages/protocol/`: the contract. `model.ts` (designs, canvases, threads, settings, refusal codes), `wire.ts` (every `/api/ws` request and event), `bridge.ts` (page and frame), `tools.ts` (canvas tool inputs), `server.ts` (the server modules' interfaces).
+- `packages/vite-plugin/`: `@finite/vite-plugin`. `stamp.ts` (JSX locs and revs), `routes.ts` (the three router adapters), `frame.ts` (file frames), `html.ts` (bridge injection into server-rendered HTML), `tailwind.ts` (`@source` for `.finite/`), `client/bridge.ts` (the frame's half of the bridge).
+- `apps/server/`: the Node server, run from TypeScript source with Node 22's type stripping, so only erasable TS and `.ts` extensions in relative imports.
+  - `main.ts`, `config.ts` (every `FINITE_*` variable), `app.ts`, `hub.ts`, `handlers.ts`, `http.ts` (attachments, the export zip, static files), `guard.ts` (Host and Origin checks).
+  - `store/`: the registry, settings, `.finite/` files, project detection (`detect.ts`), installs and the Routes page (`routes.ts`).
+  - `preview/`: the dev servers; `vite-host.mjs` is the child.
+  - `source/`: `rewrite.ts` (the edit kinds), `tailwind.ts`, `css.ts`, `tokens.ts`, `history.ts` (undo), `imports.ts` and `components.ts` (copying and detaching files).
+  - `agent/`: `index.ts` (sessions, steer and queue), `policy.ts` (the fence), `tools.ts` (canvas tools), `instructions.ts` (the system prompt addition; keep it under 2,500 characters), `events.ts`, `status.ts`, `screenshot.ts`.
+  - `scaffold/` (the blank design) and `fixtures/` (test apps).
+- `apps/web/`: the Next.js static export, styled with StyleX. `src/client/finite.ts` (the socket and live state), `src/canvas/` (camera world, frames, editor, bridge, selection), `src/components/` (design list, design screen, sidebars, thread list, composer, ✱ menu, comments, settings, `inspector/`), `src/design/editing/` (control values to CSS), `src/styles/tokens.stylex.ts` (the theme tokens).
+- `apps/desktop/`: the Electron app that runs the server bundle and shows the web app, with restarts and updates.
+- `e2e/`: `run.mjs` (the end-to-end test) and `lib.mjs` (server, web build, socket client, fixtures, Chrome).
 
 ## Vocabulary
 
-Read "Words used in the code" at the end of `docs/how-finite-works.md` for the words Finite uses, such as op, change, actor, replica and owner.
+Read "Words used in the code" at the end of `docs/how-finite-works.md` for the words Finite uses, such as loc, rev, frame, board, production, actor and turn.
 
 ## UI
 
@@ -71,7 +72,7 @@ Examples: session-recovery, fix-scroll-state, regenerate-sdk.
 
 Never make a PR unless you've been asked to.
 
-Write conventional commit titles in plain English. `feat(mcp): find nodes by text`. Start the body by explaining the problem with 1-2 concise sentences. Under this add any media like screenshots (via `--attach`, never commit assets), benchmark results in a grid and or etc. Under `## changes` list what changes you've made in an ul, continue with a short section on how you verified. Omit things such as linter and style-check. Then watch the PR until it has been merged. Address conflicts, and comments. Verify each reported bug or review issue before you fix it. Fix only a bug that you verified.
+Write conventional commit titles in plain English. `feat(source): keep arbitrary Tailwind values`. Start the body by explaining the problem with 1-2 concise sentences. Under this add any media like screenshots (via `--attach`, never commit assets), benchmark results in a grid and or etc. Under `## changes` list what changes you've made in an ul, continue with a short section on how you verified. Omit things such as linter and style-check. Then watch the PR until it has been merged. Address conflicts, and comments. Verify each reported bug or review issue before you fix it. Fix only a bug that you verified.
 
 ## Documentation
 
@@ -84,18 +85,18 @@ Do not commit implementation plans, research notes, or agent scratch files. Keep
 ## Checks
 
 - Run `vp install` after you pull.
-- `vp run ready` runs everything CI runs before the end-to-end test: `vp check`, `cargo fmt --check`, `cargo clippy -D warnings`, every test and every build. It must pass.
-- `vp check --fix` formats and lints the web side. `cargo fmt --all` formats the Rust side.
-- `vp run dev` starts the server and the web app. `vp run wasm#build` builds `finite.wasm` when you need it on its own.
+- `vp run ready` runs everything CI runs before the end-to-end test: `vp check`, every test and every build. It must pass.
+- `vp check --fix` formats and lints.
+- `vp run dev` starts the server on 4100 and the web app on 5310. If the user's desktop app holds 4100, run `FINITE_PORT=4200 node apps/server/src/main.ts` and `FINITE_API_URL=http://127.0.0.1:4200 next dev` in `apps/web` instead.
 
 ## Testing
 
-Run `vp test` for the web side and `cargo test --workspace` for the Rust side. Put a document-model test in `crates/design/tests/` and a server test in `crates/server/tests/`. The golden files in `crates/*/fixtures/` are rewritten by `FINITE_UPDATE_FIXTURES=1 cargo test`; add the changed ones to your change. `vp run e2e` checks what a person sees in headless Chrome. To see a change in the real app, use the `finite-headless` skill.
-
-A change to how servers hand a design between them (leases, saving, `Hub::tick`) must pass `crates/server/tla/check.sh`; the `verify-design-leases` skill says how to read it.
+Run `vp test` in a package, or `vp run test` for all of them. Server tests sit beside the code (`*.test.ts`). Tests that need a real project copy a fixture to a temp folder and install it (`apps/server/src/preview/fixtures.ts`). The plugin's golden files are in `packages/vite-plugin/src/__golden__/`. Tests that need the real `claude` run only with `FINITE_REAL_AGENT=1`. `vp run e2e` checks a person's core flow in headless Chrome. To see a change in the real app, use the `finite-headless` skill; to prove it with evidence, `verify-finite`. Tests and manual runs use port 0 or 4300 and up: the user's own Finite may hold 4100 and 5310.
 
 ## Skills
 
 Project skills live in `.agents/skills/`, where Codex, Cursor and opencode find them. `.claude/skills` is a symlink to it for Claude Code. Add a new skill to `.agents/skills/`.
 
+- `finite-headless`: run a private Finite (server, web app, Chrome) and drive it from the shell.
+- `verify-finite`: prove a feature works in the real app, with evidence in `.verify/<run>/`.
 - Test actual implementation, do not duplicate logic into tests.
