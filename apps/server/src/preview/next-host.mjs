@@ -151,10 +151,10 @@ async function rawConfig(root) {
     const phase = "phase-development-server";
     (async () => {
       const { default: loadConfig } = projectRequire("next/dist/server/config");
-      const { defaultConfig } = projectRequire("next/dist/server/config-shared");
-      let raw = await loadConfig(phase, root, { rawConfig: true });
-      raw = raw?.default ?? raw;
-      if (typeof raw === "function") raw = await raw(phase, { defaultConfig });
+      const { normalizeConfig } = projectRequire("next/dist/server/config-shared");
+      const loaded = await loadConfig(phase, root, { rawConfig: true });
+      // Calls a config function and awaits a promise, as Next does.
+      const raw = await normalizeConfig(phase, loaded?.default ?? loaded);
       process.send({
         webpack: Boolean(raw?.webpack),
         turbopack: Boolean(raw?.turbopack ?? raw?.experimental?.turbo),
