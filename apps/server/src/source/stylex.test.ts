@@ -357,6 +357,20 @@ const local = stylex.defineVars({ hidden: "1px" });
     expect(readVars(F, named).tokens).toEqual([{ name: "space.gap", light: "8" }]);
   });
 
+  it("reads a negative number and keeps it when a dark branch is added", () => {
+    const code = `import * as stylex from "@stylexjs/stylex";\nexport const space = stylex.defineVars({ offset: -8, nudge: +2 });\n`;
+    expect(readVars(F, code).tokens).toEqual([{ name: "space.offset", light: "-8" }]);
+    expect(writeVar(F, code, "space.offset", "light", "-12")).toBe(
+      code.replace("offset: -8", `offset: "-12"`),
+    );
+    expect(writeVar(F, code, "space.offset", "dark", "-4")).toBe(
+      code.replace(
+        "offset: -8",
+        `offset: { default: -8, "@media (prefers-color-scheme: dark)": "-4" }`,
+      ),
+    );
+  });
+
   it("sets a light value and keeps the other branches", () => {
     expect(writeVar(F, VARS, "colors.brand", "light", "#000")).toBe(
       VARS.replace(`brand: "#95ced7"`, `brand: "#000"`),
@@ -502,6 +516,35 @@ describe("picking a defineVars token", () => {
         message: expect.stringContaining("is a StyleX token"),
       });
     }
+  });
+
+  it("writes a template literal when a token sits inside a value", () => {
+    const mixed = "color-mix(in srgb, colors.brand 50%, transparent)";
+    const out = ok(pick(CARD, { color: mixed, padding: "1.5rem", margin: "0.5" }));
+    expect(out.code).toBe(
+      CARD.replace(
+        `import * as stylex from "@stylexjs/stylex";\n`,
+        `import * as stylex from "@stylexjs/stylex";\nimport { colors } from "./tokens.stylex";\n`,
+      )
+        .replace(
+          `default: "black"`,
+          "default: `color-mix(in srgb, ${colors.brand} 50%, transparent)`",
+        )
+        .replace(`padding: "16px"`, `padding: "1.5rem"`)
+        .replace(`":hover": "blue",\n    },\n`, `":hover": "blue",\n    },\n    margin: "0.5",\n`),
+    );
+  });
+
+  it("leaves a value with only unknown names a string and escapes the template text", () => {
+    const out = ok(
+      pick(CARD, {
+        padding: "url(a.png)",
+        margin: "calc(colors.brand + `x` + \\ + ${y})",
+      }),
+    ).code;
+    expect(out).toContain(`padding: "url(a.png)"`);
+    expect(out).toContain("margin: `calc(${colors.brand} + \\`x\\` + \\\\ + \\${y})`");
+    expect(out.match(/tokens\.stylex/g)).toHaveLength(1);
   });
 
   it("still writes a custom property pick as a string", () => {

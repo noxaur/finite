@@ -30,6 +30,7 @@ type Ref = { sheet: string; key: string; call: boolean; nested: boolean; member:
  * resolves to, or `undefined` when the element has no spread. A value that names a `defineVars`
  * token (`colors.brand`, from `vars`, token name → its `*.stylex.ts` file) is written as that
  * member expression, with `import`, the import to add when the file doesn't import its group yet.
+ * A token inside a longer value is written as a template literal, `${colors.brand}` in its place.
  */
 export function stylexEdit(
   code: string,
@@ -114,8 +115,7 @@ export function stylexEdit(
   }
 
   const used = useVars(code, ast, file, styles, vars);
-  const valueText = (v: string | null) =>
-    v === null ? "null" : (used.refs[v] ?? JSON.stringify(v));
+  const valueText = (v: string | null) => (v === null ? "null" : used.text(v));
   const existing = new Set(keys(entry));
   const added = [...wanted]
     .filter(([k, v]) => v !== null && !existing.has(k))
@@ -415,8 +415,15 @@ function indentAt(code: string, offset: number): string {
 /** A whole value that names a `defineVars` token, `<group>.<key>`. No CSS value has this shape. */
 const VAR_REF = /^([A-Za-z_$][\w$]*)\.([A-Za-z_][\w-]*)$/;
 
+/** A `<group>.<key>` inside a longer value, as a whole word. */
+const VAR_WORD = /(?<![\w$.-])[A-Za-z_$][\w$]*\.[A-Za-z_][\w-]*/g;
+
 /** Whether a token name is a StyleX `defineVars` variable, `<group>.<key>`. */
 export const isStylexVar = (name: string) => VAR_REF.test(name);
+
+/** Whether a value in `styles` may hold a token reference, so the design's tokens are worth loading. */
+export const mentionsVar = (styles: Record<string, string | null>) =>
+  Object.values(styles).some((v) => v !== null && /[A-Za-z_$][\w$]*\.[A-Za-z_]/.test(v));
 
 /** The values in `styles` that name a `defineVars` token, like `colors.brand`. */
 export function varRefs(styles: Record<string, string | null>): string[] {
@@ -426,10 +433,11 @@ export function varRefs(styles: Record<string, string | null>): string[] {
 }
 
 /**
- * The member expression each token `styles` names is written as, and the import to add for the
- * groups `file` doesn't import yet: `import { colors } from "../tokens.stylex";` after the other
- * imports. A group imported under another local name is used by that name; a group whose name is
- * taken by something else refuses.
+ * `text` writes a value of `styles`: a whole token as its member expression, a value with known
+ * tokens inside as a template literal, anything else as a string. `import` is the import to add
+ * for the groups `file` doesn't import yet: `import { colors } from "../tokens.stylex";` after the
+ * other imports. A group imported under another local name is used by that name; a group whose
+ * name is taken by something else refuses.
  */
 function useVars(
   code: string,
@@ -437,10 +445,13 @@ function useVars(
   file: string,
   styles: Record<string, string | null>,
   vars: Record<string, string>,
-): { refs: Record<string, string>; import?: { at: number; text: string } } {
+): { text: (value: string) => string; import?: { at: number; text: string } } {
   const refs: Record<string, string> = {};
   const missing = new Map<string, Set<string>>();
-  for (const ref of varRefs(styles)) {
+  const inside = (value: string) =>
+    isStylexVar(value) ? [] : (value.match(VAR_WORD) ?? []).filter((m) => vars[m]);
+  const named = Object.values(styles).filter((v): v is string => v !== null);
+  for (const ref of new Set([...varRefs(styles), ...named.flatMap(inside)])) {
     const home = vars[ref];
     if (!home)
       throw new Refused(
@@ -459,7 +470,21 @@ function useVars(
     }
     refs[ref] = /^[A-Za-z_$][\w$]*$/.test(k) ? `${local}.${k}` : `${local}[${JSON.stringify(k)}]`;
   }
-  if (missing.size === 0) return { refs };
+  const text = (value: string) => {
+    if (refs[value] !== undefined && isStylexVar(value)) return refs[value]!;
+    const found = inside(value);
+    if (found.length === 0) return JSON.stringify(value);
+    const escape = (raw: string) => raw.replace(/[\\`]|\$\{/g, (c) => `\\${c}`);
+    let at = 0;
+    let out = "";
+    for (const m of value.matchAll(VAR_WORD)) {
+      if (!vars[m[0]]) continue;
+      out += `${escape(value.slice(at, m.index))}\${${refs[m[0]]}}`;
+      at = m.index + m[0].length;
+    }
+    return `\`${out}${escape(value.slice(at))}\``;
+  };
+  if (missing.size === 0) return { text };
   const imports = ast.program.body.filter((s) => s.type === "ImportDeclaration");
   const last = imports.at(-1);
   const quote = last ? code[last.source.start!] : '"';
@@ -468,8 +493,8 @@ function useVars(
     ([home, groups]) =>
       `import { ${[...groups].join(", ")} } from ${quote}${specTo(file, home, false)}${quote}${semi ? ";" : ""}`,
   );
-  if (last) return { refs, import: { at: last.end!, text: lines.map((l) => `\n${l}`).join("") } };
-  return { refs, import: { at: ast.program.body[0]?.start ?? 0, text: `${lines.join("\n")}\n\n` } };
+  if (last) return { text, import: { at: last.end!, text: lines.map((l) => `\n${l}`).join("") } };
+  return { text, import: { at: ast.program.body[0]?.start ?? 0, text: `${lines.join("\n")}\n\n` } };
 }
 
 /** The local name `file` imports `group` from `home` under, if it does. */
@@ -537,10 +562,16 @@ function propKey(p: t.Node): string | undefined {
   return p.type === "ObjectProperty" && !p.computed ? keyName(p.key) : undefined;
 }
 
-/** A value written as a literal: a string, a number or a template without `${}`. */
+/** A value written as a literal: a string, a number (negative too) or a template without `${}`. */
 function literalOf(node: t.Node): string | undefined {
   if (node.type === "StringLiteral") return node.value;
   if (node.type === "NumericLiteral") return String(node.value);
+  if (
+    node.type === "UnaryExpression" &&
+    node.operator === "-" &&
+    node.argument.type === "NumericLiteral"
+  )
+    return String(-node.argument.value);
   if (node.type === "TemplateLiteral" && node.expressions.length === 0)
     return node.quasis[0]!.value.cooked ?? undefined;
   return undefined;

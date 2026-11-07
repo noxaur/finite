@@ -35,7 +35,7 @@ import {
 } from "./imports.ts";
 import { parseModule } from "./jsx.ts";
 import { editFiles, rewrite } from "./rewrite.ts";
-import { isStylexVar, readVars, varRefs, writeVar } from "./stylex.ts";
+import { isStylexVar, mentionsVar, readVars, writeVar } from "./stylex.ts";
 import {
   hasToken,
   isVariable,
@@ -229,7 +229,7 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
       const variables = edits.some((e) => e.kind === "style" && variableRefs(e.styles).length > 0)
         ? variableSheets(await sheets(design))
         : {};
-      const stylex = edits.some((e) => e.kind === "style" && varRefs(e.styles).length > 0)
+      const stylex = edits.some((e) => e.kind === "style" && mentionsVar(e.styles))
         ? (await stylexVars(design)).homes
         : {};
 
