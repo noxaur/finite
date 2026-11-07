@@ -6,12 +6,15 @@
 // server in front answers Finite's own URLs and adds the bridge to every page.
 import fs from "node:fs";
 import http from "node:http";
-import { createRequire } from "node:module";
+import { createRequire, registerHooks } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const CHANGED_DEBOUNCE_MS = 300;
 const SOURCE = /\.(tsx?|jsx?|mts|mjs|json|css)$/;
+/** Next's config loader, which imports the project's next.config and the adapter. */
+const CONFIG_LOADER = /\/next\/dist\/server\/config\.js$/;
+const CONFIG_FILE = /\/next\.config\.[cm]?[jt]s$/;
 
 const { root, host, plugin, adapter, loader, allowedHosts } = JSON.parse(
   process.env.FINITE_PREVIEW ?? "{}",
@@ -43,6 +46,21 @@ try {
     configured = true;
   };
   process.env.NEXT_ADAPTER_PATH = adapter;
+  // A project's own `adapterPath` wins over the variable. Send Next's import of that adapter to
+  // Finite's, which wraps it (adapter.ts).
+  const ownAdapter = pathToFileURL(adapter).href;
+  registerHooks({
+    resolve(specifier, context, nextResolve) {
+      // Next names the adapter and the next.config by file URL, and its own modules by path.
+      const loader = CONFIG_LOADER.test(context.parentURL ?? "");
+      if (!loader || !specifier.startsWith("file:") || CONFIG_FILE.test(specifier)) {
+        return nextResolve(specifier, context);
+      }
+      const { url } = nextResolve(specifier, context);
+      if (url === ownAdapter) return { url, shortCircuit: true };
+      return { url: `${ownAdapter}?adapter=${encodeURIComponent(url)}`, shortCircuit: true };
+    },
+  });
   process.env.FINITE_NEXT = JSON.stringify({
     loader,
     root: finite.root,
@@ -73,10 +91,10 @@ try {
     httpServer: server,
   });
   await app.prepare();
-  // A project's own `adapterPath` wins over the variable, and then Finite's never ran.
+  // This version of Next loaded the adapter some other way than the hook above expects.
   if (!configured) {
     throw new Error(
-      "The project's next.config sets adapterPath, and Finite needs that hook to preview it. Finite doesn't support projects with their own Next.js adapter yet.",
+      "Next.js didn't run Finite's adapter, which Finite needs to stamp the project's JSX. This version of Next may load adapterPath in a way Finite doesn't know yet.",
     );
   }
   for (const { file, code } of kept) {

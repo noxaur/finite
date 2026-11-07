@@ -2,7 +2,12 @@
  * Finite's Next.js adapter. `next-host.mjs` sets `NEXT_ADAPTER_PATH` to this file before it loads
  * Next, and Next calls `modifyConfig` on the project's own config: the one hook a custom server
  * has into the config `next dev` loads. The options come from `FINITE_NEXT` (`AdapterOptions`).
- * It hands the settings Finite follows to `FINITE_NEXT_CONFIGURE`, before Next scans the routes.
+ *
+ * A project's own `adapterPath` wins over the variable, so `next-host.mjs` sends Next's import of
+ * that adapter here instead, with its URL in `?adapter=`. This adapter then wraps the project's:
+ * the project's `modifyConfig` runs first, Finite's changes go on top, and its other hooks pass
+ * through. It hands the settings Finite follows, as the project's `modifyConfig` left them, to
+ * `FINITE_NEXT_CONFIGURE`, before Next scans the routes.
  */
 
 export type AdapterOptions = {
@@ -24,6 +29,7 @@ export type NextSettings = {
 };
 
 type Rule = Record<string, unknown>;
+type Context = { phase?: string };
 type Config = {
   basePath?: string;
   pageExtensions?: string[];
@@ -40,17 +46,40 @@ export const NEXT_PAGE_EXTENSIONS = ["tsx", "ts", "jsx", "js"];
 /** The files that may hold JSX. Next compiles JSX in `.js` too. */
 const GLOBS = ["*.tsx", "*.jsx", "*.js"];
 
-export const name = "finite";
+/** A Next.js adapter module: `modifyConfig`, and hooks such as `onBuildComplete`. */
+export type Adapter = {
+  name?: string;
+  modifyConfig?: (config: Config, context?: Context) => Config | Promise<Config>;
+  [hook: string]: unknown;
+};
 
 declare global {
   /**
-   * Set by `next-host.mjs`, and called with the resolved config. A project's own `adapterPath`
-   * keeps Finite's adapter from running, so it's never called.
+   * Set by `next-host.mjs`, and called with the resolved config. Never called means Finite's
+   * adapter didn't run, which `next-host.mjs` checks.
    */
   var FINITE_NEXT_CONFIGURE: ((settings: NextSettings) => void) | undefined;
 }
 
-export function modifyConfig(config: Config, context?: { phase?: string }): Config {
+/** Finite's adapter around a project's own, or around none. */
+export function wrap(project: Adapter = {}): Adapter {
+  return {
+    ...project,
+    name: "finite",
+    modifyConfig: async (config, context) =>
+      modifyConfig(
+        project.modifyConfig ? await project.modifyConfig(config, context) : config,
+        context,
+      ),
+  };
+}
+
+const own = new URL(import.meta.url).searchParams.get("adapter");
+const project = own ? ((await import(own)) as { default?: Adapter } & Adapter) : undefined;
+// Next takes an adapter's default export when it has one, as it does here.
+export default wrap(project?.default ?? project);
+
+export function modifyConfig(config: Config, context?: Context): Config {
   const options = JSON.parse(process.env.FINITE_NEXT ?? "null") as AdapterOptions | null;
   if (!options) return config;
   globalThis.FINITE_NEXT_CONFIGURE?.({

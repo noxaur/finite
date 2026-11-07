@@ -15,7 +15,7 @@ import {
   shownAs,
   tokenOf,
 } from "@/design/editing/inspect";
-import { isColor } from "@/lib/tokens";
+import { isColor, tokenRef } from "@/lib/tokens";
 import { raised } from "@/styles/raised";
 import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import { IconButton, Strip, StripItem } from "../Button";
@@ -263,7 +263,7 @@ export function StyleField({
   const note = resolved && tag && !why ? tag(resolved) : null;
   if (menu && kind) {
     // Tokens to pick from are one dropdown over the name, its note and the chevron.
-    const list = matchingTokens(scope, kind).map(([name]) => [`var(${name})`, name] as const);
+    const list = matchingTokens(scope, kind).map(([name]) => [tokenRef(name), name] as const);
     return (
       <Choice
         label={title}
@@ -283,7 +283,7 @@ export function StyleField({
       scope={scope}
       kind={kind}
       menu={menu}
-      onPick={(name) => scope.commit(set(`var(${name})`))}
+      onPick={(name) => scope.commit(set(tokenRef(name)))}
     />
   );
   return (
@@ -452,7 +452,7 @@ export function ColorField({
               scope={scope}
               kind="color"
               menu={menu}
-              onPick={(t) => scope.commit(toChanges(keep(`var(${t})`)))}
+              onPick={(t) => scope.commit(toChanges(keep(tokenRef(t))))}
             />
             {dropper && <EyeDropperButton onPick={(c) => scope.commit(toChanges(keep(c)))} />}
           </Reveal>
@@ -798,7 +798,7 @@ export function ColorSwatch({
           tokens={{
             list: tokens,
             current: token,
-            onPick: (name) => scope.commit(toChanges(`var(${name})`)),
+            onPick: (name) => scope.commit(toChanges(tokenRef(name))),
           }}
           onClose={() => setOpen(false)}
         />

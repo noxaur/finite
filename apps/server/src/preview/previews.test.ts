@@ -539,6 +539,40 @@ describe("preview lifecycle", () => {
     await previews.stop(copy.id);
   }, 90_000);
 
+  test("previews a Next.js project with its own adapter, running its modifyConfig too", async () => {
+    const fixture = await prepareFixture("next-app");
+    cleanups.push(fixture.remove);
+    const at = (file: string) => path.join(fixture.root, file);
+    fs.writeFileSync(
+      at("adapter.mjs"),
+      `await Promise.resolve();
+export default {
+  name: "mine",
+  modifyConfig: (config) => ({ ...config, distDir: "mine", env: { ...config.env, MINE: "ran" } }),
+  onBuildComplete: () => {},
+};\n`,
+    );
+    const config = at("next.config.ts");
+    fs.writeFileSync(
+      config,
+      fs
+        .readFileSync(config, "utf8")
+        .replace("{}", `{ adapterPath: ${JSON.stringify(at("adapter.mjs"))} }`),
+    );
+    fs.writeFileSync(
+      at("app/about/page.tsx"),
+      "export default () => <h1>{process.env.MINE}</h1>;\n",
+    );
+    const copy = { ...design("next-app"), id: "next-adapter", root: fixture.root };
+    const { url } = await previews.ensure(copy);
+    const about = await get(`${url}/about`);
+    expect(about.status).toBe(200);
+    expect(about.text).toMatch(/<h1 data-finite-loc="app\/about\/page.tsx:[^"]*"[^>]*>ran<\/h1>/);
+    expect(fs.existsSync(at("mine"))).toBe(false);
+    expect(fs.existsSync(at(".finite/runtime/next"))).toBe(true);
+    await previews.stop(copy.id);
+  }, 60_000);
+
   test("stops after the grace period once idle, and restarts on ensure", async () => {
     const tanstack = design("tanstack");
     previews.idle(tanstack.id);
