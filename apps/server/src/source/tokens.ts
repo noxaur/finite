@@ -10,7 +10,7 @@ import postcss, {
   type Rule,
 } from "postcss";
 import { BLOCK, parseCss, printCss, setDecls } from "./css.ts";
-import { importCandidates, resolveSpec, sheetSpecifiers } from "./imports.ts";
+import { importCandidates, resolveSpec } from "./imports.ts";
 
 /**
  * Tokens are CSS custom properties. Light values come from `@theme` blocks (and `:root`/`html`,
@@ -78,9 +78,13 @@ export function variableSheets(sheets: Sheet[]): Record<string, VariableHome> {
 
 const QUIET = new Set(["use", "forward", "mixin", "function"]);
 
+/** A `@use` or `@forward` of a plain `.css` file, which Sass copies into its output. */
+const PLAIN_CSS = /^\s*(["'])[^"']*\.css\1/;
+
 /**
  * Whether a Sass sheet outputs CSS: anything at its top level but comments, `$vars`, `@use`,
- * `@forward`, `@mixin` and `@function`, or a local sheet it `@use`s or `@forward`s that does.
+ * `@forward`, `@mixin` and `@function`, a `@use` or `@forward` of a `.css` file, or a local sheet
+ * it `@use`s or `@forward`s that does.
  */
 function emitsCss(file: string, roots: Map<string, Root>, seen = new Set([file])): boolean {
   const root = roots.get(file)!;
@@ -88,11 +92,11 @@ function emitsCss(file: string, roots: Map<string, Root>, seen = new Set([file])
     (n) =>
       n.type !== "comment" &&
       !(n.type === "decl" && n.prop.startsWith("$")) &&
-      !(n.type === "atrule" && QUIET.has(n.name)),
+      !(n.type === "atrule" && QUIET.has(n.name) && !PLAIN_CSS.test(n.params)),
   );
   return (
     own ||
-    loads(file, roots).some((dep) => {
+    loads(file, roots).some(({ dep }) => {
       if (seen.has(dep)) return false;
       seen.add(dep);
       return emitsCss(dep, roots, seen);
@@ -100,22 +104,28 @@ function emitsCss(file: string, roots: Map<string, Root>, seen = new Set([file])
   );
 }
 
-/** The local sheets `file` loads with `@use` or `@forward`. */
-function loads(file: string, roots: Map<string, Root>): string[] {
-  return sheetSpecifiers(file, roots.get(file)!.source?.input.css ?? "").flatMap(
-    ({ spec, rule }) => {
-      if (rule !== "use" && rule !== "forward") return [];
-      const target = spec.startsWith("/") ? spec.slice(1) : resolveSpec(file, spec);
-      const dep = importCandidates(file, target).find((c) => roots.has(c));
-      return dep ? [dep] : [];
-    },
-  );
+/** The local sheets `file` loads with `@use` or `@forward`, and whether a `@use` is `as *`. */
+function loads(
+  file: string,
+  roots: Map<string, Root>,
+): { dep: string; rule: "use" | "forward"; star: boolean }[] {
+  return roots.get(file)!.nodes.flatMap((n) => {
+    if (n.type !== "atrule" || (n.name !== "use" && n.name !== "forward")) return [];
+    const spec = /["']([^"']+)["']/.exec(n.params)?.[1];
+    if (spec === undefined) return [];
+    // Sass looks for a bare `@use "tokens"` next to the sheet.
+    const target = spec.startsWith("/")
+      ? spec.slice(1)
+      : resolveSpec(file, /^\.{1,2}\//.test(spec) ? spec : `./${spec}`);
+    const dep = importCandidates(file, target).find((c) => roots.has(c));
+    return dep ? [{ dep, rule: n.name, star: /\bas\s+\*/.test(n.params) }] : [];
+  });
 }
 
 /**
  * A `$var` the top-level declarations of the Sass sheet `file` use that it neither defines nor
- * reaches through `@use`/`@forward`, with a sheet that defines it. Under `@import` it's all one
- * scope; as a module, `file` can't see it.
+ * reaches bare: through `@use … as *`, or a `@forward` of a sheet that is, with a sheet that
+ * defines it. Under `@import` it's all one scope; as a module, `file` can't see it.
  */
 function unresolvedRef(
   file: string,
@@ -123,16 +133,20 @@ function unresolvedRef(
 ): VariableHome["unresolved"] | undefined {
   const defined = (f: string) =>
     new Set(roots.get(f)!.nodes.flatMap((n) => variableOf(f, n)?.name ?? []));
-  const visible = defined(file);
-  const queue = [file];
-  const seen = new Set(queue);
-  for (const f of queue)
-    for (const dep of loads(f, roots)) {
-      if (seen.has(dep)) continue;
-      seen.add(dep);
-      queue.push(dep);
-      for (const name of defined(dep)) visible.add(name);
-    }
+  // A module sees its own private `$vars`; other modules see only the public ones.
+  const visible = new Set(
+    roots
+      .get(file)!
+      .nodes.flatMap((n) => (n.type === "decl" && n.prop.startsWith("$") ? n.prop : [])),
+  );
+  const seen = new Set<string>();
+  const expose = (dep: string) => {
+    if (seen.has(dep)) return;
+    seen.add(dep);
+    for (const name of defined(dep)) visible.add(name);
+    for (const next of loads(dep, roots)) if (next.rule === "forward") expose(next.dep);
+  };
+  for (const { dep, rule, star } of loads(file, roots)) if (rule === "use" && star) expose(dep);
   for (const node of roots.get(file)!.nodes) {
     const value = variableOf(file, node)?.value;
     if (value === undefined) continue;
@@ -396,9 +410,12 @@ function darkBlock(root: Root): Container {
 }
 
 const REF = /(?<![\w.$@-])[$@][A-Za-z_][\w-]*/g;
-const QUOTED = /("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|url\([^)]*\))/;
+const QUOTED = /("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|url\((?![^)]*\$)[^)]*\))/;
 
-/** Runs `change` on a value outside its quoted strings and `url(...)`, and on their `#{…}` interpolations. */
+/**
+ * Runs `change` on a value outside its quoted strings and `url(...)` without a `$`, and on the
+ * `#{…}` interpolations of the quoted strings.
+ */
 function outsideQuotes(value: string, change: (text: string) => string): string {
   return value
     .split(QUOTED)
@@ -408,7 +425,8 @@ function outsideQuotes(value: string, change: (text: string) => string): string 
 
 /**
  * The Sass `$var` and Less `@var` references in style values, like `$brand` in `1px solid $brand`.
- * Text in quotes and `url(...)` isn't one: `url("/img/@logo.svg")` is a path.
+ * Text in quotes and `url(...)` without a `$` isn't one: `url("/img/@logo.svg")` is a path, while
+ * `url($asset)` is a reference.
  */
 export function variableRefs(styles: Record<string, string | null>): string[] {
   const refs = new Set<string>();

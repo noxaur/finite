@@ -337,6 +337,74 @@ describe("Sass and Less variable tokens", () => {
       expect(useVariables(Module, own, { padding: "$_gap" }, {}).css).toBe(own);
     });
 
+    it("counts a module's own private $vars as defined", () => {
+      const files = {
+        "src/styles/global.scss": `@use "tokens";\n`,
+        "src/styles/_tokens.scss": `$_base: red;\n$brand: $_base;\n`,
+      };
+      expect(variableSheets(sheetsOf(files)).$brand?.unresolved).toBeUndefined();
+      expect(pick(files).css).toBe(`@use "../styles/tokens" as *;\n\n.card {}\n`);
+      const hidden = {
+        ...files,
+        "src/styles/_other.scss": `$_base: blue;\n`,
+        "src/styles/_tokens.scss": `@use "other" as *;\n$brand: $_base;\n`,
+      };
+      expect(variableSheets(sheetsOf(hidden)).$brand?.unresolved).toEqual({ name: "$_base" });
+    });
+
+    it("needs @use … as * for bare names, and follows @forward through it", () => {
+      const files: Record<string, string> = {
+        "src/styles/global.scss": `@use "tokens";\n`,
+        "src/styles/_base.scss": `$base: red;\n`,
+        "src/styles/_tokens.scss": `@use "base";\n$brand: $base;\n`,
+      };
+      expect(() => pick(files)).toThrow(refused(/\$brand is defined in .*_tokens\.scss.*\$base/));
+      files["src/styles/_tokens.scss"] = `@use "base" as b;\n$brand: $base;\n`;
+      expect(() => pick(files)).toThrow(refused(/\$base/));
+      files["src/styles/_tokens.scss"] = `@use "base" as *;\n$brand: $base;\n`;
+      expect(variableSheets(sheetsOf(files)).$brand?.unresolved).toBeUndefined();
+      files["src/styles/_tokens.scss"] = `@use "api" as *;\n$brand: $base;\n`;
+      files["src/styles/_api.scss"] = `@forward "base";\n`;
+      expect(variableSheets(sheetsOf(files)).$brand?.unresolved).toBeUndefined();
+      files["src/styles/_tokens.scss"] = `@use "api";\n$brand: $base;\n`;
+      expect(variableSheets(sheetsOf(files)).$brand?.unresolved).toEqual({
+        name: "$base",
+        definedIn: "src/styles/_base.scss",
+      });
+    });
+
+    it("treats a $var inside url() as a reference, and a quoted url as text", () => {
+      expect(variableRefs({ backgroundImage: `url($asset)` })).toEqual(["$asset"]);
+      expect(variableRefs({ backgroundImage: `url("#{$asset}")` })).toEqual(["$asset"]);
+      expect(variableRefs({ backgroundImage: `url("$asset")` })).toEqual([]);
+      expect(variableRefs({ backgroundImage: `url(/img/logo.png)` })).toEqual([]);
+      const named = `@use "../styles/theme";\n.card {}\n`;
+      const vars = { $asset: { file: "src/styles/_theme.scss", emitsCss: false } };
+      expect(
+        useVariables(Module, named, { backgroundImage: `url($asset) url("/a/b.png")` }, vars).styles
+          .backgroundImage,
+      ).toBe(`url(theme.$asset) url("/a/b.png")`);
+      expect(useVariables(Module, `.card {}\n`, { backgroundImage: `url($asset)` }, vars).css).toBe(
+        `@use "../styles/theme" as *;\n\n.card {}\n`,
+      );
+    });
+
+    it("counts a @use, @forward or @import of a .css file as CSS", () => {
+      for (const rule of [
+        `@use "reset.css";`,
+        `@forward "reset.css";`,
+        `@import "reset.css";`,
+        `@import url(reset.css);`,
+        `@import url("https://example.com/reset.css");`,
+      ]) {
+        const files = {
+          "src/styles/global.scss": `@use "tokens";\n`,
+          "src/styles/_tokens.scss": `${rule}\n$brand: red;\n`,
+        };
+        expect(variableSheets(sheetsOf(files)).$brand?.emitsCss, rule).toBe(true);
+      }
+    });
+
     it("skips quoted text and url() when it looks for variables", () => {
       expect(variableRefs({ backgroundImage: `url("/images/@logo.svg")` })).toEqual([]);
       expect(variableRefs({ backgroundImage: `url(/images/@logo.svg)` })).toEqual([]);
