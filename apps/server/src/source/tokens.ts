@@ -10,7 +10,7 @@ import postcss, {
   type Rule,
 } from "postcss";
 import { BLOCK, parseCss, printCss, setDecls } from "./css.ts";
-import { importCandidates, resolveSpec } from "./imports.ts";
+import { importCandidates, resolveSpec, sheetSpecifiers } from "./imports.ts";
 
 /**
  * Tokens are CSS custom properties. Light values come from `@theme` blocks (and `:root`/`html`,
@@ -45,20 +45,32 @@ export type Sheet = { file: string; css: string; partial?: boolean };
 
 /**
  * Where a Sass `$var` or Less `@var` token is defined: the file, and whether that file outputs CSS
- * of its own, which a module's `@use` of it would copy. Less sheets never do, since a module
- * imports them by reference.
+ * of its own, or through a sheet it loads, which a module's `@use` of it would copy. Less sheets
+ * never do, since a module imports them by reference. `unresolved` names a `$var` the file's
+ * declarations use without defining it or loading it with `@use`/`@forward` (it got it from a
+ * legacy `@import` chain), so a module's `@use` of it can't compile.
  */
-export type VariableHome = { file: string; emitsCss: boolean };
+export type VariableHome = {
+  file: string;
+  emitsCss: boolean;
+  unresolved?: { name: string; definedIn?: string };
+};
 
-/** The sheet that defines each Sass `$var` and Less `@var` token, by name. */
+/**
+ * The sheet that defines each Sass `$var` and Less `@var` token, by name. A name declared twice
+ * belongs to the last, the one `readTokens` shows.
+ */
 export function variableSheets(sheets: Sheet[]): Record<string, VariableHome> {
+  const roots = new Map(sheets.map((s) => [s.file, parseCss(s.file, s.css)]));
   const out: Record<string, VariableHome> = {};
-  for (const { file, css } of sheets) {
-    const root = parseCss(file, css);
-    const home = { file, emitsCss: path.posix.extname(file) === ".scss" && emitsCss(root) };
+  for (const [file, root] of roots) {
+    const scss = path.posix.extname(file) === ".scss";
+    const home: VariableHome = { file, emitsCss: scss && emitsCss(file, roots) };
+    const unresolved = scss ? unresolvedRef(file, roots) : undefined;
+    if (unresolved) home.unresolved = unresolved;
     for (const node of root.nodes) {
       const variable = variableOf(file, node);
-      if (variable) out[variable.name] ??= home;
+      if (variable) out[variable.name] = home;
     }
   }
   return out;
@@ -68,15 +80,68 @@ const QUIET = new Set(["use", "forward", "mixin", "function"]);
 
 /**
  * Whether a Sass sheet outputs CSS: anything at its top level but comments, `$vars`, `@use`,
- * `@forward`, `@mixin` and `@function`.
+ * `@forward`, `@mixin` and `@function`, or a local sheet it `@use`s or `@forward`s that does.
  */
-function emitsCss(root: Root): boolean {
-  return root.nodes.some(
+function emitsCss(file: string, roots: Map<string, Root>, seen = new Set([file])): boolean {
+  const root = roots.get(file)!;
+  const own = root.nodes.some(
     (n) =>
       n.type !== "comment" &&
       !(n.type === "decl" && n.prop.startsWith("$")) &&
       !(n.type === "atrule" && QUIET.has(n.name)),
   );
+  return (
+    own ||
+    loads(file, roots).some((dep) => {
+      if (seen.has(dep)) return false;
+      seen.add(dep);
+      return emitsCss(dep, roots, seen);
+    })
+  );
+}
+
+/** The local sheets `file` loads with `@use` or `@forward`. */
+function loads(file: string, roots: Map<string, Root>): string[] {
+  return sheetSpecifiers(file, roots.get(file)!.source?.input.css ?? "").flatMap(
+    ({ spec, rule }) => {
+      if (rule !== "use" && rule !== "forward") return [];
+      const target = spec.startsWith("/") ? spec.slice(1) : resolveSpec(file, spec);
+      const dep = importCandidates(file, target).find((c) => roots.has(c));
+      return dep ? [dep] : [];
+    },
+  );
+}
+
+/**
+ * A `$var` the top-level declarations of the Sass sheet `file` use that it neither defines nor
+ * reaches through `@use`/`@forward`, with a sheet that defines it. Under `@import` it's all one
+ * scope; as a module, `file` can't see it.
+ */
+function unresolvedRef(
+  file: string,
+  roots: Map<string, Root>,
+): VariableHome["unresolved"] | undefined {
+  const defined = (f: string) =>
+    new Set(roots.get(f)!.nodes.flatMap((n) => variableOf(f, n)?.name ?? []));
+  const visible = defined(file);
+  const queue = [file];
+  const seen = new Set(queue);
+  for (const f of queue)
+    for (const dep of loads(f, roots)) {
+      if (seen.has(dep)) continue;
+      seen.add(dep);
+      queue.push(dep);
+      for (const name of defined(dep)) visible.add(name);
+    }
+  for (const node of roots.get(file)!.nodes) {
+    const value = variableOf(file, node)?.value;
+    if (value === undefined) continue;
+    const name = variableRefs({ value }).find((ref) => ref[0] === "$" && !visible.has(ref));
+    if (name === undefined) continue;
+    const definedIn = [...roots.keys()].find((f) => f !== file && defined(f).has(name));
+    return definedIn ? { name, definedIn } : { name };
+  }
+  return undefined;
 }
 
 /** A token name that's a Sass `$var` or Less `@var` rather than a custom property. */
@@ -85,12 +150,20 @@ export const isVariable = (name: string) => name.startsWith("$") || name.startsW
 const DIALECTS = { $: { ext: ".scss", kind: "Sass" }, "@": { ext: ".less", kind: "Less" } };
 const dialectOf = (name: string) => DIALECTS[name[0] as "$" | "@"];
 
+/** Sass keeps `$_name` and `$-name` private to their module, so a `@use` can't reach them. */
+const PRIVATE = /^\$[_-]/;
+
 /** A top-level `$name: value;` in a `.scss` sheet or `@name: value;` in a `.less` one. */
 function variableOf(file: string, node: Node): { name: string; value: string } | undefined {
   if (node.parent?.type !== "root") return undefined;
   const ext = path.posix.extname(file);
   const decl = node as Declaration;
-  if (ext === ".scss" && decl.type === "decl" && decl.prop.startsWith("$"))
+  if (
+    ext === ".scss" &&
+    decl.type === "decl" &&
+    decl.prop.startsWith("$") &&
+    !PRIVATE.test(decl.prop)
+  )
     return { name: decl.prop, value: decl.value };
   const at = node as AtRule & { variable?: boolean; value?: string };
   if (ext === ".less" && at.type === "atrule" && at.variable && !at.nodes)
@@ -195,7 +268,7 @@ function writeVariable(
 }
 
 function findVariable(file: string, root: Root, name: string): ChildNode | undefined {
-  return root.nodes.find((n) => variableOf(file, n)?.name === name);
+  return root.nodes.findLast((n) => variableOf(file, n)?.name === name);
 }
 
 export function tokenName(name: string): string {
@@ -209,15 +282,16 @@ export function tokenName(name: string): string {
 }
 
 /**
- * Where `name` lives for `tokens.set`: the sheet that has it, else the first of its dialect that
+ * Where `name` lives for `tokens.set`: the last sheet that has it, else the first of its dialect that
  * outputs no CSS (so a module can `@use` it), else the first of its dialect.
  */
 export function variableHome(name: string, sheets: Sheet[]): Sheet {
   const { ext, kind } = dialectOf(name);
   const ofDialect = sheets.filter((s) => path.posix.extname(s.file) === ext);
+  const roots = new Map(sheets.map((s) => [s.file, parseCss(s.file, s.css)]));
   const home =
-    sheets.find((s) => hasToken(s.file, s.css, name, "light")) ??
-    ofDialect.find((s) => ext === ".scss" && !emitsCss(parseCss(s.file, s.css))) ??
+    sheets.findLast((s) => hasToken(s.file, s.css, name, "light")) ??
+    ofDialect.find((s) => ext === ".scss" && !emitsCss(s.file, roots)) ??
     ofDialect[0];
   if (!home)
     throw new Refused(
@@ -322,10 +396,25 @@ function darkBlock(root: Root): Container {
 }
 
 const REF = /(?<![\w.$@-])[$@][A-Za-z_][\w-]*/g;
+const QUOTED = /("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|url\([^)]*\))/;
 
-/** The Sass `$var` and Less `@var` references in style values, like `$brand` in `1px solid $brand`. */
+/** Runs `change` on a value outside its quoted strings and `url(...)`, and on their `#{…}` interpolations. */
+function outsideQuotes(value: string, change: (text: string) => string): string {
+  return value
+    .split(QUOTED)
+    .map((part, i) => (i % 2 === 0 ? change(part) : part.replace(/#\{[^}]*\}/g, change)))
+    .join("");
+}
+
+/**
+ * The Sass `$var` and Less `@var` references in style values, like `$brand` in `1px solid $brand`.
+ * Text in quotes and `url(...)` isn't one: `url("/img/@logo.svg")` is a path.
+ */
 export function variableRefs(styles: Record<string, string | null>): string[] {
-  return [...new Set(Object.values(styles).flatMap((v) => v?.match(REF) ?? []))];
+  const refs = new Set<string>();
+  for (const value of Object.values(styles))
+    if (value) outsideQuotes(value, (text) => text.replace(REF, (ref) => (refs.add(ref), ref)));
+  return [...refs];
 }
 
 /**
@@ -353,7 +442,7 @@ export function useVariables(
   const root = parseCss(file, css);
   const renamed: Record<string, string> = {};
   for (const ref of refs) {
-    if (findVariable(file, root, ref)) continue;
+    if (findVariable(file, root, ref) || PRIVATE.test(ref)) continue;
     const home = variables[ref];
     if (!home)
       throw new Refused(
@@ -368,10 +457,21 @@ export function useVariables(
         "unsupported-style",
       );
     }
+    if (seen === undefined && home.unresolved) {
+      const { name, definedIn } = home.unresolved;
+      const use = definedIn
+        ? ` Add @use "${useSpec(home.file, definedIn)}" as * to ${home.file},`
+        : " Fix that,";
+      throw new Refused(
+        `${ref} is defined in ${home.file}, which uses ${name} without loading the sheet that defines it (it relies on a legacy @import chain), so a @use of it fails to compile.${use} then pick it again, or ask the agent.`,
+        "unsupported-style",
+      );
+    }
     if (seen === undefined) addImport(file, root, home.file);
     else if (seen !== "*") renamed[ref] = `${seen}.${ref}`;
   }
-  const rename = (v: string | null) => v?.replace(REF, (ref) => renamed[ref] ?? ref) ?? null;
+  const rename = (v: string | null) =>
+    v === null ? null : outsideQuotes(v, (text) => text.replace(REF, (ref) => renamed[ref] ?? ref));
   return {
     css: printCss(file, root),
     styles: Object.fromEntries(Object.entries(styles).map(([k, v]) => [k, rename(v)])),
@@ -402,10 +502,16 @@ function imported(file: string, root: Root, sheet: string): string | undefined {
   return undefined;
 }
 
+/** The `@use` specifier for the Sass sheet `sheet`, from `file`: no extension and no partial underscore. */
+const useSpec = (file: string, sheet: string) =>
+  path.posix
+    .relative(path.posix.dirname(file), sheet)
+    .replace(/\.scss$/, "")
+    .replace(/(^|\/)_([^/]*)$/, "$1$2");
+
 function addImport(file: string, root: Root, sheet: string): void {
-  let rel = path.posix.relative(path.posix.dirname(file), sheet);
   const sass = path.posix.extname(file) === ".scss";
-  if (sass) rel = rel.replace(/\.scss$/, "").replace(/(^|\/)_([^/]*)$/, "$1$2");
+  const rel = sass ? useSpec(file, sheet) : path.posix.relative(path.posix.dirname(file), sheet);
   const node = sass
     ? postcss.atRule({ name: "use", params: `"${rel}" as *` })
     : postcss.atRule({ name: "import", params: `(reference) "${rel}"` });

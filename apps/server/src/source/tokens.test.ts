@@ -11,6 +11,8 @@ import {
   readTokens,
   tokenName,
   useVariables,
+  variableHome,
+  variableRefs,
   variableSheets,
   writeToken,
 } from "./tokens.ts";
@@ -260,6 +262,117 @@ describe("Sass and Less variable tokens", () => {
     expect(() => write(SCSS, "@brand", "light", "#000", "g.scss", "css-modules")).toThrow(
       /Less variable/,
     );
+  });
+
+  describe("review edge cases", () => {
+    const Module = "src/c/Card.module.scss";
+    const sheetsOf = (files: Record<string, string>) =>
+      Object.entries(files).map(([file, css]) => ({
+        file,
+        css,
+        partial: !file.includes("global"),
+      }));
+    const pick = (files: Record<string, string>, name = "$brand") =>
+      useVariables(Module, `.card {}\n`, { color: name }, variableSheets(sheetsOf(files)));
+    const refused = (message: RegExp) =>
+      expect.objectContaining({
+        code: "unsupported-style",
+        message: expect.stringMatching(message),
+      });
+
+    it("writes to the last declaration of a name, the one that reads", () => {
+      const less = `@brand: red;\n@brand: blue;\n`;
+      expect(readTokens([{ file: "g.less", css: less }])).toEqual([
+        { name: "@brand", light: "blue" },
+      ]);
+      expect(write(less, "@brand", "light", "green", "g.less", "inline")).toBe(
+        `@brand: red;\n@brand: green;\n`,
+      );
+      expect(write(less, "@brand", "light", null, "g.less", "inline")).toBe(`@brand: red;\n`);
+      const scss = `$brand: red;\n$brand: blue;\n`;
+      expect(write(scss, "$brand", "light", "green", "g.scss", "inline")).toBe(
+        `$brand: red;\n$brand: green;\n`,
+      );
+    });
+
+    it("sends a variable to the last file that declares it", () => {
+      const sheets = [
+        { file: "a.scss", css: `$brand: red;\n` },
+        { file: "b.scss", css: `$brand: blue;\n` },
+      ];
+      expect(variableHome("$brand", sheets).file).toBe("b.scss");
+      expect(variableSheets(sheets).$brand?.file).toBe("b.scss");
+    });
+
+    it("refuses a partial whose $vars come through a legacy @import chain", async () => {
+      const files: Record<string, string> = {
+        "src/styles/global.scss": `@import "base";\n@import "tokens";\n`,
+        "src/styles/_base.scss": `$base: red;\n`,
+        "src/styles/_tokens.scss": `$brand: $base;\n`,
+      };
+      expect(() => pick(files)).toThrow(
+        refused(/\$brand is defined in src\/styles\/_tokens\.scss.*\$base.*@use "base" as \*/),
+      );
+      const dir = await mkdtemp(path.join(tmpdir(), "finite-chain-"));
+      await mkdir(path.join(dir, "src/styles"), { recursive: true });
+      await mkdir(path.join(dir, "src/c"), { recursive: true });
+      const compile = async () => {
+        for (const [file, css] of Object.entries(files)) await writeFile(path.join(dir, file), css);
+        const css = `@use "../styles/tokens" as *;\n.card {\n  color: $brand;\n}\n`;
+        await writeFile(path.join(dir, Module), css);
+        return sass.compile(path.join(dir, Module)).css;
+      };
+      await expect(compile()).rejects.toThrow(/Undefined variable/);
+      files["src/styles/_tokens.scss"] = `@use "base" as *;\n$brand: $base;\n`;
+      const picked = pick(files);
+      expect(picked.css).toBe(`@use "../styles/tokens" as *;\n\n.card {}\n`);
+      expect(await compile()).toContain("color: red");
+    });
+
+    it("lists no private $vars", () => {
+      const css = `$_hidden: 1px;\n$-also: 2px;\n$shown: 3px;\n`;
+      expect(readTokens([{ file: "g.scss", css }])).toEqual([{ name: "$shown", light: "3px" }]);
+      expect(Object.keys(variableSheets([{ file: "g.scss", css }]))).toEqual(["$shown"]);
+      const own = `$_gap: 1px;\n.card {}\n`;
+      expect(useVariables(Module, own, { padding: "$_gap" }, {}).css).toBe(own);
+    });
+
+    it("skips quoted text and url() when it looks for variables", () => {
+      expect(variableRefs({ backgroundImage: `url("/images/@logo.svg")` })).toEqual([]);
+      expect(variableRefs({ backgroundImage: `url(/images/@logo.svg)` })).toEqual([]);
+      expect(variableRefs({ content: `"$brand" '@brand'` })).toEqual([]);
+      expect(variableRefs({ border: `1px solid $brand`, content: `"#{$ink}"` })).toEqual([
+        "$brand",
+        "$ink",
+      ]);
+      const named = `@use "../styles/theme";\n.card {}\n`;
+      const vars = { $brand: { file: "src/styles/_theme.scss", emitsCss: false } };
+      expect(useVariables(Module, named, { content: `"$brand" $brand` }, vars).styles.content).toBe(
+        `"$brand" theme.$brand`,
+      );
+    });
+
+    it("counts the CSS that a @use or @forward brings in", () => {
+      const files = {
+        "src/styles/global.scss": `@use "tokens";\n`,
+        "src/styles/_tokens.scss": `@use "reset";\n$brand: red;\n`,
+        "src/styles/_reset.scss": `* {\n  margin: 0;\n}\n`,
+      };
+      expect(variableSheets(sheetsOf(files)).$brand?.emitsCss).toBe(true);
+      expect(() => pick(files)).toThrow(refused(/also outputs CSS/));
+      const forwarded = {
+        ...files,
+        "src/styles/_tokens.scss": `@forward "reset";\n$brand: red;\n`,
+      };
+      expect(variableSheets(sheetsOf(forwarded)).$brand?.emitsCss).toBe(true);
+      const quiet = { ...files, "src/styles/_reset.scss": `$ink: black;\n` };
+      expect(variableSheets(sheetsOf(quiet)).$brand?.emitsCss).toBe(false);
+      const loop = {
+        "src/styles/_a.scss": `@use "b";\n$brand: red;\n`,
+        "src/styles/_b.scss": `@use "a";\n`,
+      };
+      expect(variableSheets(sheetsOf(loop)).$brand?.emitsCss).toBe(false);
+    });
   });
 
   describe("used in a module sheet", () => {
