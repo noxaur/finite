@@ -12,6 +12,7 @@ import {
   type Design,
   type DesignEntry,
   type OpenDesign,
+  type PreviewState,
   type Previews,
   Refused,
   type SourceEditor,
@@ -367,7 +368,8 @@ describe("agents", () => {
   let open: OpenedDesign;
   let sdk: ReturnType<typeof fakeSdk>;
   let agents: ReturnType<typeof createAgents>;
-  const previews = { errors: () => [] } as unknown as Previews;
+  let preview: PreviewState = { status: "ready", url: "http://127.0.0.1:1" };
+  const previews = { errors: () => [], state: () => preview } as unknown as Previews;
   const source = {} as SourceEditor;
 
   const turn = (text: string, extra: Partial<Turn> = {}): Turn => ({
@@ -1036,6 +1038,11 @@ describe("agents", () => {
     expect(read.frames).toHaveLength(2);
     expect(read.comments).toHaveLength(2);
     expect(await call("frame_errors", { frameId: placed[0].id })).toBe("No errors.");
+    preview = { status: "error", log: 'Service "api" exited (code 1) after it was ready.' };
+    await expect(call("frame_errors", { frameId: placed[0].id })).rejects.toThrow(
+      /preview is down, so no frame runs:\n\nService "api" exited/,
+    );
+    preview = { status: "ready", url: "http://127.0.0.1:1" };
 
     // A prototype's frames can be removed, with the labels above them.
     await call("remove_frames", { canvasId: canvas.id, frameIds: [placed[1].id] });

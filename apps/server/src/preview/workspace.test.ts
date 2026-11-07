@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
@@ -101,6 +102,24 @@ describe("a finite.json workspace", () => {
     fs.writeFileSync(file, JSON.stringify(config));
     await expect.poll(sent, { timeout: 10_000 }).toBeGreaterThan(before);
   }, 30_000);
+
+  test("errors every preview when the api exits, and ensure starts it again", async () => {
+    const pid = execSync(`lsof -t -iTCP:${port} -sTCP:LISTEN`, { encoding: "utf8" }).trim();
+    process.kill(Number(pid), "SIGKILL");
+    for (const id of ["web-a", "web-b"]) {
+      await expect.poll(() => previews.state(id).status, { timeout: 10_000 }).toBe("error");
+    }
+    const { log } = previews.state("web-b");
+    expect(log).toMatch(
+      /^Service "api" .* exited \((code \d+|SIG\w+)\) after it was ready\. Fix it, or change services\.api in finite\.json/,
+    );
+    expect(log).toContain("api listening on");
+    await Promise.all([
+      previews.ensure(workspaceDesign("web-a", root, "web", "apps/web")),
+      previews.ensure(workspaceDesign("web-b", root, "web", "apps/web")),
+    ]);
+    expect(await answers(`http://127.0.0.1:${port}/health`)).toBe("ok");
+  }, 120_000);
 
   test("stops the api when the last preview that needs it stops", async () => {
     await previews.stop("web-a");

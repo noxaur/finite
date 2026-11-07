@@ -179,11 +179,19 @@ export function createPreviews(options: PreviewsOptions): Previews {
         }
       }, PROGRESS_MS);
     };
+    // A service that exits once it's up takes the preview down; ensure starts it again.
+    const onExit = (error: Error) => {
+      rejectReady(error);
+      releaseRun(run);
+      if (runs.get(design.id) === run && run.state.status !== "error") {
+        setState(design.id, run, { status: "error", log: error.message });
+      }
+    };
     workspaces
-      .prepare(design, onOutput, () => runs.get(design.id) === run)
+      .prepare(design, onOutput, () => runs.get(design.id) === run, onExit)
       .then(
         ({ env, release }) => {
-          if (runs.get(design.id) !== run) return release();
+          if (runs.get(design.id) !== run || run.state.status === "error") return release();
           run.release = release;
           run.log = "";
           startHost(design, run, env, resolveReady, rejectReady);
