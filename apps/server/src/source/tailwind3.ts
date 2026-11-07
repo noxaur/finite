@@ -34,9 +34,11 @@ export async function tailwind3Config(root: string): Promise<string | undefined>
 /**
  * Runs in a child `node` with the project as cwd: loads the config with the project's own
  * tailwindcss (`loadConfig` handles `.ts` and ESM since 3.3) and prints the resolved theme as
- * JSON. Functions (plugin options) drop out.
+ * JSON after `MARK`, so a config that logs to stdout doesn't break it. Functions (plugin
+ * options) drop out.
  */
-const RESOLVE = `
+const MARK = "@@finite-theme@@";
+const RESOLVE = `const MARK = ${JSON.stringify(MARK)};
 const { createRequire } = require("node:module");
 const [root, file] = process.argv.slice(1);
 const req = createRequire(root + "/package.json");
@@ -44,7 +46,7 @@ let load;
 try { load = req("tailwindcss/loadConfig"); } catch { load = req; }
 let config = load(file);
 config = config.default ?? config;
-process.stdout.write(JSON.stringify(req("tailwindcss/resolveConfig")(config).theme));
+process.stdout.write("\\n" + MARK + JSON.stringify(req("tailwindcss/resolveConfig")(config).theme));
 `;
 
 const cache = new Map<string, { mtime: number; theme: Promise<Theme> }>();
@@ -62,16 +64,19 @@ export async function configTheme(root: string, file: string): Promise<Theme> {
     cwd: root,
     timeout: 20_000,
     maxBuffer: 16 * 1024 * 1024,
-  }).then(
-    ({ stdout }) => v3Theme(JSON.parse(stdout) as Record<string, unknown>),
-    (error: Error & { stderr?: string }) => {
+  })
+    .then(({ stdout }) => {
+      const at = stdout.lastIndexOf(MARK);
+      if (at < 0) throw new Error("the child printed no theme");
+      return v3Theme(JSON.parse(stdout.slice(at + MARK.length)) as Record<string, unknown>);
+    })
+    .catch((error: Error & { stderr?: string }) => {
       console.warn(
         `reading the Tailwind theme in ${file} failed, so hand edits write arbitrary values:`,
         error.stderr?.split("\n").find((l) => /^\w*Error\b/.test(l)) ?? error.message,
       );
       return {};
-    },
-  );
+    });
   cache.set(file, { mtime: mtimeMs, theme });
   return theme;
 }
@@ -80,6 +85,9 @@ export async function configTheme(root: string, file: string): Promise<Theme> {
 const NAMESPACES: Record<string, string> = {
   colors: "--color",
   spacing: "--spacing",
+  padding: "--padding",
+  margin: "--margin",
+  gap: "--gap",
   inset: "--inset",
   width: "--width",
   height: "--height",

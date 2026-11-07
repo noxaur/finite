@@ -7,6 +7,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 import { editClasses } from "./tailwind.ts";
 import { configTheme, tailwind3Config, v3Theme } from "./tailwind3.ts";
 
+const spacing = { 0: "0px", 2: "0.5rem", 4: "1rem", px: "1px", "0.5": "0.125rem", card: "312px" };
+
 /** A slice of a resolved v3 theme (`resolveConfig(config).theme`) with a few extensions. */
 const theme = v3Theme({
   colors: {
@@ -14,7 +16,10 @@ const theme = v3Theme({
     brand: { DEFAULT: "#95ced7", dark: "#2f4f55" },
     slate: { 50: "#f8fafc" },
   },
-  spacing: { 0: "0px", 2: "0.5rem", 4: "1rem", px: "1px", "0.5": "0.125rem", card: "312px" },
+  spacing,
+  padding: spacing,
+  margin: { ...spacing, auto: "auto" },
+  gap: spacing,
   inset: { 0: "0px", 2: "0.5rem", auto: "auto", "1/2": "50%" },
   width: { 4: "1rem", card: "312px", full: "100%", "1/2": "50%", screen: "100vw" },
   maxWidth: { md: "28rem", prose: "65ch", none: "none" },
@@ -33,7 +38,7 @@ const theme = v3Theme({
     card: "10px",
     full: "9999px",
   },
-  borderWidth: { 0: "0px", 2: "2px", DEFAULT: "1px" },
+  borderWidth: { 0: "0px", 2: "2px", DEFAULT: "1px", heavy: "6px" },
   boxShadow: {
     sm: "0 1px 2px 0 rgb(0 0 0 / 0.05)",
     DEFAULT: "0 1px 3px 0 rgb(0 0 0 / 0.1)",
@@ -110,6 +115,38 @@ describe("editClasses on Tailwind v3", () => {
     expect(editClasses("z-modal shadow", { zIndex: "10", boxShadow: null }, theme, 3)).toBe("z-10");
   });
 
+  it("maps padding, margin and gap against their own scales", () => {
+    const own = v3Theme({
+      spacing,
+      padding: { ...spacing, 4: "3rem" },
+      margin: { ...spacing, 4: "2rem" },
+      gap: { ...spacing, 4: "5rem" },
+    });
+    expect(editClasses("", { padding: "16px", gap: "16px" }, own, 3)).toBe("p-[16px] gap-[16px]");
+    expect(editClasses("", { padding: "48px", gap: "80px" }, own, 3)).toBe("p-4 gap-4");
+    expect(editClasses("", { marginTop: "-32px" }, own, 3)).toBe("-mt-4");
+  });
+
+  it("replaces custom border widths, on every side", () => {
+    expect(editClasses("border-heavy", { borderWidth: "1px" }, theme, 3)).toBe("border");
+    expect(editClasses("border-t-heavy", { borderTopWidth: "2px" }, theme, 3)).toBe("border-t-2");
+    expect(editClasses("border-x-heavy", { borderLeftWidth: "1px" }, theme, 3)).toBe(
+      "border-x-heavy border-l",
+    );
+  });
+
+  it("writes a keyword name only when a replaced scale still has it", () => {
+    const bare = v3Theme({ colors: { brand: "#95ced7" }, borderRadius: { card: "10px" } });
+    expect(editClasses("", { backgroundColor: "#fff" }, bare, 3)).toBe("bg-[#fff]");
+    expect(editClasses("", { color: "transparent" }, bare, 3)).toBe("text-[transparent]");
+    expect(editClasses("", { borderRadius: "0" }, bare, 3)).toBe("rounded-[0]");
+    expect(editClasses("", { borderRadius: "9999px" }, bare, 3)).toBe("rounded-[9999px]");
+    expect(editClasses("", { padding: "1px", margin: "auto" }, bare, 3)).toBe("p-[1px] m-[auto]");
+    expect(editClasses("", { backgroundColor: "#fff", borderRadius: "0" }, theme, 3)).toBe(
+      "bg-white rounded-none",
+    );
+  });
+
   it("keeps v4's defaults out of v3 output", () => {
     // v4 has rounded-sm at 0.25rem, text-sm by default and `--spacing` steps.
     expect(editClasses("", { fontSize: "14px" }, {}, 3)).toBe("text-[14px]");
@@ -165,6 +202,17 @@ export default {
     expect(edit({ backgroundColor: "#f8fafc" })).toBe("bg-slate-50");
     expect(editClasses("rounded-card p-card", { borderRadius: "4px" }, resolved, 3)).toBe(
       "p-card rounded",
+    );
+  }, 30_000);
+
+  it("ignores what the config prints to stdout", async () => {
+    const chatty = path.join(root, "tailwind.config.mjs");
+    fs.writeFileSync(
+      chatty,
+      `console.log("hello {");\nexport default { content: [], theme: { extend: { colors: { brand: "#95ced7" } } } };\n`,
+    );
+    expect(editClasses("", { color: "#95ced7" }, await configTheme(root, chatty), 3)).toBe(
+      "text-brand",
     );
   }, 30_000);
 

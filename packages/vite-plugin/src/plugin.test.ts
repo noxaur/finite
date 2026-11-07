@@ -145,6 +145,7 @@ describe("tailwind", () => {
         "tailwind.config.cjs": `module.exports = { content: { relative: true, files: ["./src/**/*.tsx", "!./src/old/**"] }, theme: { extend: { colors: { brand: "#95ced7" } } } };`,
         "src/index.css": "@tailwind base;\n@tailwind utilities;\n",
         "src/named.css": `@config "../tailwind.config.cjs";\n@tailwind utilities;\n`,
+        "src/imports.css": `@charset "utf-8";\n/* reset */\n@import "./reset.css";\n@import url("fonts.css") layer(base);\n@tailwind base;\n`,
       }),
     );
     const tailwind = finite({ root, allowedHosts: [] }).find(
@@ -157,10 +158,15 @@ describe("tailwind", () => {
       `@config "../.finite/runtime/css/src/index.css.tailwind.config.cjs";\n@tailwind base;\n@tailwind utilities;\n`,
     );
     expect(load("src/named.css")).toBe(
-      `@config "../.finite/runtime/css/src/named.css.tailwind.config.cjs";\n\n@tailwind utilities;\n`,
+      `\n@config "../.finite/runtime/css/src/named.css.tailwind.config.cjs";\n@tailwind utilities;\n`,
+    );
+    // `@import` must precede other statements, or postcss-import drops it.
+    expect(load("src/imports.css")).toBe(
+      `@charset "utf-8";\n/* reset */\n@import "./reset.css";\n@import url("fonts.css") layer(base);\n@config "../.finite/runtime/css/src/imports.css.tailwind.config.cjs";\n@tailwind base;\n`,
     );
     expect(fs.readFileSync(path.join(root, ".finite/runtime/.gitignore"), "utf8")).toBe("*\n");
-    const config = createRequire(import.meta.url)(path.join(root, configFile));
+    const require = createRequire(import.meta.url);
+    const config = require(path.join(root, configFile));
     expect(config).toEqual({
       content: {
         relative: true,
@@ -173,6 +179,19 @@ describe("tailwind", () => {
       },
       theme: { extend: { colors: { brand: "#95ced7" } } },
     });
+
+    // Tailwind rebuilds when a file the config requires by a literal relative path changes: it
+    // clears those from the require cache and loads the config again.
+    const projectConfig = path.join(root, "tailwind.config.cjs");
+    expect(fs.readFileSync(path.join(root, configFile), "utf8")).toContain(
+      `require("../../../../tailwind.config.cjs")`,
+    );
+    fs.writeFileSync(
+      projectConfig,
+      fs.readFileSync(projectConfig, "utf8").replace("#95ced7", "#0a7f3e"),
+    );
+    for (const file of [projectConfig, path.join(root, configFile)]) delete require.cache[file];
+    expect(require(path.join(root, configFile)).theme.extend.colors.brand).toBe("#0a7f3e");
   });
 });
 
