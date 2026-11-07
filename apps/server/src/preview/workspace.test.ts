@@ -351,12 +351,27 @@ describe("finite.json changes", () => {
     const design = workspaceDesign("revert", root, "app", "app");
     const workspaces = createWorkspaces({ startTimeoutMs: 1_000 });
     cleanups.push(() => workspaces.close());
-    for (const name of ["a", "b", "a"]) {
-      config.setup = [mode(name)];
+    for (const name of ["a", "b", "a", "", "a"]) {
+      config.setup = name ? [mode(name)] : [];
       fs.writeFileSync(path.join(root, "finite.json"), JSON.stringify(config));
+      fs.rmSync(path.join(root, "mode"), { force: true });
       await workspaces.prepare(design, () => {});
-      expect(lines(path.join(root, "mode"))).toEqual([name]);
+      expect(lines(path.join(root, "mode"))).toEqual(name ? [name] : []);
     }
+  });
+
+  test("a setup command after one that exits on SIGTERM doesn't start after close", async () => {
+    const config = {
+      setup: ["trap 'exit 0' TERM; sleep 2 & wait", "touch next"],
+      apps: { app: { path: "app" } },
+    };
+    const root = tinyWorkspace(config);
+    const workspaces = createWorkspaces({ startTimeoutMs: 1_000 });
+    const done = workspaces.prepare(workspaceDesign("trap", root, "app", "app"), () => {});
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await workspaces.close();
+    await expect(done).rejects.toThrow(/shutting down/);
+    expect(fs.existsSync(path.join(root, "next"))).toBe(false);
   });
 
   test("a setup waiting for the one before it doesn't start after close", async () => {

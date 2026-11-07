@@ -85,8 +85,8 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
     const before = existing?.done.catch(() => {});
     job.done = (async () => {
       await before;
-      if (closed) throw new Refused("Finite is shutting down.");
       for (const command of commands) {
+        if (closed) throw new Refused("Finite is shutting down.");
         write(`$ ${command}\n`);
         const child = run(command, cwd, env);
         child.stdout?.on("data", (chunk: Buffer) => write(chunk.toString("utf8")));
@@ -200,15 +200,15 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
       if (!design.workspace || !design.app) return { env: {}, release: () => {}, version: "" };
       const { workspace, app } = await read(design);
       const env = envFor(workspace, { app: app.name });
-      if (workspace.setup?.length) {
-        check();
-        const scope = workspace.root;
-        await follow(setup(scope, workspace.setup, workspace.root, workspace.env ?? {}), onOutput);
-      }
-      if (app.setup?.length) {
-        check();
-        await follow(setup(`${workspace.root}\0${app.name}`, app.setup, app.dir, env), onOutput);
-      }
+      // An empty setup is a job too, so going back to the setup before it runs that again.
+      check();
+      const commands = workspace.setup ?? [];
+      await follow(setup(workspace.root, commands, workspace.root, workspace.env ?? {}), onOutput);
+      check();
+      await follow(
+        setup(`${workspace.root}\0${app.name}`, app.setup ?? [], app.dir, env),
+        onOutput,
+      );
 
       const held: Service[] = [];
       const releaseAll = () => held.splice(0).forEach(release);
