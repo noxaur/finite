@@ -1,7 +1,13 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { FiniteJson, Refused, type FiniteApp, type FiniteService } from "@finite/protocol";
+import {
+  FiniteJson,
+  Refused,
+  routeParams,
+  type FiniteApp,
+  type FiniteService,
+} from "@finite/protocol";
 import type { z } from "zod";
 import { exists, readText } from "./files.ts";
 
@@ -94,6 +100,7 @@ export async function readWorkspace(root: string): Promise<Workspace> {
     for (const need of app.needs ?? []) {
       if (!serviceNames.includes(need)) problems.push(missing(`apps.${name}.needs`, need));
     }
+    problems.push(...routeProblems(name, app.routes ?? {}));
     const where = `apps.${name}.path`;
     if (outside(root, dir)) {
       problems.push(
@@ -191,6 +198,46 @@ export function envFor(
   return { ...workspace.env, ...own.env };
 }
 
+/** The params objects for one route in `finite.json`: one, or each of an array. */
+export function paramSets(
+  value: Record<string, string> | Record<string, string>[],
+): Record<string, string>[] {
+  return Array.isArray(value) ? value : [value];
+}
+
+/** Each `apps.<name>.routes` path that isn't a path, and params that don't fit their path's segments. */
+function routeProblems(appName: string, routes: NonNullable<FiniteApp["routes"]>): string[] {
+  const problems: string[] = [];
+  for (const [routePath, value] of Object.entries(routes)) {
+    const where = `apps.${appName}.routes.${routePath}`;
+    if (!routePath.startsWith("/")) {
+      problems.push(`${where}: a route path starts with "/", like "/${routePath}".`);
+      continue;
+    }
+    const segments = routeParams(routePath);
+    const names = segments.map((p) => p.name);
+    const sets = paramSets(value);
+    sets.forEach((params, i) => {
+      const at = Array.isArray(value) ? `${where}.${i}` : where;
+      for (const key of Object.keys(params)) {
+        if (names.includes(key)) continue;
+        problems.push(
+          names.length
+            ? `${at}: no param "${key}" in this path; its params are ${names.join(", ")}.`
+            : `${at}: no param "${key}" in this path; it has no params, so use {}.`,
+        );
+      }
+      for (const segment of segments) {
+        if (segment.optional || params[segment.name]) continue;
+        problems.push(
+          `${at}: "${segment.name}" has no value. Give it one, like "${segment.name}": "42".`,
+        );
+      }
+    });
+  }
+  return problems;
+}
+
 /** Every `needs` cycle among the services, each reported once. */
 function cycles(services: Record<string, WorkspaceService>): string[] {
   const problems: string[] = [];
@@ -217,7 +264,7 @@ function cycles(services: Record<string, WorkspaceService>): string[] {
 
 const KNOWN_KEYS = {
   top: ["$schema", "setup", "env", "apps", "services"],
-  app: ["path", "setup", "needs", "env"],
+  app: ["path", "setup", "needs", "env", "routes"],
   service: ["run", "cwd", "ready", "needs", "env"],
 };
 
@@ -253,6 +300,9 @@ function describeIssue(issue: z.core.$ZodIssue, raw: unknown): string {
     case "invalid_union":
       if (keys.at(-1) === "ready") {
         return `${where}: expected a URL like "http://localhost:4000/health" or a port number like 5432, got ${JSON.stringify(value)}.`;
+      }
+      if (keys[0] === "apps" && keys[2] === "routes") {
+        return `${where}: expected a params object like {"id": "42"} or an array of them, with string values, got ${JSON.stringify(value)}.`;
       }
       return `${where}: ${issue.message}.`;
     case "too_small":

@@ -209,7 +209,7 @@ export function createStore(options: StoreOptions): FileStore {
     const by = FINITE;
     const routesPage = await design.createCanvas({ kind: "page", name: ROUTES_PAGE }, by);
     const frames = routeFrames(
-      routes.map((route) => ({ path: route, params: [] })),
+      routes.map((route) => ({ path: route, params: {} })),
       [],
     );
     if (frames.length) {

@@ -91,6 +91,8 @@ const WorkspaceName = z
   .string()
   .regex(/^[a-z0-9][a-z0-9-]*$/, "a name is lowercase letters, digits and hyphens");
 const Env = z.record(z.string(), z.string());
+/** A route frame's values for its dynamic segments, like `{ "userId": "42" }`. */
+const RouteParams = z.record(z.string(), z.string());
 
 /** An app in `finite.json`: one design. `path` is relative to the workspace root (`"."` allowed). */
 export const FiniteApp = z.strictObject({
@@ -100,6 +102,12 @@ export const FiniteApp = z.strictObject({
   /** The services its dev server needs. */
   needs: z.array(z.string()).optional(),
   env: Env.optional(),
+  /**
+   * Values for the routes' dynamic segments, keyed by the route path as the router reports it
+   * (`/users/:userId`): one params object, or an array for one frame each. A path the router
+   * doesn't report is added as a custom route.
+   */
+  routes: z.record(z.string(), z.union([RouteParams, z.array(RouteParams)])).optional(),
 });
 export type FiniteApp = z.infer<typeof FiniteApp>;
 

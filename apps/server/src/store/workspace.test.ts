@@ -119,7 +119,7 @@ describe("readWorkspace", () => {
     expect(reason).toContain(`apps: "Web" isn't a valid name.`);
     expect(reason).toContain("apps.w.path: expected a string, got 1.");
     expect(reason).toContain(
-      `apps.w: unknown key "need". Remove it, or use one of path, setup, needs, env.`,
+      `apps.w: unknown key "need". Remove it, or use one of path, setup, needs, env, routes.`,
     );
     expect(reason).toContain("apps.e.path is empty.");
     expect(reason).toContain(
@@ -203,6 +203,74 @@ describe("readWorkspace", () => {
       `services.api.cwd: ${path.join(root, "services/nope")} doesn't exist.`,
     );
     expect(reason).toContain("these 5 problems");
+  });
+
+  it("accepts routes with one params object, an array of them, or {}", async () => {
+    const routes = {
+      "/users/:userId": { userId: "42" },
+      "/posts/$slug": [{ slug: "hello-world" }, { slug: "draft" }],
+      "/docs/[[...rest]]": {},
+      "/internal/preview": {},
+    };
+    const root = await folder({
+      "finite.json": { apps: { web: { path: ".", routes } } },
+      "package.json": PKG,
+    });
+    expect((await readWorkspace(root)).apps.web!.routes).toEqual(routes);
+  });
+
+  it("reports route params that don't fit their path, naming the key path", async () => {
+    const root = await folder({
+      "finite.json": {
+        apps: {
+          web: {
+            path: ".",
+            routes: {
+              "/users/:userId": { id: "42" },
+              "/posts/$slug": [{ slug: "a" }, { slug: 7 }],
+              "/about": { id: "1" },
+              "/blog/[slug]": [{ slug: "a" }, {}],
+              about: {},
+            },
+          },
+        },
+      },
+      "package.json": PKG,
+    });
+    const reason = await problems(root);
+    expect(reason).toContain(
+      `apps.web.routes./posts/$slug: expected a params object like {"id": "42"} or an array of them, with string values`,
+    );
+    // Schema problems come first; fix them and the param names are checked.
+    const fixed = await folder({
+      "finite.json": {
+        apps: {
+          web: {
+            path: ".",
+            routes: {
+              "/users/:userId": { id: "42" },
+              "/about": { id: "1" },
+              "/blog/[slug]": [{ slug: "a" }, {}],
+              about: {},
+            },
+          },
+        },
+      },
+      "package.json": PKG,
+    });
+    const names = await problems(fixed);
+    expect(names).toContain(
+      `apps.web.routes./users/:userId: no param "id" in this path; its params are userId.`,
+    );
+    expect(names).toContain(
+      `apps.web.routes./users/:userId: "userId" has no value. Give it one, like "userId": "42".`,
+    );
+    expect(names).toContain(
+      `apps.web.routes./about: no param "id" in this path; it has no params, so use {}.`,
+    );
+    expect(names).toContain(`apps.web.routes./blog/[slug].1: "slug" has no value.`);
+    expect(names).toContain(`apps.web.routes.about: a route path starts with "/", like "/about".`);
+    expect(names).toContain("these 5 problems");
   });
 });
 

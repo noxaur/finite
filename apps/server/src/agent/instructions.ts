@@ -47,6 +47,7 @@ Write only what's needed. Paths are relative to the folder finite.json is in, an
 \`\`\`
 - \`setup\`: commands run in order in that folder before any dev server starts (install, package builds, codegen). An app's own \`setup\` runs in its folder after.
 - \`apps\`: one per app to design in. \`"path": "."\` when the app is that folder. Don't list its dev server anywhere: Finite runs it.
+- \`routes\` (in an app): real ids for dynamic routes, found in seed data, fixtures or mocks, keyed by the path as the router writes it: \`"routes": { "/users/:id": { "id": "42" } }\`. An array gives one frame each; \`{}\` adds a path the router doesn't list.
 - \`services\`: long-running processes an app \`needs\`. \`ready\` is a URL Finite polls or a port it waits for; \`cwd\` and \`needs\` are optional.
 - \`env\`: non-secret values for every command, service and dev server; an app or service can have its own.
 - No secrets: finite.json is committed. Use local defaults, and tell the person which secrets to set in their own env.
