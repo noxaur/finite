@@ -122,9 +122,11 @@ try {
     if (!name) return;
     const file = path.join(finite.root, name);
     if (ignored.some((dir) => file.includes(dir))) return;
-    // Any file in the brand folder, such as an image or a font, changes the brand board.
+    // Any file in the brand folder, such as an image or a font, changes the brand board, and so
+    // does renaming or deleting the folder itself, which the watcher reports as the folder alone.
     const brandDir = finite.brandDir();
-    const brand = brandDir && file.startsWith(path.join(finite.root, brandDir) + path.sep);
+    const brandPath = brandDir && path.join(finite.root, brandDir);
+    const brand = brandPath && (file === brandPath || file.startsWith(brandPath + path.sep));
     if (!SOURCE.test(file) && !brand) return;
     if (file === path.join(finite.root, finite.mount)) return;
     clearTimeout(timer);
