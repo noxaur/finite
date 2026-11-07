@@ -30,11 +30,13 @@ export type Workspaces = {
   /**
    * Runs the workspace's and the app's `setup` (once per finite.json version), then starts the
    * services the app needs. Streams setup output to `onOutput`. Resolves with the env finite.json
-   * gives the dev server and a `release` for the services, to call when the preview stops.
+   * gives the dev server and a `release` for the services, to call when the preview stops. Once
+   * `wanted` returns false (the preview stopped), it starts no more services and refuses.
    */
   prepare(
     design: Design,
     onOutput: (chunk: string) => void,
+    wanted?: () => boolean,
   ): Promise<{ env: Record<string, string>; release: () => void }>;
   /** Stops every service and setup command. */
   close(): Promise<void>;
@@ -140,7 +142,11 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
   }
 
   return {
-    async prepare(design, onOutput) {
+    async prepare(design, onOutput, wanted = () => true) {
+      // A preview stopped while a setup command or a service ran starts nothing after it.
+      const check = () => {
+        if (!wanted()) throw new Refused("The design's preview was stopped before it was ready.");
+      };
       if (!design.workspace || !design.app) return { env: {}, release: () => {} };
       const workspace = await readWorkspace(design.workspace);
       const app = workspace.apps[design.app];
@@ -156,6 +162,7 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
         await follow(setup(key, workspace.setup, workspace.root, workspace.env ?? {}), onOutput);
       }
       if (app.setup?.length) {
+        check();
         const key = `${workspace.root}\0${app.name}\0${workspace.hash}`;
         await follow(setup(key, app.setup, app.dir, env), onOutput);
       }
@@ -164,6 +171,7 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
       const releaseAll = () => held.splice(0).forEach(release);
       try {
         for (const name of servicesFor(workspace, app.name)) {
+          check();
           const service =
             services.get(`${workspace.root}\0${name}`) ??
             startService(workspace, workspace.services[name]!);

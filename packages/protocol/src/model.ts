@@ -58,6 +58,8 @@ export const DesignEntry = z.object({
   app: z.string().optional(),
   /** A folder Finite couldn't run yet, waiting for its setup thread to write `finite.json`. */
   setup: z.boolean().optional(),
+  /** A setup design whose `.finite/` Finite made when it connected; removing it deletes that folder. */
+  madeFinite: z.boolean().optional(),
 });
 export type DesignEntry = z.infer<typeof DesignEntry>;
 

@@ -15,6 +15,7 @@ import {
   type Unsubscribe,
 } from "@finite/protocol";
 import { allowedHosts } from "../guard.ts";
+import { WORKSPACE_FILE } from "../store/workspace.ts";
 import { createWorkspaces } from "./workspace.ts";
 
 export type PreviewsOptions = {
@@ -60,6 +61,8 @@ type Run = {
   sentRoutes: string | undefined;
   /** Lets go of the finite.json services the run holds. */
   release: (() => void) | undefined;
+  /** Watches a workspace design's finite.json, whose `routes` the Routes page shows. */
+  watcher: fs.FSWatcher | undefined;
   /** Pending throttled `starting` event while setup output streams in. */
   progress: NodeJS.Timeout | undefined;
 };
@@ -106,6 +109,8 @@ export function createPreviews(options: PreviewsOptions): Previews {
   const releaseRun = (run: Run) => {
     run.release?.();
     run.release = undefined;
+    run.watcher?.close();
+    run.watcher = undefined;
   };
 
   function start(design: Design): Run {
@@ -125,6 +130,7 @@ export function createPreviews(options: PreviewsOptions): Previews {
       cancel: (reason) => rejectReady(new Refused(reason)),
       sentRoutes: undefined,
       release: undefined,
+      watcher: undefined,
       progress: undefined,
     };
     runs.set(design.id, run);
@@ -154,22 +160,24 @@ export function createPreviews(options: PreviewsOptions): Previews {
         }
       }, PROGRESS_MS);
     };
-    workspaces.prepare(design, onOutput).then(
-      ({ env, release }) => {
-        if (runs.get(design.id) !== run) return release();
-        run.release = release;
-        run.log = "";
-        startHost(design, run, env, resolveReady, rejectReady);
-      },
-      (error: Error) => {
-        rejectReady(error);
-        if (runs.get(design.id) !== run) return;
-        setState(design.id, run, {
-          status: "error",
-          log: `${error.message}\n\n${run.log}`.trim(),
-        });
-      },
-    );
+    workspaces
+      .prepare(design, onOutput, () => runs.get(design.id) === run)
+      .then(
+        ({ env, release }) => {
+          if (runs.get(design.id) !== run) return release();
+          run.release = release;
+          run.log = "";
+          startHost(design, run, env, resolveReady, rejectReady);
+        },
+        (error: Error) => {
+          rejectReady(error);
+          if (runs.get(design.id) !== run) return;
+          setState(design.id, run, {
+            status: "error",
+            log: `${error.message}\n\n${run.log}`.trim(),
+          });
+        },
+      );
     return run;
   }
 
@@ -225,6 +233,7 @@ export function createPreviews(options: PreviewsOptions): Previews {
         setState(design.id, run, { status: "ready", url: message.url });
         resolveReady({ url: message.url });
         void refreshRoutes(design.id, run);
+        if (design.workspace) watchWorkspace(design.id, design.workspace, run);
       } else if (message.type === "error") {
         fail(message.message ?? "it failed");
       } else if (message.type === "changed") {
@@ -237,6 +246,24 @@ export function createPreviews(options: PreviewsOptions): Previews {
       fail(`it exited (${signal ?? `code ${code}`})`);
     });
     child.on("error", (error) => fail(error.message));
+  }
+
+  /**
+   * Sends the routes again whenever the workspace's finite.json changes, so the Routes page picks
+   * up its `routes`. It watches the folder, since an atomic write replaces the file.
+   */
+  function watchWorkspace(designId: string, workspace: string, run: Run) {
+    if (run.watcher || runs.get(designId) !== run) return;
+    try {
+      run.watcher = fs.watch(workspace, (_, file) => {
+        if (file !== WORKSPACE_FILE) return;
+        run.sentRoutes = undefined;
+        void refreshRoutes(designId, run);
+      });
+      run.watcher.on("error", () => run.watcher?.close());
+    } catch (error) {
+      console.error(`watching ${workspace} for finite.json changes failed:`, error);
+    }
   }
 
   async function fetchRoutes(run: Run): Promise<Route[]> {

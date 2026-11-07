@@ -357,6 +357,50 @@ describe("workspaces", () => {
     expect((await store.designs()).map((d) => d.root)).toEqual([web(root)]);
   });
 
+  it("keeps a .finite/ that was there before the setup design, when it's replaced and removed", async () => {
+    const store = newStore(await tempDir());
+    const root = await monorepo();
+    const config = await fs.readFile(path.join(root, "finite.json"), "utf8");
+    await fs.rm(path.join(root, "finite.json"));
+    const board = path.join(root, ".finite/boards/x.tsx");
+    await fs.mkdir(path.dirname(board), { recursive: true });
+    await fs.writeFile(board, "export default () => null;\n");
+
+    const setup = await store.connect(root);
+    expect(setup).toMatchObject({ setup: true });
+    expect(setup.madeFinite).toBeUndefined();
+    await fs.writeFile(path.join(root, "finite.json"), config);
+    expect(await store.finishSetup(setup.id)).toMatchObject({ replaced: true });
+    await store.remove(setup.id);
+    expect(await fs.readFile(board, "utf8")).toBe("export default () => null;\n");
+  });
+
+  it("links an app to a finite.json written after it was connected, and unlinks it", async () => {
+    const { dataDir, store, root, entry, open } = await connected();
+    expect(entry.workspace).toBeUndefined();
+    const file = path.join(root, "finite.json");
+    await fs.writeFile(file, JSON.stringify({ apps: { shop: { path: "." } } }));
+    // Connecting it again, while it's open.
+    expect(await store.connect(root)).toMatchObject({ workspace: root, app: "shop" });
+    expect(open.design).toMatchObject({ workspace: root, app: "shop" });
+
+    // Opening it, in a later server run: an invalid finite.json keeps the link.
+    await store.close();
+    await fs.writeFile(file, "{");
+    const later = newStore(dataDir);
+    expect((await later.open(entry.id)).design).toMatchObject({ workspace: root, app: "shop" });
+    await later.close();
+
+    // A finite.json that no longer lists it unlinks it.
+    await fs.writeFile(file, JSON.stringify({ apps: { other: { path: "src" } } }));
+    await fs.writeFile(path.join(root, "src/package.json"), "{}");
+    const last = newStore(dataDir);
+    const design = (await last.open(entry.id)).design;
+    expect(design.workspace).toBeUndefined();
+    expect(design.app).toBeUndefined();
+    expect((await last.designs())[0]).not.toHaveProperty("workspace");
+  });
+
   it("turns a setup design into the app at its own path", async () => {
     const store = newStore(await tempDir());
     const root = await project({ react: "^19" });

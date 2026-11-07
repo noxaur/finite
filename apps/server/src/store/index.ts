@@ -14,7 +14,7 @@ import {
 } from "@finite/protocol";
 import { ensureBrandBoard } from "./brand.ts";
 import { detectProject } from "./detect.ts";
-import { readJson, serial, toJson, writeAtomic } from "./files.ts";
+import { exists, readJson, serial, toJson, writeAtomic } from "./files.ts";
 import { type Install, install } from "./install.ts";
 import { type OpenedDesign, openDesign } from "./open.ts";
 import { ROUTES_PAGE, routeFrames } from "./routes.ts";
@@ -226,7 +226,7 @@ export function createStore(options: StoreOptions): FileStore {
   async function connectFolder(
     root: string,
     detected: Found,
-    extra: Pick<DesignEntry, "workspace" | "app" | "setup"> = {},
+    extra: Pick<DesignEntry, "workspace" | "app" | "setup" | "madeFinite"> = {},
   ): Promise<DesignEntry> {
     const rows = await list();
     const configFile = path.join(root, ".finite", "design.json");
@@ -277,7 +277,7 @@ export function createStore(options: StoreOptions): FileStore {
       await writeAtomic(configFile, toJson(config));
       name = detectedName;
     }
-    const { setup: _setup, ...base } = same;
+    const { setup: _setup, madeFinite: _madeFinite, ...base } = same;
     const next: DesignEntry = { ...base, ...extra, name };
     await saveList(rows.map((d) => (d.id === same.id ? next : d)));
     const pending = opened.get(same.id);
@@ -285,6 +285,29 @@ export function createStore(options: StoreOptions): FileStore {
       const { version: _version, id: _id, ...rest } = config;
       const { updatedAt: _at, installing: _installing, ...fields } = next;
       (await pending).setDesign({ ...fields, ...rest });
+    }
+    return next;
+  }
+
+  /**
+   * Links the row to the `finite.json` app its folder is in now, or unlinks it when none lists it,
+   * so an app connected before its `finite.json` existed gets `workspace` and `app`. An unreadable
+   * `finite.json` keeps the row as it is; the preview reports what's wrong with it.
+   */
+  async function relink(row: DesignEntry): Promise<DesignEntry> {
+    if (row.setup) return row;
+    const found = await findWorkspace(row.root);
+    const workspace = found && (await readWorkspace(found.root).catch(() => undefined));
+    if (found && !workspace) return row;
+    const app = workspace && appFor(workspace, row.root);
+    if (row.workspace === (app ? workspace.root : undefined) && row.app === app?.name) return row;
+    const { workspace: _workspace, app: _app, ...base } = row;
+    const next: DesignEntry = app ? { ...base, workspace: workspace.root, app: app.name } : base;
+    await saveList((await list()).map((d) => (d.id === row.id ? next : d)));
+    const design = await opened.get(row.id)?.catch(() => undefined);
+    if (design) {
+      const { workspace: _w, app: _a, ...fields } = design.design;
+      design.setDesign(app ? { ...fields, workspace: workspace.root, app: app.name } : fields);
     }
     return next;
   }
@@ -322,7 +345,7 @@ export function createStore(options: StoreOptions): FileStore {
       return run(async () => {
         const root = path.resolve(input);
         const same = (await list()).find((d) => d.root === root);
-        if (same) return same;
+        if (same) return relink(same);
 
         const found = await findWorkspace(root);
         if (found) {
@@ -350,7 +373,13 @@ export function createStore(options: StoreOptions): FileStore {
           ) {
             throw error;
           }
-          return connectFolder(root, SETUP_CONFIG, { workspace: root, setup: true });
+          // Only a .finite/ Finite makes here is its to delete when the setup design goes.
+          const made = !(await exists(path.join(root, ".finite")));
+          return connectFolder(root, SETUP_CONFIG, {
+            workspace: root,
+            setup: true,
+            ...(made ? { madeFinite: true } : {}),
+          });
         }
       });
     },
@@ -399,8 +428,8 @@ export function createStore(options: StoreOptions): FileStore {
         const was = opened.get(id);
         opened.delete(id);
         (await was?.catch(() => undefined))?.close();
-        // A setup design's .finite/ is Finite's own, made when it was connected.
-        if (row.setup)
+        // A setup design's .finite/ is deleted only when Finite made it, connecting the design.
+        if (row.setup && row.madeFinite)
           await fsp.rm(path.join(row.root, ".finite"), { recursive: true, force: true });
         // A blank or imported design's folder goes to the trash, never straight to deletion.
         const projects = path.join(dataDir, "projects") + path.sep;
@@ -414,7 +443,16 @@ export function createStore(options: StoreOptions): FileStore {
       });
     },
 
-    open,
+    open(id) {
+      // A design opening for the first time picks up finite.json changes since it was connected.
+      return (
+        opened.get(id) ??
+        run(async () => {
+          await relink(await entry(id));
+          return open(id);
+        })
+      );
+    },
 
     async settings() {
       const raw = await readJson(settingsFile).catch(() => undefined);

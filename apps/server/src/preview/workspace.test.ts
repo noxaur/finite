@@ -91,6 +91,17 @@ describe("a finite.json workspace", () => {
     expect(b.url).not.toBe(a.url);
   }, 240_000);
 
+  test("sends the routes again when finite.json changes, for its configured routes", async () => {
+    const sent = () => events.filter((e) => e.type === "routes").length;
+    await expect.poll(sent).toBeGreaterThan(0);
+    const before = sent();
+    const file = path.join(root, "finite.json");
+    const config = JSON.parse(fs.readFileSync(file, "utf8"));
+    config.apps.web.routes = { "/custom": {} };
+    fs.writeFileSync(file, JSON.stringify(config));
+    await expect.poll(sent, { timeout: 10_000 }).toBeGreaterThan(before);
+  }, 30_000);
+
   test("stops the api when the last preview that needs it stops", async () => {
     await previews.stop("web-a");
     expect(await answers(`http://127.0.0.1:${port}/health`)).toBe("ok");
@@ -130,6 +141,29 @@ describe("finite.json failures", () => {
     const state = previews.state("slow");
     expect(state.status).toBe("error");
     expect(state.log).toContain("waiting");
+  });
+
+  test("a preview stopped during setup starts no service and no dev server", async () => {
+    const root = tinyWorkspace({
+      setup: ["sleep 1; touch setup-done"],
+      apps: { app: { path: "app", needs: ["api"] } },
+      services: { api: { run: "touch started; sleep 30", ready: await freePort() } },
+    });
+    const events: PreviewEvent[] = [];
+    previews.on("stopped-early", (event) => events.push(event));
+    const ready = previews.ensure(workspaceDesign("stopped-early", root, "app", "app"));
+    await expect.poll(() => events.length).toBeGreaterThan(0);
+    await previews.stop("stopped-early");
+    await expect(ready).rejects.toThrow(/stopped before it was ready/);
+    const after = events.length;
+    // The shared setup command still finishes; nothing starts after it.
+    await expect
+      .poll(() => fs.existsSync(path.join(root, "setup-done")), { timeout: 5_000 })
+      .toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(fs.existsSync(path.join(root, "started"))).toBe(false);
+    expect(previews.state("stopped-early")).toEqual({ status: "stopped" });
+    expect(events.length).toBe(after);
   });
 
   test("a setup design doesn't start a preview", async () => {
