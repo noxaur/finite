@@ -142,6 +142,15 @@ describe("editClasses on Tailwind v3", () => {
     expect(editClasses("", { borderRadius: "0" }, bare, 3)).toBe("rounded-[0]");
     expect(editClasses("", { borderRadius: "9999px" }, bare, 3)).toBe("rounded-[9999px]");
     expect(editClasses("", { padding: "1px", margin: "auto" }, bare, 3)).toBe("p-[1px] m-[auto]");
+    expect(editClasses("", { lineHeight: "1", boxShadow: "none" }, bare, 3)).toBe(
+      "leading-[1] shadow-[none]",
+    );
+    expect(editClasses("", { lineHeight: "1", boxShadow: "none" }, theme, 3)).toBe(
+      "leading-none shadow-none",
+    );
+    expect(editClasses("", { lineHeight: "1", boxShadow: "none" }, {}, 4)).toBe(
+      "leading-none shadow-none",
+    );
     expect(editClasses("", { backgroundColor: "#fff", borderRadius: "0" }, theme, 3)).toBe(
       "bg-white rounded-none",
     );
@@ -186,7 +195,7 @@ export default {
   afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
 
   it("reads the theme in a child and writes v3 classes", async () => {
-    const config = await tailwind3Config(root);
+    const config = await tailwind3Config(root, []);
     expect(config).toBe(path.join(root, "tailwind.config.ts"));
     const resolved = await configTheme(root, config!);
     const edit = (styles: Record<string, string>) => editClasses("", styles, resolved, 3);
@@ -204,6 +213,20 @@ export default {
       "p-card rounded",
     );
   }, 30_000);
+
+  it("finds the config a sheet names with @config before the root one", async () => {
+    fs.mkdirSync(path.join(root, "config"), { recursive: true });
+    fs.writeFileSync(path.join(root, "config/tailwind.cjs"), `module.exports = { content: [] };\n`);
+    const sheets = [
+      { file: "src/plain.css", css: "body { margin: 0; }\n" },
+      { file: "src/index.css", css: `@config "../config/tailwind.cjs";\n@tailwind base;\n` },
+    ];
+    expect(await tailwind3Config(root, sheets)).toBe(path.join(root, "config/tailwind.cjs"));
+    // A named config that isn't there falls back to the root lookup.
+    expect(
+      await tailwind3Config(root, [{ file: "src/index.css", css: `@config "./gone.js";\n` }]),
+    ).toBe(path.join(root, "tailwind.config.ts"));
+  });
 
   it("ignores what the config prints to stdout", async () => {
     const chatty = path.join(root, "tailwind.config.mjs");

@@ -130,6 +130,29 @@ describe("SourceEditor.apply", () => {
     expect(await get("src/index.css")).toContain("--ink: #222");
   });
 
+  it("finds a Tailwind v3 config through the sheet's @config when the root has none", async () => {
+    await put("src/App.tsx", APP);
+    await put("src/index.css", `@config "../config/tw.cjs";\n@tailwind base;\n`);
+    await put(
+      "node_modules/tailwindcss/package.json",
+      `{ "name": "tailwindcss", "version": "3.4.19" }`,
+    );
+    await put("node_modules/tailwindcss/resolveConfig.js", `module.exports = (c) => c;\n`);
+    await put("config/tw.cjs", `module.exports = { theme: { padding: { card: "312px" } } };\n`);
+    const source = createSourceEditor();
+    const styles = (padding: string) =>
+      edit("src/App.tsx", {
+        kind: "style",
+        locs: ["src/App.tsx:7:6"],
+        tag: "p",
+        styles: { padding },
+      });
+    await source.apply(open(design()), [await styles("312px")], ana, page);
+    expect(await get("src/App.tsx")).toContain(`<p className="p-card">One</p>`);
+    await source.apply(open(design()), [await styles("52px")], ana, page);
+    expect(await get("src/App.tsx")).toContain(`<p className="p-[52px]">One</p>`);
+  });
+
   it("refuses a stale rev", async () => {
     await put("src/App.tsx", APP);
     const source = createSourceEditor();

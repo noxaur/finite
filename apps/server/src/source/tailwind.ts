@@ -238,7 +238,8 @@ const PROPS: Record<string, { toClass: ToClass; sample: string }> = {
   "line-height": {
     sample: "1px",
     toClass(v, theme, v3) {
-      if (v === "1") return "leading-none";
+      // v3 writes `none` only from its lineHeight scale, like every other name.
+      if (v === "1" && !v3) return "leading-none";
       return themed("leading", "--leading", "1px", (x) =>
         v3 ? arbitrary(x) : (spacingStep(x, theme) ?? arbitrary(x)),
       ).toClass(v, theme, v3);
@@ -269,7 +270,7 @@ const PROPS: Record<string, { toClass: ToClass; sample: string }> = {
   "box-shadow": {
     sample: "none",
     toClass: (v, theme, v3) =>
-      v === "none"
+      v === "none" && !v3
         ? "shadow-none"
         : themed("shadow", "--shadow", "none", arbitrary).toClass(v, theme, v3),
   },

@@ -67,9 +67,10 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
   async function tailwindTheme(
     design: Design,
   ): Promise<{ theme: Theme; tailwind: TailwindVersion }> {
-    const config = await tailwind3Config(design.root);
+    const all = await sheets(design);
+    const config = await tailwind3Config(design.root, all);
     if (config) return { theme: await configTheme(design.root, config), tailwind: 3 };
-    return { theme: lightTheme(readTokens(await sheets(design))), tailwind: 4 };
+    return { theme: lightTheme(readTokens(all)), tailwind: 4 };
   }
 
   /** Reads `files`, lets `change` produce new contents, writes what changed. All under the files' locks. */
@@ -224,7 +225,8 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
     async setToken(design, { name, mode, value }) {
       const prop = tokenName(name);
       const all = await sheets(design);
-      const config = design.styling === "tailwind" ? await tailwind3Config(design.root) : undefined;
+      const config =
+        design.styling === "tailwind" ? await tailwind3Config(design.root, all) : undefined;
       if (config && !all.some((s) => hasToken(s.file, s.css, prop, mode)))
         throw new Refused(
           `This design uses Tailwind v3, whose theme lives in ${path.basename(config)}, so a new token there wouldn't make a class. Add it to theme.extend in ${path.basename(config)}, or ask the agent to.`,

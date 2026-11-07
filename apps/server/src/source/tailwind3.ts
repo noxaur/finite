@@ -5,30 +5,34 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type { Theme } from "./tailwind.ts";
 
-const CONFIGS = [
-  "tailwind.config.ts",
-  "tailwind.config.js",
-  "tailwind.config.mjs",
-  "tailwind.config.cjs",
-];
+/** Where Tailwind v3 looks for its config when no `@config` names one, in its order. */
+const CONFIGS = ["js", "cjs", "mjs", "ts", "cts", "mts"].map((ext) => `tailwind.config.${ext}`);
+const CONFIG_DIRECTIVE = /@config\s+(["'])([^"']+)\1/;
 
-/** The design's `tailwind.config.*`, when the tailwindcss it has installed is v3. */
-export async function tailwind3Config(root: string): Promise<string | undefined> {
-  let file: string | undefined;
-  for (const name of CONFIGS) {
-    if (await stat(path.join(root, name)).catch(() => undefined)) {
-      file = path.join(root, name);
-      break;
-    }
-  }
-  if (!file) return undefined;
+/**
+ * The design's Tailwind v3 config, absolute, when the tailwindcss it has installed is v3: the
+ * file a sheet's `@config` names (relative to that sheet), else `tailwind.config.*` at the root.
+ * `sheets` are the design's global stylesheets, by root-relative path.
+ */
+export async function tailwind3Config(
+  root: string,
+  sheets: { file: string; css: string }[],
+): Promise<string | undefined> {
   try {
     const pkg = createRequire(path.join(root, "package.json")).resolve("tailwindcss/package.json");
     const { version } = JSON.parse(await readFile(pkg, "utf8")) as { version: string };
-    return version.startsWith("3.") ? file : undefined;
+    if (!version.startsWith("3.")) return undefined;
   } catch {
     return undefined;
   }
+  const exists = async (file: string) => (await stat(file).catch(() => undefined))?.isFile();
+  for (const { file, css } of sheets) {
+    const named = CONFIG_DIRECTIVE.exec(css)?.[2];
+    const config = named && path.resolve(root, path.dirname(file), named);
+    if (config && (await exists(config))) return config;
+  }
+  for (const name of CONFIGS) if (await exists(path.join(root, name))) return path.join(root, name);
+  return undefined;
 }
 
 /**
