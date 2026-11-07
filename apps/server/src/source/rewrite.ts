@@ -262,15 +262,16 @@ function style(s: StepCtx, el: t.JSXElement, styles: Record<string, string | nul
     );
   }
   if (s.convention === "stylex") {
-    const edit = stylexEdit(s.code, s.parsed.ast, el, styles, s.file, s.ctx.stylexVars ?? {});
-    if (edit) {
-      s.ms.overwrite(edit.start, edit.end, edit.text);
-      if (edit.import) s.ms.appendLeft(edit.import.at, edit.import.text);
+    const patches = stylexEdit(s.code, s.parsed.ast, el, styles, s.file, s.ctx.stylexVars ?? {});
+    if (patches) {
+      for (const p of patches)
+        if (p.start === p.end) s.ms.appendLeft(p.start, p.text);
+        else s.ms.overwrite(p.start, p.end, p.text);
       return;
     }
     if (token)
       throw new Refused(
-        `${token} is a StyleX token, which only a stylex.create entry can use, and this element has no stylex.props spread, so it would get an inline style. Give it a stylex.create entry, pick a CSS custom property (--name) token instead, or ask the agent.`,
+        `${token} is a StyleX token, which only a stylex.create entry can use, and this element has a style, a className or a spread but no stylex.props spread, so it would get an inline style. Give it a stylex.create entry, pick a CSS custom property (--name) token instead, or ask the agent.`,
         "unsupported-style",
       );
     return inline(s, el, styles);

@@ -115,6 +115,9 @@ export function frameHtml(entry: string): string {
 `;
 }
 
+/** React Router framework mode's React Refresh preamble, which its route modules check for. */
+const REACT_ROUTER_PREAMBLE = "virtual:react-router/inject-hmr-runtime";
+
 /**
  * The entry module of a file frame: the design's stylesheets, then the component inside the
  * optional wrapper and a memory router, so `<Link>` in copied production components works.
@@ -125,13 +128,13 @@ export function frameEntry(
     file: string;
     exportName: string;
     routerPackage: string | undefined;
-    /** A module that must run before any component, such as React Router's HMR preamble. */
-    preamble?: string | undefined;
+    /** React Router framework mode, whose HMR preamble must run before any component. */
+    framework?: boolean;
   },
 ): string {
   const url = (file: string) => JSON.stringify(`/${file}`);
   const lines = [
-    ...(input.preamble ? [`import ${JSON.stringify(input.preamble)};`] : []),
+    ...(input.framework ? [`import ${JSON.stringify(REACT_ROUTER_PREAMBLE)};`] : []),
     ...config.css.map((css) => `import ${url(css)};`),
     `import { createElement } from "react";`,
     `import { createRoot } from "react-dom/client";`,
@@ -142,6 +145,16 @@ export function frameEntry(
   ];
   const exportName = JSON.stringify(input.exportName);
   const render = [
+    // React Router's HMR runtime updates its data router before it runs React Refresh, and throws
+    // without one. A file frame renders in a memory router instead, so it gets a stand-in.
+    ...(input.framework
+      ? [
+          `window.__reactRouterManifest ??= { routes: {} };`,
+          `window.__reactRouterRouteModules ??= {};`,
+          `window.__reactRouterContext ??= {};`,
+          `window.__reactRouterDataRouter ??= { createRoutesForHMR() {}, _internalSetRoutes() {}, async revalidate() {} };`,
+        ]
+      : []),
     `const Component = frame[${exportName}];`,
     `if (typeof Component !== "function" && typeof Component !== "object") {`,
     `  throw new Error(${JSON.stringify(`${input.file} has no export named ${input.exportName}`)});`,
