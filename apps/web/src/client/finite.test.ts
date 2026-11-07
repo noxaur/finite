@@ -167,6 +167,26 @@ describe("finite client", () => {
     expect(f.design("d").state).toBeNull();
   });
 
+  it("fetches a design again when setup turned it into an app, but not when it moved on", async () => {
+    const f = make();
+    f.holdDesign("d");
+    const ws = FakeSocket.all[0]!;
+    ws.greet();
+    await flush();
+    ws.reply("subscribe", state());
+    await flush();
+    const subscribes = () => ws.sent.filter((m) => m.type === "subscribe").length;
+    const before = subscribes();
+    ws.push({ type: "setup.done", designId: "d", next: "web" });
+    expect(subscribes()).toBe(before);
+    ws.push({ type: "setup.done", designId: "d", next: "d" });
+    await flush();
+    expect(subscribes()).toBe(before + 1);
+    ws.reply("subscribe", { ...state(), design: { ...state().design, app: "shop" } });
+    await flush();
+    expect(f.design("d").state?.design.app).toBe("shop");
+  });
+
   it("keeps design events that arrive while subscribe waits, across a reconnect too", async () => {
     const f = make();
     f.holdDesign("d");

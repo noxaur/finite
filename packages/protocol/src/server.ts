@@ -35,10 +35,20 @@ export type Unsubscribe = () => void;
 export interface Store {
   designs(): Promise<DesignEntry[]>;
   create(input: { name: string; kind: "blank" | "import"; source?: string }): Promise<DesignEntry>;
-  /** Refuses (`unsupported-project`) without a package.json, Vite, or a supported router. */
+  /**
+   * Connects a folder. With a `finite.json` at or above it, its workspace root connects every app
+   * it lists (returning the first) and an app folder connects that app; an invalid one is refused
+   * (`invalid-config`). Else a folder detection refuses becomes a setup design (`setup: true`).
+   */
   connect(path: string): Promise<DesignEntry>;
+  /**
+   * Reads the design's `finite.json` and connects every app in it, or refuses (`invalid-config`)
+   * listing what to fix. A setup design whose folder is one of the apps becomes it; otherwise
+   * `replaced` is set and the caller removes it. Emits `setup.done` with `next`.
+   */
+  finishSetup(id: string): Promise<{ apps: DesignEntry[]; next: DesignEntry; replaced: boolean }>;
   rename(id: string, name: string): Promise<DesignEntry>;
-  /** Forgets the design. A connected root stays on disk. */
+  /** Forgets the design. A connected root stays on disk; a setup design's `.finite/` is deleted. */
   remove(id: string): Promise<void>;
   open(id: string): Promise<OpenDesign>;
   settings(): Promise<Settings>;
@@ -51,7 +61,8 @@ export type DesignChange =
   | { type: "canvas"; canvas: Canvas }
   | { type: "thread"; meta: ThreadMeta }
   | { type: "thread.event"; threadId: string; event: ThreadEvent }
-  | { type: "install"; install: InstallState };
+  | { type: "install"; install: InstallState }
+  | { type: "setup.done"; next: string };
 
 /** One design's `.finite/` folder. Writes are serialized per design and atomic. */
 export interface OpenDesign {
@@ -69,7 +80,7 @@ export interface OpenDesign {
   threads(): Promise<ThreadMeta[]>;
   createThread(
     init: Pick<ThreadMeta, "model" | "fast"> &
-      Partial<Pick<ThreadMeta, "title" | "parentId" | "canvasIds" | "effort">>,
+      Partial<Pick<ThreadMeta, "title" | "parentId" | "canvasIds" | "effort" | "setup">>,
   ): Promise<ThreadMeta>;
   updateThread(threadId: string, fn: (meta: ThreadMeta) => ThreadMeta): Promise<ThreadMeta>;
   /** Stores the event (except `text.delta`) and emits it. */

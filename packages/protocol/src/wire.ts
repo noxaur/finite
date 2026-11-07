@@ -68,6 +68,8 @@ export const requests = {
   "design.connect": { params: { path: z.string().min(1) }, result: DesignEntry },
   "design.rename": { params: { id: designId, name: z.string().min(1) }, result: DesignEntry },
   "design.remove": { params: { id: designId }, result: z.null() },
+  /** Starts a setup thread on the design, which writes `finite.json` and calls `finish_setup`. */
+  "design.setup": { params: { designId }, result: z.object({ threadId: Id }) },
 
   subscribe: { params: { designId }, result: DesignState },
   unsubscribe: { params: { designId }, result: z.null() },
@@ -239,6 +241,8 @@ export const ServerEvent = z.discriminatedUnion("type", [
   /** A new design's dependency install (the designs list shows it through `installing`). */
   z.object({ type: z.literal("install"), designId, install: InstallState }),
   z.object({ type: z.literal("settings"), settings: Settings }),
+  /** A setup thread's `finish_setup` passed: the design to show now (`next`, maybe the same one). */
+  z.object({ type: z.literal("setup.done"), designId, next: Id }),
 ]);
 export type ServerEvent = z.infer<typeof ServerEvent>;
 

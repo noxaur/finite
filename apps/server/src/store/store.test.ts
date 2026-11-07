@@ -9,6 +9,7 @@ import { detectProject } from "./detect.ts";
 import { createStore, DEFAULT_SETTINGS, type FileStore } from "./index.ts";
 import { INTERRUPTED_BY_RESTART, REMOVED_KEEP_MS } from "./open.ts";
 import { routeFrameName } from "./routes.ts";
+import { prepareFixture } from "../preview/fixtures.ts";
 
 const by: Actor = { kind: "person", id: "u1", name: "Per" };
 const cleanup: (() => Promise<void>)[] = [];
@@ -104,14 +105,6 @@ describe("connect", () => {
     await expect(store.connect(empty)).rejects.toMatchObject({
       code: "unsupported-project",
       message: expect.stringMatching(/no package\.json.*React Router.*TanStack Router/),
-    });
-    await expect(store.connect(await project({ react: "^19" }))).rejects.toMatchObject({
-      code: "unsupported-project",
-      message: expect.stringContaining("doesn't use Vite"),
-    });
-    await expect(store.connect(await project({ vite: "^8", wouter: "^3" }))).rejects.toMatchObject({
-      code: "unsupported-project",
-      message: expect.stringContaining("no supported router"),
     });
   });
 
@@ -298,6 +291,188 @@ describe("connect", () => {
     expect(lists).toEqual([[]]);
     await expect(fs.stat(path.join(root, "package.json"))).resolves.toBeTruthy();
     await expect(store.open(entry.id)).rejects.toMatchObject({ code: "not-found" });
+  });
+});
+
+describe("workspaces", () => {
+  async function monorepo() {
+    const fixture = await prepareFixture("monorepo", { install: false });
+    cleanup.push(async () => fixture.remove());
+    return fixture.root;
+  }
+  const web = (root: string) => path.join(root, "apps/web");
+
+  it("connects every app finite.json lists from the workspace root, or one from inside it", async () => {
+    const store = newStore(await tempDir());
+    const root = await monorepo();
+    const entry = await store.connect(root);
+    expect(entry).toMatchObject({
+      name: "@fixture/web",
+      root: web(root),
+      origin: "connected",
+      workspace: root,
+      app: "web",
+    });
+    expect((await store.open(entry.id)).design).toMatchObject({
+      router: "react-router",
+      styling: "tailwind",
+      workspace: root,
+    });
+    const same = { ...entry, updatedAt: expect.any(Number) };
+    expect(await store.connect(path.join(web(root), "src"))).toEqual(same);
+    expect(await store.connect(root)).toEqual(same);
+    expect(await store.designs()).toHaveLength(1);
+  });
+
+  it("refuses an invalid finite.json with every problem in it", async () => {
+    const store = newStore(await tempDir());
+    const root = await monorepo();
+    await fs.writeFile(
+      path.join(root, "finite.json"),
+      JSON.stringify({ apps: { web: { path: "apps/web", needs: ["db"] } } }),
+    );
+    await expect(store.connect(root)).rejects.toMatchObject({
+      code: "invalid-config",
+      message: expect.stringContaining('apps.web.needs: there\'s no service "db"'),
+    });
+    await expect(store.connect(web(root))).rejects.toMatchObject({ code: "invalid-config" });
+    expect(await store.designs()).toEqual([]);
+  });
+
+  it("connects a folder detection refuses as a setup design, which its apps replace", async () => {
+    const store = newStore(await tempDir());
+    const root = await monorepo();
+    const config = await fs.readFile(path.join(root, "finite.json"), "utf8");
+    await fs.rm(path.join(root, "finite.json"));
+
+    const setup = await store.connect(root);
+    expect(setup).toMatchObject({ root, workspace: root, setup: true, origin: "connected" });
+    const open = await store.open(setup.id);
+    expect(open.design).toMatchObject({ router: "none", styling: "inline", css: [], setup: true });
+    expect((await open.canvases()).map((c) => c.name).sort()).toEqual([
+      "Brand",
+      "Components",
+      "Routes",
+    ]);
+
+    await expect(store.finishSetup(setup.id)).rejects.toMatchObject({
+      code: "not-found",
+      message: expect.stringContaining("finite.json doesn't exist"),
+    });
+    await fs.writeFile(path.join(root, "finite.json"), '{ "apps": {} }');
+    await expect(store.finishSetup(setup.id)).rejects.toMatchObject({
+      code: "invalid-config",
+      message: expect.stringContaining("list at least one app"),
+    });
+
+    await fs.writeFile(path.join(root, "finite.json"), config);
+    const changes: DesignChange[] = [];
+    open.on((change) => changes.push(change));
+    const done = await store.finishSetup(setup.id);
+    expect(done).toMatchObject({ replaced: true, next: { root: web(root), app: "web" } });
+    expect(done.apps.map((a) => a.root)).toEqual([web(root)]);
+    await expect.poll(() => changes).toContainEqual({ type: "setup.done", next: done.next.id });
+
+    // Removing the setup design deletes the .finite/ Finite made for it, and nothing else.
+    await store.remove(setup.id);
+    await expect(fs.stat(path.join(root, ".finite"))).rejects.toThrow();
+    await expect(fs.stat(path.join(root, "finite.json"))).resolves.toBeTruthy();
+    expect((await store.designs()).map((d) => d.root)).toEqual([web(root)]);
+  });
+
+  it("keeps a .finite/ that was there before the setup design, when it's replaced and removed", async () => {
+    const store = newStore(await tempDir());
+    const root = await monorepo();
+    const config = await fs.readFile(path.join(root, "finite.json"), "utf8");
+    await fs.rm(path.join(root, "finite.json"));
+    const board = path.join(root, ".finite/boards/x.tsx");
+    await fs.mkdir(path.dirname(board), { recursive: true });
+    await fs.writeFile(board, "export default () => null;\n");
+
+    const setup = await store.connect(root);
+    expect(setup).toMatchObject({ setup: true });
+    expect(setup.madeFinite).toBeUndefined();
+    await fs.writeFile(path.join(root, "finite.json"), config);
+    expect(await store.finishSetup(setup.id)).toMatchObject({ replaced: true });
+    await store.remove(setup.id);
+    expect(await fs.readFile(board, "utf8")).toBe("export default () => null;\n");
+  });
+
+  it("links an app to a finite.json written after it was connected, and unlinks it", async () => {
+    const { dataDir, store, root, entry, open } = await connected();
+    expect(entry.workspace).toBeUndefined();
+    const file = path.join(root, "finite.json");
+    await fs.writeFile(file, JSON.stringify({ apps: { shop: { path: "." } } }));
+    // Connecting it again, while it's open.
+    expect(await store.connect(root)).toMatchObject({ workspace: root, app: "shop" });
+    expect(open.design).toMatchObject({ workspace: root, app: "shop" });
+
+    // Opening it, in a later server run: an invalid finite.json keeps the link.
+    await store.close();
+    await fs.writeFile(file, "{");
+    const later = newStore(dataDir);
+    expect((await later.open(entry.id)).design).toMatchObject({ workspace: root, app: "shop" });
+    await later.close();
+
+    // A finite.json that no longer lists it unlinks it.
+    await fs.writeFile(file, JSON.stringify({ apps: { other: { path: "src" } } }));
+    await fs.writeFile(path.join(root, "src/package.json"), "{}");
+    const last = newStore(dataDir);
+    const design = (await last.open(entry.id)).design;
+    expect(design.workspace).toBeUndefined();
+    expect(design.app).toBeUndefined();
+    expect((await last.designs())[0]).not.toHaveProperty("workspace");
+  });
+
+  it("turns a setup design into the app at its own path", async () => {
+    const store = newStore(await tempDir());
+    const root = await project({ react: "^19" });
+    const setup = await store.connect(root);
+    expect(setup.setup).toBe(true);
+    const open = await store.open(setup.id);
+
+    // The agent made it runnable and wrote finite.json with the folder as its one app.
+    await fs.writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({ name: "shop", devDependencies: rrTailwind }),
+    );
+    await fs.writeFile(
+      path.join(root, "finite.json"),
+      JSON.stringify({ apps: { shop: { path: "." } } }),
+    );
+    const done = await store.finishSetup(setup.id);
+    expect(done).toMatchObject({ replaced: false, next: { id: setup.id, app: "shop" } });
+    expect(done.next.setup).toBeUndefined();
+    expect(open.design).toMatchObject({ router: "react-router", workspace: root, app: "shop" });
+    expect(open.design.setup).toBeUndefined();
+    const config = JSON.parse(await fs.readFile(path.join(root, ".finite/design.json"), "utf8"));
+    expect(config).toMatchObject({ id: setup.id, router: "react-router" });
+  });
+
+  it("sets up a connected design again from finite.json, which must list its folder", async () => {
+    const { store, root, entry, open } = await connected();
+    await fs.writeFile(
+      path.join(root, "finite.json"),
+      JSON.stringify({ apps: { x: { path: "src" } } }),
+    );
+    await fs.writeFile(path.join(root, "src/package.json"), "{}");
+    await expect(store.finishSetup(entry.id)).rejects.toMatchObject({
+      code: "invalid-config",
+      message: expect.stringContaining("lists no app in"),
+    });
+    await fs.writeFile(
+      path.join(root, "finite.json"),
+      JSON.stringify({
+        apps: { shop: { path: ".", needs: ["api"] } },
+        services: { api: { run: "x" } },
+      }),
+    );
+    const done = await store.finishSetup(entry.id);
+    expect(done).toMatchObject({
+      replaced: false,
+      next: { id: entry.id, workspace: root, app: "shop" },
+    });
+    expect(open.design).toMatchObject({ router: "react-router", workspace: root, app: "shop" });
   });
 });
 

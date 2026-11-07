@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -11,6 +12,7 @@ import {
   type Actor,
   type Canvas,
   canvasTools,
+  type Design,
   type Frame,
   type OpenDesign,
   type Previews,
@@ -47,6 +49,8 @@ export type ToolContext = {
   grantProdWrite(): void;
   /** Starts a child thread with `prompt` as its first message. */
   spawn(prompt: string, canvasId: string | undefined): Promise<ThreadMeta>;
+  /** Connects finite.json's apps, or refuses with what to fix; then starts the next preview. */
+  finishSetup(): Promise<object>;
 };
 
 type Size = { width: number; height: number };
@@ -110,6 +114,17 @@ function overlap(boxes: Box[], b: Box): Box | undefined {
 
 export function boardDir(canvasId: string): string {
   return `.finite/boards/${canvasId}`;
+}
+
+/**
+ * A path an agent gave, relative to the root. The agent works from the workspace root, so a path
+ * that's relative to it and lands in the app's folder (`apps/web/src/x.tsx`) is taken too.
+ */
+export function rootRelative(design: Pick<Design, "root" | "workspace">, file: string): string {
+  if (design.workspace === undefined || design.workspace === design.root) return file;
+  const rel = path.relative(design.root, path.resolve(design.workspace, file));
+  if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return file;
+  return rel.split(path.sep).join("/");
 }
 
 /** The `finite` MCP server one thread's query talks to. */
@@ -240,8 +255,9 @@ export function canvasServer(ctx: ToolContext) {
         const board = boardDir(canvasId);
         const files = await Promise.all(
           frames.map(async (f) => {
+            const given = rootRelative(design, f.file);
             const rel = path.posix.normalize(
-              f.file.startsWith(".finite/") ? f.file : path.posix.join(board, f.file),
+              given.startsWith(".finite/") ? given : path.posix.join(board, given),
             );
             if (!rel.startsWith(".finite/")) {
               throw new Refused(`${f.file} isn't a prototype file. Write it under ${board}/.`);
@@ -365,7 +381,7 @@ export function canvasServer(ctx: ToolContext) {
         if (loc === undefined && match !== undefined) {
           throw new Refused("match needs loc: give the file (and line) the element is in.");
         }
-        const pinned = loc === undefined ? undefined : await pinLoc(design.root, loc, match);
+        const pinned = loc === undefined ? undefined : await pinLoc(design, loc, match);
         const id = randomUUID();
         await open.updateCanvas(
           c.id,
@@ -446,7 +462,12 @@ export function canvasServer(ctx: ToolContext) {
         await mkdir(dir, { recursive: true });
         let name: string;
         if (from !== undefined) {
-          const src = path.resolve(design.root, from);
+          // Relative to the app's root, else to the workspace the agent works from.
+          const inRootDir = path.resolve(design.root, from);
+          const src =
+            design.workspace === undefined || existsSync(inRootDir)
+              ? inRootDir
+              : path.resolve(design.workspace, from);
           name = path.basename(src);
           await copyFile(src, path.join(dir, name));
         } else {
@@ -508,6 +529,13 @@ export function canvasServer(ctx: ToolContext) {
     ),
 
     safeTool(
+      "finish_setup",
+      "Call in a setup thread after writing finite.json. Finite checks it and returns every problem to fix, or connects each app it lists as a design and starts the next one's preview (setup commands, services, dev server), returning whether it runs. Fix what it reports and call it again until the preview runs.",
+      canvasTools.finish_setup,
+      async () => json(await ctx.finishSetup()),
+    ),
+
+    safeTool(
       "frame_errors",
       "Lists the runtime errors, unhandled rejections and console errors a frame reported.",
       canvasTools.frame_errors,
@@ -552,11 +580,19 @@ function json(value: unknown): CallToolResult {
  * The stamped loc an agent's `file[:line[:col]]` (plus optional text) means, snapped to the HTML
  * element there.
  */
-export async function pinLoc(root: string, loc: string, match?: string): Promise<string> {
+export async function pinLoc(
+  design: Pick<Design, "root" | "workspace">,
+  loc: string,
+  match?: string,
+): Promise<string> {
+  const { root } = design;
   const parts = /^(.+?)(?::(\d+))?(?::(\d+))?$/.exec(loc.trim());
   if (!parts) throw new Refused(`${loc} isn't a loc. Write file:line:col, file:line or a file.`);
   const [, given, line, column] = parts;
-  const file = path.posix.normalize(given!.replace(/\\/g, "/").replace(/^\.\//, ""));
+  const file = rootRelative(
+    design,
+    path.posix.normalize(given!.replace(/\\/g, "/").replace(/^\.\//, "")),
+  );
   const code = await readFile(inRoot(root, file), "utf8").catch(() => undefined);
   if (code === undefined) {
     throw new Refused(

@@ -5,7 +5,10 @@ import {
   type ServerMessage,
   type Store,
 } from "@finite/protocol";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import WebSocket from "ws";
 import { createAgents } from "./agent/index.ts";
 import { type RunningServer, startServer } from "./app.ts";
@@ -120,6 +123,41 @@ describe("hub", () => {
       code: "not-implemented",
     });
     client.ws.close();
+  });
+
+  it("starts a setup thread on a folder Finite can't run, saying why", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "finite-app-setup-"));
+    const project = path.join(dir, "shop");
+    await fs.mkdir(project);
+    await fs.writeFile(path.join(project, "package.json"), '{ "name": "shop" }');
+    const store = createStore({ dataDir: path.join(dir, "data") });
+    const send = vi.fn(async () => {});
+    try {
+      const client = connect(await start(store, { send }));
+      await client.opened;
+      await client.request({ type: "hello", rid: "1", user: { id: "u", name: "Per" } });
+      let reply = await client.request({ type: "design.connect", rid: "2", path: project });
+      while (reply.type !== "reply") reply = await client.next();
+      const design = (reply as { value: DesignEntry }).value;
+      expect(design).toMatchObject({ root: project, workspace: project, setup: true });
+      let setup = await client.request({ type: "design.setup", rid: "3", designId: design.id });
+      // The design list's broadcast may come first.
+      while (setup.type !== "reply") setup = await client.next();
+      expect(setup).toMatchObject({ ok: true, value: { threadId: expect.any(String) } });
+      expect(send).toHaveBeenCalledOnce();
+      const [, threadId, turn] = send.mock.calls[0] as unknown as [
+        unknown,
+        string,
+        { text: string },
+      ];
+      expect(turn.text).toMatch(/^Set up shop for Finite/);
+      expect(turn.text).toContain("doesn't use Vite");
+      expect((setup as { value: { threadId: string } }).value.threadId).toBe(threadId);
+      client.ws.close();
+    } finally {
+      await store.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("broadcasts design list changes to every client", async () => {

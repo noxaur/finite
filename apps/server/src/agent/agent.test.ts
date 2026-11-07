@@ -7,14 +7,16 @@ import type {
   SDKMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
-import type {
-  Actor,
-  Design,
-  OpenDesign,
-  Previews,
-  SourceEditor,
-  Store,
-  Turn,
+import {
+  type Actor,
+  type Design,
+  type DesignEntry,
+  type OpenDesign,
+  type Previews,
+  Refused,
+  type SourceEditor,
+  type Store,
+  type Turn,
 } from "@finite/protocol";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -31,12 +33,13 @@ import {
   type QueryFn,
   type QueryLike,
   shortTitle,
+  startSetup,
   startThread,
 } from "./index.ts";
-import { FINITE_INSTRUCTIONS } from "./instructions.ts";
+import { FINITE_INSTRUCTIONS, SETUP_INSTRUCTIONS } from "./instructions.ts";
 import { policy } from "./policy.ts";
 import { createStatus, NOT_INSTALLED, NOT_LOGGED_IN } from "./status.ts";
-import { DEFAULT_SIZE, GAP, LABEL_OFFSET, layoutRow } from "./tools.ts";
+import { DEFAULT_SIZE, GAP, LABEL_OFFSET, layoutRow, rootRelative } from "./tools.ts";
 
 const person = { kind: "person" as const, id: "u1", name: "Ada" };
 
@@ -102,6 +105,45 @@ describe("policy", () => {
 
   it("refuses dialogs nobody can answer", () => {
     expect(policy("AskUserQuestion", {}, ctx).behavior).toBe("deny");
+  });
+
+  it("in a workspace, reads paths from its root and lets move_to_prod write shared packages", () => {
+    const app = { ...ctx, root: "/w/apps/web", workspace: "/w" };
+    const write = (file: string, c: typeof app = app) => policy("Write", { file_path: file }, c);
+    expect(write("apps/web/.finite/boards/c1/A.tsx").behavior).toBe("allow");
+    expect(write("/w/apps/web/src/assets/brand/logo.svg").behavior).toBe("allow");
+    // The workspace's own .finite/ isn't this app's.
+    expect(write(".finite/boards/c1/A.tsx").behavior).toBe("deny");
+    const denied = write("packages/ui/src/Button.tsx");
+    expect(denied.behavior === "deny" && denied.message).toContain(
+      "apps/web/.finite/boards/<canvasId>/",
+    );
+    const prod = { ...app, prodWrite: true };
+    expect(write("packages/ui/src/Button.tsx", prod).behavior).toBe("allow");
+    expect(write("/elsewhere/x.ts", prod).behavior).toBe("deny");
+  });
+
+  it("lets a setup thread write finite.json and nothing else in production", () => {
+    const setup = { ...ctx, configFile: "/p/finite.json" };
+    expect(policy("Write", { file_path: "finite.json" }, setup).behavior).toBe("allow");
+    expect(policy("Edit", { file_path: "/p/finite.json" }, setup).behavior).toBe("allow");
+    const denied = policy("Write", { file_path: "/p/package.json" }, setup);
+    expect(denied.behavior === "deny" && denied.message).toContain("writes only /p/finite.json");
+    expect(policy("Write", { file_path: "/p/finite.json" }, ctx).behavior).toBe("deny");
+    // A setup thread on an app in a repo writes the repo root's finite.json, outside the app.
+    const repo = { ...ctx, root: "/r/apps/web", configFile: "/r/finite.json" };
+    expect(policy("Write", { file_path: "/r/finite.json" }, repo).behavior).toBe("allow");
+    expect(policy("Write", { file_path: "/r/other.json" }, repo).behavior).toBe("deny");
+  });
+});
+
+describe("rootRelative", () => {
+  it("takes a workspace-relative path into the app as relative to the app's root", () => {
+    const design = { root: "/w/apps/web", workspace: "/w" };
+    expect(rootRelative(design, "apps/web/src/App.tsx")).toBe("src/App.tsx");
+    expect(rootRelative(design, "src/App.tsx")).toBe("src/App.tsx");
+    expect(rootRelative(design, "packages/ui/x.tsx")).toBe("packages/ui/x.tsx");
+    expect(rootRelative({ root: "/p" }, "apps/web/x.tsx")).toBe("apps/web/x.tsx");
   });
 });
 
@@ -302,6 +344,23 @@ const textOf = (m: SDKUserMessage) => {
   const first = content[0];
   return first?.type === "text" ? first.text : "";
 };
+
+async function connectTools(q: Fake) {
+  const server = (q.options.mcpServers as Record<string, McpSdkServerConfigWithInstance>).finite!;
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await server.instance.connect(a);
+  const client = new Client({ name: "test", version: "1" });
+  await client.connect(b);
+  return async (name: string, args: object) => {
+    const res = (await client.callTool({ name, arguments: args as Record<string, unknown> })) as {
+      isError?: boolean;
+      content: { type: string; text?: string }[];
+    };
+    const text = res.content[0]?.text ?? "";
+    if (res.isError) throw new Error(text);
+    return text.startsWith("{") || text.startsWith("[") ? JSON.parse(text) : text;
+  };
+}
 
 describe("agents", () => {
   let root: string;
@@ -895,23 +954,6 @@ describe("agents", () => {
     expect(content.map((b) => b.type)).toEqual(["text", "image"]);
   });
 
-  async function connectTools(q: Fake) {
-    const server = (q.options.mcpServers as Record<string, McpSdkServerConfigWithInstance>).finite!;
-    const [a, b] = InMemoryTransport.createLinkedPair();
-    await server.instance.connect(a);
-    const client = new Client({ name: "test", version: "1" });
-    await client.connect(b);
-    return async (name: string, args: object) => {
-      const res = (await client.callTool({ name, arguments: args as Record<string, unknown> })) as {
-        isError?: boolean;
-        content: { type: string; text?: string }[];
-      };
-      const text = res.content[0]?.text ?? "";
-      if (res.isError) throw new Error(text);
-      return text.startsWith("{") || text.startsWith("[") ? JSON.parse(text) : text;
-    };
-  }
-
   it("places frames with labels, names the thread and comments through the canvas tools", async () => {
     const canvas = await open.createCanvas({ kind: "prototype", name: "P" }, person);
     const thread = await newThread("Pricing", canvas.id);
@@ -1090,6 +1132,198 @@ describe("agents", () => {
     expect(child.running).toBe(true);
     await vi.waitFor(() => expect(sdk.queries[1]?.sent).toHaveLength(1));
     expect(textOf(sdk.queries[1]!.sent[0]!)).toBe("Import the brand logo");
+  });
+});
+
+describe("setup threads", () => {
+  let workspace: string;
+  let sdk: ReturnType<typeof fakeSdk>;
+  const opens: OpenedDesign[] = [];
+  const turn = { model: "haiku", fast: false };
+
+  beforeEach(async () => {
+    workspace = await mkdtemp(path.join(os.tmpdir(), "finite-setup-"));
+    sdk = fakeSdk();
+  });
+  afterEach(async () => {
+    for (const o of opens.splice(0)) o.close();
+    await rm(workspace, { recursive: true, force: true });
+  });
+
+  async function openAt(root: string, extra: Partial<Design>): Promise<OpenedDesign> {
+    const o = await openDesign({
+      id: extra.id ?? "d1",
+      name: "Shop",
+      root,
+      origin: "connected",
+      router: "react-router",
+      styling: "tailwind",
+      css: [],
+      brandDir: "src/assets/brand",
+      ...extra,
+    });
+    opens.push(o);
+    return o;
+  }
+
+  function agentsWith(store: Partial<Store>, previews: Partial<Previews>) {
+    const agents = createAgents({
+      store: store as Store,
+      previews: { errors: () => [], ...previews } as Previews,
+      source: {} as SourceEditor,
+      query: sdk.query,
+      claudePath: async () => "/bin/claude",
+      idleMs: 50,
+    });
+    return agents;
+  }
+
+  async function startIn(open: OpenDesign, agents: ReturnType<typeof createAgents>) {
+    const thread = await startSetup(open, turn);
+    expect(thread).toMatchObject({ setup: true, title: "Set up Finite", canvasIds: [] });
+    await agents.send(
+      open,
+      thread.id,
+      { ...turn, text: "Set up", attachments: [], by: person },
+      "steer",
+    );
+    return thread;
+  }
+
+  it("works from the workspace, may write finite.json, and gives way to the apps it connects", async () => {
+    const open = await openAt(workspace, {
+      id: "setup",
+      router: "none",
+      styling: "inline",
+      brandDir: "assets/brand",
+      workspace,
+      setup: true,
+    });
+    const web: DesignEntry = {
+      id: "web",
+      name: "@acme/web",
+      root: path.join(workspace, "apps/web"),
+      origin: "connected",
+      updatedAt: 1,
+      workspace,
+      app: "web",
+    };
+    const finishSetup = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new Refused(
+          "finite.json isn't valid. Fix this problem:\n- apps.web.path: …",
+          "invalid-config",
+        ),
+      )
+      .mockResolvedValueOnce({ apps: [web], next: web, replaced: true });
+    const remove = vi.fn(async () => {});
+    const stop = vi.fn(async () => {});
+    const ensure = vi.fn(async () => ({ url: "http://127.0.0.1:5555" }));
+    const agents = agentsWith(
+      { finishSetup, remove, open: async () => ({ design: { ...web } }) as unknown as OpenDesign },
+      { stop, ensure },
+    );
+    await startIn(open, agents);
+    const q = sdk.queries[0]!;
+    expect(q.options.cwd).toBe(workspace);
+    const append = (q.options.systemPrompt as { append: string }).append;
+    expect(append.startsWith(SETUP_INSTRUCTIONS)).toBe(true);
+    expect(append).toContain(`Write finite.json at ${path.join(workspace, "finite.json")}.`);
+    expect(SETUP_INSTRUCTIONS.length).toBeLessThan(2500);
+
+    const canUse = q.options.canUseTool!;
+    const opts = { signal: new AbortController().signal, toolUseID: "t", requestId: "r" };
+    expect((await canUse("Write", { file_path: "finite.json" }, opts))?.behavior).toBe("allow");
+    expect((await canUse("Edit", { file_path: "package.json" }, opts))?.behavior).toBe("deny");
+
+    const call = await connectTools(q);
+    await expect(call("finish_setup", {})).rejects.toThrow(/apps\.web\.path/);
+    const out = await call("finish_setup", {});
+    expect(out).toMatchObject({
+      connected: [{ designId: "web", app: "web" }],
+      preview: "@acme/web runs at http://127.0.0.1:5555.",
+    });
+    expect(stop).toHaveBeenCalledWith("web");
+    expect(ensure).toHaveBeenCalledWith(expect.objectContaining({ id: "web" }));
+    expect(remove).not.toHaveBeenCalled();
+
+    // The setup design goes when the turn that replaced it ends.
+    q.emit(result());
+    await vi.waitFor(() => expect(remove).toHaveBeenCalledWith("setup"));
+    expect(q.closed).toBe(true);
+    await agents.close();
+  });
+
+  it("restarts a connected design's preview and reports why it still fails", async () => {
+    const open = await openAt(workspace, {});
+    const self = { id: "d1", name: "Shop", root: workspace, origin: "connected", updatedAt: 1 };
+    const stop = vi.fn(async () => {});
+    const ensure = vi.fn(async () => {
+      throw new Error("pnpm -F api build exited with code 1");
+    });
+    const remove = vi.fn(async () => {});
+    const agents = agentsWith(
+      {
+        finishSetup: async () => ({ apps: [self], next: self, replaced: false }) as never,
+        open: async () => open,
+        remove,
+      },
+      { stop, ensure, state: () => ({ status: "error", log: "line 1\nboom" }) },
+    );
+    await startIn(open, agents);
+    const q = sdk.queries[0]!;
+    // No finite.json above it and no repository: it goes in the design's own folder.
+    expect((q.options.systemPrompt as { append: string }).append).toContain(
+      `Write finite.json at ${path.join(workspace, "finite.json")}.`,
+    );
+    const out = await (await connectTools(q))("finish_setup", {});
+    expect(out).toMatchObject({
+      preview: "Shop didn't start: pnpm -F api build exited with code 1",
+      log: "line 1\nboom",
+    });
+    expect(stop).toHaveBeenCalledWith("d1");
+    expect(ensure).toHaveBeenCalledWith(open.design);
+    q.emit(result());
+    await vi.waitFor(async () => expect((await open.threads())[0]!.running).toBe(false));
+    expect(remove).not.toHaveBeenCalled();
+    expect(q.closed).toBe(false);
+    await agents.close();
+  });
+
+  it("runs a workspace app's threads from the workspace, taking workspace paths", async () => {
+    const root = path.join(workspace, "apps/web");
+    const open = await openAt(root, { workspace, app: "web" });
+    const agents = agentsWith({}, {});
+    const canvas = await open.createCanvas({ kind: "prototype", name: "P" }, person);
+    const t = { ...turn, text: "Pricing", attachments: [], by: person };
+    const thread = await startThread(open, { canvasId: canvas.id }, t);
+    await agents.send(open, thread.id, t, "steer");
+    const q = sdk.queries[0]!;
+    expect(q.options.cwd).toBe(workspace);
+    const append = (q.options.systemPrompt as { append: string }).append;
+    expect(append.startsWith(FINITE_INSTRUCTIONS)).toBe(true);
+    expect(append).toContain(`apps/web/.finite/boards/${canvas.id}/`);
+    const board = path.join(root, ".finite/boards", canvas.id);
+    await mkdir(board, { recursive: true });
+    await writeFile(path.join(board, "A.tsx"), "export default () => null;");
+    const { placed } = await (
+      await connectTools(q)
+    )("place_frames", {
+      canvasId: canvas.id,
+      frames: [
+        {
+          file: `apps/web/.finite/boards/${canvas.id}/A.tsx`,
+          name: "A",
+          title: "t",
+          why: "w",
+          width: 10,
+          height: 10,
+        },
+      ],
+    });
+    expect(placed[0].source).toEqual({ kind: "file", file: `.finite/boards/${canvas.id}/A.tsx` });
+    await agents.close();
   });
 });
 

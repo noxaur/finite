@@ -1,6 +1,6 @@
 # Finite
 
-Finite is a design canvas for real React projects. Each design is a React and TypeScript codebase, and each frame on the canvas is a live page of it. You can connect a codebase you already have (a Next.js app, or a Vite app with React Router or TanStack Router), create a blank design (a new Vite, React, TypeScript and Tailwind project), or import one from a Figma link, a URL or files.
+Finite is a design canvas for real React projects. Each design is a React and TypeScript codebase, and each frame on the canvas is a live page of it. You can connect a codebase you already have (a Next.js app, or a Vite app with React Router or TanStack Router, alone or in a monorepo), create a blank design (a new Vite, React, TypeScript and Tailwind project), or import one from a Figma link, a URL or files.
 
 You edit frames like in Figma: select an element, move and resize it, change its text and styles in the inspector, undo with ⌘Z. Finite writes each edit back to the TSX in the project's own convention, so a Tailwind project gets Tailwind classes, a CSS-modules project (plain CSS, Sass or Less) gets a changed rule and a StyleX project gets a changed or new `stylex.create` entry. Agents work beside you. On the Prototypes tab, a message to the composer starts a thread, which runs your local Claude Code CLI on the project. The agent writes prototype components onto a canvas, labels each one with what it tried and why, and leaves comments. It can read all of production but writes only prototypes and brand assets, until you ask it to move a prototype to prod.
 
@@ -57,7 +57,7 @@ vp run ready            # vp check (format, lint, type check), test, build
 | `apps/web`             | The Next.js app, styled with StyleX, built as a static export into `out/`                                       |
 | `apps/server`          | The Node server: `/api/ws`, the design store, previews, the source editor and agents                            |
 | `apps/server/scaffold` | The project a blank design starts from                                                                          |
-| `apps/server/fixtures` | Small React Router, TanStack and Next.js apps the tests connect                                                 |
+| `apps/server/fixtures` | Small React Router, TanStack and Next.js apps, and a pnpm monorepo, that the tests connect                      |
 | `apps/desktop`         | The Electron app, bundled with `vp pack`                                                                        |
 | `packages/protocol`    | The wire protocol, the data model and the module interfaces, as zod schemas and types                           |
 | `packages/vite-plugin` | `@finite/vite-plugin`: stamps JSX with its source location, injects the bridge, lists routes (also for Next.js) |
@@ -109,6 +109,7 @@ Without a Developer ID, the app isn't notarized, so Gatekeeper blocks the first 
 
 - If the browser gets `403` with `unknown host` or `requests from … aren't allowed`, you opened Finite under a name it doesn't know, such as your machine's network address. Add that name to `FINITE_ALLOWED_HOSTS` (comma-separated). The check keeps other websites from reading your designs.
 - If **Connect** refuses a folder, the reason says what's missing: Finite needs a `package.json` and either Next.js (with an `app/` or `pages/` folder) or Vite with React Router or TanStack Router.
+- A monorepo, or an app whose pages need a built package, codegen or a running API, needs a `finite.json` at the repository root that lists its apps, setup commands and services. Connect the folder anyway: Finite starts a setup thread that reads the repo and writes the file. When a design's preview fails, **Set up with Claude** starts the same thread. Commit `finite.json`, and keep secrets out of it. [How Finite works](docs/how-finite-works.md#workspaces-and-finitejson) has the schema.
 - A Next.js design gets one file of Finite's outside `.finite/`: `app/%5F%5Ffinite/frame/page.tsx` (inside the route group that holds your root layout, if `app/layout` doesn't exist), or `pages/__finite/frame.tsx`. It is listed in `.git/info/exclude` and removed when the preview stops. If your project already has a file there, or you edited Finite's, the preview refuses to start and says so.
 - If a design's dev server fails to start, the canvas shows the end of its output, such as a plugin in the project's `vite.config.ts` that throws. Fix the project, then open the design again.
 - If threads don't start, run `claude` in a terminal and log in. In the desktop app, Finite looks for `claude` on your login shell's `PATH`.

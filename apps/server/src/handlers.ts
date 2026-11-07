@@ -8,7 +8,8 @@ import {
   type Route,
   type ThreadMeta,
 } from "@finite/protocol";
-import { carrySelection, startThread } from "./agent/index.ts";
+import { carrySelection, setupReason, startSetup, startThread } from "./agent/index.ts";
+import { setupPrompt } from "./agent/instructions.ts";
 import type { Context, Handlers } from "./hub.ts";
 import { installOf } from "./store/index.ts";
 import { syncRoutes } from "./store/routes.ts";
@@ -33,6 +34,21 @@ export const handlers: Handlers = {
     await Promise.all([modules.previews.stop(id), modules.agents.stopDesign(id)]);
     await modules.store.remove(id);
     return null;
+  },
+
+  async "design.setup"({ designId }, { hub, modules, by }) {
+    const open = await hub.open(designId);
+    const { model, effort, fast } = await modules.store.settings();
+    const thread = await startSetup(open, { model, effort, fast });
+    const reason = await setupReason(open.design, modules.previews.state(designId));
+    const text = setupPrompt(open.design.name, reason);
+    await modules.agents.send(
+      open,
+      thread.id,
+      { text, attachments: [], model, effort, fast, by },
+      "steer",
+    );
+    return { threadId: thread.id };
   },
 
   async subscribe({ designId }, { client, hub, modules }) {

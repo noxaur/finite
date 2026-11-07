@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Actor, Canvas, Frame, OpenDesign, Route } from "@finite/protocol";
+import { paramSets, readWorkspace } from "./workspace.ts";
 
 /** The page that shows one frame per route of the app. */
 export const ROUTES_PAGE = "Routes";
@@ -46,24 +47,54 @@ function overlaps(a: { x: number; y: number }, frames: readonly Frame[]): boolea
   );
 }
 
-/** A frame for a route at the first grid slot nothing sits in. */
-export function routeFrames(routes: readonly Route[], existing: readonly Frame[]): Frame[] {
+/** One frame's worth of a route: its path and the values for its dynamic segments. */
+export type RouteView = { path: string; params: Record<string, string> };
+
+/** `apps.<name>.routes` from `finite.json`: params for a route path, or several. */
+export type ConfiguredRoutes = Record<string, Record<string, string> | Record<string, string>[]>;
+
+/**
+ * The frames the Routes page should show: each reported route with its configured params (one view
+ * per params object) or the sample value, then each configured path the router doesn't report.
+ */
+export function routeViews(
+  routes: readonly Route[],
+  configured: ConfiguredRoutes = {},
+): RouteView[] {
+  const views: RouteView[] = [];
+  const add = (path: string) => {
+    for (const params of paramSets(configured[path]!)) views.push({ path, params });
+  };
+  for (const route of routes) {
+    if (configured[route.path]) add(route.path);
+    else {
+      const params = Object.fromEntries(route.params.map((p) => [p, SAMPLE_PARAM]));
+      views.push({ path: route.path, params });
+    }
+  }
+  const reported = new Set(routes.map((r) => r.path));
+  for (const path of Object.keys(configured)) if (!reported.has(path)) add(path);
+  return views;
+}
+
+/** What a route frame matches by: its path and params, in a stable order. */
+function viewKey(path: string, params: Record<string, string> = {}): string {
+  return JSON.stringify([path, Object.entries(params).sort(([a], [b]) => (a < b ? -1 : 1))]);
+}
+
+/** A frame for each view, each at the first grid slot nothing sits in. */
+export function routeFrames(views: readonly RouteView[], existing: readonly Frame[]): Frame[] {
   const taken = [...existing];
   const out: Frame[] = [];
   let i = 0;
-  for (const route of routes) {
+  for (const { path, params } of views) {
     while (overlaps(slot(i), taken)) i++;
-    const params = Object.fromEntries(route.params.map((p) => [p, SAMPLE_PARAM]));
     const frame: Frame = {
       id: randomUUID(),
-      name: routeFrameName(route.path, params),
+      name: routeFrameName(path, params),
       ...slot(i),
       ...ROUTE_FRAME,
-      source: {
-        kind: "route",
-        path: route.path,
-        ...(route.params.length ? { params } : {}),
-      },
+      source: { kind: "route", path, ...(Object.keys(params).length ? { params } : {}) },
     };
     taken.push(frame);
     out.push(frame);
@@ -72,18 +103,26 @@ export function routeFrames(routes: readonly Route[], existing: readonly Frame[]
 }
 
 /**
- * The Routes page after the app's routes changed: a frame for each new route, and frames whose
- * route went away marked `gone` (kept where people put them). `undefined` when nothing changes.
+ * The Routes page after the app's routes or its `finite.json` routes changed: a frame for each new
+ * path and params, and frames neither source gives any more marked `gone` (kept where people put
+ * them). `undefined` when nothing changes.
  */
-export function syncedRoutesPage(page: Canvas, routes: readonly Route[]): Canvas | undefined {
-  const paths = new Set(routes.map((r) => r.path));
+export function syncedRoutesPage(
+  page: Canvas,
+  routes: readonly Route[],
+  configured: ConfiguredRoutes = {},
+): Canvas | undefined {
+  const views = routeViews(routes, configured);
+  const wanted = new Set(views.map((v) => viewKey(v.path, v.params)));
   const shown = new Set(
-    page.frames.flatMap((f) => (f.source.kind === "route" ? [f.source.path] : [])),
+    page.frames.flatMap((f) =>
+      f.source.kind === "route" ? [viewKey(f.source.path, f.source.params)] : [],
+    ),
   );
   let changed = false;
   const frames = page.frames.map((f) => {
     if (f.source.kind !== "route") return f;
-    const gone = !paths.has(f.source.path);
+    const gone = !wanted.has(viewKey(f.source.path, f.source.params));
     if (gone === (f.gone === true)) return f;
     changed = true;
     if (gone) return { ...f, gone: true };
@@ -91,18 +130,29 @@ export function syncedRoutesPage(page: Canvas, routes: readonly Route[]): Canvas
     return rest;
   });
   const added = routeFrames(
-    routes.filter((r) => !shown.has(r.path)),
+    views.filter((v) => !shown.has(viewKey(v.path, v.params))),
     frames,
   );
   if (!changed && added.length === 0) return undefined;
   return { ...page, frames: [...frames, ...added] };
 }
 
-/** Keeps the design's Routes page in step with the routes its dev server reports. */
+/**
+ * Keeps the design's Routes page in step with the routes its dev server reports and, for a
+ * workspace app, the `routes` its `finite.json` lists (read again each time). An unreadable
+ * `finite.json` leaves the page as it is.
+ */
 export async function syncRoutes(open: OpenDesign, routes: readonly Route[]): Promise<void> {
   const page = (await open.canvases()).find(
     (c) => c.kind === "page" && c.name === ROUTES_PAGE && c.removedAt === undefined,
   );
   if (!page) return;
-  await open.updateCanvas(page.id, (c) => syncedRoutesPage(c, routes) ?? c, FINITE);
+  const { workspace, app } = open.design;
+  let configured: ConfiguredRoutes = {};
+  if (workspace && app) {
+    const read = await readWorkspace(workspace).catch(() => undefined);
+    if (!read) return;
+    configured = read.apps[app]?.routes ?? {};
+  }
+  await open.updateCanvas(page.id, (c) => syncedRoutesPage(c, routes, configured) ?? c, FINITE);
 }

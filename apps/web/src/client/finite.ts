@@ -100,7 +100,12 @@ export interface FiniteOptions {
 const OPEN = 1;
 const DEFAULT_TIMEOUT_MS = 30_000;
 /** Requests that do slow work on the server (scaffolding a project, installing packages). */
-const SLOW: ReadonlySet<RequestType> = new Set(["design.create", "design.connect", "subscribe"]);
+const SLOW: ReadonlySet<RequestType> = new Set([
+  "design.create",
+  "design.connect",
+  "design.setup",
+  "subscribe",
+]);
 const SLOW_TIMEOUT_MS = 10 * 60_000;
 const BACKOFF_MS = [250, 500, 1000, 2000, 5000];
 
@@ -266,6 +271,12 @@ export function createFinite(options: FiniteOptions) {
         break;
       case "thread.event":
         appendThreadEvent(event.threadId, event.event);
+        return;
+      case "setup.done":
+        // The design became the app finite.json names: its state changed underneath, so fetch it.
+        if (event.next === event.designId && holds.has(event.designId)) {
+          void subscribeDesign(event.designId);
+        }
         return;
       case "canvas":
       case "thread":

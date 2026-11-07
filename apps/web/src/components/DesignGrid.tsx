@@ -61,7 +61,7 @@ export function DesignGrid() {
         <StartButton
           icon="folder"
           label="Connect a codebase"
-          note="A Next.js, React Router or TanStack app"
+          note="An app, or a monorepo with several"
           on={start === "connect"}
           onClick={() => setStart(start === "connect" ? null : "connect")}
         />
@@ -168,6 +168,11 @@ function StartForm({ kind, onCancel }: { kind: Start; onCancel: () => void }) {
       if (kind === "connect") {
         setBusy("Reading the project…");
         design = await finite.request("design.connect", { path: path.trim() });
+        if (design.setup) {
+          // Finite can't run it as it is: a setup thread writes its finite.json first.
+          setBusy("Starting the setup…");
+          ({ threadId } = await finite.request("design.setup", { designId: design.id }));
+        }
       } else {
         setBusy(kind === "blank" ? "Creating the project…" : "Creating the design…");
         design = await finite.request("design.create", {
@@ -185,7 +190,7 @@ function StartForm({ kind, onCancel }: { kind: Start; onCancel: () => void }) {
           );
         }
       }
-      if (brand) {
+      if (brand && !design.setup) {
         setBusy("Starting the brand import…");
         const brandThread = await thread(design.id, BRAND_PROMPT);
         threadId ??= brandThread;
@@ -483,7 +488,8 @@ const styles = stylex.create({
   pathRow: { display: "flex", gap: space.sm },
   grow: { flexGrow: 1, minWidth: 0 },
   check: { display: "flex", alignItems: "center", gap: space.sm, fontSize: 13 },
-  error: { margin: 0, color: colors.danger, fontSize: 13 },
+  // An invalid finite.json's reason lists one problem per line.
+  error: { margin: 0, color: colors.danger, fontSize: 13, whiteSpace: "pre-wrap" },
   actions: { display: "flex", alignItems: "center", gap: space.sm },
   busy: { display: "flex", alignItems: "center", gap: space.sm, color: colors.muted, fontSize: 12 },
   spinner: {
