@@ -16,13 +16,20 @@ import {
   type Element,
   type Parsed,
 } from "./jsx.ts";
-import { stylexEdit } from "./stylex.ts";
-import { editClasses, kebab, stripClasses, type Theme } from "./tailwind.ts";
+import { stylexEdit, varRefs } from "./stylex.ts";
+import { editClasses, kebab, stripClasses, type TailwindVersion, type Theme } from "./tailwind.ts";
+import { useVariables, variableRefs, type VariableHome } from "./tokens.ts";
 
 export type RewriteContext = {
   theme: Theme;
+  /** Tailwind's major version (default 4); v3 writes only the config's scales. */
+  tailwind?: TailwindVersion;
   /** Other files an edit may change (the `*.module.{css,scss,sass,less}` files this file imports), by root-relative path. */
   files: Record<string, string>;
+  /** The file that defines each Sass `$var` and Less `@var` token (`variableSheets`). */
+  variables?: Record<string, VariableHome>;
+  /** The `*.stylex.ts` file that defines each StyleX `defineVars` token (`group.key`). */
+  stylexVars?: Record<string, string>;
 };
 
 export type Rewritten = {
@@ -236,29 +243,60 @@ function asChild(element: Element, what: string) {
 const CLASS_FNS = new Set(["cn", "clsx", "twMerge", "classnames", "classNames", "cx"]);
 
 function style(s: StepCtx, el: t.JSXElement, styles: Record<string, string | null>): void {
-  if (s.convention === "stylex") {
-    const edit = stylexEdit(s.code, s.parsed.ast, el, styles);
-    if (!edit) return inline(s, el, styles);
-    return void s.ms.overwrite(edit.start, edit.end, edit.text);
-  }
   const cls = attribute(el, "className");
-  if (s.convention === "inline" || (s.convention === "css-modules" && !cls))
+  const token = varRefs(styles)[0];
+  if (token && s.convention !== "stylex") {
+    const how = { tailwind: "Tailwind classes", "css-modules": "a CSS module" }[
+      s.convention as string
+    ];
+    throw new Refused(
+      `${token} is a StyleX token, which only a stylex.create entry can use, and this element is styled with ${how ?? "inline styles"}. Pick a CSS custom property (--name) token instead, or ask the agent.`,
+      "unsupported-style",
+    );
+  }
+  if (s.convention === "css-modules" && cls) return cssModule(s, cls, styles);
+  const ref = variableRefs(styles)[0];
+  if (ref) {
+    const how = { stylex: "StyleX", tailwind: "Tailwind classes" }[s.convention as string];
+    throw new Refused(
+      `${ref} is a ${ref.startsWith("$") ? "Sass" : "Less"} variable, which only a rule in a ${ref.startsWith("$") ? ".module.scss" : ".module.less"} sheet can use, and this element is styled with ${how ?? "inline styles"}. Pick a CSS custom property (--name) token instead, or ask the agent.`,
+      "unsupported-style",
+    );
+  }
+  if (s.convention === "stylex") {
+    const patches = stylexEdit(s.code, s.parsed.ast, el, styles, s.file, s.ctx.stylexVars ?? {});
+    if (patches) {
+      for (const p of patches)
+        if (p.start === p.end) s.ms.appendLeft(p.start, p.text);
+        else s.ms.overwrite(p.start, p.end, p.text);
+      return;
+    }
+    if (token)
+      throw new Refused(
+        `${token} is a StyleX token, which only a stylex.create entry can use, and this element has a style, a className or a spread but no stylex.props spread, so it would get an inline style. Give it a stylex.create entry, pick a CSS custom property (--name) token instead, or ask the agent.`,
+        "unsupported-style",
+      );
     return inline(s, el, styles);
-  if (s.convention === "css-modules") return cssModule(s, cls!, styles);
+  }
+  if (s.convention === "inline" || s.convention === "css-modules") return inline(s, el, styles);
 
   if (!cls) {
-    const classes = editClasses("", styles, s.ctx.theme);
+    const classes = editClasses("", styles, s.ctx.theme, s.ctx.tailwind);
     if (classes !== "") s.ms.appendLeft(attributeInsertAt(el), ` className="${classes}"`);
     return;
   }
   const value = cls.value;
   if (value?.type === "StringLiteral")
-    return setLiteral(s, value, editClasses(value.value, styles, s.ctx.theme));
+    return setLiteral(s, value, editClasses(value.value, styles, s.ctx.theme, s.ctx.tailwind));
   if (value?.type === "JSXExpressionContainer") {
     const expr = value.expression;
     const lit = literal(expr);
     if (lit !== undefined)
-      return setLiteral(s, expr as t.StringLiteral, editClasses(lit, styles, s.ctx.theme));
+      return setLiteral(
+        s,
+        expr as t.StringLiteral,
+        editClasses(lit, styles, s.ctx.theme, s.ctx.tailwind),
+      );
     if (
       expr.type === "CallExpression" &&
       expr.callee.type === "Identifier" &&
@@ -268,8 +306,12 @@ function style(s: StepCtx, el: t.JSXElement, styles: Record<string, string | nul
       const last = args.at(-1);
       if (last) {
         for (const arg of args.slice(0, -1))
-          setLiteral(s, arg, stripClasses(literal(arg)!, styles, s.ctx.theme));
-        return setLiteral(s, last, editClasses(literal(last)!, styles, s.ctx.theme));
+          setLiteral(s, arg, stripClasses(literal(arg)!, styles, s.ctx.theme, s.ctx.tailwind));
+        return setLiteral(
+          s,
+          last,
+          editClasses(literal(last)!, styles, s.ctx.theme, s.ctx.tailwind),
+        );
       }
     }
   }
@@ -313,7 +355,8 @@ function cssModule(s: StepCtx, cls: t.JSXAttribute, styles: Record<string, strin
   if (name === undefined || sheet === undefined) throw new Refused(ASK, "unsupported-style");
   const css = s.files[sheet];
   if (css === undefined) throw new Refused(`${sheet} doesn't exist`, "not-found");
-  s.files[sheet] = editRule(sheet, css, name, styles);
+  const used = useVariables(sheet, css, styles, s.ctx.variables ?? {});
+  s.files[sheet] = editRule(sheet, used.css, name, used.styles);
 }
 
 function inline(s: StepCtx, el: t.JSXElement, styles: Record<string, string | null>): void {

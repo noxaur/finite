@@ -15,12 +15,30 @@ export function resolveToken(
   return alias ? resolveToken(table, alias, mode, depth + 1) : value;
 }
 
-/** The token a whole-value `var(--x)` points at, like `--x`, or `undefined` for any other value. */
+/**
+ * The token a whole value points at: `var(--x)` is `--x`, and a Sass `$x` or Less `@x` is itself;
+ * `undefined` for any other value.
+ */
 export function aliasOf(value: string | undefined): string | undefined {
-  return value === undefined ? undefined : (tokenOf(value) ?? undefined);
+  if (value === undefined) return undefined;
+  return tokenOf(value) ?? /^\s*([$@][A-Za-z_][\w-]*)\s*$/.exec(value)?.[1];
 }
 
-/** A token's name as people read it, without the leading `--`. */
+/**
+ * What using a token writes: `var(--x)` for a custom property, and the name itself for a Sass
+ * `$x` or Less `@x`, which only a `.module.scss` or `.module.less` rule can take, or a StyleX
+ * `colors.brand`, which only a `stylex.create` entry can take.
+ */
+export const tokenRef = (name: string): string => (name.startsWith("--") ? `var(${name})` : name);
+
+/** Whether a token is a Sass `$x` or Less `@x`, which has one value and no dark mode. */
+export const isVariable = (name: string): boolean => name.startsWith("$") || name.startsWith("@");
+
+/** Whether a token is a StyleX `defineVars` variable, `<group>.<key>`. */
+export const isStylexVar = (name: string): boolean =>
+  /^[A-Za-z_$][\w$]*\.[A-Za-z_][\w-]*$/.test(name);
+
+/** A token's name as people read it, without the leading `--`. A `$` or `@` stays. */
 export const displayName = (name: string): string => name.replace(/^--/, "");
 
 /** The four control points of an easing value, or `undefined` when it isn't one. */

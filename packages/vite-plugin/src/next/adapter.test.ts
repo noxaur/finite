@@ -1,21 +1,64 @@
 import { afterEach, beforeEach, describe, expect, test } from "vite-plus/test";
-import { modifyConfig } from "./adapter.ts";
+import { type AdapterOptions, modifyConfig, wrap } from "./adapter.ts";
 import { nextBundler } from "./index.ts";
 
-const OPTIONS = {
+const OPTIONS: AdapterOptions = {
   loader: "/finite/loader.ts",
-  root: "/app",
+  root: "/project",
   distDir: ".finite/runtime/next",
   sheets: {},
+  configs: {},
 };
-const LOADER = { loader: OPTIONS.loader, options: { root: OPTIONS.root, sheets: OPTIONS.sheets } };
+const LOADER = {
+  loader: OPTIONS.loader,
+  options: { root: OPTIONS.root, sheets: OPTIONS.sheets, configs: OPTIONS.configs },
+};
+
+afterEach(() => {
+  delete process.env.FINITE_NEXT;
+});
+
+describe("wrap", () => {
+  test("runs the project's modifyConfig first and applies Finite's changes on top", async () => {
+    process.env.FINITE_NEXT = JSON.stringify(OPTIONS);
+    const seen: unknown[] = [];
+    const adapter = wrap({
+      name: "mine",
+      modifyConfig: (config, context) => {
+        seen.push(context);
+        return {
+          ...config,
+          distDir: "build",
+          compress: true,
+          turbopack: { rules: { "*.tsx": { loaders: ["mine-loader"] } } },
+        };
+      },
+    });
+    const context = { phase: "phase-development-server" };
+    const config = await adapter.modifyConfig!({ output: "standalone" }, context);
+    expect(seen).toEqual([context]);
+    expect(config).toMatchObject({
+      output: "standalone",
+      distDir: ".finite/runtime/next",
+      compress: false,
+    });
+    expect(config.turbopack?.rules?.["*.tsx"]).toEqual([
+      expect.objectContaining({ loaders: [expect.objectContaining({ loader: OPTIONS.loader })] }),
+      { loaders: ["mine-loader"] },
+    ]);
+  });
+
+  test("passes the project's other hooks through", () => {
+    const onBuildComplete = () => {};
+    const adapter = wrap({ name: "mine", onBuildComplete });
+    expect(adapter.onBuildComplete).toBe(onBuildComplete);
+    expect(adapter.name).toBe("finite");
+  });
+});
 
 describe("modifyConfig", () => {
   beforeEach(() => {
     process.env.FINITE_NEXT = JSON.stringify(OPTIONS);
-  });
-  afterEach(() => {
-    delete process.env.FINITE_NEXT;
   });
 
   test("chains the stamping loader onto the project's own webpack function, as a pre rule last", () => {
@@ -39,15 +82,22 @@ describe("modifyConfig", () => {
     expect(result.module.rules).toHaveLength(1);
   });
 
+  test("adds a webpack rule for the Tailwind v3 sheets by path, never one for every .css", () => {
+    const sheet = "/project/app/globals.css";
+    process.env.FINITE_NEXT = JSON.stringify({ ...OPTIONS, configs: { [sheet]: "/config.cjs" } });
+    const result = modifyConfig({}).webpack!({ module: { rules: [] } }, {});
+    expect(result.module.rules[1]).toMatchObject({ test: [sheet], enforce: "pre" });
+  });
+
   test("keeps webpack from watching its own output in the distDir", () => {
     const watching = (ignored: RegExp | string[]) =>
       modifyConfig({}).webpack!({ module: { rules: [] }, watchOptions: { ignored } }, {})
         .watchOptions!.ignored;
     const next = watching(/node_modules/) as RegExp;
-    expect(next.test("/app/node_modules/x.js")).toBe(true);
-    expect(next.test("/app/.finite/runtime/next/static/chunks/app/layout.js")).toBe(true);
-    expect(next.test("/app/.finite/runtime/frames.ts")).toBe(false);
-    expect(watching(["**/dist/**"])).toEqual(["**/dist/**", "/app/.finite/runtime/next/**"]);
+    expect(next.test("/project/node_modules/x.js")).toBe(true);
+    expect(next.test("/project/.finite/runtime/next/static/chunks/project/layout.js")).toBe(true);
+    expect(next.test("/project/.finite/runtime/frames.ts")).toBe(false);
+    expect(watching(["**/dist/**"])).toEqual(["**/dist/**", "/project/.finite/runtime/next/**"]);
   });
 
   test("puts the Turbopack rule before the project's own", () => {

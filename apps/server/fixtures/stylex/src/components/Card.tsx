@@ -1,5 +1,6 @@
 import * as stylex from "@stylexjs/stylex";
 import { Link } from "react-router";
+import { colors } from "../tokens.stylex";
 
 const styles = stylex.create({
   card: {
@@ -7,7 +8,7 @@ const styles = stylex.create({
     borderRadius: "8px",
     borderWidth: "1px",
     borderStyle: "solid",
-    borderColor: "#c8d3d6",
+    borderColor: colors.line,
     backgroundColor: {
       default: "#f7f9fa",
       ":hover": "#e3f1f3",

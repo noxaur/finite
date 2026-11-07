@@ -69,6 +69,7 @@ beforeAll(async () => {
   );
 }, 240_000);
 
+// Each fixture copy has its own node_modules to delete.
 afterAll(async () => {
   await previews?.close();
   for (const cleanup of cleanups) cleanup();
@@ -131,7 +132,7 @@ describe("previews", () => {
     expect(
       previews.frameUrl("rr-spa", { kind: "file", file: ".finite/boards/demo/Hero.tsx" }),
     ).toBe(`${url}/__finite/frame?file=.finite%2Fboards%2Fdemo%2FHero.tsx`);
-    // The browser builds the same URL: both use the protocol's routeHref.
+    // The browser builds the same URL: both use the protocol's frameHref.
     expect(
       previews.frameUrl("rr-spa", { kind: "route", path: "/posts/{-$id}", params: { id: "42" } }),
     ).toBe(`${url}/posts/42`);
@@ -310,6 +311,23 @@ describe("Next.js previews", () => {
       .toContain("mark.png");
   }, 30_000);
 
+  test("drops the brand assets from the brand board when the brand folder is renamed away", async () => {
+    // The watcher reports the folder itself, not the files that moved with it.
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const root = roots["next-app"];
+    fs.mkdirSync(path.join(root, "assets/brand"), { recursive: true });
+    fs.writeFileSync(path.join(root, "assets/brand/gone.png"), Buffer.from([0x89, 0x50]));
+    const runtime = () => fs.readFileSync(path.join(root, ".finite/runtime/brand.ts"), "utf8");
+    await expect.poll(runtime, { timeout: 10_000 }).toContain("gone.png");
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    fs.renameSync(path.join(root, "assets/brand"), path.join(root, "assets/brand-old"));
+    try {
+      await expect.poll(runtime, { timeout: 10_000 }).not.toContain("gone.png");
+    } finally {
+      fs.renameSync(path.join(root, "assets/brand-old"), path.join(root, "assets/brand"));
+    }
+  }, 30_000);
+
   test("refuses a frame file outside the design, and never imports one it wasn't given", async () => {
     const page = await get(`${urls["next-pages"]}/__finite/frame?file=../../etc/passwd`);
     expect(page.status).toBe(400);
@@ -327,6 +345,56 @@ describe("Next.js previews", () => {
     expect(await origin("http://localhost:3000")).toBe("http://localhost:3000");
     expect(await origin("https://evil.example")).toBeNull();
   });
+
+  test.each(["turbopack", "webpack"])(
+    "generates Tailwind v3 classes used only in .finite/, without touching the project (%s)",
+    async (bundler) => {
+      const fixture = await prepareFixture("next-tailwind3");
+      cleanups.push(fixture.remove);
+      const at = (file: string) => path.join(fixture.root, file);
+      if (bundler === "webpack") {
+        const pkg = fs.readFileSync(at("package.json"), "utf8");
+        fs.writeFileSync(at("package.json"), pkg.replace(`"next dev"`, `"next dev --webpack"`));
+      }
+      const project = ["app/globals.css", "tailwind.config.ts", "postcss.config.mjs"];
+      const before = project.map((file) => fs.readFileSync(at(file), "utf8"));
+      const board = (file: string, className: string) => {
+        fs.mkdirSync(path.dirname(at(file)), { recursive: true });
+        fs.writeFileSync(at(file), `export default () => <section className="${className}" />;\n`);
+      };
+      board(".finite/boards/demo/Hero.tsx", "bg-[#0a7f3e] p-[13px] text-brand");
+      board(".finite/runtime/Stray.tsx", "bg-[#999001]");
+      const copy = {
+        ...design("next-app"),
+        id: `next-tailwind3-${bundler}`,
+        root: fixture.root,
+        css: ["app/globals.css"],
+      };
+      const { url } = await previews.ensure(copy);
+      const css = async () => {
+        const page = await get(
+          previews.frameUrl(copy.id, { kind: "file", file: ".finite/boards/demo/Hero.tsx" }),
+        );
+        expect(page.status).toBe(200);
+        const sheets = [...page.text.matchAll(/<link rel="stylesheet" href="([^"]+\.css[^"]*)"/g)];
+        const css = await Promise.all(sheets.map(([, href]) => get(url + href, "text/css")));
+        return css.map((sheet) => sheet.text).join("\n");
+      };
+      const first = await css();
+      expect(first).toContain("bg-\\[\\#0a7f3e\\]");
+      expect(first).toContain(".text-brand");
+      // The project's own content globs still apply.
+      expect(first).toContain(".bg-slate-50");
+      expect(first).not.toContain("999001");
+
+      // A board written while the preview runs gets its classes too.
+      board(".finite/boards/later/Late.tsx", "bg-[#0b8f4e]");
+      await expect.poll(css, { timeout: 15_000 }).toContain("bg-\\[\\#0b8f4e\\]");
+      expect(project.map((file) => fs.readFileSync(at(file), "utf8"))).toEqual(before);
+      await previews.stop(copy.id);
+    },
+    90_000,
+  );
 });
 
 describe("preview lifecycle", () => {
@@ -490,6 +558,136 @@ describe("preview lifecycle", () => {
     const frame = await get(`${url}/__finite/frame?file=src%2Fpages%2Fabout.tsx`);
     expect(frame.status).toBe(200);
     expect((await get(`${url}/about`)).status).toBe(200);
+    await previews.stop(copy.id);
+  }, 60_000);
+
+  test("follows a Next.js project's pageExtensions and basePath", async () => {
+    const fixture = await prepareFixture("next-pages");
+    cleanups.push(fixture.remove);
+    const at = (file: string) => path.join(fixture.root, file);
+    fs.writeFileSync(
+      at("next.config.ts"),
+      fs
+        .readFileSync(at("next.config.ts"), "utf8")
+        .replace("{}", `{ basePath: "/docs", pageExtensions: ["page.tsx", "mdx"] }`),
+    );
+    for (const page of ["_app", "_document", "about", "index", "posts/[id]"]) {
+      fs.renameSync(at(`src/pages/${page}.tsx`), at(`src/pages/${page}.page.tsx`));
+    }
+    // Not a page with these pageExtensions, so not a route either.
+    fs.writeFileSync(
+      at("src/pages/posts/Card.tsx"),
+      "export function Card() {\n  return <p>Card</p>;\n}\n",
+    );
+    const copy = { ...design("next-pages"), id: "next-settings", root: fixture.root };
+    const seen: string[][] = [];
+    const off = previews.on(copy.id, (e) => {
+      if (e.type === "routes") seen.push(e.routes.map((r) => r.path));
+    });
+    const { url } = await previews.ensure(copy);
+    expect(url).toMatch(/:\d+\/docs$/);
+    expect(fs.existsSync(at("src/pages/__finite/frame.page.tsx"))).toBe(true);
+    expect(await previews.routes(copy.id)).toEqual([
+      { path: "/about", params: [], file: "src/pages/about.page.tsx" },
+      { path: "/", params: [], file: "src/pages/index.page.tsx" },
+      { path: "/posts/[id]", params: ["id"], file: "src/pages/posts/[id].page.tsx" },
+    ]);
+
+    const about = await get(previews.frameUrl(copy.id, { kind: "route", path: "/about" }));
+    expect(about.status).toBe(200);
+    expect(about.text).toContain(`<script type="module" src="/docs/__finite/bridge.js"></script>`);
+    expect(about.text).toContain(`data-finite-loc="src/pages/about.page.tsx:6:6"`);
+    expect((await get(previews.frameUrl(copy.id, { kind: "route", path: "/" }))).status).toBe(200);
+    expect((await get(`${url}/__finite/bridge.js`, "*/*")).status).toBe(200);
+    const card = await get(
+      previews.frameUrl(copy.id, {
+        kind: "file",
+        file: "src/pages/posts/Card.tsx",
+        exportName: "Card",
+      }),
+    );
+    expect(card.status).toBe(200);
+    expect(card.text).toContain(`id="finite-page"`);
+    expect(card.text).toContain(`src="/docs/__finite/bridge.js"`);
+    // A page with one of the config's own extensions refreshes the routes too.
+    fs.writeFileSync(at("src/pages/guide.mdx"), "# Guide\n");
+    await expect.poll(() => seen.at(-1), { timeout: 10_000 }).toContain("/guide");
+    off();
+    await previews.stop(copy.id);
+    expect(fs.existsSync(at("src/pages/__finite"))).toBe(false);
+  }, 90_000);
+
+  test("serves an App Router project's frames and brand files under its basePath", async () => {
+    const fixture = await prepareFixture("next-app");
+    cleanups.push(fixture.remove);
+    const at = (file: string) => path.join(fixture.root, file);
+    fs.writeFileSync(
+      at("next.config.ts"),
+      fs.readFileSync(at("next.config.ts"), "utf8").replace("{}", `{ basePath: "/base" }`),
+    );
+    // The fixture's design.json puts the brand folder in assets/brand.
+    fs.mkdirSync(at("assets/brand"), { recursive: true });
+    fs.writeFileSync(at("assets/brand/logo.svg"), `<svg xmlns="http://www.w3.org/2000/svg"/>`);
+    const copy = { ...design("next-app"), id: "next-base", root: fixture.root };
+    const { url } = await previews.ensure(copy);
+    expect(url).toMatch(/:\d+\/base$/);
+    expect((await previews.routes(copy.id)).map((r) => r.path)).toContain("/about");
+
+    const about = await get(previews.frameUrl(copy.id, { kind: "route", path: "/about" }));
+    expect(about.status).toBe(200);
+    expect(about.text).toContain(`src="/base/__finite/bridge.js"`);
+    const counter = await get(
+      previews.frameUrl(copy.id, {
+        kind: "file",
+        file: "app/_components/Counter.tsx",
+        exportName: "Counter",
+      }),
+    );
+    expect(counter.status).toBe(200);
+    expect(counter.text).toContain(`data-finite-loc="app/_components/Counter.tsx`);
+    // Outside the basePath, Finite's URLs are Next's 404s like any other.
+    const origin = new URL(url).origin;
+    expect((await get(`${origin}/__finite/routes`, "*/*")).status).toBe(404);
+
+    const brand = fs.readFileSync(at(".finite/runtime/brand.ts"), "utf8");
+    expect(brand).toContain(`"/base/__finite/asset?file=assets%2Fbrand%2Flogo.svg"`);
+    const logo = await fetch(`${url}/__finite/asset?file=assets%2Fbrand%2Flogo.svg`);
+    expect(logo.headers.get("content-type")).toBe("image/svg+xml");
+    await logo.body?.cancel();
+    await previews.stop(copy.id);
+  }, 90_000);
+
+  test("previews a Next.js project with its own adapter, running its modifyConfig too", async () => {
+    const fixture = await prepareFixture("next-app");
+    cleanups.push(fixture.remove);
+    const at = (file: string) => path.join(fixture.root, file);
+    fs.writeFileSync(
+      at("adapter.mjs"),
+      `await Promise.resolve();
+export default {
+  name: "mine",
+  modifyConfig: (config) => ({ ...config, distDir: "mine", env: { ...config.env, MINE: "ran" } }),
+  onBuildComplete: () => {},
+};\n`,
+    );
+    const config = at("next.config.ts");
+    fs.writeFileSync(
+      config,
+      fs
+        .readFileSync(config, "utf8")
+        .replace("{}", `{ adapterPath: ${JSON.stringify(at("adapter.mjs"))} }`),
+    );
+    fs.writeFileSync(
+      at("app/about/page.tsx"),
+      "export default () => <h1>{process.env.MINE}</h1>;\n",
+    );
+    const copy = { ...design("next-app"), id: "next-adapter", root: fixture.root };
+    const { url } = await previews.ensure(copy);
+    const about = await get(`${url}/about`);
+    expect(about.status).toBe(200);
+    expect(about.text).toMatch(/<h1 data-finite-loc="app\/about\/page.tsx:[^"]*"[^>]*>ran<\/h1>/);
+    expect(fs.existsSync(at("mine"))).toBe(false);
+    expect(fs.existsSync(at(".finite/runtime/next"))).toBe(true);
     await previews.stop(copy.id);
   }, 60_000);
 

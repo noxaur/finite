@@ -93,6 +93,66 @@ describe("SourceEditor.apply", () => {
     expect(await get("src/App.tsx")).toContain(`<p className="text-brand">One</p>`);
   });
 
+  it("matches a Tailwind v3 config's theme and refuses new tokens there", async () => {
+    await put("src/App.tsx", APP);
+    await put("src/index.css", `@tailwind base;\n:root { --ink: #111; }\n`);
+    // A stand-in tailwindcss v3: the child loads the config with require and resolves it here.
+    await put(
+      "node_modules/tailwindcss/package.json",
+      `{ "name": "tailwindcss", "version": "3.4.19" }`,
+    );
+    await put("node_modules/tailwindcss/resolveConfig.js", `module.exports = (c) => c;\n`);
+    await put(
+      "tailwind.config.cjs",
+      `module.exports = { theme: { colors: { brand: { DEFAULT: "#95ced7" } }, borderRadius: { DEFAULT: "4px" } } };\n`,
+    );
+    const source = createSourceEditor();
+    await source.apply(
+      open(design()),
+      [
+        await edit("src/App.tsx", {
+          kind: "style",
+          locs: ["src/App.tsx:7:6"],
+          tag: "p",
+          styles: { color: "#95ced7", borderRadius: "4px", padding: "52px" },
+        }),
+      ],
+      ana,
+      page,
+    );
+    expect(await get("src/App.tsx")).toContain(
+      `<p className="text-brand rounded p-[52px]">One</p>`,
+    );
+    await expect(
+      source.setToken(design(), { name: "--color-new", mode: "light", value: "red" }),
+    ).rejects.toThrow("theme.extend in tailwind.config.cjs");
+    await source.setToken(design(), { name: "--ink", mode: "light", value: "#222" });
+    expect(await get("src/index.css")).toContain("--ink: #222");
+  });
+
+  it("finds a Tailwind v3 config through the sheet's @config when the root has none", async () => {
+    await put("src/App.tsx", APP);
+    await put("src/index.css", `@config "../config/tw.cjs";\n@tailwind base;\n`);
+    await put(
+      "node_modules/tailwindcss/package.json",
+      `{ "name": "tailwindcss", "version": "3.4.19" }`,
+    );
+    await put("node_modules/tailwindcss/resolveConfig.js", `module.exports = (c) => c;\n`);
+    await put("config/tw.cjs", `module.exports = { theme: { padding: { card: "312px" } } };\n`);
+    const source = createSourceEditor();
+    const styles = (padding: string) =>
+      edit("src/App.tsx", {
+        kind: "style",
+        locs: ["src/App.tsx:7:6"],
+        tag: "p",
+        styles: { padding },
+      });
+    await source.apply(open(design()), [await styles("312px")], ana, page);
+    expect(await get("src/App.tsx")).toContain(`<p className="p-card">One</p>`);
+    await source.apply(open(design()), [await styles("52px")], ana, page);
+    expect(await get("src/App.tsx")).toContain(`<p className="p-[52px]">One</p>`);
+  });
+
   it("refuses a stale rev", async () => {
     await put("src/App.tsx", APP);
     const source = createSourceEditor();
@@ -350,6 +410,323 @@ describe("SourceEditor with Sass and Less modules", () => {
   });
 });
 
+describe("SourceEditor with Sass and Less variable tokens", () => {
+  const CARD = (ext: string) =>
+    `import s from "./Card.module.${ext}";\nexport const Card = () => <div className={s.card}>x</div>;\n`;
+  const MODULE = `@use "../styles/tokens" as t;\n\n.card {\n  gap: t.$gap;\n}\n`;
+  const GLOBAL = `@use "tokens";\n@use "theme" as *;\n\n$shade: #2a7f8e;\n\n:root {\n  --ink: #111;\n}\n`;
+  const d = () => ({
+    ...design("css-modules"),
+    css: ["src/styles/global.scss", "src/styles/theme.less"],
+  });
+  const styleCard = async (styles: Record<string, string | null>) =>
+    edit("src/c/Card.tsx", { kind: "style", locs: ["src/c/Card.tsx:2:26"], tag: "div", styles });
+
+  beforeEach(async () => {
+    await put("src/styles/global.scss", GLOBAL);
+    await put("src/styles/_tokens.scss", `$gap: 4px;\n`);
+    await put("src/styles/_theme.scss", `// Brand colours.\n$brand: #95ced7;\n`);
+    await put("src/styles/theme.less", `@line: #2a7f8e;\n`);
+  });
+
+  it("lists $vars and @vars, edits their light value and refuses a dark one", async () => {
+    const source = createSourceEditor();
+    expect(await source.tokens(d())).toEqual([
+      { name: "$shade", light: "#2a7f8e" },
+      { name: "--ink", light: "#111" },
+      { name: "@line", light: "#2a7f8e" },
+      { name: "$gap", light: "4px" },
+      { name: "$brand", light: "#95ced7" },
+    ]);
+    await source.setToken(d(), { name: "$brand", mode: "light", value: "#fff" });
+    await source.setToken(d(), { name: "$shade", mode: "light", value: "#000" });
+    await source.setToken(d(), { name: "$new", mode: "light", value: "2px" });
+    await source.setToken(d(), { name: "@pad", mode: "light", value: "6px" });
+    expect(await get("src/styles/_theme.scss")).toBe(`// Brand colours.\n$brand: #fff;\n`);
+    expect(await get("src/styles/global.scss")).toBe(GLOBAL.replace("#2a7f8e", "#000"));
+    // A new $var goes in the first sheet that outputs no CSS, so a module can @use it.
+    expect(await get("src/styles/_tokens.scss")).toBe(`$gap: 4px;\n$new: 2px;\n`);
+    expect(await get("src/styles/theme.less")).toBe(`@line: #2a7f8e;\n@pad: 6px;\n`);
+    await expect(
+      source.setToken(d(), { name: "$brand", mode: "dark", value: "#000" }),
+    ).rejects.toMatchObject({ code: "invalid", message: expect.stringContaining("no dark mode") });
+    await expect(
+      source.setToken(
+        { ...d(), css: ["src/styles/theme.less"] },
+        {
+          name: "$new",
+          mode: "light",
+          value: "1px",
+        },
+      ),
+    ).rejects.toMatchObject({ code: "invalid", message: expect.stringContaining(".scss") });
+  });
+
+  it("writes a picked $var into the module rule with its @use, and undo takes both out", async () => {
+    await put("src/c/Card.tsx", CARD("scss"));
+    await put("src/c/Card.module.scss", MODULE);
+    const source = createSourceEditor();
+    await source.apply(open(d()), [await styleCard({ color: "$brand" })], ana, page);
+    const picked = `@use "../styles/tokens" as t;\n@use "../styles/theme" as *;\n\n.card {\n  gap: t.$gap;\n  color: $brand;\n}\n`;
+    expect(await get("src/c/Card.module.scss")).toBe(picked);
+    // A second pick finds the @use already there.
+    await source.apply(open(d()), [await styleCard({ background: "$brand" })], ana, page);
+    expect(await get("src/c/Card.module.scss")).toBe(
+      picked.replace("color: $brand;\n", "color: $brand;\n  background: $brand;\n"),
+    );
+    await source.undo(open(d()), ana);
+    await source.undo(open(d()), ana);
+    expect(await get("src/c/Card.module.scss")).toBe(MODULE);
+    await source.redo(open(d()), ana);
+    expect(await get("src/c/Card.module.scss")).toBe(picked);
+  });
+
+  it("writes a picked @var into a .module.less rule with @import (reference)", async () => {
+    await put("src/c/Card.tsx", CARD("less"));
+    await put("src/c/Card.module.less", `.card {\n  margin: 0;\n}\n`);
+    await createSourceEditor().apply(
+      open(d()),
+      [await styleCard({ borderColor: "@line" })],
+      ana,
+      page,
+    );
+    expect(await get("src/c/Card.module.less")).toBe(
+      `@import (reference) "../styles/theme.less";\n\n.card {\n  margin: 0;\n  border-color: @line;\n}\n`,
+    );
+  });
+
+  it("writes a $var into a prototype's module, importing production's sheet", async () => {
+    const dir = ".finite/boards/c1";
+    await put(`${dir}/Card.tsx`, CARD("scss"));
+    await put(`${dir}/Card.module.scss`, `.card {\n  margin: 0;\n}\n`);
+    await createSourceEditor().apply(
+      open(d()),
+      [
+        await edit(`${dir}/Card.tsx`, {
+          kind: "style",
+          locs: [`${dir}/Card.tsx:2:26`],
+          tag: "div",
+          styles: { color: "$brand" },
+        }),
+      ],
+      ana,
+      proto,
+    );
+    expect(await get(`${dir}/Card.module.scss`)).toBe(
+      `@use "../../../src/styles/theme" as *;\n\n.card {\n  margin: 0;\n  color: $brand;\n}\n`,
+    );
+  });
+
+  it("follows the module's namespace for a partial's $var, and refuses one from a sheet with CSS", async () => {
+    await put("src/c/Card.tsx", CARD("scss"));
+    await put("src/c/Card.module.scss", MODULE);
+    const source = createSourceEditor();
+    await source.apply(open(d()), [await styleCard({ margin: "$gap" })], ana, page);
+    expect(await get("src/c/Card.module.scss")).toBe(
+      MODULE.replace("gap: t.$gap;\n", "gap: t.$gap;\n  margin: t.$gap;\n"),
+    );
+    await source.undo(open(d()), ana);
+    await expect(
+      source.apply(open(d()), [await styleCard({ color: "$shade" })], ana, page),
+    ).rejects.toMatchObject({
+      code: "unsupported-style",
+      message: expect.stringContaining("Move the $vars into a partial (src/styles/_tokens.scss)"),
+    });
+    expect(await get("src/c/Card.module.scss")).toBe(MODULE);
+  });
+
+  it("refuses a $var on an inline-styled element and leaves the file alone", async () => {
+    const plain = `export const Card = () => <div>x</div>;\n`;
+    await put("src/c/Card.tsx", plain);
+    await expect(
+      createSourceEditor().apply(
+        open(d()),
+        [
+          await edit("src/c/Card.tsx", {
+            kind: "style",
+            locs: ["src/c/Card.tsx:1:26"],
+            tag: "div",
+            styles: { color: "$brand" },
+          }),
+        ],
+        ana,
+        page,
+      ),
+    ).rejects.toMatchObject({ code: "unsupported-style" });
+    expect(await get("src/c/Card.tsx")).toBe(plain);
+  });
+});
+
+describe("SourceEditor with StyleX defineVars tokens", () => {
+  const VARS = `import * as stylex from "@stylexjs/stylex";
+
+export const colors = stylex.defineVars({
+  brand: "#95ced7",
+});
+`;
+  const HOME = `import { create, props } from "@stylexjs/stylex";
+import { Card } from "../components/Card.tsx";
+
+const styles = create({
+  main: {
+    gap: "8px",
+  },
+  heading: {
+    fontSize: "24px",
+  },
+});
+
+export default function Home() {
+  return (
+    <main {...props(styles.main)}>
+      <h1 {...props(styles.heading)}>Welcome home</h1>
+      <p>Body</p>
+    </main>
+  );
+}
+`;
+  const sx = () => design("stylex");
+  const pickH1 = async (styles: Record<string, string | null>) =>
+    edit("src/pages/Home.tsx", {
+      kind: "style",
+      locs: ["src/pages/Home.tsx:16:6"],
+      tag: "h1",
+      styles,
+    });
+
+  beforeEach(async () => {
+    await put("src/index.css", `:root {\n  --ink: #111;\n}\n`);
+    await put("src/tokens.stylex.ts", VARS);
+    await put("src/pages/Home.tsx", HOME);
+  });
+
+  it("lists defineVars next to the custom properties and edits them on the Tokens page", async () => {
+    const source = createSourceEditor();
+    expect(await source.tokens(sx())).toEqual([
+      { name: "--ink", light: "#111" },
+      { name: "colors.brand", light: "#95ced7" },
+    ]);
+    // Only a StyleX design reads them.
+    expect(await source.tokens(design("inline"))).toEqual([{ name: "--ink", light: "#111" }]);
+    await source.setToken(sx(), { name: "colors.brand", mode: "dark", value: "#1a6f7b" });
+    expect(
+      await source.setToken(sx(), { name: "colors.accent", mode: "light", value: "#f0c" }),
+    ).toEqual([
+      { name: "--ink", light: "#111" },
+      { name: "colors.brand", light: "#95ced7", dark: "#1a6f7b" },
+      { name: "colors.accent", light: "#f0c" },
+    ]);
+    expect(await get("src/tokens.stylex.ts")).toBe(
+      VARS.replace(
+        `brand: "#95ced7",`,
+        `brand: {\n    default: "#95ced7",\n    "@media (prefers-color-scheme: dark)": "#1a6f7b",\n  },\n  accent: "#f0c",`,
+      ),
+    );
+    // Custom properties still go in the stylesheet.
+    await source.setToken(sx(), { name: "--line", mode: "light", value: "#ccc" });
+    expect(await get("src/index.css")).toBe(`:root {\n  --ink: #111;\n  --line: #ccc;\n}\n`);
+  });
+
+  it("refuses a token for a group no defineVars has, or when there's none", async () => {
+    const source = createSourceEditor();
+    await expect(
+      source.setToken(sx(), { name: "space.lg", mode: "light", value: "24px" }),
+    ).rejects.toMatchObject({
+      code: "invalid",
+      message: expect.stringContaining("Add it to colors.lg"),
+    });
+    await rm(path.join(root, "src/tokens.stylex.ts"));
+    await expect(
+      source.setToken(sx(), { name: "colors.brand", mode: "light", value: "#000" }),
+    ).rejects.toMatchObject({
+      code: "invalid",
+      message: expect.stringContaining("no stylex.defineVars yet"),
+    });
+  });
+
+  it("writes a picked token and its import, and undo and redo work around another actor's edit", async () => {
+    const source = createSourceEditor();
+    const picked = HOME.replace(
+      `import { Card } from "../components/Card.tsx";\n`,
+      `import { Card } from "../components/Card.tsx";\nimport { colors } from "../tokens.stylex";\n`,
+    ).replace(`fontSize: "24px",\n`, `fontSize: "24px",\n    color: colors.brand,\n`);
+    const result = await source.apply(
+      open(sx()),
+      [await pickH1({ color: "colors.brand" })],
+      ana,
+      page,
+    );
+    expect(await get("src/pages/Home.tsx")).toBe(picked);
+    const p = result.remap["src/pages/Home.tsx:17:6"]!;
+    expect(p).toBe("src/pages/Home.tsx:19:6");
+    await source.apply(
+      open(sx()),
+      [await edit("src/pages/Home.tsx", { kind: "text", loc: p, tag: "p", text: "Other" })],
+      bo,
+      page,
+    );
+    await source.undo(open(sx()), ana);
+    expect(await get("src/pages/Home.tsx")).toBe(HOME.replace("Body", "Other"));
+    await source.redo(open(sx()), ana);
+    expect(await get("src/pages/Home.tsx")).toBe(picked.replace("Body", "Other"));
+    await source.undo(open(sx()), bo);
+    expect(await get("src/pages/Home.tsx")).toBe(picked);
+  });
+
+  it("imports a token into a prototype from production, and still writes a custom property", async () => {
+    const file = ".finite/boards/c1/Home.tsx";
+    await put(file, HOME);
+    const source = createSourceEditor();
+    await source.apply(
+      open(sx()),
+      [
+        await edit(file, {
+          kind: "style",
+          locs: [`${file}:16:6`],
+          tag: "h1",
+          styles: { color: "colors.brand", borderColor: "var(--ink)" },
+        }),
+      ],
+      ana,
+      proto,
+    );
+    const code = await get(file);
+    expect(code).toContain(`import { colors } from "../../../src/tokens.stylex";\n`);
+    expect(code).toContain(`color: colors.brand,\n    borderColor: "var(--ink)",\n`);
+  });
+
+  it("gives an element without a stylex.props spread a new entry with the token, and undo restores the file", async () => {
+    const source = createSourceEditor();
+    const result = await source.apply(
+      open(sx()),
+      [
+        await edit("src/pages/Home.tsx", {
+          kind: "style",
+          locs: ["src/pages/Home.tsx:17:6"],
+          tag: "p",
+          styles: { color: "colors.brand" },
+        }),
+      ],
+      ana,
+      page,
+    );
+    expect(await get("src/pages/Home.tsx")).toBe(
+      HOME.replace(
+        `import { Card } from "../components/Card.tsx";\n`,
+        `import { Card } from "../components/Card.tsx";\nimport { colors } from "../tokens.stylex";\n`,
+      )
+        .replace(
+          `fontSize: "24px",\n  },\n`,
+          `fontSize: "24px",\n  },\n  text: {\n    color: colors.brand,\n  },\n`,
+        )
+        .replace("<p>", "<p {...props(styles.text)}>"),
+    );
+    expect(result.remap["src/pages/Home.tsx:17:6"]).toBe("src/pages/Home.tsx:21:6");
+    await source.undo(open(sx()), ana);
+    expect(await get("src/pages/Home.tsx")).toBe(HOME);
+  });
+});
+
 describe("SourceEditor undo and redo", () => {
   const d = () => design();
   const styleH1 = () =>
@@ -461,6 +838,61 @@ export function Card() {
     expect(await get("src/Card.tsx")).toBe(padded("Two"));
     await source.undo(sx, bo);
     expect(await get("src/Card.tsx")).toBe(padded("One"));
+  });
+
+  it("refuses to undo a new StyleX entry after another actor's edit between the entry and the element", async () => {
+    const card = `import * as stylex from "@stylexjs/stylex";
+
+const styles = stylex.create({
+  card: {
+    color: "red",
+  },
+});
+
+export function Card() {
+  return (
+    <div {...stylex.props(styles.card)}>
+      <h2>Title</h2>
+      <span>By Ana</span>
+      <p>One</p>
+    </div>
+  );
+}
+`;
+    const styledP = (text: string) =>
+      card
+        .replace(`  },\n});`, `  },\n  text: {\n    padding: "8px",\n  },\n});`)
+        .replace("<p>", "<p {...stylex.props(styles.text)}>")
+        .replace("Title", text);
+    await put("src/Card.tsx", card);
+    const source = createSourceEditor();
+    const sx = open(design("stylex"));
+    const styled = await source.apply(
+      sx,
+      [
+        await edit("src/Card.tsx", {
+          kind: "style",
+          locs: ["src/Card.tsx:14:6"],
+          tag: "p",
+          styles: { padding: "8px" },
+        }),
+      ],
+      ana,
+      page,
+    );
+    expect(await get("src/Card.tsx")).toBe(styledP("Title"));
+    const h2 = styled.remap["src/Card.tsx:12:6"]!;
+    expect(h2).toBe("src/Card.tsx:15:6");
+    await source.apply(
+      sx,
+      [await edit("src/Card.tsx", { kind: "text", loc: h2, tag: "h2", text: "Heading" })],
+      bo,
+      page,
+    );
+    const afterBo = await get("src/Card.tsx");
+    expect(afterBo).toBe(styledP("Heading"));
+    await expect(source.undo(sx, ana)).rejects.toMatchObject({ code: "stale" });
+    expect(await get("src/Card.tsx")).toBe(afterBo);
   });
 
   it("a new edit clears the redo stack", async () => {
@@ -706,6 +1138,45 @@ describe("exportFrames with Sass and Less", () => {
         "package.json",
         "src/bg.png",
         "src/styles/shared.scss",
+      ].sort(),
+    );
+  });
+});
+
+describe("exportFrames with Sass import-only files", () => {
+  it("resolves @import to the .import.scss file first, and @use to the plain one", async () => {
+    await put(
+      ".finite/boards/c1/Home.tsx",
+      `import "./home.scss";\nexport default () => <div />;\n`,
+    );
+    await put(".finite/boards/c1/home.scss", `@import "theme", "plain";\n@use "colors";\n`);
+    await put(".finite/boards/c1/_theme.import.scss", `@forward "theme";\n`);
+    await put(".finite/boards/c1/_theme.scss", `$a: 1;\n`);
+    await put(".finite/boards/c1/plain.import.scss", `.p {}\n`);
+    await put(".finite/boards/c1/plain.scss", `.unused {}\n`);
+    await put(".finite/boards/c1/colors.import.scss", `.unused {}\n`);
+    await put(".finite/boards/c1/_colors.scss", `$red: red;\n`);
+    await put("package.json", `{"name":"d"}`);
+    const files = await createSourceEditor().exportFrames(open(design()), "c1", [
+      {
+        id: "f",
+        name: "Home",
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 100,
+        source: { kind: "file", file: ".finite/boards/c1/Home.tsx" },
+      },
+    ]);
+    expect(files.map((f) => f.path).sort()).toEqual(
+      [
+        ".finite/boards/c1/Home.tsx",
+        ".finite/boards/c1/_colors.scss",
+        ".finite/boards/c1/_theme.import.scss",
+        ".finite/boards/c1/_theme.scss",
+        ".finite/boards/c1/home.scss",
+        ".finite/boards/c1/plain.import.scss",
+        "package.json",
       ].sort(),
     );
   });

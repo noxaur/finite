@@ -6,8 +6,14 @@ import path from "node:path";
 import { allowsOrigin } from "../client/bridge.ts";
 import { frameFile, PAGE_FILL, readFrameConfig } from "../frame.ts";
 import { bridgeScript, streamIntoHtml } from "../html.ts";
-import { importsTailwind } from "../tailwind.ts";
-import { nextRoutes } from "./routes.ts";
+import {
+  finiteConfigFile,
+  hasTailwindDirectives,
+  importsTailwind,
+  writeFiniteConfig,
+} from "../tailwind.ts";
+import type { NextSettings } from "./adapter.ts";
+import { nextRoutes, pageExtension } from "./routes.ts";
 
 export type FiniteNextOptions = {
   root: string;
@@ -35,7 +41,8 @@ const NEXT_DEV = /\bnext\s+dev\b([^&|;]*)/;
 /**
  * Everything Finite adds to a Next.js dev server, for `next-host.mjs`: the files that make file
  * frames, the brand board and Tailwind's `.finite/` source work, and the request handling that
- * goes in front of Next's own (routes, the bridge and its injection, CORS).
+ * goes in front of Next's own (routes, the bridge and its injection, CORS). `prepare` takes the
+ * project's resolved config, from the adapter; Finite's URLs go under its `basePath`.
  */
 export function finiteNext(options: FiniteNextOptions) {
   const root = fs.realpathSync(options.root);
@@ -46,28 +53,20 @@ export function finiteNext(options: FiniteNextOptions) {
   const isDir = (dir: string) => fs.statSync(at(dir), { throwIfNoEntry: false })?.isDirectory();
   // As in Next, `app/` or `pages/` at the root win over `src/app/` and `src/pages/`.
   const base = isDir("app") || isDir("pages") ? "" : "src/";
-  /**
-   * The route that renders file frames. An App Router folder starting with `_` is private, so
-   * the mount spells `__finite` as `%5F%5Ffinite`, which Next serves at `/__finite/frame`. It goes
-   * next to the root layout, which may sit in a route group (`app/(site)/layout.tsx`); groups add
-   * no URL segment.
-   */
-  const mount = pages
-    ? `${base}pages/__finite/frame.tsx`
-    : `${rootLayoutDir(root, `${base}app`)}/%5F%5Ffinite/frame/page.tsx`;
-  const fromMount = (file: string) => {
-    const relative = path.posix.relative(path.posix.dirname(mount), file);
-    return relative.startsWith(".") ? relative : `./${relative}`;
-  };
-  const mountCode = pages
-    ? pagesMount(fromMount(`${RUNTIME}/frames`))
-    : appMount(fromMount(`${RUNTIME}/frames`));
+  /** The project's resolved config, set by `prepare`. */
+  let settings: NextSettings = { basePath: "", pageExtensions: [] };
+  let extension = pageExtension([]);
+  let mount: string | undefined;
+  let mountCode = "";
 
-  /** Each stylesheet that imports Tailwind, and Finite's copy that adds `.finite/` as a source. */
+  /** Each stylesheet that imports Tailwind v4, and Finite's copy that adds `.finite/` as a source. */
   const sheets: Record<string, string> = {};
+  /** Each Tailwind v3 stylesheet, and Finite's config that adds `.finite/` to `content`. */
+  const configs: Record<string, string> = {};
   for (const css of config.css) {
-    if (fs.existsSync(at(css)) && importsTailwind(fs.readFileSync(at(css), "utf8")))
-      sheets[at(css)] = at(`${RUNTIME}/css/${css}`);
+    const code = fs.existsSync(at(css)) ? fs.readFileSync(at(css), "utf8") : "";
+    if (importsTailwind(code)) sheets[at(css)] = at(`${RUNTIME}/css/${css}`);
+    else if (hasTailwindDirectives(code)) configs[at(css)] = finiteConfigFile(root, at(css));
   }
 
   /** The files the frame registry imports, starting with those of the last run. */
@@ -126,7 +125,9 @@ export function finiteNext(options: FiniteNextOptions) {
       for (const entry of fs.readdirSync(at(dir), { withFileTypes: true })) {
         const file = `${dir}/${entry.name}`;
         if (entry.isDirectory()) walk(file);
-        else if (entry.isFile()) files[file] = `${ASSET_URL}?${new URLSearchParams({ file })}`;
+        else if (entry.isFile()) {
+          files[file] = `${settings.basePath}${ASSET_URL}?${new URLSearchParams({ file })}`;
+        }
       }
     };
     if (brandDir && isDir(brandDir)) walk(brandDir);
@@ -165,15 +166,45 @@ export function finiteNext(options: FiniteNextOptions) {
     root,
     distDir: DIST_DIR,
     sheets,
-    /** Never `import()`ed from a query: frames come only from the registry's literal imports. */
-    mount,
+    configs,
+    /**
+     * The file frame route, relative to the root, once prepared. Never `import()`ed from a query:
+     * frames come only from the registry's literal imports.
+     */
+    get mount() {
+      return mount;
+    },
+    get basePath() {
+      return settings.basePath;
+    },
 
     /**
      * Writes Finite's files: `.finite/runtime/` (ignored by git and Tailwind), the generated
      * stylesheets, the registry and brand maps, and the mount, added to `.git/info/exclude`.
      * Throws a reason when the project's own config or files are in the way.
      */
-    prepare() {
+    prepare(resolved: NextSettings) {
+      settings = resolved;
+      // The mount is TSX, so it takes the first page extension that holds TSX.
+      const ext = settings.pageExtensions.find((e) => e.endsWith("tsx"));
+      if (!ext) {
+        throw new Error(
+          `next.config's pageExtensions (${settings.pageExtensions.join(", ")}) has no TSX extension, and Finite renders file frames through a TSX page. Add one, such as "tsx" or "page.tsx", then open the design again.`,
+        );
+      }
+      /*
+       * The route that renders file frames. An App Router folder starting with `_` is private, so
+       * the mount spells `__finite` as `%5F%5Ffinite`, which Next serves at `/__finite/frame`. It
+       * goes next to the root layout, which may sit in a route group (`app/(site)/layout.tsx`);
+       * groups add no URL segment.
+       */
+      extension = pageExtension(settings.pageExtensions);
+      mount = pages
+        ? `${base}pages/__finite/frame.${ext}`
+        : `${rootLayoutDir(root, `${base}app`, extension)}/%5F%5Ffinite/frame/page.${ext}`;
+      const registry = path.posix.relative(path.posix.dirname(mount), `${RUNTIME}/frames`);
+      mountCode = pages ? pagesMount(registry) : appMount(registry);
+
       writeIfChanged(at(`${RUNTIME}/.gitignore`), "*\n");
       for (const [sheet, copy] of Object.entries(sheets)) {
         const relative = path.relative(path.dirname(copy), sheet).split(path.sep).join("/");
@@ -187,6 +218,9 @@ export function finiteNext(options: FiniteNextOptions) {
             "",
           ].join("\n"),
         );
+      }
+      for (const sheet of Object.keys(configs)) {
+        writeFiniteConfig(root, sheet, fs.readFileSync(sheet, "utf8"));
       }
       writeRegistry();
       writeBrand();
@@ -209,6 +243,9 @@ export function finiteNext(options: FiniteNextOptions) {
       writeIfChanged(at(mount), mountCode);
     },
 
+    /** Whether a file has one of the config's `pageExtensions`, so it may be a route. */
+    isPage: (file: string) => settings.pageExtensions.length > 0 && extension.test(file),
+
     /** The brand folder, relative to the root, whose files the brand board lists. */
     brandDir: () => readBrandDir(root),
 
@@ -220,6 +257,7 @@ export function finiteNext(options: FiniteNextOptions) {
 
     /** Removes the mount, unless someone changed it, and the folders it leaves empty. */
     close() {
+      if (!mount) return;
       const file = at(mount);
       if (!fs.existsSync(file) || fs.readFileSync(file, "utf8") !== mountCode) return;
       fs.rmSync(file);
@@ -236,6 +274,14 @@ export function finiteNext(options: FiniteNextOptions) {
      */
     async handle(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
       const url = new URL(req.url ?? "/", "http://localhost");
+      const { basePath } = settings;
+      // Finite's own URLs, like the project's, are under the basePath.
+      const finitePath =
+        url.pathname === basePath
+          ? "/"
+          : url.pathname.startsWith(`${basePath}/`)
+            ? url.pathname.slice(basePath.length)
+            : undefined;
       if (!allowsHost(allowedHosts, req.headers.host)) {
         res.statusCode = 403;
         res.end("This host isn't allowed; open the design from Finite.");
@@ -254,10 +300,10 @@ export function finiteNext(options: FiniteNextOptions) {
           return true;
         }
       }
-      if (url.pathname === "/__finite/routes") {
+      if (finitePath === "/__finite/routes") {
         let body: string;
         try {
-          const routes = await nextRoutes(root);
+          const routes = await nextRoutes(root, settings.pageExtensions);
           // The mount is a route to Next, not to the person.
           body = JSON.stringify(routes.filter((r) => !r.path.startsWith("/__finite")));
           res.statusCode = 200;
@@ -272,17 +318,17 @@ export function finiteNext(options: FiniteNextOptions) {
         res.end(body);
         return true;
       }
-      if (url.pathname === BRIDGE_URL) {
+      if (finitePath === BRIDGE_URL) {
         res.setHeader("content-type", "text/javascript");
         res.setHeader("cache-control", "no-cache");
         res.end(bridgeScript(allowedHosts));
         return true;
       }
-      if (url.pathname === ASSET_URL) {
+      if (finitePath === ASSET_URL) {
         serveAsset(res, url);
         return true;
       }
-      const frame = url.pathname === "/__finite/frame";
+      const frame = finitePath === "/__finite/frame";
       if (frame && req.headers[PROBE]) return false;
       if (frame) {
         const checked = frameFile(root, url.searchParams.get("file"));
@@ -299,7 +345,7 @@ export function finiteNext(options: FiniteNextOptions) {
         }
       }
       if (req.method === "GET" && !req.headers.rsc) {
-        const bridge = `<script type="module" src="${BRIDGE_URL}"></script>`;
+        const bridge = `<script type="module" src="${basePath}${BRIDGE_URL}"></script>`;
         streamIntoHtml(res, frame ? bridge + PAGE_FILL : bridge);
       }
       return false;
@@ -420,10 +466,11 @@ export default function FiniteFrame() {
  * The App Router folder that holds the root layout: `app/` itself, or the first route group
  * under it, depth first, that has a `layout` file. `app/` when there is none.
  */
-function rootLayoutDir(root: string, app: string): string {
+function rootLayoutDir(root: string, app: string, layout: RegExp): string {
   const find = (dir: string): string | undefined => {
     const entries = fs.readdirSync(path.join(root, dir), { withFileTypes: true });
-    if (entries.some((e) => e.isFile() && /^layout\.(tsx|ts|jsx|js)$/.test(e.name))) return dir;
+    const isLayout = (name: string) => layout.test(name) && name.replace(layout, "") === "layout";
+    if (entries.some((e) => e.isFile() && isLayout(e.name))) return dir;
     const groups = entries.filter((e) => e.isDirectory() && /^\([^.].*\)$/.test(e.name));
     for (const group of groups.map((e) => e.name).sort()) {
       const found = find(`${dir}/${group}`);

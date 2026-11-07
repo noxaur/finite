@@ -3,7 +3,6 @@ import { describe, expect, it } from "vite-plus/test";
 import { ATTACH_RANGE, labelAnchor } from "./labelAnchor";
 import { childrenIn, layerName, layerNameAt, layerRows, pathIn } from "./layers";
 import { pinSpot } from "./pins";
-import { frameSrc } from "./frameSrc";
 import { keyOf, remapSelection, selectionStore, toggleItem } from "./selection";
 import { framesToMount } from "./virtualize";
 
@@ -144,30 +143,6 @@ describe("layer trees", () => {
   });
 });
 
-describe("frame sources", () => {
-  it("loads a route with its params filled in", () => {
-    expect(
-      frameSrc("http://127.0.0.1:5173/", {
-        kind: "route",
-        path: "/users/:id/$tab",
-        params: { id: "4 2", tab: "posts" },
-      }),
-    ).toBe("http://127.0.0.1:5173/users/4%202/posts");
-  });
-
-  it("loads one file's export through the plugin's frame page", () => {
-    expect(
-      frameSrc("http://127.0.0.1:5173", {
-        kind: "file",
-        file: ".finite/boards/c1/Card.tsx",
-        exportName: "Card",
-      }),
-    ).toBe(
-      "http://127.0.0.1:5173/__finite/frame?file=.finite%2Fboards%2Fc1%2FCard.tsx&export=Card",
-    );
-  });
-});
-
 describe("comment pins", () => {
   const frame = (id: string) =>
     id === "f" ? { box: { x: 100, y: 50, width: 400, height: 300 } } : undefined;
@@ -191,16 +166,6 @@ describe("comment pins", () => {
     expect(pinSpot(anchor, frame, null)).toEqual({ at: { x: 500, y: 50 }, moved: false });
     expect(pinSpot({ frameId: "gone" }, frame, null)).toBeNull();
     expect(pinSpot({ x: 3, y: 4 }, frame, null)).toEqual({ at: { x: 3, y: 4 }, moved: false });
-  });
-});
-
-describe("frameSrc", () => {
-  it("fills route params the way the server does, optional ones and splats included", () => {
-    const route = (path: string, params?: Record<string, string>) =>
-      frameSrc("http://127.0.0.1:5000/", { kind: "route", path, ...(params ? { params } : {}) });
-    expect(route("/posts/{-$id}", { id: "42" })).toBe("http://127.0.0.1:5000/posts/42");
-    expect(route("/posts/{-$id}")).toBe("http://127.0.0.1:5000/posts");
-    expect(route("/docs/$", { _splat: "a/b" })).toBe("http://127.0.0.1:5000/docs/a/b");
   });
 });
 

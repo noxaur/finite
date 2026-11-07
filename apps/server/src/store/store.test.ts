@@ -215,6 +215,29 @@ describe("connect", () => {
     );
   });
 
+  it("finds Tailwind v3 stylesheets by their @tailwind directives", async () => {
+    const fixtures = fileURLToPath(new URL("../../fixtures/", import.meta.url));
+    expect(await detectProject(path.join(fixtures, "next-tailwind3"))).toEqual({
+      name: "fixture-next-tailwind3",
+      router: "next-app",
+      styling: "tailwind",
+      css: ["app/globals.css"],
+      brandDir: "assets/brand",
+    });
+    const vite = await project(
+      { vite: "^8", "react-router": "^8", tailwindcss: "^3" },
+      {
+        "src/main.tsx": 'import "./reset.css";\nimport "./index.css";',
+        "src/reset.css": "body { margin: 0; }",
+        "src/index.css": "@tailwind base;\n@tailwind components;\n@tailwind utilities;\n",
+      },
+    );
+    expect(await detectProject(vite)).toMatchObject({
+      styling: "tailwind",
+      css: ["src/index.css"],
+    });
+  });
+
   it("detects Next.js's App Router and Pages Router, without Vite", async () => {
     const fixtures = fileURLToPath(new URL("../../fixtures/", import.meta.url));
     expect(await detectProject(path.join(fixtures, "next-app"))).toEqual({

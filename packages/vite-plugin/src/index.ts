@@ -8,7 +8,12 @@ import { allowsOrigin, LOOPBACK_HOSTS } from "./client/bridge.ts";
 import { bridgeScript, injectIntoHtml } from "./html.ts";
 import { scanRoutes } from "./routes.ts";
 import { stamp } from "./stamp.ts";
-import { addFiniteSource } from "./tailwind.ts";
+import {
+  addFiniteConfig,
+  addFiniteSource,
+  hasTailwindDirectives,
+  writeFiniteConfig,
+} from "./tailwind.ts";
 
 export { scanRoutes, routeParams } from "./routes.ts";
 export { stamp, rev } from "./stamp.ts";
@@ -30,8 +35,6 @@ const BRIDGE_URL = "/@finite/bridge";
 const FRAME_URL = "/@finite/frame";
 const BRIDGE_ID = "\0finite:bridge";
 const FRAME_ID = "\0finite:frame";
-/** React Router framework mode's React Refresh preamble, which its route modules check for. */
-const REACT_ROUTER_PREAMBLE = "virtual:react-router/inject-hmr-runtime";
 
 /** Stamps `data-finite-loc`/`data-finite-rev`, injects the bridge, serves frames and routes. */
 export function finite(options: FiniteOptions): Plugin[] {
@@ -47,7 +50,7 @@ export function finite(options: FiniteOptions): Plugin[] {
     }
   };
   let base = "/";
-  let preamble: string | undefined;
+  let framework = false;
 
   const stamping: Plugin = {
     name: "finite:stamp",
@@ -80,7 +83,13 @@ export function finite(options: FiniteOptions): Plugin[] {
       if (id.startsWith("\0") || /[?&](raw|url)\b/.test(id)) return null;
       const file = cleanId(id);
       if (!file.endsWith(".css") || !fs.existsSync(file)) return null;
-      const css = addFiniteSource(fs.readFileSync(file, "utf8"), file, root);
+      const code = fs.readFileSync(file, "utf8");
+      const relative = path.relative(root, file);
+      const own = !relative.startsWith("..") && !relative.split(path.sep).includes("node_modules");
+      const css =
+        own && hasTailwindDirectives(code)
+          ? addFiniteConfig(code, file, writeFiniteConfig(root, file, code))
+          : addFiniteSource(code, file, root);
       if (css === null) return null;
       tailwindSheets.add(id);
       return { code: css, map: null };
@@ -121,8 +130,7 @@ export function finite(options: FiniteOptions): Plugin[] {
     },
     configResolved(config) {
       base = config.base;
-      const framework = config.plugins.some((p) => p.name === "react-router:inject-hmr-runtime");
-      preamble = framework ? REACT_ROUTER_PREAMBLE : undefined;
+      framework = config.plugins.some((p) => p.name === "react-router:inject-hmr-runtime");
     },
     resolveId(id) {
       if (id === BRIDGE_URL) return BRIDGE_ID;
@@ -142,7 +150,7 @@ export function finite(options: FiniteOptions): Plugin[] {
         file: checked.file,
         exportName: query.get("export") || "default",
         routerPackage,
-        preamble,
+        framework,
       });
     },
     transformIndexHtml: {

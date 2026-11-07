@@ -1,3 +1,5 @@
-// Shared by the module sheets. Tokens for the canvas are the custom properties in global.scss.
+// Sass tokens. This partial outputs no CSS, so a module sheet that picks one gets
+// `@use "../styles/tokens" as *;` without a copy of global.scss.
 $radius: 8px;
 $gap: 12px;
+$shade: #2a7f8e;

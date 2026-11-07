@@ -1,10 +1,16 @@
 import { describe, expect, test } from "vite-plus/test";
-import { aliasOf, bezierOf, displayName } from "./tokens";
+import { aliasOf, bezierOf, displayName, isStylexVar, resolveToken, tokenRef } from "./tokens";
 
 describe("aliasOf", () => {
   test("names the token a whole-value var() points at", () => {
     expect(aliasOf("var(--blue-500)")).toBe("--blue-500");
     expect(aliasOf(" var( --blue-500 ) ")).toBe("--blue-500");
+  });
+
+  test("names a whole-value Sass or Less variable", () => {
+    expect(aliasOf("$brand")).toBe("$brand");
+    expect(aliasOf(" @line ")).toBe("@line");
+    expect(aliasOf("1px solid $line")).toBeUndefined();
   });
 
   test("is undefined for raw values and var() inside a larger value", () => {
@@ -17,6 +23,29 @@ describe("aliasOf", () => {
 
 test("displayName drops only the leading dashes", () => {
   expect(displayName("--brand-text")).toBe("brand-text");
+  expect(displayName("$brand")).toBe("$brand");
+});
+
+test("tokenRef writes var() for a custom property and the bare name for a variable", () => {
+  expect(tokenRef("--brand")).toBe("var(--brand)");
+  expect(tokenRef("$brand")).toBe("$brand");
+  expect(tokenRef("@brand")).toBe("@brand");
+  expect(tokenRef("colors.brand")).toBe("colors.brand");
+});
+
+test("isStylexVar is a defineVars group.key and nothing CSS writes", () => {
+  expect(isStylexVar("colors.brand")).toBe(true);
+  expect(isStylexVar("colors.line-soft")).toBe(true);
+  for (const name of ["--brand", "$brand", "1.5", "url(a.png)", "t.$gap"])
+    expect(isStylexVar(name)).toBe(false);
+});
+
+test("resolveToken follows a variable that names another", () => {
+  const table = {
+    modes: [{ id: "light", name: "Light" }],
+    tokens: { $brand: { light: "$cyan" }, $cyan: { light: "#95ced7" } },
+  };
+  expect(resolveToken(table, "$brand", "dark")).toBe("#95ced7");
 });
 
 describe("bezierOf", () => {
