@@ -6,12 +6,12 @@ import {
   type Design,
   type FrameError,
   type FrameSource,
+  frameHref,
   type PreviewEvent,
   type Previews,
   type PreviewState,
   Refused,
   type Route,
-  routeHref,
   type Unsubscribe,
 } from "@finite/protocol";
 import { allowedHosts } from "../guard.ts";
@@ -228,12 +228,7 @@ export function createPreviews(options: PreviewsOptions): Previews {
     frameUrl(designId, source: FrameSource) {
       const url = runs.get(designId)?.state.url;
       if (!url) throw new Refused("The design's preview isn't ready yet; wait for it to start.");
-      if (source.kind === "file") {
-        const query = new URLSearchParams({ file: source.file });
-        if (source.exportName) query.set("export", source.exportName);
-        return `${url}/__finite/frame?${query.toString()}`;
-      }
-      return url + routeHref(source.path, source.params ?? {});
+      return frameHref(url, source);
     },
 
     stop: stopRun,

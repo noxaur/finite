@@ -1,3 +1,5 @@
+import type { FrameSource } from "./model.ts";
+
 /**
  * The URL path a route frame loads: `routePath` with its dynamic segments filled from `params`.
  *
@@ -16,6 +18,23 @@ export function routeHref(routePath: string, params: Readonly<Record<string, str
   });
   const path = segments.join("/");
   return path.startsWith("/") ? path : `/${path}`;
+}
+
+/**
+ * The URL a frame's iframe loads from a design's preview URL: the route's path with its params
+ * filled in by `routeHref`, or the plugin's frame page for one file's export. The preview URL may
+ * end in a base path (a Next.js `basePath`), and the frame's path goes under it.
+ */
+export function frameHref(previewUrl: string, source: FrameSource): string {
+  const base = previewUrl.replace(/\/+$/, "");
+  if (source.kind === "file") {
+    const query = new URLSearchParams({ file: source.file });
+    if (source.exportName !== undefined) query.set("export", source.exportName);
+    return `${base}/__finite/frame?${query.toString()}`;
+  }
+  const href = routeHref(source.path, source.params ?? {});
+  // Next redirects `<basePath>/` to `<basePath>`, so the home route is the base itself.
+  return href === "/" && new URL(base).pathname !== "/" ? base : base + href;
 }
 
 function parseSegment(

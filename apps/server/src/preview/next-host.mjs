@@ -11,7 +11,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const CHANGED_DEBOUNCE_MS = 300;
-const SOURCE = /\.(tsx?|jsx?|mts|mjs|json|css)$/;
+const SOURCE = /\.(tsx?|jsx?|mts|mjs|json|css|mdx?)$/;
 
 const { root, host, plugin, adapter, loader, allowedHosts } = JSON.parse(
   process.env.FINITE_PREVIEW ?? "{}",
@@ -34,9 +34,14 @@ try {
   }
   const { finiteNext } = await import(pathToFileURL(plugin).href);
   finite = finiteNext({ root, allowedHosts });
-  finite.prepare();
 
-  // Next calls the adapter's `modifyConfig` on the config it loads.
+  // Next calls the adapter's `modifyConfig` on the config it loads, which hands Finite the
+  // resolved config before Next scans the routes, so the mount is there when it does.
+  let configured = false;
+  globalThis.FINITE_NEXT_CONFIGURE = (settings) => {
+    finite.prepare(settings);
+    configured = true;
+  };
   process.env.NEXT_ADAPTER_PATH = adapter;
   process.env.FINITE_NEXT = JSON.stringify({
     loader,
@@ -69,7 +74,7 @@ try {
   });
   await app.prepare();
   // A project's own `adapterPath` wins over the variable, and then Finite's never ran.
-  if (!globalThis.FINITE_NEXT_ADAPTED) {
+  if (!configured) {
     throw new Error(
       "The project's next.config sets adapterPath, and Finite needs that hook to preview it. Finite doesn't support projects with their own Next.js adapter yet.",
     );
@@ -110,7 +115,7 @@ try {
     const brandPath = brandDir && path.join(finite.root, brandDir);
     const brand = brandPath && (file === brandPath || file.startsWith(brandPath + path.sep));
     if (!SOURCE.test(file) && !brand) return;
-    if (file === path.join(finite.root, finite.mount)) return;
+    if (finite.mount && file === path.join(finite.root, finite.mount)) return;
     clearTimeout(timer);
     timer = setTimeout(() => {
       finite.sync();
@@ -126,7 +131,9 @@ try {
   process.on("SIGTERM", close);
   process.on("SIGINT", close);
 
-  send({ type: "ready", url: `http://${host.includes(":") ? `[${host}]` : host}:${port}` });
+  // Frames load under the basePath, as the project's own pages do.
+  const origin = `http://${host.includes(":") ? `[${host}]` : host}:${port}`;
+  send({ type: "ready", url: origin + finite.basePath });
 } catch (error) {
   finite?.close();
   console.error(error?.stack ?? String(error));

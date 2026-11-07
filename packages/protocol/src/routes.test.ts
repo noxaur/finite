@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { routeHref } from "./routes.ts";
+import { frameHref, routeHref } from "./routes.ts";
 
 describe("routeHref", () => {
   it("fills React Router and TanStack params", () => {
@@ -35,5 +35,43 @@ describe("routeHref", () => {
   it("adds the leading slash", () => {
     expect(routeHref("about", {})).toBe("/about");
     expect(routeHref("/", {})).toBe("/");
+  });
+});
+
+describe("frameHref", () => {
+  it("loads a route with its params filled in", () => {
+    expect(
+      frameHref("http://127.0.0.1:5173/", {
+        kind: "route",
+        path: "/users/:id/$tab",
+        params: { id: "4 2", tab: "posts" },
+      }),
+    ).toBe("http://127.0.0.1:5173/users/4%202/posts");
+    expect(frameHref("http://127.0.0.1:5173", { kind: "route", path: "/" })).toBe(
+      "http://127.0.0.1:5173/",
+    );
+  });
+
+  it("loads one file's export through the plugin's frame page", () => {
+    expect(
+      frameHref("http://127.0.0.1:5173", {
+        kind: "file",
+        file: ".finite/boards/c1/Card.tsx",
+        exportName: "Card",
+      }),
+    ).toBe(
+      "http://127.0.0.1:5173/__finite/frame?file=.finite%2Fboards%2Fc1%2FCard.tsx&export=Card",
+    );
+  });
+
+  it("puts routes and file frames under a Next.js basePath", () => {
+    const base = "http://127.0.0.1:5000/docs";
+    expect(frameHref(base, { kind: "route", path: "/posts/[id]", params: { id: "7" } })).toBe(
+      "http://127.0.0.1:5000/docs/posts/7",
+    );
+    expect(frameHref(base, { kind: "route", path: "/" })).toBe(base);
+    expect(frameHref(`${base}/`, { kind: "file", file: "src/Card.tsx" })).toBe(
+      "http://127.0.0.1:5000/docs/__finite/frame?file=src%2FCard.tsx",
+    );
   });
 });
