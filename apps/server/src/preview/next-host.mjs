@@ -1,9 +1,11 @@
 // One Next.js design's dev server, run as a child of the Finite server (see index.ts), with the
 // same IPC as vite-host.mjs: { type: "ready", url } | { type: "error", message } |
 // { type: "changed" }.
-// It loads the project's own `next` and runs `next dev` (Turbopack) as a custom server. Next's
-// config gets Finite's adapter (stamping loader, distDir under .finite/runtime), and a node:http
-// server in front answers Finite's own URLs and adds the bridge to every page.
+// It loads the project's own `next` and runs `next dev` as a custom server, with Turbopack or, for
+// a project that needs it, webpack (`nextBundler`). Next's config gets Finite's adapter (stamping
+// loader, distDir under .finite/runtime), and a node:http server in front answers Finite's own
+// URLs and adds the bridge to every page.
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import { createRequire, registerHooks } from "node:module";
@@ -35,8 +37,11 @@ try {
       `Next.js isn't installed in ${root}. Run your package manager's install there, then try again.`,
     );
   }
-  const { finiteNext } = await import(pathToFileURL(plugin).href);
+  const { finiteNext, nextBundler } = await import(pathToFileURL(plugin).href);
   finite = finiteNext({ root, allowedHosts });
+
+  const { scripts } = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+  const bundler = nextBundler(scripts, await rawConfig(root));
 
   // Next calls the adapter's `modifyConfig` on the config it loads, which hands Finite the
   // resolved config before Next scans the routes, so the mount is there when it does.
@@ -66,6 +71,7 @@ try {
     root: finite.root,
     distDir: finite.distDir,
     sheets: finite.sheets,
+    configs: finite.configs,
   });
 
   const server = http.createServer();
@@ -84,7 +90,7 @@ try {
   const { default: next } = await import(pathToFileURL(nextPath).href);
   const app = next({
     dev: true,
-    turbopack: true,
+    [bundler]: true,
     dir: root,
     hostname: host,
     port,
@@ -157,4 +163,41 @@ try {
   console.error(error?.stack ?? String(error));
   send({ type: "error", message: String(error?.message ?? error) });
   process.exit(1);
+}
+
+/**
+ * The project's raw config for the dev phase, as `next dev` reads it to pick a bundler: whether
+ * it has `webpack` and `turbopack`. It loads in a process of its own: Next caches a raw load as
+ * the full config, which would then lack its defaults here, and a worker thread would share
+ * Next's native bindings with this one.
+ */
+async function rawConfig(root) {
+  const code = `
+    const { createRequire } = require("node:module");
+    const root = process.argv[1];
+    const projectRequire = createRequire(root + "/package.json");
+    const phase = "phase-development-server";
+    (async () => {
+      const { default: loadConfig } = projectRequire("next/dist/server/config");
+      const { normalizeConfig } = projectRequire("next/dist/server/config-shared");
+      const loaded = await loadConfig(phase, root, { rawConfig: true });
+      // Calls a config function and awaits a promise, as Next does.
+      const raw = await normalizeConfig(phase, loaded?.default ?? loaded);
+      process.send({
+        webpack: Boolean(raw?.webpack),
+        turbopack: Boolean(raw?.turbopack ?? raw?.experimental?.turbo),
+      }, () => process.exit(0));
+    })();
+  `;
+  const child = spawn(process.execPath, ["-e", code, root], {
+    cwd: root,
+    stdio: ["ignore", "ignore", "inherit", "ipc"],
+  });
+  return new Promise((resolve, reject) => {
+    child.once("message", resolve);
+    child.once("error", reject);
+    child.once("exit", (code) =>
+      reject(new Error(`Couldn't read the project's next.config (exit code ${code}).`)),
+    );
+  });
 }

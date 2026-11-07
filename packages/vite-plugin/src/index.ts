@@ -8,11 +8,16 @@ import { allowsOrigin, LOOPBACK_HOSTS } from "./client/bridge.ts";
 import { bridgeScript, injectIntoHtml } from "./html.ts";
 import { scanRoutes } from "./routes.ts";
 import { stamp } from "./stamp.ts";
-import { addFiniteSource } from "./tailwind.ts";
+import {
+  addFiniteConfig,
+  addFiniteSource,
+  hasTailwindDirectives,
+  writeFiniteConfig,
+} from "./tailwind.ts";
 
 export { scanRoutes, routeParams } from "./routes.ts";
 export { stamp, rev } from "./stamp.ts";
-export { finiteNext } from "./next/index.ts";
+export { finiteNext, nextBundler } from "./next/index.ts";
 
 export type FiniteOptions = {
   /** The design root, where `.finite/` lives. */
@@ -78,7 +83,13 @@ export function finite(options: FiniteOptions): Plugin[] {
       if (id.startsWith("\0") || /[?&](raw|url)\b/.test(id)) return null;
       const file = cleanId(id);
       if (!file.endsWith(".css") || !fs.existsSync(file)) return null;
-      const css = addFiniteSource(fs.readFileSync(file, "utf8"), file, root);
+      const code = fs.readFileSync(file, "utf8");
+      const relative = path.relative(root, file);
+      const own = !relative.startsWith("..") && !relative.split(path.sep).includes("node_modules");
+      const css =
+        own && hasTailwindDirectives(code)
+          ? addFiniteConfig(code, file, writeFiniteConfig(root, file, code))
+          : addFiniteSource(code, file, root);
       if (css === null) return null;
       tailwindSheets.add(id);
       return { code: css, map: null };

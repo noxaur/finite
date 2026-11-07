@@ -71,7 +71,7 @@ The page calls the server with relative `/api/...` URLs, so it needs both on one
 - **Desktop dev:** Electron loads the Next.js dev server, so it uses the same rewrite.
 - **Desktop release and deploys:** the server serves the built web app itself, from `FINITE_STATIC_DIR`.
 
-Frames load from each design's own dev server (Vite, or `next dev` with Turbopack), which the server starts on a free port on the same host when someone opens the design. `next build` produces a static export (`output: "export"` in `apps/web/next.config.ts`), so Next features that need a server at request time (route handlers, server actions, middleware, dynamic routes without `generateStaticParams`) aren't available.
+Frames load from each design's own dev server (Vite, or `next dev` with Turbopack, or webpack for a project that needs it), which the server starts on a free port on the same host when someone opens the design. `next build` produces a static export (`output: "export"` in `apps/web/next.config.ts`), so Next features that need a server at request time (route handlers, server actions, middleware, dynamic routes without `generateStaticParams`) aren't available.
 
 StyleX compiles through Babel (`apps/web/babel.config.js`) and the StyleX PostCSS plugin (`apps/web/postcss.config.js`), which replaces the `@stylex;` line in `src/app/globals.css` with the collected rules. This follows StyleX's official Next.js example.
 
