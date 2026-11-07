@@ -13,12 +13,15 @@ const SAMPLE_PARAM = "1";
 
 const FINITE: Actor = { kind: "person", id: "finite", name: "Finite" };
 
-/** `/` → Home, `/users/:userId` with `{ userId: "1" }` → `Users · userId=1`. */
+/**
+ * `/` → Home, `/users/:userId` with `{ userId: "1" }` → `Users · userId=1`. Next's bracket
+ * segments stay as written, so `/docs/[...slug]` → `Docs / [...slug]`.
+ */
 export function routeFrameName(path: string, params: Record<string, string> = {}): string {
   const words = path
     .split("/")
     .filter((s) => s && !/^[:$]|^\{-?\$|^\*$/.test(s))
-    .map((s) => s.replace(/[-_.]+/g, " "));
+    .map((s) => (s.startsWith("[") ? s : s.replace(/[-_.]+/g, " ")));
   const base = words.length ? words.join(" / ") : "Home";
   const name = base.charAt(0).toUpperCase() + base.slice(1);
   const filled = Object.entries(params).map(([k, v]) => `${k}=${v}`);

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Route, Router } from "@finite/protocol";
 import { type AstNode, parseModule, walk } from "./ast.ts";
+import { nextRoutes } from "./next/routes.ts";
 
 /** Loads a module through Vite (`server.ssrLoadModule`), for route configs that are code. */
 export type LoadModule = (file: string) => Promise<Record<string, unknown>>;
@@ -11,8 +12,9 @@ const SKIP_DIRS = new Set(["node_modules", "dist", "build", "coverage", "public"
 const MAX_SCAN_FILES = 5_000;
 
 /**
- * The app's routes: TanStack Router's generated route tree, React Router's framework-mode
- * `routes.ts`, or a scan of the source for `createBrowserRouter([...])` and `<Route path>`.
+ * The app's routes: a scan of Next.js's `app/` or `pages/`, TanStack Router's generated route
+ * tree, React Router's framework-mode `routes.ts`, or a scan of the source for
+ * `createBrowserRouter([...])` and `<Route path>`.
  * `router` (from `.finite/design.json`) narrows which adapters run.
  */
 export async function scanRoutes(
@@ -21,6 +23,7 @@ export async function scanRoutes(
   load: LoadModule,
 ): Promise<Route[]> {
   if (router === "none") return [];
+  if (router === "next-app" || router === "next-pages") return nextRoutes(root);
   if (router !== "react-router") {
     const tanstack = tanstackRoutes(root);
     if (tanstack || router === "tanstack") return tanstack ?? [];
@@ -28,14 +31,19 @@ export async function scanRoutes(
   return (await frameworkRoutes(root, load)) ?? sourceRoutes(root);
 }
 
-/** Dynamic segments: `:id` and `*` (React Router), `$id`, `{-$id}` and `$` (TanStack). */
+/**
+ * Dynamic segments: `:id` and `*` (React Router), `$id`, `{-$id}` and `$` (TanStack), `[id]`,
+ * `[...slug]` and `[[...slug]]` (Next.js).
+ */
 export function routeParams(routePath: string): string[] {
   const params: string[] = [];
   for (const segment of routePath.split("/")) {
     const match =
       /^:([^?]+)\??$/.exec(segment) ??
       /^\{-?\$([^}]+)\}$/.exec(segment) ??
-      /^\$(.+)$/.exec(segment);
+      /^\$(.+)$/.exec(segment) ??
+      /^\[\[\.\.\.([^\]]+)\]\]$/.exec(segment) ??
+      /^\[(?:\.\.\.)?([^\]]+)\]$/.exec(segment);
     if (match) params.push(match[1]!);
     else if (segment === "*") params.push("*");
     else if (segment === "$") params.push("_splat");

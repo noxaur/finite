@@ -1,17 +1,18 @@
 import fs from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { createRequire, stripTypeScriptTypes } from "node:module";
+import { createRequire } from "node:module";
 import path from "node:path";
 import type { Plugin, ViteDevServer } from "vite";
 import { frameEntry, frameFile, frameHtml, readFrameConfig } from "./frame.ts";
 import { allowsOrigin, LOOPBACK_HOSTS } from "./client/bridge.ts";
-import { injectIntoHtml } from "./html.ts";
+import { bridgeScript, injectIntoHtml } from "./html.ts";
 import { scanRoutes } from "./routes.ts";
 import { stamp } from "./stamp.ts";
 import { addFiniteSource } from "./tailwind.ts";
 
 export { scanRoutes, routeParams } from "./routes.ts";
 export { stamp, rev } from "./stamp.ts";
+export { finiteNext } from "./next/index.ts";
 
 export type FiniteOptions = {
   /** The design root, where `.finite/` lives. */
@@ -31,9 +32,6 @@ const BRIDGE_ID = "\0finite:bridge";
 const FRAME_ID = "\0finite:frame";
 /** React Router framework mode's React Refresh preamble, which its route modules check for. */
 const REACT_ROUTER_PREAMBLE = "virtual:react-router/inject-hmr-runtime";
-const BRIDGE_SOURCE = new URL("./client/bridge.ts", import.meta.url);
-/** The bridge as JavaScript, beside the bundled plugin in the desktop app (`vite-plugin.mjs`). */
-const BRIDGE_BUILT = new URL("./vite-plugin-bridge.mjs", import.meta.url);
 
 /** Stamps `data-finite-loc`/`data-finite-rev`, injects the bridge, serves frames and routes. */
 export function finite(options: FiniteOptions): Plugin[] {
@@ -133,14 +131,7 @@ export function finite(options: FiniteOptions): Plugin[] {
       return null;
     },
     load(id) {
-      if (id === BRIDGE_ID) {
-        const hosts = `const FINITE_ALLOWED_HOSTS = ${JSON.stringify(allowedHosts)};\n`;
-        if (fs.existsSync(BRIDGE_BUILT)) {
-          const built = fs.readFileSync(BRIDGE_BUILT, "utf8");
-          return hosts + built.replace(/^\/\/# sourceMappingURL=.*$/m, "");
-        }
-        return hosts + stripTypeScriptTypes(fs.readFileSync(BRIDGE_SOURCE, "utf8"));
-      }
+      if (id === BRIDGE_ID) return bridgeScript(allowedHosts);
       if (!id.startsWith(FRAME_ID)) return null;
       const query = new URLSearchParams(id.slice(FRAME_ID.length));
       const checked = frameFile(root, query.get("file"));

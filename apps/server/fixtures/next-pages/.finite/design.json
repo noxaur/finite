@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "next-pages",
+  "router": "next-pages",
+  "styling": "css-modules",
+  "css": ["src/styles/globals.css"],
+  "brandDir": "src/assets/brand"
+}
