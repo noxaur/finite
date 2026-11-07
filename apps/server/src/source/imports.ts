@@ -127,45 +127,61 @@ const DIALECT_COMMENTS = new RegExp(String.raw`${KEEP}|/\*[\s\S]*?\*/|//[^\n]*`,
 const NAMES = /"([^"]*)"|'([^']*)'|url\(\s*([^"')\s][^)]*?)\s*\)/g;
 
 /** The stylesheet's `@import`, `@use`, `@forward` and `url()` specifiers, with comments ignored. */
-export function sheetSpecifiers(file: string, code: string): string[] {
+export function sheetSpecifiers(
+  file: string,
+  code: string,
+): { spec: string; rule: "import" | "use" | "forward" | "url" }[] {
   const ext = path.posix.extname(file);
   const dialect = ext === ".scss" || ext === ".sass" || ext === ".less";
   const plain = code.replace(
     dialect ? DIALECT_COMMENTS : CSS_COMMENTS,
     (_, keep?: string) => keep ?? "",
   );
-  const specs: string[] = [];
+  const specs: { spec: string; rule: "import" | "use" | "forward" | "url" }[] = [];
   if (dialect) {
     // Sass and Less look for a bare `@use "tokens"` next to the sheet, so it reads as `./tokens`.
     const end = ext === ".sass" ? String.raw`\n` : ";{}";
     for (const m of plain.matchAll(new RegExp(`@(import|use|forward)\\s+([^${end}]*)`, "g"))) {
       const names = [...m[2]!.matchAll(NAMES)].map((n) => n[1] ?? n[2] ?? n[3]!);
-      for (const spec of m[1] === "import" ? names : names.slice(0, 1)) {
-        if (/^(\/(?!\/)|\.{1,2}\/)/.test(spec)) specs.push(spec);
-        else if (!/^([a-z][\w+.-]*:|\/\/|~)|[#@]\{/i.test(spec)) specs.push(`./${spec}`);
+      const rule = m[1] as "import" | "use" | "forward";
+      for (const spec of rule === "import" ? names : names.slice(0, 1)) {
+        if (/^(\/(?!\/)|\.{1,2}\/)/.test(spec)) specs.push({ spec, rule });
+        else if (!/^([a-z][\w+.-]*:|\/\/|~)|[#@]\{/i.test(spec))
+          specs.push({ spec: `./${spec}`, rule });
       }
     }
   } else {
-    for (const m of plain.matchAll(/@import\s+(?:url\(\s*)?["']([^"']+)["']/g)) specs.push(m[1]!);
+    for (const m of plain.matchAll(/@import\s+(?:url\(\s*)?["']([^"']+)["']/g))
+      specs.push({ spec: m[1]!, rule: "import" });
   }
-  for (const m of plain.matchAll(/url\(\s*["']?([^"')]+)["']?\s*\)/g)) specs.push(m[1]!);
+  for (const m of plain.matchAll(/url\(\s*["']?([^"')]+)["']?\s*\)/g))
+    specs.push({ spec: m[1]!, rule: "url" });
   return specs;
 }
 
 /**
  * The files an import from `fromFile` could mean. In Sass `@use "a/b"` is `a/b.scss`, the partial
- * `a/_b.scss`, or `a/b/index` (`_index`); Less adds `.less`. No load paths, only the sheet's folder.
+ * `a/_b.scss`, or `a/b/index` (`_index`); a Sass `@import` (`fromImport`) tries the import-only
+ * `a/b.import.scss` and `a/_b.import.scss` first. Less adds `.less`. No load paths, only the
+ * sheet's folder.
  */
-export function importCandidates(fromFile: string, target: string): string[] {
+export function importCandidates(fromFile: string, target: string, fromImport = false): string[] {
   const ext = path.posix.extname(fromFile);
   const sass = ext === ".scss" || ext === ".sass";
   if (!sass && ext !== ".less") return candidates(target);
   const partial = (file: string) =>
     path.posix.join(path.posix.dirname(file), `_${path.posix.basename(file)}`);
   if (!sass) return path.posix.extname(target) === ".less" ? [target] : [target, `${target}.less`];
-  if (STYLE_EXTENSIONS.includes(path.posix.extname(target))) return [target, partial(target)];
+  const targetExt = path.posix.extname(target);
+  if (STYLE_EXTENSIONS.includes(targetExt)) {
+    const only = `${target.slice(0, -targetExt.length)}.import${targetExt}`;
+    return [...(fromImport ? [only, partial(only)] : []), target, partial(target)];
+  }
   const exts = [".scss", ".sass", ".css"];
   return [
+    ...(fromImport
+      ? exts.flatMap((e) => [`${target}.import${e}`, partial(`${target}.import${e}`)])
+      : []),
     target,
     ...exts.map((e) => `${target}${e}`),
     ...exts.map((e) => partial(`${target}${e}`)),
