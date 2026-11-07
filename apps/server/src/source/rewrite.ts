@@ -16,11 +16,12 @@ import {
   type Element,
   type Parsed,
 } from "./jsx.ts";
+import { stylexEdit } from "./stylex.ts";
 import { editClasses, kebab, stripClasses, type Theme } from "./tailwind.ts";
 
 export type RewriteContext = {
   theme: Theme;
-  /** Other files an edit may change (the `*.module.css` files this file imports), by root-relative path. */
+  /** Other files an edit may change (the `*.module.{css,scss,sass,less}` files this file imports), by root-relative path. */
   files: Record<string, string>;
 };
 
@@ -235,6 +236,11 @@ function asChild(element: Element, what: string) {
 const CLASS_FNS = new Set(["cn", "clsx", "twMerge", "classnames", "classNames", "cx"]);
 
 function style(s: StepCtx, el: t.JSXElement, styles: Record<string, string | null>): void {
+  if (s.convention === "stylex") {
+    const edit = stylexEdit(s.code, s.parsed.ast, el, styles);
+    if (!edit) return inline(s, el, styles);
+    return void s.ms.overwrite(edit.start, edit.end, edit.text);
+  }
   const cls = attribute(el, "className");
   if (s.convention === "inline" || (s.convention === "css-modules" && !cls))
     return inline(s, el, styles);
@@ -307,7 +313,7 @@ function cssModule(s: StepCtx, cls: t.JSXAttribute, styles: Record<string, strin
   if (name === undefined || sheet === undefined) throw new Refused(ASK, "unsupported-style");
   const css = s.files[sheet];
   if (css === undefined) throw new Refused(`${sheet} doesn't exist`, "not-found");
-  s.files[sheet] = editRule(css, name, styles);
+  s.files[sheet] = editRule(sheet, css, name, styles);
 }
 
 function inline(s: StepCtx, el: t.JSXElement, styles: Record<string, string | null>): void {

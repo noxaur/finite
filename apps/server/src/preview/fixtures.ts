@@ -11,6 +11,7 @@ const FIXTURES = fileURLToPath(new URL("../../fixtures/", import.meta.url));
  * Copies `apps/server/fixtures/<name>` to a temp folder and installs its dependencies there, so
  * tests run it like a person's own project, outside this workspace and its lockfile. The
  * fixtures pin exact versions; `--prefer-offline` takes them from the pnpm store when it can.
+ * `sass` has an optional file watcher with a build script, which pnpm 12 otherwise fails on.
  */
 export async function prepareFixture(name: string, options: { install?: boolean } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `finite-${name}-`)));
@@ -21,7 +22,14 @@ export async function prepareFixture(name: string, options: { install?: boolean 
   if (options.install !== false) {
     await promisify(execFile)(
       "pnpm",
-      ["install", "--prefer-offline", "--ignore-workspace", "--no-lockfile", "--reporter=silent"],
+      [
+        "install",
+        "--prefer-offline",
+        "--ignore-workspace",
+        "--no-lockfile",
+        "--reporter=silent",
+        "--config.strict-dep-builds=false",
+      ],
       { cwd: root, timeout: 180_000 },
     );
   }

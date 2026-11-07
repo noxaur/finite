@@ -1,0 +1,21 @@
+@use "tokens";
+
+// Light tokens. Finite reads and writes these.
+:root {
+  --ink: #1a2128;
+  --paper: #f7f9fa;
+  --brand: #95ced7;
+}
+
+.dark {
+  --ink: #f7f9fa;
+  --paper: #11161a;
+}
+
+body {
+  margin: 0;
+  padding: tokens.$gap;
+  font-family: system-ui, sans-serif;
+  color: var(--ink);
+  background: var(--paper);
+}

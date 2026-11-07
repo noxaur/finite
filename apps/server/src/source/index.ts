@@ -23,12 +23,13 @@ import {
 } from "./files.ts";
 import { createHistory, diffPatch, stepPatches, type Patch } from "./history.ts";
 import {
-  candidates,
   cssModules,
+  importCandidates,
   isRelative,
   moveImports,
   resolveSpec,
   retarget,
+  sheetSpecifiers,
   specifiers,
 } from "./imports.ts";
 import { parseModule } from "./jsx.ts";
@@ -152,9 +153,7 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
         guardPrototype(design.root, canvas, modules);
       }
       const theme =
-        design.styling === "tailwind"
-          ? lightTheme(readTokens((await sheets(design)).map((s) => s.css)))
-          : {};
+        design.styling === "tailwind" ? lightTheme(readTokens(await sheets(design))) : {};
 
       const remap: Remap = {};
       const patches = await transact(design.root, [...files, ...modules], (contents) => {
@@ -202,16 +201,18 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
     },
 
     async tokens(design) {
-      return readTokens((await sheets(design)).map((s) => s.css));
+      return readTokens(await sheets(design));
     },
 
     async setToken(design, { name, mode, value }) {
       const prop = tokenName(name);
       const all = await sheets(design);
       const target =
-        all.find((s) => hasToken(s.css, prop, mode)) ??
-        all.find((s) => /@theme\b/.test(s.css)) ??
-        all.find((s) => /@import\s+["']tailwindcss/.test(s.css)) ??
+        all.find((s) => hasToken(s.file, s.css, prop, mode)) ??
+        (design.styling === "tailwind"
+          ? (all.find((s) => /@theme\b/.test(s.css)) ??
+            all.find((s) => /@import\s+["']tailwindcss/.test(s.css)))
+          : all.find((s) => /:root\b/.test(s.css))) ??
         all[0];
       if (!target)
         throw new Refused(
@@ -220,10 +221,20 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
         );
       await transact(design.root, [target.file], (contents) => {
         return new Map([
-          [target.file, writeToken(contents.get(target.file) ?? "", prop, mode, value)],
+          [
+            target.file,
+            writeToken(
+              target.file,
+              contents.get(target.file) ?? "",
+              prop,
+              mode,
+              value,
+              design.styling,
+            ),
+          ],
         ]);
       });
-      return readTokens((await sheets(design)).map((s) => s.css));
+      return readTokens(await sheets(design));
     },
 
     components: (design) => listComponents(design.root),
@@ -253,7 +264,7 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
         for (const spec of localImports(file, data.toString("utf8"))) {
           const target = spec.startsWith("/") ? spec.slice(1) : resolveSpec(file, spec);
           if (!isInside(root, target)) continue;
-          const dep = await existing(root, candidates(target));
+          const dep = await existing(root, importCandidates(file, target));
           if (dep) queue.push(dep);
         }
       }
@@ -285,7 +296,8 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
 
 /**
  * The local files a module or stylesheet pulls in, as written: relative (or root-absolute) import
- * specifiers of a JS/TS module, `@import` and `url()` of CSS. Query strings (`?url`) are dropped.
+ * specifiers of a JS/TS module, `@import`, `@use`, `@forward` and `url()` of a stylesheet. Query
+ * strings (`?url`) are dropped.
  */
 function localImports(file: string, code: string): string[] {
   let specs: string[] = [];
@@ -297,10 +309,8 @@ function localImports(file: string, code: string): string[] {
       return [];
     }
     specs = specifiers(ast).map((lit) => lit.value);
-  } else if (file.endsWith(".css")) {
-    const plain = code.replace(/\/\*[\s\S]*?\*\//g, "");
-    for (const m of plain.matchAll(/@import\s+(?:url\(\s*)?["']([^"']+)["']/g)) specs.push(m[1]!);
-    for (const m of plain.matchAll(/url\(\s*["']?([^"')]+)["']?\s*\)/g)) specs.push(m[1]!);
+  } else if (/\.(css|scss|sass|less)$/.test(file)) {
+    specs = sheetSpecifiers(file, code);
   }
   return specs
     .map((spec) => spec.replace(/[?#].*$/, ""))

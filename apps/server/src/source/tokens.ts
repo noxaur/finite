@@ -1,4 +1,4 @@
-import { Refused, type Token, type TokenMode } from "@finite/protocol";
+import { Refused, type Styling, type Token, type TokenMode } from "@finite/protocol";
 import postcss, {
   type AtRule,
   type Container,
@@ -7,18 +7,19 @@ import postcss, {
   type Root,
   type Rule,
 } from "postcss";
-import { BLOCK, setDecls } from "./css.ts";
+import { BLOCK, parseCss, printCss, setDecls } from "./css.ts";
 
 /**
  * Tokens are CSS custom properties. Light values come from `@theme` blocks (and `:root`/`html`,
  * where shadcn-style themes keep them); dark values from `.dark` rules,
  * `@media (prefers-color-scheme: dark)`, and `@variant dark` blocks, the three ways a Tailwind v4
- * stylesheet writes dark mode. New dark tokens go in a `.dark` rule.
+ * stylesheet writes dark mode. New dark tokens go in a `.dark` rule. The sheets may be `.css`,
+ * `.scss` or `.less`; Sass `$vars` and Less `@vars` aren't tokens.
  */
-export function readTokens(sheets: string[]): Token[] {
+export function readTokens(sheets: { file: string; css: string }[]): Token[] {
   const tokens = new Map<string, Token>();
-  for (const css of sheets) {
-    postcss.parse(css).walkDecls((decl) => {
+  for (const { file, css } of sheets) {
+    parseCss(file, css).walkDecls((decl) => {
       const mode = modeOf(decl);
       if (!mode || !decl.prop.startsWith("--")) return;
       const token = tokens.get(decl.prop) ?? { name: decl.prop };
@@ -42,26 +43,33 @@ export function lightTheme(tokens: Token[]): Record<string, string> {
   return Object.fromEntries([...raw].map(([k, v]) => [k, resolve(v)]));
 }
 
-export function hasToken(css: string, name: string, mode: TokenMode): boolean {
-  return find(postcss.parse(css), name, mode) !== undefined;
+export function hasToken(file: string, css: string, name: string, mode: TokenMode): boolean {
+  return find(parseCss(file, css), name, mode) !== undefined;
 }
 
-/** Sets (or with `null`, removes) one token in one mode. */
+/**
+ * Sets (or with `null`, removes) one token in one mode. A new light token goes in `@theme` for a
+ * Tailwind design, else in the first `:root` rule.
+ */
 export function writeToken(
+  file: string,
   css: string,
   name: string,
   mode: TokenMode,
   value: string | null,
+  styling: Styling,
 ): string {
-  const root = postcss.parse(css);
+  const root = parseCss(file, css);
   const existing = find(root, name, mode);
   if (existing) {
     setDecls(existing.parent as Container, { [name]: value });
-    return root.toString();
+    return printCss(file, root);
   }
   if (value === null) return css;
-  setDecls(mode === "light" ? themeBlock(root) : darkBlock(root), { [name]: value });
-  return root.toString();
+  const block =
+    mode === "dark" ? darkBlock(root) : styling === "tailwind" ? themeBlock(root) : rootBlock(root);
+  setDecls(block, { [name]: value });
+  return printCss(file, root);
 }
 
 export function tokenName(name: string): string {
@@ -121,6 +129,24 @@ function themeBlock(root: Root): Container {
   if (last) last.after(block);
   else root.prepend(block);
   return block;
+}
+
+const PREAMBLE = new Set(["charset", "use", "forward", "import"]);
+
+/** The first top-level `:root` rule, added after the `@use`, `@forward` and `@import`s when there's none. */
+function rootBlock(root: Root): Container {
+  const existing = root.nodes.find(
+    (n): n is Rule => n.type === "rule" && n.selector.trim() === ":root",
+  );
+  if (existing) return existing;
+  const rule = postcss.rule({ selector: ":root", raws: { ...BLOCK, before: "\n\n" } });
+  const last = root.nodes.findLast((n) => n.type === "atrule" && PREAMBLE.has(n.name));
+  if (last) last.after(rule);
+  else root.prepend(rule);
+  rule.raws.before = last ? "\n\n" : "";
+  const next = rule.next();
+  if (next && !/\n\s*\n/.test(next.raws.before ?? "")) next.raws.before = "\n\n";
+  return rule;
 }
 
 /** The first dark-mode block, or a new `.dark` rule at the end. */

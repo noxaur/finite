@@ -167,6 +167,37 @@ describe("connect", () => {
     expect((await store.open((await store.connect(inline)).id)).design.styling).toBe("inline");
   });
 
+  it("finds CSS modules and global sheets written in Sass or Less", async () => {
+    const store = newStore(await tempDir());
+    const sass = await project(
+      { vite: "^8", "react-router": "^8", sass: "^1" },
+      {
+        "src/main.tsx":
+          'import "./global.scss";\nimport "./theme.less";\nimport "./card.module.scss";',
+        "src/A.tsx":
+          'import s from "./a.module.scss";\nexport const A = () => <div className={s.a} />;',
+        "src/B.tsx":
+          'import s from "./b.module.sass";\nexport const B = () => <div className={s.b} />;',
+        "src/global.scss": ":root { --ink: #111; }",
+        "src/theme.less": ":root { --paper: #fff; }",
+      },
+    );
+    expect((await store.open((await store.connect(sass)).id)).design).toMatchObject({
+      styling: "css-modules",
+      css: ["src/global.scss", "src/theme.less"],
+    });
+    const sassOnly = await project(
+      { vite: "^8", "react-router": "^8" },
+      {
+        "src/A.tsx":
+          'import s from "./a.module.sass";\nexport const A = () => <div className={s.a} />;',
+      },
+    );
+    expect((await store.open((await store.connect(sassOnly)).id)).design.styling).toBe(
+      "css-modules",
+    );
+  });
+
   it("renames a design and bumps updatedAt on any change", async () => {
     const { dataDir, store, entry, open } = await connected();
     const renamed = await store.rename(entry.id, "Storefront");

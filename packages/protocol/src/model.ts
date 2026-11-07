@@ -38,7 +38,7 @@ export const DesignOrigin = z.enum(["connected", "blank", "import"]);
 export type DesignOrigin = z.infer<typeof DesignOrigin>;
 export const Router = z.enum(["react-router", "tanstack", "none"]);
 export type Router = z.infer<typeof Router>;
-export const Styling = z.enum(["tailwind", "css-modules", "inline"]);
+export const Styling = z.enum(["tailwind", "css-modules", "inline", "stylex"]);
 export type Styling = z.infer<typeof Styling>;
 
 /** One row of `$FINITE_DATA_DIR/designs.json`. A connected root is a reference and is never deleted. */

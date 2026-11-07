@@ -1,0 +1,20 @@
+@ink: #1a2128; // text on the brand colour
+@pad: 6px;
+
+.pill(@r: 999px) {
+  border-radius: @r;
+}
+
+// A small label.
+.badge {
+  .pill();
+  display: inline-block;
+  padding: @pad (@pad * 2);
+  font-size: 12px;
+  color: @ink;
+  background: #95ced7;
+
+  &:hover {
+    background: #b7e0e6;
+  }
+}
