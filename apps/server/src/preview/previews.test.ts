@@ -688,6 +688,12 @@ describe.skipIf(!chromePath)("bridge in Chrome", () => {
       "app/_components/Counter.tsx:8:4",
     );
 
+    // Edit only after React hydrated the page, or the new HTML fails hydration.
+    await expect
+      .poll(() =>
+        frame.$eval("h1", (h) => Object.keys(h).some((key) => key.startsWith("__reactFiber$"))),
+      )
+      .toBe(true);
     const home = path.join(roots["next-app"], "app/page.tsx");
     fs.writeFileSync(home, fs.readFileSync(home, "utf8").replace(">Home<", ">Welcome<"));
     await expect
