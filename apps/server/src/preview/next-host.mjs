@@ -103,7 +103,11 @@ try {
   fs.watch(finite.root, { recursive: true }, (_event, name) => {
     if (!name) return;
     const file = path.join(finite.root, name);
-    if (!SOURCE.test(file) || ignored.some((dir) => file.includes(dir))) return;
+    if (ignored.some((dir) => file.includes(dir))) return;
+    // Any file in the brand folder, such as an image or a font, changes the brand board.
+    const brandDir = finite.brandDir();
+    const brand = brandDir && file.startsWith(path.join(finite.root, brandDir) + path.sep);
+    if (!SOURCE.test(file) && !brand) return;
     if (file === path.join(finite.root, finite.mount)) return;
     clearTimeout(timer);
     timer = setTimeout(() => {

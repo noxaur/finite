@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
@@ -26,6 +27,8 @@ const PROBE = "x-finite-probe";
 const REGISTRY_TIMEOUT_MS = 10_000;
 const MOUNT_MARKER =
   "// Written by Finite while it previews this project, and removed when it stops.";
+/** The sha1 of the mount Finite last wrote, so a mount someone edited is never overwritten. */
+const MOUNT_RECORD = `${RUNTIME}/mount.sha1`;
 
 /**
  * Everything Finite adds to a Next.js dev server, for `next-host.mjs`: the files that make file
@@ -43,11 +46,13 @@ export function finiteNext(options: FiniteNextOptions) {
   const base = isDir("app") || isDir("pages") ? "" : "src/";
   /**
    * The route that renders file frames. An App Router folder starting with `_` is private, so
-   * the mount spells `__finite` as `%5F%5Ffinite`, which Next serves at `/__finite/frame`.
+   * the mount spells `__finite` as `%5F%5Ffinite`, which Next serves at `/__finite/frame`. It goes
+   * next to the root layout, which may sit in a route group (`app/(site)/layout.tsx`); groups add
+   * no URL segment.
    */
   const mount = pages
     ? `${base}pages/__finite/frame.tsx`
-    : `${base}app/%5F%5Ffinite/frame/page.tsx`;
+    : `${rootLayoutDir(root, `${base}app`)}/%5F%5Ffinite/frame/page.tsx`;
   const fromMount = (file: string) => {
     const relative = path.posix.relative(path.posix.dirname(mount), file);
     return relative.startsWith(".") ? relative : `./${relative}`;
@@ -189,9 +194,21 @@ export function finiteNext(options: FiniteNextOptions) {
           `${mount} is the project's own file, but Finite renders file frames there. Move or rename it, then open the design again.`,
         );
       }
+      const recorded = fs.existsSync(at(MOUNT_RECORD))
+        ? fs.readFileSync(at(MOUNT_RECORD), "utf8")
+        : undefined;
+      if (existing !== undefined && existing !== mountCode && sha1(existing) !== recorded) {
+        throw new Error(
+          `${mount} changed since Finite wrote it, and Finite renders file frames there. Keep your changes somewhere else and delete it, then open the design again.`,
+        );
+      }
       excludeFromGit(root, mount);
+      writeIfChanged(at(MOUNT_RECORD), sha1(mountCode));
       writeIfChanged(at(mount), mountCode);
     },
+
+    /** The brand folder, relative to the root, whose files the brand board lists. */
+    brandDir: () => readBrandDir(root),
 
     /** Brings the registry and brand maps up to date after files changed. */
     sync() {
@@ -374,6 +391,28 @@ export default function FiniteFrame() {
   );
 }
 `;
+}
+
+/**
+ * The App Router folder that holds the root layout: `app/` itself, or the first route group
+ * under it, depth first, that has a `layout` file. `app/` when there is none.
+ */
+function rootLayoutDir(root: string, app: string): string {
+  const find = (dir: string): string | undefined => {
+    const entries = fs.readdirSync(path.join(root, dir), { withFileTypes: true });
+    if (entries.some((e) => e.isFile() && /^layout\.(tsx|ts|jsx|js)$/.test(e.name))) return dir;
+    const groups = entries.filter((e) => e.isDirectory() && /^\([^.].*\)$/.test(e.name));
+    for (const group of groups.map((e) => e.name).sort()) {
+      const found = find(`${dir}/${group}`);
+      if (found) return found;
+    }
+    return undefined;
+  };
+  return (fs.existsSync(path.join(root, app)) && find(app)) || app;
+}
+
+function sha1(text: string): string {
+  return createHash("sha1").update(text).digest("hex");
 }
 
 function readBrandDir(root: string): string | undefined {

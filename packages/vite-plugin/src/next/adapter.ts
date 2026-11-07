@@ -19,6 +19,7 @@ type Config = {
   distDir?: string;
   compress?: boolean;
   devIndicators?: unknown;
+  output?: string;
   turbopack?: { rules?: Record<string, unknown> };
 };
 
@@ -32,7 +33,7 @@ declare global {
   var FINITE_NEXT_ADAPTED: boolean | undefined;
 }
 
-export function modifyConfig(config: Config): Config {
+export function modifyConfig(config: Config, context?: { phase?: string }): Config {
   const options = JSON.parse(process.env.FINITE_NEXT ?? "null") as AdapterOptions | null;
   if (!options) return config;
   globalThis.FINITE_NEXT_ADAPTED = true;
@@ -43,8 +44,12 @@ export function modifyConfig(config: Config): Config {
   const rules = { ...config.turbopack?.rules };
   // All matching rules run, in order: ours first, so it sees the file as it is on disk.
   for (const glob of GLOBS) rules[glob] = [ours, ...asRules(rules[glob])];
+  // `output: "export"` forbids the Pages Router mount's getServerSideProps, and the preview is a
+  // dev server, which never exports.
+  const { output, ...rest } = config;
+  const exported = output === "export" && context?.phase === "phase-development-server";
   return {
-    ...config,
+    ...(exported ? rest : config),
     distDir: options.distDir,
     // The host adds the bridge to HTML as it streams, which it can't do to a compressed body.
     compress: false,

@@ -264,6 +264,19 @@ describe("Next.js previews", () => {
     expect(outside.status).toBe(404);
   }, 30_000);
 
+  test("lists a brand asset added on its own on the brand board", async () => {
+    // Only an image, once the preview's own writes have settled, so no source change syncs too.
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const root = roots["next-app"];
+    fs.mkdirSync(path.join(root, "assets/brand"), { recursive: true });
+    fs.writeFileSync(path.join(root, "assets/brand/mark.png"), Buffer.from([0x89, 0x50]));
+    await expect
+      .poll(() => fs.readFileSync(path.join(root, ".finite/runtime/brand.ts"), "utf8"), {
+        timeout: 10_000,
+      })
+      .toContain("mark.png");
+  }, 30_000);
+
   test("refuses a frame file outside the design, and never imports one it wasn't given", async () => {
     const page = await get(`${urls["next-pages"]}/__finite/frame?file=../../etc/passwd`);
     expect(page.status).toBe(400);
@@ -353,6 +366,63 @@ describe("preview lifecycle", () => {
     const copy = { ...design("next-pages"), id: "next-taken", root: fixture.root };
     await expect(previews.ensure(copy)).rejects.toThrow(/project's own file/);
     expect(fs.readFileSync(mine, "utf8")).toBe("export default () => null;\n");
+  }, 60_000);
+
+  test("keeps a Next.js frame mount someone edited, and won't overwrite it on the next start", async () => {
+    const fixture = await prepareFixture("next-pages");
+    cleanups.push(fixture.remove);
+    const copy = { ...design("next-pages"), id: "next-edited", root: fixture.root };
+    await previews.ensure(copy);
+    const mount = path.join(fixture.root, "src/pages/__finite/frame.tsx");
+    const edited = `${fs.readFileSync(mount, "utf8")}// mine\n`;
+    fs.writeFileSync(mount, edited);
+    await previews.stop(copy.id);
+    expect(fs.readFileSync(mount, "utf8")).toBe(edited);
+    await expect(previews.ensure(copy)).rejects.toThrow(/changed since Finite wrote it/);
+    expect(fs.readFileSync(mount, "utf8")).toBe(edited);
+  }, 60_000);
+
+  test("mounts Next.js file frames inside the route group that holds the root layout", async () => {
+    const fixture = await prepareFixture("next-app");
+    cleanups.push(fixture.remove);
+    const at = (file: string) => path.join(fixture.root, file);
+    // Only app/(site)/layout.tsx: every page sits in a group with a root layout.
+    fs.mkdirSync(at("app/(site)"));
+    for (const name of ["page.tsx", "about", "(marketing)", "blog", "docs", "shop"]) {
+      fs.renameSync(at(`app/${name}`), at(`app/(site)/${name}`));
+    }
+    fs.writeFileSync(
+      at("app/(site)/layout.tsx"),
+      fs.readFileSync(at("app/layout.tsx"), "utf8").replace("./globals.css", "../globals.css"),
+    );
+    fs.rmSync(at("app/layout.tsx"));
+    const copy = { ...design("next-app"), id: "next-groups", root: fixture.root };
+    const { url } = await previews.ensure(copy);
+    expect(fs.existsSync(at("app/(site)/%5F%5Ffinite/frame/page.tsx"))).toBe(true);
+    expect(fs.existsSync(at("app/%5F%5Ffinite"))).toBe(false);
+    expect((await get(`${url}/about`)).status).toBe(200);
+    const frame = await get(
+      `${url}/__finite/frame?file=app%2F_components%2FCounter.tsx&export=Counter`,
+    );
+    expect(frame.status).toBe(200);
+    expect(frame.text).toContain(`data-finite-loc="app/_components/Counter.tsx`);
+    expect((await previews.routes(copy.id)).map((r) => r.path)).not.toContain("/__finite/frame");
+    await previews.stop(copy.id);
+    expect(fs.existsSync(at("app/(site)/%5F%5Ffinite"))).toBe(false);
+    expect(fs.existsSync(at("app/(site)/layout.tsx"))).toBe(true);
+  }, 60_000);
+
+  test("renders Next.js file frames for a project with output: export", async () => {
+    const fixture = await prepareFixture("next-pages");
+    cleanups.push(fixture.remove);
+    const config = path.join(fixture.root, "next.config.ts");
+    fs.writeFileSync(config, fs.readFileSync(config, "utf8").replace("{}", `{ output: "export" }`));
+    const copy = { ...design("next-pages"), id: "next-export", root: fixture.root };
+    const { url } = await previews.ensure(copy);
+    const frame = await get(`${url}/__finite/frame?file=src%2Fpages%2Fabout.tsx`);
+    expect(frame.status).toBe(200);
+    expect((await get(`${url}/about`)).status).toBe(200);
+    await previews.stop(copy.id);
   }, 60_000);
 
   test("stops after the grace period once idle, and restarts on ensure", async () => {
