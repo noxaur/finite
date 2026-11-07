@@ -16,8 +16,9 @@ import {
   type Element,
   type Parsed,
 } from "./jsx.ts";
-import { stylexEdit } from "./stylex.ts";
+import { stylexEdit, varRefs } from "./stylex.ts";
 import { editClasses, kebab, stripClasses, type TailwindVersion, type Theme } from "./tailwind.ts";
+import { useVariables, variableRefs, type VariableHome } from "./tokens.ts";
 
 export type RewriteContext = {
   theme: Theme;
@@ -25,6 +26,10 @@ export type RewriteContext = {
   tailwind?: TailwindVersion;
   /** Other files an edit may change (the `*.module.{css,scss,sass,less}` files this file imports), by root-relative path. */
   files: Record<string, string>;
+  /** The file that defines each Sass `$var` and Less `@var` token (`variableSheets`). */
+  variables?: Record<string, VariableHome>;
+  /** The `*.stylex.ts` file that defines each StyleX `defineVars` token (`group.key`). */
+  stylexVars?: Record<string, string>;
 };
 
 export type Rewritten = {
@@ -238,15 +243,41 @@ function asChild(element: Element, what: string) {
 const CLASS_FNS = new Set(["cn", "clsx", "twMerge", "classnames", "classNames", "cx"]);
 
 function style(s: StepCtx, el: t.JSXElement, styles: Record<string, string | null>): void {
-  if (s.convention === "stylex") {
-    const edit = stylexEdit(s.code, s.parsed.ast, el, styles);
-    if (!edit) return inline(s, el, styles);
-    return void s.ms.overwrite(edit.start, edit.end, edit.text);
-  }
   const cls = attribute(el, "className");
-  if (s.convention === "inline" || (s.convention === "css-modules" && !cls))
+  const token = varRefs(styles)[0];
+  if (token && s.convention !== "stylex") {
+    const how = { tailwind: "Tailwind classes", "css-modules": "a CSS module" }[
+      s.convention as string
+    ];
+    throw new Refused(
+      `${token} is a StyleX token, which only a stylex.create entry can use, and this element is styled with ${how ?? "inline styles"}. Pick a CSS custom property (--name) token instead, or ask the agent.`,
+      "unsupported-style",
+    );
+  }
+  if (s.convention === "css-modules" && cls) return cssModule(s, cls, styles);
+  const ref = variableRefs(styles)[0];
+  if (ref) {
+    const how = { stylex: "StyleX", tailwind: "Tailwind classes" }[s.convention as string];
+    throw new Refused(
+      `${ref} is a ${ref.startsWith("$") ? "Sass" : "Less"} variable, which only a rule in a ${ref.startsWith("$") ? ".module.scss" : ".module.less"} sheet can use, and this element is styled with ${how ?? "inline styles"}. Pick a CSS custom property (--name) token instead, or ask the agent.`,
+      "unsupported-style",
+    );
+  }
+  if (s.convention === "stylex") {
+    const edit = stylexEdit(s.code, s.parsed.ast, el, styles, s.file, s.ctx.stylexVars ?? {});
+    if (edit) {
+      s.ms.overwrite(edit.start, edit.end, edit.text);
+      if (edit.import) s.ms.appendLeft(edit.import.at, edit.import.text);
+      return;
+    }
+    if (token)
+      throw new Refused(
+        `${token} is a StyleX token, which only a stylex.create entry can use, and this element has no stylex.props spread, so it would get an inline style. Give it a stylex.create entry, pick a CSS custom property (--name) token instead, or ask the agent.`,
+        "unsupported-style",
+      );
     return inline(s, el, styles);
-  if (s.convention === "css-modules") return cssModule(s, cls!, styles);
+  }
+  if (s.convention === "inline" || s.convention === "css-modules") return inline(s, el, styles);
 
   if (!cls) {
     const classes = editClasses("", styles, s.ctx.theme, s.ctx.tailwind);
@@ -323,7 +354,8 @@ function cssModule(s: StepCtx, cls: t.JSXAttribute, styles: Record<string, strin
   if (name === undefined || sheet === undefined) throw new Refused(ASK, "unsupported-style");
   const css = s.files[sheet];
   if (css === undefined) throw new Refused(`${sheet} doesn't exist`, "not-found");
-  s.files[sheet] = editRule(sheet, css, name, styles);
+  const used = useVariables(sheet, css, styles, s.ctx.variables ?? {});
+  s.files[sheet] = editRule(sheet, used.css, name, used.styles);
 }
 
 function inline(s: StepCtx, el: t.JSXElement, styles: Record<string, string | null>): void {

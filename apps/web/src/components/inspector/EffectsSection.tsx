@@ -20,6 +20,7 @@ import { type ListEntry, moveEntry, readList, splitList, writeList } from "@/des
 import type { Target as Node } from "./styleEditor";
 import { numberOf, whenNumber } from "../DraftField";
 import type { IconName } from "@/lib/icons";
+import { tokenRef } from "@/lib/tokens";
 import {
   AddMenu,
   Block,
@@ -387,7 +388,7 @@ function EffectRow({
             scope={scope}
             kind="shadow"
             menu={false}
-            onPick={(t) => commit([visible(`var(${t})`)])}
+            onPick={(t) => commit([visible(tokenRef(t))])}
           />
         </div>
       </Block>

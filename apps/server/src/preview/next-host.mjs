@@ -6,12 +6,15 @@
 // server in front answers Finite's own URLs and adds the bridge to every page.
 import fs from "node:fs";
 import http from "node:http";
-import { createRequire } from "node:module";
+import { createRequire, registerHooks } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const CHANGED_DEBOUNCE_MS = 300;
 const SOURCE = /\.(tsx?|jsx?|mts|mjs|json|css)$/;
+/** Next's config loader, which imports the project's next.config and the adapter. */
+const CONFIG_LOADER = /\/next\/dist\/server\/config\.js$/;
+const CONFIG_FILE = /\/next\.config\.[cm]?[jt]s$/;
 
 const { root, host, plugin, adapter, loader, allowedHosts } = JSON.parse(
   process.env.FINITE_PREVIEW ?? "{}",
@@ -34,10 +37,30 @@ try {
   }
   const { finiteNext } = await import(pathToFileURL(plugin).href);
   finite = finiteNext({ root, allowedHosts });
-  finite.prepare();
 
-  // Next calls the adapter's `modifyConfig` on the config it loads.
+  // Next calls the adapter's `modifyConfig` on the config it loads, which hands Finite the
+  // resolved config before Next scans the routes, so the mount is there when it does.
+  let configured = false;
+  globalThis.FINITE_NEXT_CONFIGURE = (settings) => {
+    finite.prepare(settings);
+    configured = true;
+  };
   process.env.NEXT_ADAPTER_PATH = adapter;
+  // A project's own `adapterPath` wins over the variable. Send Next's import of that adapter to
+  // Finite's, which wraps it (adapter.ts).
+  const ownAdapter = pathToFileURL(adapter).href;
+  registerHooks({
+    resolve(specifier, context, nextResolve) {
+      // Next names the adapter and the next.config by file URL, and its own modules by path.
+      const loader = CONFIG_LOADER.test(context.parentURL ?? "");
+      if (!loader || !specifier.startsWith("file:") || CONFIG_FILE.test(specifier)) {
+        return nextResolve(specifier, context);
+      }
+      const { url } = nextResolve(specifier, context);
+      if (url === ownAdapter) return { url, shortCircuit: true };
+      return { url: `${ownAdapter}?adapter=${encodeURIComponent(url)}`, shortCircuit: true };
+    },
+  });
   process.env.FINITE_NEXT = JSON.stringify({
     loader,
     root: finite.root,
@@ -69,10 +92,10 @@ try {
     httpServer: server,
   });
   await app.prepare();
-  // A project's own `adapterPath` wins over the variable, and then Finite's never ran.
-  if (!globalThis.FINITE_NEXT_ADAPTED) {
+  // This version of Next loaded the adapter some other way than the hook above expects.
+  if (!configured) {
     throw new Error(
-      "The project's next.config sets adapterPath, and Finite needs that hook to preview it. Finite doesn't support projects with their own Next.js adapter yet.",
+      "Next.js didn't run Finite's adapter, which Finite needs to stamp the project's JSX. This version of Next may load adapterPath in a way Finite doesn't know yet.",
     );
   }
   for (const { file, code } of kept) {
@@ -105,11 +128,13 @@ try {
     if (!name) return;
     const file = path.join(finite.root, name);
     if (ignored.some((dir) => file.includes(dir))) return;
-    // Any file in the brand folder, such as an image or a font, changes the brand board.
+    // Any file in the brand folder, such as an image or a font, changes the brand board, and so
+    // does renaming or deleting the folder itself, which the watcher reports as the folder alone.
     const brandDir = finite.brandDir();
-    const brand = brandDir && file.startsWith(path.join(finite.root, brandDir) + path.sep);
-    if (!SOURCE.test(file) && !brand) return;
-    if (file === path.join(finite.root, finite.mount)) return;
+    const brandPath = brandDir && path.join(finite.root, brandDir);
+    const brand = brandPath && (file === brandPath || file.startsWith(brandPath + path.sep));
+    if (!SOURCE.test(file) && !brand && !finite.isPage(file)) return;
+    if (finite.mount && file === path.join(finite.root, finite.mount)) return;
     clearTimeout(timer);
     timer = setTimeout(() => {
       finite.sync();
@@ -125,7 +150,9 @@ try {
   process.on("SIGTERM", close);
   process.on("SIGINT", close);
 
-  send({ type: "ready", url: `http://${host.includes(":") ? `[${host}]` : host}:${port}` });
+  // Frames load under the basePath, as the project's own pages do.
+  const origin = `http://${host.includes(":") ? `[${host}]` : host}:${port}`;
+  send({ type: "ready", url: origin + finite.basePath });
 } catch (error) {
   finite?.close();
   console.error(error?.stack ?? String(error));

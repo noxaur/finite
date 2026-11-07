@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   Refused,
@@ -9,6 +9,7 @@ import {
   type Remap,
   type Route,
   type SourceEditor,
+  type Token,
 } from "@finite/protocol";
 import { listComponents } from "./components.ts";
 import {
@@ -34,9 +35,21 @@ import {
 } from "./imports.ts";
 import { parseModule } from "./jsx.ts";
 import { editFiles, rewrite } from "./rewrite.ts";
+import { isStylexVar, mentionsVar, readVars, writeVar } from "./stylex.ts";
 import type { TailwindVersion, Theme } from "./tailwind.ts";
 import { configTheme, tailwind3Config } from "./tailwind3.ts";
-import { hasToken, lightTheme, readTokens, tokenName, writeToken } from "./tokens.ts";
+import {
+  hasToken,
+  isVariable,
+  lightTheme,
+  readTokens,
+  type Sheet,
+  tokenName,
+  variableHome,
+  variableRefs,
+  variableSheets,
+  writeToken,
+} from "./tokens.ts";
 
 export { rewrite } from "./rewrite.ts";
 
@@ -54,11 +67,30 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
   const history = createHistory();
   const actorKey = (design: Design, by: Actor) => `${design.id}\u0000${by.kind}:${by.id}`;
 
-  async function sheets(design: Design): Promise<{ file: string; css: string }[]> {
-    const out: { file: string; css: string }[] = [];
-    for (const file of design.css) {
+  /**
+   * The design's global sheets, then the local `.scss` partials they load with `@use`, `@forward`
+   * or `@import`, followed all the way down, which hold Sass variable tokens.
+   */
+  async function sheets(design: Design): Promise<Sheet[]> {
+    const out: Sheet[] = [];
+    const seen = new Set(design.css);
+    const queue = design.css.map((file) => ({ file, partial: false }));
+    while (queue.length > 0) {
+      const { file, partial } = queue.shift()!;
       const css = await readText(inRoot(design.root, file));
-      if (css !== undefined) out.push({ file, css });
+      if (css === undefined) continue;
+      out.push(partial ? { file, css, partial } : { file, css });
+      if (path.posix.extname(file) !== ".scss") continue;
+      for (const { spec, rule } of localImports(file, css)) {
+        if (rule === "url") continue;
+        const target = spec.startsWith("/") ? spec.slice(1) : resolveSpec(file, spec);
+        if (!isInside(design.root, target)) continue;
+        const dep = await existing(design.root, importCandidates(file, target, rule === "import"));
+        if (dep?.endsWith(".scss") && !seen.has(dep)) {
+          seen.add(dep);
+          queue.push({ file: dep, partial: true });
+        }
+      }
     }
     return out;
   }
@@ -71,6 +103,46 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
     const config = await tailwind3Config(design.root, all);
     if (config) return { theme: await configTheme(design.root, config), tailwind: 3 };
     return { theme: lightTheme(readTokens(all)), tailwind: 4 };
+  }
+
+  /**
+   * A StyleX design's `defineVars` tokens, from its `*.stylex.ts` (or `.js`, `.tsx`…) files under
+   * `src/` and `app/`, with the file that defines each token and each group. The first file to
+   * define a group wins.
+   */
+  async function stylexVars(design: Design): Promise<{
+    tokens: Token[];
+    homes: Record<string, string>;
+    groups: Map<string, string>;
+  }> {
+    const tokens: Token[] = [];
+    const homes: Record<string, string> = {};
+    const groups = new Map<string, string>();
+    if (design.styling !== "stylex") return { tokens, homes, groups };
+    for (const dir of ["src", "app"]) {
+      const entries = await readdir(inRoot(design.root, dir), { recursive: true }).catch(() => []);
+      for (const entry of entries.sort((a, b) => a.localeCompare(b))) {
+        const file = `${dir}/${entry.split(path.sep).join("/")}`;
+        if (!/\.stylex\.[cm]?[jt]sx?$/.test(file) || file.includes("node_modules/")) continue;
+        let read: ReturnType<typeof readVars>;
+        try {
+          read = readVars(file, (await readText(inRoot(design.root, file))) ?? "");
+        } catch {
+          continue; // a file that doesn't parse has no tokens to show
+        }
+        for (const group of read.groups) if (!groups.has(group)) groups.set(group, file);
+        for (const token of read.tokens) {
+          if (groups.get(token.name.split(".")[0]!) !== file) continue;
+          homes[token.name] = file;
+          tokens.push(token);
+        }
+      }
+    }
+    return { tokens, homes, groups };
+  }
+
+  async function allTokens(design: Design): Promise<Token[]> {
+    return [...readTokens(await sheets(design)), ...(await stylexVars(design)).tokens];
   }
 
   /** Reads `files`, lets `change` produce new contents, writes what changed. All under the files' locks. */
@@ -168,6 +240,12 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
         design.styling === "tailwind"
           ? await tailwindTheme(design)
           : { theme: {}, tailwind: 4 as const };
+      const variables = edits.some((e) => e.kind === "style" && variableRefs(e.styles).length > 0)
+        ? variableSheets(await sheets(design))
+        : {};
+      const stylex = edits.some((e) => e.kind === "style" && mentionsVar(e.styles))
+        ? (await stylexVars(design)).homes
+        : {};
 
       const remap: Remap = {};
       const patches = await transact(design.root, [...files, ...modules], (contents) => {
@@ -182,6 +260,8 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
             theme,
             tailwind,
             files: extra,
+            variables,
+            stylexVars: stylex,
           });
           if (result instanceof Refused) throw result;
           out.set(file, result.code);
@@ -218,27 +298,45 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
       return { file: copy };
     },
 
-    async tokens(design) {
-      return readTokens(await sheets(design));
-    },
+    tokens: allTokens,
 
     async setToken(design, { name, mode, value }) {
       const prop = tokenName(name);
+      if (isStylexVar(prop)) {
+        const [group, key] = prop.split(".") as [string, string];
+        const { groups } = await stylexVars(design);
+        const file = groups.get(group);
+        if (!file)
+          throw new Refused(
+            design.styling !== "stylex"
+              ? `${prop} is a StyleX token, but this design isn't styled with StyleX. Use a CSS custom property (--${key}) instead.`
+              : groups.size === 0
+                ? `${prop} is a StyleX token, but this design has no stylex.defineVars yet. Add a src/tokens.stylex.ts with export const ${group} = stylex.defineVars({ … }), or ask the agent.`
+                : `This design has no defineVars named ${group}. Add it to ${[...groups.keys()].map((g) => `${g}.${key}`).join(" or ")}, or ask the agent to add a ${group} group.`,
+            "invalid",
+          );
+        await transact(design.root, [file], (contents) => {
+          return new Map([[file, writeVar(file, contents.get(file) ?? "", prop, mode, value)]]);
+        });
+        return allTokens(design);
+      }
       const all = await sheets(design);
       const config =
         design.styling === "tailwind" ? await tailwind3Config(design.root, all) : undefined;
-      if (config && !all.some((s) => hasToken(s.file, s.css, prop, mode)))
+      if (config && !isVariable(prop) && !all.some((s) => hasToken(s.file, s.css, prop, mode)))
         throw new Refused(
           `This design uses Tailwind v3, whose theme lives in ${path.basename(config)}, so a new token there wouldn't make a class. Add it to theme.extend in ${path.basename(config)}, or ask the agent to.`,
           "invalid",
         );
-      const target =
-        all.find((s) => hasToken(s.file, s.css, prop, mode)) ??
-        (design.styling === "tailwind"
-          ? (all.find((s) => /@theme\b/.test(s.css)) ??
-            all.find((s) => /@import\s+["']tailwindcss/.test(s.css)))
-          : all.find((s) => /:root\b/.test(s.css))) ??
-        all[0];
+      const globals = all.filter((s) => !s.partial);
+      const target = isVariable(prop)
+        ? variableHome(prop, all)
+        : (globals.find((s) => hasToken(s.file, s.css, prop, mode)) ??
+          (design.styling === "tailwind"
+            ? (globals.find((s) => /@theme\b/.test(s.css)) ??
+              globals.find((s) => /@import\s+["']tailwindcss/.test(s.css)))
+            : globals.find((s) => /:root\b/.test(s.css))) ??
+          globals[0]);
       if (!target)
         throw new Refused(
           "This design has no stylesheet to keep tokens in. Add one to css in .finite/design.json.",
@@ -259,7 +357,7 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
           ],
         ]);
       });
-      return readTokens(await sheets(design));
+      return allTokens(design);
     },
 
     components: (design) => listComponents(design.root),
@@ -286,10 +384,10 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
         const data = await readFile(inRoot(root, file)).catch(() => undefined);
         if (!data) continue;
         out.push({ path: file, data: new Uint8Array(data) });
-        for (const spec of localImports(file, data.toString("utf8"))) {
+        for (const { spec, rule } of localImports(file, data.toString("utf8"))) {
           const target = spec.startsWith("/") ? spec.slice(1) : resolveSpec(file, spec);
           if (!isInside(root, target)) continue;
-          const dep = await existing(root, importCandidates(file, target));
+          const dep = await existing(root, importCandidates(file, target, rule === "import"));
           if (dep) queue.push(dep);
         }
       }
@@ -321,11 +419,11 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
 
 /**
  * The local files a module or stylesheet pulls in, as written: relative (or root-absolute) import
- * specifiers of a JS/TS module, `@import`, `@use`, `@forward` and `url()` of a stylesheet. Query
- * strings (`?url`) are dropped.
+ * specifiers of a JS/TS module, `@import`, `@use`, `@forward` and `url()` of a stylesheet, with
+ * the rule that names each. Query strings (`?url`) are dropped.
  */
-function localImports(file: string, code: string): string[] {
-  let specs: string[] = [];
+function localImports(file: string, code: string): { spec: string; rule?: string }[] {
+  let specs: { spec: string; rule?: string }[] = [];
   if (/\.[cm]?[jt]sx?$/.test(file)) {
     let ast: ReturnType<typeof parseModule>;
     try {
@@ -333,13 +431,13 @@ function localImports(file: string, code: string): string[] {
     } catch {
       return [];
     }
-    specs = specifiers(ast).map((lit) => lit.value);
+    specs = specifiers(ast).map((lit) => ({ spec: lit.value }));
   } else if (/\.(css|scss|sass|less)$/.test(file)) {
     specs = sheetSpecifiers(file, code);
   }
   return specs
-    .map((spec) => spec.replace(/[?#].*$/, ""))
-    .filter((spec) => isRelative(spec) || (spec.startsWith("/") && !spec.startsWith("//")));
+    .map((s) => ({ ...s, spec: s.spec.replace(/[?#].*$/, "") }))
+    .filter(({ spec }) => isRelative(spec) || (spec.startsWith("/") && !spec.startsWith("//")));
 }
 
 function isInside(root: string, file: string): boolean {
