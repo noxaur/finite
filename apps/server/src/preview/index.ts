@@ -30,6 +30,11 @@ export type PreviewsOptions = {
   plugin?: string;
   /** Hosts the Finite shell is served from, as the server allows them (default: loopback names). */
   allowedHosts?: readonly string[];
+  /**
+   * Looks a design's `finite.json` up again after it changes, updating the design's `workspace`
+   * and `app` in place, before the preview compares what it runs with.
+   */
+  relink?: (designId: string) => Promise<unknown>;
 };
 
 const VITE_HOST = fileURLToPath(new URL("./vite-host.mjs", import.meta.url));
@@ -62,8 +67,12 @@ type Run = {
   sentRoutes: string | undefined;
   /** Lets go of the finite.json services the run holds. */
   release: (() => void) | undefined;
+  /** What finite.json gave the run, from `Workspaces.version`; a change restarts the run. */
+  version: string | undefined;
   /** Watches a workspace design's finite.json, whose `routes` the Routes page shows. */
   watcher: fs.FSWatcher | undefined;
+  /** finite.json reloads, one at a time. */
+  reloads: Promise<void>;
   /** Pending throttled `starting` event while setup output streams in. */
   progress: NodeJS.Timeout | undefined;
 };
@@ -91,6 +100,8 @@ export function createPreviews(options: PreviewsOptions): Previews {
   const listeners = new Map<string, Set<(event: PreviewEvent) => void>>();
   const errors = new Map<string, Map<string, FrameError[]>>();
   const idleTimers = new Map<string, NodeJS.Timeout>();
+  /** Designs whose run is stopping to start again; a stop meanwhile cancels the start. */
+  const restarting = new Set<string>();
   const workspaces = createWorkspaces({ startTimeoutMs });
 
   const emit = (designId: string, event: PreviewEvent) => {
@@ -125,7 +136,11 @@ export function createPreviews(options: PreviewsOptions): Previews {
     run.watcher = undefined;
   };
 
-  function start(design: Design): Run {
+  /**
+   * Starts a run. `previous` lets go of the services of the run it replaces, called once this one
+   * holds its own, so a service both need keeps running.
+   */
+  function start(design: Design, previous?: () => void): Run {
     let resolveReady!: (value: { url: string }) => void;
     let rejectReady!: (error: Error) => void;
     const ready = new Promise<{ url: string }>((resolve, reject) => {
@@ -142,7 +157,9 @@ export function createPreviews(options: PreviewsOptions): Previews {
       cancel: (reason) => rejectReady(new Refused(reason)),
       sentRoutes: undefined,
       release: undefined,
+      version: undefined,
       watcher: undefined,
+      reloads: Promise.resolve(),
       progress: undefined,
     };
     runs.set(design.id, run);
@@ -160,10 +177,12 @@ export function createPreviews(options: PreviewsOptions): Previews {
             error instanceof Error ? error.message : String(error),
           ),
       );
+      previous?.();
       return run;
     }
     emit(design.id, { type: "preview", ...run.state });
     if (!design.workspace) {
+      previous?.();
       startHost(design, run, {}, resolveReady, rejectReady);
       return run;
     }
@@ -189,10 +208,12 @@ export function createPreviews(options: PreviewsOptions): Previews {
     };
     workspaces
       .prepare(design, onOutput, () => runs.get(design.id) === run, onExit)
+      .finally(() => previous?.())
       .then(
-        ({ env, release }) => {
+        ({ env, release, version }) => {
           if (runs.get(design.id) !== run || run.state.status === "error") return release();
           run.release = release;
+          run.version = version;
           run.log = "";
           startHost(design, run, env, resolveReady, rejectReady);
         },
@@ -260,7 +281,7 @@ export function createPreviews(options: PreviewsOptions): Previews {
         setState(design.id, run, { status: "ready", url: message.url });
         resolveReady({ url: message.url });
         void refreshRoutes(design.id, run);
-        if (design.workspace) watchWorkspace(design.id, design.workspace, run);
+        if (design.workspace) watchWorkspace(design, design.workspace, run);
       } else if (message.type === "error") {
         fail(message.message ?? "it failed");
       } else if (message.type === "changed") {
@@ -276,21 +297,56 @@ export function createPreviews(options: PreviewsOptions): Previews {
   }
 
   /**
-   * Sends the routes again whenever the workspace's finite.json changes, so the Routes page picks
-   * up its `routes`. It watches the folder, since an atomic write replaces the file.
+   * Reloads the workspace's finite.json whenever it changes. It watches the folder, since an
+   * atomic write replaces the file. It also reloads once now, for an edit made while the run
+   * started.
    */
-  function watchWorkspace(designId: string, workspace: string, run: Run) {
-    if (run.watcher || runs.get(designId) !== run) return;
+  function watchWorkspace(design: Design, workspace: string, run: Run) {
+    if (run.watcher || runs.get(design.id) !== run) return;
     try {
       run.watcher = fs.watch(workspace, (_, file) => {
-        if (file !== WORKSPACE_FILE) return;
-        run.sentRoutes = undefined;
-        void refreshRoutes(designId, run);
+        if (file === WORKSPACE_FILE) reload(design, run, true);
       });
       run.watcher.on("error", () => run.watcher?.close());
     } catch (error) {
       console.error(`watching ${workspace} for finite.json changes failed:`, error);
     }
+    reload(design, run, false);
+  }
+
+  /**
+   * Restarts the run when finite.json changed what it runs with (setup, needs, env, services, or
+   * the design's app), else sends the routes again, so the Routes page picks up its `routes`. An
+   * invalid finite.json keeps the run as it is, with the reason in its state's `log`.
+   */
+  function reload(design: Design, run: Run, edited: boolean) {
+    const current = () => runs.get(design.id) === run;
+    run.reloads = run.reloads.then(async () => {
+      await options.relink?.(design.id).catch(() => {});
+      if (!current()) return;
+      const version = await workspaces.version(design).catch((error: Error) => error);
+      if (!current()) return;
+      if (version instanceof Error) {
+        return setState(design.id, run, { ...run.state, log: version.message });
+      }
+      if (version !== run.version) return restart(design, run);
+      if (run.state.log) setState(design.id, run, { status: run.state.status, url: run.state.url });
+      if (!edited) return;
+      run.sentRoutes = undefined;
+      await refreshRoutes(design.id, run);
+    });
+  }
+
+  /** Starts the design's preview again, unless it's idle (nobody views it), which only stops it. */
+  async function restart(design: Design, run: Run) {
+    const idle = idleTimers.has(design.id);
+    const release = run.release ?? (() => {});
+    run.release = undefined;
+    const stopped = stopRun(design.id);
+    restarting.add(design.id);
+    await stopped;
+    if (!restarting.delete(design.id) || idle || runs.has(design.id)) return release();
+    start(design, release);
   }
 
   async function fetchRoutes(run: Run): Promise<Route[]> {
@@ -315,6 +371,7 @@ export function createPreviews(options: PreviewsOptions): Previews {
 
   async function stopRun(designId: string): Promise<void> {
     cancelIdle(designId);
+    restarting.delete(designId);
     const run = runs.get(designId);
     if (!run) return;
     setState(designId, run, { status: "stopped" });
@@ -387,6 +444,7 @@ export function createPreviews(options: PreviewsOptions): Previews {
     errors: (designId, frameId) => errors.get(designId)?.get(frameId) ?? [],
 
     async close() {
+      restarting.clear();
       await Promise.all([...runs.keys()].map(stopRun));
       await workspaces.close();
     },

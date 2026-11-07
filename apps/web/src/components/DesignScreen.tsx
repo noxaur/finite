@@ -357,7 +357,8 @@ export function DesignScreen({ id }: { id: string }) {
 
 /**
  * While a new design's dependencies install, its dev server starts, or either fails. A failed
- * preview, or a folder Finite can't run yet, offers a setup thread that writes its finite.json.
+ * preview, or a folder Finite can't run yet, offers a setup thread that writes its finite.json. A
+ * running preview with a log has an invalid finite.json, and keeps running as it was.
  */
 function Preview({
   state,
@@ -371,7 +372,8 @@ function Preview({
   onSetup: () => void;
 }) {
   const installing = install && install.status !== "done" ? install : undefined;
-  if (!installing && (!state || state.status === "ready" || state.status === "stopped")) {
+  const ready = state?.status === "ready";
+  if (!installing && (!state || (ready && !state.log) || state.status === "stopped")) {
     return null;
   }
   const failed = installing ? installing.status === "error" : state?.status === "error";
@@ -380,11 +382,13 @@ function Preview({
     ? failed
       ? "Installing dependencies failed"
       : "Installing dependencies…"
-    : needsSetup
-      ? "Finite can’t run this folder yet"
-      : failed
-        ? "The dev server stopped"
-        : "Starting the dev server…";
+    : ready
+      ? "finite.json isn’t valid, so the preview runs as it was"
+      : needsSetup
+        ? "Finite can’t run this folder yet"
+        : failed
+          ? "The dev server stopped"
+          : "Starting the dev server…";
   let log = installing ? installing.log : state?.log?.trim();
   // A setup design's log is its reason. A failed preview's starts with what went wrong and what
   // to do, then the output.
