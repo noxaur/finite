@@ -1,5 +1,6 @@
 import type * as t from "@babel/types";
 import { Refused } from "@finite/protocol";
+import { walk } from "./jsx.ts";
 import { kebab } from "./tailwind.ts";
 
 const SOURCES = new Set(["@stylexjs/stylex", "stylex"]);
@@ -65,6 +66,10 @@ export function stylexEdit(
     );
   const target = ref(args[at]!)!;
   const name = code.slice(target.member.start!, target.member.end!);
+  if (shadowed(ast, el, target.sheet))
+    throw refuse(
+      `${name} refers to a parameter or local named ${target.sheet}, not the module-level stylex.create object`,
+    );
   if (!b.sheets.has(target.sheet))
     throw refuse(
       `${name} comes from another file (${b.imported.get(target.sheet)}), so Finite can't edit it by hand`,
@@ -215,14 +220,63 @@ function ref(node: t.Node): Ref | undefined {
   return { sheet: root.name, key, call, nested: member.object !== root, member };
 }
 
-/** The refs a conditional argument may apply: `on && styles.x`, `on ? styles.x : styles.y`. */
+/** The refs a conditional argument may apply: `on && styles.x`, `on ? styles.x : [styles.y]`. */
 function conditional(node: t.Node): Ref[] {
+  if (node.type === "ArrayExpression")
+    return node.elements.flatMap((e) => (e === null ? [] : conditional(e)));
   if (node.type === "LogicalExpression")
     return [...conditional(node.left), ...conditional(node.right)];
   if (node.type === "ConditionalExpression")
     return [...conditional(node.consequent), ...conditional(node.alternate)];
   const r = ref(node);
   return r ? [r] : [];
+}
+
+/** True when a function around `el` binds `name` as a parameter or a local, hiding the module's. */
+function shadowed(ast: t.File, el: t.JSXElement, name: string): boolean {
+  const parents = new Map<t.Node, t.Node | undefined>();
+  walk(ast, (node, parent) => void parents.set(node, parent));
+  const functionOf = (node: t.Node | undefined) => {
+    while (node && !FUNCTIONS.has(node.type)) node = parents.get(node);
+    return node as t.Function | undefined;
+  };
+  for (let fn = functionOf(parents.get(el)); fn; fn = functionOf(parents.get(fn))) {
+    if (fn.params.some((p) => binds(p, name))) return true;
+    let found = false;
+    walk(fn.body, (node) => {
+      const id =
+        node.type === "VariableDeclarator"
+          ? node.id
+          : node.type === "FunctionDeclaration" || node.type === "ClassDeclaration"
+            ? node.id
+            : undefined;
+      if (id && functionOf(parents.get(node)) === fn && binds(id, name)) found = true;
+    });
+    if (found) return true;
+  }
+  return false;
+}
+
+const FUNCTIONS = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
+
+/** Whether a parameter or declaration pattern introduces `name`. */
+function binds(pattern: t.Node, name: string): boolean {
+  switch (pattern.type) {
+    case "Identifier":
+      return pattern.name === name;
+    case "AssignmentPattern":
+      return binds(pattern.left, name);
+    case "RestElement":
+      return binds(pattern.argument, name);
+    case "ArrayPattern":
+      return pattern.elements.some((e) => e !== null && binds(e, name));
+    case "ObjectPattern":
+      return pattern.properties.some((p) => binds(p.type === "RestElement" ? p : p.value, name));
+    case "TSParameterProperty":
+      return binds(pattern.parameter, name);
+    default:
+      return false;
+  }
 }
 
 /** The value of `ref`'s key in its `create` object in this file. */

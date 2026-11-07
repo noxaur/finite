@@ -79,8 +79,9 @@ function detectStyling(tailwind: boolean, stylex: boolean, code: SourceFile[]): 
   return modules > 0 && modules >= classStrings ? "css-modules" : "inline";
 }
 
-/** True when the file imports `@stylexjs/stylex` and calls its `props`, under any local name. */
-function callsStylexProps(text: string): boolean {
+/** True when the file imports `@stylexjs/stylex` and calls its `props` outside comments, under any local name. */
+function callsStylexProps(source: string): boolean {
+  const text = source.replace(/\/\*[\s\S]*?\*\/|(?<!:)\/\/.*/g, "");
   const names: string[] = [];
   for (const m of text.matchAll(/import\s+([^;'"]*?)\s*from\s*["']@stylexjs\/stylex["']/g)) {
     const ns = /\*\s*as\s+([\w$]+)/.exec(m[1]!)?.[1];

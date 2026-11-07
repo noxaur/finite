@@ -47,6 +47,15 @@ describe("detectProject styling", () => {
     expect(await styling(stylex, { "src/C.tsx": CLASSES })).toBe("inline");
   });
 
+  it("doesn't count props calls in comments", async () => {
+    const commented = `import * as sx from "@stylexjs/stylex";
+// <div {...sx.props(s.a)} />
+/* <div {...sx.props(s.b)} /> */
+export const A = () => <div />;
+`;
+    expect(await styling(stylex, { "src/A.tsx": commented })).toBe("inline");
+  });
+
   it("doesn't pick StyleX without the dependency", async () => {
     expect(await styling(rr, { "src/A.tsx": NAMESPACE })).toBe("inline");
   });

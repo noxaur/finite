@@ -92,6 +92,13 @@ describe("editRule in .scss", () => {
     expect(compileScss(out)).toContain(".badge {\n  color: blue;");
   });
 
+  it("adds after an @include that follows a nested rule, so the new declaration wins", () => {
+    const css = `@mixin ink {\n  color: red;\n}\n\n.card {\n  &:hover {\n    opacity: .5;\n  }\n  @include ink;\n}\n`;
+    const out = editRule("Card.module.scss", css, "card", { color: "blue" });
+    expect(out).toBe(css.replace("  @include ink;\n", "  @include ink;\n  color: blue;\n"));
+    expect(compileScss(out)).toMatch(/\.card \{\s*color: red;\s*color: blue;\s*\}/);
+  });
+
   it("edits an existing top-level rule that has @include", () => {
     const out = editRule("Card.module.scss", SCSS, "pill", { color: "blue" });
     expect(out).toBe(
@@ -117,6 +124,13 @@ describe("editRule in .less", () => {
       ),
     );
     expect(await compileLess(out)).toContain("padding: 12px;");
+  });
+
+  it("adds after a mixin call that follows a nested rule, so the new declaration wins", async () => {
+    const css = `.ink() {\n  color: red;\n}\n\n.card {\n  &:hover {\n    opacity: .5;\n  }\n  .ink();\n}\n`;
+    const out = editRule("Card.module.less", css, "card", { color: "blue" });
+    expect(out).toBe(css.replace("  .ink();\n", "  .ink();\n  color: blue;\n"));
+    expect(await compileLess(out)).toMatch(/\.card \{\s*color: red;\s*color: blue;\s*\}/);
   });
 
   it("appends a rule for a class that isn't in the sheet", async () => {

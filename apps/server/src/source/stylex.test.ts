@@ -64,6 +64,12 @@ export function Card({ active, style }: { active: boolean; style?: stylex.StyleX
 `;
 }
 const DIV = L(9, 9);
+/** The loc of the `<div` in `code`. */
+function divAt(code: string) {
+  const before = code.slice(0, code.indexOf("<div"));
+  const line = before.split("\n").length;
+  return L(line, before.length - before.lastIndexOf("\n") - 1);
+}
 
 describe("stylex styles", () => {
   it("edits the create entry of the last unconditional argument, above the JSX", () => {
@@ -127,6 +133,45 @@ describe("stylex styles", () => {
     expect(
       refused(run(card("styles.card, active ? styles.on : null"), [DIV], "div", { color: "blue" })),
     ).toContain("sets color");
+  });
+
+  it("refuses a later conditional array that sets the same property", () => {
+    expect(
+      refused(run(card("styles.card, active && [styles.on]"), [DIV], "div", { color: "blue" })),
+    ).toContain("sets color");
+    expect(
+      refused(
+        run(card("styles.card, [active ? styles.on : null]"), [DIV], "div", { color: "blue" }),
+      ),
+    ).toContain("sets color");
+  });
+
+  it("refuses when a parameter or local shadows the module-level sheet", () => {
+    const signature =
+      "export function Card({ active, style }: { active: boolean; style?: stylex.StyleXStyles }) {";
+    const heads = [
+      "export function Card({ styles }: { styles: any }) {",
+      "export function Card({ a: [{ b: styles }] }: any) {",
+      "export function Card(styles: any) {",
+      `${signature}\n  const styles = {} as any;`,
+      `${signature}\n  function styles() {}`,
+    ];
+    for (const head of heads) {
+      const code = card("styles.card").replace(signature, head);
+      const message = refused(run(code, [divAt(code)], "div", { padding: "4px" }));
+      expect(message).toContain("styles.card");
+      expect(message).toContain("not the module-level stylex.create object");
+    }
+  });
+
+  it("edits the module-level sheet when only a sibling function binds its name", () => {
+    const code = card("styles.card").replace(
+      "export function Card(",
+      "function other(styles: any) {\n  return styles;\n}\n\nexport function Card(",
+    );
+    expect(ok(run(code, [divAt(code)], "div", { padding: "4px" })).code).toBe(
+      code.replace(`padding: "16px"`, `padding: "4px"`),
+    );
   });
 
   it("ignores later arguments that set other properties or that it can't resolve", () => {

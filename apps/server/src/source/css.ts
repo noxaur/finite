@@ -1,6 +1,13 @@
 import path from "node:path";
 import { Refused } from "@finite/protocol";
-import postcss, { type Container, type Node, type Root, type Rule, type Syntax } from "postcss";
+import postcss, {
+  type AtRule,
+  type Container,
+  type ChildNode,
+  type Root,
+  type Rule,
+  type Syntax,
+} from "postcss";
 import * as less from "postcss-less";
 import * as scss from "postcss-scss";
 import { kebab } from "./tailwind.ts";
@@ -120,8 +127,15 @@ export function setDecls(container: Container, styles: Record<string, string | n
     container.raws.semicolon = true;
     const decl = postcss.decl({ prop, value, raws });
     // After the other declarations and mixin calls, so it wins, but before the nested rules: older
-    // Sass warns about a declaration after one (mixed-decls).
-    let nested: Node | undefined = nodes.find((n) => n.type === "rule" && !(n as RuleLike).mixin);
+    // Sass warns about a declaration after one (mixed-decls). A mixin call after a nested rule can
+    // override it, so then it goes after the last declaration or mixin call.
+    let nested: ChildNode | undefined = nodes.find(
+      (n) => n.type === "rule" && !(n as RuleLike).mixin,
+    );
+    if (nested && nodes.slice(nodes.indexOf(nested)).some(isMixinCall)) {
+      nodes.findLast((n) => n.type === "decl" || isMixinCall(n))!.after(decl);
+      continue;
+    }
     while (nested?.prev()?.type === "comment" && nested.prev()!.raws.before?.includes("\n"))
       nested = nested.prev();
     if (nested) nested.before(decl);
@@ -130,6 +144,14 @@ export function setDecls(container: Container, styles: Record<string, string | n
 }
 
 type RuleLike = { mixin?: boolean };
+
+/** A Sass `@include` or a Less mixin call such as `.pill(8px);`. */
+function isMixinCall(node: ChildNode): boolean {
+  return (
+    (node.type === "atrule" && (node as AtRule).name === "include") ||
+    (node as RuleLike).mixin === true
+  );
+}
 
 /** Raws for a new block, so it prints `sel {` … `}` on its own lines. */
 export const BLOCK = { between: " ", after: "\n", semicolon: true };
