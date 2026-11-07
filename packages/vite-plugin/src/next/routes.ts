@@ -46,7 +46,9 @@ export function pageExtension(pageExtensions: string[]): RegExp {
  */
 async function appRoutes(root: string, dir: string, segments: string[], page: RegExp, add: Add) {
   const entries = await readDir(root, dir);
-  const file = entries.find((entry) => entry.isFile() && entry.name.replace(page, "") === "page");
+  const file = entries.find(
+    (entry) => entry.isFile() && page.test(entry.name) && entry.name.replace(page, "") === "page",
+  );
   if (file) add(segments, path.posix.join(dir, file.name));
   const folders = entries.filter((entry) => entry.isDirectory());
   folders.sort((a, b) => Number(a.name.startsWith("@")) - Number(b.name.startsWith("@")));

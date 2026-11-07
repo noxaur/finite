@@ -11,7 +11,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const CHANGED_DEBOUNCE_MS = 300;
-const SOURCE = /\.(tsx?|jsx?|mts|mjs|json|css|mdx?)$/;
+const SOURCE = /\.(tsx?|jsx?|mts|mjs|json|css)$/;
 
 const { root, host, plugin, adapter, loader, allowedHosts } = JSON.parse(
   process.env.FINITE_PREVIEW ?? "{}",
@@ -114,7 +114,7 @@ try {
     const brandDir = finite.brandDir();
     const brandPath = brandDir && path.join(finite.root, brandDir);
     const brand = brandPath && (file === brandPath || file.startsWith(brandPath + path.sep));
-    if (!SOURCE.test(file) && !brand) return;
+    if (!SOURCE.test(file) && !brand && !finite.isPage(file)) return;
     if (finite.mount && file === path.join(finite.root, finite.mount)) return;
     clearTimeout(timer);
     timer = setTimeout(() => {

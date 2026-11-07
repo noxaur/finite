@@ -48,6 +48,7 @@ export function finiteNext(options: FiniteNextOptions) {
   const base = isDir("app") || isDir("pages") ? "" : "src/";
   /** The project's resolved config, set by `prepare`. */
   let settings: NextSettings = { basePath: "", pageExtensions: [] };
+  let extension = pageExtension([]);
   let mount: string | undefined;
   let mountCode = "";
 
@@ -186,7 +187,7 @@ export function finiteNext(options: FiniteNextOptions) {
        * goes next to the root layout, which may sit in a route group (`app/(site)/layout.tsx`);
        * groups add no URL segment.
        */
-      const extension = pageExtension(settings.pageExtensions);
+      extension = pageExtension(settings.pageExtensions);
       mount = pages
         ? `${base}pages/__finite/frame.${ext}`
         : `${rootLayoutDir(root, `${base}app`, extension)}/%5F%5Ffinite/frame/page.${ext}`;
@@ -227,6 +228,9 @@ export function finiteNext(options: FiniteNextOptions) {
       writeIfChanged(at(MOUNT_RECORD), sha1(mountCode));
       writeIfChanged(at(mount), mountCode);
     },
+
+    /** Whether a file has one of the config's `pageExtensions`, so it may be a route. */
+    isPage: (file: string) => settings.pageExtensions.length > 0 && extension.test(file),
 
     /** The brand folder, relative to the root, whose files the brand board lists. */
     brandDir: () => readBrandDir(root),
@@ -430,7 +434,8 @@ export default function FiniteFrame() {
 function rootLayoutDir(root: string, app: string, layout: RegExp): string {
   const find = (dir: string): string | undefined => {
     const entries = fs.readdirSync(path.join(root, dir), { withFileTypes: true });
-    if (entries.some((e) => e.isFile() && e.name.replace(layout, "") === "layout")) return dir;
+    const isLayout = (name: string) => layout.test(name) && name.replace(layout, "") === "layout";
+    if (entries.some((e) => e.isFile() && isLayout(e.name))) return dir;
     const groups = entries.filter((e) => e.isDirectory() && /^\([^.].*\)$/.test(e.name));
     for (const group of groups.map((e) => e.name).sort()) {
       const found = find(`${dir}/${group}`);

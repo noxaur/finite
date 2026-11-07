@@ -451,7 +451,7 @@ describe("preview lifecycle", () => {
       at("next.config.ts"),
       fs
         .readFileSync(at("next.config.ts"), "utf8")
-        .replace("{}", `{ basePath: "/docs", pageExtensions: ["page.tsx"] }`),
+        .replace("{}", `{ basePath: "/docs", pageExtensions: ["page.tsx", "mdx"] }`),
     );
     for (const page of ["_app", "_document", "about", "index", "posts/[id]"]) {
       fs.renameSync(at(`src/pages/${page}.tsx`), at(`src/pages/${page}.page.tsx`));
@@ -462,6 +462,10 @@ describe("preview lifecycle", () => {
       "export function Card() {\n  return <p>Card</p>;\n}\n",
     );
     const copy = { ...design("next-pages"), id: "next-settings", root: fixture.root };
+    const seen: string[][] = [];
+    const off = previews.on(copy.id, (e) => {
+      if (e.type === "routes") seen.push(e.routes.map((r) => r.path));
+    });
     const { url } = await previews.ensure(copy);
     expect(url).toMatch(/:\d+\/docs$/);
     expect(fs.existsSync(at("src/pages/__finite/frame.page.tsx"))).toBe(true);
@@ -487,6 +491,10 @@ describe("preview lifecycle", () => {
     expect(card.status).toBe(200);
     expect(card.text).toContain(`id="finite-page"`);
     expect(card.text).toContain(`src="/docs/__finite/bridge.js"`);
+    // A page with one of the config's own extensions refreshes the routes too.
+    fs.writeFileSync(at("src/pages/guide.mdx"), "# Guide\n");
+    await expect.poll(() => seen.at(-1), { timeout: 10_000 }).toContain("/guide");
+    off();
     await previews.stop(copy.id);
     expect(fs.existsSync(at("src/pages/__finite"))).toBe(false);
   }, 90_000);

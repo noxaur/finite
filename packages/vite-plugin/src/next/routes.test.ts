@@ -92,6 +92,7 @@ describe("nextRoutes", () => {
       "pages/notes.mdx",
       "app/page.tsx",
       "app/shop/page.page.tsx",
+      "app/team/page",
     ]);
     expect(await nextRoutes(root, ["page.tsx", "mdx"])).toEqual([
       { path: "/shop", file: "app/shop/page.page.tsx", params: [] },
