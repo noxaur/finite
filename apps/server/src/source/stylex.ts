@@ -415,15 +415,27 @@ function indentAt(code: string, offset: number): string {
 /** A whole value that names a `defineVars` token, `<group>.<key>`. No CSS value has this shape. */
 const VAR_REF = /^([A-Za-z_$][\w$]*)\.([A-Za-z_][\w-]*)$/;
 
-/** A `<group>.<key>` inside a longer value, as a whole word. */
-const VAR_WORD = /(?<![\w$.-])[A-Za-z_$][\w$]*\.[A-Za-z_][\w-]*/g;
+/** A `<group>.<key>` inside a longer value, as a whole word: not part of a longer name or file name. */
+const VAR_WORD = /(?<![\w$.-])[A-Za-z_$][\w$]*\.[A-Za-z_][\w-]*(?![\w$.-])/g;
+
+/** A quoted CSS string, or the contents of a `url(...)`. Text of CSS, never a token. */
+const CSS_TEXT =
+  /"(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?|(?<![\w-])url\((?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^)])*\)?/gi;
+
+/** The `<group>.<key>` words of `value` that are CSS, outside quoted strings and `url(...)`. */
+function varWords(value: string): RegExpExecArray[] {
+  const text = [...value.matchAll(CSS_TEXT)].map((m) => [m.index, m.index + m[0].length] as const);
+  return [...value.matchAll(VAR_WORD)].filter(
+    (m) => !text.some(([from, to]) => m.index >= from && m.index < to),
+  ) as RegExpExecArray[];
+}
 
 /** Whether a token name is a StyleX `defineVars` variable, `<group>.<key>`. */
 export const isStylexVar = (name: string) => VAR_REF.test(name);
 
 /** Whether a value in `styles` may hold a token reference, so the design's tokens are worth loading. */
 export const mentionsVar = (styles: Record<string, string | null>) =>
-  Object.values(styles).some((v) => v !== null && /[A-Za-z_$][\w$]*\.[A-Za-z_]/.test(v));
+  Object.values(styles).some((v) => v !== null && varWords(v).length > 0);
 
 /** The values in `styles` that name a `defineVars` token, like `colors.brand`. */
 export function varRefs(styles: Record<string, string | null>): string[] {
@@ -449,7 +461,11 @@ function useVars(
   const refs: Record<string, string> = {};
   const missing = new Map<string, Set<string>>();
   const inside = (value: string) =>
-    isStylexVar(value) ? [] : (value.match(VAR_WORD) ?? []).filter((m) => vars[m]);
+    isStylexVar(value)
+      ? []
+      : varWords(value)
+          .map((m) => m[0])
+          .filter((m) => vars[m]);
   const named = Object.values(styles).filter((v): v is string => v !== null);
   for (const ref of new Set([...varRefs(styles), ...named.flatMap(inside)])) {
     const home = vars[ref];
@@ -477,7 +493,7 @@ function useVars(
     const escape = (raw: string) => raw.replace(/[\\`]|\$\{/g, (c) => `\\${c}`);
     let at = 0;
     let out = "";
-    for (const m of value.matchAll(VAR_WORD)) {
+    for (const m of varWords(value)) {
       if (!vars[m[0]]) continue;
       out += `${escape(value.slice(at, m.index))}\${${refs[m[0]]}}`;
       at = m.index + m[0].length;

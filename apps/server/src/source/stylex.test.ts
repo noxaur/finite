@@ -2,7 +2,7 @@ import { Refused, type SourceEdit } from "@finite/protocol";
 import { describe, expect, it } from "vite-plus/test";
 import { rev } from "./files.ts";
 import { rewrite } from "./rewrite.ts";
-import { readVars, writeVar } from "./stylex.ts";
+import { mentionsVar, readVars, writeVar } from "./stylex.ts";
 
 const FILE = "src/Card.tsx";
 
@@ -545,6 +545,44 @@ describe("picking a defineVars token", () => {
     expect(out).toContain(`padding: "url(a.png)"`);
     expect(out).toContain("margin: `calc(${colors.brand} + \\`x\\` + \\\\ + \\${y})`");
     expect(out.match(/tokens\.stylex/g)).toHaveLength(1);
+  });
+
+  it("keeps token names inside urls, quoted strings and longer words out of the template", () => {
+    const out = ok(
+      pick(CARD, {
+        backgroundImage: "url(colors.brand.png)",
+        fontFamily: `"colors.brand", 'colors.brand', sans-serif`,
+        margin: "url( 'colors.brand' )",
+        padding: "colors.brand.png",
+        gap: "1px colors.brandx",
+      }),
+    ).code;
+    expect(out).toContain(`backgroundImage: "url(colors.brand.png)"`);
+    expect(out).toContain(`fontFamily: "\\"colors.brand\\", 'colors.brand', sans-serif"`);
+    expect(out).toContain(`margin: "url( 'colors.brand' )"`);
+    expect(out).toContain(`padding: "colors.brand.png"`);
+    expect(out).toContain(`gap: "1px colors.brandx"`);
+    expect(out).not.toContain("tokens.stylex");
+  });
+
+  it("still interpolates a token that sits next to a url or a quoted string", () => {
+    const out = ok(
+      pick(CARD, {
+        backgroundImage: `linear-gradient(colors.brand, transparent), url(colors.brand.png)`,
+      }),
+    ).code;
+    expect(out).toContain(
+      "backgroundImage: `linear-gradient(${colors.brand}, transparent), url(colors.brand.png)`",
+    );
+  });
+
+  it("only looks for tokens outside urls and quoted strings when deciding to load them", () => {
+    expect(mentionsVar({ color: "colors.brand" })).toBe(true);
+    expect(mentionsVar({ color: "color-mix(in srgb, colors.brand 50%, red)" })).toBe(true);
+    expect(mentionsVar({ a: "url(colors.brand.png)", b: `"colors.brand", serif`, c: null })).toBe(
+      false,
+    );
+    expect(mentionsVar({ a: "colors.brand.png" })).toBe(false);
   });
 
   it("still writes a custom property pick as a string", () => {
