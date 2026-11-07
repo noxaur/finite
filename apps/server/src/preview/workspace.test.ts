@@ -152,7 +152,9 @@ describe("finite.json failures", () => {
     const events: PreviewEvent[] = [];
     previews.on("stopped-early", (event) => events.push(event));
     const ready = previews.ensure(workspaceDesign("stopped-early", root, "app", "app"));
-    await expect.poll(() => events.length).toBeGreaterThan(0);
+    await expect
+      .poll(() => events.some((e) => e.type === "preview" && e.log?.includes("$ sleep 1")))
+      .toBe(true);
     await previews.stop("stopped-early");
     await expect(ready).rejects.toThrow(/stopped before it was ready/);
     const after = events.length;

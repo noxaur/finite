@@ -158,6 +158,7 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
       }
       const env = envFor(workspace, { app: app.name });
       if (workspace.setup?.length) {
+        check();
         const key = `${workspace.root}\0${workspace.hash}`;
         await follow(setup(key, workspace.setup, workspace.root, workspace.env ?? {}), onOutput);
       }
