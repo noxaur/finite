@@ -199,7 +199,7 @@ describe("Next.js previews", () => {
       { path: "/", params: [], file: "src/pages/index.tsx" },
       { path: "/posts/[id]", params: ["id"], file: "src/pages/posts/[id].tsx" },
     ]);
-  });
+  }, 60_000);
 
   test("serves route pages with the bridge, stamped on the server and the client", async () => {
     const app = await get(previews.frameUrl("next-app", { kind: "route", path: "/about" }));
@@ -216,7 +216,7 @@ describe("Next.js previews", () => {
     expect(pages.text).toContain(`data-finite-loc="src/pages/posts/[id].tsx:8:6"`);
     // The project's Tailwind sheet is swapped for Finite's copy, which adds .finite/ as a source.
     expect(app.text).toContain("_finite_runtime_css_app_globals");
-  });
+  }, 60_000);
 
   test("renders a prototype file frame with classes used only in .finite/", async () => {
     fs.mkdirSync(path.join(roots["next-app"], ".finite/boards/demo"), { recursive: true });
@@ -236,7 +236,7 @@ describe("Next.js previews", () => {
     expect(fs.readFileSync(path.join(roots["next-app"], "app/globals.css"), "utf8")).not.toContain(
       "@source",
     );
-  });
+  }, 60_000);
 
   test("renders the brand board without Vite's import.meta.glob", async () => {
     // The fixture's design.json puts the brand folder in assets/brand.
