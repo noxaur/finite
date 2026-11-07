@@ -29,6 +29,8 @@ const MOUNT_MARKER =
   "// Written by Finite while it previews this project, and removed when it stops.";
 /** The sha1 of the mount Finite last wrote, so a mount someone edited is never overwritten. */
 const MOUNT_RECORD = `${RUNTIME}/mount.sha1`;
+/** `next dev` in a package.json script, and the flags after it up to the next command. */
+const NEXT_DEV = /\bnext\s+dev\b([^&|;]*)/;
 
 /**
  * Everything Finite adds to a Next.js dev server, for `next-host.mjs`: the files that make file
@@ -303,6 +305,27 @@ export function finiteNext(options: FiniteNextOptions) {
       return false;
     },
   };
+}
+
+/**
+ * Which bundler `next dev` runs the project with. The flag on the script that runs `next dev`
+ * (`dev` first) decides, as it does for the person. Without one, Next 16 picks Turbopack and
+ * exits when the config has a `webpack` function but no `turbopack` config, so that means
+ * webpack: such a project can only run on it. `config` says what Next's raw config for the dev
+ * phase has: a `webpack` function, and a `turbopack` (or `experimental.turbo`) config.
+ */
+export function nextBundler(
+  scripts: Record<string, string> | undefined,
+  config: { webpack: boolean; turbopack: boolean },
+): "webpack" | "turbopack" {
+  const runs = Object.entries(scripts ?? {}).flatMap(([key, value]) => {
+    const flags = NEXT_DEV.exec(value)?.[1];
+    return flags === undefined ? [] : [{ key, flags }];
+  });
+  const flags = (runs.find((run) => run.key === "dev") ?? runs[0])?.flags ?? "";
+  if (/(^|\s)--webpack\b/.test(flags)) return "webpack";
+  if (/(^|\s)--turbo(pack)?\b/.test(flags)) return "turbopack";
+  return config.webpack && !config.turbopack ? "webpack" : "turbopack";
 }
 
 /**

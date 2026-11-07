@@ -17,8 +17,8 @@ type LoaderContext = {
 const CSS_IMPORT = /(\bimport\s*(?:[^'";]*?\bfrom\s*)?)(["'])([^"']+\.css)\2/g;
 
 /**
- * The Turbopack loader (webpack's loader API) that stamps JSX in a Next.js project, the job
- * `finite:stamp` does in Vite. It runs before SWC, on the file as it is on disk, so locs and revs
+ * The loader that stamps JSX in a Next.js project, under Turbopack or webpack (both take
+ * webpack's loader API), the job `finite:stamp` does in Vite. It runs before SWC, on the file as it is on disk, so locs and revs
  * match the source edits compare against. It also points imports of the project's Tailwind
  * stylesheet at Finite's copy, which adds `.finite/` as a source.
  */

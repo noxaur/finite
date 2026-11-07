@@ -13,7 +13,14 @@ import { BRAND_BOARD, brandBoard } from "../store/brand.ts";
 import { prepareFixture } from "./fixtures.ts";
 import { createPreviews } from "./index.ts";
 
-const FIXTURES = ["rr-spa", "rr-framework", "tanstack", "next-app", "next-pages"] as const;
+const FIXTURES = [
+  "rr-spa",
+  "rr-framework",
+  "tanstack",
+  "next-app",
+  "next-pages",
+  "next-webpack",
+] as const;
 type FixtureName = (typeof FIXTURES)[number];
 
 let previews: Previews;
@@ -28,7 +35,10 @@ const CONFIGS: Record<FixtureName, Pick<Design, "router" | "styling" | "css">> =
   tanstack: { router: "tanstack", styling: "inline", css: [] },
   "next-app": { router: "next-app", styling: "tailwind", css: ["app/globals.css"] },
   "next-pages": { router: "next-pages", styling: "css-modules", css: ["src/styles/globals.css"] },
+  "next-webpack": { router: "next-app", styling: "tailwind", css: ["app/globals.css"] },
 };
+/** The App Router fixtures: `next-app` runs on Turbopack, `next-webpack` on webpack. */
+const NEXT_APPS = ["next-app", "next-webpack"] as const;
 
 function design(name: FixtureName): Design {
   return {
@@ -62,7 +72,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await previews?.close();
   for (const cleanup of cleanups) cleanup();
-});
+}, 60_000);
 
 describe("previews", () => {
   test("answers cross-origin requests only from the Finite shell's hosts", async () => {
@@ -218,51 +228,74 @@ describe("Next.js previews", () => {
     expect(app.text).toContain("_finite_runtime_css_app_globals");
   }, 60_000);
 
-  test("renders a prototype file frame with classes used only in .finite/", async () => {
-    fs.mkdirSync(path.join(roots["next-app"], ".finite/boards/demo"), { recursive: true });
-    fs.writeFileSync(
-      path.join(roots["next-app"], ".finite/boards/demo/Hero.tsx"),
-      `export default () => <section className="bg-[#0a7f3e] p-[13px]">Hero</section>;\n`,
-    );
-    const page = await get(
-      previews.frameUrl("next-app", { kind: "file", file: ".finite/boards/demo/Hero.tsx" }),
-    );
+  test("runs a project that needs webpack on webpack, with its own webpack config", async () => {
+    const page = await get(previews.frameUrl("next-webpack", { kind: "route", path: "/" }));
     expect(page.status).toBe(200);
-    expect(page.text).toContain(`id="finite-page"`);
-    expect(page.text).toMatch(/<section data-finite-loc="\.finite\/boards\/demo\/Hero\.tsx:1:21"/);
-    const sheet = /href="([^"]+_finite_runtime_css_app_globals[^"]+\.css)"/.exec(page.text)![1]!;
-    const css = await get(urls["next-app"] + sheet, "text/css");
-    expect(css.text).toContain("bg-\\[\\#0a7f3e\\]");
-    expect(fs.readFileSync(path.join(roots["next-app"], "app/globals.css"), "utf8")).not.toContain(
-      "@source",
+    expect(page.text.match(/\/__finite\/bridge\.js/g)).toHaveLength(1);
+    // The fixture's webpack() defines __BUNDLER__, which Turbopack would leave undefined.
+    expect(page.text).toContain("Built with <!-- -->webpack");
+    expect(page.text).toMatch(
+      /<h1 data-finite-loc="app\/page\.tsx:9:6" data-finite-rev="[0-9a-f]{8}"/,
     );
+    expect(page.text).toContain(`<button data-finite-loc="app/_components/Counter.tsx:8:4"`);
   }, 60_000);
 
-  test("renders the brand board without Vite's import.meta.glob", async () => {
-    // The fixture's design.json puts the brand folder in assets/brand.
-    const root = roots["next-app"];
-    fs.mkdirSync(path.join(root, "assets/brand"), { recursive: true });
-    fs.writeFileSync(
-      path.join(root, "assets/brand/logo.svg"),
-      `<svg xmlns="http://www.w3.org/2000/svg"/>`,
-    );
-    fs.mkdirSync(path.join(root, path.dirname(BRAND_BOARD)), { recursive: true });
-    fs.writeFileSync(path.join(root, BRAND_BOARD), brandBoard(design("next-app")));
-    await expect
-      .poll(() => fs.readFileSync(path.join(root, ".finite/runtime/brand.ts"), "utf8"), {
-        timeout: 10_000,
-      })
-      .toContain("logo.svg");
-    const page = await get(previews.frameUrl("next-app", { kind: "file", file: BRAND_BOARD }));
-    expect(page.status).toBe(200);
-    expect(page.text).toContain(`src="/__finite/asset?file=assets%2Fbrand%2Flogo.svg"`);
-    expect(page.text).toContain("--color-brand");
-    const logo = await fetch(`${urls["next-app"]}/__finite/asset?file=assets/brand/logo.svg`);
-    expect(logo.headers.get("content-type")).toBe("image/svg+xml");
-    expect(await logo.text()).toContain("<svg");
-    const outside = await fetch(`${urls["next-app"]}/__finite/asset?file=app/page.tsx`);
-    expect(outside.status).toBe(404);
-  }, 30_000);
+  test.each(NEXT_APPS)(
+    "renders a prototype file frame with classes used only in .finite/ (%s)",
+    async (name) => {
+      fs.mkdirSync(path.join(roots[name], ".finite/boards/demo"), { recursive: true });
+      fs.writeFileSync(
+        path.join(roots[name], ".finite/boards/demo/Hero.tsx"),
+        `export default () => <section className="bg-[#0a7f3e] p-[13px]">Hero</section>;\n`,
+      );
+      const page = await get(
+        previews.frameUrl(name, { kind: "file", file: ".finite/boards/demo/Hero.tsx" }),
+      );
+      expect(page.status).toBe(200);
+      expect(page.text).toContain(`id="finite-page"`);
+      expect(page.text).toMatch(
+        /<section data-finite-loc="\.finite\/boards\/demo\/Hero\.tsx:1:21"/,
+      );
+      // Turbopack names the sheet after Finite's copy, webpack after the layout that imports it.
+      const sheets = [...page.text.matchAll(/<link rel="stylesheet" href="([^"]+\.css[^"]*)"/g)];
+      const css = await Promise.all(sheets.map(([, href]) => get(urls[name] + href, "text/css")));
+      expect(css.map((sheet) => sheet.text).join("\n")).toContain("bg-\\[\\#0a7f3e\\]");
+      expect(fs.readFileSync(path.join(roots[name], "app/globals.css"), "utf8")).not.toContain(
+        "@source",
+      );
+    },
+    60_000,
+  );
+
+  test.each(NEXT_APPS)(
+    "renders the brand board without Vite's import.meta.glob (%s)",
+    async (name) => {
+      // The fixture's design.json puts the brand folder in assets/brand.
+      const root = roots[name];
+      fs.mkdirSync(path.join(root, "assets/brand"), { recursive: true });
+      fs.writeFileSync(
+        path.join(root, "assets/brand/logo.svg"),
+        `<svg xmlns="http://www.w3.org/2000/svg"/>`,
+      );
+      fs.mkdirSync(path.join(root, path.dirname(BRAND_BOARD)), { recursive: true });
+      fs.writeFileSync(path.join(root, BRAND_BOARD), brandBoard(design(name)));
+      await expect
+        .poll(() => fs.readFileSync(path.join(root, ".finite/runtime/brand.ts"), "utf8"), {
+          timeout: 10_000,
+        })
+        .toContain("logo.svg");
+      const page = await get(previews.frameUrl(name, { kind: "file", file: BRAND_BOARD }));
+      expect(page.status).toBe(200);
+      expect(page.text).toContain(`src="/__finite/asset?file=assets%2Fbrand%2Flogo.svg"`);
+      expect(page.text).toContain("--color-brand");
+      const logo = await fetch(`${urls[name]}/__finite/asset?file=assets/brand/logo.svg`);
+      expect(logo.headers.get("content-type")).toBe("image/svg+xml");
+      expect(await logo.text()).toContain("<svg");
+      const outside = await fetch(`${urls[name]}/__finite/asset?file=app/page.tsx`);
+      expect(outside.status).toBe(404);
+    },
+    30_000,
+  );
 
   test("lists a brand asset added on its own on the brand board", async () => {
     // Only an image, once the preview's own writes have settled, so no source change syncs too.
@@ -410,6 +443,41 @@ describe("preview lifecycle", () => {
     await previews.stop(copy.id);
     expect(fs.existsSync(at("app/(site)/%5F%5Ffinite"))).toBe(false);
     expect(fs.existsSync(at("app/(site)/layout.tsx"))).toBe(true);
+  }, 60_000);
+
+  test("runs a Pages Router project on webpack when its dev script says --webpack", async () => {
+    const fixture = await prepareFixture("next-pages");
+    cleanups.push(fixture.remove);
+    const pkg = path.join(fixture.root, "package.json");
+    fs.writeFileSync(
+      pkg,
+      fs.readFileSync(pkg, "utf8").replace(`"next dev"`, `"next dev --webpack"`),
+    );
+    const copy = { ...design("next-pages"), id: "next-pages-webpack", root: fixture.root };
+    const { url } = await previews.ensure(copy);
+    const page = await get(`${url}/posts/7`);
+    expect(page.status).toBe(200);
+    // webpack's dev runtime, which Turbopack doesn't serve.
+    expect(page.text).toContain("/_next/static/chunks/webpack.js");
+    expect(page.text).toContain(`data-finite-loc="src/pages/posts/[id].tsx:8:6"`);
+    const frame = await get(`${url}/__finite/frame?file=src%2Fpages%2Fabout.tsx`);
+    expect(frame.status).toBe(200);
+    expect(frame.text).toContain(`id="finite-page"`);
+    await previews.stop(copy.id);
+  }, 60_000);
+
+  test("runs a project on webpack when its config has webpack() and no turbopack", async () => {
+    const fixture = await prepareFixture("next-webpack");
+    cleanups.push(fixture.remove);
+    const pkg = path.join(fixture.root, "package.json");
+    fs.writeFileSync(
+      pkg,
+      fs.readFileSync(pkg, "utf8").replace(`"next dev --webpack"`, `"next dev"`),
+    );
+    const copy = { ...design("next-webpack"), id: "next-webpack-config", root: fixture.root };
+    const { url } = await previews.ensure(copy);
+    expect((await get(`${url}/`)).text).toContain("Built with <!-- -->webpack");
+    await previews.stop(copy.id);
   }, 60_000);
 
   test("renders Next.js file frames for a project with output: export", async () => {
@@ -675,52 +743,62 @@ describe.skipIf(!chromePath)("bridge in Chrome", () => {
     await fresh.page.close();
   }, 60_000);
 
-  test("hit, HMR and file frames on Next.js", async () => {
-    const { page, frame } = await open(`${urls["next-app"]}/`, "h1[data-finite-loc]");
-    const heading = await frame.$eval("h1", (h) => {
-      const r = h.getBoundingClientRect();
-      return { x: r.x + 4, y: r.y + 4, rev: h.getAttribute("data-finite-rev") };
-    });
-    const hit = await ask(page, "hit", { x: heading.x, y: heading.y });
-    expect(hit.value).toMatchObject({ loc: "app/page.tsx:7:6", tag: "h1" });
-    // A client component is stamped too.
-    expect(await frame.$eval("button", (b) => b.getAttribute("data-finite-loc"))).toBe(
-      "app/_components/Counter.tsx:8:4",
-    );
-
-    // Edit only after React hydrated the page, or the new HTML fails hydration.
-    await expect
-      .poll(() =>
-        frame.$eval("h1", (h) => Object.keys(h).some((key) => key.startsWith("__reactFiber$"))),
-      )
-      .toBe(true);
-    const home = path.join(roots["next-app"], "app/page.tsx");
-    fs.writeFileSync(home, fs.readFileSync(home, "utf8").replace(">Home<", ">Welcome<"));
-    await expect
-      .poll(() => bridgeEvents(page).then((list) => list.some((e) => e.type === "updated")), {
-        timeout: 15_000,
-      })
-      .toBe(true);
-    await expect.poll(() => frame.$eval("h1", (h) => h.textContent)).toBe("Welcome");
-    expect(await frame.$eval("h1", (h) => h.getAttribute("data-finite-rev"))).not.toBe(heading.rev);
-    expect((await bridgeEvents(page)).filter((e) => e.type === "error")).toEqual([]);
-    await page.close();
-
-    for (const [name, file, exportName, selector] of [
-      ["next-app", "app/_components/Counter.tsx", "Counter", "button[data-finite-loc]"],
-      ["next-pages", "src/pages/about.tsx", undefined, "h1[data-finite-loc]"],
-    ] as const) {
-      const src = previews.frameUrl(name, {
-        kind: "file",
-        file,
-        ...(exportName && { exportName }),
+  test.each([
+    ["next-app", "app/page.tsx:7:6"],
+    ["next-webpack", "app/page.tsx:9:6"],
+  ] as const)(
+    "hit, HMR and file frames on Next.js (%s)",
+    async (name, headingLoc) => {
+      const { page, frame } = await open(`${urls[name]}/`, "h1[data-finite-loc]");
+      const heading = await frame.$eval("h1", (h) => {
+        const r = h.getBoundingClientRect();
+        return { x: r.x + 4, y: r.y + 4, rev: h.getAttribute("data-finite-rev") };
       });
-      const opened = await open(src, selector);
-      const errors = (await bridgeEvents(opened.page)).filter((e) => e.type === "error");
-      expect(errors, src).toEqual([]);
-      await opened.page.close();
-    }
-  }, 120_000);
+      const hit = await ask(page, "hit", { x: heading.x, y: heading.y });
+      expect(hit.value).toMatchObject({ loc: headingLoc, tag: "h1" });
+      // A client component is stamped too.
+      expect(await frame.$eval("button", (b) => b.getAttribute("data-finite-loc"))).toBe(
+        "app/_components/Counter.tsx:8:4",
+      );
+
+      // Edit only after React hydrated the page, or the new HTML fails hydration.
+      await expect
+        .poll(() =>
+          frame.$eval("h1", (h) => Object.keys(h).some((key) => key.startsWith("__reactFiber$"))),
+        )
+        .toBe(true);
+      const updates = () =>
+        bridgeEvents(page).then((list) => list.filter((e) => e.type === "updated").length);
+      const before = await updates();
+      const home = path.join(roots[name], "app/page.tsx");
+      fs.writeFileSync(home, fs.readFileSync(home, "utf8").replace(">Home<", ">Welcome<"));
+      await expect
+        .poll(() => frame.$eval("h1", (h) => h.textContent), { timeout: 15_000 })
+        .toBe("Welcome");
+      await expect.poll(updates).toBeGreaterThan(before);
+      expect(await frame.$eval("h1", (h) => h.getAttribute("data-finite-rev"))).not.toBe(
+        heading.rev,
+      );
+      expect((await bridgeEvents(page)).filter((e) => e.type === "error")).toEqual([]);
+      await page.close();
+
+      for (const [fixture, file, exportName, selector] of [
+        [name, "app/_components/Counter.tsx", "Counter", "button[data-finite-loc]"],
+        ["next-pages", "src/pages/about.tsx", undefined, "h1[data-finite-loc]"],
+      ] as const) {
+        const src = previews.frameUrl(fixture, {
+          kind: "file",
+          file,
+          ...(exportName && { exportName }),
+        });
+        const opened = await open(src, selector);
+        const errors = (await bridgeEvents(opened.page)).filter((e) => e.type === "error");
+        expect(errors, src).toEqual([]);
+        await opened.page.close();
+      }
+    },
+    120_000,
+  );
 
   test("connects in React Router framework mode and in TanStack frames", async () => {
     for (const src of [
