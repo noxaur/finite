@@ -21,7 +21,8 @@ type Service = {
   name: string;
   /** Unset for a service that was already answering, which Finite didn't start. */
   child: ChildProcess | undefined;
-  refs: number;
+  /** Each holder's `onExit`, told when the service exits after it was ready. */
+  holders: Set<(error: Error) => void>;
   ready: Promise<void>;
   log: string;
 };
@@ -32,11 +33,13 @@ export type Workspaces = {
    * services the app needs. Streams setup output to `onOutput`. Resolves with the env finite.json
    * gives the dev server and a `release` for the services, to call when the preview stops. Once
    * `wanted` returns false (the preview stopped), it starts no more services and refuses.
+   * `onExit` gets the error when a service it holds exits after it was ready.
    */
   prepare(
     design: Design,
     onOutput: (chunk: string) => void,
     wanted?: () => boolean,
+    onExit?: (error: Error) => void,
   ): Promise<{ env: Record<string, string>; release: () => void }>;
   /** Stops every service and setup command. */
   close(): Promise<void>;
@@ -96,7 +99,7 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
     const service: Service = {
       name: spec.name,
       child: undefined,
-      refs: 0,
+      holders: new Set(),
       ready: Promise.resolve(),
       log: "",
     };
@@ -105,6 +108,7 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
       new Refused(
         `${where} ${reason}. Fix it, or change services.${spec.name} in finite.json, then open the design again.${service.log ? `\n\nIts output:\n${service.log}` : ""}`,
       );
+    let up = false;
     service.ready = (async () => {
       if (spec.ready !== undefined && (await answers(spec.ready))) return;
       const child = run(spec.run, spec.dir, envFor(workspace, { service: spec.name }));
@@ -118,6 +122,9 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
       void exited(child).then((value) => {
         exit = value;
         if (services.get(key) === service) services.delete(key);
+        if (!up) return;
+        const error = failed(`exited (${value}) after it was ready`);
+        for (const onExit of service.holders) onExit(error);
       });
       if (spec.ready === undefined) return;
       const deadline = Date.now() + options.startTimeoutMs;
@@ -130,19 +137,23 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
         `didn't answer on ${spec.ready} within ${Math.round(options.startTimeoutMs / 1000)}s`,
       );
     })();
+    service.ready.then(
+      () => (up = true),
+      () => {},
+    );
     services.set(key, service);
     return service;
   }
 
-  function release(service: Service) {
-    service.refs -= 1;
-    if (service.refs > 0) return;
+  function release(service: Service, onExit: (error: Error) => void) {
+    service.holders.delete(onExit);
+    if (service.holders.size > 0) return;
     for (const [key, value] of services) if (value === service) services.delete(key);
     if (service.child) void stop(service.child);
   }
 
   return {
-    async prepare(design, onOutput, wanted = () => true) {
+    async prepare(design, onOutput, wanted = () => true, onExit = () => {}) {
       // A preview stopped while a setup command or a service ran starts nothing after it.
       const check = () => {
         if (!wanted()) throw new Refused("The design's preview was stopped before it was ready.");
@@ -169,14 +180,14 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
       }
 
       const held: Service[] = [];
-      const releaseAll = () => held.splice(0).forEach(release);
+      const releaseAll = () => held.splice(0).forEach((service) => release(service, onExit));
       try {
         for (const name of servicesFor(workspace, app.name)) {
           check();
           const service =
             services.get(`${workspace.root}\0${name}`) ??
             startService(workspace, workspace.services[name]!);
-          service.refs += 1;
+          service.holders.add(onExit);
           held.push(service);
           await service.ready;
         }
@@ -188,6 +199,7 @@ export function createWorkspaces(options: { startTimeoutMs: number }): Workspace
     },
 
     async close() {
+      for (const service of services.values()) service.holders.clear();
       jobs.clear();
       services.clear();
       await Promise.all([...groups].map(stop));

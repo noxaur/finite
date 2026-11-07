@@ -537,10 +537,14 @@ export function canvasServer(ctx: ToolContext) {
 
     safeTool(
       "frame_errors",
-      "Lists the runtime errors, unhandled rejections and console errors a frame reported.",
+      "Lists the runtime errors, unhandled rejections and console errors a frame reported, or why the design's preview is down.",
       canvasTools.frame_errors,
       async ({ frameId }) => {
         await findFrame(frameId);
+        const preview = ctx.previews.state(design.id);
+        if (preview.status === "error") {
+          throw new Refused(`The design's preview is down, so no frame runs:\n\n${preview.log}`);
+        }
         const errors = ctx.previews.errors(design.id, frameId);
         if (errors.length === 0) return text("No errors.");
         return json(errors.map(({ kind, message, stack }) => ({ kind, message, stack })));

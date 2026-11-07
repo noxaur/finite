@@ -163,7 +163,7 @@ Without a `finite.json`, detection runs as before. When it refuses a folder that
 `Previews.ensure` on a design with a `workspace` (`preview/workspace.ts`) does three things before the dev server:
 
 1. Runs the workspace's `setup`, then the app's, once per server run and again whenever `finite.json`'s text changes (its sha1). Designs of one workspace share the run. While it runs, the preview is `starting` with the output in `log`; a failing command makes it `error` with the command, its exit code and output.
-2. Starts the services the app needs, transitively, each after the ones it needs, and waits for `ready` up to the start timeout. Every design of the workspace shares a service, counted by reference. It stops (SIGTERM to its process group, SIGKILL after 5 s) when the last preview that needs it stops. A service that's already answering on its `ready` before Finite starts it, because the person runs it themselves, is used as is.
+2. Starts the services the app needs, transitively, each after the ones it needs, and waits for `ready` up to the start timeout. Every design of the workspace shares a service, counted by reference. It stops (SIGTERM to its process group, SIGKILL after 5 s) when the last preview that needs it stops. If it exits on its own after it was ready, every preview holding it goes to `error`, with the service, its exit code or signal and its output in `log`; the next `ensure` (opening the design again, or the agent's `screenshot`) starts it again. A service that's already answering on its `ready` before Finite starts it, because the person runs it themselves, is used as is.
 3. Starts the dev server child as before, with the merged env.
 
 A preview stopped during these steps (by `Previews.stop` or removing the design) starts nothing after the step it's on and lets go of the services it holds. A setup command other designs share runs to its end; `Previews.close` kills it.
@@ -202,17 +202,17 @@ The **permission fence** (`agent/policy.ts`) keeps agents out of production code
 
 The **canvas tools** are an in-process MCP server named `finite` (`agent/tools.ts`, input shapes in `packages/protocol/src/tools.ts`):
 
-| Tool                          | What it does                                                                                      |
-| ----------------------------- | ------------------------------------------------------------------------------------------------- |
-| `read_canvas`, `open_canvas`  | Read a canvas; open a page or prototype by name (or make one) and link it to the thread.          |
-| `place_frames`                | Put TSX files on a canvas in a row, each with a title and a why label above it.                   |
-| `write_text`, `comment`       | A text label on the canvas; a comment pinned to a frame or an element in it.                      |
-| `copy_production`             | Copy one production component or route file onto the board, its imports pointing at production.   |
-| `move_to_prod`                | Allow production writes for the rest of the turn.                                                 |
-| `add_brand_asset`             | Copy a file or URL into the brand folder and list it on the Brand page.                           |
-| `spawn_thread`, `name_thread` | Start a child thread; name this one.                                                              |
-| `screenshot`, `frame_errors`  | A PNG of a frame, taken in the system Chrome with puppeteer-core; the errors its bridge reported. |
-| `finish_setup`                | Check `finite.json` and connect its apps, then start the next design's preview and report it.     |
+| Tool                          | What it does                                                                                                                                     |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `read_canvas`, `open_canvas`  | Read a canvas; open a page or prototype by name (or make one) and link it to the thread.                                                         |
+| `place_frames`                | Put TSX files on a canvas in a row, each with a title and a why label above it.                                                                  |
+| `write_text`, `comment`       | A text label on the canvas; a comment pinned to a frame or an element in it.                                                                     |
+| `copy_production`             | Copy one production component or route file onto the board, its imports pointing at production.                                                  |
+| `move_to_prod`                | Allow production writes for the rest of the turn.                                                                                                |
+| `add_brand_asset`             | Copy a file or URL into the brand folder and list it on the Brand page.                                                                          |
+| `spawn_thread`, `name_thread` | Start a child thread; name this one.                                                                                                             |
+| `screenshot`, `frame_errors`  | A PNG of a frame, taken in the system Chrome with puppeteer-core; the errors its bridge reported, or the preview's log when the preview is down. |
+| `finish_setup`                | Check `finite.json` and connect its apps, then start the next design's preview and report it.                                                    |
 
 ## The web app
 
