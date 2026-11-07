@@ -1,0 +1,8 @@
+:root {
+  --brand: #95ced7;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+}

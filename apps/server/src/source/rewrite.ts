@@ -16,6 +16,7 @@ import {
   type Element,
   type Parsed,
 } from "./jsx.ts";
+import { stylexEdit } from "./stylex.ts";
 import { editClasses, kebab, stripClasses, type Theme } from "./tailwind.ts";
 
 export type RewriteContext = {
@@ -235,6 +236,11 @@ function asChild(element: Element, what: string) {
 const CLASS_FNS = new Set(["cn", "clsx", "twMerge", "classnames", "classNames", "cx"]);
 
 function style(s: StepCtx, el: t.JSXElement, styles: Record<string, string | null>): void {
+  if (s.convention === "stylex") {
+    const edit = stylexEdit(s.code, s.parsed.ast, el, styles);
+    if (!edit) return inline(s, el, styles);
+    return void s.ms.overwrite(edit.start, edit.end, edit.text);
+  }
   const cls = attribute(el, "className");
   if (s.convention === "inline" || (s.convention === "css-modules" && !cls))
     return inline(s, el, styles);

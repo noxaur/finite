@@ -6,7 +6,7 @@ Finite is a design canvas for real React projects, which agents edit and people 
 
 These are the things we can't compromise on. They make us what we are today and tomorrow.
 
-- Real React projects: a design is an ordinary React and TypeScript codebase, not a custom format. Frames are live pages of the project's own Vite dev server, and every hand edit writes TSX in the project's own convention (Tailwind, CSS modules or inline styles). The project's files are the truth; Finite's own state is JSON in `.finite/`.
+- Real React projects: a design is an ordinary React and TypeScript codebase, not a custom format. Frames are live pages of the project's own Vite dev server, and every hand edit writes TSX in the project's own convention (Tailwind, CSS modules, StyleX or inline styles). The project's files are the truth; Finite's own state is JSON in `.finite/`.
 - Built for agents: agents do most of the work, through the person's local Claude Code CLI with Finite's canvas tools. Every tool result, refusal and error is written for an agent or a person to read, and says what to do instead. People select, move, resize and restyle on the canvas too.
 - Live and shared: several people and threads work on one design at once and see every change live. One actor's edit or undo never wipes out another's work.
 - Fast: the canvas holds many live iframes and stays smooth while agents work. Performance is a core feature. Measure it, and don't trade it for convenience.
@@ -28,7 +28,7 @@ The most common defect in this repo is a feature that works on the path you test
 - **Both tabs.** The Design tab (pages, layers, tokens, inspector) and the Prototypes tab (thread list, composer, prototype canvases) share the canvas. A canvas change must work on a page and on a prototype, where hand edits outside `.finite/` are refused with `outside-prototype`.
 - **Connected and blank designs.** A blank design starts from `apps/server/scaffold`; a connected one is whatever the person has. Test both. A connected root is the person's own code: Finite never deletes it.
 - **The three router adapters.** Routes come from TanStack Router's route tree, React Router's framework-mode `routes.ts`, or a scan of React Router's data and declarative modes (`packages/vite-plugin/src/routes.ts`). The fixtures `rr-spa`, `rr-framework` and `tanstack` in `apps/server/fixtures` cover each.
-- **Every styling convention.** A hand edit has a Tailwind, a CSS-modules and an inline path (`apps/server/src/source/`). Change one and check the others, and the `unsupported-style` refusal.
+- **Every styling convention.** A hand edit has a Tailwind, a CSS-modules, a StyleX and an inline path (`apps/server/src/source/`). Change one and check the others, and the `unsupported-style` refusal. The `stylex` fixture covers StyleX.
 - **Undo and concurrent edits.** Undo is per actor and works by span patches. Check undo, redo, and an edit by someone else in the same file in between.
 - **Reverse states.** If you added a way in, add the way out and the way to see it. Remove needs restore, resolve needs reopen, snooze and settle need a way to wake. A one-way door is a bug.
 - **The protocol.** A new request or event goes in `packages/protocol/src/wire.ts`, a handler in `apps/server/src/handlers.ts`, and the client side in `apps/web/src/client/finite.ts`.
@@ -46,7 +46,7 @@ Read `docs/how-finite-works.md` before you change the server, the plugin or the 
   - `main.ts`, `config.ts` (every `FINITE_*` variable), `app.ts`, `hub.ts`, `handlers.ts`, `http.ts` (attachments, the export zip, static files), `guard.ts` (Host and Origin checks).
   - `store/`: the registry, settings, `.finite/` files, project detection (`detect.ts`), installs and the Routes page (`routes.ts`).
   - `preview/`: the dev servers; `vite-host.mjs` is the child.
-  - `source/`: `rewrite.ts` (the edit kinds), `tailwind.ts`, `css.ts`, `tokens.ts`, `history.ts` (undo), `imports.ts` and `components.ts` (copying and detaching files).
+  - `source/`: `rewrite.ts` (the edit kinds), `tailwind.ts`, `css.ts`, `stylex.ts`, `tokens.ts`, `history.ts` (undo), `imports.ts` and `components.ts` (copying and detaching files).
   - `agent/`: `index.ts` (sessions, steer and queue), `policy.ts` (the fence), `tools.ts` (canvas tools), `instructions.ts` (the system prompt addition; keep it under 2,500 characters), `events.ts`, `status.ts`, `screenshot.ts`.
   - `scaffold/` (the blank design) and `fixtures/` (test apps).
 - `apps/web/`: the Next.js static export, styled with StyleX. `src/client/finite.ts` (the socket and live state), `src/canvas/` (camera world, frames, editor, bridge, selection), `src/components/` (design list, design screen, sidebars, thread list, composer, ✱ menu, comments, settings, `inspector/`), `src/design/editing/` (control values to CSS), `src/styles/tokens.stylex.ts` (the theme tokens).

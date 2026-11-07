@@ -319,6 +319,58 @@ describe("SourceEditor undo and redo", () => {
     await expect(source.undo(open(d()), ana)).rejects.toMatchObject({ message: "Nothing to undo" });
   });
 
+  it("undoes and redoes a StyleX create edit around another actor's edit in the same file", async () => {
+    const card = `import * as stylex from "@stylexjs/stylex";
+
+const styles = stylex.create({
+  card: {
+    color: "red",
+  },
+});
+
+export function Card() {
+  return (
+    <div {...stylex.props(styles.card)}>
+      <p>One</p>
+    </div>
+  );
+}
+`;
+    const padded = (text: string) =>
+      card.replace(`color: "red",`, `color: "red",\n    padding: "8px",`).replace("One", text);
+    await put("src/Card.tsx", card);
+    const source = createSourceEditor();
+    const sx = open(design("stylex"));
+    const styled = await source.apply(
+      sx,
+      [
+        await edit("src/Card.tsx", {
+          kind: "style",
+          locs: ["src/Card.tsx:11:4"],
+          tag: "div",
+          styles: { padding: "8px" },
+        }),
+      ],
+      ana,
+      page,
+    );
+    expect(await get("src/Card.tsx")).toBe(padded("One"));
+    const p = styled.remap["src/Card.tsx:12:6"]!;
+    expect(p).toBe("src/Card.tsx:13:6");
+    await source.apply(
+      sx,
+      [await edit("src/Card.tsx", { kind: "text", loc: p, tag: "p", text: "Two" })],
+      bo,
+      page,
+    );
+    await source.undo(sx, ana);
+    expect(await get("src/Card.tsx")).toBe(card.replace("One", "Two"));
+    await source.redo(sx, ana);
+    expect(await get("src/Card.tsx")).toBe(padded("Two"));
+    await source.undo(sx, bo);
+    expect(await get("src/Card.tsx")).toBe(padded("One"));
+  });
+
   it("a new edit clears the redo stack", async () => {
     await put("src/App.tsx", APP);
     const source = createSourceEditor();
