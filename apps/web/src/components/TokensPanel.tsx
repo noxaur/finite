@@ -5,23 +5,27 @@ import type { Token, TokenMode } from "@finite/protocol";
 import { useEffect, useRef, useState } from "react";
 import { finite } from "@/client/finite";
 import { setAlpha } from "@/design/editing/colors";
-import { displayName, hexOf, isColor } from "@/lib/tokens";
+import { displayName, hexOf, isColor, isVariable } from "@/lib/tokens";
 import { colors, fonts, radii, shadows, size, space } from "@/styles/tokens.stylex";
 import { IconButton } from "./Button";
 import { type ColorPick, ColorPicker } from "./ColorPicker";
 
 const MODES: readonly TokenMode[] = ["light", "dark"];
 
-/** A token name as CSS wants it: `--brand`, whether or not it was typed with the dashes. */
+/**
+ * A token name as the stylesheet wants it: `--brand`, whether or not it was typed with the dashes,
+ * or a Sass `$brand` or Less `@brand` as typed.
+ */
 export const tokenName = (typed: string) => {
   const t = typed.trim();
-  return t.startsWith("--") ? t : `--${t}`;
+  return t.startsWith("--") || isVariable(t) ? t : `--${t}`;
 };
 
 /**
  * The design's tokens, at the bottom of the left sidebar: the CSS custom properties in its
- * `@theme` (Light) and `.dark` (Dark) blocks, each value editable in place. Colors get a swatch
- * that opens the color picker. Clearing a value takes the token out of that mode.
+ * `@theme` (Light) and `.dark` (Dark) blocks, and the Sass `$vars` and Less `@vars` of its global
+ * sheets (Light only), each value editable in place. Colors get a swatch that opens the color
+ * picker. Clearing a value takes the token out of that mode.
  */
 export function TokensSection({ designId }: { designId: string }) {
   const [tokens, setTokens] = useState<readonly Token[] | null>(null);
@@ -73,14 +77,24 @@ export function TokensSection({ designId }: { designId: string }) {
           <span title={t.name} {...stylex.props(styles.name)}>
             {displayName(t.name)}
           </span>
-          {MODES.map((mode) => (
-            <ValueField
-              key={mode}
-              name={t.name}
-              value={t[mode] ?? ""}
-              onSave={(v) => void save(t.name, mode, v.trim() === "" ? null : v.trim())}
-            />
-          ))}
+          {MODES.map((mode) =>
+            mode === "dark" && isVariable(t.name) ? (
+              <span
+                key={mode}
+                title={`${t.name} is a ${t.name.startsWith("$") ? "Sass" : "Less"} variable, with one value for both modes`}
+                {...stylex.props(styles.note)}
+              >
+                —
+              </span>
+            ) : (
+              <ValueField
+                key={mode}
+                name={t.name}
+                value={t[mode] ?? ""}
+                onSave={(v) => void save(t.name, mode, v.trim() === "" ? null : v.trim())}
+              />
+            ),
+          )}
         </div>
       ))}
       {adding && (

@@ -416,6 +416,27 @@ describe("inline styles", () => {
 });
 
 describe("refusals and batches", () => {
+  it.each(conventions)(
+    "refuses a Sass or Less variable on an element no module rule styles (%s)",
+    (convention) => {
+      for (const [value, sheet] of [
+        ["$brand", ".module.scss"],
+        ["1px solid @line", ".module.less"],
+      ]) {
+        const result = refused(
+          run(
+            APP,
+            [{ kind: "style", locs: [L(7)], tag: "p", styles: { color: value! } }],
+            convention,
+          ),
+        );
+        expect(result.code).toBe("unsupported-style");
+        expect(result.reason).toContain(sheet);
+        expect(result.reason).toMatch(/Pick a CSS custom property \(--name\) token instead/);
+      }
+    },
+  );
+
   it("refuses a stale rev", () => {
     const result = rewrite(
       APP,

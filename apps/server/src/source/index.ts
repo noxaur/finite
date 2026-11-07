@@ -34,7 +34,17 @@ import {
 } from "./imports.ts";
 import { parseModule } from "./jsx.ts";
 import { editFiles, rewrite } from "./rewrite.ts";
-import { hasToken, lightTheme, readTokens, tokenName, writeToken } from "./tokens.ts";
+import {
+  hasToken,
+  isVariable,
+  lightTheme,
+  readTokens,
+  tokenName,
+  variableHome,
+  variableRefs,
+  variableSheets,
+  writeToken,
+} from "./tokens.ts";
 
 export { rewrite } from "./rewrite.ts";
 
@@ -154,6 +164,9 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
       }
       const theme =
         design.styling === "tailwind" ? lightTheme(readTokens(await sheets(design))) : {};
+      const variables = edits.some((e) => e.kind === "style" && variableRefs(e.styles).length > 0)
+        ? variableSheets(await sheets(design))
+        : {};
 
       const remap: Remap = {};
       const patches = await transact(design.root, [...files, ...modules], (contents) => {
@@ -164,7 +177,11 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
         for (const file of files) {
           const code = contents.get(file);
           if (code === undefined) throw new Refused(`${file} doesn't exist`, "not-found");
-          const result = rewrite(code, file, edits, design.styling, { theme, files: extra });
+          const result = rewrite(code, file, edits, design.styling, {
+            theme,
+            files: extra,
+            variables,
+          });
           if (result instanceof Refused) throw result;
           out.set(file, result.code);
           Object.assign(remap, result.remap);
@@ -207,13 +224,14 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
     async setToken(design, { name, mode, value }) {
       const prop = tokenName(name);
       const all = await sheets(design);
-      const target =
-        all.find((s) => hasToken(s.file, s.css, prop, mode)) ??
-        (design.styling === "tailwind"
-          ? (all.find((s) => /@theme\b/.test(s.css)) ??
-            all.find((s) => /@import\s+["']tailwindcss/.test(s.css)))
-          : all.find((s) => /:root\b/.test(s.css))) ??
-        all[0];
+      const target = isVariable(prop)
+        ? variableHome(prop, all)
+        : (all.find((s) => hasToken(s.file, s.css, prop, mode)) ??
+          (design.styling === "tailwind"
+            ? (all.find((s) => /@theme\b/.test(s.css)) ??
+              all.find((s) => /@import\s+["']tailwindcss/.test(s.css)))
+            : all.find((s) => /:root\b/.test(s.css))) ??
+          all[0]);
       if (!target)
         throw new Refused(
           "This design has no stylesheet to keep tokens in. Add one to css in .finite/design.json.",
@@ -261,10 +279,10 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
         const data = await readFile(inRoot(root, file)).catch(() => undefined);
         if (!data) continue;
         out.push({ path: file, data: new Uint8Array(data) });
-        for (const spec of localImports(file, data.toString("utf8"))) {
+        for (const { spec, rule } of localImports(file, data.toString("utf8"))) {
           const target = spec.startsWith("/") ? spec.slice(1) : resolveSpec(file, spec);
           if (!isInside(root, target)) continue;
-          const dep = await existing(root, importCandidates(file, target));
+          const dep = await existing(root, importCandidates(file, target, rule === "import"));
           if (dep) queue.push(dep);
         }
       }
@@ -296,11 +314,11 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
 
 /**
  * The local files a module or stylesheet pulls in, as written: relative (or root-absolute) import
- * specifiers of a JS/TS module, `@import`, `@use`, `@forward` and `url()` of a stylesheet. Query
- * strings (`?url`) are dropped.
+ * specifiers of a JS/TS module, `@import`, `@use`, `@forward` and `url()` of a stylesheet, with
+ * the rule that names each. Query strings (`?url`) are dropped.
  */
-function localImports(file: string, code: string): string[] {
-  let specs: string[] = [];
+function localImports(file: string, code: string): { spec: string; rule?: string }[] {
+  let specs: { spec: string; rule?: string }[] = [];
   if (/\.[cm]?[jt]sx?$/.test(file)) {
     let ast: ReturnType<typeof parseModule>;
     try {
@@ -308,13 +326,13 @@ function localImports(file: string, code: string): string[] {
     } catch {
       return [];
     }
-    specs = specifiers(ast).map((lit) => lit.value);
+    specs = specifiers(ast).map((lit) => ({ spec: lit.value }));
   } else if (/\.(css|scss|sass|less)$/.test(file)) {
     specs = sheetSpecifiers(file, code);
   }
   return specs
-    .map((spec) => spec.replace(/[?#].*$/, ""))
-    .filter((spec) => isRelative(spec) || (spec.startsWith("/") && !spec.startsWith("//")));
+    .map((s) => ({ ...s, spec: s.spec.replace(/[?#].*$/, "") }))
+    .filter(({ spec }) => isRelative(spec) || (spec.startsWith("/") && !spec.startsWith("//")));
 }
 
 function isInside(root: string, file: string): boolean {

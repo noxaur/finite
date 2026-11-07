@@ -1,6 +1,19 @@
 import type { Styling } from "@finite/protocol";
 import { describe, expect, it } from "vite-plus/test";
-import { hasToken, lightTheme, readTokens, writeToken } from "./tokens.ts";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import less from "less";
+import * as sass from "sass";
+import {
+  hasToken,
+  lightTheme,
+  readTokens,
+  tokenName,
+  useVariables,
+  variableSheets,
+  writeToken,
+} from "./tokens.ts";
 
 const read = (...sheets: string[]) => readTokens(sheets.map((css) => ({ file: "app.css", css })));
 const write = (
@@ -110,12 +123,29 @@ $gap: 4px;
 }
 `;
 
-    it("reads custom properties and ignores $vars and @vars", () => {
+    it("reads custom properties and the top-level $vars and @vars, in order", () => {
       const scss = readTokens([{ file: "g.scss", css: SCSS }]);
-      expect(scss).toEqual([{ name: "--brand", light: "#95ced7", dark: "#4a8f99" }]);
+      expect(scss).toEqual([
+        { name: "--brand", light: "#95ced7", dark: "#4a8f99" },
+        { name: "$gap", light: "4px" },
+      ]);
       expect(readTokens([{ file: "g.less", css: LESS }])).toEqual([
+        { name: "@gap", light: "4px" },
         { name: "--brand", light: "#95ced7" },
       ]);
+    });
+
+    it("leaves out nested variables, Sass flags, Less rulesets and the other dialect's sigil", () => {
+      const scss = `$a: 1px !default;\n.x {\n  $local: 2px;\n}\n`;
+      expect(readTokens([{ file: "g.scss", css: scss }])).toEqual([{ name: "$a", light: "1px" }]);
+      const less = `@a: 1px;\n@set: { color: red; };\n.x {\n  @local: 2px;\n}\n`;
+      expect(readTokens([{ file: "g.less", css: less }])).toEqual([{ name: "@a", light: "1px" }]);
+      expect(
+        variableSheets([
+          { file: "g.scss", css: scss },
+          { file: "t.less", css: less },
+        ]),
+      ).toEqual({ $a: "g.scss", "@a": "t.less" });
     });
 
     it("changes a value in place and leaves the rest byte-identical", () => {
@@ -158,6 +188,137 @@ $gap: 4px;
     it("finds a token in a .scss sheet", () => {
       expect(hasToken("g.scss", SCSS, "--brand", "dark")).toBe(true);
       expect(hasToken("g.scss", SCSS, "--gap", "light")).toBe(false);
+    });
+  });
+});
+
+describe("Sass and Less variable tokens", () => {
+  const SCSS = `@use "sass:math";\n\n$brand: #95ced7 !default; // cyan\n$gap: 4px;\n\n.a {\n  color: $brand;\n}\n`;
+  const LESS = `@import (reference) "./mixins";\n@brand: #95ced7; // cyan\n\n.a {\n  color: @brand;\n}\n`;
+
+  it("takes $ and @ names as they are", () => {
+    expect(tokenName("$brand")).toBe("$brand");
+    expect(tokenName("@brand")).toBe("@brand");
+    expect(tokenName("brand")).toBe("--brand");
+    expect(() => tokenName("$1")).toThrow(/Sass variable/);
+  });
+
+  it("changes a value in place, keeping !default, and the sheet still compiles", async () => {
+    const next = write(SCSS, "$brand", "light", "#111", "g.scss", "css-modules");
+    expect(next).toBe(SCSS.replace("#95ced7 !default", "#111 !default"));
+    expect(sass.compileString(next).css).toContain("color: #111");
+    const nextLess = write(LESS, "@brand", "light", "#111", "g.less", "css-modules");
+    expect(nextLess).toBe(LESS.replace("#95ced7", "#111"));
+    expect((await less.render(nextLess.replace(/@import[^\n]*\n/, ""))).css).toContain(
+      "color: #111",
+    );
+  });
+
+  it("adds a new variable after the last one, else after the imports, and removes one", () => {
+    expect(write(SCSS, "$ink", "light", "#222", "g.scss", "css-modules")).toBe(
+      SCSS.replace("$gap: 4px;\n", "$gap: 4px;\n$ink: #222;\n"),
+    );
+    expect(write(`@use "x";\n\n.a {}\n`, "$ink", "light", "#222", "g.scss", "inline")).toBe(
+      `@use "x";\n$ink: #222;\n\n.a {}\n`,
+    );
+    expect(write(`.a {}\n`, "@ink", "light", "#222", "g.less", "inline")).toBe(
+      `@ink: #222;\n\n.a {}\n`,
+    );
+    expect(write(SCSS, "$gap", "light", null, "g.scss", "css-modules")).toBe(
+      SCSS.replace("$gap: 4px;\n", ""),
+    );
+    expect(write(SCSS, "$none", "light", null, "g.scss", "css-modules")).toBe(SCSS);
+  });
+
+  it("refuses a dark value, and a variable in the wrong dialect", () => {
+    expect(() => write(SCSS, "$brand", "dark", "#000", "g.scss", "css-modules")).toThrow(
+      /\$brand is a Sass variable, which has one value and no dark mode.*--brand/,
+    );
+    expect(() => write(SCSS, "@brand", "light", "#000", "g.scss", "css-modules")).toThrow(
+      /Less variable/,
+    );
+  });
+
+  describe("used in a module sheet", () => {
+    const vars = { $brand: "src/styles/_theme.scss", "@brand": "src/styles/theme.less" };
+    const use = (file: string, css: string, value: string) =>
+      useVariables(file, css, { color: value }, vars);
+    const MODULE = `@use "../styles/tokens" as t;\n\n$accent: red;\n\n.card {\n  gap: t.$gap;\n}\n`;
+
+    it("adds @use … as * after the module's own @use", () => {
+      const { css, styles } = use("src/c/Card.module.scss", MODULE, "$brand");
+      expect(styles).toEqual({ color: "$brand" });
+      expect(css).toBe(MODULE.replace(` as t;\n`, ` as t;\n@use "../styles/theme" as *;\n`));
+    });
+
+    it("adds the import first when the module has none, and Less gets @import (reference)", () => {
+      expect(use("src/c/Card.module.scss", `.card {}\n`, "1px solid $brand").css).toBe(
+        `@use "../styles/theme" as *;\n\n.card {}\n`,
+      );
+      expect(use("src/c/Card.module.less", `@ink: #111; // ink\n.card {}\n`, "@brand").css).toBe(
+        `@import (reference) "../styles/theme.less";\n\n@ink: #111; // ink\n.card {}\n`,
+      );
+      const lessModule = `@import "./mixins.less";\n.card {}\n`;
+      expect(use("src/c/Card.module.less", lessModule, "@brand").css).toBe(
+        `@import "./mixins.less";\n@import (reference) "../styles/theme.less";\n.card {}\n`,
+      );
+    });
+
+    it("leaves a module that defines or imports the variable alone, and follows a namespace", () => {
+      const own = `$brand: red;\n.card {}\n`;
+      expect(use("src/c/Card.module.scss", own, "$brand").css).toBe(own);
+      const star = `@use "../styles/theme" as *;\n.card {}\n`;
+      expect(use("src/c/Card.module.scss", star, "$brand").css).toBe(star);
+      const legacy = `@import "../styles/theme";\n.card {}\n`;
+      expect(use("src/c/Card.module.scss", legacy, "$brand").css).toBe(legacy);
+      const named = `@use "../styles/theme";\n.card {}\n`;
+      expect(use("src/c/Card.module.scss", named, "1px solid $brand")).toEqual({
+        css: named,
+        styles: { color: "1px solid theme.$brand" },
+      });
+      const less = `@import (reference) "../styles/theme";\n.card {}\n`;
+      expect(use("src/c/Card.module.less", less, "@brand").css).toBe(less);
+    });
+
+    it("refuses another dialect's variable, and one no global sheet defines", () => {
+      expect(() => use("src/c/Card.module.less", `.card {}\n`, "$brand")).toThrow(
+        expect.objectContaining({
+          code: "unsupported-style",
+          message: expect.stringMatching(/Sass variable/),
+        }),
+      );
+      expect(() => use("src/c/Card.module.css", `.card {}\n`, "$brand")).toThrow(
+        expect.objectContaining({ code: "unsupported-style" }),
+      );
+      expect(() => use("src/c/Card.module.scss", `.card {}\n`, "$nope")).toThrow(
+        expect.objectContaining({ code: "not-found", message: expect.stringMatching(/Tokens/) }),
+      );
+    });
+
+    it("compiles with sass and less once the import is added", async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "finite-vars-"));
+      await mkdir(path.join(dir, "src/styles"), { recursive: true });
+      await mkdir(path.join(dir, "src/c"), { recursive: true });
+      await writeFile(path.join(dir, "src/styles/_tokens.scss"), `$gap: 4px;\n`);
+      await writeFile(path.join(dir, "src/styles/_theme.scss"), `$brand: #95ced7;\n`);
+      await writeFile(
+        path.join(dir, "src/styles/theme.less"),
+        `@brand: #95ced7;\n.global { a: b; }\n`,
+      );
+      const scss = use("src/c/Card.module.scss", MODULE, "$brand").css.replace(
+        ".card {",
+        ".card {\n  color: $brand;",
+      );
+      await writeFile(path.join(dir, "src/c/Card.module.scss"), scss);
+      expect(sass.compile(path.join(dir, "src/c/Card.module.scss")).css).toContain(
+        "color: #95ced7",
+      );
+      const lessCss = use("src/c/Card.module.less", `.card {\n  color: @brand;\n}\n`, "@brand").css;
+      const out = await less.render(lessCss, {
+        filename: path.join(dir, "src/c/Card.module.less"),
+      });
+      expect(out.css).toContain("color: #95ced7");
+      expect(out.css).not.toContain(".global");
     });
   });
 });

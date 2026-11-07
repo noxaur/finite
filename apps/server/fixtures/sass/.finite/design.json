@@ -3,6 +3,6 @@
   "id": "sass",
   "router": "react-router",
   "styling": "css-modules",
-  "css": ["src/styles/global.scss"],
+  "css": ["src/styles/global.scss", "src/styles/theme.less"],
   "brandDir": "src/assets/brand"
 }
