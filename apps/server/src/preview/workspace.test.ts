@@ -389,8 +389,10 @@ describe("finite.json changes", () => {
     const workspaces = createWorkspaces({ startTimeoutMs: 1_000 });
     const done = workspaces.prepare(workspaceDesign("trap", root, "app", "app"), () => {});
     await new Promise((resolve) => setTimeout(resolve, 300));
+    // It refuses while close runs, so the check is attached first.
+    const refused = expect(done).rejects.toThrow(/shutting down/);
     await workspaces.close();
-    await expect(done).rejects.toThrow(/shutting down/);
+    await refused;
     expect(fs.existsSync(path.join(root, "next"))).toBe(false);
   });
 
@@ -404,9 +406,12 @@ describe("finite.json changes", () => {
     fs.writeFileSync(path.join(root, "finite.json"), JSON.stringify(config));
     const second = workspaces.prepare(workspaceDesign("two", root, "app", "app"), () => {});
     await new Promise((resolve) => setTimeout(resolve, 200));
+    const refused = Promise.all([
+      expect(first).rejects.toThrow(),
+      expect(second).rejects.toThrow(/shutting down/),
+    ]);
     await workspaces.close();
-    await expect(first).rejects.toThrow();
-    await expect(second).rejects.toThrow(/shutting down/);
+    await refused;
     expect(fs.existsSync(path.join(root, "queued"))).toBe(false);
   });
 
