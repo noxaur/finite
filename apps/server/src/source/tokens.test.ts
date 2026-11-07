@@ -145,7 +145,30 @@ $gap: 4px;
           { file: "g.scss", css: scss },
           { file: "t.less", css: less },
         ]),
-      ).toEqual({ $a: "g.scss", "@a": "t.less" });
+      ).toEqual({
+        $a: { file: "g.scss", emitsCss: true },
+        "@a": { file: "t.less", emitsCss: false },
+      });
+    });
+
+    it("reads only the $vars of a partial, and knows a partial that outputs no CSS", () => {
+      const partial = `@use "sass:math";
+// spacing
+$gap: 4px !default;
+@mixin pad { padding: $gap; }
+@function half($x) { @return math.div($x, 2); }
+:root {
+  --skip: 1px;
+}
+`;
+      const quiet = partial.replace(/:root[^}]*}\n/, "");
+      expect(readTokens([{ file: "_t.scss", css: partial, partial: true }])).toEqual([
+        { name: "$gap", light: "4px" },
+      ]);
+      expect(variableSheets([{ file: "_t.scss", css: quiet, partial: true }])).toEqual({
+        $gap: { file: "_t.scss", emitsCss: false },
+      });
+      expect(variableSheets([{ file: "_t.scss", css: partial }]).$gap?.emitsCss).toBe(true);
     });
 
     it("changes a value in place and leaves the rest byte-identical", () => {
@@ -240,7 +263,11 @@ describe("Sass and Less variable tokens", () => {
   });
 
   describe("used in a module sheet", () => {
-    const vars = { $brand: "src/styles/_theme.scss", "@brand": "src/styles/theme.less" };
+    const vars = {
+      $brand: { file: "src/styles/_theme.scss", emitsCss: false },
+      $shade: { file: "src/styles/global.scss", emitsCss: true },
+      "@brand": { file: "src/styles/theme.less", emitsCss: false },
+    };
     const use = (file: string, css: string, value: string) =>
       useVariables(file, css, { color: value }, vars);
     const MODULE = `@use "../styles/tokens" as t;\n\n$accent: red;\n\n.card {\n  gap: t.$gap;\n}\n`;
@@ -278,6 +305,22 @@ describe("Sass and Less variable tokens", () => {
       });
       const less = `@import (reference) "../styles/theme";\n.card {}\n`;
       expect(use("src/c/Card.module.less", less, "@brand").css).toBe(less);
+    });
+
+    it("refuses a $var from a sheet that outputs CSS, unless the module already loads it", () => {
+      expect(() => use("src/c/Card.module.scss", `.card {}\n`, "$shade")).toThrow(
+        expect.objectContaining({
+          code: "unsupported-style",
+          message: expect.stringMatching(
+            /\$shade is defined in src\/styles\/global\.scss, which also outputs CSS.*Move the \$vars into a partial \(src\/styles\/_tokens\.scss\) that global\.scss @uses/,
+          ),
+        }),
+      );
+      const named = `@use "../styles/global" as g;\n.card {}\n`;
+      expect(use("src/c/Card.module.scss", named, "$shade")).toEqual({
+        css: named,
+        styles: { color: "g.$shade" },
+      });
     });
 
     it("refuses another dialect's variable, and one no global sheet defines", () => {

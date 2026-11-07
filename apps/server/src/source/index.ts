@@ -39,6 +39,7 @@ import {
   isVariable,
   lightTheme,
   readTokens,
+  type Sheet,
   tokenName,
   variableHome,
   variableRefs,
@@ -62,11 +63,30 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
   const history = createHistory();
   const actorKey = (design: Design, by: Actor) => `${design.id}\u0000${by.kind}:${by.id}`;
 
-  async function sheets(design: Design): Promise<{ file: string; css: string }[]> {
-    const out: { file: string; css: string }[] = [];
-    for (const file of design.css) {
+  /**
+   * The design's global sheets, then the local `.scss` partials they load with `@use`, `@forward`
+   * or `@import`, followed all the way down, which hold Sass variable tokens.
+   */
+  async function sheets(design: Design): Promise<Sheet[]> {
+    const out: Sheet[] = [];
+    const seen = new Set(design.css);
+    const queue = design.css.map((file) => ({ file, partial: false }));
+    while (queue.length > 0) {
+      const { file, partial } = queue.shift()!;
       const css = await readText(inRoot(design.root, file));
-      if (css !== undefined) out.push({ file, css });
+      if (css === undefined) continue;
+      out.push(partial ? { file, css, partial } : { file, css });
+      if (path.posix.extname(file) !== ".scss") continue;
+      for (const { spec, rule } of localImports(file, css)) {
+        if (rule === "url") continue;
+        const target = spec.startsWith("/") ? spec.slice(1) : resolveSpec(file, spec);
+        if (!isInside(design.root, target)) continue;
+        const dep = await existing(design.root, importCandidates(file, target, rule === "import"));
+        if (dep?.endsWith(".scss") && !seen.has(dep)) {
+          seen.add(dep);
+          queue.push({ file: dep, partial: true });
+        }
+      }
     }
     return out;
   }
@@ -224,14 +244,15 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
     async setToken(design, { name, mode, value }) {
       const prop = tokenName(name);
       const all = await sheets(design);
+      const globals = all.filter((s) => !s.partial);
       const target = isVariable(prop)
         ? variableHome(prop, all)
-        : (all.find((s) => hasToken(s.file, s.css, prop, mode)) ??
+        : (globals.find((s) => hasToken(s.file, s.css, prop, mode)) ??
           (design.styling === "tailwind"
-            ? (all.find((s) => /@theme\b/.test(s.css)) ??
-              all.find((s) => /@import\s+["']tailwindcss/.test(s.css)))
-            : all.find((s) => /:root\b/.test(s.css))) ??
-          all[0]);
+            ? (globals.find((s) => /@theme\b/.test(s.css)) ??
+              globals.find((s) => /@import\s+["']tailwindcss/.test(s.css)))
+            : globals.find((s) => /:root\b/.test(s.css))) ??
+          globals[0]);
       if (!target)
         throw new Refused(
           "This design has no stylesheet to keep tokens in. Add one to css in .finite/design.json.",

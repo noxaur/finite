@@ -1,8 +1,5 @@
 @use "tokens";
 
-// Sass tokens. Module sheets that use one get `@use "../styles/global" as *;`.
-$shade: #2a7f8e;
-
 // Light tokens. Finite reads and writes these.
 :root {
   --ink: #1a2128;

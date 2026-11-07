@@ -354,7 +354,7 @@ describe("SourceEditor with Sass and Less variable tokens", () => {
   const CARD = (ext: string) =>
     `import s from "./Card.module.${ext}";\nexport const Card = () => <div className={s.card}>x</div>;\n`;
   const MODULE = `@use "../styles/tokens" as t;\n\n.card {\n  gap: t.$gap;\n}\n`;
-  const GLOBAL = `@use "tokens";\n\n$brand: #95ced7;\n\n:root {\n  --ink: #111;\n}\n`;
+  const GLOBAL = `@use "tokens";\n@use "theme" as *;\n\n$shade: #2a7f8e;\n\n:root {\n  --ink: #111;\n}\n`;
   const d = () => ({
     ...design("css-modules"),
     css: ["src/styles/global.scss", "src/styles/theme.less"],
@@ -365,19 +365,27 @@ describe("SourceEditor with Sass and Less variable tokens", () => {
   beforeEach(async () => {
     await put("src/styles/global.scss", GLOBAL);
     await put("src/styles/_tokens.scss", `$gap: 4px;\n`);
+    await put("src/styles/_theme.scss", `// Brand colours.\n$brand: #95ced7;\n`);
     await put("src/styles/theme.less", `@line: #2a7f8e;\n`);
   });
 
   it("lists $vars and @vars, edits their light value and refuses a dark one", async () => {
     const source = createSourceEditor();
     expect(await source.tokens(d())).toEqual([
-      { name: "$brand", light: "#95ced7" },
+      { name: "$shade", light: "#2a7f8e" },
       { name: "--ink", light: "#111" },
       { name: "@line", light: "#2a7f8e" },
+      { name: "$gap", light: "4px" },
+      { name: "$brand", light: "#95ced7" },
     ]);
     await source.setToken(d(), { name: "$brand", mode: "light", value: "#fff" });
+    await source.setToken(d(), { name: "$shade", mode: "light", value: "#000" });
+    await source.setToken(d(), { name: "$new", mode: "light", value: "2px" });
     await source.setToken(d(), { name: "@pad", mode: "light", value: "6px" });
-    expect(await get("src/styles/global.scss")).toBe(GLOBAL.replace("#95ced7", "#fff"));
+    expect(await get("src/styles/_theme.scss")).toBe(`// Brand colours.\n$brand: #fff;\n`);
+    expect(await get("src/styles/global.scss")).toBe(GLOBAL.replace("#2a7f8e", "#000"));
+    // A new $var goes in the first sheet that outputs no CSS, so a module can @use it.
+    expect(await get("src/styles/_tokens.scss")).toBe(`$gap: 4px;\n$new: 2px;\n`);
     expect(await get("src/styles/theme.less")).toBe(`@line: #2a7f8e;\n@pad: 6px;\n`);
     await expect(
       source.setToken(d(), { name: "$brand", mode: "dark", value: "#000" }),
@@ -399,7 +407,7 @@ describe("SourceEditor with Sass and Less variable tokens", () => {
     await put("src/c/Card.module.scss", MODULE);
     const source = createSourceEditor();
     await source.apply(open(d()), [await styleCard({ color: "$brand" })], ana, page);
-    const picked = `@use "../styles/tokens" as t;\n@use "../styles/global" as *;\n\n.card {\n  gap: t.$gap;\n  color: $brand;\n}\n`;
+    const picked = `@use "../styles/tokens" as t;\n@use "../styles/theme" as *;\n\n.card {\n  gap: t.$gap;\n  color: $brand;\n}\n`;
     expect(await get("src/c/Card.module.scss")).toBe(picked);
     // A second pick finds the @use already there.
     await source.apply(open(d()), [await styleCard({ background: "$brand" })], ana, page);
@@ -445,8 +453,26 @@ describe("SourceEditor with Sass and Less variable tokens", () => {
       proto,
     );
     expect(await get(`${dir}/Card.module.scss`)).toBe(
-      `@use "../../../src/styles/global" as *;\n\n.card {\n  margin: 0;\n  color: $brand;\n}\n`,
+      `@use "../../../src/styles/theme" as *;\n\n.card {\n  margin: 0;\n  color: $brand;\n}\n`,
     );
+  });
+
+  it("follows the module's namespace for a partial's $var, and refuses one from a sheet with CSS", async () => {
+    await put("src/c/Card.tsx", CARD("scss"));
+    await put("src/c/Card.module.scss", MODULE);
+    const source = createSourceEditor();
+    await source.apply(open(d()), [await styleCard({ margin: "$gap" })], ana, page);
+    expect(await get("src/c/Card.module.scss")).toBe(
+      MODULE.replace("gap: t.$gap;\n", "gap: t.$gap;\n  margin: t.$gap;\n"),
+    );
+    await source.undo(open(d()), ana);
+    await expect(
+      source.apply(open(d()), [await styleCard({ color: "$shade" })], ana, page),
+    ).rejects.toMatchObject({
+      code: "unsupported-style",
+      message: expect.stringContaining("Move the $vars into a partial (src/styles/_tokens.scss)"),
+    });
+    expect(await get("src/c/Card.module.scss")).toBe(MODULE);
   });
 
   it("refuses a $var on an inline-styled element and leaves the file alone", async () => {

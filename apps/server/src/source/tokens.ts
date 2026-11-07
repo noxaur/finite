@@ -18,20 +18,21 @@ import { importCandidates, resolveSpec } from "./imports.ts";
  * `@media (prefers-color-scheme: dark)`, and `@variant dark` blocks, the three ways a Tailwind v4
  * stylesheet writes dark mode. New dark tokens go in a `.dark` rule. The sheets may be `.css`,
  * `.scss` or `.less`. A top-level Sass `$var` in a `.scss` sheet or Less `@var` in a `.less` one is
- * a token too, named with its sigil, with a light value only.
+ * a token too, named with its sigil, with a light value only. A `partial` (a local file a global
+ * `.scss` sheet loads) gives its `$vars` only.
  */
-export function readTokens(sheets: { file: string; css: string }[]): Token[] {
+export function readTokens(sheets: Sheet[]): Token[] {
   const tokens = new Map<string, Token>();
   const set = (name: string, mode: TokenMode, value: string) => {
     const token = tokens.get(name) ?? { name };
     token[mode] = value;
     tokens.set(name, token);
   };
-  for (const { file, css } of sheets) {
+  for (const { file, css, partial } of sheets) {
     parseCss(file, css).walk((node) => {
       const variable = variableOf(file, node);
       if (variable) return set(variable.name, "light", flagless(variable.value));
-      if (node.type !== "decl" || !node.prop.startsWith("--")) return;
+      if (partial || node.type !== "decl" || !node.prop.startsWith("--")) return;
       const mode = modeOf(node);
       if (mode) set(node.prop, mode, node.value);
     });
@@ -39,16 +40,43 @@ export function readTokens(sheets: { file: string; css: string }[]): Token[] {
   return [...tokens.values()];
 }
 
-/** The global sheet that defines each Sass `$var` and Less `@var` token, by name. */
-export function variableSheets(sheets: { file: string; css: string }[]): Record<string, string> {
-  const out: Record<string, string> = {};
+/** A global stylesheet, or (`partial`) a local `.scss` file one of them loads. */
+export type Sheet = { file: string; css: string; partial?: boolean };
+
+/**
+ * Where a Sass `$var` or Less `@var` token is defined: the file, and whether that file outputs CSS
+ * of its own, which a module's `@use` of it would copy. Less sheets never do, since a module
+ * imports them by reference.
+ */
+export type VariableHome = { file: string; emitsCss: boolean };
+
+/** The sheet that defines each Sass `$var` and Less `@var` token, by name. */
+export function variableSheets(sheets: Sheet[]): Record<string, VariableHome> {
+  const out: Record<string, VariableHome> = {};
   for (const { file, css } of sheets) {
-    for (const node of parseCss(file, css).nodes) {
+    const root = parseCss(file, css);
+    const home = { file, emitsCss: path.posix.extname(file) === ".scss" && emitsCss(root) };
+    for (const node of root.nodes) {
       const variable = variableOf(file, node);
-      if (variable) out[variable.name] ??= file;
+      if (variable) out[variable.name] ??= home;
     }
   }
   return out;
+}
+
+const QUIET = new Set(["use", "forward", "mixin", "function"]);
+
+/**
+ * Whether a Sass sheet outputs CSS: anything at its top level but comments, `$vars`, `@use`,
+ * `@forward`, `@mixin` and `@function`.
+ */
+function emitsCss(root: Root): boolean {
+  return root.nodes.some(
+    (n) =>
+      n.type !== "comment" &&
+      !(n.type === "decl" && n.prop.startsWith("$")) &&
+      !(n.type === "atrule" && QUIET.has(n.name)),
+  );
 }
 
 /** A token name that's a Sass `$var` or Less `@var` rather than a custom property. */
@@ -180,15 +208,17 @@ export function tokenName(name: string): string {
   return n.startsWith("--") || isVariable(n) ? n : `--${n}`;
 }
 
-/** Where `name` lives for `tokens.set`: the sheet that has it, else the first of its dialect. */
-export function variableHome(
-  name: string,
-  sheets: { file: string; css: string }[],
-): { file: string; css: string } {
+/**
+ * Where `name` lives for `tokens.set`: the sheet that has it, else the first of its dialect that
+ * outputs no CSS (so a module can `@use` it), else the first of its dialect.
+ */
+export function variableHome(name: string, sheets: Sheet[]): Sheet {
   const { ext, kind } = dialectOf(name);
+  const ofDialect = sheets.filter((s) => path.posix.extname(s.file) === ext);
   const home =
     sheets.find((s) => hasToken(s.file, s.css, name, "light")) ??
-    sheets.find((s) => path.posix.extname(s.file) === ext);
+    ofDialect.find((s) => ext === ".scss" && !emitsCss(parseCss(s.file, s.css))) ??
+    ofDialect[0];
   if (!home)
     throw new Refused(
       `${name} is a ${kind} variable, but none of this design's stylesheets is ${ext}. Add one to css in .finite/design.json, or use a CSS custom property (--${name.slice(1)}).`,
@@ -300,15 +330,16 @@ export function variableRefs(styles: Record<string, string | null>): string[] {
 
 /**
  * Lets the module sheet `file` use the variables `styles` refer to: one it defines or already
- * imports is left alone, `@use "x" as ns` turns `$brand` into `ns.$brand`, and otherwise the sheet
+ * imports is left alone, `@use "x" as ns` turns `$brand` into `ns.$brand`, and otherwise the file
  * that defines it (`variables`, from `variableSheets`) is imported after the module's own: Sass
- * gets `@use "<path>" as *;`, Less `@import (reference) "<path>";`.
+ * gets `@use "<path>" as *;`, Less `@import (reference) "<path>";`. Sass has no reference-only
+ * import, so a Sass file that outputs CSS is refused rather than copied into the module.
  */
 export function useVariables(
   file: string,
   css: string,
   styles: Record<string, string | null>,
-  variables: Record<string, string>,
+  variables: Record<string, VariableHome>,
 ): { css: string; styles: Record<string, string | null> } {
   const refs = variableRefs(styles);
   if (refs.length === 0) return { css, styles };
@@ -323,14 +354,21 @@ export function useVariables(
   const renamed: Record<string, string> = {};
   for (const ref of refs) {
     if (findVariable(file, root, ref)) continue;
-    const sheet = variables[ref];
-    if (!sheet)
+    const home = variables[ref];
+    if (!home)
       throw new Refused(
         `${ref} isn't a variable in this design's global stylesheets. Add it under Tokens first, or ask the agent.`,
         "not-found",
       );
-    const seen = imported(file, root, sheet);
-    if (seen === undefined) addImport(file, root, sheet);
+    const seen = imported(file, root, home.file);
+    if (seen === undefined && home.emitsCss) {
+      const partial = path.posix.join(path.posix.dirname(home.file), "_tokens.scss");
+      throw new Refused(
+        `${ref} is defined in ${home.file}, which also outputs CSS, and a @use would copy all of that CSS into ${file}. Move the $vars into a partial (${partial}) that ${path.posix.basename(home.file)} @uses, then pick it again, or ask the agent.`,
+        "unsupported-style",
+      );
+    }
+    if (seen === undefined) addImport(file, root, home.file);
     else if (seen !== "*") renamed[ref] = `${seen}.${ref}`;
   }
   const rename = (v: string | null) => v?.replace(REF, (ref) => renamed[ref] ?? ref) ?? null;

@@ -18,14 +18,14 @@ import {
 } from "./jsx.ts";
 import { stylexEdit } from "./stylex.ts";
 import { editClasses, kebab, stripClasses, type Theme } from "./tailwind.ts";
-import { useVariables, variableRefs } from "./tokens.ts";
+import { useVariables, variableRefs, type VariableHome } from "./tokens.ts";
 
 export type RewriteContext = {
   theme: Theme;
   /** Other files an edit may change (the `*.module.{css,scss,sass,less}` files this file imports), by root-relative path. */
   files: Record<string, string>;
-  /** The global sheet that defines each Sass `$var` and Less `@var` token (`variableSheets`). */
-  variables?: Record<string, string>;
+  /** The file that defines each Sass `$var` and Less `@var` token (`variableSheets`). */
+  variables?: Record<string, VariableHome>;
 };
 
 export type Rewritten = {
