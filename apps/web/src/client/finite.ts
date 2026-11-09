@@ -298,6 +298,11 @@ export function createFinite(options: FiniteOptions) {
     );
   }
 
+  /** Asks again, naming the memory this page knows, so a reply forgotten since is refused. */
+  function resend(ws: SocketLike, frame: string) {
+    ws.send(JSON.stringify({ ...(JSON.parse(frame) as object), memory: serverMemory }));
+  }
+
   function overdue(rid: string, p: Pending) {
     if (p.frame === undefined) {
       pending.delete(rid);
@@ -318,7 +323,7 @@ export function createFinite(options: FiniteOptions) {
     // Asked twice with no sign of life: a dead socket that hasn't noticed yet.
     if (p.asked) return ws.close();
     p.asked = true;
-    ws.send(p.frame);
+    resend(ws, p.frame);
     wait(rid, p);
   }
 
@@ -333,7 +338,7 @@ export function createFinite(options: FiniteOptions) {
       if (p.frame === undefined) continue;
       if (sameMemory && Date.now() - p.sentAt < GIVE_UP_MS) {
         p.asked = false;
-        ws.send(p.frame);
+        resend(ws, p.frame);
         wait(rid, p);
         continue;
       }

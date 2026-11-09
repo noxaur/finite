@@ -166,7 +166,8 @@ describe("finite client", () => {
     ws.close();
     const ws2 = await reconnect();
     const again = ws2.sent.find((m) => m.type === "thread.interrupt")!;
-    expect(again).toEqual(frame);
+    expect(again).toMatchObject(frame);
+    expect(again.memory).toEqual(expect.any(String));
     ws2.push({ type: "reply", rid: again.rid, ok: true, value: null });
     await expect(result).resolves.toBeNull();
   });

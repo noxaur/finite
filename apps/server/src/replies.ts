@@ -26,8 +26,11 @@ export function createReplyMemory(now: () => number = Date.now, maxKept = MAX_KE
   return {
     name: () => name,
 
-    /** The stored reply, `"running"`, or nothing when the caller should run it now. */
-    ask(rid: string, asker: Asker): Reply | "running" | undefined {
+    /**
+     * The stored reply, `"running"`, `"forgotten"` when `memory` (the name this was last asked
+     * under) has changed, or nothing when the caller should run it now.
+     */
+    ask(rid: string, asker: Asker, memory?: string): Reply | "running" | "forgotten" | undefined {
       dropExpired();
       const done = kept.get(rid);
       if (done) return done.reply;
@@ -36,6 +39,8 @@ export function createReplyMemory(now: () => number = Date.now, maxKept = MAX_KE
         askers.add(asker);
         return "running";
       }
+      // Asked again after its reply was pushed out: it may have run, so it can't run now.
+      if (memory !== undefined && memory !== name) return "forgotten";
       running.set(rid, new Set([asker]));
       return undefined;
     },

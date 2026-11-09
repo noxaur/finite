@@ -42,6 +42,17 @@ describe("reply memory", () => {
     expect(memory.name()).toBe(name);
   });
 
+  it("won't run a request asked again after its reply was pushed out", () => {
+    const memory = createReplyMemory(Date.now, 1);
+    memory.ask("a", person());
+    memory.finish("a", reply("a"));
+    const name = memory.name();
+    memory.ask("b", person());
+    memory.finish("b", reply("b"));
+    expect(memory.ask("a", person(), name)).toBe("forgotten");
+    expect(memory.ask("a", person(), memory.name())).toBeUndefined();
+  });
+
   it("changes its name when it runs out of room, so a page can tell", () => {
     const memory = createReplyMemory(Date.now, 2);
     const name = memory.name();

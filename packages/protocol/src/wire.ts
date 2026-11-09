@@ -295,6 +295,7 @@ type RequestShape<K extends RequestType> = {
   type: z.ZodLiteral<K>;
   rid: z.ZodString;
   once: z.ZodOptional<z.ZodLiteral<true>>;
+  memory: z.ZodOptional<z.ZodString>;
 } & (typeof requests)[K]["params"] extends infer S extends z.ZodRawShape
   ? S
   : never;
@@ -306,6 +307,8 @@ function requestSchema<K extends RequestType>(type: K): RequestSchema<K> {
     rid: z.string().min(1),
     // The server remembers this `rid` and its reply, so asking again can't run it twice.
     once: z.literal(true).optional(),
+    // On asking again: the memory it was asked under, so a forgotten reply can't run it twice.
+    memory: z.string().optional(),
     ...requests[type].params,
   };
   return z.object(shape) as unknown as RequestSchema<K>;
@@ -332,7 +335,7 @@ export type ClientMessage = { [K in RequestType]: z.infer<RequestSchema<K>> }[Re
 /** A request of one type, `rid` and `type` included. */
 export type Request<K extends RequestType> = Extract<ClientMessage, { type: K }>;
 /** What a caller passes for a request: the message without `type`, `rid` and `once`. */
-export type Params<K extends RequestType> = Omit<Request<K>, "type" | "rid" | "once">;
+export type Params<K extends RequestType> = Omit<Request<K>, "type" | "rid" | "once" | "memory">;
 /** The reply value of a request. */
 export type Result<K extends RequestType> = z.infer<(typeof requests)[K]["result"]>;
 

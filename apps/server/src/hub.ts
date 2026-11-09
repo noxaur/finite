@@ -184,7 +184,12 @@ export function createHub(modules: Modules, handle: Handlers = handlers): Hub {
       return client.send(refusal(message.rid, "send hello first", "invalid"));
     }
     if (!message.once) return client.send(await answer(client, message));
-    const known = replies.ask(message.rid, client);
+    const known = replies.ask(message.rid, client, message.memory);
+    if (known === "forgotten") {
+      const reason =
+        "Finite lost track of this while you were disconnected. It may have gone through, so check before you try again.";
+      return client.send(refusal(message.rid, reason));
+    }
     if (known === "running") return client.send({ type: "running", rid: message.rid });
     if (known) return client.send(known);
     replies.finish(message.rid, await answer(client, message));
@@ -204,7 +209,7 @@ export function createHub(modules: Modules, handle: Handlers = handlers): Hub {
   }
 
   function dispatch(client: Client, message: ClientMessage): Promise<unknown> {
-    const { type, rid: _rid, once: _once, ...params } = message;
+    const { type, rid: _rid, once: _once, memory: _memory, ...params } = message;
     const user = client.user ?? (message.type === "hello" ? message.user : undefined);
     const by: Actor = { kind: "person", id: user?.id ?? "anonymous", name: user?.name ?? "" };
     const run = handle[type] as (params: unknown, ctx: Context) => Promise<unknown>;

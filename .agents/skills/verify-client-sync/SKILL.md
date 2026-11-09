@@ -90,6 +90,6 @@ Last synced: `51ee6f77f44453401756379b78aca7017ee11950`
 - **A socket that is closing but hasn't fired `onclose`**, where `request` re-queues itself.
 - **`close()`**, which only tests call.
 - **Requests the server refuses**, apart from hello and history.
-- **The server forgetting a reply by count while a copy of the request or its reply is travelling.** That takes 1000 later replies inside one trip. A copy that arrived after that would run again.
+- **The server forgetting a reply by count while a copy of the request or its reply is travelling.** That takes 1000 later replies inside one trip. A request asked again after that is refused, because it carries the memory name it was asked under and the name changes when a reply is pushed out early (`replies.ts`, not modelled). Only an original copy still on its way could run again.
 - **Forgetting by age**, which only happens after the page has stopped asking: `GIVE_UP_MS` is 10 minutes under `REPLY_KEPT_MS`, and the model's `RequestGivesUp` stands in for it.
 - **The server's `running` answer**, which only restarts the page's timer.

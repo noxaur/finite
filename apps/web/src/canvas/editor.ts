@@ -167,6 +167,12 @@ const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
  * `source.edit` or `canvas.patch`. Selection lives in `selectionStore`, so the layers, the
  * inspector, the composer and the ✱ menu all read the same one.
  */
+/** Whether two reads of a text hold the same expressions at the same atoms. */
+function sameKeeps(a: TextEdit["keeps"], b: TextEdit["keeps"]) {
+  const names = (keeps: TextEdit["keeps"]) => keeps.map((k) => [k.id, k.kind, k.label]);
+  return JSON.stringify(names(a)) === JSON.stringify(names(b));
+}
+
 export class CanvasEditor implements ToolHost {
   readonly store: Store<EditorState> = createStore(initial);
   /** rev, tag and stamped ancestors of each selected element, by selection key. */
@@ -944,6 +950,10 @@ export class CanvasEditor implements ToolHost {
       if (!now)
         return keep(target.rev, "That text moved. Copy your words, press Esc, and open it again.");
       if (now.identity !== target.identity) return this.notSaved(content);
+      // An atom is a place in `keeps`: under a new list the words would name other expressions.
+      if (content.some((item) => item.t === "atom") && !sameKeeps(now.keeps, editing.keeps)) {
+        return this.notSaved(content);
+      }
       const changed = "That text changed while you typed. Enter replaces it; Esc drops your words.";
       if (!sameContent(normalize(now.content), normalize(editing.content))) {
         return keep(now.rev, changed);
