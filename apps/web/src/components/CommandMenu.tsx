@@ -70,6 +70,7 @@ const PLACEHOLDER: Record<Step["kind"], string> = {
 
 /** The folder to list for a path being typed, and the part after it that filters the list. */
 function splitPath(value: string): { dir: string; rest: string } {
+  if (value === "~") return { dir: "~/", rest: "" };
   const at = value.lastIndexOf("/");
   return at < 0
     ? { dir: "~/", rest: value }
@@ -96,6 +97,7 @@ export function CommandMenu({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [dirs, setDirs] = useState<string[]>([]);
   const [repos, setRepos] = useState<Repo[]>([]);
+  const reposQuery = useRef("");
   const files = useRef<HTMLInputElement>(null);
 
   const go = (next: Step) => {
@@ -143,10 +145,16 @@ export function CommandMenu({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     if (step.kind !== "clone-search" || !value.trim()) return setRepos([]);
     let live = true;
+    const query = value.trim();
     const timer = setTimeout(() => {
       finite
-        .request("repo.search", { query: value.trim() })
-        .then((r) => live && (setRepos(r), setError(null)))
+        .request("repo.search", { query })
+        .then((r) => {
+          if (!live) return;
+          reposQuery.current = query;
+          setRepos(r);
+          setError(null);
+        })
         .catch((e: unknown) => live && setError(e instanceof Error ? e.message : String(e)));
     }, 250);
     return () => {
@@ -294,6 +302,8 @@ export function CommandMenu({ onClose }: { onClose: () => void }) {
   /** Enter on a row runs it; on nothing, the folder steps connect or clone at the typed path. */
   const confirm = (withCommand: boolean) => {
     if (busy) return;
+    // The rows still on screen answer an earlier query until the new search returns.
+    if (step.kind === "clone-search" && reposQuery.current !== value.trim()) return;
     if (step.kind === "connect" && (withCommand || !target)) {
       const path = (target?.open ? `${dir}${target.label}` : typedPath).replace(/\/$/, "") || "/";
       return void finish(() => connectFolder(path));

@@ -89,6 +89,8 @@ export function CommandItem({
       role="option"
       aria-selected={!!on}
       tabIndex={-1}
+      // The search bar keeps focus, since it handles the menu's keys.
+      onMouseDown={(e) => e.preventDefault()}
       onClick={onClick}
       onMouseMove={onHover}
       {...stylex.props(styles.item, on && styles.itemOn, onClick && styles.clickable)}

@@ -24,7 +24,11 @@ export function parseRepo(input: string): Repo | null {
     ) ?? /^([\w.-]+)\/([\w.-]+?)(?:\.git)?$/.exec(text);
   if (!match) return null;
   const [, owner, name] = match;
-  return { name: `${owner}/${name}`, url: `https://github.com/${owner}/${name}` };
+  // An ssh URL stays ssh: the person's key may be the only access they have to a private repo.
+  const url = text.startsWith("git@")
+    ? `git@github.com:${owner}/${name}.git`
+    : `https://github.com/${owner}/${name}`;
+  return { name: `${owner}/${name}`, url };
 }
 
 type GitHubRepo = {

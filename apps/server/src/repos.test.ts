@@ -15,7 +15,10 @@ describe("parseRepo", () => {
     expect(parseRepo("https://github.com/acme/app")).toEqual(want);
     expect(parseRepo("https://github.com/acme/app.git")).toEqual(want);
     expect(parseRepo("https://github.com/acme/app/tree/main/src")).toEqual(want);
-    expect(parseRepo("git@github.com:acme/app.git")).toEqual(want);
+    expect(parseRepo("git@github.com:acme/app.git")).toEqual({
+      name: "acme/app",
+      url: "git@github.com:acme/app.git",
+    });
     expect(parseRepo("acme/app")).toEqual(want);
   });
 
