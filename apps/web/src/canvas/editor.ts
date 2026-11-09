@@ -184,6 +184,8 @@ export class CanvasEditor {
   private space = false;
   private hoverFrame = 0;
   private hoverSeq = 0;
+  /** Bumped when the pin changes, so a click still waiting on its frame doesn't pin afterwards. */
+  private pinSeq = 0;
   /** Where the measure tool last probed, and the element right under that point. */
   private pointer: { frameId: string; at: Point; leaf: string | null } | null = null;
   private noticeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -294,6 +296,7 @@ export class CanvasEditor {
 
   setTool(tool: Tool) {
     this.stopProbing();
+    this.pinSeq++;
     this.update({ tool, commentDraft: null, hover: null, measure: NO_MEASURE });
   }
 
@@ -615,6 +618,7 @@ export class CanvasEditor {
   }
 
   private unpin() {
+    this.pinSeq++;
     this.update({ measure: { ...this.state.measure, pin: null } });
   }
 
@@ -622,8 +626,9 @@ export class CanvasEditor {
   private async pinAt(world: Point, frame: Frame | null) {
     if (!frame) return this.unpin();
     const at = this.local(frame, world);
+    const seq = ++this.pinSeq;
     const found = await this.elementAt(frame.id, at, this.state.measure.up);
-    if (this.state.tool !== "measure") return;
+    if (seq !== this.pinSeq) return;
     if (!found) return this.unpin();
     const { m } = found;
     const target: MeasureTarget =
@@ -646,10 +651,12 @@ export class CanvasEditor {
     const replies = await bridgeOf(pin.frameId)
       ?.measure([pin.target])
       .catch(() => null);
-    if (!replies || this.state.measure.pin !== pin) return;
+    // A refresh keeps the pin's target, so a second refresh in flight still lands.
+    const current = this.state.measure.pin;
+    if (!replies || current?.target !== pin.target) return;
     const m = replies[0] ?? null;
-    if (m && sameMeasurement(m, pin.m)) return;
-    this.update({ measure: { ...this.state.measure, pin: m && { ...pin, m } } });
+    if (m && sameMeasurement(m, current.m)) return;
+    this.update({ measure: { ...this.state.measure, pin: m && { ...current, m } } });
   }
 
   // Pointer

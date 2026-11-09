@@ -187,6 +187,31 @@ describe("the measure tool", () => {
     expect(editor.state.measure.pin).toBeNull();
   });
 
+  it("drops a click still waiting on its frame once Esc has unpinned", async () => {
+    await click(10, 10);
+    const answers: ((value: (Measurement | null)[]) => void)[] = [];
+    measure.mockImplementationOnce(() => new Promise((resolve) => answers.push(resolve)));
+    await click(20, 20);
+    key("Escape");
+    answers[0]!([measured({ loc: "b.tsx:1:1" })]);
+    await settle();
+    expect(editor.state.measure.pin).toBeNull();
+  });
+
+  it("keeps the newest of two overlapping refreshes of the pin", async () => {
+    await click(10, 10);
+    const answers: ((value: (Measurement | null)[]) => void)[] = [];
+    measure.mockImplementation(() => new Promise((resolve) => answers.push(resolve)));
+    editor.frameChanged();
+    editor.frameChanged();
+    await settle();
+    answers[0]!([measured({ text: "first" })]);
+    await settle();
+    answers[1]!([measured({ text: "second" })]);
+    await settle();
+    expect(editor.state.measure.pin?.m.text).toBe("second");
+  });
+
   it("forgets a pin whose frame is removed", async () => {
     await click(10, 10);
     editor.setCanvas({ ...canvas, frames: [] });

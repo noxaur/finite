@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vite-plus/test";
-import { type Cut, xyCut } from "./client/bridge.ts";
+import { type Cut, gapLength, horizontalRadius, xyCut } from "./client/bridge.ts";
 
 const rect = (x: number, y: number, width: number, height: number) => ({ x, y, width, height });
 const summary = (cuts: Cut[]) => cuts.map((c) => [c.axis, c.size, ...c.between]);
@@ -158,5 +158,19 @@ describe("xyCut", () => {
     expect(cuts[0]?.size).toBe(0.23);
     expect(cuts[0]?.rect.x).toBe(10.1);
     expect(cuts[0]?.rect.width).toBe(0.23);
+  });
+});
+
+describe("computed lengths", () => {
+  test("an elliptical radius reports its horizontal radius", () => {
+    expect(horizontalRadius("20px 50%", 200, 1)).toBe(20);
+    expect(horizontalRadius("50%", 200, 1)).toBe(100);
+    expect(horizontalRadius("10px", 200, 2)).toBe(20);
+  });
+
+  test("a percentage gap resolves against the content box", () => {
+    expect(gapLength("10%", 200, 1)).toBe(20);
+    expect(gapLength("8px", 200, 2)).toBe(16);
+    expect(gapLength("normal", 200, 1)).toBe(0);
   });
 });

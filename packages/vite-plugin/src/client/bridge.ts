@@ -332,6 +332,17 @@ function inFlowChildren(parent: Element): InFlowChild[] {
 
 const px = (value: string) => parseFloat(value) || 0;
 
+/** A computed corner radius, which can be elliptical ("20px 50%"), as its horizontal radius. */
+export function horizontalRadius(value: string, width: number, scale: number): number {
+  const [horizontal = ""] = value.split(" ");
+  return horizontal.endsWith("%") ? (px(horizontal) / 100) * width : px(horizontal) * scale;
+}
+
+/** A computed gap in pixels. A percentage resolves against the content box along its axis. */
+export function gapLength(value: string, contentSize: number, scale: number): number {
+  return value.endsWith("%") ? (px(value) / 100) * contentSize : px(value) * scale;
+}
+
 function isAxisAligned(style: CSSStyleDeclaration): boolean {
   if (style.rotate && style.rotate !== "none") return false;
   const matrix = /matrix(3d)?\(([^)]+)\)/.exec(style.transform);
@@ -363,10 +374,10 @@ function measureOne(element: Element, matches: Element[], props: readonly string
       left: read("left", scaleX),
     };
   };
-  const corner = (name: string) => {
-    const value = style.getPropertyValue(`border-${name}-radius`);
-    return round(value.includes("%") ? (px(value) / 100) * raw.width : px(value) * scaleX);
-  };
+  const corner = (name: string) =>
+    round(horizontalRadius(style.getPropertyValue(`border-${name}-radius`), raw.width, scaleX));
+  const padding = edges("padding");
+  const border = edges("border", "-width");
 
   const all = inFlowChildren(element);
   const items = all.slice(0, MAX_CHILDREN);
@@ -384,7 +395,18 @@ function measureOne(element: Element, matches: Element[], props: readonly string
   };
   const causeOf = ({ axis, size, between: [a, b] }: Cut): MeasuredGap["cause"] => {
     const scale = axis === "x" ? scaleX : scaleY;
-    const cssGap = px(axis === "x" ? style.columnGap : style.rowGap) * scale;
+    const cssGap =
+      axis === "x"
+        ? gapLength(
+            style.columnGap,
+            raw.width - padding.left - padding.right - border.left - border.right,
+            scale,
+          )
+        : gapLength(
+            style.rowGap,
+            raw.height - padding.top - padding.bottom - border.top - border.bottom,
+            scale,
+          );
     const before = margin(a, axis === "x" ? "margin-right" : "margin-bottom") * scale;
     const after = margin(b, axis === "x" ? "margin-left" : "margin-top") * scale;
     const same = (length: number) => Math.abs(size - length) < SAME_LENGTH;
@@ -416,8 +438,8 @@ function measureOne(element: Element, matches: Element[], props: readonly string
     index: matches.indexOf(element),
     count: matches.length,
     box: roundRect(raw),
-    padding: edges("padding"),
-    border: edges("border", "-width"),
+    padding,
+    border,
     margin: edges("margin"),
     radius: {
       topLeft: corner("top-left"),
