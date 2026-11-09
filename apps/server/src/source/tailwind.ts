@@ -290,6 +290,13 @@ const PROPS: Record<string, { toClass: ToClass; sample: string }> = {
             x === "none" ? "[shadow:none]" : arbitrary(x),
           ).toClass(v, theme, v3),
   },
+  "object-fit": keywords({
+    contain: "object-contain",
+    cover: "object-cover",
+    fill: "object-fill",
+    none: "object-none",
+    "scale-down": "object-scale-down",
+  }),
   overflow: keywords(overflow("overflow")),
   "overflow-x": keywords(overflow("overflow-x")),
   "overflow-y": keywords(overflow("overflow-y")),

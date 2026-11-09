@@ -415,7 +415,7 @@ function conditional(node: t.Node): Ref[] {
  * `let`, `const` or class declaration counts only when its block encloses `el`; `var` and function
  * declarations are scoped to the whole function.
  */
-function shadowed(ast: t.File, el: t.JSXElement, name: string): boolean {
+export function shadowed(ast: t.File, el: t.JSXElement, name: string): boolean {
   const parents = new Map<t.Node, t.Node | undefined>();
   walk(ast, (node, parent) => void parents.set(node, parent));
   const above = new Set<t.Node>();
@@ -671,7 +671,7 @@ type Import = { names: string; from: string };
  * imports (or its directives), then `decl` after a blank line. A file with neither gets them
  * before its first statement.
  */
-function head(code: string, ast: t.File, imports: Import[], decl?: string): Patch[] {
+export function head(code: string, ast: t.File, imports: Import[], decl?: string): Patch[] {
   if (imports.length === 0 && decl === undefined) return [];
   const last = ast.program.body.filter((s) => s.type === "ImportDeclaration").at(-1);
   const quote = last ? code[last.source.start!] : '"';

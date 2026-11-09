@@ -157,17 +157,17 @@ try {
     await until(() => fs.readFileSync(file, "utf8") === before, "the file to be restored", 10_000);
   });
 
-  await check("the Measure tool draws over the element under the pointer", async () => {
+  await check("the Inspect tool draws over the element under the pointer", async () => {
     await page.keyboard.press("m");
     const at = await pointInFrame(home.id, "h1[data-finite-loc]");
     await page.mouse.move(at.x, at.y);
-    await page.waitForSelector("[data-measure] div", { timeout: 10_000 });
-    const purple = await page.$eval("[data-measure]", (el) =>
+    await page.waitForSelector("[data-inspect] div", { timeout: 10_000 });
+    const purple = await page.$eval("[data-inspect]", (el) =>
       getComputedStyle(el).getPropertyValue("--measure"),
     );
     if (!purple.trim()) throw new Error("the figure has no --measure color");
     await page.keyboard.press("Escape");
-    await until(async () => !(await page.$("[data-measure]")), "the figure to go", 10_000);
+    await until(async () => !(await page.$("[data-inspect]")), "the figure to go", 10_000);
   });
 
   await check("the Prototypes tab opens an empty prototype with a composer", async () => {

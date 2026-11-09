@@ -73,7 +73,7 @@ export const colors = stylex.defineVars({
   hover: "#3a9fb0",
   ok: { default: "#15803d", [DARK]: "#4ade80" },
   danger: { default: "#b8341f", [DARK]: "#f0806c" },
-  /** The Measure tool's drawing and card, over artboards in either theme. Equals `MEASURE_PURPLE`. */
+  /** The Inspect tool's drawing and card, over artboards in either theme. Equals `MEASURE_PURPLE`. */
   measure: "#8b3ff0",
   /** Claude's asterisk mark, next to the model's name in the composer. */
   claude: "#d97757",

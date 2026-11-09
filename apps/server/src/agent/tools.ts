@@ -25,7 +25,7 @@ import {
 import { inRoot } from "../source/files.ts";
 import { snapLoc } from "../source/jsx.ts";
 import { ensureBrandBoard } from "../store/brand.ts";
-import type { Screenshots } from "./screenshot.ts";
+import type { Region, Screenshots } from "./screenshot.ts";
 
 type CallToolResult = Awaited<ReturnType<Parameters<typeof tool>[3]>>;
 
@@ -37,6 +37,8 @@ export const MIN_HUG = { width: 200, height: 120 };
 /** How far above its frame a label's top sits. */
 export const LABEL_OFFSET = 120;
 const NOTE_WIDTH = 480;
+/** Room a section built around frames leaves on every side. */
+const SECTION_PAD = 40;
 const MAX_HUG_WIDTH = 1920;
 
 /** What the canvas operations work with, whoever calls them. */
@@ -178,16 +180,54 @@ export function canvasOps(ctx: CanvasContext, names: ToolNames = THREAD_TOOLS) {
         source,
       })),
       texts: c.texts.map(({ id, title, body, x, y, width }) => ({ id, title, body, x, y, width })),
+      sections: c.sections.map(({ id, name, x, y, width, height }) => ({
+        id,
+        name,
+        x,
+        y,
+        width,
+        height,
+      })),
+      slices: c.slices.map(({ id, frameId, name, x, y, width, height }) => ({
+        id,
+        frameId,
+        name,
+        x,
+        y,
+        width,
+        height,
+      })),
       comments: c.comments
         .filter((m) => !m.resolvedAt)
         .map((m) => ({
           id: m.id,
+          ...(m.kind === "annotation" ? { kind: m.kind } : {}),
           anchor: m.anchor,
           author: m.author.name,
           text: m.text,
           replies: m.replies.map((r) => `${r.author.name}: ${r.text}`),
         })),
     };
+  }
+
+  /**
+   * `region` cut to the frame's width, or a refusal when it starts past the right edge or ends
+   * below the bottom of a fixed-height frame. A hugging frame has no fixed height, so only its
+   * width is checked.
+   */
+  function cropped(frame: Frame, region: Region): Region {
+    const size = `${frame.width}×${frame.height}`;
+    if (region.x >= frame.width) {
+      throw new Refused(
+        `region starts at x ${region.x}, past the right edge of ${frame.name} (${size}). Use the frame's own pixels.`,
+      );
+    }
+    if (!frame.hug && region.y + region.height > frame.height) {
+      throw new Refused(
+        `region ends at y ${region.y + region.height}, past the bottom of ${frame.name} (${size}). Use the frame's own pixels.`,
+      );
+    }
+    return { ...region, width: Math.min(region.width, frame.width - region.x) };
   }
 
   /** Below everything on the canvas, at the left edge. */
@@ -316,7 +356,63 @@ export function canvasOps(ctx: CanvasContext, names: ToolNames = THREAD_TOOLS) {
       return { textId: text.id, x: text.x, y: text.y };
     },
 
-    async comment({ frameId, loc, match, index, text }: CanvasToolInput<"comment">) {
+    async writeSection(input: CanvasToolInput<"write_section">) {
+      const { canvasId, sectionId, remove, frameIds } = input;
+      const c = await canvas(canvasId);
+      const old = sectionId === undefined ? undefined : c.sections.find((s) => s.id === sectionId);
+      if (sectionId !== undefined && !old) {
+        throw new Refused(
+          `There's no section ${sectionId} on ${c.name}. Call ${names.read} to list them, or leave sectionId out to make one.`,
+        );
+      }
+      if (remove) {
+        if (!old) throw new Refused("remove needs sectionId: the section to remove.");
+        if (c.kind === "page" && old.author.id !== actor.id) {
+          throw new Refused(
+            `"${old.name}" on the ${c.name} page wasn't made by this thread, so it stays. Ask the person to remove it.`,
+          );
+        }
+        await open.patchCanvas(canvasId, { op: "removeSection", sectionId: old.id }, actor);
+        return { sectionId: old.id, removed: true };
+      }
+      const fitted = frameIds === undefined ? undefined : sectionAround(c, frameIds, names.read);
+      const box = {
+        x: input.x ?? fitted?.x ?? old?.x,
+        y: input.y ?? fitted?.y ?? old?.y,
+        width: input.width ?? fitted?.width ?? old?.width,
+        height: input.height ?? fitted?.height ?? old?.height,
+      };
+      const name = input.name ?? old?.name;
+      if (name === undefined) throw new Refused("A new section needs a name.");
+      if (
+        box.x === undefined ||
+        box.y === undefined ||
+        box.width === undefined ||
+        box.height === undefined
+      ) {
+        throw new Refused("A new section needs x, y, width and height, or frameIds to wrap.");
+      }
+      const section = {
+        id: old?.id ?? randomUUID(),
+        name,
+        x: box.x,
+        y: box.y,
+        width: box.width,
+        height: box.height,
+        author: old?.author ?? actor,
+      };
+      await open.patchCanvas(canvasId, { op: "setSection", section }, actor);
+      return {
+        sectionId: section.id,
+        name: section.name,
+        x: section.x,
+        y: section.y,
+        width: section.width,
+        height: section.height,
+      };
+    },
+
+    async comment({ frameId, loc, match, index, text, annotation }: CanvasToolInput<"comment">) {
       const { canvas: c } = await findFrame(frameId);
       if (loc === undefined && match !== undefined) {
         throw new Refused("match needs loc: give the file (and line) the element is in.");
@@ -331,6 +427,7 @@ export function canvasOps(ctx: CanvasContext, names: ToolNames = THREAD_TOOLS) {
             ...cv.comments,
             {
               id,
+              ...(annotation ? { kind: "annotation" as const } : {}),
               anchor: {
                 frameId,
                 ...(pinned === undefined ? {} : { loc: pinned }),
@@ -389,11 +486,14 @@ export function canvasOps(ctx: CanvasContext, names: ToolNames = THREAD_TOOLS) {
       return { file: path.posix.join(design.brandDir, name), brandCanvasId: brand.id };
     },
 
-    async screenshot(frameId: string): Promise<Uint8Array> {
+    cropped,
+
+    async screenshot(frameId: string, region?: Region): Promise<Uint8Array> {
       const { frame } = await findFrame(frameId);
+      const crop = region && cropped(frame, region);
       await ctx.previews.ensure(design);
       const url = ctx.previews.frameUrl(design.id, frame.source);
-      return ctx.screenshots.capture(url, frame.width, frame.height);
+      return ctx.screenshots.capture(url, frame.width, frame.height, crop);
     },
 
     async measure({ frameId, select, index = 0, to, image = true }: CanvasToolInput<"measure">) {
@@ -560,9 +660,16 @@ export function canvasServer(ctx: ToolContext) {
 
     safeTool(
       "comment",
-      "Pins a comment on a frame, or on one HTML element in it. loc is file:line:col as a selection gives it (col = the 0-based column of the element's `<`), or file:line, or a file with match (text the element shows); it snaps to the element there. index = which rendered instance of loc, from the selection. Use it to point people at what you changed or what you need from them.",
+      "Pins a comment on a frame, or on one HTML element in it. loc is file:line:col as a selection gives it (col = the 0-based column of the element's `<`), or file:line, or a file with match (text the element shows); it snaps to the element there. index = which rendered instance of loc, from the selection. Use it to point people at what you changed or what you need from them. annotation: true leaves a note that stays on the canvas instead (a spacing rule, why a color): text only, and nobody has to answer it.",
       canvasTools.comment,
       async (input) => json(await ops.comment(input)),
+    ),
+
+    safeTool(
+      "write_section",
+      'Makes, changes or removes a section: a named rectangle on a canvas that groups frames, which move with it when a person drags it. Name it for the flow it holds ("Onboarding"). Give x, y, width, height, or frameIds to size it around those frames and their labels. With sectionId it changes that section (only the rectangle: frames stay put); remove: true with sectionId removes it and leaves the frames. read_canvas lists sections with their ids.',
+      canvasTools.write_section,
+      async (input) => json(await ops.writeSection(input)),
     ),
 
     safeTool(
@@ -630,10 +737,10 @@ export function canvasServer(ctx: ToolContext) {
 
     safeTool(
       "screenshot",
-      "Renders a frame at its size and returns a PNG, so you can see what people see.",
+      "Renders a frame at its size and returns a PNG, so you can see what people see. region ({x, y, width, height} in the frame's own pixels) crops to one part, to check a detail up close.",
       canvasTools.screenshot,
-      async ({ frameId }) => {
-        const png = await ops.screenshot(frameId);
+      async ({ frameId, region }) => {
+        const png = await ops.screenshot(frameId, region);
         return {
           content: [
             { type: "image", data: Buffer.from(png).toString("base64"), mimeType: "image/png" },
@@ -720,6 +827,28 @@ export async function pinLoc(
     column: column === undefined ? undefined : Number(column),
     ...(match === undefined ? {} : { match }),
   });
+}
+
+/**
+ * The box of a section around frames: their union, with the label above each, and `SECTION_PAD`
+ * on every side.
+ */
+export function sectionAround(c: Canvas, frameIds: string[], read: string): Box {
+  const frames = frameIds.map((id) => {
+    const frame = c.frames.find((f) => f.id === id);
+    if (!frame) throw new Refused(`There's no frame ${id} on ${c.name}. Call ${read}.`);
+    return frame;
+  });
+  const left = Math.min(...frames.map((f) => f.x));
+  const top = Math.min(...frames.map((f) => f.y - LABEL_OFFSET));
+  const right = Math.max(...frames.map((f) => f.x + f.width));
+  const bottom = Math.max(...frames.map((f) => f.y + f.height));
+  return {
+    x: left - SECTION_PAD,
+    y: top - SECTION_PAD,
+    width: right - left + SECTION_PAD * 2,
+    height: bottom - top + SECTION_PAD * 2,
+  };
 }
 
 /** `/` → Home, `/cart/:id` → CartId. */

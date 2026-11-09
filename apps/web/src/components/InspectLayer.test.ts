@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { MEASURE_PURPLE, type Measurement } from "@finite/protocol";
 import { describe, expect, it, vi } from "vite-plus/test";
-import type { Probe } from "@/canvas/tools/measure";
+import type { Probe } from "@/canvas/tools/inspect";
 
 vi.mock("@stylexjs/stylex", () => ({
   create: () => ({}),
@@ -16,8 +16,8 @@ vi.mock("@/styles/tokens.stylex", () => ({
 }));
 vi.mock("@/client/finite", () => ({ finite: {} }));
 
-const { figuresOf, zoomStepOf } = await import("./MeasureLayer");
-const { distanceText, gapChips, specRows } = await import("./MeasureCard");
+const { figuresOf, zoomStepOf } = await import("./InspectLayer");
+const { distanceText, gapChips, specRows } = await import("./InspectCard");
 
 const element = (over: Partial<Measurement> = {}): Measurement => ({
   tag: "div",
@@ -47,7 +47,7 @@ const probe = (frameId: string, over: Partial<Measurement> = {}): Probe => ({
 
 const other = { loc: "src/App.tsx:9:4" };
 
-describe("the figures the measure tool draws", () => {
+describe("the figures the inspect tool draws", () => {
   it("draws nothing with nothing measured", () => {
     expect(figuresOf({ hover: null, pin: null, up: 0 })).toEqual([]);
   });

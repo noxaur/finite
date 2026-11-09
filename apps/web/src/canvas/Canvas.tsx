@@ -4,7 +4,7 @@ import * as stylex from "@stylexjs/stylex";
 import type { Canvas as CanvasDoc, Route } from "@finite/protocol";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { CommentLayer } from "@/components/Comments";
-import { MeasureCard } from "@/components/MeasureCard";
+import { InspectCard } from "@/components/InspectCard";
 import { SelectionLayer } from "@/components/SelectionLayer";
 import { Camera } from "@/design/camera";
 import { colors, fonts, radii, shadows, space } from "@/styles/tokens.stylex";
@@ -12,7 +12,9 @@ import { Button } from "@/components/Button";
 import { Toolbar } from "@/components/Toolbar";
 import { useDesignState } from "@/client/finite";
 import { activeEditor, CanvasEditor, useEditorState } from "./editor";
+import { SectionsLayer, SlicesLayer } from "./CanvasObjects";
 import { FrameView } from "./FrameView";
+import { MeasureOverlay } from "./MeasureOverlay";
 import { useSelection } from "./selection";
 import { TextEditor, TextLabels } from "./TextLabels";
 import { ToolOverlays } from "./ToolOverlays";
@@ -134,8 +136,8 @@ function CanvasView({
       raf = requestAnimationFrame(() => {
         const boxes = editor.frames.map((f) => ({ id: f.id, ...editor.boxOf(f) }));
         const pinned = new Set(selection.map((s) => s.frameId));
-        const measurePin = editor.state.measure.pin;
-        if (measurePin) pinned.add(measurePin.frameId);
+        const inspectPin = editor.state.inspect.pin;
+        if (inspectPin) pinned.add(inspectPin.frameId);
         setMounted((prev) => {
           const next = framesToMount(boxes, editor.camera.visibleWorld(1), prev, pinned);
           return next.length === prev.length && next.every((id, i) => id === prev[i]) ? prev : next;
@@ -165,6 +167,7 @@ function CanvasView({
       <div ref={world} {...stylex.props(styles.world)}>
         {editor && state && (
           <>
+            <SectionsLayer editor={editor} state={state} />
             <TextLabels editor={editor} state={state} />
             {canvas.frames.map((frame) => {
               const box = editor.boxOf(frame);
@@ -205,8 +208,10 @@ function CanvasView({
                 </div>
               );
             })}
+            <SlicesLayer editor={editor} state={state} />
             <SelectionLayer editor={editor} state={state} selection={selection} />
             <ToolOverlays editor={editor} state={state} />
+            {state.tool === "measure" && <MeasureOverlay host={editor} state={state} />}
             <CommentLayer
               designId={designId}
               canvasId={canvas.id}
@@ -236,8 +241,8 @@ function CanvasView({
         )}
       </div>
       {editor && state && <Toolbar editor={editor} state={state} />}
-      {editor && state?.tool === "measure" && (
-        <MeasureCard editor={editor} measure={state.measure} />
+      {editor && state?.tool === "inspect" && (
+        <InspectCard editor={editor} inspect={state.inspect} />
       )}
     </div>
   );

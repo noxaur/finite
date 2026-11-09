@@ -576,6 +576,102 @@ describe("canvases", () => {
     expect(canvasChanges).toHaveLength(13);
   });
 
+  it("adds, moves, resizes and removes sections and slices, and undo and redo take each back", async () => {
+    const { open } = await connected();
+    const other = { kind: "person", id: "u2", name: "Ana" } as const;
+    const page = await open.createCanvas({ kind: "page", name: "Flows" }, by);
+    const id = page.id;
+    const at = (box: Partial<{ x: number; y: number }> = {}) => ({
+      id: "s",
+      name: "Onboarding",
+      x: 0,
+      y: 0,
+      width: 600,
+      height: 400,
+      author: by,
+      ...box,
+    });
+    const text = { id: "t", x: 10, y: 20, width: 100, title: "T", body: "B", author: by };
+    await open.patchCanvas(id, { op: "addFrames", frames: [frame("a", 50), frame("b", 700)] }, by);
+    await open.patchCanvas(id, { op: "setText", text }, by);
+
+    let canvas = await open.patchCanvas(id, { op: "setSection", section: at() }, by);
+    expect(canvas.sections).toEqual([at()]);
+    canvas = await open.patchCanvas(id, { op: "setSection", section: at({ x: 5 }) }, by);
+    expect(canvas.sections).toEqual([at({ x: 5 })]);
+
+    // Moving a section moves what's inside it as one step.
+    canvas = await open.patchCanvas(
+      id,
+      {
+        op: "moveSection",
+        sectionId: "s",
+        x: 105,
+        y: 200,
+        frames: [{ id: "a", x: 150, y: 200 }],
+        texts: [{ id: "t", x: 110, y: 220 }],
+      },
+      by,
+    );
+    expect(canvas.sections[0]).toMatchObject({ x: 105, y: 200 });
+    expect(canvas.frames.find((f) => f.id === "a")).toMatchObject({ x: 150, y: 200 });
+    expect(canvas.frames.find((f) => f.id === "b")).toMatchObject({ x: 700, y: 0 });
+    expect(canvas.texts[0]).toMatchObject({ x: 110, y: 220 });
+    canvas = await open.undoCanvas(id, by);
+    expect(canvas.sections[0]).toMatchObject({ x: 5, y: 0 });
+    expect(canvas.frames.find((f) => f.id === "a")).toMatchObject({ x: 50, y: 0 });
+    expect(canvas.texts[0]).toMatchObject({ x: 10, y: 20 });
+    canvas = await open.undoCanvas(id, by, true);
+    expect(canvas.sections[0]).toMatchObject({ x: 105, y: 200 });
+    canvas = await open.undoCanvas(id, by);
+
+    // A slice sits in one frame, in the frame's own pixels.
+    const slice = { id: "sl", frameId: "a", name: "Hero", x: 10, y: 10, width: 50, height: 40 };
+    canvas = await open.patchCanvas(id, { op: "setSlice", slice }, by);
+    expect(canvas.slices).toEqual([slice]);
+    await expect(
+      open.patchCanvas(id, { op: "setSlice", slice: { ...slice, id: "x", frameId: "gone" } }, by),
+    ).rejects.toMatchObject({ code: "not-found" });
+    await expect(
+      open.patchCanvas(id, { op: "setSlice", slice: { ...slice, name: " " } }, by),
+    ).rejects.toMatchObject({ code: "invalid" });
+
+    // Slices travel with their frame to another canvas.
+    const ideas = await open.createCanvas({ kind: "prototype", name: "Ideas" }, by);
+    await open.patchCanvas(id, { op: "moveFramesTo", frameIds: ["a"], toCanvasId: ideas.id }, by);
+    expect((await open.canvases()).find((c) => c.id === id)!.slices).toEqual([]);
+    expect((await open.canvases()).find((c) => c.id === ideas.id)!.slices).toEqual([slice]);
+    await open.undoCanvas(id, by);
+    expect((await open.canvases()).find((c) => c.id === id)!.slices).toEqual([slice]);
+
+    // Removing is a patch too, so undo brings the section back, whoever made it.
+    canvas = await open.patchCanvas(id, { op: "removeSlice", sliceId: "sl" }, by);
+    expect(canvas.slices).toEqual([]);
+    canvas = await open.undoCanvas(id, by);
+    expect(canvas.slices).toEqual([slice]);
+    canvas = await open.patchCanvas(id, { op: "removeSection", sectionId: "s" }, other);
+    expect(canvas.sections).toEqual([]);
+    canvas = await open.undoCanvas(id, other);
+    expect(canvas.sections.map((x) => x.id)).toEqual(["s"]);
+    await expect(
+      open.patchCanvas(id, { op: "removeSection", sectionId: "nope" }, by),
+    ).rejects.toMatchObject({ code: "not-found" });
+    await expect(
+      open.patchCanvas(
+        id,
+        {
+          op: "moveSection",
+          sectionId: "s",
+          x: 0,
+          y: 0,
+          frames: [{ id: "gone", x: 0, y: 0 }],
+          texts: [],
+        },
+        by,
+      ),
+    ).rejects.toMatchObject({ code: "not-found" });
+  });
+
   it("saves to disk, survives a reopen, and purges canvases removed over 30 days ago", async () => {
     const { dataDir, store, entry, open } = await connected();
     const fresh = await open.createCanvas({ kind: "page", name: "Fresh" }, by);

@@ -4,28 +4,28 @@ import * as stylex from "@stylexjs/stylex";
 import { drawFigure, type Figure } from "@finite/protocol";
 import { type CSSProperties, useCallback, useMemo, useSyncExternalStore } from "react";
 import type { CanvasEditor } from "../canvas/editor";
-import { type MeasureState, type Probe, sameElement } from "../canvas/tools/measure";
+import { type InspectState, type Probe, sameElement } from "../canvas/tools/inspect";
 import { colors } from "@/styles/tokens.stylex";
 
 /** Pin and hover when they're two elements in one frame: the pair the distance is between. */
-export function comparedPair({ hover, pin }: MeasureState): [Probe, Probe] | null {
+export function comparedPair({ hover, pin }: InspectState): [Probe, Probe] | null {
   return pin && hover && pin.frameId === hover.frameId && !sameElement(pin, hover)
     ? [pin, hover]
     : null;
 }
 
-export function figuresOf(measure: MeasureState): { frameId: string; figure: Figure }[] {
-  const pair = comparedPair(measure);
+export function figuresOf(inspect: InspectState): { frameId: string; figure: Figure }[] {
+  const pair = comparedPair(inspect);
   if (pair) return [{ frameId: pair[0].frameId, figure: { target: pair[0].m, other: pair[1].m } }];
-  const { hover, pin } = measure;
+  const { hover, pin } = inspect;
   const probes = pin && hover && sameElement(pin, hover) ? [pin] : [pin, hover];
   return probes
     .filter((p): p is Probe => p !== null)
     .map((p) => ({ frameId: p.frameId, figure: { target: p.m } }));
 }
 
-export function drawingsOf(measure: MeasureState, zoom: number) {
-  return figuresOf(measure).map(({ frameId, figure }) => ({
+export function drawingsOf(inspect: InspectState, zoom: number) {
+  return figuresOf(inspect).map(({ frameId, figure }) => ({
     frameId,
     ...drawFigure(figure, zoom),
   }));
@@ -52,12 +52,12 @@ export function useZoomStep(editor: CanvasEditor) {
 const FIGURE_VARS = { "--measure": colors.measure, "--measure-on": colors.halo } as CSSProperties;
 
 /**
- * Draws the measure tool's figures over the frames. It sits in the camera's world, so it pans and
+ * Draws the inspect tool's figures over the frames. It sits in the camera's world, so it pans and
  * zooms with them; screen-constant lines and pills use `--inv-zoom`.
  */
-export function MeasureLayer({ editor, measure }: { editor: CanvasEditor; measure: MeasureState }) {
+export function InspectLayer({ editor, inspect }: { editor: CanvasEditor; inspect: InspectState }) {
   const zoom = useZoomStep(editor);
-  const drawings = useMemo(() => drawingsOf(measure, zoom), [measure, zoom]);
+  const drawings = useMemo(() => drawingsOf(inspect, zoom), [inspect, zoom]);
   return drawings.map(({ frameId, html }) => {
     const frame = editor.frame(frameId);
     if (!frame) return null;
@@ -67,7 +67,7 @@ export function MeasureLayer({ editor, measure }: { editor: CanvasEditor; measur
     return (
       <div
         key={frameId}
-        data-measure={frameId}
+        data-inspect={frameId}
         {...root}
         style={{ ...root.style, ...FIGURE_VARS }}
         dangerouslySetInnerHTML={{ __html: html }}

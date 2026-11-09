@@ -4,9 +4,9 @@ import * as stylex from "@stylexjs/stylex";
 import { distanceBetween, type Distance, type Measurement, SPEC } from "@finite/protocol";
 import { type ReactNode, useMemo } from "react";
 import type { CanvasEditor } from "@/canvas/editor";
-import type { MeasureState } from "@/canvas/tools/measure";
+import type { InspectState } from "@/canvas/tools/inspect";
 import { colors, fonts, radii, size, space } from "@/styles/tokens.stylex";
-import { comparedPair, drawingsOf, useZoomStep } from "./MeasureLayer";
+import { comparedPair, drawingsOf, useZoomStep } from "./InspectLayer";
 
 /** Computed values that mean a property was left alone, per `SPEC` prop. */
 const INITIAL: Readonly<Record<string, readonly string[]>> = {
@@ -91,30 +91,30 @@ export function distanceText({ relation, lines }: Distance) {
 }
 
 /**
- * The measure tool's readout, docked at the top right of the canvas viewport: the
+ * The inspect tool's readout, docked at the top right of the canvas viewport: the
  * pinned element, else the one under the pointer. It stays put, so it never covers what's measured.
  */
-export function MeasureCard({ editor, measure }: { editor: CanvasEditor; measure: MeasureState }) {
+export function InspectCard({ editor, inspect }: { editor: CanvasEditor; inspect: InspectState }) {
   const zoom = useZoomStep(editor);
   const hidden = useMemo(
-    () => drawingsOf(measure, zoom).reduce((n, d) => n + d.hidden, 0),
-    [measure, zoom],
+    () => drawingsOf(inspect, zoom).reduce((n, d) => n + d.hidden, 0),
+    [inspect, zoom],
   );
-  const shown = measure.pin ?? measure.hover;
-  const shell = { "data-canvas-ui": "", "data-camera-ignore": "", "data-measure-card": "" };
+  const shown = inspect.pin ?? inspect.hover;
+  const shell = { "data-canvas-ui": "", "data-camera-ignore": "", "data-inspect-card": "" };
   if (!shown) {
     return (
-      <aside {...shell} aria-label="Measure" {...stylex.props(styles.card)}>
-        <p {...stylex.props(styles.empty)}>Hover an element to measure it.</p>
+      <aside {...shell} aria-label="Inspect" {...stylex.props(styles.card)}>
+        <p {...stylex.props(styles.empty)}>Hover an element to inspect it.</p>
       </aside>
     );
   }
   const { m } = shown;
-  const pair = comparedPair(measure);
+  const pair = comparedPair(inspect);
   const distance = pair && distanceText(distanceBetween(pair[0].m.box, pair[1].m.box));
   const chips = gapChips(m.gaps);
   return (
-    <aside {...shell} aria-label="Measure" {...stylex.props(styles.card)}>
+    <aside {...shell} aria-label="Inspect" {...stylex.props(styles.card)}>
       <header {...stylex.props(styles.header)}>
         <div {...stylex.props(styles.titleRow)}>
           <span title={m.name} {...stylex.props(styles.name)}>
@@ -126,7 +126,7 @@ export function MeasureCard({ editor, measure }: { editor: CanvasEditor; measure
               {m.index + 1}/{m.count}
             </span>
           )}
-          {measure.pin && <span {...stylex.props(styles.pinned)}>Pinned</span>}
+          {inspect.pin && <span {...stylex.props(styles.pinned)}>Pinned</span>}
         </div>
         <div {...stylex.props(styles.loc)}>{m.loc ?? "Rendered by a library"}</div>
       </header>

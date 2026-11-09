@@ -7,13 +7,15 @@ import type {
   Loc,
   NewNode,
   Rect,
+  Section,
   SourceEdit,
+  Slice,
   TextLabel,
 } from "@finite/protocol";
 import type { ComponentType } from "react";
 import type { Camera } from "@/design/camera";
 import type { IconName } from "@/lib/icons";
-import type { EditorState, ElementFacts } from "../editor";
+import type { EditorState, ElementFacts, ObjectSelection } from "../editor";
 import type { Point } from "../gestures";
 import type { SelectionItem } from "../selection";
 
@@ -62,7 +64,12 @@ export type Down = {
 };
 
 /** A shape being drawn, in canvas units. Page-level, so it costs no bridge traffic. */
-export type Ghost = { box: Rect; round?: boolean };
+export type Ghost = {
+  box: Rect;
+  round?: boolean;
+  /** An outline drawn instead of the box, in the box's own units. */
+  d?: string;
+};
 
 /** Where a drawn shape landed. */
 export type Placed = { frameId: string; loc: Loc; index: number };
@@ -115,6 +122,8 @@ export interface ToolHost {
   readonly state: EditorState;
   readonly frames: readonly Frame[];
   readonly texts: readonly TextLabel[];
+  readonly sections: readonly Section[];
+  readonly slices: readonly Slice[];
   readonly facts: Map<string, ElementFacts>;
   /** A press is down on the canvas. */
   readonly pressing: boolean;
@@ -145,6 +154,8 @@ export interface ToolHost {
     path: HitElement[],
   ): SelectionItem;
   selectText(id: string | null): void;
+  /** Picks a section or slice, or nothing. */
+  selectObject(picked: ObjectSelection | null): void;
   frameItem(frameId: string): SelectionItem;
   refreshSelection(): Promise<void>;
   setTool(id: string): void;

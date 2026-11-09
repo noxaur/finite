@@ -14,9 +14,12 @@ const previews = createPreviews({
   allowedHosts: config.allowedHosts,
   relink: (id) => store.relink(id),
 });
-const source = createSourceEditor({ routes: (design) => previews.routes(design.id) });
 // `agents.close()` closes it, once, when the server shuts down.
 const screenshots = createScreenshots();
+const source = createSourceEditor({
+  routes: (design) => previews.routes(design.id),
+  render: { previews, screenshots },
+});
 const agents = createAgents({ store, previews, source, screenshots });
 
 const server = await startServer({

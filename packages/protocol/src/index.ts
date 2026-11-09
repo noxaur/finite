@@ -13,3 +13,4 @@ export {
 export * from "./tools.ts";
 export * from "./routes.ts";
 export type * from "./server.ts";
+export * from "./geometry.ts";

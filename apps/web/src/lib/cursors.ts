@@ -147,7 +147,7 @@ const CURSORS: Record<string, string> = {
     { d: "M12 12H12.01", width: 1.5 },
   ]),
   // The crosshair between two corner brackets: what's under it gets measured.
-  measure: cursor(unit(CENTER, "crosshair"), [
+  inspect: cursor(unit(CENTER, "crosshair"), [
     { d: "M12 6V10M12 14V18M6 12H10M14 12H18", width: 1.5 },
     { d: "M3 8V3H8M21 16V21H16", width: 1.5 },
   ]),

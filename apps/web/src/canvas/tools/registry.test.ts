@@ -20,7 +20,19 @@ describe("resolveKey", () => {
     expect(resolveKey(press("v"), page)).toEqual({ kind: "tool", id: "select" });
     expect(resolveKey(press("h"), page)).toEqual({ kind: "tool", id: "hand" });
     expect(resolveKey(press("r"), page)).toEqual({ kind: "tool", id: "rectangle" });
-    expect(resolveKey(press("m"), page)).toEqual({ kind: "tool", id: "measure" });
+    expect(resolveKey(press("m"), page)).toEqual({ kind: "tool", id: "inspect" });
+    expect(resolveKey(press("m", { shiftKey: true }), page)).toEqual({
+      kind: "tool",
+      id: "measure",
+    });
+    expect(resolveKey(press("f"), page)).toEqual({ kind: "tool", id: "frame" });
+    expect(resolveKey(press("o"), page)).toEqual({ kind: "tool", id: "ellipse" });
+    expect(resolveKey(press("l"), page)).toEqual({ kind: "tool", id: "line" });
+    expect(resolveKey(press("l", { shiftKey: true }), page)).toEqual({ kind: "tool", id: "arrow" });
+    expect(resolveKey(press("k", { shiftKey: true, metaKey: true }), page)).toEqual({
+      kind: "tool",
+      id: "image",
+    });
     expect(resolveKey(press("z", { metaKey: true }), page)).toEqual({
       kind: "command",
       id: "undo",
@@ -97,15 +109,29 @@ describe("the registry", () => {
       "comment",
       "annotation",
       "measure",
+      "inspect",
     ]);
     for (const tool of TOOLS) expect(GROUPS).toContain(tool.group);
   });
 
   it("shows only the tools that work", () => {
     expect(toolsIn("move").map((t) => t.id)).toEqual(["select", "hand", "interact"]);
-    expect(toolsIn("shape").map((t) => t.id)).toEqual(["rectangle"]);
-    expect(toolsIn("comment").map((t) => t.id)).toEqual(["comment", "measure"]);
-    expect(toolsIn("frame")).toEqual([]);
+    expect(toolsIn("shape").map((t) => t.id)).toEqual([
+      "rectangle",
+      "line",
+      "arrow",
+      "ellipse",
+      "polygon",
+      "star",
+      "image",
+    ]);
+    expect(toolsIn("comment").map((t) => t.id)).toEqual([
+      "comment",
+      "annotation",
+      "measure",
+      "inspect",
+    ]);
+    expect(toolsIn("frame").map((t) => t.id)).toEqual(["frame", "section", "slice"]);
   });
 
   it("writes a shortcut the way the menu shows it", () => {

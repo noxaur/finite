@@ -30,7 +30,7 @@ const canvas = {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-describe("the measure tool", () => {
+describe("the inspect tool", () => {
   let editor: Editor;
   let viewport: EventTarget;
   const key = (k: string) =>
@@ -73,7 +73,7 @@ describe("the measure tool", () => {
       toWorld: (x: number, y: number) => ({ x, y }),
     } as unknown as Camera;
     editor = new CanvasEditor("d", canvas, "design", viewport as HTMLElement, camera);
-    editor.setTool("measure");
+    editor.setTool("inspect");
   });
 
   afterEach(() => {
@@ -84,18 +84,18 @@ describe("the measure tool", () => {
   it("M enters from anywhere and turns Interact off", () => {
     editor.setTool("interact");
     expect(key("m")).toBe(true);
-    expect(editor.state.tool).toBe("measure");
+    expect(editor.state.tool).toBe("inspect");
   });
 
   it("Interact, V and C leave and clear what was measured", async () => {
     for (const leave of [() => key("i"), () => key("v"), () => key("c")]) {
-      editor.setTool("measure");
+      editor.setTool("inspect");
       await move(10, 10);
       await click(10, 10);
-      expect(editor.state.measure.pin).not.toBeNull();
+      expect(editor.state.inspect.pin).not.toBeNull();
       leave();
-      expect(editor.state.tool).not.toBe("measure");
-      expect(editor.state.measure).toEqual({ hover: null, pin: null, up: 0 });
+      expect(editor.state.tool).not.toBe("inspect");
+      expect(editor.state.inspect).toEqual({ hover: null, pin: null, up: 0 });
     }
   });
 
@@ -106,16 +106,16 @@ describe("the measure tool", () => {
     key("v");
     answer([measured()]);
     await moved;
-    expect(editor.state.measure.hover).toBeNull();
+    expect(editor.state.inspect.hover).toBeNull();
   });
 
   it("Esc unpins first, then returns to Select", async () => {
     await move(10, 10);
     await click(10, 10);
-    expect(editor.state.measure.pin?.target).toEqual({ loc: "a.tsx:1:1", index: 0 });
+    expect(editor.state.inspect.pin?.target).toEqual({ loc: "a.tsx:1:1", index: 0 });
     expect(key("Escape")).toBe(true);
-    expect(editor.state.measure.pin).toBeNull();
-    expect(editor.state.tool).toBe("measure");
+    expect(editor.state.inspect.pin).toBeNull();
+    expect(editor.state.tool).toBe("inspect");
     expect(key("Escape")).toBe(true);
     expect(editor.state.tool).toBe("select");
   });
@@ -124,13 +124,13 @@ describe("the measure tool", () => {
     await click(10, 10);
     measure.mockResolvedValue([measured({ loc: "b.tsx:1:1" })]);
     await click(20, 20);
-    expect(editor.state.measure.pin?.m.loc).toBe("b.tsx:1:1");
+    expect(editor.state.inspect.pin?.m.loc).toBe("b.tsx:1:1");
     await click(20, 20);
-    expect(editor.state.measure.pin).toBeNull();
+    expect(editor.state.inspect.pin).toBeNull();
     await click(20, 20);
-    expect(editor.state.measure.pin).not.toBeNull();
+    expect(editor.state.inspect.pin).not.toBeNull();
     await click(900, 900);
-    expect(editor.state.measure.pin).toBeNull();
+    expect(editor.state.inspect.pin).toBeNull();
   });
 
   it("↑ walks up and stops at the topmost element; ↓ comes back", async () => {
@@ -140,14 +140,14 @@ describe("the measure tool", () => {
     measure.mockResolvedValue([leaf, parent]);
     expect(key("ArrowUp")).toBe(true);
     await settle();
-    expect(editor.state.measure).toMatchObject({ up: 1, hover: { m: parent } });
+    expect(editor.state.inspect).toMatchObject({ up: 1, hover: { m: parent } });
     key("ArrowUp");
     await settle();
-    expect(editor.state.measure.up).toBe(1);
+    expect(editor.state.inspect.up).toBe(1);
     measure.mockResolvedValue([leaf]);
     key("ArrowDown");
     await settle();
-    expect(editor.state.measure).toMatchObject({ up: 0, hover: { m: leaf } });
+    expect(editor.state.inspect).toMatchObject({ up: 0, hover: { m: leaf } });
     expect(key("ArrowDown")).toBe(true);
   });
 
@@ -159,7 +159,7 @@ describe("the measure tool", () => {
     const next = measured({ loc: "z.tsx:5:5" });
     measure.mockResolvedValue([next, measured({ loc: "a.tsx:0:0" })]);
     await move(40, 40);
-    expect(editor.state.measure).toMatchObject({ up: 0, hover: { m: next } });
+    expect(editor.state.inspect).toMatchObject({ up: 0, hover: { m: next } });
   });
 
   it("Backspace and ⌘D do nothing while measuring", () => {
@@ -188,11 +188,11 @@ describe("the measure tool", () => {
     measure.mockResolvedValue([moved]);
     editor.frameChanged();
     await settle();
-    expect(editor.state.measure.pin?.m.name).toBe("moved");
+    expect(editor.state.inspect.pin?.m.name).toBe("moved");
     measure.mockResolvedValue([null]);
     editor.frameChanged();
     await settle();
-    expect(editor.state.measure.pin).toBeNull();
+    expect(editor.state.inspect.pin).toBeNull();
   });
 
   it("drops a click held down while Esc unpins", async () => {
@@ -202,7 +202,7 @@ describe("the measure tool", () => {
     key("Escape");
     viewport.dispatchEvent(Object.assign(new Event("pointerup"), at));
     await settle();
-    expect(editor.state.measure.pin).toBeNull();
+    expect(editor.state.inspect.pin).toBeNull();
   });
 
   it("drops a click still waiting on its frame once Esc has unpinned", async () => {
@@ -213,7 +213,7 @@ describe("the measure tool", () => {
     key("Escape");
     answers[0]!([measured({ loc: "b.tsx:1:1" })]);
     await settle();
-    expect(editor.state.measure.pin).toBeNull();
+    expect(editor.state.inspect.pin).toBeNull();
   });
 
   it("keeps the newest of two overlapping refreshes of the pin", async () => {
@@ -227,12 +227,12 @@ describe("the measure tool", () => {
     await settle();
     answers[1]!([measured({ text: "second" })]);
     await settle();
-    expect(editor.state.measure.pin?.m.text).toBe("second");
+    expect(editor.state.inspect.pin?.m.text).toBe("second");
   });
 
   it("forgets a pin whose frame is removed", async () => {
     await click(10, 10);
     editor.setCanvas({ ...canvas, frames: [] });
-    expect(editor.state.measure.pin).toBeNull();
+    expect(editor.state.inspect.pin).toBeNull();
   });
 });

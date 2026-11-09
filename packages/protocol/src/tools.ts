@@ -1,5 +1,13 @@
 import { z } from "zod";
 
+/** A box in a frame's own CSS pixels. */
+const Region = z.object({
+  x: z.number().min(0),
+  y: z.number().min(0),
+  width: z.number().positive(),
+  height: z.number().positive(),
+});
+
 /**
  * Input shapes of the canvas tools agents call through the `finite` MCP server. They're raw zod
  * shapes because the Agent SDK's `tool(name, description, shape, handler)` takes one.
@@ -42,6 +50,22 @@ export const canvasTools = {
     /** Which rendered instance of `loc` (from a selection), default 0. */
     index: z.number().int().min(0).optional(),
     text: z.string().min(1),
+    /** Leaves a note that stays on the canvas, for people. No agent is asked to act on it. */
+    annotation: z.boolean().optional(),
+  },
+  write_section: {
+    canvasId: z.string(),
+    /** Changes or removes this section. Leave it out to make one. */
+    sectionId: z.string().optional(),
+    name: z.string().min(1).optional(),
+    x: z.number().optional(),
+    y: z.number().optional(),
+    width: z.number().positive().optional(),
+    height: z.number().positive().optional(),
+    /** Sizes a new section around these frames (and their labels) when x, y, width, height are left out. */
+    frameIds: z.array(z.string()).min(1).optional(),
+    /** Removes `sectionId`. The frames in it stay. */
+    remove: z.boolean().optional(),
   },
   copy_production: {
     canvasId: z.string(),
@@ -55,7 +79,7 @@ export const canvasTools = {
   },
   spawn_thread: { prompt: z.string().min(1), canvasId: z.string().optional() },
   name_thread: { title: z.string().min(1) },
-  screenshot: { frameId: z.string() },
+  screenshot: { frameId: z.string(), region: Region.optional() },
   measure: {
     frameId: z.string(),
     /** CSS selector. `[data-finite-loc="src/x.tsx:12:4"]` picks exactly one element. */
@@ -74,6 +98,7 @@ export const canvasTools = {
 const elementOp = { frameId: z.string(), select: z.string().min(1) };
 const onCanvas = { canvasId: z.string().optional() };
 const { canvasId: _textCanvas, ...textFields } = canvasTools.write_text;
+const { canvasId: _sectionCanvas, ...sectionFields } = canvasTools.write_section;
 
 /** One step of the `/mcp` `edit` tool. */
 export const editOp = z.discriminatedUnion("op", [
@@ -96,6 +121,7 @@ export const editOp = z.discriminatedUnion("op", [
     frameIds: canvasTools.remove_frames.frameIds,
   }),
   z.object({ op: z.literal("text"), ...onCanvas, ...textFields }),
+  z.object({ op: z.literal("section"), ...onCanvas, ...sectionFields }),
   z.object({
     op: z.literal("copy_production"),
     ...onCanvas,
@@ -159,6 +185,8 @@ export const mcpTools = {
     designId: z.string(),
     frameIds: z.array(z.string()).min(1).optional(),
     canvasId: z.string().optional(),
+    /** Crops to a box in the frame's own pixels. Needs exactly one frame in frameIds. */
+    region: Region.optional(),
   },
   measure: { designId: z.string(), ...canvasTools.measure },
   comments: {
