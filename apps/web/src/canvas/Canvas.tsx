@@ -5,6 +5,8 @@ import type { Canvas as CanvasDoc, Route } from "@finite/protocol";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { CommentLayer } from "@/components/Comments";
 import { InteractivePill } from "@/components/InteractivePill";
+import { MeasureCard } from "@/components/MeasureCard";
+import { MeasureLayer } from "@/components/MeasureLayer";
 import { SelectionLayer } from "@/components/SelectionLayer";
 import { Camera } from "@/design/camera";
 import { colors, fonts, radii, shadows, space } from "@/styles/tokens.stylex";
@@ -129,6 +131,8 @@ function CanvasView({
       raf = requestAnimationFrame(() => {
         const boxes = editor.frames.map((f) => ({ id: f.id, ...editor.boxOf(f) }));
         const pinned = new Set(selection.map((s) => s.frameId));
+        const measurePin = editor.state.measure.pin;
+        if (measurePin) pinned.add(measurePin.frameId);
         setMounted((prev) => {
           const next = framesToMount(boxes, editor.camera.visibleWorld(1), prev, pinned);
           return next.length === prev.length && next.every((id, i) => id === prev[i]) ? prev : next;
@@ -149,7 +153,11 @@ function CanvasView({
     <div
       ref={viewport}
       data-canvas=""
-      {...stylex.props(styles.viewport, state?.tool === "comment" && styles.commentCursor)}
+      {...stylex.props(
+        styles.viewport,
+        state?.tool === "comment" && styles.commentCursor,
+        state?.tool === "measure" && styles.measureCursor,
+      )}
     >
       <div ref={world} {...stylex.props(styles.world)}>
         {editor && state && (
@@ -195,6 +203,7 @@ function CanvasView({
               );
             })}
             <SelectionLayer editor={editor} state={state} selection={selection} />
+            {state.tool === "measure" && <MeasureLayer editor={editor} measure={state.measure} />}
             <CommentLayer
               designId={designId}
               canvasId={canvas.id}
@@ -231,6 +240,9 @@ function CanvasView({
           onInteract={(on) => editor.setInteract(on)}
         />
       )}
+      {editor && state?.tool === "measure" && (
+        <MeasureCard editor={editor} measure={state.measure} />
+      )}
     </div>
   );
 }
@@ -248,6 +260,7 @@ const styles = stylex.create({
     outline: "none",
   },
   commentCursor: { cursor: "crosshair" },
+  measureCursor: { cursor: "var(--cursor-measure, crosshair)" },
   world: {
     position: "absolute",
     left: 0,

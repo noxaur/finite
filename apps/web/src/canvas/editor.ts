@@ -7,6 +7,8 @@ import type {
   HitElement,
   LayerNode,
   Loc,
+  MeasureTarget,
+  Measurement,
   Rect,
   Rev,
   SourceEdit,
@@ -50,7 +52,24 @@ const NOTICE_MS = 5000;
 /** How soon a second click makes a double-click, in milliseconds. */
 const DOUBLE_MS = 400;
 
-export type Tool = "select" | "comment";
+export type Tool = "select" | "comment" | "measure";
+
+/** One measured element and how to measure it again. */
+export type Probe = { frameId: string; target: MeasureTarget; m: Measurement };
+
+export type MeasureState = {
+  readonly hover: Probe | null;
+  readonly pin: Probe | null;
+  /** How many stamped parents ↑ has walked from what the pointer is on. */
+  readonly up: number;
+};
+
+const NO_MEASURE: MeasureState = { hover: null, pin: null, up: 0 };
+
+export const sameElement = (a: Probe, b: Probe) =>
+  a.frameId === b.frameId && a.m.loc === b.m.loc && a.m.index === b.m.index;
+
+const sameMeasurement = (a: Measurement, b: Measurement) => JSON.stringify(a) === JSON.stringify(b);
 
 /** What an element selection knows beyond its loc: what the edits it makes need. */
 export type ElementFacts = { rev: Rev; tag: string; path: HitElement[] };
@@ -101,6 +120,8 @@ export interface EditorState {
   readonly sizes: Readonly<Record<string, number>>;
   /** Counts frame loads and HMR updates, so what's measured in frames measures again. */
   readonly updates: number;
+  /** The measure tool's element under the pointer and its pin; empty in the other tools. */
+  readonly measure: MeasureState;
 }
 
 const initial: EditorState = {
@@ -121,6 +142,7 @@ const initial: EditorState = {
   openComment: null,
   sizes: {},
   updates: 0,
+  measure: NO_MEASURE,
 };
 
 type Gesture = {
@@ -162,6 +184,8 @@ export class CanvasEditor {
   private space = false;
   private hoverFrame = 0;
   private hoverSeq = 0;
+  /** Where the measure tool last probed, and the element right under that point. */
+  private pointer: { frameId: string; at: Point; leaf: string | null } | null = null;
   private noticeTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly abort = new AbortController();
   private readonly offSelection: () => void;
@@ -180,7 +204,14 @@ export class CanvasEditor {
     viewport.addEventListener("pointermove", (e) => this.onMove(e), capture);
     viewport.addEventListener("pointerup", (e) => void this.onUp(e), capture);
     viewport.addEventListener("pointercancel", () => this.cancelPress(), capture);
-    viewport.addEventListener("pointerleave", () => this.setHover(null), { signal });
+    viewport.addEventListener(
+      "pointerleave",
+      () => {
+        this.setHover(null);
+        if (this.state.tool === "measure") this.clearProbe();
+      },
+      { signal },
+    );
     window.addEventListener("keydown", (e) => this.onKey(e), { signal });
     window.addEventListener(
       "keyup",
@@ -192,6 +223,14 @@ export class CanvasEditor {
     window.addEventListener("blur", () => (this.space = camera.space = false), { signal });
     // Left-drag pans only on the empty canvas; on frames it selects and edits.
     camera.mayPan = (e) => this.state.tool === "select" && this.frameAt(this.worldOf(e)) === null;
+    // The measure card scrolls itself; a pinch over it still zooms.
+    camera.routeWheel = (e) =>
+      !e.ctrlKey &&
+      !e.metaKey &&
+      e.target instanceof Element &&
+      e.target.closest("[data-measure-card]")
+        ? "native"
+        : "camera";
     this.offSelection = selectionStore.subscribe(() => void this.refreshSelection());
     void this.refreshSelection();
   }
@@ -220,6 +259,16 @@ export class CanvasEditor {
     if (this.state.selectedText && !canvas.texts.some((t) => t.id === this.state.selectedText)) {
       this.update({ selectedText: null });
     }
+    const { hover, pin } = this.state.measure;
+    if ((hover && !ids.has(hover.frameId)) || (pin && !ids.has(pin.frameId))) {
+      this.update({
+        measure: {
+          ...this.state.measure,
+          hover: hover && ids.has(hover.frameId) ? hover : null,
+          pin: pin && ids.has(pin.frameId) ? pin : null,
+        },
+      });
+    }
     void this.refreshSelection();
   }
 
@@ -244,10 +293,12 @@ export class CanvasEditor {
   }
 
   setTool(tool: Tool) {
-    this.update({ tool, commentDraft: null, hover: null });
+    this.stopProbing();
+    this.update({ tool, commentDraft: null, hover: null, measure: NO_MEASURE });
   }
 
   setInteract(interact: boolean) {
+    if (interact && this.state.tool === "measure") this.setTool("select");
     this.update({ interact, hover: null });
   }
 
@@ -255,6 +306,7 @@ export class CanvasEditor {
   frameChanged() {
     this.update({ updates: this.state.updates + 1 });
     void this.refreshSelection();
+    void this.remeasure();
   }
 
   setSize(frameId: string, height: number) {
@@ -495,6 +547,111 @@ export class CanvasEditor {
     });
   }
 
+  // Measure
+
+  private stopProbing() {
+    cancelAnimationFrame(this.hoverFrame);
+    this.hoverSeq++;
+    this.pointer = null;
+  }
+
+  private clearProbe() {
+    this.stopProbing();
+    const { measure } = this.state;
+    if (measure.hover || measure.up > 0) {
+      this.update({ measure: { ...measure, hover: null, up: 0 } });
+    }
+  }
+
+  private probeAt(e: PointerEvent) {
+    cancelAnimationFrame(this.hoverFrame);
+    const { clientX, clientY, target } = e;
+    this.hoverFrame = requestAnimationFrame(() => {
+      // Over the card or the pill the probe holds still, so what the card shows can be read.
+      if (target instanceof Element && target.closest("[data-canvas-ui]")) return;
+      const world = this.camera.toWorld(clientX, clientY);
+      const frame = this.frameAt(world);
+      if (!frame) return this.clearProbe();
+      void this.probe(frame.id, this.local(frame, world), this.state.measure.up);
+    });
+  }
+
+  /**
+   * The element at a point, `up` stamped parents above the one right under it. A different element
+   * under the point starts the walk over; `up` comes back as the walk that was kept.
+   */
+  private async elementAt(frameId: string, at: Point, up: number) {
+    const targets: MeasureTarget[] = up > 0 ? [{ at }, { at, up }] : [{ at }];
+    const replies = await bridgeOf(frameId)
+      ?.measure(targets)
+      .catch(() => null);
+    const leaf = replies?.[0] ?? null;
+    if (!leaf) return null;
+    const key = `${frameId}|${leaf.loc}|${leaf.index}`;
+    return up > 0 && key === this.pointer?.leaf
+      ? { key, m: replies?.[1] ?? leaf, up }
+      : { key, m: leaf, up: 0 };
+  }
+
+  private async probe(frameId: string, at: Point, up: number) {
+    const seq = ++this.hoverSeq;
+    const found = await this.elementAt(frameId, at, up);
+    if (seq !== this.hoverSeq || this.press || this.state.tool !== "measure") return;
+    if (!found) return this.clearProbe();
+    this.pointer = { frameId, at, leaf: found.key };
+    const { measure } = this.state;
+    const hover: Probe = { frameId, target: { at, up: found.up }, m: found.m };
+    if (measure.hover && sameElement(measure.hover, hover)) {
+      // ↑ past the topmost stamped element: there's nothing more to walk.
+      if (found.up > measure.up) return;
+      if (found.up === measure.up && sameMeasurement(measure.hover.m, hover.m)) return;
+    }
+    this.update({ measure: { ...measure, hover, up: found.up } });
+  }
+
+  private walk(delta: 1 | -1) {
+    const up = this.state.measure.up + delta;
+    if (this.pointer && up >= 0) void this.probe(this.pointer.frameId, this.pointer.at, up);
+  }
+
+  private unpin() {
+    this.update({ measure: { ...this.state.measure, pin: null } });
+  }
+
+  /** A click: pins what's under it, or unpins when that's the pin or nothing at all. */
+  private async pinAt(world: Point, frame: Frame | null) {
+    if (!frame) return this.unpin();
+    const at = this.local(frame, world);
+    const found = await this.elementAt(frame.id, at, this.state.measure.up);
+    if (this.state.tool !== "measure") return;
+    if (!found) return this.unpin();
+    const { m } = found;
+    const target: MeasureTarget =
+      m.loc === undefined ? { at, up: found.up } : { loc: m.loc, index: m.index };
+    const probe: Probe = { frameId: frame.id, target, m };
+    const { pin } = this.state.measure;
+    this.update({
+      measure: { ...this.state.measure, pin: pin && sameElement(pin, probe) ? null : probe },
+    });
+  }
+
+  /** A frame loaded or applied an HMR update: what's measured may have moved or gone. */
+  private async remeasure() {
+    if (this.state.tool !== "measure") return;
+    if (this.pointer) {
+      void this.probe(this.pointer.frameId, this.pointer.at, this.state.measure.up);
+    }
+    const { pin } = this.state.measure;
+    if (!pin) return;
+    const replies = await bridgeOf(pin.frameId)
+      ?.measure([pin.target])
+      .catch(() => null);
+    if (!replies || this.state.measure.pin !== pin) return;
+    const m = replies[0] ?? null;
+    if (m && sameMeasurement(m, pin.m)) return;
+    this.update({ measure: { ...this.state.measure, pin: m && { ...pin, m } } });
+  }
+
   // Pointer
 
   private ignored(e: Event) {
@@ -533,6 +690,9 @@ export class CanvasEditor {
         begin: async () => null,
         click: () => this.placeComment(world, frame),
       };
+    } else if (this.state.tool === "measure") {
+      e.preventDefault();
+      start = { begin: async () => null, click: () => this.pinAt(world, frame) };
     } else if (handle) {
       const which = handle.dataset.handle as Handle;
       const key = handle.dataset.key!;
@@ -602,6 +762,7 @@ export class CanvasEditor {
     if (!press || press.pointerId !== e.pointerId) {
       if (!this.press && this.state.tool === "select" && !this.state.interact) this.hoverAt(e);
       else if (this.state.tool === "comment") this.hoverAt(e);
+      else if (!this.press && this.state.tool === "measure") this.probeAt(e);
       return;
     }
     const screen = { x: e.clientX, y: e.clientY };
@@ -951,6 +1112,7 @@ export class CanvasEditor {
       if (this.state.commentDraft || this.state.openComment) {
         return (this.update({ commentDraft: null, openComment: null }), done());
       }
+      if (this.state.measure.pin) return (this.unpin(), done());
       if (this.state.tool !== "select") return (this.setTool("select"), done());
       if (this.state.selectedText) return (this.selectText(null), done());
       return (this.selectParent(), done());
@@ -959,19 +1121,33 @@ export class CanvasEditor {
       void this.undo(e.shiftKey ? "redo" : "undo");
       return done();
     }
+    // The measure tool hides the selection: these two would act on something unseen.
+    const measuring = this.state.tool === "measure";
     if (mod && e.key.toLowerCase() === "d") {
-      void this.duplicate();
+      if (!measuring) void this.duplicate();
       return done();
     }
     if (mod && (e.key === "=" || e.key === "+")) return (this.camera.zoomBy(1.25), done());
     if (mod && e.key === "-") return (this.camera.zoomBy(0.8), done());
     if (mod && e.key === "0") return (this.camera.set({ ...this.camera.view, zoom: 1 }), done());
-    if (e.key === "Backspace" || e.key === "Delete") return (void this.remove(), done());
+    if (e.key === "Backspace" || e.key === "Delete") {
+      if (!measuring) void this.remove();
+      return done();
+    }
     if (mod || e.altKey) return false;
     if (e.shiftKey && e.code === "Digit1") return (this.fitAll(), done());
     if (e.shiftKey && e.code === "Digit2") return (this.fitSelection(), done());
     if (e.key === "c" || e.key === "C") return (this.setTool("comment"), done());
     if (e.key === "v" || e.key === "V") return (this.setTool("select"), done());
+    if (e.key === "m" || e.key === "M") {
+      this.setInteract(false);
+      this.setTool("measure");
+      return done();
+    }
+    if (measuring && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+      this.walk(e.key === "ArrowUp" ? 1 : -1);
+      return done();
+    }
     return false;
   }
 

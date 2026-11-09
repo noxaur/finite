@@ -34,6 +34,7 @@ export function SelectionLayer({
   state: EditorState;
   selection: readonly SelectionItem[];
 }) {
+  if (state.tool === "measure") return null;
   const world = (frameId: string, r: Rect): Rect | null => {
     const frame = editor.frame(frameId);
     if (!frame) return null;

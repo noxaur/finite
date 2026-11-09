@@ -3,6 +3,7 @@ import {
   BRIDGE_HELLO,
   type BridgeEvent,
   type BridgeRequestType,
+  bridgeRequests,
   type BridgeResult,
   type FrameBridge,
   FrameMessage,
@@ -10,6 +11,7 @@ import {
   type Inspection,
   type LayerNode,
   type Loc,
+  MEASURE_PROPS,
   type Rect,
 } from "@finite/protocol";
 
@@ -144,6 +146,9 @@ export function connectFrame(iframe: HTMLIFrameElement, frameId: string): FrameB
     rects: (locs) => send("rects", { locs }) as Promise<Record<Loc, Rect[]>>,
     inspect: (loc, index) => send("inspect", { loc, index }) as Promise<Inspection | null>,
     layers: () => send("layers", {}) as Promise<LayerNode[]>,
+    // Parsed, unlike the rest: the overlay is innerHTML, and a design's JS can answer on this port.
+    measure: async (targets) =>
+      bridgeRequests.measure.result.parse(await send("measure", { targets, props: MEASURE_PROPS })),
     preview(loc, styles) {
       port?.postMessage({ type: "preview", loc, styles });
     },

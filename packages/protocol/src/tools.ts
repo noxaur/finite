@@ -56,6 +56,17 @@ export const canvasTools = {
   spawn_thread: { prompt: z.string().min(1), canvasId: z.string().optional() },
   name_thread: { title: z.string().min(1) },
   screenshot: { frameId: z.string() },
+  measure: {
+    frameId: z.string(),
+    /** CSS selector. `[data-finite-loc="src/x.tsx:12:4"]` picks exactly one element. */
+    select: z.string().min(1),
+    /** Which match, default 0. */
+    index: z.number().int().min(0).optional(),
+    /** A second CSS selector: also report and draw the distance to its first match. */
+    to: z.string().min(1).optional(),
+    /** false skips the PNG, for numbers only. */
+    image: z.boolean().optional(),
+  },
   frame_errors: { frameId: z.string() },
   finish_setup: {},
 } as const satisfies Record<string, z.ZodRawShape>;
@@ -120,7 +131,7 @@ export const editOp = z.discriminatedUnion("op", [
 ]);
 export type EditOp = z.infer<typeof editOp>;
 
-/** Input shapes of the six tools external agents call at `/mcp`. */
+/** Input shapes of the seven tools external agents call at `/mcp`. */
 export const mcpTools = {
   designs: {
     action: z.enum(["list", "create", "connect", "rename", "remove"]).optional(),
@@ -149,6 +160,7 @@ export const mcpTools = {
     frameIds: z.array(z.string()).min(1).optional(),
     canvasId: z.string().optional(),
   },
+  measure: { designId: z.string(), ...canvasTools.measure },
   comments: {
     designId: z.string(),
     canvasId: z.string().optional(),

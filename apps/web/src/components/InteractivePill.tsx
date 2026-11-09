@@ -7,9 +7,9 @@ import { colors, fonts, radii, shadows, space } from "@/styles/tokens.stylex";
 import { Button, IconButton } from "./Button";
 
 /**
- * The canvas's tools, at the top center: select (V), comment (C), and Interact, which lets the
- * pointer into the frames to click through the real app. While Interact is on, the pill says
- * so and Esc leaves it.
+ * The canvas's tools, at the top center: select (V), comment (C), measure (M), and Interact,
+ * which lets the pointer into the frames to click through the real app. While Interact or
+ * Measure is on, the pill says so and how to leave.
  */
 export function InteractivePill({
   tool,
@@ -56,6 +56,19 @@ export function InteractivePill({
           onTool("comment");
         }}
       />
+      <IconButton
+        size="small"
+        variant="ghost"
+        icon={RULER}
+        label="Measure"
+        title="Measure (M)"
+        picked={tool === "measure" && !interact}
+        aria-pressed={tool === "measure" && !interact}
+        onClick={() => {
+          onInteract(false);
+          onTool("measure");
+        }}
+      />
       <span {...stylex.props(styles.divider)} />
       <Button
         size="small"
@@ -68,6 +81,9 @@ export function InteractivePill({
         Interact
       </Button>
       {interact && <span {...stylex.props(styles.note)}>Esc to edit</span>}
+      {tool === "measure" && !interact && (
+        <span {...stylex.props(styles.note)}>Click to pin · ↑ parent · Esc</span>
+      )}
     </div>
   );
 }
@@ -88,6 +104,20 @@ const POINTER = (
 const PIN = (
   <svg width="15" height="15" viewBox="-2 -4 44 44" overflow="visible" aria-hidden="true">
     <path d={PIN_PATH} fill="none" stroke="currentColor" strokeWidth="2.9" strokeLinejoin="round" />
+  </svg>
+);
+
+/** A ruler with three ticks, on whole pixels at 15px. */
+const RULER = (
+  <svg width="15" height="15" viewBox="0 0 24 24" overflow="visible" aria-hidden="true">
+    <path
+      d="M4 7.2h16a1.6 1.6 0 0 1 1.6 1.6v6.4a1.6 1.6 0 0 1-1.6 1.6H4a1.6 1.6 0 0 1-1.6-1.6V8.8A1.6 1.6 0 0 1 4 7.2zM7.2 7.2v3.2M12 7.2v4.8M16.8 7.2v3.2"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
   </svg>
 );
 

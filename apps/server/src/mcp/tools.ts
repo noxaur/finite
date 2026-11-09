@@ -18,7 +18,14 @@ import type { z } from "zod";
 import { startThread } from "../agent/index.ts";
 import { policy } from "../agent/policy.ts";
 import type { RenderedElement, Screenshots } from "../agent/screenshot.ts";
-import { boardDir, canvasOps, rootRelative, type ToolNames } from "../agent/tools.ts";
+import {
+  boardDir,
+  canvasOps,
+  MEASURE_DESCRIPTION,
+  measureContent,
+  rootRelative,
+  type ToolNames,
+} from "../agent/tools.ts";
 import { commentEdit, updateComment } from "../handlers.ts";
 import type { Hub, Modules } from "../hub.ts";
 import { inRoot } from "../source/files.ts";
@@ -116,7 +123,7 @@ function isWaiting(comment: Comment): boolean {
   );
 }
 
-/** The six tools external agents use, on one session's MCP server. */
+/** The seven tools external agents use, on one session's MCP server. */
 export function finiteMcpServer(ctx: McpContext): McpServer {
   const { hub, modules, screenshots } = ctx;
   const server = new McpServer(
@@ -721,6 +728,12 @@ Production code is refused unless you pass production: true, which you may do on
       return { content };
     },
   );
+
+  register("measure", MEASURE_DESCRIPTION, mcpTools.measure, async ({ designId, ...input }) => {
+    const open = await designOf(designId);
+    const result = await withPreview(open, () => opsOf(open).measure(input));
+    return { content: measureContent(result) };
+  });
 
   register(
     "comments",

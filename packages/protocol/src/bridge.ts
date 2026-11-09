@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { Measurement, MeasureTarget } from "./measure.ts";
 import { Loc, Rect, Rev } from "./model.ts";
 
 /**
@@ -62,6 +63,10 @@ export const bridgeRequests = {
   rects: { params: { locs: z.array(Loc) }, result: z.record(z.string(), z.array(Rect)) },
   inspect: { params: { loc: Loc, index: z.number().int().min(0) }, result: Inspection.nullable() },
   layers: { params: {}, result: z.array(LayerNode) },
+  measure: {
+    params: { targets: z.array(MeasureTarget), props: z.array(z.string()) },
+    result: z.array(Measurement.nullable()),
+  },
 } as const satisfies Record<string, { params: z.ZodRawShape; result: z.ZodType }>;
 
 export type BridgeRequestType = keyof typeof bridgeRequests;
@@ -78,6 +83,7 @@ export const ParentMessage = z.discriminatedUnion("type", [
   request("rects"),
   request("inspect"),
   request("layers"),
+  request("measure"),
   z.object({
     type: z.literal("preview"),
     loc: Loc,
@@ -130,6 +136,8 @@ export interface FrameBridge {
   rects(locs: Loc[]): Promise<Record<Loc, Rect[]>>;
   inspect(loc: Loc, index: number): Promise<Inspection | null>;
   layers(): Promise<LayerNode[]>;
+  /** One Measurement per target, `null` where nothing matched. */
+  measure(targets: MeasureTarget[]): Promise<(Measurement | null)[]>;
   preview(loc: Loc, styles: Record<string, string | null> | null): void;
   on(fn: (event: BridgeEvent) => void): () => void;
   close(): void;

@@ -222,6 +222,7 @@ The **canvas tools** are an in-process MCP server named `finite` (`agent/tools.t
 | `add_brand_asset`             | Copy a file or URL into the brand folder and list it on the Brand page.                                                                          |
 | `spawn_thread`, `name_thread` | Start a child thread; name this one.                                                                                                             |
 | `screenshot`, `frame_errors`  | A PNG of a frame, taken in the system Chrome with puppeteer-core; the errors its bridge reported, or the preview's log when the preview is down. |
+| `measure`                     | One element's box model, real gaps and computed style as JSON, plus a PNG crop with the boxes and distances drawn on it. See Measure below.      |
 | `finish_setup`                | Check `finite.json` and connect its apps, then start the next design's preview and report it.                                                    |
 
 ## External agents over MCP
@@ -230,16 +231,17 @@ The **canvas tools** are an in-process MCP server named `finite` (`agent/tools.t
 
 `mcp/index.ts` keeps one transport and one `McpServer` per session, and forgets a session after an hour without a call. A session's actor is `mcp-<session id>`, named after the client, so its undo and comments are its own. A client that sends an `X-Finite-Agent` header takes that as its id and name, which keeps its undo across reconnects. Every call goes through `hub.open`, so viewers see the changes live.
 
-`mcp/tools.ts` declares six tools, with input shapes in `packages/protocol/src/tools.ts`. They share `canvasOps` in `agent/tools.ts` with the thread tools, so placing a frame behaves the same from either side.
+`mcp/tools.ts` declares seven tools, with input shapes in `packages/protocol/src/tools.ts`. They share `canvasOps` in `agent/tools.ts` with the thread tools, so placing a frame behaves the same from either side.
 
-| Tool       | What it does                                                                                                              |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `designs`  | List, create, connect, rename or remove designs.                                                                          |
-| `read`     | A design's overview, a canvas, a frame's rendered elements, a file, or its tokens, components or routes.                  |
-| `edit`     | Run a list of ops: make a canvas, write files, place frames, add notes, set tokens, and change rendered elements.         |
-| `render`   | A PNG of each frame with its runtime errors, at most six per call.                                                        |
-| `comments` | List, add, reply to, resolve and reopen comments. `wait` is a long poll of up to 55 seconds for a comment a person wrote. |
-| `undo`     | Take back the session's last file change, or with `canvasId` its last change to that canvas.                              |
+| Tool       | What it does                                                                                                                    |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `designs`  | List, create, connect, rename or remove designs.                                                                                |
+| `read`     | A design's overview, a canvas, a frame's rendered elements, a file, or its tokens, components or routes.                        |
+| `edit`     | Run a list of ops: make a canvas, write files, place frames, add notes, set tokens, and change rendered elements.               |
+| `render`   | A PNG of each frame with its runtime errors, at most six per call.                                                              |
+| `measure`  | One element's size, padding, border, margin, radius, gaps between its children and computed style, with a PNG crop drawn on it. |
+| `comments` | List, add, reply to, resolve and reopen comments. `wait` is a long poll of up to 55 seconds for a comment a person wrote.       |
+| `undo`     | Take back the session's last file change, or with `canvasId` its last change to that canvas.                                    |
 
 `read` with a `frameId` lists each rendered element with its tag, loc and text, and `[data-finite-loc="src/x.tsx:12:4"]` selects exactly the element a line names. Element ops in `edit` take a CSS selector. `Screenshots.elements` loads the frame once in headless Chrome and reads `data-finite-loc` and `data-finite-rev` off what each selector matches, which gives the same locs and revs the page sends in a `source.edit`. Element ops in a row on one canvas go into one `SourceEditor.apply`, so they apply together and undo in one step. Ops otherwise run in order and aren't a transaction: the first failure stops the call, and the result lists what was applied and what was refused.
 
@@ -248,6 +250,14 @@ The permission fence applies here too, since an external agent has no thread to 
 A call that loads a frame starts the design's preview, then calls `hub.release`, which starts the 60-second idle grace period unless a page is subscribed. The next call's `Previews.ensure`, or a page subscribing, cancels that timer. `render` reports the errors of its own headless load, merged with what an open page's bridge reported, so a broken frame doesn't read as clean when no page is open. Those errors stay in the result and never reach `previews.reportError`, so they can't go stale after a fix.
 
 A prototype is listed by its thread, so the `canvas` op makes a thread along with a new prototype. That thread holds no agent session. If a person sends it a message, Finite starts a local Claude Code session there, as in any other thread.
+
+## Measure
+
+Measure answers "how far apart are these, really" with numbers the browser computed, for people and for agents. The frame does the measuring: `measureElements` in `packages/vite-plugin/src/client/bridge.ts` finds an element (by a point, a loc and instance, or a CSS selector), reads its border box, padding, border, margin and radius (scaled for a CSS `transform`, with `axisAligned: false` under a rotate or skew), its in-flow children, the computed properties in `SPEC` (`packages/protocol/src/measure.ts`), and the gaps between neighbouring children. Each gap is a real distance whatever produced it, and its `cause` is `gap` (the parent's CSS gap), `margin` (a child's margin) or `free` (alignment or leftover space), which tells an agent what to edit. Both hosts parse the reply with the `Measurement` schema.
+
+There is one drawing. `drawFigure` in `packages/protocol/src/figure.ts` turns a `Measurement` (or two, for a distance) into markup in frame pixels: padding and margin bands, hatched gaps, outlines and size pills in `MEASURE_PURPLE`. The web app draws it over the frame's iframe, and the server draws the same markup onto a headless page. A person uses the Measure tool (press M): hover for the box model card, click to pin an element, then hover another to see the distance between them. An agent calls `measure` with `frameId`, `select`, and optionally `index`, `to` (a second selector, for the distance) and `image: false`.
+
+For the agent, `Screenshots.measureElement` loads the frame once in headless Chrome and calls `window.__finiteMeasure`, which the bridge sets on a top-level page. It refuses in words when the bridge is missing, a selector is invalid, or nothing matches, and when `index` is past the matches it says how many there are. With an image, it appends a root with `figureRootCss` and the drawing to the page and captures a clip around the elements, 40 px out and clamped to the page, at twice a zoom chosen so the long edge is about 1,568 px. When several elements match, the result's `note` says how many. The thread tool and the `/mcp` tool both call `canvasOps.measure`.
 
 ## The web app
 

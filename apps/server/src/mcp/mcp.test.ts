@@ -17,7 +17,7 @@ import type {
 } from "@finite/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import WebSocket from "ws";
-import type { LoadError, RenderedElement, Screenshots } from "../agent/screenshot.ts";
+import type { LoadError, Measured, RenderedElement, Screenshots } from "../agent/screenshot.ts";
 import { type RunningServer, startServer } from "../app.ts";
 import { allowedHosts } from "../guard.ts";
 import type { Modules } from "../hub.ts";
@@ -38,6 +38,7 @@ let running: RunningServer | undefined;
 let clients: Client[] = [];
 let preview: PreviewState;
 let elements: Screenshots["elements"];
+let measureElement: Screenshots["measureElement"];
 let loadErrors: LoadError[];
 let bridgeErrors: FrameError[];
 const idle = vi.fn();
@@ -91,7 +92,8 @@ async function start(overrides: { idleMs?: number; styling?: Design["styling"] }
   const screenshots: Screenshots = {
     capture: async () => new Uint8Array([1, 2, 3]),
     captureWithErrors: async () => ({ png: new Uint8Array([1, 2, 3]), errors: loadErrors }),
-    measure: async () => ({ width: 300, height: 200 }),
+    hugSize: async () => ({ width: 300, height: 200 }),
+    measureElement: (...args) => measureElement(...args),
     elements: (...args) => elements(...args),
     close: async () => {},
   };
@@ -155,6 +157,7 @@ beforeEach(async () => {
   root = await mkdtemp(path.join(os.tmpdir(), "finite-mcp-"));
   preview = { status: "ready", url: "http://frame" };
   elements = async (_url, _w, _h, selects) => selects.map(() => []);
+  measureElement = async () => ({ missing: "nothing" });
   loadErrors = [];
   bridgeErrors = [];
   idle.mockClear();
@@ -214,9 +217,9 @@ describe("/mcp sessions", () => {
     const client = await connect(await start());
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(
-      ["comments", "designs", "edit", "read", "render", "undo"].sort(),
+      ["comments", "designs", "edit", "measure", "read", "render", "undo"].sort(),
     );
-    expect(client.getInstructions()).toContain("six tools");
+    expect(client.getInstructions()).toContain("seven tools");
   });
 });
 
@@ -445,6 +448,136 @@ describe("/mcp tools", () => {
     expect(result.content.map((c) => c.type)).toEqual(["text", "image", "text"]);
     expect(result.content[0]!.text).toContain(frame.id);
     expect(result.content[2]!.text).toBe("No errors.");
+  });
+
+  describe("measure", () => {
+    const edges = { top: 8, right: 8, bottom: 8, left: 8 };
+    const measurement = (count = 1): Measured["element"] => ({
+      tag: "h1",
+      name: "h1",
+      index: 0,
+      count,
+      box: { x: 10, y: 20, width: 100, height: 40 },
+      padding: edges,
+      border: { top: 0, right: 0, bottom: 0, left: 0 },
+      margin: { top: 0, right: 0, bottom: 0, left: 0 },
+      radius: { topLeft: 0, topRight: 0, bottomRight: 0, bottomLeft: 0 },
+      axisAligned: true,
+      flow: "block",
+      children: [],
+      childCount: 0,
+      gaps: [],
+      style: { display: "block" },
+    });
+
+    it("returns the measurement as JSON, then the PNG, and says when several match", async () => {
+      const client = await connect(await start());
+      await boardFrame();
+      const seen: unknown[] = [];
+      measureElement = async (_url, w, h, query) => {
+        seen.push([w, h, query]);
+        return { element: measurement(3), png: new Uint8Array([9]) };
+      };
+      const result = await call(client, "measure", {
+        designId: "d1",
+        frameId: "f1",
+        select: ".card",
+      });
+      expect(result.content.map((c) => c.type)).toEqual(["text", "image"]);
+      const body = value(result);
+      expect(body.element).toMatchObject({ tag: "h1", count: 3 });
+      expect(body.note).toBe("3 elements match .card. Pass index for another.");
+      expect(seen).toEqual([[300, 200, { select: ".card", index: 0, image: true }]]);
+    });
+
+    it("skips the PNG with image: false", async () => {
+      const client = await connect(await start());
+      await boardFrame();
+      let asked: unknown;
+      measureElement = async (_u, _w, _h, query) => {
+        asked = query;
+        return { element: measurement() };
+      };
+      const result = await call(client, "measure", {
+        designId: "d1",
+        frameId: "f1",
+        select: "h1",
+        image: false,
+      });
+      expect(result.content.map((c) => c.type)).toEqual(["text"]);
+      expect(value(result).note).toBeUndefined();
+      expect(asked).toMatchObject({ image: false });
+    });
+
+    it("reports the distance to a second element", async () => {
+      const client = await connect(await start());
+      await boardFrame();
+      const other = { ...measurement(), box: { x: 10, y: 100, width: 100, height: 40 } };
+      let asked: unknown;
+      measureElement = async (_u, _w, _h, query) => {
+        asked = query;
+        return {
+          element: measurement(),
+          to: other,
+          distance: { relation: "apart", lines: [] },
+          png: new Uint8Array([9]),
+        };
+      };
+      const result = await call(client, "measure", {
+        designId: "d1",
+        frameId: "f1",
+        select: "h1",
+        to: "p",
+      });
+      expect(asked).toMatchObject({ to: "p" });
+      expect(value(result)).toMatchObject({
+        to: { box: { y: 100 } },
+        distance: { relation: "apart" },
+      });
+    });
+
+    it("refuses an invalid selector, a missing match and an index out of range in words", async () => {
+      const client = await connect(await start());
+      await boardFrame();
+      measureElement = async () => ({ invalid: "'!!' is not a valid selector", select: "!!" });
+      const invalid = await call(client, "measure", {
+        designId: "d1",
+        frameId: "f1",
+        select: "!!",
+      });
+      expect(invalid.isError).toBe(true);
+      expect(invalid.content[0]!.text).toContain(`"!!" isn't a CSS selector`);
+
+      measureElement = async () => ({ missing: ".nope" });
+      const missing = await call(client, "measure", {
+        designId: "d1",
+        frameId: "f1",
+        select: ".nope",
+      });
+      expect(missing.isError).toBe(true);
+      expect(missing.content[0]!.text).toContain(`".nope" matches nothing in Card`);
+      expect(missing.content[0]!.text).toContain("Call read with frameId f1");
+
+      measureElement = async () => ({ count: 2 });
+      const range = await call(client, "measure", {
+        designId: "d1",
+        frameId: "f1",
+        select: "h1",
+        index: 5,
+      });
+      expect(range.isError).toBe(true);
+      expect(range.content[0]!.text).toContain("matches 2 elements");
+      expect(range.content[0]!.text).toContain("index 5 is out of range");
+    });
+
+    it("refuses when the preview is down", async () => {
+      const client = await connect(await start());
+      await boardFrame();
+      preview = { status: "error", log: "vite exploded" };
+      const result = await call(client, "measure", { designId: "d1", frameId: "f1", select: "h1" });
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).toContain("vite exploded");
+    });
   });
 
   it("reports a headless load's errors, merged with the bridge's and without repeats", async () => {
