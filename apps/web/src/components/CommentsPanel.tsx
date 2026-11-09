@@ -47,6 +47,7 @@ export function CommentsPanel({ canvas }: { canvas: Canvas }) {
               <span {...stylex.props(styles.meta)}>
                 <span {...stylex.props(styles.author)}>{c.author.name || "Someone"}</span>
                 <span {...stylex.props(styles.muted)}>
+                  {c.kind === "annotation" && "Annotation · "}
                   {where(c)} · <TimeAgo at={c.createdAt} />
                   {c.replies.length > 0 &&
                     ` · ${c.replies.length} repl${c.replies.length === 1 ? "y" : "ies"}`}

@@ -1,5 +1,5 @@
 import { type Canvas, type CanvasPatch, type Frame, Refused } from "@finite/protocol";
-import { refuseSections } from "./sections.ts";
+import { applySectionPatch, inverseSectionPatch } from "./sections.ts";
 
 type LocalPatch = Exclude<CanvasPatch, { op: "moveFramesTo" }>;
 
@@ -80,14 +80,15 @@ export function applyPatch(canvas: Canvas, patch: LocalPatch): Canvas {
     }
     case "setSection":
     case "removeSection":
+    case "moveSection":
     case "setSlice":
     case "removeSlice":
-      return refuseSections();
+      return applySectionPatch(canvas, patch);
   }
 }
 
 /**
- * Moves frames, and the comments pinned to them, from one canvas to another. Returns both
+ * Moves frames, and the comments and slices pinned to them, from one canvas to another. Returns both
  * canvases after the move.
  */
 export function moveFramesTo(
@@ -111,11 +112,13 @@ export function moveFramesTo(
       ...from,
       frames: from.frames.filter((f) => !moving.has(f.id)),
       comments: from.comments.filter((c) => !pinned(c)),
+      slices: from.slices.filter((s) => !moving.has(s.frameId)),
     },
     to: {
       ...to,
       frames: [...to.frames, ...from.frames.filter((f) => moving.has(f.id))],
       comments: [...to.comments, ...from.comments.filter(pinned)],
+      slices: [...to.slices, ...from.slices.filter((s) => moving.has(s.frameId))],
     },
   };
 }
@@ -174,8 +177,9 @@ export function inversePatch(before: Canvas, patch: CanvasPatch): Step {
     }
     case "setSection":
     case "removeSection":
+    case "moveSection":
     case "setSlice":
     case "removeSlice":
-      return refuseSections();
+      return on(inverseSectionPatch(before, patch));
   }
 }

@@ -131,12 +131,20 @@ export const handlers: Handlers = {
     return ctx.modules.source.addAsset(await ctx.hub.open(designId), attachment);
   },
 
-  "comment.add": ({ designId, canvasId, anchor, text }, ctx) =>
+  "comment.add": ({ designId, canvasId, anchor, text, kind }, ctx) =>
     updateCanvas(ctx, designId, canvasId, (c) => ({
       ...c,
       comments: [
         ...c.comments,
-        { id: randomUUID(), anchor, author: ctx.by, text, replies: [], createdAt: Date.now() },
+        {
+          id: randomUUID(),
+          anchor,
+          ...(kind === "annotation" ? { kind } : {}),
+          author: ctx.by,
+          text,
+          replies: [],
+          createdAt: Date.now(),
+        },
       ],
     })),
   async "comment.reply"({ designId, canvasId, commentId, text }, ctx) {

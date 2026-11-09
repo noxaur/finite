@@ -130,6 +130,7 @@ export const requests = {
       created: z.record(z.string(), Loc),
     }),
   },
+  /** Renders a slice to a PNG in Chrome. `url` is a `data:` URL, ready for a download link. */
   "canvas.exportSlice": {
     params: { designId, canvasId: Id, sliceId: Id },
     result: z.object({ url: z.string() }),
@@ -141,7 +142,14 @@ export const requests = {
   },
 
   "comment.add": {
-    params: { designId, canvasId: Id, anchor: CommentAnchor, text: z.string().min(1) },
+    params: {
+      designId,
+      canvasId: Id,
+      anchor: CommentAnchor,
+      text: z.string().min(1),
+      /** An annotation is a note that stays on the canvas; no agent is asked to act on it. */
+      kind: z.enum(["comment", "annotation"]).optional(),
+    },
     result: Canvas,
   },
   "comment.reply": {
