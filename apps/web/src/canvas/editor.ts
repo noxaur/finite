@@ -6,7 +6,7 @@ import type {
   Hit,
   HitElement,
   Loc,
-  NewNode,
+  Inline,
   Rect,
   Rev,
   Section,
@@ -16,10 +16,12 @@ import type {
 } from "@finite/protocol";
 import { useSyncExternalStore } from "react";
 import type { Camera } from "@/design/camera";
+import { hasText, normalize, sameContent } from "@/design/editing/inline";
 import { bridgeOf, mountedBridges } from "./bridge";
 import { draw } from "./tools/draw";
 import type { Ghost, Gesture, KeyInput, Placed, PressPlan, ToolDef, ToolHost } from "./tools/host";
 import { ALL_COMMANDS, type KeyEnv, resolveKey, type ToolId, toolOf } from "./tools/registry";
+import { placeText } from "./tools/text";
 import { layerName, layerNameAt, pathIn } from "./layers";
 import { undoOrderFor } from "./undoOrder";
 import { finite } from "@/client/finite";
@@ -49,16 +51,30 @@ export type Notice = {
   action?: { label: string; run: () => void };
 };
 
+/** What finishing a text edit writes to: an element that exists, or a new one to place. */
+export type TextTarget =
+  | {
+      kind: "element";
+      frameId: string;
+      loc: Loc;
+      tag: string;
+      rev: Rev;
+      /** The stamped path to the element, outermost first, for the detach offer. */
+      chain: readonly HitElement[];
+    }
+  | { kind: "new"; box: Rect; deep: boolean; alt: boolean; fixed: boolean };
+
 export type TextEdit = {
-  frameId: string;
-  loc: Loc;
-  index: number;
-  rev: Rev;
-  tag: string;
-  /** The element's box in its frame, CSS pixels. */
+  /** Where the text sits on the canvas, in canvas units. */
   rect: Rect;
-  text: string;
   font: Record<string, string>;
+  content: Inline[];
+  keeps: { id: number; kind: string; label: string; loc?: Loc | undefined }[];
+  /** How each kept wrapper's text is drawn in the frame, by its id. */
+  keepStyles: Record<number, Record<string, string>>;
+  /** SVG text: no format bar, no line breaks. */
+  plain: boolean;
+  target: TextTarget;
 };
 
 /** A section or slice the person picked, which the selection store (elements and frames) doesn't hold. */
@@ -540,7 +556,11 @@ export class CanvasEditor implements ToolHost {
 
   private onDown(e: PointerEvent) {
     if (e.button !== 0 || this.space || this.ignored(e)) return;
-    if (this.state.editingText) return;
+    if (this.state.editingText) {
+      // A press outside the overlay ends the edit, the same as leaving the box.
+      if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+      return;
+    }
     // A press that isn't on a section's or slice's own controls lets go of it.
     if (this.state.selectedObject) this.update({ selectedObject: null });
     // A press on the canvas takes the keys back from a field outside it, like the composer, so
@@ -839,22 +859,30 @@ export class CanvasEditor implements ToolHost {
     }
   }
 
-  /** Ends a text edit: sends the text when it changed. */
-  async finishText(text: string | null) {
+  /** Ends a text edit: writes the runs when they changed; `null` puts the text back. */
+  async finishText(content: Inline[] | null, measured = { width: 0, height: 0 }) {
     const editing = this.state.editingText;
     if (!editing) return;
     this.update({ editingText: null });
-    bridgeOf(editing.frameId)?.preview(editing.loc, null);
-    if (text === null || text === editing.text) return;
-    await this.edit([
-      {
-        kind: "text",
-        loc: editing.loc,
-        tag: editing.tag,
-        text,
-        revs: revsOf([{ loc: editing.loc, rev: editing.rev }]),
-      },
-    ]);
+    const target = editing.target;
+    if (target.kind === "new") {
+      if (content && hasText(content)) await placeText(this, target, content, measured);
+      return;
+    }
+    bridgeOf(target.frameId)?.preview(target.loc, null);
+    if (content === null || sameContent(content, normalize(editing.content))) return;
+    await this.edit(
+      [
+        {
+          kind: "inline",
+          loc: target.loc,
+          tag: target.tag,
+          content,
+          revs: revsOf([{ loc: target.loc, rev: target.rev }]),
+        },
+      ],
+      target.chain,
+    );
   }
 
   /**
@@ -939,8 +967,12 @@ export class CanvasEditor implements ToolHost {
     }
   }
 
+  readInline(loc: Loc) {
+    return finite.request("source.inline", { designId: this.designId, loc });
+  }
+
   /** Adds a shape where `box` lands, or says why it can't. */
-  draw(input: { box: Rect; node: NewNode; deep?: boolean; alt?: boolean }): Promise<Placed | null> {
+  draw(input: Parameters<ToolHost["draw"]>[0]): Promise<Placed | null> {
     return draw(this, input);
   }
 

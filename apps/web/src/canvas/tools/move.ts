@@ -16,6 +16,7 @@ import {
 import { childrenIn } from "../layers";
 import { keyOf, type SelectionItem, selectionStore, toggleItem } from "../selection";
 import type { Gesture, ToolDef, ToolHost } from "./host";
+import { editText, textRootOf } from "./text";
 import { enterVector } from "./vectorEdit";
 
 /** What a press landed on, read off the DOM it hit. */
@@ -107,25 +108,11 @@ async function onDoubleClick(host: ToolHost, e: MouseEvent, target: Element | nu
     return enterVector(host, frame.id, hit.loc, hit.index);
   }
   const selected = selectionStore.get().find((s) => s.frameId === frame.id);
-  const sameEl = selected?.loc === hit.loc && (selected.index ?? 0) === hit.index;
-  // On the selected element: type into its text, when it holds only text.
-  if (sameEl) {
-    const inspection = await bridge.inspect(hit.loc, hit.index).catch(() => null);
-    if (inspection?.text !== undefined) {
-      return host.update({
-        editingText: {
-          frameId: frame.id,
-          loc: hit.loc,
-          index: hit.index,
-          rev: inspection.rev,
-          tag: inspection.tag,
-          rect: hit.rect,
-          text: inspection.text,
-          font: inspection.computed,
-        },
-      });
-    }
-  }
+  const sameEl =
+    (selected?.loc === hit.loc && (selected.index ?? 0) === hit.index) ||
+    selected?.loc === textRootOf(hit).loc;
+  // On the selected element: type into its text, when it holds text.
+  if (sameEl && (await editText(host, frame, hit))) return;
   const next = drillInto(hit, selected?.loc);
   if (!next) return;
   const chain = chainOf(hit);

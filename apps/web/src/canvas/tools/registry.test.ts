@@ -137,6 +137,7 @@ describe("the registry", () => {
     ]);
     expect(toolsIn("comment").map((t) => t.id)).toEqual(["comment", "annotation", "measure"]);
     expect(toolsIn("pen").map((t) => t.id)).toEqual(["pen", "pencil"]);
+    expect(toolsIn("text").map((t) => t.id)).toEqual(["text", "textOnPath"]);
     expect(toolsIn("frame").map((t) => t.id)).toEqual(["frame", "section", "slice"]);
   });
 

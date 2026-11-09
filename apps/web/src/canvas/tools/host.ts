@@ -4,9 +4,11 @@ import type {
   FrameBridge,
   Hit,
   HitElement,
+  Inline,
   Loc,
   NewNode,
   Rect,
+  Rev,
   Section,
   SourceEdit,
   Slice,
@@ -128,11 +130,24 @@ export interface ToolHost {
   /** Pointer capture and drag slop, for overlay handles marked data-canvas-ui. */
   press(e: PointerEvent, plan: PressPlan): void;
   /** Adds a shape where `box` lands: picks the target, places it, selects it. */
-  draw(input: { box: Rect; node: NewNode; deep?: boolean; alt?: boolean }): Promise<Placed | null>;
+  draw(input: {
+    box: Rect;
+    node: NewNode;
+    deep?: boolean;
+    alt?: boolean;
+    /** The sides the new element takes from its content, not the box. */
+    hug?: readonly ("width" | "height")[];
+  }): Promise<Placed | null>;
   edit(
     edits: SourceEdit[],
     chain?: readonly HitElement[],
   ): Promise<{ created: Record<string, Loc> } | false>;
+  /** The element's children as editable runs, and the rev they belong to. */
+  readInline(loc: Loc): Promise<{
+    rev: Rev;
+    content: Inline[];
+    keeps: { id: number; kind: string; label: string; loc?: Loc | undefined }[];
+  }>;
   patch(p: CanvasPatch): Promise<void>;
   say(text: string): void;
   select(items: SelectionItem[]): void;

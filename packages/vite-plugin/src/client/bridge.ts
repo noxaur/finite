@@ -158,11 +158,16 @@ function rectOf(element: Element): Rect {
   return { x, y, width, height };
 }
 
+/** The tag as JSX spells it: HTML tags are lowercase, and SVG's keep their case (`textPath`). */
+function tagOf(element: Element): string {
+  return element instanceof HTMLElement ? element.tagName.toLowerCase() : element.tagName;
+}
+
 function describe(element: Element): HitElement {
   return {
     loc: element.getAttribute(LOC) ?? "",
     rev: element.getAttribute(REV) ?? "",
-    tag: element.tagName.toLowerCase(),
+    tag: tagOf(element),
   };
 }
 
@@ -172,6 +177,18 @@ function ownText(element: Element): string | undefined {
   if (nodes.length === 0 || nodes.some((node) => node.nodeType !== Node.TEXT_NODE))
     return undefined;
   return element.textContent ?? "";
+}
+
+/** The element's text when it holds only text and inline elements. */
+function inlineText(element: Element): string | undefined {
+  const nodes = Array.from(element.childNodes);
+  const inline = nodes.every(
+    (node) =>
+      node.nodeType !== Node.ELEMENT_NODE ||
+      getComputedStyle(node as Element).display.startsWith("inline"),
+  );
+  const text = element.textContent ?? "";
+  return inline && text.trim() !== "" ? text : undefined;
 }
 
 function layerName(element: Element): string {
@@ -212,9 +229,9 @@ const requests: Record<string, (params: Request) => unknown> = {
     const computed: Record<string, string> = {};
     for (const key of COMPUTED) computed[key] = style[key];
     const parent = element.parentElement ? getComputedStyle(element.parentElement) : undefined;
-    const text = ownText(element);
+    const text = inlineText(element);
     return {
-      tag: element.tagName.toLowerCase(),
+      tag: tagOf(element),
       rev: element.getAttribute(REV) ?? "",
       className: element.getAttribute("class") ?? "",
       computed,
@@ -272,6 +289,7 @@ const requests: Record<string, (params: Request) => unknown> = {
       d: element.getAttribute("d") ?? "",
       ctm: [m.a, m.b, m.c, m.d, m.e, m.f],
       viewBox: element.ownerSVGElement?.getAttribute("viewBox") ?? null,
+      id: element.id || null,
     };
   },
 };

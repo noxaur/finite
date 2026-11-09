@@ -1,5 +1,6 @@
 import type * as t from "@babel/types";
 import {
+  type Inline,
   type InsertPlace,
   type Loc,
   type NewNode,
@@ -13,8 +14,8 @@ import MagicString from "magic-string";
 import { editRule } from "./css.ts";
 import { rev } from "./files.ts";
 import { cssModules } from "./imports.ts";
-import { setInline } from "./inline.ts";
-import { insert, type Printed } from "./insert.ts";
+import { type Kept, setInline } from "./inline.ts";
+import { insert } from "./insert.ts";
 import {
   asChild,
   attribute,
@@ -22,7 +23,6 @@ import {
   attrText,
   indentAt,
   isWhitespaceText,
-  jsxText,
   parseTsx,
   siblings,
   slot,
@@ -64,7 +64,7 @@ const ASK = "Ask the agent to change this";
 /** One edit applied to one element. */
 type Op =
   | { kind: "style"; at: string; tag: string; styles: Record<string, string | null> }
-  | { kind: "text"; at: string; tag: string; text: string }
+  | { kind: "inline"; at: string; tag: string; content: Inline[] }
   | { kind: "reorder"; at: string; tag: string; before: string | null }
   | { kind: "remove" | "duplicate"; at: string }
   | { kind: "attr"; at: string; name: string; value: string | null }
@@ -82,6 +82,10 @@ export function parseLoc(loc: Loc): { file: string; key: string } {
 /** Every style map the edit writes, a new node's and its children's included. */
 export function editStyles(edit: SourceEdit): Record<string, string | null>[] {
   if (edit.kind === "style") return [edit.styles];
+  if (edit.kind === "inline")
+    return edit.content.flatMap((item) =>
+      (item.marks ?? []).flatMap((mark) => (mark.m === "span" ? [mark.styles] : [])),
+    );
   if (edit.kind !== "insert") return [];
   const all: Record<string, string>[] = [];
   const visit = (node: NewNode) => {
@@ -192,11 +196,12 @@ function rewriteOrThrow(
 
 /**
  * Enters what an insert printed into the position map, so later ops find it like any other
- * element, and returns the style ops that dress it. The elements no earlier position maps to are
+ * element, and returns the style ops that dress it. An element that was only reprinted goes back
+ * under its original key. The elements no earlier position maps to are
  * the printed ones, and both lists are in document order.
  */
 function track(
-  made: Printed[],
+  made: Kept[],
   moved: Map<string, string>,
   parsed: Parsed,
   where: Map<string, string>,
@@ -212,7 +217,7 @@ function track(
   if (fresh.length !== made.length)
     throw new Error(`printed ${made.length} elements, parsed ${fresh.length} new ones`);
   return made.flatMap((node, i): Op[] => {
-    where.set(`${NEW}${node.key}`, fresh[i]!);
+    where.set(node.orig ?? `${NEW}${node.key}`, fresh[i]!);
     return Object.keys(node.styles).length === 0
       ? []
       : [{ kind: "style", at: `${NEW}${node.key}`, tag: node.tag, styles: node.styles }];
@@ -232,8 +237,6 @@ function toOps(edit: SourceEdit, file: string): Op[] {
     case "remove":
     case "duplicate":
       return edit.locs.flatMap(here).map((at) => ({ kind: edit.kind, at }));
-    case "text":
-      return here(edit.loc).map((at) => ({ kind: "text", at, tag: edit.tag, text: edit.text }));
     case "attr":
       return here(edit.loc).map((at) => ({ kind: "attr", at, name: edit.name, value: edit.value }));
     case "insert":
@@ -249,7 +252,12 @@ function toOps(edit: SourceEdit, file: string): Op[] {
     case "unwrap":
       return unwrap();
     case "inline":
-      return setInline();
+      return here(edit.loc).map((at) => ({
+        kind: "inline",
+        at,
+        tag: edit.tag,
+        content: edit.content,
+      }));
     case "reorder": {
       const before = edit.before ? parseLoc(edit.before) : null;
       if (before && before.file !== parseLoc(edit.loc).file) {
@@ -295,12 +303,12 @@ type StepCtx = {
 };
 
 /** Applies the op; an insert says what it printed. */
-function applyOp(s: StepCtx, element: Element, op: Op): Printed[] | void {
+function applyOp(s: StepCtx, element: Element, op: Op): Kept[] | void {
   switch (op.kind) {
     case "style":
       return style(s, element.node, op.styles);
-    case "text":
-      return text(s, element.node, op.text);
+    case "inline":
+      return setInline(s, element, op.content);
     case "reorder":
       return reorder(s, element, op.before);
     case "remove": {
@@ -536,40 +544,7 @@ function objectText(
   return `{\n${parts.map((p) => `${indent}${p},`).join("\n")}\n${closeIndent}}`;
 }
 
-// Text, order, attributes
-
-function text(s: StepCtx, el: t.JSXElement, value: string): void {
-  const opening = el.openingElement;
-  if (!el.closingElement) {
-    let start = opening.end! - 2;
-    while (/\s/.test(s.code[start - 1]!)) start--;
-    s.ms.overwrite(start, opening.end!, `>${jsxText(value)}</${tagName(opening.name)}>`);
-    return;
-  }
-  const kids = el.children;
-  if (kids.length === 0) return void s.ms.appendLeft(opening.end!, jsxText(value));
-  if (kids.every((k) => k.type === "JSXText")) {
-    const start = kids[0]!.start!;
-    const end = kids.at(-1)!.end!;
-    const raw = s.code.slice(start, end);
-    if (raw.trim() === "") return void s.ms.overwrite(start, end, jsxText(value));
-    const lead = /^\s*/.exec(raw)![0];
-    const trail = /\s*$/.exec(raw)![0];
-    s.ms.overwrite(start + lead.length, end - trail.length, jsxText(value));
-    return;
-  }
-  const solid = kids.filter((k) => !isWhitespaceText(k));
-  const only = solid[0];
-  if (
-    solid.length === 1 &&
-    only?.type === "JSXExpressionContainer" &&
-    literal(only.expression) !== undefined
-  ) {
-    s.ms.overwrite(only.expression.start!, only.expression.end!, JSON.stringify(value));
-    return;
-  }
-  throw new Refused(`This text is built from code or other elements. ${ASK}.`, "unsupported-style");
-}
+// Order, attributes
 
 function reorder(s: StepCtx, element: Element, beforeKey: string | null): void {
   const child = asChild(element, "move");
