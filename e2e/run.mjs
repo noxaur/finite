@@ -73,12 +73,14 @@ try {
 
   await check("the design list loads", async () => {
     await page.goto(server.url, { waitUntil: "networkidle2" });
-    await page.waitForSelector("::-p-text(Create blank design)", { timeout: 15_000 });
+    await page.waitForSelector("::-p-text(Search or start)", { timeout: 15_000 });
   });
 
-  await check("Create blank design opens the new design", async () => {
-    await (await page.waitForSelector("::-p-text(Create blank design)")).click();
-    await (await page.waitForSelector('button[type="submit"]::-p-text(Create)')).click();
+  await check("⌘K › New project opens the new design", async () => {
+    await (await page.waitForSelector("::-p-text(Search or start)")).click();
+    await (await page.waitForSelector('[role="option"]::-p-text(New project)')).click();
+    await page.keyboard.type("Untitled");
+    await page.keyboard.press("Enter");
     await page.waitForFunction(() => location.pathname.startsWith("/design"), { timeout: 30_000 });
     designId = new URL(page.url()).searchParams.get("id");
     if (!designId) throw new Error(`no design id in ${page.url()}`);

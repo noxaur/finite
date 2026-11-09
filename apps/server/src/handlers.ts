@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { rm } from "node:fs/promises";
 import {
   type Canvas,
   type Comment,
@@ -9,7 +10,9 @@ import {
   type ThreadMeta,
 } from "@finite/protocol";
 import { carrySelection, startThread } from "./agent/index.ts";
+import { expandHome, listDirs } from "./browse.ts";
 import type { Context, Handlers } from "./hub.ts";
+import { cloneRepo, searchRepos } from "./repos.ts";
 import { installOf } from "./store/index.ts";
 import { syncRoutes } from "./store/routes.ts";
 
@@ -26,7 +29,19 @@ export const handlers: Handlers = {
   "designs.list": (_, { modules }) => modules.store.designs(),
   "design.create": ({ name, kind, source }, { modules }) =>
     modules.store.create({ name, kind, ...(source === undefined ? {} : { source }) }),
-  "design.connect": ({ path }, { modules }) => modules.store.connect(path),
+  "design.connect": ({ path }, { modules }) => modules.store.connect(expandHome(path)),
+  async "design.clone"({ url, path }, { modules }) {
+    const folder = await cloneRepo(url, path);
+    try {
+      return await modules.store.connect(folder);
+    } catch (error) {
+      // Finite made this folder a moment ago and nothing is connected to it.
+      await rm(folder, { recursive: true, force: true });
+      throw error;
+    }
+  },
+  "fs.list": ({ path }) => listDirs(path),
+  "repo.search": ({ query }) => searchRepos(query),
   "design.rename": ({ id, name }, { modules }) => modules.store.rename(id, name),
   async "design.remove"({ id }, { modules }) {
     // Sessions working in the design stop first, so none writes into a folder on its way out.
