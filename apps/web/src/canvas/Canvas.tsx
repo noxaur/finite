@@ -4,16 +4,18 @@ import * as stylex from "@stylexjs/stylex";
 import type { Canvas as CanvasDoc, Route } from "@finite/protocol";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { CommentLayer } from "@/components/Comments";
-import { InteractivePill } from "@/components/InteractivePill";
 import { SelectionLayer } from "@/components/SelectionLayer";
 import { Camera } from "@/design/camera";
 import { colors, fonts, radii, shadows, space } from "@/styles/tokens.stylex";
 import { Button } from "@/components/Button";
+import { Toolbar } from "@/components/Toolbar";
 import { useDesignState } from "@/client/finite";
 import { activeEditor, CanvasEditor, useEditorState } from "./editor";
 import { FrameView } from "./FrameView";
 import { useSelection } from "./selection";
 import { TextEditor, TextLabels } from "./TextLabels";
+import { ToolOverlays } from "./ToolOverlays";
+import { toolOf } from "./tools/registry";
 import { framesToMount } from "./virtualize";
 
 /**
@@ -59,6 +61,8 @@ const EMPTY: CanvasDoc = {
   frames: [],
   texts: [],
   comments: [],
+  sections: [],
+  slices: [],
   updatedAt: 0,
 };
 
@@ -144,12 +148,16 @@ function CanvasView({
   }, [editor, canvas.frames, selection]);
 
   const selectedFrames = new Set(selection.map((s) => s.frameId));
+  const cursor = state ? toolOf(state.tool).cursor : undefined;
 
   return (
     <div
       ref={viewport}
       data-canvas=""
-      {...stylex.props(styles.viewport, state?.tool === "comment" && styles.commentCursor)}
+      {...stylex.props(
+        styles.viewport,
+        cursor !== undefined && cursor !== "" && styles.toolCursor(cursor),
+      )}
     >
       <div ref={world} {...stylex.props(styles.world)}>
         {editor && state && (
@@ -188,13 +196,14 @@ function CanvasView({
                     height={box.height}
                     previewUrl={previewUrl}
                     mounted={mounted.includes(frame.id)}
-                    interact={state.interact}
+                    interact={state.tool === "interact"}
                     editor={editor}
                   />
                 </div>
               );
             })}
             <SelectionLayer editor={editor} state={state} selection={selection} />
+            <ToolOverlays editor={editor} state={state} />
             <CommentLayer
               designId={designId}
               canvasId={canvas.id}
@@ -223,14 +232,7 @@ function CanvasView({
           </>
         )}
       </div>
-      {editor && state && (
-        <InteractivePill
-          tool={state.tool}
-          interact={state.interact}
-          onTool={(t) => editor.setTool(t)}
-          onInteract={(on) => editor.setInteract(on)}
-        />
-      )}
+      {editor && state && <Toolbar editor={editor} state={state} />}
     </div>
   );
 }
@@ -247,7 +249,8 @@ const styles = stylex.create({
     fontFamily: fonts.sans,
     outline: "none",
   },
-  commentCursor: { cursor: "crosshair" },
+  // A tool's cursor, kept off the inline `cursor` the camera sets while it pans.
+  toolCursor: (cursor: string) => ({ cursor }),
   world: {
     position: "absolute",
     left: 0,

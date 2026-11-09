@@ -6,11 +6,14 @@ import {
   type Canvas,
   type Design,
   type Frame,
+  type Loc,
   type Remap,
   type Route,
   type SourceEditor,
   type Token,
 } from "@finite/protocol";
+import { addAsset } from "./assets.ts";
+import { boardFile } from "./boardFile.ts";
 import { listComponents } from "./components.ts";
 import {
   fileLocks,
@@ -33,8 +36,10 @@ import {
   sheetSpecifiers,
   specifiers,
 } from "./imports.ts";
+import { readInline } from "./inline.ts";
 import { parseModule } from "./jsx.ts";
-import { editFiles, rewrite } from "./rewrite.ts";
+import { editFiles, editStyles, rewrite } from "./rewrite.ts";
+import { exportSlice } from "./sliceExport.ts";
 import { isStylexVar, mentionsVar, readVars, writeVar } from "./stylex.ts";
 import type { TailwindVersion, Theme } from "./tailwind.ts";
 import { configTheme, tailwind3Config } from "./tailwind3.ts";
@@ -240,14 +245,14 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
         design.styling === "tailwind"
           ? await tailwindTheme(design)
           : { theme: {}, tailwind: 4 as const };
-      const variables = edits.some((e) => e.kind === "style" && variableRefs(e.styles).length > 0)
+      const styles = edits.flatMap(editStyles);
+      const variables = styles.some((s) => variableRefs(s).length > 0)
         ? variableSheets(await sheets(design))
         : {};
-      const stylex = edits.some((e) => e.kind === "style" && mentionsVar(e.styles))
-        ? (await stylexVars(design)).homes
-        : {};
+      const stylex = styles.some(mentionsVar) ? (await stylexVars(design)).homes : {};
 
       const remap: Remap = {};
+      const created: Record<string, Loc> = {};
       const patches = await transact(design.root, [...files, ...modules], (contents) => {
         const out = new Map(contents);
         let extra = Object.fromEntries(
@@ -266,13 +271,14 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
           if (result instanceof Refused) throw result;
           out.set(file, result.code);
           Object.assign(remap, result.remap);
+          Object.assign(created, result.created);
           extra = result.files;
         }
         for (const [file, css] of Object.entries(extra)) out.set(file, css);
         return out;
       });
       if (patches.length > 0) history.push(actorKey(design, by), patches);
-      return { ok: true, remap };
+      return { ok: true, remap, created };
     },
 
     undo: (open, by) => step(open.design, by, "undo"),
@@ -297,6 +303,11 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
       });
       return { file: copy };
     },
+
+    inline: (open, loc) => readInline(open, loc),
+    draw: (open, input, by) => boardFile(open, input, by),
+    addAsset: (open, attachment) => addAsset(open, attachment),
+    exportSlice: (open, input) => exportSlice(open, input),
 
     tokens: allTokens,
 

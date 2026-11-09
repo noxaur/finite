@@ -15,6 +15,20 @@
 
 export type IconName =
   | "play"
+  | "hand"
+  | "interact"
+  | "comment"
+  | "annotation"
+  | "measure"
+  | "section"
+  | "slice"
+  | "line"
+  | "arrow"
+  | "ellipse"
+  | "polygon"
+  | "star"
+  | "pen"
+  | "textOnPath"
   | "previous"
   | "next"
   | "close"
@@ -136,6 +150,26 @@ const upperA = (x: number) => path(`M${x} 18.4l4-12.8 4 12.8M${x + 1.25} 14.4h5.
 /** Each icon's SVG children; `s` is the stroke width, for the few that vary it. */
 const SHAPES: Record<IconName, string | ((s: number) => string)> = {
   play: path("M8.4 5.6 18.8 12 8.4 18.4z", FILL),
+  hand: path(
+    "M7.2 12.8V7.2a1.6 1.6 0 0 1 3.2 0V12V5.6a1.6 1.6 0 0 1 3.2 0V12V7.2a1.6 1.6 0 0 1 3.2 0V12.8V10.4a1.6 1.6 0 0 1 3.2 0v4.8a5.6 5.6 0 0 1-5.6 5.6h-2c-2.5 0-3.6-1.2-4.8-3l-3-4.4c-.9-1.4.8-3 2.3-1.8z",
+  ),
+  interact: path("M8 8l12 4.4-5.6 2-2 5.6zM8 2.4v2.4M2.4 8h2.4M4 4l1.7 1.7"),
+  comment: path(
+    "M4.8 19.2V9.6a4.8 4.8 0 0 1 4.8-4.8h4.8a4.8 4.8 0 0 1 4.8 4.8v1.6a4.8 4.8 0 0 1-4.8 4.8H9.1c-1.5 0-2.4.7-3 1.4z",
+  ),
+  annotation: path("M4 5.6h16M4 10.4h10.4M4 15.2h6.4M16.8 13.6v6.4M13.6 16.8h6.4"),
+  measure: path("M4 8.8h16v6.4H4zM8 8.8v2.4M12 8.8v3.2M16 8.8v2.4"),
+  section: path(
+    "M4 8.8V18.4a1.6 1.6 0 0 0 1.6 1.6h12.8a1.6 1.6 0 0 0 1.6-1.6V8.8zM4 8.8V5.6A1.6 1.6 0 0 1 5.6 4h4.8v4.8",
+  ),
+  slice: path("M5.6 18.4 18.4 5.6M5.6 5.6h4.8M5.6 5.6v4.8M18.4 18.4h-4.8M18.4 18.4v-4.8"),
+  line: path("M5.6 18.4 18.4 5.6"),
+  arrow: path("M5.6 18.4 18.4 5.6M10.4 5.6h8v8"),
+  ellipse: circle(12, 12, 8),
+  polygon: path("M12 4l8 14.4H4z"),
+  star: path("M12 4l2.5 5.3 5.5.7-4 4 1 5.6-5-2.8-5 2.8 1-5.6-4-4 5.5-.7z"),
+  pen: path("M12 4l4.8 8-3.2 6.4h-3.2L7.2 12zM12 4v7.2M10.4 20.8h3.2"),
+  textOnPath: path("M4 18.4C4 12 8.8 8.8 12 8.8s8 3.2 8 9.6M8.8 7.2V5.6h6.4v1.6M12 5.6v6.4"),
   previous: path("M14.8 6 8.8 12l6 6"),
   next: path("M9.2 6l6 6-6 6"),
   close: path("M6.4 6.4l11.2 11.2M17.6 6.4 6.4 17.6"),

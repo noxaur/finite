@@ -199,6 +199,8 @@ export type CommentReply = z.infer<typeof CommentReply>;
 export const Comment = z.object({
   id: Id,
   anchor: CommentAnchor,
+  /** An annotation stays on the canvas as a note; absent means a comment. */
+  kind: z.enum(["comment", "annotation"]).optional(),
   author: Actor,
   text: z.string(),
   replies: z.array(CommentReply),
@@ -206,6 +208,29 @@ export const Comment = z.object({
   resolvedAt: z.number().optional(),
 });
 export type Comment = z.infer<typeof Comment>;
+
+/** A named region of the canvas. Which frames it holds is geometry, read when it's dragged. */
+export const Section = z.object({
+  id: Id,
+  name: z.string(),
+  x: z.number(),
+  y: z.number(),
+  width: z.number().positive(),
+  height: z.number().positive(),
+  author: Actor,
+});
+export type Section = z.infer<typeof Section>;
+
+/** A region of a frame marked for export. */
+export const Slice = z.object({
+  id: Id,
+  name: z.string(),
+  x: z.number(),
+  y: z.number(),
+  width: z.number().positive(),
+  height: z.number().positive(),
+});
+export type Slice = z.infer<typeof Slice>;
 
 export const CanvasKind = z.enum(["page", "prototype"]);
 export type CanvasKind = z.infer<typeof CanvasKind>;
@@ -222,6 +247,8 @@ export const Canvas = z.object({
   frames: z.array(Frame),
   texts: z.array(TextLabel),
   comments: z.array(Comment),
+  sections: z.array(Section).default([]),
+  slices: z.array(Slice).default([]),
   createdAt: z.number().optional(),
   updatedAt: z.number(),
   removedAt: z.number().optional(),
@@ -253,6 +280,12 @@ export const CanvasPatch = z.discriminatedUnion("op", [
   /** Adds the text, or replaces the one with its id. */
   z.object({ op: z.literal("setText"), text: TextLabel }),
   z.object({ op: z.literal("removeText"), textId: Id }),
+  /** Adds the section, or replaces the one with its id. */
+  z.object({ op: z.literal("setSection"), section: Section }),
+  z.object({ op: z.literal("removeSection"), sectionId: Id }),
+  /** Adds the slice, or replaces the one with its id. */
+  z.object({ op: z.literal("setSlice"), slice: Slice }),
+  z.object({ op: z.literal("removeSlice"), sliceId: Id }),
 ]);
 export type CanvasPatch = z.infer<typeof CanvasPatch>;
 
@@ -427,6 +460,64 @@ export const FrameError = z.object({
 });
 export type FrameError = z.infer<typeof FrameError>;
 
+/** New JSX as data, never as code: nothing on the wire can become an expression. */
+export type NewNode = {
+  /** An intrinsic element's name. */
+  tag: string;
+  /** The client's name for this node, answered in `created` with its loc. */
+  ref?: string | undefined;
+  /** The layer name, written as `data-name`. */
+  name?: string | undefined;
+  /** Geometry and other non-CSS attributes: `d`, `viewBox`, `alt`. */
+  attrs?: Record<string, string> | undefined;
+  /** Applied through the same path as a style edit, so every styling convention works. */
+  styles?: Record<string, string> | undefined;
+  /** A file from `asset.add`, written as an ES import and `src={name}`. */
+  src?: { asset: string } | undefined;
+  text?: string | undefined;
+  children?: NewNode[] | undefined;
+};
+const NEW_TAG = /^[a-z][a-z0-9]*$/;
+const newNodeFields = {
+  tag: z.string().regex(NEW_TAG, "a new element's tag is an intrinsic name, like div"),
+  ref: z.string().min(1).optional(),
+  name: z.string().optional(),
+  attrs: z.record(z.string(), z.string()).optional(),
+  styles: z.record(z.string(), z.string()).optional(),
+  src: z.object({ asset: z.string().min(1) }).optional(),
+};
+export const NewNode: z.ZodType<NewNode> = z.lazy(() =>
+  z.object({
+    ...newNodeFields,
+    text: z.string().optional(),
+    children: z.array(NewNode).optional(),
+  }),
+);
+
+/** Inside the anchor element at its `start` or `end`, or beside it `before` or `after`. */
+export const InsertPlace = z.enum(["start", "end", "before", "after"]);
+export type InsertPlace = z.infer<typeof InsertPlace>;
+
+/** One formatting wrapper on a run of inline text. `keep` reprints an existing wrapper verbatim. */
+export const Mark = z.discriminatedUnion("m", [
+  z.object({ m: z.enum(["strong", "b", "em", "i", "u", "s", "del"]) }),
+  z.object({
+    m: z.literal("span"),
+    styles: z.record(z.string(), z.string()),
+    ref: z.string().optional(),
+  }),
+  z.object({ m: z.literal("keep"), id: z.number().int().min(0) }),
+]);
+export type Mark = z.infer<typeof Mark>;
+
+/** Inline content as data. An `atom` is an expression, component or comment, kept verbatim. */
+export const Inline = z.discriminatedUnion("t", [
+  z.object({ t: z.literal("text"), text: z.string(), marks: z.array(Mark) }),
+  z.object({ t: z.literal("br") }),
+  z.object({ t: z.literal("atom"), id: z.number().int().min(0) }),
+]);
+export type Inline = z.infer<typeof Inline>;
+
 /** A hand edit. `revs` holds the rev of every file the edit's locs point into. */
 const revs = z.record(z.string(), Rev);
 export const SourceEdit = z.discriminatedUnion("kind", [
@@ -452,6 +543,32 @@ export const SourceEdit = z.discriminatedUnion("kind", [
     loc: Loc,
     name: z.string(),
     value: z.string().nullable(),
+    revs,
+  }),
+  /** Adds `node` beside or inside the element at `loc`. */
+  z.object({
+    kind: z.literal("insert"),
+    loc: Loc,
+    tag: z.string(),
+    place: InsertPlace,
+    node: NewNode,
+    revs,
+  }),
+  /** Puts the elements at `locs` inside a new `wrapper`. */
+  z.object({
+    kind: z.literal("wrap"),
+    locs: z.array(Loc).min(1),
+    wrapper: z.object(newNodeFields),
+    revs,
+  }),
+  /** Replaces the element at `loc` with its children. */
+  z.object({ kind: z.literal("unwrap"), loc: Loc, tag: z.string(), revs }),
+  /** Replaces the children of the element at `loc` with `content`. */
+  z.object({
+    kind: z.literal("inline"),
+    loc: Loc,
+    tag: z.string(),
+    content: z.array(Inline),
     revs,
   }),
 ]);

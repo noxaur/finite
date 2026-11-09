@@ -12,9 +12,6 @@ import { Button, IconButton } from "./Button";
 import { PinFilters, PinIcon } from "./PinIcon";
 import { TimeAgo } from "./TimeAgo";
 
-/** The canvas tools the old tool rail switches between. */
-export type Mode = "pointer" | "interact" | "comment";
-
 /** How far right of its pin a popover starts, in pixels. */
 const POPOVER_GAP = 36;
 

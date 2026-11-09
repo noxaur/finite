@@ -237,6 +237,8 @@ export async function openDesign(design: Design): Promise<OpenedDesign> {
           frames: [],
           texts: [],
           comments: [],
+          sections: [],
+          slices: [],
           // Strictly after every other canvas, so pages made in the same millisecond keep their order.
           createdAt: Math.max(
             Date.now(),

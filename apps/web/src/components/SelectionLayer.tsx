@@ -42,7 +42,7 @@ export function SelectionLayer({
   };
   const hover = state.hover && world(state.hover.frameId, state.hover.rect);
   const drop = state.dropLine && world(state.dropLine.frameId, state.dropLine.rect);
-  const resizable = selection.length === 1 && !state.dragging && !state.interact;
+  const resizable = selection.length === 1 && !state.dragging && state.tool !== "interact";
   const [first] = selection;
   const firstRect = first && state.rects[keyOf(first)];
   const labelAt = first && firstRect ? world(first.frameId, firstRect) : null;
