@@ -207,6 +207,78 @@ describe("writing an element's children", () => {
   });
 });
 
+describe("printing what the source already holds", () => {
+  const keep = { m: "keep", id: 0 } as const;
+  const strong = { m: "strong" } as const;
+
+  it("prints a kept wrapper once, with other marks inside it, when formatting splits it", async () => {
+    const code = app(`<p><strong><span id="anchor" title={track()}>abcd</span></strong></p>`);
+    expect((await read(code)).content).toEqual([text("abcd", [strong, keep])]);
+    expect(
+      edit(code, [text("a", [strong, keep]), text("bc", [keep]), text("d", [strong, keep])]).code,
+    ).toContain(
+      `<p><span id="anchor" title={track()}><strong>a</strong>bc<strong>d</strong></span></p>`,
+    );
+  });
+
+  it("refuses rather than repeat a kept wrapper's attributes when new content splits it", () => {
+    const code = app(`<p><span id="anchor">abcd</span></p>`);
+    expect(() => edit(code, [text("ab", [keep]), text("x"), text("cd", [keep])])).toThrow(
+      /would repeat <span>/,
+    );
+  });
+
+  it("keeps boundary spaces once when the text changes", () => {
+    expect(edit(app(`<p> Hello </p>`), [text(" Hallo ")]).code).toContain(`<p> Hallo </p>`);
+  });
+
+  it.each([
+    ["boundary spaces", `<p> Hello </p>`],
+    ["a non-breaking space at the edge", `<p>\u00a0Hello</p>`],
+    [
+      "text across line breaks",
+      `<p>
+      Hello
+      world
+    </p>`,
+    ],
+    [
+      "pieces across line breaks",
+      `<p>Hi{" "}
+      {"there"} <b>you</b> {user.name}</p>`,
+    ],
+  ])("writes nothing for an unchanged read: %s", async (_name, jsx) => {
+    const code = app(jsx);
+    const result = edit(code, (await read(code)).content);
+    expect(result.code).toBe(code);
+    expect(result.remap).toEqual({});
+  });
+
+  it.each([
+    [`<p><span id="anchor">{""}</span> hello</p>`, `<span id="anchor">{""}</span>`],
+    [`<p><span id="anchor"></span> hello</p>`, `<span id="anchor"></span>`],
+    [
+      `<p><a id="anchor" href="/x">{/* none */}</a> hello</p>`,
+      `<a id="anchor" href="/x">{/* none */}</a>`,
+    ],
+  ])("reprints a wrapper with no visible text: %s", async (jsx, kept) => {
+    const code = app(jsx);
+    const next = (await read(code)).content.map((item) =>
+      item.t === "text" ? { ...item, text: item.text.replace("hello", "hallo") } : item,
+    );
+    expect(edit(code, next).code).toContain(`<p>${kept} hallo</p>`);
+  });
+
+  it.each([
+    ["a tab", `{"a\\tb"} hello`, "a\tb hallo", `{"a\\tb hallo"}`],
+    ["a carriage return", `{"a\\rb"} hello`, "a\rb hallo", `{"a\\rb hallo"}`],
+  ])("keeps %s in a string expression", async (_name, children, value, printed) => {
+    const code = app(`<pre>${children}</pre>`);
+    expect((await read(code)).content).toEqual([text(value.replace("hallo", "hello"))]);
+    expect(edit(code, [text(value)]).code).toContain(`<pre>${printed}</pre>`);
+  });
+});
+
 describe("a colored run in each styling convention", () => {
   const styles = { color: "#ff0000", "font-size": "20px" };
   const colored = [text("Hi "), text("there", [{ m: "span", styles, ref: "s" }])];

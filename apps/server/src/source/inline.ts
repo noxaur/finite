@@ -90,6 +90,9 @@ const BLOCK = new Set([
   "ul",
 ]);
 
+/** JSX's own whitespace: a non-breaking space is text. */
+const BLANK = /^[ \t\r\n]*$/;
+
 /** What a label may show before it's cut. */
 const LABEL_MAX = 28;
 
@@ -161,7 +164,7 @@ function read(el: t.JSXElement, code: string, file: string): Read {
             `This text holds a <${tag}>, so it isn't one piece of text. Select the <${tag}> and edit the text inside it, or ask the agent to change this.`,
             "unsupported-style",
           );
-        } else if (WRAPPERS.has(tag) && child.children.length > 0) {
+        } else if (WRAPPERS.has(tag) && !showsNothing(child)) {
           const href = linkHref(child);
           if (bare && FORMAT.has(tag))
             visit(child.children, [...marks, { m: tag } as Extract<Mark, { m: "strong" }>]);
@@ -180,6 +183,18 @@ function read(el: t.JSXElement, code: string, file: string): Read {
   };
   visit(el.children, []);
   return { content, sources };
+}
+
+/** A wrapper with no visible text to edit: a run in it would be nothing, and it would vanish. */
+function showsNothing(el: t.JSXElement): boolean {
+  return el.children.every((child) => {
+    if (child.type === "JSXText") return BLANK.test(cleanText(child.value));
+    if (child.type !== "JSXExpressionContainer") return false;
+    const value = stringValue(child.expression);
+    return (
+      child.expression.type === "JSXEmptyExpression" || (value !== undefined && BLANK.test(value))
+    );
+  });
 }
 
 /** An `<a>` with only a literal `href`: the one link shape the format bar can rewrite. */
@@ -234,13 +249,14 @@ type Step = InsertStep & { where: Map<string, string> };
  */
 export function setInline(s: Step, element: Element, content: Inline[]): Kept[] {
   const el = element.node;
-  const { sources } = read(el, s.code, s.file);
+  const { content: held, sources } = read(el, s.code, s.file);
+  if (JSON.stringify(content) === JSON.stringify(held)) return [];
   const opening = el.openingElement;
   const close = el.closingElement;
   const inner = close ? s.code.slice(opening.end!, close.start!) : "";
   const blank = inner.trim() === "";
-  const lead = blank ? "" : /^\s*/.exec(inner)![0];
-  const trail = blank ? "" : /\s*$/.exec(inner)![0];
+  const lead = blank ? "" : dropped(/^[ \t\r\n]*/.exec(inner)![0]);
+  const trail = blank ? "" : dropped(/[ \t\r\n]*$/.exec(inner)![0]);
   const out: Kept[] = [];
   const printing: Printing = {
     s,
@@ -250,8 +266,10 @@ export function setInline(s: Step, element: Element, content: Inline[]): Kept[] 
     exposedStart: lead.includes("\n"),
     exposedEnd: trail.includes("\n"),
     classes: new Set(),
+    printed: new Set(),
   };
-  const body = render(printing, content, 0, content, 0);
+  const whole = wrappersWhole(content);
+  const body = render(printing, whole, 0, whole, 0);
 
   if (!close) {
     if (body === "") return out;
@@ -268,6 +286,35 @@ export function setInline(s: Step, element: Element, content: Inline[]): Kept[] 
   return out;
 }
 
+/** Edge whitespace JSX drops because it holds a line break; anything else is in the runs. */
+const dropped = (space: string) => (/[\r\n]/.test(space) ? space : "");
+
+/**
+ * Moves kept wrappers outermost on the runs of any wrapper whose runs disagree on what's outside
+ * it, so formatting that splits those runs nests inside one copy of the wrapper.
+ */
+function wrappersWhole(content: readonly Inline[]): readonly Inline[] {
+  const outside = new Map<number, string>();
+  const split = new Set<number>();
+  for (const item of content) {
+    marksOf(item).forEach((mark, i) => {
+      if (mark.m !== "keep") return;
+      const around = JSON.stringify(marksOf(item).slice(0, i));
+      if ((outside.get(mark.id) ?? around) !== around) split.add(mark.id);
+      outside.set(mark.id, around);
+    });
+  }
+  if (split.size === 0) return content;
+  return content.map((item) => {
+    const marks = marksOf(item);
+    if (!marks.some((m) => m.m === "keep" && split.has(m.id))) return item;
+    return {
+      ...item,
+      marks: [...marks.filter((m) => m.m === "keep"), ...marks.filter((m) => m.m !== "keep")],
+    } as Inline;
+  });
+}
+
 type Printing = {
   s: Step;
   sources: Map<number, Source>;
@@ -278,6 +325,8 @@ type Printing = {
   exposedStart: boolean;
   exposedEnd: boolean;
   classes: Set<string>;
+  /** The kept wrappers printed so far: a second copy would repeat their attributes. */
+  printed: Set<number>;
 };
 
 /** Prints `items`, grouping the neighbours that share each mark into one wrapper. */
@@ -313,6 +362,12 @@ function wrapperOpen(p: Printing, mark: Mark): { text: string; close: string } {
     const source = p.sources.get(mark.id);
     if (source?.node.type !== "JSXElement" || source.kind !== "wrapper")
       throw new Refused(`There's no wrapper ${mark.id} in this text`, "invalid");
+    if (p.printed.has(mark.id))
+      throw new Refused(
+        `This edit would repeat ${source.label} and its attributes. Keep other text out of the middle of it, or ask the agent to change this.`,
+        "unsupported-style",
+      );
+    p.printed.add(mark.id);
     const opening = source.node.openingElement;
     keepElement(p, source.node);
     for (const attr of opening.attributes) keepEach(p, attr);
@@ -384,7 +439,7 @@ const NBSP = " ";
 function textOf(value: string, startExposed: boolean, endExposed: boolean): string {
   if (value === "") return "";
   const dropped = (startExposed && /^\s/.test(value)) || (endExposed && /\s$/.test(value));
-  if (dropped || /[{}<>&\n]/.test(value))
+  if (dropped || /[{}<>&\n\t\r]/.test(value))
     return `{${JSON.stringify(value).replaceAll(NBSP, "\\u00a0")}}`;
   return value.replaceAll(NBSP, "&nbsp;");
 }

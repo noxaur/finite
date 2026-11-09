@@ -267,6 +267,8 @@ export function RichTextEditor({ editor, editing }: { editor: CanvasEditor; edit
 
   const onKey = (e: React.KeyboardEvent) => {
     e.stopPropagation();
+    // During IME composition, Enter and Escape belong to the composition.
+    if (e.nativeEvent.isComposing) return;
     const key = e.key.toLowerCase();
     const mod = e.metaKey || e.ctrlKey;
     const format = mod && !e.shiftKey && !editing.plain ? FORMAT_KEYS[key] : undefined;

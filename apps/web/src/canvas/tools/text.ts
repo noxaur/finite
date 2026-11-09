@@ -261,6 +261,11 @@ async function onPath(host: ToolHost, frame: Frame, path: HitElement, index: num
   const bridge = host.bridge(frame.id);
   const info = await bridge?.vector(path.loc, index).catch(() => null);
   if (!bridge || !info) return host.say("That path isn't in the frame any more.");
+  const rendered = (await bridge.rects([path.loc]).catch(() => null))?.[path.loc]?.length ?? 1;
+  if (rendered > 1)
+    return host.say(
+      `This path renders ${rendered} times from one line of code, so text on it would only follow the first. Pick a path that renders once, or ask the agent to change this.`,
+    );
   const id = info.id ?? `path-${Math.random().toString(16).slice(2, 8)}`;
   const revs = { [fileOf(path.loc)]: path.rev };
   const done = await host.edit([
