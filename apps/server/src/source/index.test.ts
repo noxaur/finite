@@ -426,10 +426,7 @@ describe("SourceEditor inserting an element", () => {
   it("refuses the parts that aren't built yet, saying so", async () => {
     const source = createSourceEditor();
     const o = open(design());
-    for (const call of [
-      source.inline(o, "src/App.tsx:5:4"),
-      source.exportSlice(o, { canvasId: "c", sliceId: "s" }),
-    ]) {
+    for (const call of [source.inline(o, "src/App.tsx:5:4")]) {
       await expect(call).rejects.toMatchObject({ code: "not-implemented" });
     }
   });

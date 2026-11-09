@@ -119,8 +119,8 @@ describe("the registry", () => {
       "star",
       "image",
     ]);
-    expect(toolsIn("comment").map((t) => t.id)).toEqual(["comment"]);
-    expect(toolsIn("frame").map((t) => t.id)).toEqual(["frame"]);
+    expect(toolsIn("comment").map((t) => t.id)).toEqual(["comment", "annotation", "measure"]);
+    expect(toolsIn("frame").map((t) => t.id)).toEqual(["frame", "section", "slice"]);
   });
 
   it("writes a shortcut the way the menu shows it", () => {

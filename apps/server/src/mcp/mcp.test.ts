@@ -40,6 +40,8 @@ let preview: PreviewState;
 let elements: Screenshots["elements"];
 let loadErrors: LoadError[];
 let bridgeErrors: FrameError[];
+/** The arguments of each headless load. */
+let loads: unknown[][];
 const idle = vi.fn();
 let canvasId: string;
 const apply = vi.fn();
@@ -90,7 +92,10 @@ async function start(overrides: { idleMs?: number; styling?: Design["styling"] }
   };
   const screenshots: Screenshots = {
     capture: async () => new Uint8Array([1, 2, 3]),
-    captureWithErrors: async () => ({ png: new Uint8Array([1, 2, 3]), errors: loadErrors }),
+    captureWithErrors: async (...args) => {
+      loads.push(args);
+      return { png: new Uint8Array([1, 2, 3]), errors: loadErrors };
+    },
     measure: async () => ({ width: 300, height: 200 }),
     elements: (...args) => elements(...args),
     close: async () => {},
@@ -156,6 +161,7 @@ beforeEach(async () => {
   preview = { status: "ready", url: "http://frame" };
   elements = async (_url, _w, _h, selects) => selects.map(() => []);
   loadErrors = [];
+  loads = [];
   bridgeErrors = [];
   idle.mockClear();
   apply.mockClear();
@@ -546,6 +552,118 @@ describe("/mcp tools", () => {
 
     await call(client, "comments", { designId: "d1", resolve: [added.commentId] });
     expect(await list()).toEqual([]);
+  });
+
+  it("never asks an agent to answer an annotation, but lists it", async () => {
+    const client = await connect(await start(), "cursor");
+    const { frame } = await boardFrame();
+    await call(client, "comments", {
+      designId: "d1",
+      add: { frameId: frame.id, text: "Spacing follows the 8pt grid", annotation: true },
+    });
+    const [note] = value(await call(client, "comments", { designId: "d1" }));
+    expect(note).toMatchObject({ kind: "annotation", waiting: false });
+    // A person's annotation is a note, not a request.
+    await open.updateCanvas(
+      canvasId,
+      (c) => ({
+        ...c,
+        comments: [
+          ...c.comments,
+          {
+            id: "n1",
+            kind: "annotation",
+            anchor: { frameId: frame.id },
+            author: person,
+            text: "Brand blue only",
+            replies: [],
+            createdAt: Date.now(),
+          },
+        ],
+      }),
+      person,
+    );
+    const all = value(await call(client, "comments", { designId: "d1" }));
+    expect(all.map((c: { waiting: boolean }) => c.waiting)).toEqual([false, false]);
+    const waiting = await call(client, "comments", { designId: "d1", wait: 0.05 });
+    expect(waiting.content[0]!.text).toContain("wait again");
+  });
+
+  it("makes, resizes and removes a section, and canvas undo takes each back", async () => {
+    const client = await connect(await start());
+    const { frame } = await boardFrame();
+    const sections = async () => (await open.canvases()).find((c) => c.id === canvasId)!.sections;
+
+    const made = value(
+      await call(client, "edit", {
+        designId: "d1",
+        canvasId,
+        ops: [{ op: "section", name: "Onboarding", frameIds: [frame.id] }],
+      }),
+    ).applied[0];
+    expect(made).toMatchObject({ x: -40, y: -160, width: 380, height: 400 });
+    expect(await sections()).toMatchObject([{ id: made.sectionId, name: "Onboarding" }]);
+
+    await call(client, "edit", {
+      designId: "d1",
+      canvasId,
+      ops: [{ op: "section", sectionId: made.sectionId, name: "Sign-up", width: 900 }],
+    });
+    expect(await sections()).toMatchObject([{ name: "Sign-up", width: 900 }]);
+    expect(value(await call(client, "read", { designId: "d1", canvasId })).sections).toMatchObject([
+      { id: made.sectionId, name: "Sign-up", width: 900 },
+    ]);
+
+    await call(client, "edit", {
+      designId: "d1",
+      canvasId,
+      ops: [{ op: "section", sectionId: made.sectionId, remove: true }],
+    });
+    expect(await sections()).toEqual([]);
+    await call(client, "undo", { designId: "d1", canvasId });
+    expect(await sections()).toMatchObject([{ name: "Sign-up" }]);
+    await call(client, "undo", { designId: "d1", canvasId });
+    await call(client, "undo", { designId: "d1", canvasId });
+    expect(await sections()).toEqual([]);
+
+    const bad = await call(client, "edit", {
+      designId: "d1",
+      canvasId,
+      ops: [{ op: "section", name: "No box" }],
+    });
+    expect(bad.isError).toBe(true);
+    expect(bad.content[0]!.text).toContain("frameIds");
+  });
+
+  it("renders a region of one frame, cut to the frame's width", async () => {
+    const client = await connect(await start());
+    const { frame } = await boardFrame();
+    const region = { x: 250, y: 10, width: 200, height: 50 };
+    const result = await call(client, "render", { designId: "d1", frameIds: [frame.id], region });
+    expect(result.content.map((c) => c.type)).toEqual(["text", "image", "text"]);
+    expect(loads.at(-1)).toEqual([
+      "http://frame/x",
+      frame.width,
+      frame.height,
+      { x: 250, y: 10, width: 50, height: 50 },
+    ]);
+
+    const many = await call(client, "render", { designId: "d1", canvasId, region });
+    expect(many.isError).toBe(true);
+    expect(many.content[0]!.text).toContain("single frame");
+    const outside = await call(client, "render", {
+      designId: "d1",
+      frameIds: [frame.id],
+      region: { ...region, x: 400 },
+    });
+    expect(outside.content[0]!.text).toContain("past the right edge");
+    const below = await call(client, "render", {
+      designId: "d1",
+      frameIds: [frame.id],
+      region: { x: 0, y: 400, width: 100, height: 50 },
+    });
+    expect(below.content[0]!.text).toContain("past the bottom of Card (300×200)");
+    expect(below.content.map((c) => c.type)).not.toContain("image");
   });
 
   it("wakes a waiting comments call when a person writes", async () => {

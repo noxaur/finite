@@ -11,7 +11,9 @@ import { Button } from "@/components/Button";
 import { Toolbar } from "@/components/Toolbar";
 import { useDesignState } from "@/client/finite";
 import { activeEditor, CanvasEditor, useEditorState } from "./editor";
+import { SectionsLayer, SlicesLayer } from "./CanvasObjects";
 import { FrameView } from "./FrameView";
+import { MeasureOverlay } from "./MeasureOverlay";
 import { useSelection } from "./selection";
 import { TextEditor, TextLabels } from "./TextLabels";
 import { ToolOverlays } from "./ToolOverlays";
@@ -162,6 +164,7 @@ function CanvasView({
       <div ref={world} {...stylex.props(styles.world)}>
         {editor && state && (
           <>
+            <SectionsLayer editor={editor} state={state} />
             <TextLabels editor={editor} state={state} />
             {canvas.frames.map((frame) => {
               const box = editor.boxOf(frame);
@@ -202,8 +205,10 @@ function CanvasView({
                 </div>
               );
             })}
+            <SlicesLayer editor={editor} state={state} />
             <SelectionLayer editor={editor} state={state} selection={selection} />
             <ToolOverlays editor={editor} state={state} />
+            {state.tool === "measure" && <MeasureOverlay host={editor} state={state} />}
             <CommentLayer
               designId={designId}
               canvasId={canvas.id}
