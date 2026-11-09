@@ -39,7 +39,7 @@ import {
 import { readInline } from "./inline.ts";
 import { parseModule } from "./jsx.ts";
 import { editFiles, editStyles, rewrite } from "./rewrite.ts";
-import { exportSlice } from "./sliceExport.ts";
+import { exportSlice, type SliceRenderer } from "./sliceExport.ts";
 import { isStylexVar, mentionsVar, readVars, writeVar } from "./stylex.ts";
 import type { TailwindVersion, Theme } from "./tailwind.ts";
 import { configTheme, tailwind3Config } from "./tailwind3.ts";
@@ -63,6 +63,8 @@ export type SourceEditorOptions = {
   routes?: (design: Design) => Promise<Route[]>;
   /** The file locks to share with other writers (default: the process's `fileLocks`). */
   locks?: Locked;
+  /** The preview and Chrome that `exportSlice` renders with; without them it refuses. */
+  render?: SliceRenderer;
 };
 
 const PROTOTYPE_DIR = ".finite/";
@@ -328,7 +330,7 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
     inline: (open, loc) => readInline(open, loc),
     draw: (open, input, by) => boardFile(open, input, by),
     addAsset: (open, attachment) => addAsset(open, attachment),
-    exportSlice: (open, input) => exportSlice(open, input),
+    exportSlice: (open, input) => exportSlice(options.render, open, input),
 
     tokens: allTokens,
 

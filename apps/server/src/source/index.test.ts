@@ -421,7 +421,6 @@ describe("SourceEditor inserting an element", () => {
     for (const call of [
       source.inline(o, "src/App.tsx:5:4"),
       source.addAsset(o, "a.png"),
-      source.exportSlice(o, { canvasId: "c", sliceId: "s" }),
       source.draw(
         o,
         {

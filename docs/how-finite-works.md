@@ -51,7 +51,7 @@ $FINITE_DATA_DIR/
 <root>/.finite/       meant to be committed with the project
   design.json         { version: 1, id, router, styling, css[], wrapper?, brandDir }   router: react-router | tanstack | next-app | next-pages | none (a setup design)
   runtime/            generated files for Next.js and Tailwind v3 designs, ignored by git (see Previews)
-  canvases/<id>.json  one canvas: frames, text labels, comments; listed by createdAt
+  canvases/<id>.json  one canvas: frames, text labels, comments, sections, slices; listed by createdAt
   boards/<canvasId>/  the prototype components agents write, one default export per file
   threads/<id>.json   thread metadata (ThreadMeta)
   threads/<id>.jsonl  the thread's event log, one ThreadEvent per line
@@ -73,9 +73,9 @@ Every new design starts with three pages: **Routes**, with one frame per route t
 The first message is `hello { user }`. `subscribe { designId }` returns the design's whole state (`DesignState`: the design, its canvases, threads, preview state and routes), and from then on the server pushes events: `canvas` (the whole canvas after any change), `thread`, `thread.event`, `preview` and `routes`. `designs` and `settings` go to every socket. The requests fall into groups:
 
 - Designs: `designs.list`, `design.create`, `design.connect`, `design.setup` (start a setup thread), `design.remove`. `setup.done { designId, next }` tells a design's subscribers which design to show once its setup passed.
-- Canvases: `canvas.create`, `rename`, `remove`, `restore` and `patch`. A `CanvasPatch` moves, resizes, adds, removes, renames or moves frames to another canvas, or sets and removes a text label.
+- Canvases: `canvas.create`, `rename`, `remove`, `restore` and `patch`. A `CanvasPatch` moves, resizes, adds, removes, renames or moves frames to another canvas, sets and removes a text label, a section or a slice, or moves a section with the frames and labels inside it (`moveSection`).
 - Source: `source.edit`, `source.undo`, `source.redo`, `source.detach`, `tokens.get`, `tokens.set`, `components.list`.
-- Comments: `comment.add`, `reply`, `resolve`, `reopen`.
+- Comments: `comment.add` (with `kind: "annotation"` for a note), `reply`, `resolve`, `reopen`. `canvas.exportSlice` renders a slice to a PNG.
 - Threads: `thread.send`, `thread.queued` (edit or drop a queued message), `interrupt`, `snooze`, `settle`, `rename`, `history`.
 - Settings and Claude: `settings.get`, `settings.set`, `claude.status`.
 - `frame.error`: a frame's runtime error, which the page forwards for the agent's `frame_errors` tool.
@@ -214,17 +214,18 @@ The **permission fence** (`agent/policy.ts`) keeps agents out of production code
 
 The **canvas tools** are an in-process MCP server named `finite` (`agent/tools.ts`, input shapes in `packages/protocol/src/tools.ts`):
 
-| Tool                          | What it does                                                                                                                                     |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `read_canvas`, `open_canvas`  | Read a canvas; open a page or prototype by name (or make one) and link it to the thread.                                                         |
-| `place_frames`                | Put TSX files on a canvas in a row, each with a title and a why label above it.                                                                  |
-| `write_text`, `comment`       | A text label on the canvas; a comment pinned to a frame or an element in it.                                                                     |
-| `copy_production`             | Copy one production component or route file onto the board, its imports pointing at production.                                                  |
-| `move_to_prod`                | Allow production writes for the rest of the turn.                                                                                                |
-| `add_brand_asset`             | Copy a file or URL into the brand folder and list it on the Brand page.                                                                          |
-| `spawn_thread`, `name_thread` | Start a child thread; name this one.                                                                                                             |
-| `screenshot`, `frame_errors`  | A PNG of a frame, taken in the system Chrome with puppeteer-core; the errors its bridge reported, or the preview's log when the preview is down. |
-| `finish_setup`                | Check `finite.json` and connect its apps, then start the next design's preview and report it.                                                    |
+| Tool                          | What it does                                                                                                                                                                                           |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `read_canvas`, `open_canvas`  | Read a canvas; open a page or prototype by name (or make one) and link it to the thread.                                                                                                               |
+| `place_frames`                | Put TSX files on a canvas in a row, each with a title and a why label above it.                                                                                                                        |
+| `write_text`, `comment`       | A text label on the canvas; a comment pinned to a frame or an element in it, or with `annotation` a note for people that no agent acts on.                                                             |
+| `write_section`               | Make, move, resize, rename or (with `remove`) delete a named section; `frameIds` sizes a new one around those frames.                                                                                  |
+| `copy_production`             | Copy one production component or route file onto the board, its imports pointing at production.                                                                                                        |
+| `move_to_prod`                | Allow production writes for the rest of the turn.                                                                                                                                                      |
+| `add_brand_asset`             | Copy a file or URL into the brand folder and list it on the Brand page.                                                                                                                                |
+| `spawn_thread`, `name_thread` | Start a child thread; name this one.                                                                                                                                                                   |
+| `screenshot`, `frame_errors`  | A PNG of a frame (or with `region`, a box of it in the frame's pixels), taken in the system Chrome with puppeteer-core; the errors its bridge reported, or the preview's log when the preview is down. |
+| `finish_setup`                | Check `finite.json` and connect its apps, then start the next design's preview and report it.                                                                                                          |
 
 ## External agents over MCP
 
@@ -234,14 +235,14 @@ The **canvas tools** are an in-process MCP server named `finite` (`agent/tools.t
 
 `mcp/tools.ts` declares six tools, with input shapes in `packages/protocol/src/tools.ts`. They share `canvasOps` in `agent/tools.ts` with the thread tools, so placing a frame behaves the same from either side.
 
-| Tool       | What it does                                                                                                              |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `designs`  | List, create, connect, rename or remove designs.                                                                          |
-| `read`     | A design's overview, a canvas, a frame's rendered elements, a file, or its tokens, components or routes.                  |
-| `edit`     | Run a list of ops: make a canvas, write files, place frames, add notes, set tokens, and change rendered elements.         |
-| `render`   | A PNG of each frame with its runtime errors, at most six per call.                                                        |
-| `comments` | List, add, reply to, resolve and reopen comments. `wait` is a long poll of up to 55 seconds for a comment a person wrote. |
-| `undo`     | Take back the session's last file change, or with `canvasId` its last change to that canvas.                              |
+| Tool       | What it does                                                                                                                                                                 |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `designs`  | List, create, connect, rename or remove designs.                                                                                                                             |
+| `read`     | A design's overview, a canvas, a frame's rendered elements, a file, or its tokens, components or routes.                                                                     |
+| `edit`     | Run a list of ops: make a canvas, write files, place frames, add notes and sections, set tokens, and change rendered elements.                                               |
+| `render`   | A PNG of each frame with its runtime errors, at most six per call. With `region`, one frame cropped to a box.                                                                |
+| `comments` | List, add (also as an `annotation`), reply to, resolve and reopen comments. `wait` is a long poll of up to 55 seconds for a comment a person wrote; annotations don't count. |
+| `undo`     | Take back the session's last file change, or with `canvasId` its last change to that canvas, such as a frame, a label or a section.                                          |
 
 `read` with a `frameId` lists each rendered element with its tag, loc and text, and `[data-finite-loc="src/x.tsx:12:4"]` selects exactly the element a line names. Element ops in `edit` take a CSS selector. `Screenshots.elements` loads the frame once in headless Chrome and reads `data-finite-loc` and `data-finite-rev` off what each selector matches, which gives the same locs and revs the page sends in a `source.edit`. Element ops in a row on one canvas go into one `SourceEditor.apply`, so they apply together and undo in one step. Ops otherwise run in order and aren't a transaction: the first failure stops the call, and the result lists what was applied and what was refused.
 
@@ -266,7 +267,7 @@ The bottom toolbar has one split button per group: Move, Frame, Shape, Pen, Text
 
 `resolveKey` in `tools/registry.ts` turns a key press into a tool or command from one table, with a test that catches duplicate shortcuts. Escape and mod combos always work. A key forwarded out of a frame in Interact mode belongs to the app in the frame, and the rest of the table ignores it.
 
-A tool draws through `host.draw` (`tools/draw.ts`). It sends `drop` over the bridge for the stamped chain at the box's center, picks a container with `planInsert` (`design/editing/insertion.ts`), sends one atomic `source.edit`, and selects the new element once it reaches the frame. The frame's own file wins over a shared component's, and ⌘ takes the nearest element whatever its file. A flex or grid container gets a flow child in its slot, and anything else an absolute child; Alt inverts that. Over empty page, `drop` answers the top-level stamped elements. Move, Hand, Interact, Comment and Rectangle work today. A shape drawn on empty canvas needs `canvas.draw`, which refuses with `not-implemented` until the board-file work lands.
+A tool draws through `host.draw` (`tools/draw.ts`). It sends `drop` over the bridge for the stamped chain at the box's center, picks a container with `planInsert` (`design/editing/insertion.ts`), sends one atomic `source.edit`, and selects the new element once it reaches the frame. The frame's own file wins over a shared component's, and ⌘ takes the nearest element whatever its file. A flex or grid container gets a flow child in its slot, and anything else an absolute child; Alt inverts that. Over empty page, `drop` answers the top-level stamped elements. Move, Hand, Interact, Comment, Annotation, Measurement, Section, Slice and Rectangle work today. A shape drawn on empty canvas needs `canvas.draw`, which refuses with `not-implemented` until the board-file work lands.
 
 ### Shapes
 
@@ -277,6 +278,14 @@ A tool draws through `host.draw` (`tools/draw.ts`). It sends `drop` over the bri
 ### Auto layout
 
 ### Canvas and agent
+
+A **section** (⇧S) is a named rectangle on the canvas. Drag with the tool to draw one, or click for a 480 × 320 box. Which frames it holds is never stored: when you drag its title, `objects.ts` reads the frames wholly inside the box and the labels that belong to them (a label above a frame goes with the frame; a free label goes if its corner is inside), shows them moving through `objectOverrides`, `frameOverrides` and `textOverrides`, and sends one `moveSection` patch with every new position. So a section move is one undo step. Its handles resize the box alone, double-clicking the title renames it, and Delete removes the section and leaves its frames. The server holds them in `Canvas.sections`, with the patch ops in `store/sections.ts`.
+
+A **slice** (S) marks a box inside one frame, in that frame's own pixels, so it follows the frame when the frame moves. It can't leave its frame. With a slice picked, **Export PNG** sends `canvas.exportSlice`: the server makes sure the frame's preview runs, loads the frame in headless Chrome at its width and clips the screenshot to the box (`source/sliceExport.ts`), and the page saves the returned `data:` URL. Export is 1x. A slice of a frame that was removed is hidden and comes back if the removal is undone.
+
+An **annotation** (Y) is a comment with `kind: "annotation"`: text for people, pinned like a comment but drawn as a note, and no agent is asked to act on it (`comments` `wait` skips it). Resolve and Reopen work as for any comment. **Measurement** (⇧M) draws only an overlay: click an element or frame (or select one), then hover another to see the gap or the four insets between them, in canvas units. It writes nothing and clears when you pick the tool again.
+
+Every addition has its way back. ⌘Z takes back a section or slice you added, moved, resized or removed, per person like every canvas change, and ⇧⌘Z does it again. An agent's `write_section` with `remove: true` deletes one, and that agent's own `undo` (`/mcp`) puts it back; undo is per actor, so a person's ⌘Z doesn't take back the agent's change. The agent tools are `write_section`, `comment` with `annotation`, and `screenshot` with `region` (a thread's tools in `agent/tools.ts`), and the same three through `edit` (op `section`), `comments` and `render` on `/mcp`. Their drawing conventions are in the tool descriptions, since `agent/instructions.ts` is out of room: a section is padded 40 around the frames it names, and `region` is in the frame's pixels and must start inside the frame.
 
 ## The end-to-end test
 
