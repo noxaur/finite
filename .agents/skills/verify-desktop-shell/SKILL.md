@@ -47,19 +47,19 @@ Each constant in the `.cfg` files toggles one piece of code. `current.cfg` is th
 
 ## Coverage
 
-Last synced: `51ee6f77f44453401756379b78aca7017ee11950`
+Last synced: `4025ebd6712ebb76e092381adc0457c218cd56de`
 
 | File                              | Function                               | Actions                                    | Rules                                                          |
 | --------------------------------- | -------------------------------------- | ------------------------------------------ | -------------------------------------------------------------- |
 | `apps/desktop/src/main.ts:95`     | `startServer`                          | `ProbeFinishes`, `HealthAnswers`           | `QuitLeavesNoServer`                                           |
-| `apps/desktop/src/main.ts:108`    | `spawnServer`, stop and error handlers | `Spawn`, `OnStop`, `ServerCrashes`         | all                                                            |
-| `apps/desktop/src/main.ts:261`    | `whenReady` chain's `catch`            | `HealthTimesOut`                           | `QuitFinishes`                                                 |
+| `apps/desktop/src/main.ts:110`    | `spawnServer`, stop and error handlers | `Spawn`, `OnStop`, `ServerCrashes`         | all                                                            |
+| `apps/desktop/src/main.ts:276`    | `whenReady` chain's `catch`            | `HealthTimesOut`                           | `QuitFinishes`                                                 |
 | `apps/desktop/src/main.ts:287`    | `before-quit`                          | `BeforeQuit`, `YouQuit`, `ServerObeysQuit` | `QuitFinishes`, `QuitLeavesNoServer`, `NoRestartWhileQuitting` |
 | `apps/desktop/src/restarts.ts:11` | `afterStop`                            | `OnStop`, `AMinutePasses`                  | `NoRestartPastTheLimit`                                        |
 
 ## Bounds and assumptions
 
-The check covers every order of events with `MAX_STOPS` = 3, and 59 reachable states for the current code. `stops` is a count of stops still inside `WINDOW_MS`, and `AMinutePasses` drops one. A live process always ends after SIGTERM or the SIGKILL 5 seconds later. An uncaught `error` is assumed to leave the app running, which is what Electron's default handler does.
+The check covers every order of events with `MAX_STOPS` = 3, and 48 reachable states for the current code. `stops` is a count of stops still inside `WINDOW_MS`, and `AMinutePasses` drops one. A live process always ends after SIGTERM or the SIGKILL 5 seconds later. An uncaught `error` is assumed to leave the app running, which is what Electron's default handler does.
 
 Left out:
 

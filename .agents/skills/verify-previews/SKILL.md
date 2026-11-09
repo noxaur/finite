@@ -11,7 +11,7 @@ The model describes the code by hand, so it can't see your diff. You carry the c
 
 ## Check a change
 
-1. Run `git diff 51ee6f77f44453401756379b78aca7017ee11950 --stat -- <the files in Coverage>`, using the sha in "Last synced". No changes to those files means the verification still applies: stop here.
+1. Run `git diff 4025ebd6712ebb76e092381adc0457c218cd56de --stat -- <the files in Coverage>`, using the sha in "Last synced". No changes to those files means the verification still applies: stop here.
 2. For each changed function, read the action named in Coverage and decide whether it still describes the code. Each action is one stretch of code with no `await` inside it, so a new `await` splits an action, and a moved check changes what an action guards.
 3. Edit `model/Previews.tla` until it describes the new code. Run a config with a constant only when the change matches that variant.
 4. Run `.agents/skills/verify-previews/check.sh`. It takes about a minute and needs Java and TLC 2.19 at `~/.local/share/tlaplus/tla2tools.jar` (or `TLA2TOOLS`).
@@ -54,7 +54,7 @@ Each run covers one design and one viewer, with at most 2 visits, 1 agent tool c
 
 ## Coverage
 
-Last synced: 51ee6f77f44453401756379b78aca7017ee11950
+Last synced: 4025ebd6712ebb76e092381adc0457c218cd56de
 
 | File                                                               | Function                                                     | Actions and rules                                                             |
 | ------------------------------------------------------------------ | ------------------------------------------------------------ | ----------------------------------------------------------------------------- |
@@ -63,7 +63,7 @@ Last synced: 51ee6f77f44453401756379b78aca7017ee11950
 |                                                                    | `stopRun`, `stopChild`                                       | `StopSync`, `StoppedChildExits`, `IdleTimerFires`                             |
 |                                                                    | `restart`, `reload`                                          | `FiniteJsonChanges`, `RestartResumes`                                         |
 |                                                                    | `idle`, `watch`, `startIdle`                                 | `Unsubscribe`, `ToolFinishes`; `UnwatchedHasIdleTimer`                        |
-|                                                                    | `remove`                                                     | `RemoveDesign`, `EnsureResumes`; `RemovedDesignRunsNothing`                   |
+|                                                                    | `remove`, `refuseRemoved`                                    | `RemoveDesign`, `EnsureResumes`; `RemovedDesignRunsNothing`                   |
 |                                                                    | `onExit` in `start`                                          | `ServiceExits`; `ErrorMeansNoChild`                                           |
 | `apps/server/src/preview/workspace.ts`                             | `prepare`, `release`, `retire`, service exit                 | `PrepareSucceeds`, `Settle`, `ServiceExits`; `ServiceHeld`                    |
 | `apps/server/src/hub.ts`                                           | `unsubscribe`, `release`                                     | `Unsubscribe`, `ToolFinishes`                                                 |

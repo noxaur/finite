@@ -6,17 +6,17 @@
 EXTENDS Naturals, Sequences
 
 CONSTANTS
-  Requests,      \* the canvas's calls: hit, rects, inspect, layers, drop, vector, measure
+  Requests,      \* the canvas's calls: hit, rects, inspect, layers, drop, vector, measure, measureArea
   MaxDocs,       \* documents the iframe loads (2 = one reload)
   MaxRemounts,   \* times the effect re-runs on the same iframe
   \* The code as it stands has every toggle TRUE but AskHelloOnRemount and ChartOnly, and MaxRemounts 0.
   LoadFallback,          \* bridge.ts:130-134, a load with no hello connects anyway
   DropPendingOnHello,    \* bridge.ts:94, onHello refuses what was in flight
   TimerOnSend,           \* bridge.ts:144, the 5 s timer set in send()
-  FlushAndSizeOnConnect, \* client/bridge.ts:891-892, flush the buffer and force a size report
-  RejectWaitingOnClose,  \* bridge.ts:187, close() also rejects requests still waiting for a hello
+  FlushAndSizeOnConnect, \* client/bridge.ts:1037-1038, flush the buffer and force a size report
+  RejectWaitingOnClose,  \* bridge.ts:190-191, close() also rejects requests still waiting for a hello
   TimerWhileWaiting,     \* bridge.ts:144, a waiting request has the 5 s timer too
-  NoticeUnload,          \* client/bridge.ts:895 and bridge.ts:101-107, the frame says it's leaving
+  NoticeUnload,          \* client/bridge.ts:1041 and bridge.ts:101-107, the frame says it's leaving
   IgnoreRepeatHello,     \* bridge.ts:87-90, the hello after a load's connect keeps its channel
   AskHelloOnRemount,     \* not taken: a new bridge asks a loaded frame to say hello again
   ChartOnly              \* chart.cfg only: leaves out steps that add states but nothing to the picture
@@ -34,7 +34,7 @@ VARIABLES
   hostChanDoc, \* the document that channel was opened for (ghost)
   nextChan,    \* the next MessageChannel to create
   connects,    \* BRIDGE_CONNECT messages on their way to the window
-  frameChan,   \* client/bridge.ts:153 `port`
+  frameChan,   \* client/bridge.ts:154 `port`
   reqState,    \* "unmade", "waiting" (bridge.ts:66 `waiting`), "inflight" (`pending`), "stranded", "settled"
   reqChan,     \* the channel a request was posted on
   reqDoc,      \* the document that channel belonged to (ghost)
@@ -81,7 +81,7 @@ EffectConnects ==
                  connects, frameChan, reqState, reqChan, reqDoc, askedStale, refusedNoReload,
                  errorState, sizeChan, remounts>>
 
-\* client/bridge.ts:915, the last line of start().
+\* client/bridge.ts:1061, the last line of start().
 BridgeSaysHello ==
   /\ page = "blank" /\ page' = "live" /\ helloMsg' = TRUE /\ loadPending' = TRUE
   /\ UNCHANGED <<bridge, doc, greeted, helloDue, chanTaken, hostChan, hostChanDoc, nextChan, connects, frameChan,
@@ -117,13 +117,13 @@ LoadFires ==
        ELSE UNCHANGED <<helloDue, chanTaken, hostChan, hostChanDoc, nextChan, connects, reqState, reqChan, reqDoc, refusedNoReload>>
   /\ UNCHANGED <<bridge, page, doc, helloMsg, frameChan, askedStale, errorState, sizeChan, remounts>>
 
-\* close() removed the listener (bridge.ts:184).
+\* close() removed the listener (bridge.ts:187).
 LoadAfterClose ==
   /\ loadPending /\ loadPending' = FALSE /\ bridge = "closed"
   /\ UNCHANGED <<bridge, page, doc, helloMsg, greeted, helloDue, chanTaken, hostChan, hostChanDoc, nextChan, connects,
                  frameChan, reqState, reqChan, reqDoc, askedStale, refusedNoReload, errorState, sizeChan, remounts>>
 
-\* client/bridge.ts:881-893.
+\* client/bridge.ts:1027-1039. Its source and origin checks (1029-1033) are left out; see SKILL.md.
 FrameTakesConnect ==
   /\ page = "live" /\ connects # <<>>
   /\ frameChan' = Head(connects) /\ connects' = Tail(connects)
@@ -138,7 +138,7 @@ ConnectHasNoListener ==
   /\ UNCHANGED <<bridge, page, doc, loadPending, helloMsg, greeted, helloDue, chanTaken, hostChan, hostChanDoc, nextChan,
                  frameChan, reqState, reqChan, reqDoc, askedStale, refusedNoReload, errorState, sizeChan, remounts>>
 
-\* bridge.ts:137-163, send() while open: `if (port) go(); else waiting.push(go)`.
+\* bridge.ts:137-163, send() while open: `if (port) go(); else waiting.set(id, go)`.
 CanvasAsks(r) ==
   /\ bridge = "open" /\ reqState[r] = "unmade"
   /\ IF hostChan # 0
@@ -161,7 +161,7 @@ CanvasAsksClosed(r) ==
   /\ UNCHANGED <<bridge, page, doc, loadPending, helloMsg, greeted, helloDue, chanTaken, hostChan, hostChanDoc, nextChan,
                  connects, frameChan, reqChan, reqDoc, askedStale, refusedNoReload, errorState, sizeChan, remounts>>
 
-\* client/bridge.ts receive(), then the reply or refusal over the port.
+\* client/bridge.ts:891-907, receive(), then the reply or refusal over the port.
 FrameAnswers(r) ==
   /\ reqState[r] = "inflight" /\ page = "live" /\ reqChan[r] = frameChan
   /\ reqState' = [reqState EXCEPT ![r] = "settled"]
@@ -176,7 +176,7 @@ RequestTimesOut(r) ==
   /\ UNCHANGED <<bridge, page, doc, loadPending, helloMsg, greeted, helloDue, chanTaken, hostChan, hostChanDoc, nextChan,
                  connects, frameChan, reqChan, reqDoc, askedStale, refusedNoReload, errorState, sizeChan, remounts>>
 
-\* client/bridge.ts:156-159 and reportError at :806: errors buffer before connect.
+\* client/bridge.ts:157-160 (post) and reportError at :952: errors buffer before connect.
 FrameReportsError ==
   /\ ~ChartOnly
   /\ page = "live" /\ errorState = "none"
@@ -198,7 +198,7 @@ FrameReloads ==
        ELSE UNCHANGED <<hostChan, hostChanDoc, greeted, helloDue, chanTaken, reqState>>
   /\ UNCHANGED <<bridge, nextChan, reqChan, reqDoc, askedStale, refusedNoReload, remounts>>
 
-\* bridge.ts:182-193, close(). Without RejectWaitingOnClose, `waiting` is left and never settles.
+\* bridge.ts:185-196, close(). Without RejectWaitingOnClose, a waiting request is left and never settles.
 BridgeCloses ==
   /\ ~ChartOnly \/ remounts = 0
   /\ bridge = "open" /\ bridge' = "closed"

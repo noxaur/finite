@@ -1,6 +1,6 @@
 ---
 name: verify-client-sync
-description: TLA+ model of the page's connection to the Finite server. Use when a change touches apps/web/src/client/finite.ts (connect, retry, resume, request, track, subscribeDesign, holdDesign, loadThread, appendThreadEvent), the subscribe or unsubscribe handlers, or apps/server/src/hub.ts socket handling, or when reconnects, stale subscriptions, lost requests or stuck streaming text are reported.
+description: TLA+ model of the page's connection to the Finite server. Use when a change touches apps/web/src/client/finite.ts (connect, retry, resume, request, track, overdue, askAgain, subscribeDesign, holdDesign, loadThread, appendThreadEvent), the hello, subscribe or unsubscribe handlers, apps/server/src/hub.ts socket handling, or apps/server/src/replies.ts, or when reconnects, stale subscriptions, lost requests or stuck streaming text are reported.
 ---
 
 # Verify client sync
@@ -42,10 +42,10 @@ Read every result with `/statechart`: it turns a violation into its shortest pat
 Compare with the sync commit:
 
 ```bash
-git diff 51ee6f77f44453401756379b78aca7017ee11950 -- apps/web/src/client/finite.ts apps/server/src/hub.ts apps/server/src/handlers.ts
+git diff 4025ebd6712ebb76e092381adc0457c218cd56de -- apps/web/src/client/finite.ts apps/server/src/hub.ts apps/server/src/replies.ts apps/server/src/handlers.ts
 ```
 
-Changes in `handlers.ts` matter only inside `subscribe` and `unsubscribe`. An empty or unrelated diff needs no model change, so run the check only if you edited the model.
+Changes in `handlers.ts` matter only inside `hello` (its `memory`), `subscribe` and `unsubscribe`. An empty or unrelated diff needs no model change, so run the check only if you edited the model.
 
 ## When the code changed
 
@@ -61,7 +61,7 @@ Keep a rule's meaning when it goes red. Weakening a rule to pass hides the bug i
 
 ## Coverage
 
-Last synced: `51ee6f77f44453401756379b78aca7017ee11950`
+Last synced: `4025ebd6712ebb76e092381adc0457c218cd56de`
 
 | File                            | Function                          | Actions                                                                 | Rules                                                             |
 | ------------------------------- | --------------------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------- |
@@ -76,6 +76,7 @@ Last synced: `51ee6f77f44453401756379b78aca7017ee11950`
 | `apps/web/src/client/finite.ts` | `subscribeDesign`                 | `SnapshotArrives`                                                       | `ReleasedDesignUnsubscribed`                                      |
 | `apps/web/src/client/finite.ts` | `loadThread`, `appendThreadEvent` | `HistoryArrives`, `HistoryRefused`, `ServerStreamsText`, `TurnFinishes` | `NoStaleStreaming`, `LoadedMeansHistory`                          |
 | `apps/server/src/hub.ts`        | `connect` (message and close)     | `ServerReceivesSubscribe`, `ServerReceivesUnsubscribe`, `Closed`        | `HeldDesignSubscribed`, `ReleasedDesignUnsubscribed`              |
+| `apps/server/src/handlers.ts`   | `hello`                           | `HelloAccepted`, `ServerForgets`, `ServerRestarts`                      | `AtMostOnce`, `FailedMeansNotApplied`                             |
 | `apps/server/src/handlers.ts`   | `subscribe`, `unsubscribe`        | `ServerAddsSubscription`, `ServerReceivesUnsubscribe`                   | `ReleasedDesignUnsubscribed`                                      |
 
 ## Bounds and what's left out

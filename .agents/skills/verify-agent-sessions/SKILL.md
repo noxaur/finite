@@ -60,7 +60,7 @@ The `current` row covers 3 sends, 1 Stop and 1 crash. `current-four-sends` cover
 
 Timing assumptions: a steer's turn starts well inside the 3 s grace (measured 37 ms), and a crash doesn't land on the 10-minute idle timer.
 
-Left out: `editQueued` (inside the lock, only removes or rewrites), `writing` file locks, `sessionId` and resume, spawned child threads, `stopDesign` (ends in the design's removal), `awaitingSince`, event mapping and which errors are suppressed, a deliver that rejects while taking a message off the queue, a store write that fails after deliver marks running, a `move_to_prod` with no call id (any stopped result revokes it, which fails safe), a grant that lands after its own turn's result was handled, and a finished or steered result revoking a later turn's grant (`StoppedResultLeavesLaterGrant` covers stopped results only). A server restart appears only in `fixed`: `store/open.ts:123` repairs `running` before anything reads it.
+Left out: `editQueued` (inside the lock, only removes or rewrites), `writing` file locks, `sessionId` and resume, spawned child threads, `stopDesign` (ends in the design's removal), `awaitingSince`, `settledAt` (`settle`, `granted`), event mapping and which errors are suppressed, a deliver that rejects while taking a message off the queue, a store write that fails after deliver marks running, a `move_to_prod` with no call id (any stopped result revokes it, which fails safe), a grant that lands after its own turn's result was handled, and a finished or steered result revoking a later turn's grant (`StoppedResultLeavesLaterGrant` covers stopped results only). A server restart appears only in `fixed`: `store/open.ts:124` repairs `running` before anything reads it.
 
 ## Coverage
 
@@ -71,7 +71,7 @@ Left out: `editQueued` (inside the lock, only removes or rewrites), `writing` fi
 | `apps/server/src/agent/index.ts`       | `Live`, `inThread`                                   | the state record and lock                                                |
 |                                        | `sendNow`, `start`                                   | `RunSend`                                                                |
 |                                        | `deliver`                                            | `DeliverPrepares`, `DeliverPushes`, `DeliverRejects`                     |
-|                                        | `consume`                                            | `ConsumeInit`, `ConsumeCall`, `ConsumeResult`, `ConsumeEnd`, `RunResult` |
+|                                        | `consume`, `answersStop`                             | `ConsumeInit`, `ConsumeCall`, `ConsumeResult`, `ConsumeEnd`, `RunResult` |
 |                                        | `holdForSteer`                                       | `RunResult`, `RunGrace`                                                  |
 |                                        | `finishTurn`, `removeSetup`                          | `FinishTurn`, `RemoveSetup`                                              |
 |                                        | `ended`                                              | `RunEnded`                                                               |

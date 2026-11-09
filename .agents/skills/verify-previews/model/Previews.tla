@@ -26,7 +26,7 @@ InitFor(k) == [
     viewer |-> FALSE,       \* a client is subscribed
     idleTimer |-> FALSE,    \* idleTimers has the design
     restarting |-> FALSE,   \* the `restarting` set has the design
-    restartIdle |-> FALSE,  \* restart()'s `idle` snapshot
+    restartIdle |-> FALSE,  \* the `idle` snapshot restart() took before it checked `watched`
     page |-> "idle", agent |-> "idle", mcp |-> "idle",  \* where each caller of ensure() is
     preparing |-> {},       \* runs whose workspaces.prepare is in flight
     service |-> "none",     \* the finite.json service
@@ -114,7 +114,7 @@ Subscribe ==
             /\ s' = [x EXCEPT !.page = "afterInstall", !.install = "running", !.finished = FALSE,
                               !.outcome = "none", !.kept = TRUE, !.retries = s.retries + 1]
 
-\* hub.ts:114 unsubscribe, hub.ts:118 release, preview/index.ts:476 idle. idle() is a no-op with
+\* hub.ts:118 unsubscribe, hub.ts:122 release, preview/index.ts:476 idle. idle() is a no-op with
 \* no run, so a viewer who leaves while nothing runs leaves no record of it.
 Unsubscribe ==
     /\ Life /\ s.viewer
@@ -125,7 +125,8 @@ IdleTimerFires ==
     /\ Life /\ s.idleTimer
     /\ s' = StopSync(s)
 
-\* handlers.ts:49 design.remove and preview/index.ts:467 remove: stops, and refuses later ensures.
+\* handlers.ts:49 design.remove, mcp/tools.ts:279, agent/index.ts:596 removeSetup, and
+\* preview/index.ts:467 remove: stops, and refuses later ensures.
 RemoveDesign ==
     /\ Life /\ ~s.removed /\ s.removes < Removes
     /\ s' = [StopSync(s) EXCEPT !.removed = TRUE, !.removes = s.removes + 1]
@@ -133,7 +134,7 @@ RemoveDesign ==
 \* --- The dependency install (store/install.ts) ------------------------------------------------
 
 \* install.ts:65 finish, on the child's `exit`. Success also runs install.ts's job.done.then
-\* (store/index.ts:159), which forgets the job.
+\* (store/index.ts:160), which forgets the job.
 InstallSucceeds ==
     /\ Life /\ s.install = "running" /\ ~s.finished
     /\ s' = [s EXCEPT !.install = "done", !.finished = TRUE, !.outcome = "ok",
@@ -162,8 +163,9 @@ InstallFailEndsWait ==
 
 \* --- Agents and MCP use the preview without being viewers ---------------------------------------
 
-\* agent/tools.ts:274,494,501 and mcp/tools.ts:193 ensure. The model starts tools only once the
-\* dependencies are in; mcp/tools.ts refuses before that, and a dev server has nothing to run.
+\* agent/tools.ts:291,511,537,555, agent/index.ts:616 finish_setup and mcp/tools.ts:193 ensure. The
+\* model starts tools only once the dependencies are in; mcp/tools.ts refuses before that, and a dev
+\* server has nothing to run.
 ToolEnsures(c) ==
     /\ Life /\ c \in {"agent", "mcp"} /\ CallerIn(s, c) = "idle" /\ ~s.removed /\ s.nodeModules
     /\ IF c = "agent" THEN s.agentUsed < AgentTools ELSE s.mcpUsed < McpTools
@@ -262,7 +264,9 @@ RestartResumes ==
 
 \* --- Next.js frame registry (packages/vite-plugin/src/next/index.ts:343-354) --------------------
 
-\* A request for a file that's on the list goes straight to Next, compiled or not.
+\* A request for a file not yet on the list adds it and waits for the compile; one for a file still
+\* compiling waits on that same `compiling` entry (ShareRegistryWait). Without it, it went straight to
+\* Next, compiled or not.
 FrameRequested(r) ==
     /\ s.kind = "next" /\ s.req[r] = "none"
     /\ IF ~s.registered
