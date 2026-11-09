@@ -1,7 +1,7 @@
 import type { Frame, Hit } from "@finite/protocol";
 import { describe, expect, it, vi } from "vite-plus/test";
 import type { Down, ToolHost } from "./host";
-import { textOnPath } from "./text";
+import { placeText, textOnPath } from "./text";
 
 const LOC = "src/App.tsx:3:30";
 const RECT = { x: 0, y: 0, width: 10, height: 10 };
@@ -51,5 +51,42 @@ describe("text on a path", () => {
     await plan.click();
     expect(edit).toHaveBeenCalledTimes(1);
     expect(say).not.toHaveBeenCalled();
+  });
+});
+
+describe("new text", () => {
+  const content = [{ t: "text" as const, text: "Hi", marks: [] }];
+  const point = { x: 40, y: 60, width: 1, height: 1 };
+  const measured = { width: 100.4, height: 24 };
+
+  function drawing(over: Frame | null) {
+    const draw = vi.fn(async () => null);
+    return { draw, host: { frameAt: () => over, draw } as unknown as ToolHost };
+  }
+
+  it("makes a frame big enough for the text on empty canvas", async () => {
+    const { host, draw } = drawing(null);
+    const target = { kind: "new", box: point, deep: false, alt: false, fixed: false } as const;
+    await placeText(host, target, content, measured);
+    expect(draw).toHaveBeenCalledWith(
+      expect.objectContaining({ box: { x: 40, y: 60, width: 109, height: 32 } }),
+    );
+  });
+
+  it("keeps a dragged width on empty canvas, and takes the height from the text", async () => {
+    const { host, draw } = drawing(null);
+    const box = { x: 40, y: 60, width: 300, height: 6 };
+    const target = { kind: "new", box, deep: false, alt: false, fixed: true } as const;
+    await placeText(host, target, content, measured);
+    expect(draw).toHaveBeenCalledWith(
+      expect.objectContaining({ box: { x: 40, y: 60, width: 300, height: 32 } }),
+    );
+  });
+
+  it("leaves the box alone over a frame, where the text hugs it", async () => {
+    const { host, draw } = drawing(FRAME);
+    const target = { kind: "new", box: point, deep: false, alt: false, fixed: false } as const;
+    await placeText(host, target, content, measured);
+    expect(draw).toHaveBeenCalledWith(expect.objectContaining({ box: point }));
   });
 });

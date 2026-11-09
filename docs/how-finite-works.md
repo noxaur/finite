@@ -295,7 +295,7 @@ Enter sends one `inline` edit. Its `content` holds the runs, and atoms and `keep
 
 A size or color on part of the text is a `span` mark. `rewrite.ts` styles it through the same queued style edit a new element gets, so it's a Tailwind class, a rule in the file's one CSS module, a `stylex.create` entry or an inline style. Kept wrappers and the elements inside chips stay in the position map, so the selection follows them. `/mcp`'s `content` op also uses `inline`, and refuses text that holds code or other elements.
 
-The Text tool (T) waits to write anything. A click opens an empty box at the point, and a drag opens one as wide as the drag. Enter inserts a `<p>` through `host.draw`. A click makes it hug its text on both sides, and a drag gives it a fixed width and a height that hugs. Nothing lands if the box is empty or Escape closes it. Over existing text, a click edits that text. Text on path puts a `<text><textPath href="#id">` beside a selected or clicked `<path>`, adding an `id` to the path when it has none, and takes plain text only.
+The Text tool (T) waits to write anything. A click opens an empty box at the point, and a drag opens one as wide as the drag. Enter inserts a `<p>` through `host.draw`. A click makes it hug its text on both sides, and a drag gives it a fixed width and a height that hugs. On empty canvas the text becomes a frame sized to what was typed, since a frame doesn't grow to fit its content. Nothing lands if the box is empty or Escape closes it. Over existing text, a click edits that text. Text on path puts a `<text><textPath href="#id">` beside a selected or clicked `<path>`, adding an `id` to the path when it has none, and takes plain text only.
 
 ### Auto layout
 

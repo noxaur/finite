@@ -251,7 +251,10 @@ export function RichTextEditor({ editor, editing }: { editor: CanvasEditor; edit
       const bridge = editor.bridge(target.frameId);
       for (const k of editing.keeps) if (k.loc) bridge?.preview(k.loc, null);
     }
-    void editor.finishText(keep && el ? readBox(el, palette.current) : null);
+    void editor.finishText(
+      keep && el ? readBox(el, palette.current) : null,
+      el ? { width: el.offsetWidth, height: el.offsetHeight } : undefined,
+    );
   };
 
   /** Applies a change to the selected runs, then puts the box and the selection back. */

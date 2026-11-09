@@ -857,13 +857,13 @@ export class CanvasEditor implements ToolHost {
   }
 
   /** Ends a text edit: writes the runs when they changed; `null` puts the text back. */
-  async finishText(content: Inline[] | null) {
+  async finishText(content: Inline[] | null, measured = { width: 0, height: 0 }) {
     const editing = this.state.editingText;
     if (!editing) return;
     this.update({ editingText: null });
     const target = editing.target;
     if (target.kind === "new") {
-      if (content && hasText(content)) await placeText(this, target, content);
+      if (content && hasText(content)) await placeText(this, target, content, measured);
       return;
     }
     bridgeOf(target.frameId)?.preview(target.loc, null);

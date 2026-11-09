@@ -165,9 +165,19 @@ export async function placeText(
   host: ToolHost,
   target: Extract<TextTarget, { kind: "new" }>,
   content: Inline[],
+  measured: { width: number; height: number },
 ) {
+  const { box } = target;
+  // On empty canvas the box becomes a frame, and a frame doesn't grow to fit what's in it.
+  const onCanvas = !host.frameAt({ x: box.x + box.width / 2, y: box.y + box.height / 2 });
   const placed = await host.draw({
-    box: target.box,
+    box: onCanvas
+      ? {
+          ...box,
+          width: target.fixed ? box.width : Math.ceil(measured.width) + FRAME_ROOM,
+          height: Math.ceil(measured.height) + FRAME_ROOM,
+        }
+      : box,
     node: { tag: "p", name: "Text", text: plainText(content), styles: NEW_TEXT },
     deep: target.deep,
     alt: target.alt,
@@ -185,6 +195,8 @@ export async function placeText(
   }
 }
 
+/** Room a new frame leaves around its text, since the design's font can run wider than the box's. */
+const FRAME_ROOM = 8;
 const NEW_TEXT = { margin: "0", "font-size": "16px" };
 
 export const text = {
