@@ -73,7 +73,7 @@ Every new design starts with three pages: **Routes**, with one frame per route t
 The first message is `hello { user }`. `subscribe { designId }` returns the design's whole state (`DesignState`: the design, its canvases, threads, preview state and routes), and from then on the server pushes events: `canvas` (the whole canvas after any change), `thread`, `thread.event`, `preview` and `routes`. `designs` and `settings` go to every socket. The requests fall into groups:
 
 - Designs: `designs.list`, `design.create`, `design.connect`, `design.clone`, `design.setup` (start a setup thread), `design.remove`. `setup.done { designId, next }` tells a design's subscribers which design to show once its setup passed.
-- Starting a design: `fs.list` (folders for the path picker), `repo.search` (GitHub search or a pasted URL).
+- Starting a design: `fs.list` (folders for the path picker), `repo.search` (a pasted URL, else GitHub search: through the local `gh` when it is installed and logged in, unauthenticated when it is not, with identical searches cached for a minute).
 - Canvases: `canvas.create`, `rename`, `remove`, `restore`, `patch` and `draw`. A `CanvasPatch` moves, resizes, adds, removes, renames or moves frames to another canvas, sets and removes a text label, a section or a slice, or moves a section with the frames and labels inside it (`moveSection`).
 - Source: `source.edit`, `source.undo`, `source.redo`, `source.detach`, `asset.add`, `tokens.get`, `tokens.set`, `components.list`.
 - Comments: `comment.add` (with `kind: "annotation"` for a note), `reply`, `resolve`, `reopen`. `canvas.exportSlice` renders a slice to a PNG.
