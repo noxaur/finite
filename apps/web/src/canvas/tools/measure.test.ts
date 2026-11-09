@@ -195,6 +195,16 @@ describe("the measure tool", () => {
     expect(editor.state.measure.pin).toBeNull();
   });
 
+  it("drops a click held down while Esc unpins", async () => {
+    await click(10, 10);
+    const at = { clientX: 10, clientY: 10, pointerId: 1, button: 0 };
+    viewport.dispatchEvent(Object.assign(new Event("pointerdown"), at));
+    key("Escape");
+    viewport.dispatchEvent(Object.assign(new Event("pointerup"), at));
+    await settle();
+    expect(editor.state.measure.pin).toBeNull();
+  });
+
   it("drops a click still waiting on its frame once Esc has unpinned", async () => {
     await click(10, 10);
     const answers: ((value: (Measurement | null)[]) => void)[] = [];

@@ -180,7 +180,12 @@ export const measure = {
     host.update({ measure: NO_MEASURE });
   },
   down(host, p) {
-    return { begin: async () => null, click: () => pinAt(host, p.world, p.frame) };
+    // Esc or a tool switch during the press cancels it, as it does a click already answering.
+    const seq = sessionOf(host).pinSeq;
+    return {
+      begin: async () => null,
+      click: () => (seq === sessionOf(host).pinSeq ? pinAt(host, p.world, p.frame) : undefined),
+    };
   },
   pointerMove: probeAt,
   pointerLeave: clearProbe,
