@@ -45,14 +45,14 @@ let canvasId: string;
 const apply = vi.fn();
 let modules: Modules;
 
-async function start(overrides: { idleMs?: number } = {}) {
+async function start(overrides: { idleMs?: number; styling?: Design["styling"] } = {}) {
   const design: Design = {
     id: "d1",
     name: "Shop",
     root,
     origin: "blank",
     router: "none",
-    styling: "inline",
+    styling: overrides.styling ?? "inline",
     css: [],
     brandDir: "src/assets/brand",
   };
@@ -310,6 +310,62 @@ describe("/mcp tools", () => {
 
     await call(client, "undo", { designId: "d1" });
     expect(await readFile(path.join(root, file), "utf8")).toBe(CARD);
+  });
+
+  it("refuses a page frame's element op that would change a production CSS module", async () => {
+    const client = await connect(await start({ styling: "css-modules" }));
+    const css = ".title { color: red; }\n";
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "src/Card.module.css"), css);
+    const code =
+      'import s from "../src/Card.module.css";\nexport default function P() {\n  return <h1 className={s.title}>Hi</h1>;\n}\n';
+    const file = ".finite/P.tsx";
+    await mkdir(path.join(root, ".finite"), { recursive: true });
+    await writeFile(path.join(root, file), code);
+    const page = await open.createCanvas({ kind: "page", name: "Page" }, person);
+    const frame = {
+      id: "p1",
+      name: "P",
+      x: 0,
+      y: 0,
+      width: 300,
+      height: 200,
+      source: { kind: "file" as const, file },
+    };
+    await open.patchCanvas(page.id, { op: "addFrames", frames: [frame] }, person);
+    const element: RenderedElement = {
+      tag: "h1",
+      loc: `${file}:3:9`,
+      rev: rev(code),
+      text: "Hi",
+      depth: 0,
+    };
+    elements = async (_url, _w, _h, selects) => selects.map(() => [element]);
+    const result = await call(client, "edit", {
+      designId: "d1",
+      ops: [{ op: "style", frameId: frame.id, select: "h1", styles: { color: "blue" } }],
+    });
+    expect(result.isError).toBe(true);
+    expect(value(result).refused.reason).toContain("production code");
+    expect(await readFile(path.join(root, "src/Card.module.css"), "utf8")).toBe(css);
+  });
+
+  it("refuses to redo making a file someone else has since made", async () => {
+    const url = await start();
+    const [a, b] = [await connect(url, "a"), await connect(url, "b")];
+    const write = (client: Client, content: string) =>
+      call(client, "edit", {
+        designId: "d1",
+        canvasId,
+        ops: [{ op: "write", file: "Same.tsx", content }],
+      });
+    await write(a, "A content\n");
+    await call(a, "undo", { designId: "d1" });
+    await write(b, "B content\n");
+    const redo = await call(a, "undo", { designId: "d1", redo: true });
+    expect(redo.isError).toBe(true);
+    const file = path.join(root, `.finite/boards/${canvasId}/Same.tsx`);
+    expect(await readFile(file, "utf8")).toBe("B content\n");
   });
 
   it("says when one JSX element renders several instances", async () => {

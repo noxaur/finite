@@ -433,6 +433,14 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
         design.root,
         [...new Set(patches.map((p) => p.file))],
         (contents) => {
+          for (const file of created) {
+            if (direction === "redo" && contents.has(file)) {
+              throw new Refused(
+                `${file} exists again since, so Finite can't redo making it. It was skipped; redo again to go further back.`,
+                "stale",
+              );
+            }
+          }
           // A redo of a deleted file starts from nothing.
           const seeded = new Map(contents);
           for (const file of created) if (!seeded.has(file)) seeded.set(file, "");

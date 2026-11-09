@@ -628,7 +628,9 @@ Production code is refused unless you pass production: true, which you may do on
             }
           }
         }
-        await modules.source.apply(open, edits, actor, canvas);
+        // Without production, a page takes the prototype fence too: it covers CSS modules.
+        const fenced = production ? canvas : { ...canvas, kind: "prototype" as const };
+        await modules.source.apply(open, edits, actor, fenced);
         return applied;
       }
 
