@@ -226,6 +226,31 @@ The **canvas tools** are an in-process MCP server named `finite` (`agent/tools.t
 | `screenshot`, `frame_errors`  | A PNG of a frame, taken in the system Chrome with puppeteer-core; the errors its bridge reported, or the preview's log when the preview is down. |
 | `finish_setup`                | Check `finite.json` and connect its apps, then start the next design's preview and report it.                                                    |
 
+## External agents over MCP
+
+`mcp/` serves Finite to agents outside the app, like Claude Code, Cursor or a chat app, as an MCP server at `/mcp` over Streamable HTTP. Connect one with `claude mcp add --transport http finite http://127.0.0.1:4100/mcp`. The endpoint sits behind the same Host and Origin guard as the socket, and has no login, so it trusts whatever can reach the port.
+
+`mcp/index.ts` keeps one transport and one `McpServer` per session, and forgets a session after an hour without a call. A session's actor is `mcp-<session id>`, named after the client, so its undo and comments are its own. A client that sends an `X-Finite-Agent` header takes that as its id and name, which keeps its undo across reconnects. Every call goes through `hub.open`, so viewers see the changes live.
+
+`mcp/tools.ts` declares six tools, with input shapes in `packages/protocol/src/tools.ts`. They share `canvasOps` in `agent/tools.ts` with the thread tools, so placing a frame behaves the same from either side.
+
+| Tool       | What it does                                                                                                              |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `designs`  | List, create, connect, rename or remove designs.                                                                          |
+| `read`     | A design's overview, a canvas, a frame's rendered elements, a file, or its tokens, components or routes.                  |
+| `edit`     | Run a list of ops: make a canvas, write files, place frames, add notes, set tokens, and change rendered elements.         |
+| `render`   | A PNG of each frame with its runtime errors, at most six per call.                                                        |
+| `comments` | List, add, reply to, resolve and reopen comments. `wait` is a long poll of up to 55 seconds for a comment a person wrote. |
+| `undo`     | Take back the session's last file change, or with `canvasId` its last change to that canvas.                              |
+
+`read` with a `frameId` lists each rendered element with its tag, loc and text, and `[data-finite-loc="src/x.tsx:12:4"]` selects exactly the element a line names. Element ops in `edit` take a CSS selector. `Screenshots.elements` loads the frame once in headless Chrome and reads `data-finite-loc` and `data-finite-rev` off what each selector matches, which gives the same locs and revs the page sends in a `source.edit`. Element ops in a row on one canvas go into one `SourceEditor.apply`, so they apply together and undo in one step. Ops otherwise run in order and aren't a transaction: the first failure stops the call, and the result lists what was applied and what was refused.
+
+The permission fence applies here too, since an external agent has no thread to hold a `move_to_prod` grant. `edit` takes `production: true` for one call instead, and without it `write`, element ops and `token` refuse production files. The flag is a rule for the agent, not a lock: an external agent with its own file tools can write production anyway.
+
+A call that loads a frame starts the design's preview, then calls `hub.release`, which starts the 60-second idle grace period unless a page is subscribed. The next call's `Previews.ensure`, or a page subscribing, cancels that timer. `render` reports the errors of its own headless load, merged with what an open page's bridge reported, so a broken frame doesn't read as clean when no page is open. Those errors stay in the result and never reach `previews.reportError`, so they can't go stale after a fix.
+
+A prototype is listed by its thread, so the `canvas` op makes a thread along with a new prototype. That thread holds no agent session. If a person sends it a message, Finite starts a local Claude Code session there, as in any other thread.
+
 ## The web app
 
 `apps/web` is a Next.js static export (`output: "export"`), styled with StyleX, so there's no Next server: the Node server serves `out/` in the desktop app. A design screen is `/design/?id=<designId>` (with `&tab=prototypes` on the Prototypes tab), since a static export can't prerender a route per design.
@@ -267,6 +292,7 @@ A tool draws through `host.draw` (`tools/draw.ts`). It sends `drop` over the bri
 - **Production**: the project's own code, outside `.finite/` and the brand folder. (The Next.js frame mount is Finite's file, not production.)
 - **Loc**: `"src/x.tsx:12:4"`, the position of a JSX opening element, which the plugin stamps on what it renders. **Index** is which rendered instance of a loc, when a `.map()` renders it many times.
 - **Rev**: the first 8 hex digits of a file's sha1 when Vite transformed it. An edit carries the revs it saw.
+- **Session** (MCP): one external client's connection to `/mcp`, and the actor its changes belong to.
 - **Remap**: where each edited loc moved, so the selection follows the element.
 - **Convention**: how the design styles things (Tailwind, CSS modules, StyleX or inline), which hand edits follow.
 - **Preview**: a design's dev server (Vite or Next.js), and its status (stopped, starting, ready, error, needs-setup).

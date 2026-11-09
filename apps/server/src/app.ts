@@ -5,6 +5,8 @@ import { WebSocketServer } from "ws";
 import { refuse } from "./guard.ts";
 import { createHttpHandler, json } from "./http.ts";
 import { createHub, type Handlers, type Hub, type Modules } from "./hub.ts";
+import { createScreenshots, type Screenshots } from "./agent/screenshot.ts";
+import { createMcpEndpoint, MCP_PATH } from "./mcp/index.ts";
 
 export type ServerOptions = {
   port: number;
@@ -13,6 +15,10 @@ export type ServerOptions = {
   staticDir?: string | undefined;
   modules: Modules;
   handlers?: Handlers;
+  /** The browser `/mcp` renders with. Whoever passes it closes it. */
+  screenshots?: Screenshots;
+  /** How long an unused `/mcp` session lasts. */
+  mcpIdleMs?: number;
 };
 
 export type RunningServer = { url: string; hub: Hub; close(): Promise<void> };
@@ -21,11 +27,21 @@ export type RunningServer = { url: string; hub: Hub; close(): Promise<void> };
 export async function startServer(options: ServerOptions): Promise<RunningServer> {
   const hub = createHub(options.modules, options.handlers);
   const handle = createHttpHandler(hub, options.modules, options.staticDir);
+  const screenshots = options.screenshots ?? createScreenshots();
+  const mcp = createMcpEndpoint({
+    hub,
+    modules: options.modules,
+    screenshots,
+    ...(options.mcpIdleMs === undefined ? {} : { idleMs: options.mcpIdleMs }),
+  });
   const wss = new WebSocketServer({ noServer: true, maxPayload: 4 * 1024 * 1024 });
 
   const server = http.createServer((req, res) => {
     const refused = refuse(options.allowedHosts, req.headers);
     if (refused) return json(res, 403, { reason: refused });
+    if (new URL(req.url ?? "/", "http://localhost").pathname === MCP_PATH) {
+      return void mcp.handle(req, res);
+    }
     void handle(req, res);
   });
 
@@ -52,7 +68,9 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     hub,
     async close() {
       for (const ws of wss.clients) ws.terminate();
+      await mcp.close();
       await hub.close();
+      if (!options.screenshots) await screenshots.close();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
   };

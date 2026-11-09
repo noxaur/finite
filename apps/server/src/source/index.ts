@@ -1,4 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import {
   Refused,
@@ -150,11 +150,15 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
     return [...readTokens(await sheets(design)), ...(await stylexVars(design)).tokens];
   }
 
-  /** Reads `files`, lets `change` produce new contents, writes what changed. All under the files' locks. */
+  /**
+   * Reads `files`, lets `change` produce new contents, writes what changed. All under the files'
+   * locks. A file in `deleteEmpty` that ends up empty is deleted instead.
+   */
   async function transact(
     root: string,
     files: string[],
     change: (contents: Map<string, string>) => Map<string, string> | Promise<Map<string, string>>,
+    deleteEmpty: ReadonlySet<string> = new Set(),
   ): Promise<Patch[]> {
     return locked(
       files.map((f) => inRoot(root, f)),
@@ -176,7 +180,10 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
             throw new Refused(`${file} changed while this edit ran; try again`, "stale");
           }
         }
-        for (const { file, code } of writes) await writeAtomic(inRoot(root, file), code);
+        for (const { file, code } of writes) {
+          if (code === "" && deleteEmpty.has(file)) await rm(inRoot(root, file), { force: true });
+          else await writeAtomic(inRoot(root, file), code);
+        }
         return writes.map((w) => w.patch);
       },
     );
@@ -279,6 +286,20 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
       });
       if (patches.length > 0) history.push(actorKey(design, by), patches);
       return { ok: true, remap, created };
+    },
+
+    async write(open, file, content, by) {
+      let created = false;
+      const patches = await transact(open.design.root, [file], (contents) => {
+        created = !contents.has(file);
+        return new Map([[file, content]]);
+      });
+      if (patches.length > 0) {
+        history.push(
+          actorKey(open.design, by),
+          patches.map((p) => ({ ...p, created })),
+        );
+      }
     },
 
     undo: (open, by) => step(open.design, by, "undo"),
@@ -418,11 +439,28 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
   async function step(design: Design, by: Actor, direction: "undo" | "redo"): Promise<void> {
     await history.step(actorKey(design, by), direction, async (patches) => {
       let moved: Patch[] = [];
-      await transact(design.root, [...new Set(patches.map((p) => p.file))], (contents) => {
-        const result = stepPatches(contents, patches, direction);
-        moved = result.patches;
-        return result.contents;
-      });
+      const created = new Set(patches.filter((p) => p.created).map((p) => p.file));
+      await transact(
+        design.root,
+        [...new Set(patches.map((p) => p.file))],
+        (contents) => {
+          for (const file of created) {
+            if (direction === "redo" && contents.has(file)) {
+              throw new Refused(
+                `${file} exists again since, so Finite can't redo making it. It was skipped; redo again to go further back.`,
+                "stale",
+              );
+            }
+          }
+          // A redo of a deleted file starts from nothing.
+          const seeded = new Map(contents);
+          for (const file of created) if (!seeded.has(file)) seeded.set(file, "");
+          const result = stepPatches(seeded, patches, direction);
+          moved = result.patches;
+          return result.contents;
+        },
+        created,
+      );
       return moved;
     });
   }

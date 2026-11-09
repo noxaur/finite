@@ -130,6 +130,8 @@ export interface SourceEditor {
   apply(open: OpenDesign, edits: SourceEdit[], by: Actor, canvas: Canvas): Promise<SourceResult>;
   undo(open: OpenDesign, by: Actor): Promise<void>;
   redo(open: OpenDesign, by: Actor): Promise<void>;
+  /** Writes a whole file as one undo step of `by`'s. Undoing a file this made deletes it. */
+  write(open: OpenDesign, file: string, content: string, by: Actor): Promise<void>;
   /** Copies `file` into `.finite/boards/<canvasId>/` and rewrites `importer`'s import of it. */
   detach(
     open: OpenDesign,

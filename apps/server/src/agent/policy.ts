@@ -24,6 +24,8 @@ export type PolicyContext = {
   workspace?: string;
   /** In a setup thread, the `finite.json` it may write. */
   configFile?: string;
+  /** How this agent gets production writes, in place of the move_to_prod advice. */
+  prodGrant?: string;
 };
 
 /**
@@ -73,7 +75,7 @@ export function policy(
   return deny(
     `Production code is read-only here. Write prototypes under ${at(".finite/boards/<canvasId>/")} and brand ` +
       `assets under ${at(brand)}/. To change ${path.relative(realProject, file)}, the person has to ask ` +
-      `you to move it to prod: then call move_to_prod first.`,
+      `you to move it to prod: then ${ctx.prodGrant ?? "call move_to_prod first"}.`,
   );
 }
 

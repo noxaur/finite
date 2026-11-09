@@ -57,6 +57,8 @@ export type Hub = {
   broadcastAll(message: ServerEvent): void;
   /** Drops the client's subscription; the design's preview idles when nobody else watches it. */
   unsubscribe(client: Client, designId: string): void;
+  /** Starts the preview's idle grace period, unless a client is subscribed to the design. */
+  release(designId: string): void;
   /** The design, opened once and kept; its changes are broadcast to its subscribers. */
   open(designId: string): Promise<OpenDesign>;
   close(): Promise<void>;
@@ -110,8 +112,11 @@ export function createHub(modules: Modules, handle: Handlers = handlers): Hub {
     },
 
     unsubscribe(client, designId) {
-      if (!client.subscriptions.delete(designId)) return;
-      for (const other of clients) if (other.subscriptions.has(designId)) return;
+      if (client.subscriptions.delete(designId)) hub.release(designId);
+    },
+
+    release(designId) {
+      for (const client of clients) if (client.subscriptions.has(designId)) return;
       modules.previews.idle(designId);
     },
 
