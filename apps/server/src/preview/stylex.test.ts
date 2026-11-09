@@ -1,11 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { Design, Previews } from "@finite/protocol";
-import { getChromePath } from "chrome-launcher";
-import puppeteer, { type Browser, type Page } from "puppeteer-core";
+import type { Browser, Page } from "puppeteer-core";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
 import { rev } from "../source/files.ts";
-import { prepareFixture, viewed } from "./fixtures.ts";
+import {
+  chromePath,
+  LAUNCH_HOOK_TIMEOUT_MS,
+  launchChrome,
+  prepareFixture,
+  viewed,
+} from "./fixtures.ts";
 import { createPreviews } from "./index.ts";
 
 const FIXTURES = ["stylex", "stylex-framework"] as const;
@@ -101,25 +106,12 @@ describe("a StyleX project in React Router framework mode", () => {
   });
 });
 
-const chromePath = (() => {
-  try {
-    return getChromePath();
-  } catch {
-    return undefined;
-  }
-})();
-
 describe.skipIf(!chromePath)("StyleX framework mode in Chrome", () => {
   let browser: Browser;
 
   beforeAll(async () => {
-    browser = await puppeteer.launch({
-      executablePath: chromePath!,
-      headless: true,
-      // CI's Ubuntu runners block the user namespaces Chrome's sandbox needs.
-      args: process.env.CI ? ["--no-sandbox"] : [],
-    });
-  }, 30_000);
+    browser = await launchChrome();
+  }, LAUNCH_HOOK_TIMEOUT_MS);
 
   afterAll(async () => {
     await browser?.close();

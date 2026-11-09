@@ -6,12 +6,17 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import type { Design, LayerNode, PreviewEvent, Previews } from "@finite/protocol";
-import { getChromePath } from "chrome-launcher";
-import puppeteer, { type Browser, type Frame, type Page } from "puppeteer-core";
+import type { Browser, Frame, Page } from "puppeteer-core";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vite-plus/test";
 import { createScreenshots } from "../agent/screenshot.ts";
 import { BRAND_BOARD, brandBoard } from "../store/brand.ts";
-import { prepareFixture, viewed } from "./fixtures.ts";
+import {
+  chromePath,
+  LAUNCH_HOOK_TIMEOUT_MS,
+  launchChrome,
+  prepareFixture,
+  viewed,
+} from "./fixtures.ts";
 import { createPreviews } from "./index.ts";
 
 const FIXTURES = [
@@ -706,14 +711,6 @@ export default {
 
 // The browser half: a parent page that does the parent side of the bridge handshake.
 
-const chromePath = (() => {
-  try {
-    return getChromePath();
-  } catch {
-    return undefined;
-  }
-})();
-
 const PARENT = `<!doctype html><html><body style="margin:0">
 <script>
   window.bridge = { events: [], pending: new Map(), id: 0, port: null, hellos: 0 };
@@ -747,19 +744,14 @@ describe.skipIf(!chromePath)("bridge in Chrome", () => {
   let parentUrl: string;
 
   beforeAll(async () => {
-    browser = await puppeteer.launch({
-      executablePath: chromePath!,
-      headless: true,
-      // CI's Ubuntu runners block the user namespaces Chrome's sandbox needs.
-      args: process.env.CI ? ["--no-sandbox"] : [],
-    });
+    browser = await launchChrome();
     parentServer = http.createServer((_, res) => {
       res.setHeader("content-type", "text/html");
       res.end(PARENT);
     });
     await new Promise<void>((resolve) => parentServer.listen(0, "127.0.0.1", resolve));
     parentUrl = `http://127.0.0.1:${(parentServer.address() as AddressInfo).port}/`;
-  }, 30_000);
+  }, LAUNCH_HOOK_TIMEOUT_MS);
 
   afterAll(async () => {
     await browser?.close();
