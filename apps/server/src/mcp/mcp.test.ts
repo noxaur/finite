@@ -308,7 +308,7 @@ describe("/mcp tools", () => {
     expect(apply).toHaveBeenCalledTimes(1);
     expect(apply.mock.calls[0]![0]).toMatchObject([
       { kind: "style", tag: "h1", locs: [element.loc], revs: { [file]: element.rev } },
-      { kind: "text", tag: "h1", text: "Hello" },
+      { kind: "inline", tag: "h1", content: [{ t: "text", text: "Hello", marks: [] }] },
     ]);
     const code = await readFile(path.join(root, file), "utf8");
     expect(code).toContain("blue");
@@ -316,6 +316,23 @@ describe("/mcp tools", () => {
 
     await call(client, "undo", { designId: "d1" });
     expect(await readFile(path.join(root, file), "utf8")).toBe(CARD);
+  });
+
+  it("refuses to replace text that holds code, so a content op can't drop an expression", async () => {
+    const client = await connect(await start());
+    const { frame, element, file } = await boardFrame();
+    await writeFile(
+      path.join(root, file),
+      `export default function Card() {\n  return <h1 style={{ color: "red" }}>Hi {name}</h1>;\n}\n`,
+    );
+    elements = vi.fn(async (_url, _w, _h, selects) => selects.map(() => [element]));
+    const result = await call(client, "edit", {
+      designId: "d1",
+      ops: [{ op: "content", frameId: frame.id, select: "h1", text: "Hello" }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("built from code or other elements");
+    expect(apply).not.toHaveBeenCalled();
   });
 
   it("refuses a page frame's element op that would change a production CSS module", async () => {

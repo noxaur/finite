@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import type { KeyInput } from "./host";
+import type { KeyCombo, KeyInput } from "./host";
 import { GROUPS, keyHint, resolveKey, shortcutList, TOOLS, toolsIn } from "./registry";
 import { dragBox } from "./shapes";
 
@@ -57,6 +57,16 @@ describe("resolveKey", () => {
     });
   });
 
+  it("opens point editing with Enter, but not once it's open", () => {
+    expect(resolveKey(press("Enter"), page)).toEqual({ kind: "command", id: "enterVector" });
+    expect(resolveKey(press("Enter"), { ...page, vector: true })).toBeNull();
+    expect(resolveKey(press("p"), page)).toEqual({ kind: "tool", id: "pen" });
+    expect(resolveKey(press("P", { shiftKey: true }), page)).toEqual({
+      kind: "tool",
+      id: "pencil",
+    });
+  });
+
   it("takes tool keys from the page even during Interact", () => {
     expect(resolveKey(press("v"), { ...page, interact: true })).toEqual({
       kind: "tool",
@@ -66,7 +76,13 @@ describe("resolveKey", () => {
 
   it("keeps tool keys out of a text editor, and hidden tools off the keyboard", () => {
     expect(resolveKey(press("v"), { ...page, editing: true })).toBeNull();
-    expect(resolveKey(press("p"), page)).toBeNull();
+    for (const tool of TOOLS.filter((t) => !t.enabled)) {
+      if (!tool.keys?.key) continue;
+      const combo: KeyCombo = tool.keys;
+      expect(
+        resolveKey(press(combo.key!, { shiftKey: !!combo.shift, metaKey: !!combo.mod }), page),
+      ).toBeNull();
+    }
   });
 });
 
@@ -112,6 +128,7 @@ describe("the registry", () => {
       "image",
       "pen",
       "pencil",
+      "vectorEdit",
       "text",
       "textOnPath",
       "comment",
@@ -133,6 +150,8 @@ describe("the registry", () => {
       "image",
     ]);
     expect(toolsIn("comment").map((t) => t.id)).toEqual(["comment", "annotation", "measure"]);
+    expect(toolsIn("pen").map((t) => t.id)).toEqual(["pen", "pencil"]);
+    expect(toolsIn("text").map((t) => t.id)).toEqual(["text", "textOnPath"]);
     expect(toolsIn("frame").map((t) => t.id)).toEqual(["frame", "section", "slice"]);
   });
 

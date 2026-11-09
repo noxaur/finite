@@ -329,10 +329,10 @@ describe("wrap through the SourceEditor", () => {
       open,
       [
         {
-          kind: "text",
+          kind: "inline",
           loc: `${FILE}:8:4`,
           tag: "i",
-          text: "Changed",
+          content: [{ t: "text", text: "Changed", marks: [] }],
           revs: { [FILE]: rev(wrapped) },
         },
       ],

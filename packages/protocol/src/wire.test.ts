@@ -69,7 +69,15 @@ describe("parseClientMessage", () => {
         rid: "5",
         designId: "d",
         canvasId: "c",
-        edits: [{ kind: "text", loc, tag: "h1", text: "Hi", revs: { "src/App.tsx": rev } }],
+        edits: [
+          {
+            kind: "inline",
+            loc,
+            tag: "h1",
+            content: [{ t: "text", text: "Hi", marks: [] }],
+            revs: { "src/App.tsx": rev },
+          },
+        ],
       });
     expect(edit("src/App.tsx:12:4", "0a1b2c3d").ok).toBe(true);
     expect(edit("src/App.tsx", "0a1b2c3d")).toMatchObject({

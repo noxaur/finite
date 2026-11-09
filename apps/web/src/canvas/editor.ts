@@ -6,7 +6,7 @@ import type {
   Hit,
   HitElement,
   Loc,
-  NewNode,
+  Inline,
   Rect,
   Rev,
   Section,
@@ -16,10 +16,12 @@ import type {
 } from "@finite/protocol";
 import { useSyncExternalStore } from "react";
 import type { Camera } from "@/design/camera";
+import { hasText, normalize, sameContent } from "@/design/editing/inline";
 import { bridgeOf, mountedBridges } from "./bridge";
 import { draw } from "./tools/draw";
 import type { Ghost, Gesture, KeyInput, Placed, PressPlan, ToolDef, ToolHost } from "./tools/host";
 import { ALL_COMMANDS, type KeyEnv, resolveKey, type ToolId, toolOf } from "./tools/registry";
+import { placeText } from "./tools/text";
 import { layerName, layerNameAt, pathIn } from "./layers";
 import { undoOrderFor } from "./undoOrder";
 import { finite } from "@/client/finite";
@@ -49,16 +51,30 @@ export type Notice = {
   action?: { label: string; run: () => void };
 };
 
+/** What finishing a text edit writes to: an element that exists, or a new one to place. */
+export type TextTarget =
+  | {
+      kind: "element";
+      frameId: string;
+      loc: Loc;
+      tag: string;
+      rev: Rev;
+      /** The stamped path to the element, outermost first, for the detach offer. */
+      chain: readonly HitElement[];
+    }
+  | { kind: "new"; box: Rect; deep: boolean; alt: boolean; fixed: boolean };
+
 export type TextEdit = {
-  frameId: string;
-  loc: Loc;
-  index: number;
-  rev: Rev;
-  tag: string;
-  /** The element's box in its frame, CSS pixels. */
+  /** Where the text sits on the canvas, in canvas units. */
   rect: Rect;
-  text: string;
   font: Record<string, string>;
+  content: Inline[];
+  keeps: { id: number; kind: string; label: string; loc?: Loc | undefined }[];
+  /** How each kept wrapper's text is drawn in the frame, by its id. */
+  keepStyles: Record<number, Record<string, string>>;
+  /** SVG text: no format bar, no line breaks. */
+  plain: boolean;
+  target: TextTarget;
 };
 
 /** A section or slice the person picked, which the selection store (elements and frames) doesn't hold. */
@@ -266,7 +282,10 @@ export class CanvasEditor implements ToolHost {
     const tool = toolOf(id);
     if (!tool.enabled) return;
     // A key held down repeats, and that same tool's press has to survive it.
-    if (tool.id !== this.state.tool) this.cancelPress();
+    if (tool.id !== this.state.tool) {
+      this.cancelPress();
+      toolOf(this.state.tool).deactivate?.(this);
+    }
     this.update({ tool: tool.id as ToolId, commentDraft: null, hover: null, ghost: null });
     tool.activate?.(this);
   }
@@ -537,7 +556,11 @@ export class CanvasEditor implements ToolHost {
 
   private onDown(e: PointerEvent) {
     if (e.button !== 0 || this.space || this.ignored(e)) return;
-    if (this.state.editingText) return;
+    if (this.state.editingText) {
+      // A press outside the overlay ends the edit, the same as leaving the box.
+      if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+      return;
+    }
     // A press that isn't on a section's or slice's own controls lets go of it.
     if (this.state.selectedObject) this.update({ selectedObject: null });
     // A press on the canvas takes the keys back from a field outside it, like the composer, so
@@ -691,7 +714,7 @@ export class CanvasEditor implements ToolHost {
       source,
       interact: this.state.tool === "interact",
       editing,
-      vector: false,
+      vector: this.state.tool === "vectorEdit",
     });
     if (!action) return false;
     if (action.kind === "tool") this.setTool(action.id);
@@ -836,40 +859,78 @@ export class CanvasEditor implements ToolHost {
     }
   }
 
-  /** Ends a text edit: sends the text when it changed. */
-  async finishText(text: string | null) {
+  /** Ends a text edit: writes the runs when they changed; `null` puts the text back. */
+  async finishText(content: Inline[] | null, measured = { width: 0, height: 0 }) {
     const editing = this.state.editingText;
     if (!editing) return;
     this.update({ editingText: null });
-    bridgeOf(editing.frameId)?.preview(editing.loc, null);
-    if (text === null || text === editing.text) return;
-    await this.edit([
-      {
-        kind: "text",
-        loc: editing.loc,
-        tag: editing.tag,
-        text,
-        revs: revsOf([{ loc: editing.loc, rev: editing.rev }]),
-      },
-    ]);
+    const target = editing.target;
+    if (target.kind === "new") {
+      if (content && hasText(content)) await placeText(this, target, content, measured);
+      return;
+    }
+    bridgeOf(target.frameId)?.preview(target.loc, null);
+    if (content === null || sameContent(content, normalize(editing.content))) return;
+    await this.edit(
+      [
+        {
+          kind: "inline",
+          loc: target.loc,
+          tag: target.tag,
+          content,
+          revs: revsOf([{ loc: target.loc, rev: target.rev }]),
+        },
+      ],
+      target.chain,
+    );
   }
 
-  /** Sends the inspector's style edits as one `source.edit`: each group sets `styles` on `locs`. */
-  styleEdits(groups: Array<{ locs: Loc[]; styles: Record<string, string | null> }>) {
-    const els = this.selectedElements();
+  /**
+   * Sends the inspector's style edits as one `source.edit`: each group sets `styles` on `locs`.
+   * `standIns` are elements edited for a selected one, like the `<path>` in a selected `<svg>`.
+   */
+  styleEdits(
+    groups: Array<{ locs: Loc[]; styles: Record<string, string | null> }>,
+    standIns: ReadonlyArray<{ of: SelectionItem & { loc: Loc } } & HitElement> = [],
+  ) {
+    const els: HitElement[] = [
+      ...this.selectedElements().map((e) => ({
+        loc: e.item.loc,
+        rev: e.facts.rev,
+        tag: e.facts.tag,
+      })),
+      ...standIns,
+    ];
     const edits: SourceEdit[] = [];
     for (const g of groups) {
-      const mine = els.filter((e) => g.locs.includes(e.item.loc));
-      if (mine.length === 0) continue;
-      edits.push({
-        kind: "style",
-        locs: [...new Set(mine.map((e) => e.item.loc))],
-        tag: mine[0]!.facts.tag,
-        styles: g.styles,
-        revs: revsOf(mine.map((e) => ({ loc: e.item.loc, rev: e.facts.rev }))),
-      });
+      const mine = els.filter((e) => g.locs.includes(e.loc));
+      for (const tag of new Set(mine.map((e) => e.tag))) {
+        const same = mine.filter((e) => e.tag === tag);
+        edits.push({
+          kind: "style",
+          locs: [...new Set(same.map((e) => e.loc))],
+          tag,
+          styles: g.styles,
+          revs: revsOf(same),
+        });
+      }
     }
-    return edits.length > 0 ? this.edit(edits) : Promise.resolve(false);
+    if (edits.length === 0) return Promise.resolve(false);
+    const used = standIns.filter((s) =>
+      edits.some((e) => e.kind === "style" && e.locs.includes(s.loc)),
+    );
+    if (used.length === 0) return this.edit(edits);
+    // A stand-in isn't selected, so the detach offer needs its ancestors from the selected one.
+    const [first] = used;
+    const facts = this.facts.get(keyOf(first!.of));
+    const chain = facts && [
+      ...[...facts.path].reverse(),
+      { loc: first!.of.loc, rev: facts.rev, tag: facts.tag },
+    ];
+    return this.edit(edits, chain).then((done) => {
+      if (!done) for (const s of used) bridgeOf(s.of.frameId)?.preview(s.loc, null);
+      return done;
+    });
   }
 
   /** Shows a frame somewhere else than the canvas says, while a field previews it; `null` puts it back. */
@@ -908,8 +969,12 @@ export class CanvasEditor implements ToolHost {
     }
   }
 
+  readInline(loc: Loc) {
+    return finite.request("source.inline", { designId: this.designId, loc });
+  }
+
   /** Adds a shape where `box` lands, or says why it can't. */
-  draw(input: { box: Rect; node: NewNode; deep?: boolean; alt?: boolean }): Promise<Placed | null> {
+  draw(input: Parameters<ToolHost["draw"]>[0]): Promise<Placed | null> {
     return draw(this, input);
   }
 

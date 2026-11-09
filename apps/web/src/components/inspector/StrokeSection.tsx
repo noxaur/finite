@@ -31,7 +31,7 @@ import {
   StyleField,
   Toggle,
 } from "./controls";
-import { type Changes, rawOf, readOf, type Scope } from "./scope";
+import { type Changes, isPainted, rawOf, readOf, type Scope } from "./scope";
 
 const STYLES = ["solid", "dashed", "dotted", "double"].map(
   (s) => [s, s[0]!.toUpperCase() + s.slice(1)] as const,
@@ -60,7 +60,7 @@ function readerOf(scope: Scope, t: Node): Reader {
  * place, unless the layer already has the other one there, which the
  * position says instead of replacing it.
  */
-export function StrokeSection({ scope }: { scope: Scope }) {
+function BoxStroke({ scope }: { scope: Scope }) {
   const readers = scope.targets.map((t) => readerOf(scope, t));
   const border = readers.some(hasBorder);
   const outline = readers.some((r) => outlinePosition(r) !== null);
@@ -99,6 +99,57 @@ export function StrokeSection({ scope }: { scope: Scope }) {
         ))}
     </Section>
   );
+}
+
+/** An SVG shape's stroke, which is paint and width rather than a border. */
+function VectorStroke({ scope }: { scope: Scope }) {
+  const stroke = readOf(scope, "stroke");
+  const painted = stroke.kind === "mixed" || isPainted(rawOf(stroke), "none");
+  return (
+    <Section
+      title="Stroke"
+      action={
+        !painted && (
+          <Toggle
+            icon="plus"
+            title="Add stroke"
+            onClick={() => scope.commit({ stroke: "#000000", "stroke-width": "2px" })}
+          />
+        )
+      }
+    >
+      {painted && (
+        <>
+          <Row
+            action={
+              <Toggle
+                icon="minus"
+                title="Remove stroke"
+                onClick={() => scope.commit({ stroke: "none" })}
+              />
+            }
+          >
+            <StyleField scope={scope} prop="stroke" title="Stroke color" color />
+          </Row>
+          <Row>
+            <div {...stylex.props(styles.half)}>
+              <StyleField
+                scope={scope}
+                prop="stroke-width"
+                icon="borderWidth"
+                title="Stroke width"
+                unit="px"
+              />
+            </div>
+          </Row>
+        </>
+      )}
+    </Section>
+  );
+}
+
+export function StrokeSection({ scope }: { scope: Scope }) {
+  return scope.vector ? <VectorStroke scope={scope} /> : <BoxStroke scope={scope} />;
 }
 
 /**
