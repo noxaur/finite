@@ -104,3 +104,27 @@ describe("editClasses", () => {
     expect(() => editClasses("", { transform: "rotate(3deg)" }, theme)).toThrow("Ask the agent");
   });
 });
+
+describe("SVG paint and zoom", () => {
+  it.each([
+    ["fill", "#d9d9d9", "fill-[#d9d9d9]"],
+    ["fill", "none", "fill-none"],
+    ["stroke", "#123456", "stroke-[#123456]"],
+    ["stroke-width", "2px", "stroke-2"],
+    ["stroke-width", "1.5", "stroke-[1.5px]"],
+    ["zoom", "1.5", "[zoom:1.5]"],
+  ])("writes %s: %s", (prop, value, cls) => {
+    expect(editClasses("", { [prop]: value }, {})).toBe(cls);
+  });
+
+  it("replaces the class it conflicts with", () => {
+    expect(editClasses("stroke-2 stroke-[#123456]", { "stroke-width": "4px" }, {})).toBe(
+      "stroke-[#123456] stroke-4",
+    );
+    expect(editClasses("[zoom:2]", { zoom: "1.5" }, {})).toBe("[zoom:1.5]");
+  });
+
+  it("clears them with null", () => {
+    expect(editClasses("stroke-2 fill-none", { fill: null, "stroke-width": null }, {})).toBe("");
+  });
+});

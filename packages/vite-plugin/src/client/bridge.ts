@@ -115,11 +115,25 @@ const COMPUTED = [
   "borderBottomLeftRadius",
   "boxShadow",
   "objectFit",
+  "zoom",
 ] as const;
 
 type Rect = { x: number; y: number; width: number; height: number };
 type HitElement = { loc: string; rev: string; tag: string };
 type LayerNode = HitElement & { index: number; name: string; children: LayerNode[] };
+type DropChild = HitElement & {
+  index: number;
+  count: number;
+  rect: Rect;
+  display: string;
+  flexDirection: string;
+  position: string;
+  borderLeft: number;
+  borderTop: number;
+  scrollLeft: number;
+  scrollTop: number;
+};
+type DropNode = DropChild & { children: DropChild[] };
 type Request = { type: string; id: number } & Record<string, unknown>;
 
 declare global {
@@ -557,7 +571,62 @@ const requests: Record<string, (params: Request) => unknown> = {
   measure({ targets, props }) {
     return measureElements(targets as MeasureTarget[], props as string[]);
   },
+
+  /** The stamped chain at a point, nearest first, with what placing a new element there needs. */
+  drop({ x, y }) {
+    const under = stamped(document.elementFromPoint(x as number, y as number));
+    // A framework route renders <html> and <body> itself, and those are the page, not content.
+    const first = under === document.documentElement || under === document.body ? null : under;
+    const nodes: Element[] = [];
+    for (let up = first; up; up = stamped(up.parentElement)) nodes.push(up);
+    // Over empty page: the top-level elements, nearest (last in the page) first.
+    if (!first) nodes.push(...stampedChildren(document.body).reverse());
+    const chain: DropNode[] = nodes.map((element) => ({
+      ...dropChild(element),
+      children: stampedChildren(element).map(dropChild),
+    }));
+    return { chain };
+  },
+
+  /** A `<path>`'s geometry as drawn, or `null` when `loc` isn't one. */
+  vector({ loc, index }) {
+    const element = instances(loc as string)[index as number];
+    if (!(element instanceof SVGPathElement)) return null;
+    const m = element.getScreenCTM();
+    if (!m) return null;
+    return {
+      d: element.getAttribute("d") ?? "",
+      ctm: [m.a, m.b, m.c, m.d, m.e, m.f],
+      viewBox: element.ownerSVGElement?.getAttribute("viewBox") ?? null,
+    };
+  },
 };
+
+function dropChild(element: Element): DropChild {
+  const style = getComputedStyle(element);
+  const hit = describe(element);
+  const all = instances(hit.loc);
+  return {
+    ...hit,
+    index: all.indexOf(element),
+    count: all.length,
+    rect: rectOf(element),
+    display: style.display,
+    flexDirection: style.flexDirection,
+    position: style.position,
+    borderLeft: parseFloat(style.borderLeftWidth) || 0,
+    borderTop: parseFloat(style.borderTopWidth) || 0,
+    scrollLeft: element.scrollLeft,
+    scrollTop: element.scrollTop,
+  };
+}
+
+/** The nearest stamped elements under `parent`, looking through unstamped ones. */
+function stampedChildren(parent: Element): Element[] {
+  return Array.from(parent.children).flatMap((child) =>
+    child.hasAttribute(LOC) ? [child] : stampedChildren(child),
+  );
+}
 
 // Previews: inline styles shown without writing them, undone on the next HMR update.
 
@@ -635,7 +704,9 @@ function scheduleSize(): void {
   });
 }
 
-function editable(target: EventTarget | null): boolean {
+/** Whether a key press belongs to a field; `composedPath` sees into shadow DOM, where `target` can't. */
+function editable(event: Event): boolean {
+  const target = event.composedPath()[0];
   if (!(target instanceof HTMLElement)) return false;
   return target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName);
 }
@@ -711,7 +782,7 @@ function start(): void {
   window.addEventListener(
     "keydown",
     (event) => {
-      if (editable(event.target) && !event.metaKey && !event.ctrlKey) return;
+      if (editable(event) && !event.metaKey && !event.ctrlKey) return;
       post({
         type: "key",
         key: event.key,

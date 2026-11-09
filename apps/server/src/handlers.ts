@@ -104,8 +104,8 @@ export const handlers: Handlers = {
   async "source.edit"({ designId, canvasId, edits }, ctx) {
     const open = await ctx.hub.open(designId);
     const canvas = await findCanvas(open, canvasId);
-    const { remap } = await ctx.modules.source.apply(open, edits, ctx.by, canvas);
-    return { remap };
+    const { remap, created } = await ctx.modules.source.apply(open, edits, ctx.by, canvas);
+    return { remap, created };
   },
   async "source.undo"({ designId }, ctx) {
     await ctx.modules.source.undo(await ctx.hub.open(designId), ctx.by);
@@ -117,6 +117,18 @@ export const handlers: Handlers = {
   },
   async "source.detach"({ designId, ...input }, ctx) {
     return ctx.modules.source.detach(await ctx.hub.open(designId), input, ctx.by);
+  },
+  async "source.inline"({ designId, loc }, ctx) {
+    return ctx.modules.source.inline(await ctx.hub.open(designId), loc);
+  },
+  async "canvas.draw"({ designId, ...input }, ctx) {
+    return ctx.modules.source.draw(await ctx.hub.open(designId), input, ctx.by);
+  },
+  async "canvas.exportSlice"({ designId, ...input }, ctx) {
+    return ctx.modules.source.exportSlice(await ctx.hub.open(designId), input);
+  },
+  async "asset.add"({ designId, attachment }, ctx) {
+    return ctx.modules.source.addAsset(await ctx.hub.open(designId), attachment);
   },
 
   "comment.add": ({ designId, canvasId, anchor, text }, ctx) =>

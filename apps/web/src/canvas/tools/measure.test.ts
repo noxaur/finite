@@ -1,17 +1,18 @@
 import type { Canvas, Measurement } from "@finite/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { Camera } from "@/design/camera";
-import type { CanvasEditor as Editor } from "./editor";
+import type { CanvasEditor as Editor } from "../editor";
 
 const measure = vi.fn<(targets: unknown[]) => Promise<(Measurement | null)[]>>();
 
 vi.mock("@/client/finite", () => ({ finite: {} }));
-vi.mock("./bridge", () => ({
+vi.mock("@/design/editing/insertion", () => ({}));
+vi.mock("../bridge", () => ({
   bridgeOf: () => ({ measure, rects: async () => ({}), inspect: async () => null }),
   mountedBridges: () => new Map(),
 }));
 
-const { CanvasEditor } = await import("./editor");
+const { CanvasEditor } = await import("../editor");
 
 const measured = (over: Partial<Measurement> = {}) =>
   ({ tag: "div", name: "div", loc: "a.tsx:1:1", index: 0, count: 1, ...over }) as Measurement;
@@ -33,14 +34,10 @@ describe("the measure tool", () => {
   let editor: Editor;
   let viewport: EventTarget;
   const key = (k: string) =>
-    editor.key({
-      key: k,
-      code: "",
-      metaKey: false,
-      ctrlKey: false,
-      shiftKey: false,
-      altKey: false,
-    });
+    editor.key(
+      { key: k, code: "", metaKey: false, ctrlKey: false, shiftKey: false, altKey: false },
+      "page",
+    );
 
   const move = async (x: number, y: number) => {
     viewport.dispatchEvent(
@@ -85,16 +82,13 @@ describe("the measure tool", () => {
   });
 
   it("M enters from anywhere and turns Interact off", () => {
-    editor.setTool("select");
-    editor.setInteract(true);
+    editor.setTool("interact");
     expect(key("m")).toBe(true);
     expect(editor.state.tool).toBe("measure");
-    expect(editor.state.interact).toBe(false);
   });
 
   it("Interact, V and C leave and clear what was measured", async () => {
-    for (const leave of [() => editor.setInteract(true), () => key("v"), () => key("c")]) {
-      editor.setInteract(false);
+    for (const leave of [() => key("i"), () => key("v"), () => key("c")]) {
       editor.setTool("measure");
       await move(10, 10);
       await click(10, 10);
@@ -166,6 +160,20 @@ describe("the measure tool", () => {
     measure.mockResolvedValue([next, measured({ loc: "a.tsx:0:0" })]);
     await move(40, 40);
     expect(editor.state.measure).toMatchObject({ up: 0, hover: { m: next } });
+  });
+
+  it("Backspace and ⌘D do nothing while measuring", () => {
+    const remove = vi.spyOn(editor, "remove");
+    const duplicate = vi.spyOn(editor, "duplicate");
+    expect(key("Backspace")).toBe(true);
+    expect(
+      editor.key(
+        { key: "d", code: "", metaKey: true, ctrlKey: false, shiftKey: false, altKey: false },
+        "page",
+      ),
+    ).toBe(true);
+    expect(remove).not.toHaveBeenCalled();
+    expect(duplicate).not.toHaveBeenCalled();
   });
 
   it("leaves arrow keys alone in the other tools", () => {

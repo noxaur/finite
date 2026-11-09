@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { MEASURE_PURPLE, type Measurement } from "@finite/protocol";
 import { describe, expect, it, vi } from "vite-plus/test";
-import type { Probe } from "@/canvas/editor";
+import type { Probe } from "@/canvas/tools/measure";
 
 vi.mock("@stylexjs/stylex", () => ({
   create: () => ({}),

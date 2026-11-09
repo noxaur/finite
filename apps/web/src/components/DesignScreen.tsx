@@ -91,6 +91,24 @@ export function DesignScreen({ id }: { id: string }) {
 
   // When a thread opens its first prototype, the screen follows it there.
   const seenCanvases = useRef<{ thread: string | null; count: number }>({ thread: null, count: 0 });
+  const dock = useRef<HTMLDivElement>(null);
+
+  // The canvas's toolbar sits just above the composer, whose height follows what's typed.
+  useEffect(() => {
+    const el = dock.current;
+    const main = el?.parentElement;
+    if (!el || !main) return;
+    const measure = () =>
+      main.style.setProperty(
+        "--dock-clearance",
+        `${main.getBoundingClientRect().bottom - el.getBoundingClientRect().top}px`,
+      );
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    observer.observe(main);
+    return () => observer.disconnect();
+  }, []);
   useEffect(() => {
     if (!thread) return;
     const seen = seenCanvases.current;
@@ -322,7 +340,7 @@ export function DesignScreen({ id }: { id: string }) {
             onAsk={focusComposer}
             onExport={exportSelection}
           />
-          <div {...stylex.props(styles.dock)}>
+          <div ref={dock} {...stylex.props(styles.dock)}>
             <Composer
               designId={id}
               thread={thread}

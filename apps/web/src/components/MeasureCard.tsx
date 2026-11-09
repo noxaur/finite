@@ -3,7 +3,8 @@
 import * as stylex from "@stylexjs/stylex";
 import { distanceBetween, type Distance, type Measurement, SPEC } from "@finite/protocol";
 import { type ReactNode, useMemo } from "react";
-import type { CanvasEditor, MeasureState } from "@/canvas/editor";
+import type { CanvasEditor } from "@/canvas/editor";
+import type { MeasureState } from "@/canvas/tools/measure";
 import { colors, fonts, radii, size, space } from "@/styles/tokens.stylex";
 import { comparedPair, drawingsOf, useZoomStep } from "./MeasureLayer";
 
@@ -90,7 +91,7 @@ export function distanceText({ relation, lines }: Distance) {
 }
 
 /**
- * The measure tool's readout, docked under the pill at the top right of the canvas viewport: the
+ * The measure tool's readout, docked at the top right of the canvas viewport: the
  * pinned element, else the one under the pointer. It stays put, so it never covers what's measured.
  */
 export function MeasureCard({ editor, measure }: { editor: CanvasEditor; measure: MeasureState }) {
@@ -235,17 +236,17 @@ function BoxLayer({
 }
 
 const styles = stylex.create({
-  // Under the pill's row, however wide the pill's note gets.
+  // Its height stops short of the bottom toolbar, for a canvas narrow enough to put them in line.
   card: {
     position: "absolute",
-    top: `calc(${size.lg} + ${space.xs})`,
+    top: space.sm,
     right: space.sm,
     zIndex: 2,
     display: "flex",
     flexDirection: "column",
     width: 270,
     maxWidth: `calc(100% - ${space.md})`,
-    maxHeight: `calc(100% - ${size.lg} - ${space.xs} - ${space.sm})`,
+    maxHeight: `calc(100% - ${space.sm} - ${size.lg} - ${space.sm} - var(--dock-clearance, 0px))`,
     overflowY: "auto",
     overscrollBehavior: "contain",
     scrollbarWidth: "thin",

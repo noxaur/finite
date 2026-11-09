@@ -3,7 +3,8 @@
 import * as stylex from "@stylexjs/stylex";
 import { drawFigure, type Figure } from "@finite/protocol";
 import { type CSSProperties, useCallback, useMemo, useSyncExternalStore } from "react";
-import { type CanvasEditor, type MeasureState, type Probe, sameElement } from "../canvas/editor";
+import type { CanvasEditor } from "../canvas/editor";
+import { type MeasureState, type Probe, sameElement } from "../canvas/tools/measure";
 import { colors } from "@/styles/tokens.stylex";
 
 /** Pin and hover when they're two elements in one frame: the pair the distance is between. */

@@ -1,7 +1,8 @@
 import { describe, expect, expectTypeOf, it } from "vite-plus/test";
 import {
-  type Canvas,
+  Canvas,
   type CanvasPatch,
+  NewNode,
   type Params,
   ParentMessage,
   parseClientMessage,
@@ -104,6 +105,28 @@ describe("bridge messages", () => {
   });
 });
 
+describe("new elements on the wire", () => {
+  it("keeps a new element's tag to an intrinsic name", () => {
+    expect(NewNode.safeParse({ tag: "div" }).success).toBe(true);
+    expect(NewNode.safeParse({ tag: "Foo" }).success).toBe(false);
+    expect(NewNode.safeParse({ tag: "div onClick" }).success).toBe(false);
+  });
+
+  it("reads a canvas written before sections existed", () => {
+    const canvas = Canvas.parse({
+      id: "c",
+      kind: "page",
+      name: "Page",
+      threadIds: [],
+      frames: [],
+      texts: [],
+      comments: [],
+      updatedAt: 0,
+    });
+    expect(canvas).toMatchObject({ sections: [], slices: [] });
+  });
+});
+
 describe("request map", () => {
   it("types params and results per request", () => {
     expectTypeOf<Params<"canvas.patch">>().toEqualTypeOf<{
@@ -112,6 +135,9 @@ describe("request map", () => {
       patch: CanvasPatch;
     }>();
     expectTypeOf<Result<"canvas.patch">>().toEqualTypeOf<Canvas>();
-    expectTypeOf<Result<"source.edit">>().toEqualTypeOf<{ remap: Record<string, string> }>();
+    expectTypeOf<Result<"source.edit">>().toEqualTypeOf<{
+      remap: Record<string, string>;
+      created: Record<string, string>;
+    }>();
   });
 });

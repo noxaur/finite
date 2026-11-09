@@ -5,6 +5,7 @@ import {
   type BridgeRequestType,
   bridgeRequests,
   type BridgeResult,
+  type DropNode,
   type FrameBridge,
   FrameMessage,
   type Hit,
@@ -13,6 +14,7 @@ import {
   type Loc,
   MEASURE_PROPS,
   type Rect,
+  type VectorInfo,
 } from "@finite/protocol";
 
 /** How long a request waits for the frame before it gives up. */
@@ -149,6 +151,8 @@ export function connectFrame(iframe: HTMLIFrameElement, frameId: string): FrameB
     // Parsed, unlike the rest: the overlay is innerHTML, and a design's JS can answer on this port.
     measure: async (targets) =>
       bridgeRequests.measure.result.parse(await send("measure", { targets, props: MEASURE_PROPS })),
+    drop: (x, y) => send("drop", { x, y }) as Promise<{ chain: DropNode[] }>,
+    vector: (loc, index) => send("vector", { loc, index }) as Promise<VectorInfo | null>,
     preview(loc, styles) {
       port?.postMessage({ type: "preview", loc, styles });
     },

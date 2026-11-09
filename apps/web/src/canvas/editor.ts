@@ -5,10 +5,8 @@ import type {
   Frame,
   Hit,
   HitElement,
-  LayerNode,
   Loc,
-  MeasureTarget,
-  Measurement,
+  NewNode,
   Rect,
   Rev,
   SourceEdit,
@@ -17,25 +15,14 @@ import type {
 import { useSyncExternalStore } from "react";
 import type { Camera } from "@/design/camera";
 import { bridgeOf, mountedBridges } from "./bridge";
-import { childrenIn, layerName, layerNameAt, pathIn } from "./layers";
+import { draw } from "./tools/draw";
+import { type MeasureState, NO_MEASURE } from "./tools/measure";
+import type { Ghost, Gesture, KeyInput, Placed, PressPlan, ToolDef, ToolHost } from "./tools/host";
+import { ALL_COMMANDS, type KeyEnv, resolveKey, type ToolId, toolOf } from "./tools/registry";
+import { layerName, layerNameAt, pathIn } from "./layers";
 import { undoOrderFor } from "./undoOrder";
 import { finite } from "@/client/finite";
-import {
-  baseName,
-  chainOf,
-  detachTarget,
-  drillInto,
-  fileOf,
-  flowAxis,
-  type Handle,
-  movedFrames,
-  type Point,
-  reorderBefore,
-  resizeEdit,
-  resizedFrame,
-  resizeStyles,
-  revsOf,
-} from "./gestures";
+import { baseName, detachTarget, fileOf, type Point, revsOf } from "./gestures";
 import {
   createStore,
   keyOf,
@@ -43,7 +30,6 @@ import {
   type SelectionItem,
   selectionStore,
   type Store,
-  toggleItem,
 } from "./selection";
 
 /** How far the pointer travels before a press becomes a drag, in screen pixels. */
@@ -51,25 +37,6 @@ const DRAG_SLOP = 3;
 const NOTICE_MS = 5000;
 /** How soon a second click makes a double-click, in milliseconds. */
 const DOUBLE_MS = 400;
-
-export type Tool = "select" | "comment" | "measure";
-
-/** One measured element and how to measure it again. */
-export type Probe = { frameId: string; target: MeasureTarget; m: Measurement };
-
-export type MeasureState = {
-  readonly hover: Probe | null;
-  readonly pin: Probe | null;
-  /** How many stamped parents ↑ has walked from what the pointer is on. */
-  readonly up: number;
-};
-
-const NO_MEASURE: MeasureState = { hover: null, pin: null, up: 0 };
-
-export const sameElement = (a: Probe, b: Probe) =>
-  a.frameId === b.frameId && a.m.loc === b.m.loc && a.m.index === b.m.index;
-
-const sameMeasurement = (a: Measurement, b: Measurement) => JSON.stringify(a) === JSON.stringify(b);
 
 /** What an element selection knows beyond its loc: what the edits it makes need. */
 export type ElementFacts = { rev: Rev; tag: string; path: HitElement[] };
@@ -94,9 +61,10 @@ export type TextEdit = {
 };
 
 export interface EditorState {
-  readonly tool: Tool;
-  /** The pointer reaches into the frames, to click through the real app. */
-  readonly interact: boolean;
+  /** The current tool. On Interact, the pointer reaches into the frames, into the real app. */
+  readonly tool: ToolId;
+  /** A shape being drawn. */
+  readonly ghost: Ghost | null;
   /** What's under the pointer: a frame (no loc) or an element's box in it. */
   readonly hover: { frameId: string; rect: Rect } | null;
   /** Each selected thing's box in its frame (CSS pixels); `null` until measured. */
@@ -126,7 +94,7 @@ export interface EditorState {
 
 const initial: EditorState = {
   tool: "select",
-  interact: false,
+  ghost: null,
   hover: null,
   rects: {},
   label: null,
@@ -145,12 +113,8 @@ const initial: EditorState = {
   measure: NO_MEASURE,
 };
 
-type Gesture = {
-  move(screen: Point, world: Point, e: PointerEvent): void;
-  end(commit: boolean): void | Promise<void>;
-};
-
 type Press = {
+  tool: ToolDef;
   pointerId: number;
   /** What was pressed: pointer capture retargets the release to the viewport. */
   target: Element | null;
@@ -174,20 +138,16 @@ const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
  * `source.edit` or `canvas.patch`. Selection lives in `selectionStore`, so the layers, the
  * inspector, the composer and the ✱ menu all read the same one.
  */
-export class CanvasEditor {
+export class CanvasEditor implements ToolHost {
   readonly store: Store<EditorState> = createStore(initial);
   /** rev, tag and stamped ancestors of each selected element, by selection key. */
-  private readonly facts = new Map<string, ElementFacts>();
+  readonly facts = new Map<string, ElementFacts>();
   private canvas: Canvas;
-  private press: Press | null = null;
+  private current: Press | null = null;
   private lastClick: { at: number; x: number; y: number } | null = null;
   private space = false;
   private hoverFrame = 0;
   private hoverSeq = 0;
-  /** Bumped when the pin changes, so a click still waiting on its frame doesn't pin afterwards. */
-  private pinSeq = 0;
-  /** Where the measure tool last probed, and the element right under that point. */
-  private pointer: { frameId: string; at: Point; leaf: string | null } | null = null;
   private noticeTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly abort = new AbortController();
   private readonly offSelection: () => void;
@@ -210,7 +170,7 @@ export class CanvasEditor {
       "pointerleave",
       () => {
         this.setHover(null);
-        if (this.state.tool === "measure") this.clearProbe();
+        toolOf(this.state.tool).pointerLeave?.(this);
       },
       { signal },
     );
@@ -218,21 +178,16 @@ export class CanvasEditor {
     window.addEventListener(
       "keyup",
       (e) => {
-        if (e.code === "Space") this.space = camera.space = false;
+        if (e.code === "Space") this.setSpace(false);
       },
       { signal },
     );
-    window.addEventListener("blur", () => (this.space = camera.space = false), { signal });
+    window.addEventListener("blur", () => this.setSpace(false), { signal });
     // Left-drag pans only on the empty canvas; on frames it selects and edits.
-    camera.mayPan = (e) => this.state.tool === "select" && this.frameAt(this.worldOf(e)) === null;
-    // The measure card scrolls itself; a pinch over it still zooms.
-    camera.routeWheel = (e) =>
-      !e.ctrlKey &&
-      !e.metaKey &&
-      e.target instanceof Element &&
-      e.target.closest("[data-measure-card]")
-        ? "native"
-        : "camera";
+    camera.mayPan = (e) => {
+      const pan = toolOf(this.state.tool).pan;
+      return pan === "always" || (pan === "empty" && this.frameAt(this.worldOf(e)) === null);
+    };
     this.offSelection = selectionStore.subscribe(() => void this.refreshSelection());
     void this.refreshSelection();
   }
@@ -242,13 +197,19 @@ export class CanvasEditor {
     this.offSelection();
     clearTimeout(this.noticeTimer);
     cancelAnimationFrame(this.hoverFrame);
+    toolOf(this.state.tool).deactivate?.(this);
   }
 
   get state() {
     return this.store.get();
   }
 
-  private update(patch: Partial<EditorState>) {
+  /** A press is down on the canvas. */
+  get pressing() {
+    return this.current !== null;
+  }
+
+  update(patch: Partial<EditorState>) {
     this.store.set({ ...this.state, ...patch });
   }
 
@@ -261,21 +222,16 @@ export class CanvasEditor {
     if (this.state.selectedText && !canvas.texts.some((t) => t.id === this.state.selectedText)) {
       this.update({ selectedText: null });
     }
-    const { hover, pin } = this.state.measure;
-    if ((hover && !ids.has(hover.frameId)) || (pin && !ids.has(pin.frameId))) {
-      this.update({
-        measure: {
-          ...this.state.measure,
-          hover: hover && ids.has(hover.frameId) ? hover : null,
-          pin: pin && ids.has(pin.frameId) ? pin : null,
-        },
-      });
-    }
+    toolOf(this.state.tool).canvasChanged?.(this);
     void this.refreshSelection();
   }
 
   get frames(): readonly Frame[] {
     return this.canvas.frames;
+  }
+
+  get canvasId(): string {
+    return this.canvas.id;
   }
 
   get texts(): readonly TextLabel[] {
@@ -294,22 +250,23 @@ export class CanvasEditor {
     return this.canvas.frames.find((f) => f.id === id);
   }
 
-  setTool(tool: Tool) {
-    this.stopProbing();
-    this.pinSeq++;
-    this.update({ tool, commentDraft: null, hover: null, measure: NO_MEASURE });
+  setTool(id: string) {
+    const tool = toolOf(id);
+    if (!tool.enabled) return;
+    toolOf(this.state.tool).deactivate?.(this);
+    this.update({ tool: tool.id as ToolId, commentDraft: null, hover: null, ghost: null });
+    tool.activate?.(this);
   }
 
-  setInteract(interact: boolean) {
-    if (interact && this.state.tool === "measure") this.setTool("select");
-    this.update({ interact, hover: null });
+  setGhost(ghost: Ghost | null) {
+    this.update({ ghost });
   }
 
   /** A frame loaded or applied an HMR update: rects and revs may have moved. */
   frameChanged() {
     this.update({ updates: this.state.updates + 1 });
     void this.refreshSelection();
-    void this.remeasure();
+    toolOf(this.state.tool).frameUpdated?.(this);
   }
 
   setSize(frameId: string, height: number) {
@@ -350,14 +307,14 @@ export class CanvasEditor {
     return null;
   }
 
-  private local(frame: Frame, p: Point): Point {
+  local(frame: Frame, p: Point): Point {
     const b = this.boxOf(frame);
     return { x: p.x - b.x, y: p.y - b.y };
   }
 
   // Selection
 
-  private frameItem(frameId: string): SelectionItem {
+  frameItem(frameId: string): SelectionItem {
     const name = this.frame(frameId)?.name;
     return name === undefined ? { frameId } : { frameId, name };
   }
@@ -371,7 +328,7 @@ export class CanvasEditor {
    * Selects one hit element, remembering what edits to it need. Its name is the layer name: the
    * component or tag's meaning at once, then the bridge's own name (text, label) once it answers.
    */
-  private selectHit(frameId: string, hit: Hit | HitElement, index: number, path: HitElement[]) {
+  selectHit(frameId: string, hit: Hit | HitElement, index: number, path: HitElement[]) {
     const parentFile = path[0] && fileOf(path[0].loc);
     const name = layerName({ loc: hit.loc, tag: hit.tag, name: "" }, parentFile);
     const item = { frameId, loc: hit.loc, index, name };
@@ -441,8 +398,7 @@ export class CanvasEditor {
     if (items.length !== 1 || only?.loc === undefined) return null;
     const file = fileOf(only.loc);
     const frame = this.frame(only.frameId);
-    const own = frame?.source.kind === "file" ? frame.source.file : this.routeFile?.(frame);
-    if (own === file) return null;
+    if (frame && this.ownFile(frame) === file) return null;
     let count = 0;
     await Promise.all(
       [...mountedBridges().values()].map(async (b) => {
@@ -452,6 +408,10 @@ export class CanvasEditor {
     );
     const name = baseName(file);
     return count > 1 ? `Edits ${name} · used in ${count} places` : `Edits ${name}`;
+  }
+
+  ownFile(frame: Frame): string | undefined {
+    return frame.source.kind === "file" ? frame.source.file : this.routeFile?.(frame);
   }
 
   /** Set by the canvas: the route module a route frame renders, when the router names one. */
@@ -541,122 +501,13 @@ export class CanvasEditor {
       const hit = await bridgeOf(frame.id)
         ?.hit(p.x, p.y)
         .catch(() => null);
-      if (seq !== this.hoverSeq || this.press) return;
+      if (seq !== this.hoverSeq || this.current) return;
       const b = this.boxOf(frame);
       this.setHover({
         frameId: frame.id,
         rect: hit?.rect ?? { x: 0, y: 0, width: b.width, height: b.height },
       });
     });
-  }
-
-  // Measure
-
-  private stopProbing() {
-    cancelAnimationFrame(this.hoverFrame);
-    this.hoverSeq++;
-    this.pointer = null;
-  }
-
-  private clearProbe() {
-    this.stopProbing();
-    const { measure } = this.state;
-    if (measure.hover || measure.up > 0) {
-      this.update({ measure: { ...measure, hover: null, up: 0 } });
-    }
-  }
-
-  private probeAt(e: PointerEvent) {
-    cancelAnimationFrame(this.hoverFrame);
-    const { clientX, clientY, target } = e;
-    this.hoverFrame = requestAnimationFrame(() => {
-      // Over the card or the pill the probe holds still, so what the card shows can be read.
-      if (target instanceof Element && target.closest("[data-canvas-ui]")) return;
-      const world = this.camera.toWorld(clientX, clientY);
-      const frame = this.frameAt(world);
-      if (!frame) return this.clearProbe();
-      void this.probe(frame.id, this.local(frame, world), this.state.measure.up);
-    });
-  }
-
-  /**
-   * The element at a point, `up` stamped parents above the one right under it. A different element
-   * under the point starts the walk over; `up` comes back as the walk that was kept.
-   */
-  private async elementAt(frameId: string, at: Point, up: number) {
-    const targets: MeasureTarget[] = up > 0 ? [{ at }, { at, up }] : [{ at }];
-    const replies = await bridgeOf(frameId)
-      ?.measure(targets)
-      .catch(() => null);
-    const leaf = replies?.[0] ?? null;
-    if (!leaf) return null;
-    const key = `${frameId}|${leaf.loc}|${leaf.index}`;
-    return up > 0 && key === this.pointer?.leaf
-      ? { key, m: replies?.[1] ?? leaf, up }
-      : { key, m: leaf, up: 0 };
-  }
-
-  private async probe(frameId: string, at: Point, up: number) {
-    const seq = ++this.hoverSeq;
-    const found = await this.elementAt(frameId, at, up);
-    if (seq !== this.hoverSeq || this.press || this.state.tool !== "measure") return;
-    if (!found) return this.clearProbe();
-    this.pointer = { frameId, at, leaf: found.key };
-    const { measure } = this.state;
-    const hover: Probe = { frameId, target: { at, up: found.up }, m: found.m };
-    if (measure.hover && sameElement(measure.hover, hover)) {
-      // ↑ past the topmost stamped element: there's nothing more to walk.
-      if (found.up > measure.up) return;
-      if (found.up === measure.up && sameMeasurement(measure.hover.m, hover.m)) return;
-    }
-    this.update({ measure: { ...measure, hover, up: found.up } });
-  }
-
-  private walk(delta: 1 | -1) {
-    const up = this.state.measure.up + delta;
-    if (this.pointer && up >= 0) void this.probe(this.pointer.frameId, this.pointer.at, up);
-  }
-
-  private unpin() {
-    this.pinSeq++;
-    this.update({ measure: { ...this.state.measure, pin: null } });
-  }
-
-  /** A click: pins what's under it, or unpins when that's the pin or nothing at all. */
-  private async pinAt(world: Point, frame: Frame | null) {
-    if (!frame) return this.unpin();
-    const at = this.local(frame, world);
-    const seq = ++this.pinSeq;
-    const found = await this.elementAt(frame.id, at, this.state.measure.up);
-    if (seq !== this.pinSeq) return;
-    if (!found) return this.unpin();
-    const { m } = found;
-    const target: MeasureTarget =
-      m.loc === undefined ? { at, up: found.up } : { loc: m.loc, index: m.index };
-    const probe: Probe = { frameId: frame.id, target, m };
-    const { pin } = this.state.measure;
-    this.update({
-      measure: { ...this.state.measure, pin: pin && sameElement(pin, probe) ? null : probe },
-    });
-  }
-
-  /** A frame loaded or applied an HMR update: what's measured may have moved or gone. */
-  private async remeasure() {
-    if (this.state.tool !== "measure") return;
-    if (this.pointer) {
-      void this.probe(this.pointer.frameId, this.pointer.at, this.state.measure.up);
-    }
-    const { pin } = this.state.measure;
-    if (!pin) return;
-    const replies = await bridgeOf(pin.frameId)
-      ?.measure([pin.target])
-      .catch(() => null);
-    // A refresh keeps the pin's target, so a second refresh in flight still lands.
-    const current = this.state.measure.pin;
-    if (!replies || current?.target !== pin.target) return;
-    const m = replies[0] ?? null;
-    if (m && sameMeasurement(m, current.m)) return;
-    this.update({ measure: { ...this.state.measure, pin: m && { ...current, m } } });
   }
 
   // Pointer
@@ -676,71 +527,23 @@ export class CanvasEditor {
     const target = e.target instanceof Element ? e.target : null;
     const world = this.worldOf(e);
     const screen = { x: e.clientX, y: e.clientY };
-    const shift = e.shiftKey;
-    const deep = e.metaKey || e.ctrlKey;
-
-    const handle = target?.closest<HTMLElement>("[data-handle]");
-    const titleId = target?.closest<HTMLElement>("[data-frame-title]")?.dataset.frameTitle;
-    const textId = target?.closest<HTMLElement>("[data-text-id]")?.dataset.textId;
-    const frame = this.frameAt(world);
-    if (this.state.interact && frame && !handle && !titleId) return;
+    const tool = toolOf(this.state.tool);
+    const plan = tool.down?.(this, {
+      event: e,
+      target,
+      world,
+      screen,
+      shift: e.shiftKey,
+      deep: e.metaKey || e.ctrlKey,
+      alt: e.altKey,
+      frame: this.frameAt(world),
+    });
+    if (!plan || plan === "pass") return;
     if (this.state.notice) this.update({ notice: null });
-
-    let start: Omit<
-      Press,
-      "pointerId" | "target" | "screen" | "world" | "started" | "gesture"
-    > | null = null;
-
-    if (this.state.tool === "comment") {
-      e.preventDefault();
-      start = {
-        begin: async () => null,
-        click: () => this.placeComment(world, frame),
-      };
-    } else if (this.state.tool === "measure") {
-      e.preventDefault();
-      start = { begin: async () => null, click: () => this.pinAt(world, frame) };
-    } else if (handle) {
-      const which = handle.dataset.handle as Handle;
-      const key = handle.dataset.key!;
-      start = { begin: () => this.beginResize(key, which, screen), click: () => {} };
-    } else if (textId) {
-      start = {
-        begin: async () => this.beginMoveText(textId, world),
-        click: () => this.selectText(textId),
-      };
-    } else if (titleId) {
-      const f = this.frame(titleId)!;
-      const item = this.frameItem(f.id);
-      const selected = selectionStore.get().some((s) => s.loc === undefined && s.frameId === f.id);
-      if (!selected) selectionStore.set(shift ? toggleItem(selectionStore.get(), item) : [item]);
-      this.update({ selectedText: null });
-      start = {
-        begin: async () => this.beginMoveFrames(world),
-        click: () => {
-          if (selected && shift) selectionStore.set(toggleItem(selectionStore.get(), item));
-        },
-      };
-    } else if (frame) {
-      const p = this.local(frame, world);
-      const bridge = bridgeOf(frame.id);
-      const hit = bridge ? bridge.hit(p.x, p.y).catch(() => null) : Promise.resolve(null);
-      this.update({ selectedText: null });
-      start = {
-        begin: async () => this.beginDragInFrame(frame, await hit, world, deep),
-        click: async () => this.clickInFrame(frame, await hit, shift, deep),
-      };
-    } else {
-      // The empty canvas: the camera pans on a drag; a click clears the selection.
-      start = {
-        begin: async () => null,
-        click: () => {
-          if (!shift) selectionStore.set([]);
-          this.update({ selectedText: null, editingLabel: null });
-        },
-      };
-      this.press = {
-        ...start,
+    if (plan.passive) {
+      this.current = {
+        ...plan,
+        tool,
         pointerId: e.pointerId,
         target,
         screen,
@@ -750,14 +553,26 @@ export class CanvasEditor {
       };
       return;
     }
+    this.press(e, plan, tool, target, world);
+  }
+
+  /** Takes the pointer and turns the press into `plan`: a drag past the slop, else a click. */
+  press(
+    e: PointerEvent,
+    plan: PressPlan,
+    tool: ToolDef = toolOf(this.state.tool),
+    target: Element | null = e.target instanceof Element ? e.target : null,
+    world: Point = this.worldOf(e),
+  ) {
     e.preventDefault();
     e.stopPropagation();
     this.viewport.setPointerCapture(e.pointerId);
-    this.press = {
-      ...start,
+    this.current = {
+      ...plan,
+      tool,
       pointerId: e.pointerId,
       target,
-      screen,
+      screen: { x: e.clientX, y: e.clientY },
       world,
       started: false,
       gesture: null,
@@ -765,11 +580,12 @@ export class CanvasEditor {
   }
 
   private onMove(e: PointerEvent) {
-    const press = this.press;
+    const press = this.current;
     if (!press || press.pointerId !== e.pointerId) {
-      if (!this.press && this.state.tool === "select" && !this.state.interact) this.hoverAt(e);
-      else if (this.state.tool === "comment") this.hoverAt(e);
-      else if (!this.press && this.state.tool === "measure") this.probeAt(e);
+      if (press) return;
+      const tool = toolOf(this.state.tool);
+      if (tool.hover) this.hoverAt(e);
+      tool.pointerMove?.(this, e);
       return;
     }
     const screen = { x: e.clientX, y: e.clientY };
@@ -783,14 +599,14 @@ export class CanvasEditor {
     }
     const world = this.worldOf(e);
     void press.gesture?.then((g) => {
-      if (this.press === press) g?.move(screen, world, e);
+      if (this.current === press) g?.move(screen, world, e);
     });
   }
 
   private async onUp(e: PointerEvent) {
-    const press = this.press;
+    const press = this.current;
     if (!press || press.pointerId !== e.pointerId) return;
-    this.press = null;
+    this.current = null;
     if (this.viewport.hasPointerCapture(e.pointerId))
       this.viewport.releasePointerCapture(e.pointerId);
     if (!press.started) {
@@ -806,281 +622,29 @@ export class CanvasEditor {
         now - last.at < DOUBLE_MS &&
         Math.hypot(e.clientX - last.x, e.clientY - last.y) < DRAG_SLOP * 2;
       this.lastClick = double || !plain ? null : { at: now, x: e.clientX, y: e.clientY };
-      if (double) await this.onDoubleClick(e, press.target);
+      if (double) await press.tool.doubleClick?.(this, e, press.target);
+      this.backToMove(press.tool);
       return;
     }
     const g = await press.gesture;
     this.update({ dragging: false });
     await g?.end(true);
+    this.backToMove(press.tool);
+  }
+
+  /** A tool that isn't sticky hands back to Move after one use. */
+  private backToMove(tool: ToolDef) {
+    if (!tool.sticky && this.state.tool === tool.id) this.setTool("select");
   }
 
   private cancelPress() {
-    const press = this.press;
-    this.press = null;
-    this.update({ dragging: false });
+    const press = this.current;
+    this.current = null;
+    this.update({ dragging: false, ghost: null });
     void press?.gesture?.then((g) => g?.end(false));
   }
 
-  private async onDoubleClick(e: MouseEvent, target: Element | null) {
-    if (
-      target?.closest("[data-canvas-ui]") ||
-      this.state.interact ||
-      this.state.tool !== "select"
-    ) {
-      return;
-    }
-    const textId = target?.closest<HTMLElement>("[data-text-id]")?.dataset.textId;
-    if (textId) return this.update({ editingLabel: textId, selectedText: textId });
-    const titleId = target?.closest<HTMLElement>("[data-frame-title]")?.dataset.frameTitle;
-    if (titleId) return;
-    const world = this.worldOf(e);
-    const frame = this.frameAt(world);
-    if (!frame) return;
-    const bridge = bridgeOf(frame.id);
-    const p = this.local(frame, world);
-    const hit = await bridge?.hit(p.x, p.y).catch(() => null);
-    if (!hit || !bridge) return;
-    const selected = selectionStore.get().find((s) => s.frameId === frame.id);
-    const sameEl = selected?.loc === hit.loc && (selected.index ?? 0) === hit.index;
-    // On the selected element: type into its text, when it holds only text.
-    if (sameEl) {
-      const inspection = await bridge.inspect(hit.loc, hit.index).catch(() => null);
-      if (inspection?.text !== undefined) {
-        return this.update({
-          editingText: {
-            frameId: frame.id,
-            loc: hit.loc,
-            index: hit.index,
-            rev: inspection.rev,
-            tag: inspection.tag,
-            rect: hit.rect,
-            text: inspection.text,
-            font: inspection.computed,
-          },
-        });
-      }
-    }
-    const next = drillInto(hit, selected?.loc);
-    if (!next) return;
-    const chain = chainOf(hit);
-    const i = chain.findIndex((c) => c.loc === next.loc);
-    const path = chain.slice(0, i).reverse();
-    const index = next.loc === hit.loc ? hit.index : 0;
-    selectionStore.set([this.selectHit(frame.id, next, index, path)]);
-  }
-
-  private clickInFrame(frame: Frame, hit: Hit | null, shift: boolean, deep: boolean) {
-    let item: SelectionItem = this.frameItem(frame.id);
-    const current = selectionStore.get();
-    if (hit) {
-      // A press on the selected element's ancestor chain keeps the selected one, unless ⌘.
-      const selectedInChain =
-        !deep &&
-        !shift &&
-        current.find(
-          (s) =>
-            s.frameId === frame.id &&
-            s.loc !== undefined &&
-            chainOf(hit).some((c) => c.loc === s.loc),
-        );
-      item = selectedInChain || this.selectHit(frame.id, hit, hit.index, hit.path);
-    }
-    selectionStore.set(shift ? toggleItem(current, item) : [item]);
-  }
-
-  // Gestures
-
-  private async beginMoveFrames(from: Point): Promise<Gesture | null> {
-    const ids = new Set(
-      selectionStore
-        .get()
-        .filter((s) => s.loc === undefined)
-        .map((s) => s.frameId),
-    );
-    const frames = this.canvas.frames.filter((f) => ids.has(f.id));
-    if (frames.length === 0) return null;
-    let d = { x: 0, y: 0 };
-    return {
-      move: (_, world) => {
-        d = { x: world.x - from.x, y: world.y - from.y };
-        const frameOverrides: Record<string, Rect> = {};
-        for (const f of frames) {
-          const b = this.boxOf({ ...f });
-          frameOverrides[f.id] = { ...b, x: Math.round(f.x + d.x), y: Math.round(f.y + d.y) };
-        }
-        this.update({ frameOverrides });
-      },
-      end: async (commit) => {
-        if (commit && (d.x !== 0 || d.y !== 0)) {
-          await this.patch({ op: "moveFrames", frames: movedFrames(frames, d) });
-        }
-        this.update({ frameOverrides: {} });
-      },
-    };
-  }
-
-  private async beginMoveText(id: string, from: Point): Promise<Gesture | null> {
-    const text = this.canvas.texts.find((t) => t.id === id);
-    if (!text) return null;
-    this.selectText(id);
-    let at = { x: text.x, y: text.y };
-    return {
-      move: (_, world) => {
-        at = { x: Math.round(text.x + world.x - from.x), y: Math.round(text.y + world.y - from.y) };
-        this.update({ textOverrides: { [id]: at } });
-      },
-      end: async (commit) => {
-        if (commit && (at.x !== text.x || at.y !== text.y)) {
-          await this.patch({ op: "setText", text: { ...text, ...at } });
-        }
-        this.update({ textOverrides: {} });
-      },
-    };
-  }
-
-  private async beginResize(key: string, handle: Handle, from: Point): Promise<Gesture | null> {
-    const item = selectionStore.get().find((s) => keyOf(s) === key);
-    const frame = item && this.frame(item.frameId);
-    if (!item || !frame) return null;
-    const zoom = () => this.camera.view.zoom;
-    if (item.loc === undefined) {
-      let d = { x: 0, y: 0 };
-      const start = this.boxOf(frame);
-      return {
-        move: (screen) => {
-          d = { x: (screen.x - from.x) / zoom(), y: (screen.y - from.y) / zoom() };
-          const r = resizedFrame({ ...frame, ...start }, handle, d);
-          this.update({ frameOverrides: { [frame.id]: r } });
-        },
-        end: async (commit) => {
-          if (commit && (d.x !== 0 || d.y !== 0)) {
-            await this.patch({
-              op: "resizeFrames",
-              frames: [resizedFrame({ ...frame, ...start }, handle, d)],
-            });
-          }
-          this.update({ frameOverrides: {} });
-          void this.refreshSelection();
-        },
-      };
-    }
-    const facts = this.facts.get(key);
-    const rect = this.state.rects[key];
-    const bridge = bridgeOf(frame.id);
-    if (!facts || !rect || !bridge) return null;
-    const el = { loc: item.loc, rev: facts.rev, tag: facts.tag };
-    let d = { x: 0, y: 0 };
-    return {
-      move: (screen) => {
-        d = { x: (screen.x - from.x) / zoom(), y: (screen.y - from.y) / zoom() };
-        bridge.preview(item.loc!, resizeStyles(rect, handle, d));
-        void bridge.rects([item.loc!]).then((r) => {
-          const now = r[item.loc!]?.[item.index ?? 0];
-          if (now) this.update({ rects: { ...this.state.rects, [key]: now } });
-        });
-      },
-      end: async (commit) => {
-        const edit = commit ? resizeEdit(el, rect, handle, d) : null;
-        if (edit) await this.edit([edit]);
-        else bridge.preview(item.loc!, null);
-        void this.refreshSelection();
-      },
-    };
-  }
-
-  /** A drag that starts inside a frame: reorders the selected element within its flex or grid parent. */
-  private async beginDragInFrame(
-    frame: Frame,
-    hit: Hit | null,
-    from: Point,
-    deep: boolean,
-  ): Promise<Gesture | null> {
-    const selected = selectionStore.get();
-    const frameSelected = selected.some((s) => s.loc === undefined && s.frameId === frame.id);
-    if (!hit) return frameSelected ? this.beginMoveFrames(from) : null;
-    const chain = chainOf(hit);
-    let item = deep
-      ? undefined
-      : selected.find(
-          (s) =>
-            s.frameId === frame.id && s.loc !== undefined && chain.some((c) => c.loc === s.loc),
-        );
-    if (!item) {
-      item = this.selectHit(frame.id, hit, hit.index, hit.path);
-      selectionStore.set([item]);
-    }
-    const bridge = bridgeOf(frame.id);
-    const facts = this.facts.get(keyOf(item));
-    if (!bridge || !facts || item.loc === undefined) return null;
-    const loc = item.loc;
-    const inspection = await bridge.inspect(loc, item.index ?? 0).catch(() => null);
-    const axis = inspection ? flowAxis(inspection.parent) : null;
-    if (!axis) {
-      this.say("Only children of a flex or grid layout can be dragged into a new order.");
-      return null;
-    }
-    const parent = facts.path[0];
-    const layers = await bridge.layers().catch(() => [] as LayerNode[]);
-    const siblingNodes = childrenIn(layers, parent ? { loc: parent.loc, index: 0 } : null) ?? [];
-    const locs = [...new Set(siblingNodes.map((n) => n.loc))];
-    const rects = await bridge.rects(locs).catch(() => ({}) as Record<string, Rect[]>);
-    const siblings = locs
-      .map((l) => ({ loc: l, rect: rects[l]?.[0] }))
-      .filter((s): s is { loc: Loc; rect: Rect } => s.rect !== undefined);
-    let before: Loc | null | undefined;
-    return {
-      move: (_, world) => {
-        const p = this.local(frame, world);
-        before = reorderBefore(loc, siblings, p, axis);
-        if (before === undefined) return this.update({ dropLine: null });
-        const target =
-          before === null ? siblings.at(-1)?.rect : siblings.find((s) => s.loc === before)?.rect;
-        if (!target) return this.update({ dropLine: null });
-        const edge = before === null;
-        const line =
-          axis === "x"
-            ? {
-                x: edge ? target.x + target.width : target.x,
-                y: target.y,
-                width: 0,
-                height: target.height,
-              }
-            : {
-                x: target.x,
-                y: edge ? target.y + target.height : target.y,
-                width: target.width,
-                height: 0,
-              };
-        this.update({ dropLine: { frameId: frame.id, rect: line } });
-      },
-      end: async (commit) => {
-        this.update({ dropLine: null });
-        if (!commit || before === undefined) return;
-        await this.edit([
-          { kind: "reorder", loc, tag: facts.tag, before, revs: revsOf([{ loc, rev: facts.rev }]) },
-        ]);
-      },
-    };
-  }
-
   // Comments
-
-  private async placeComment(world: Point, frame: Frame | null) {
-    if (!frame)
-      return this.update({ commentDraft: { anchor: { x: world.x, y: world.y }, at: world } });
-    const p = this.local(frame, world);
-    const hit = await bridgeOf(frame.id)
-      ?.hit(p.x, p.y)
-      .catch(() => null);
-    const b = this.boxOf(frame);
-    const anchor: CommentAnchor = hit
-      ? { frameId: frame.id, loc: hit.loc, index: hit.index }
-      : { frameId: frame.id };
-    const at = hit
-      ? { x: b.x + hit.rect.x + hit.rect.width, y: b.y + hit.rect.y }
-      : { x: b.x + b.width, y: b.y };
-    this.update({ commentDraft: { anchor, at }, openComment: null });
-  }
 
   // Keys
 
@@ -1095,67 +659,43 @@ export class CanvasEditor {
     ) {
       return;
     }
-    this.key(e);
+    this.key(e, "page");
   }
 
   /** A key pressed on the canvas, or forwarded by a frame's bridge. Returns whether it was used. */
-  key(
-    e: Pick<KeyboardEvent, "key" | "code" | "metaKey" | "ctrlKey" | "shiftKey" | "altKey"> & {
-      preventDefault?: () => void;
-      repeat?: boolean;
-    },
-  ): boolean {
-    const mod = e.metaKey || e.ctrlKey;
+  key(e: KeyInput, source: KeyEnv["source"]): boolean {
+    const editing = this.state.editingText !== null || this.state.editingLabel !== null;
     const done = () => {
       e.preventDefault?.();
       return true;
     };
-    if (e.code === "Space" && !mod) {
-      this.space = this.camera.space = true;
-      return done();
+    if (!editing && toolOf(this.state.tool).key?.(this, e)) return done();
+    const action = resolveKey(e, {
+      source,
+      interact: this.state.tool === "interact",
+      editing,
+      vector: false,
+    });
+    if (!action) return false;
+    if (action.kind === "tool") this.setTool(action.id);
+    else ALL_COMMANDS.find((c) => c.id === action.id)?.run(this);
+    return done();
+  }
+
+  /** Space-drag pans; the camera reads the same flag. */
+  setSpace(on: boolean) {
+    this.space = this.camera.space = on;
+  }
+
+  /** Backs out of whatever's open, one step at a time. */
+  escape() {
+    if (this.state.tool === "interact") return this.setTool("select");
+    if (this.state.commentDraft || this.state.openComment) {
+      return this.update({ commentDraft: null, openComment: null });
     }
-    if (e.key === "Escape") {
-      if (this.state.interact) return (this.setInteract(false), done());
-      if (this.state.commentDraft || this.state.openComment) {
-        return (this.update({ commentDraft: null, openComment: null }), done());
-      }
-      if (this.state.measure.pin) return (this.unpin(), done());
-      if (this.state.tool !== "select") return (this.setTool("select"), done());
-      if (this.state.selectedText) return (this.selectText(null), done());
-      return (this.selectParent(), done());
-    }
-    if (mod && e.key.toLowerCase() === "z") {
-      void this.undo(e.shiftKey ? "redo" : "undo");
-      return done();
-    }
-    // The measure tool hides the selection: these two would act on something unseen.
-    const measuring = this.state.tool === "measure";
-    if (mod && e.key.toLowerCase() === "d") {
-      if (!measuring) void this.duplicate();
-      return done();
-    }
-    if (mod && (e.key === "=" || e.key === "+")) return (this.camera.zoomBy(1.25), done());
-    if (mod && e.key === "-") return (this.camera.zoomBy(0.8), done());
-    if (mod && e.key === "0") return (this.camera.set({ ...this.camera.view, zoom: 1 }), done());
-    if (e.key === "Backspace" || e.key === "Delete") {
-      if (!measuring) void this.remove();
-      return done();
-    }
-    if (mod || e.altKey) return false;
-    if (e.shiftKey && e.code === "Digit1") return (this.fitAll(), done());
-    if (e.shiftKey && e.code === "Digit2") return (this.fitSelection(), done());
-    if (e.key === "c" || e.key === "C") return (this.setTool("comment"), done());
-    if (e.key === "v" || e.key === "V") return (this.setTool("select"), done());
-    if (e.key === "m" || e.key === "M") {
-      this.setInteract(false);
-      this.setTool("measure");
-      return done();
-    }
-    if (measuring && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
-      this.walk(e.key === "ArrowUp" ? 1 : -1);
-      return done();
-    }
-    return false;
+    if (this.state.tool !== "select") return this.setTool("select");
+    if (this.state.selectedText) return this.selectText(null);
+    this.selectParent();
   }
 
   fitAll() {
@@ -1307,10 +847,16 @@ export class CanvasEditor {
     this.update({ frameOverrides: box ? { [frameId]: box } : {} });
   }
 
-  /** Sends source edits; keeps the selection on the elements through `remap`, or says why not. */
-  async edit(edits: SourceEdit[]): Promise<boolean> {
+  /**
+   * Sends source edits; keeps the selection on the elements through `remap`, or says why not.
+   * `chain` is the stamped path to a new element's parent, outermost first, for the detach offer.
+   */
+  async edit(
+    edits: SourceEdit[],
+    chain?: readonly HitElement[],
+  ): Promise<{ created: Record<string, Loc> } | false> {
     try {
-      const { remap } = await finite.request("source.edit", {
+      const { remap, created } = await finite.request("source.edit", {
         designId: this.designId,
         canvasId: this.canvas.id,
         edits,
@@ -1323,13 +869,26 @@ export class CanvasEditor {
         if (facts) this.facts.set(keyOf(item), facts);
       });
       selectionStore.set(after);
-      return true;
+      return { created };
     } catch (e) {
       for (const el of this.selectedElements())
         bridgeOf(el.item.frameId)?.preview(el.item.loc, null);
-      this.refused(e, edits);
+      this.refused(e, edits, chain);
       return false;
     }
+  }
+
+  /** Adds a shape where `box` lands, or says why it can't. */
+  draw(input: { box: Rect; node: NewNode; deep?: boolean; alt?: boolean }): Promise<Placed | null> {
+    return draw(this, input);
+  }
+
+  bridge(frameId: string) {
+    return bridgeOf(frameId);
+  }
+
+  select(items: SelectionItem[]) {
+    selectionStore.set(items);
   }
 
   async patch(patch: CanvasPatch) {
@@ -1346,12 +905,12 @@ export class CanvasEditor {
     }
   }
 
-  private refused(e: unknown, edits: SourceEdit[]) {
+  private refused(e: unknown, edits: SourceEdit[], passed?: readonly HitElement[]) {
     if (errorCode(e) !== "outside-prototype") return this.say(errorText(e));
     const first = edits[0];
     const loc = first && ("loc" in first ? first.loc : first.locs[0]);
     const el = this.selectedElements().find((x) => x.item.loc === loc);
-    const chain = el ? [...el.facts.path].reverse() : [];
+    const chain = passed ?? (el ? [...el.facts.path].reverse() : []);
     const target = loc ? detachTarget(chain, loc) : null;
     if (!target) return this.say(errorText(e));
     this.say(errorText(e), {
@@ -1391,7 +950,7 @@ export class CanvasEditor {
       }
     }
     const c = this.camera.visibleWorld(0);
-    return { x: c.x + c.width / 2 - 150, y: c.y + c.height - 120 / this.camera.view.zoom };
+    return { x: c.x + c.width / 2 - 150, y: c.y + c.height - 190 / this.camera.view.zoom };
   }
 }
 
