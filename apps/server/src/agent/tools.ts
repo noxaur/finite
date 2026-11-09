@@ -54,8 +54,11 @@ export type CanvasContext = {
 
 export type ToolContext = CanvasContext & {
   threadId: string;
-  /** Allows production writes until the turn ends, and settles the thread if it succeeds. */
-  grantProdWrite(): void;
+  /**
+   * Allows production writes until the turn ends, and settles the thread if it succeeds.
+   * `toolUseId` is the call asking, which says whose turn the grant belongs to.
+   */
+  grantProdWrite(toolUseId: string | undefined): void;
   /** Starts a child thread with `prompt` as its first message. */
   spawn(prompt: string, canvasId: string | undefined): Promise<ThreadMeta>;
   /** Connects finite.json's apps, or refuses with what to fix; then starts the next preview. */
@@ -737,9 +740,9 @@ export function canvasServer(ctx: ToolContext) {
       "move_to_prod",
       "Call only when a person asks to move, ship or get these frames to production. Allows Write/Edit on production files until this turn ends; then edit production to match the frames in production's conventions. The thread settles when the turn succeeds.",
       canvasTools.move_to_prod,
-      async ({ frameIds }) => {
+      async ({ frameIds }, extra) => {
         const frames = await Promise.all(frameIds.map(ops.findFrame));
-        ctx.grantProdWrite();
+        ctx.grantProdWrite(toolUseIdOf(extra));
         return json({
           allowed: "Production Write/Edit is on until this turn ends.",
           frames: frames.map(({ frame }) => ({
@@ -833,16 +836,22 @@ function safeTool<S extends AnyZodRawShape>(
   name: string,
   description: string,
   shape: S,
-  handler: (args: InferShape<S>) => Promise<CallToolResult>,
+  handler: (args: InferShape<S>, extra: unknown) => Promise<CallToolResult>,
 ) {
-  return tool(name, description, shape, async (args) => {
+  return tool(name, description, shape, async (args, extra) => {
     try {
-      return await handler(args);
+      return await handler(args, extra);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return { ...text(message), isError: true };
     }
   });
+}
+
+/** The id Claude Code gives a tool call: the same as its `tool_use` block's in the stream. */
+function toolUseIdOf(extra: unknown): string | undefined {
+  const id = (extra as { _meta?: Record<string, unknown> })._meta?.["claudecode/toolUseId"];
+  return typeof id === "string" ? id : undefined;
 }
 
 function text(value: string): CallToolResult {
