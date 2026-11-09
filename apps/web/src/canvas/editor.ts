@@ -950,10 +950,9 @@ export class CanvasEditor implements ToolHost {
       if (!now)
         return keep(target.rev, "That text moved. Copy your words, press Esc, and open it again.");
       if (now.identity !== target.identity) return this.notSaved(content);
-      // An atom is a place in `keeps`: under a new list the words would name other expressions.
-      if (content.some((item) => item.t === "atom") && !sameKeeps(now.keeps, editing.keeps)) {
-        return this.notSaved(content);
-      }
+      // An atom is a place in `keeps`: under a new list the words would name other expressions,
+      // or drop one written since.
+      if (!sameKeeps(now.keeps, editing.keeps)) return this.notSaved(content);
       const changed = "That text changed while you typed. Enter replaces it; Esc drops your words.";
       if (!sameContent(normalize(now.content), normalize(editing.content))) {
         return keep(now.rev, changed);

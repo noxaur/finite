@@ -368,6 +368,21 @@ describe("typed text when the file changes under it", () => {
     editor.dispose();
   });
 
+  it("doesn't drop an expression written since, when the words deleted the old one", async () => {
+    const keep = (label: string) => ({ id: 0, kind: "expression", label });
+    const atom = [...words("Hello "), { t: "atom" as const, id: 0 }];
+    const edits = serverWith(
+      () => ({ rev: "new", content: atom, keeps: [keep("balance")], identity: "the paragraph" }),
+      1,
+    );
+    const { editor } = editorOnViewport();
+    editor.update({ editingText: { ...edit, content: atom, keeps: [keep("name")] } });
+    await editor.finishText(words("Hello"));
+    expect(edits()).toHaveLength(1);
+    expect(editor.state.notice?.text).toContain("Hello");
+    editor.dispose();
+  });
+
   it("keeps the words without writing when another element took the same place", async () => {
     const edits = serverWith(
       () => ({ rev: "new", content: words("Agent's"), keeps: [], identity: "another paragraph" }),
