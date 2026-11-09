@@ -253,6 +253,40 @@ describe("hub", () => {
     });
   });
 
+  describe("GET /api/designs/:id/icon", () => {
+    async function icon(id: string, root?: string) {
+      await start(root ? { designs: async () => [{ ...designs[0]!, root }] } : {});
+      return fetch(`${running!.url}/api/designs/${id}/icon`);
+    }
+
+    it("streams the app's icon with headers that lock down a direct visit", async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "finite-http-icon-"));
+      try {
+        await fs.mkdir(path.join(dir, "public"));
+        await fs.writeFile(path.join(dir, "public/favicon.svg"), "<svg/>");
+        const res = await icon("d1", dir);
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-type")).toBe("image/svg+xml");
+        expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+        expect(res.headers.get("cache-control")).toBe("no-cache");
+        expect(res.headers.get("content-security-policy")).toContain("sandbox");
+        expect(await res.text()).toBe("<svg/>");
+      } finally {
+        await fs.rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("answers 204 with no body when the app has no icon", async () => {
+      const res = await icon("d1", path.join(os.tmpdir(), "finite-no-such-app"));
+      expect(res.status).toBe(204);
+      expect(await res.text()).toBe("");
+    });
+
+    it("answers 404 for an unknown design", async () => {
+      expect((await icon("nope")).status).toBe(404);
+    });
+  });
+
   it("refuses a socket from another site", async () => {
     const client = connect(await start(), "https://evil.example");
     await expect(client.opened).rejects.toThrow("HTTP 403");

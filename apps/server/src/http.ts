@@ -5,6 +5,7 @@ import { Refused } from "@finite/protocol";
 import busboy from "busboy";
 import { zipSync } from "fflate";
 import type { Hub, Modules } from "./hub.ts";
+import { findAppIcon } from "./store/appIcon.ts";
 
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
@@ -51,6 +52,30 @@ export function createHttpHandler(hub: Hub, modules: Modules, staticDir: string 
           "content-disposition": `attachment; filename="${safeName(canvas.name)}.zip"`,
         });
         res.end(zip);
+      },
+    ],
+    // GET /api/designs/:id/icon: the connected app's own icon (see `findAppIcon`), or 204 when it
+    // has none, so an <img> errors without the browser logging a 404.
+    [
+      "GET",
+      /^\/api\/designs\/([^/]+)\/icon$/,
+      async (_req, res, _url, [designId]) => {
+        const design = (await modules.store.designs()).find((d) => d.id === designId);
+        if (!design) throw new Refused(`no design ${designId}`, "not-found");
+        const file = await findAppIcon(design.root);
+        if (!file) {
+          res.writeHead(204);
+          return void res.end();
+        }
+        // The SVG comes from an untrusted repo and could be opened directly on this origin.
+        res.writeHead(200, {
+          "content-type": types[path.extname(file).toLowerCase()] ?? "application/octet-stream",
+          "cache-control": "no-cache",
+          "x-content-type-options": "nosniff",
+          "content-security-policy":
+            "default-src 'none'; style-src 'unsafe-inline'; img-src data:; sandbox",
+        });
+        fs.createReadStream(file).pipe(res);
       },
     ],
   ];
@@ -133,6 +158,7 @@ const types: Record<string, string> = {
   ".svg": "image/svg+xml",
   ".png": "image/png",
   ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
   ".webp": "image/webp",
   ".woff2": "font/woff2",
   ".wasm": "application/wasm",
