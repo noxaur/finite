@@ -2,14 +2,16 @@
 
 import * as stylex from "@stylexjs/stylex";
 import type { Frame, Inspection, Token } from "@finite/protocol";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { bridgeOf } from "@/canvas/bridge";
 import { finite } from "@/client/finite";
 import { type CanvasEditor, useActiveEditor, useEditorState } from "@/canvas/editor";
 import { baseName, fileOf } from "@/canvas/gestures";
+import { soleStampedPath } from "@/canvas/layers";
 import { keyOf, type SelectionItem, useSelection } from "@/canvas/selection";
 import { radiusOf } from "@/design/editing/appearance";
 import { routeStyles } from "@/design/editing/inspect";
+import { paintTargets } from "@/design/editing/svgPaint";
 import type { TokenTable } from "@/design/types";
 import { colors, fonts, size, space } from "@/styles/tokens.stylex";
 import { IconButton } from "../Button";
@@ -54,8 +56,6 @@ const CORNERS = [
 const camel = (prop: string) => prop.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
 
 /** A `CSSStyleDeclaration` the fields can read, from what the bridge measured (camelCase keys). */
-const SVG_SHAPES = new Set(["path", "rect", "circle", "ellipse", "line", "polyline", "polygon"]);
-
 function declaration(computed: Readonly<Record<string, string>>): CSSStyleDeclaration {
   const own = (prop: string) => computed[prop] ?? computed[camel(prop)] ?? "";
   // The bridge measures the corners; the radius field reads them as one, like `rounded-card`.
@@ -71,7 +71,12 @@ function declaration(computed: Readonly<Record<string, string>>): CSSStyleDeclar
   });
 }
 
-type Inspected = { item: SelectionItem & { loc: string }; inspection: Inspection };
+type Inspected = {
+  item: SelectionItem & { loc: string };
+  inspection: Inspection;
+  /** What Fill and Stroke edit in its place: an `<svg>`'s one stamped `<path>`. */
+  paint?: Inspected;
+};
 
 /** What the bridge says about each selected element, measured again after every frame update. */
 function useInspections(items: readonly SelectionItem[], updates: number): Inspected[] | null {
@@ -81,11 +86,24 @@ function useInspections(items: readonly SelectionItem[], updates: number): Inspe
     let live = true;
     const els = items.filter((i): i is SelectionItem & { loc: string } => i.loc !== undefined);
     void Promise.all(
-      els.map(async (item) => {
-        const inspection = await bridgeOf(item.frameId)
-          ?.inspect(item.loc, item.index ?? 0)
-          .catch(() => null);
-        return inspection ? { item, inspection } : null;
+      els.map(async (item): Promise<Inspected | null> => {
+        const bridge = bridgeOf(item.frameId);
+        const inspection = await bridge?.inspect(item.loc, item.index ?? 0).catch(() => null);
+        if (!bridge || !inspection) return null;
+        if (inspection.tag !== "svg") return { item, inspection };
+        const layers = await bridge.layers().catch(() => []);
+        const path = soleStampedPath(layers, item.loc, item.index ?? 0);
+        const found = path && (await bridge.inspect(path.loc, path.index).catch(() => null));
+        return path && found
+          ? {
+              item,
+              inspection,
+              paint: {
+                item: { frameId: item.frameId, loc: path.loc, index: path.index },
+                inspection: found,
+              },
+            }
+          : { item, inspection };
       }),
     ).then((all) => {
       if (live) setFound(all.filter((x): x is Inspected => x !== null));
@@ -207,7 +225,23 @@ function ElementPanel({
   inspected: Inspected[];
   tokens: TokenTable;
 }) {
-  const byId = new Map(inspected.map((x) => [keyOf(x.item), x]));
+  const { targets: painted, vector } = paintTargets(inspected);
+  const byId = new Map([...inspected, ...painted].map((x) => [keyOf(x.item), x]));
+  const standIns = useRef<Parameters<CanvasEditor["styleEdits"]>[1]>([]);
+  standIns.current = vector
+    ? inspected.flatMap((x) =>
+        x.paint
+          ? [
+              {
+                of: x.item,
+                loc: x.paint.item.loc,
+                rev: x.paint.inspection.rev,
+                tag: x.paint.inspection.tag,
+              },
+            ]
+          : [],
+      )
+    : [];
   const styleEditor = useMemo(
     () =>
       createStyleEditor(
@@ -215,17 +249,12 @@ function ElementPanel({
           const x = byId.get(id);
           return x && { frameId: x.item.frameId, loc: x.item.loc };
         },
-        (groups) => editor.styleEdits(groups),
+        (groups) => editor.styleEdits(groups, standIns.current),
       ),
     // A new selection makes a new editor; within one, the locs stay put.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [editor, inspected.map((x) => keyOf(x.item)).join(" ")],
+    [editor, [...inspected, ...painted].map((x) => keyOf(x.item)).join(" ")],
   );
-  const targets: Target[] = inspected.map((x) => ({
-    id: keyOf(x.item),
-    parent: `${keyOf(x.item)}^`,
-    styles: {},
-  }));
   const computedOf = (id: string) => {
     if (id.endsWith("^")) {
       const p = byId.get(id.slice(0, -1))?.inspection.parent;
@@ -234,34 +263,45 @@ function ElementPanel({
     const x = byId.get(id);
     return x ? declaration(x.inspection.computed) : null;
   };
-  const editsEach = (changes: (target: Target) => Changes): StyleEdit[] => {
-    // Targets that write the same styles share one edit.
-    const groups = new Map<string, { ids: string[]; styles: Changes }>();
-    for (const t of targets) {
-      const routed = routeStyles(t.styles, changes(t));
-      const key = JSON.stringify(routed);
-      const group = groups.get(key);
-      if (group) group.ids.push(t.id);
-      else groups.set(key, { ids: [t.id], styles: routed });
-    }
-    return [...groups.values()].map((g) => ({ kind: "setStyles", ...g }));
+  const scopeOf = (list: readonly Inspected[]): Scope => {
+    const targets: Target[] = list.map((x) => ({
+      id: keyOf(x.item),
+      parent: `${keyOf(x.item)}^`,
+      styles: {},
+    }));
+    const editsEach = (changes: (target: Target) => Changes): StyleEdit[] => {
+      // Targets that write the same styles share one edit.
+      const groups = new Map<string, { ids: string[]; styles: Changes }>();
+      for (const t of targets) {
+        const routed = routeStyles(t.styles, changes(t));
+        const key = JSON.stringify(routed);
+        const group = groups.get(key);
+        if (group) group.ids.push(t.id);
+        else groups.set(key, { ids: [t.id], styles: routed });
+      }
+      return [...groups.values()].map((g) => ({ kind: "setStyles", ...g }));
+    };
+    const edits = (changes: Changes) => editsEach(() => changes);
+    const [first] = targets;
+    return {
+      targets,
+      text: list.every((x) => x.inspection.text !== undefined),
+      vector,
+      computed: first ? computedOf(first.id) : null,
+      computedOf,
+      tokens,
+      mode: "light",
+      editor: styleEditor,
+      edits,
+      editsEach,
+      commit: (changes) => void styleEditor.commit(edits(changes)),
+      commitEach: (changes) => void styleEditor.commit(editsEach(changes)),
+    };
   };
-  const edits = (changes: Changes) => editsEach(() => changes);
+  const scope = scopeOf(inspected);
+  const paintScope = vector ? scopeOf(painted) : scope;
+  const { targets } = scope;
   const [first] = targets;
-  const scope: Scope = {
-    targets,
-    text: inspected.every((x) => x.inspection.text !== undefined),
-    vector: inspected.every((x) => SVG_SHAPES.has(x.inspection.tag)),
-    computed: first ? computedOf(first.id) : null,
-    computedOf,
-    tokens,
-    mode: "light",
-    editor: styleEditor,
-    edits,
-    editsEach,
-    commit: (changes) => void styleEditor.commit(edits(changes)),
-    commitEach: (changes) => void styleEditor.commit(editsEach(changes)),
-  };
   const one = inspected.length === 1 ? inspected[0] : undefined;
   const rect = one && editor.state.rects[keyOf(one.item)];
   const geometry = one && first && rect ? geometryOf(first, rect) : null;
@@ -270,8 +310,8 @@ function ElementPanel({
   return (
     <div key={key}>
       <LayoutSection scope={scope} editor={styleEditor} geometry={geometry} />
-      <FillSection scope={scope} />
-      <StrokeSection scope={scope} />
+      <FillSection scope={paintScope} />
+      <StrokeSection scope={paintScope} />
       <RadiusSection scope={scope} />
       <AppearanceSection scope={scope} />
       <EffectsSection scope={scope} />

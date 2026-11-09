@@ -10,15 +10,32 @@ export type Anchor = { p: Point; in: Point | null; out: Point | null; mode: Hand
 
 export type SubPath = { anchors: Anchor[]; closed: boolean };
 
-const EPSILON = 1e-3;
+/** How close two points of a subpath count as one, as a fraction of its span. */
+const SAME_POINT = 1e-6;
 /** How far from opposite two handles can be and still count as mirrored: the sine of the angle. */
 const COLLINEAR = 0.02;
 const NUMBER = /[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?/y;
 
-const near = (a: Point, b: Point, within = EPSILON) =>
+const near = (a: Point, b: Point, within: number) =>
   Math.abs(a.x - b.x) <= within && Math.abs(a.y - b.y) <= within;
 
-const noHandle = (h: Point | null, p: Point) => (h && near(h, p) ? null : h);
+/** The wider of a subpath's two spans, control points included. */
+function spanOf(s: SubPath): number {
+  let left = Infinity;
+  let right = -Infinity;
+  let top = Infinity;
+  let bottom = -Infinity;
+  for (const a of s.anchors) {
+    for (const p of [a.p, a.in, a.out]) {
+      if (!p) continue;
+      left = Math.min(left, p.x);
+      right = Math.max(right, p.x);
+      top = Math.min(top, p.y);
+      bottom = Math.max(bottom, p.y);
+    }
+  }
+  return left === Infinity ? 0 : Math.max(right - left, bottom - top);
+}
 
 /** The handle mode two handles show: collinear means mirrored, and equal length means by length too. */
 export function deriveMode(a: Pick<Anchor, "p" | "in" | "out">): HandleMode {
@@ -97,15 +114,7 @@ export function parsePath(d: string): SubPath[] {
     };
     const type = command.toUpperCase();
     if (type === "Z") {
-      if (sub) {
-        const anchors: Anchor[] = (sub as SubPath).anchors;
-        const last = anchors[anchors.length - 1]!;
-        if (anchors.length > 1 && near(last.p, anchors[0]!.p)) {
-          anchors[0]!.in = last.in;
-          anchors.pop();
-        }
-        (sub as SubPath).closed = true;
-      }
+      if (sub) (sub as SubPath).closed = true;
       sub = null;
       cur = start;
       lastCubic = lastQuad = null;
@@ -165,9 +174,11 @@ export function parsePath(d: string): SubPath[] {
         const sweep = flag();
         const to = point();
         const from = cur;
-        if (near(from, to)) continue;
-        for (const seg of arcToCubics(from, rx, ry, rotation, large, sweep, to)) {
-          cubic(seg.c1, seg.c2, seg.to);
+        // The spec omits an arc only when its endpoints are identical.
+        if (from.x !== to.x || from.y !== to.y) {
+          for (const seg of arcToCubics(from, rx, ry, rotation, large, sweep, to)) {
+            cubic(seg.c1, seg.c2, seg.to);
+          }
         }
       }
       if (type !== "C" && type !== "S") lastCubic = null;
@@ -177,13 +188,20 @@ export function parsePath(d: string): SubPath[] {
     skip();
   }
 
-  const kept = paths.filter((s) => s.anchors.length > 1);
-  for (const s of kept) {
-    for (const a of s.anchors) {
-      a.in = noHandle(a.in, a.p);
-      a.out = noHandle(a.out, a.p);
+  const kept: SubPath[] = [];
+  for (const s of paths) {
+    const within = spanOf(s) * SAME_POINT;
+    const { anchors } = s;
+    if (s.closed && anchors.length > 1 && near(anchors.at(-1)!.p, anchors[0]!.p, within)) {
+      anchors[0]!.in = anchors.pop()!.in;
+    }
+    for (const a of anchors) {
+      a.in = a.in && near(a.in, a.p, within) ? null : a.in;
+      a.out = a.out && near(a.out, a.p, within) ? null : a.out;
       a.mode = deriveMode(a);
     }
+    // One anchor is still a shape when it holds a curve from itself back to itself.
+    if (anchors.length > 1 || anchors[0]?.in || anchors[0]?.out) kept.push(s);
   }
   return kept;
 }
@@ -254,31 +272,39 @@ function arcToCubics(
   return out;
 }
 
-const num = (v: number) => {
-  const r = Math.round(v * 100) / 100;
-  return Object.is(r, -0) ? "0" : String(r);
-};
-const pair = (p: Point) => `${num(p.x)} ${num(p.y)}`;
+type Print = (p: Point) => string;
 
-function segment(a: Anchor, b: Anchor): string {
+/** Prints points to two decimals, or more on a subpath too small for two to hold its shape. */
+function printerFor(span: number): Print {
+  const places = span > 0 ? Math.max(2, Math.ceil(-Math.log10(span)) + 2) : 2;
+  const factor = 10 ** Math.min(places, 12);
+  const num = (v: number) => {
+    const r = Math.round(v * factor) / factor;
+    return Object.is(r, -0) ? "0" : String(r);
+  };
+  return (p) => `${num(p.x)} ${num(p.y)}`;
+}
+
+function segment(a: Anchor, b: Anchor, pair: Print): string {
   if (!a.out && !b.in) return `L${pair(b.p)}`;
   return `C${pair(a.out ?? a.p)} ${pair(b.in ?? b.p)} ${pair(b.p)}`;
 }
 
-/** Absolute M, L, C and Z, to two decimals. */
+/** Absolute M, L, C and Z. Each subpath picks its own decimals, so an edit can't round another. */
 export function printPath(paths: readonly SubPath[]): string {
   return paths
     .map((s) => {
       const [head, ...rest] = s.anchors;
       if (!head) return "";
+      const pair = printerFor(spanOf(s));
       let out = `M${pair(head.p)}`;
       let prev = head;
       for (const a of rest) {
-        out += segment(prev, a);
+        out += segment(prev, a, pair);
         prev = a;
       }
       if (!s.closed) return out;
-      if (prev.out || head.in) out += segment(prev, head);
+      if (prev.out || head.in) out += segment(prev, head, pair);
       return `${out}Z`;
     })
     .join("");

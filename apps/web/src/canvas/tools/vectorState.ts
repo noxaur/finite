@@ -73,13 +73,31 @@ let queue: Promise<void> = Promise.resolve();
 let pending = 0;
 export const editPending = () => pending > 0;
 
+type Target = Pick<VectorEditing, "frameId" | "loc" | "index">;
+
+/** Whether vector edit is still on the path an edit was made on. */
+const editingNow = (t: Target) => {
+  const s = vectorEditing.get();
+  return s !== null && s.frameId === t.frameId && s.loc === t.loc && s.index === t.index;
+};
+
+/** The rev to send with an edit: the session's, or the frame's once vector edit has moved on. */
+async function revOf(host: ToolHost, t: Target, fallback: string) {
+  if (editingNow(t)) return vectorEditing.get()!.rev;
+  const now = await host
+    .bridge(t.frameId)
+    ?.inspect(t.loc, t.index)
+    .catch(() => null);
+  return now?.rev ?? fallback;
+}
+
 /** Waits for the frame to show a new rev after an edit, and takes it. */
-async function landed(host: ToolHost, s: VectorEditing, before: string) {
-  const bridge = host.bridge(s.frameId);
+async function landed(host: ToolHost, t: Target, before: string) {
+  const bridge = host.bridge(t.frameId);
   for (const end = performance.now() + LANDING_MS; performance.now() < end;) {
-    const now = await bridge?.inspect(s.loc, s.index).catch(() => null);
+    const now = await bridge?.inspect(t.loc, t.index).catch(() => null);
     if (now && now.rev !== before) {
-      if (vectorEditing.get()?.loc === s.loc) update({ rev: now.rev });
+      if (editingNow(t)) update({ rev: now.rev });
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, LANDING_STEP_MS));
@@ -96,20 +114,21 @@ export function commit(host: ToolHost, paths: SubPath[], picked: Ref[]) {
   if (d === s.printed) return host.bridge(s.frameId)?.preview(s.loc, null);
   update({ printed: d });
   pending++;
+  const target: Target = { frameId: s.frameId, loc: s.loc, index: s.index };
   queue = queue.then(async () => {
     try {
-      const now = vectorEditing.get() ?? s;
+      const rev = await revOf(host, target, s.rev);
       const done = await host.edit([
         {
           kind: "attr",
-          loc: now.loc,
+          loc: target.loc,
           name: "d",
           value: d,
-          revs: revsOf([{ loc: now.loc, rev: now.rev }]),
+          revs: revsOf([{ loc: target.loc, rev }]),
         },
       ]);
-      if (done) await landed(host, now, now.rev);
-      else host.bridge(now.frameId)?.preview(now.loc, null);
+      if (done) await landed(host, target, rev);
+      else host.bridge(target.frameId)?.preview(target.loc, null);
     } finally {
       pending--;
     }

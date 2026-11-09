@@ -305,7 +305,9 @@ export function deleteAnchors(paths: readonly SubPath[], refs: readonly Ref[]): 
   const next = clone(paths);
   const gone = new Set(refs.map((r) => `${r.sub}:${r.i}`));
   return next.flatMap((s, si): SubPath[] => {
+    const before = s.anchors.length;
     s.anchors = s.anchors.filter((_, i) => !gone.has(`${si}:${i}`));
+    if (s.anchors.length === before) return [s];
     if (s.anchors.length < 2) return [];
     if (s.closed && s.anchors.length === 2 && !s.anchors.some((a) => a.in || a.out)) {
       s.closed = false;
