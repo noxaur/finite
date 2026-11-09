@@ -576,10 +576,21 @@ function reorder(s: StepCtx, element: Element, beforeKey: string | null): void {
   s.ms.move(from.start, from.end, slot(parent, before.node).start);
 }
 
+/** Whether an attribute's value is literal text, so writing over it loses no code. */
+function isLiteralValue(attr: t.JSXAttribute): boolean {
+  const value = attr.value;
+  if (!value || value.type === "StringLiteral") return true;
+  if (value.type !== "JSXExpressionContainer") return false;
+  const e = value.expression;
+  return e.type === "StringLiteral" || (e.type === "TemplateLiteral" && e.expressions.length === 0);
+}
+
 function attr(s: StepCtx, el: t.JSXElement, name: string, value: string | null): void {
   if (!/^[A-Za-z_][\w:.-]*$/.test(name))
     throw new Refused(`${name} isn't an attribute name`, "invalid");
   const existing = attribute(el, name);
+  if (existing && !isLiteralValue(existing))
+    throw new Refused("This value comes from code. Ask the agent.", "invalid");
   const attrs = el.openingElement.attributes;
   if (value === null) {
     if (!existing) return;

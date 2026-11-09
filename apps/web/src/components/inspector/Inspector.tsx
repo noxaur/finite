@@ -54,6 +54,8 @@ const CORNERS = [
 const camel = (prop: string) => prop.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
 
 /** A `CSSStyleDeclaration` the fields can read, from what the bridge measured (camelCase keys). */
+const SVG_SHAPES = new Set(["path", "rect", "circle", "ellipse", "line", "polyline", "polygon"]);
+
 function declaration(computed: Readonly<Record<string, string>>): CSSStyleDeclaration {
   const own = (prop: string) => computed[prop] ?? computed[camel(prop)] ?? "";
   // The bridge measures the corners; the radius field reads them as one, like `rounded-card`.
@@ -249,6 +251,7 @@ function ElementPanel({
   const scope: Scope = {
     targets,
     text: inspected.every((x) => x.inspection.text !== undefined),
+    vector: inspected.every((x) => SVG_SHAPES.has(x.inspection.tag)),
     computed: first ? computedOf(first.id) : null,
     computedOf,
     tokens,

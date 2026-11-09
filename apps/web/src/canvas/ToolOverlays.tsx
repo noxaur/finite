@@ -4,10 +4,11 @@ import * as stylex from "@stylexjs/stylex";
 import { colors } from "@/styles/tokens.stylex";
 import type { CanvasEditor, EditorState } from "./editor";
 import { toolOf } from "./tools/registry";
+import { VECTOR_OVERLAYS } from "./tools/VectorOverlay";
 
 /** What tools draw over the frames: the shape being dragged out, and the current tool's own overlay. */
 export function ToolOverlays({ editor, state }: { editor: CanvasEditor; state: EditorState }) {
-  const Overlay = toolOf(state.tool).Overlay;
+  const Overlay = toolOf(state.tool).Overlay ?? VECTOR_OVERLAYS[state.tool];
   const ghost = state.ghost;
   return (
     <>

@@ -17,6 +17,8 @@ export interface Scope {
   readonly targets: ReadonlyArray<Node>;
   /** Whether every target is a text layer, so a drop shadow writes `text-shadow`. */
   readonly text: boolean;
+  /** Whether every target is an SVG shape, whose paint is `fill` and `stroke` rather than a box's. */
+  readonly vector: boolean;
   /** The browser's styles on the first target, where they can be read. */
   readonly computed: CSSStyleDeclaration | null;
   /** The browser's styles on any node, like a target's parent, where they can be read. */

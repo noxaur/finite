@@ -12,7 +12,7 @@ import { section } from "./section";
 import { arrow, ellipse, frame, image, line, polygon, rectangle, star } from "./shapes";
 import { slice } from "./slice";
 import { text, textOnPath } from "./text";
-import { vectorCommands } from "./vectorEdit";
+import { vectorCommands, vectorEdit } from "./vectorEdit";
 
 export type { KeyEnv } from "./commands";
 
@@ -34,6 +34,7 @@ export const TOOLS = [
   image,
   pen,
   pencil,
+  vectorEdit,
   text,
   textOnPath,
   comment,
@@ -59,7 +60,7 @@ export const GROUPS: readonly ToolGroup[] = ["move", "frame", "shape", "pen", "t
 
 /** The enabled tools of a group, in registry order. */
 export function toolsIn(group: ToolGroup): ToolDef[] {
-  return TOOLS.filter((t) => t.group === group && t.enabled);
+  return (TOOLS as readonly ToolDef[]).filter((t) => t.group === group && t.enabled && !t.hidden);
 }
 
 export type KeyAction = { kind: "tool"; id: ToolId } | { kind: "command"; id: string };

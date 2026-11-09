@@ -16,6 +16,7 @@ import {
 import { childrenIn } from "../layers";
 import { keyOf, type SelectionItem, selectionStore, toggleItem } from "../selection";
 import type { Gesture, ToolDef, ToolHost } from "./host";
+import { enterVector } from "./vectorEdit";
 
 /** What a press landed on, read off the DOM it hit. */
 export function pressTargets(target: Element | null) {
@@ -101,6 +102,10 @@ async function onDoubleClick(host: ToolHost, e: MouseEvent, target: Element | nu
   const p = host.local(frame, world);
   const hit = await bridge?.hit(p.x, p.y).catch(() => null);
   if (!hit || !bridge) return;
+  if (hit.tag === "path") {
+    selectionStore.set([host.selectHit(frame.id, hit, hit.index, hit.path)]);
+    return enterVector(host, frame.id, hit.loc, hit.index);
+  }
   const selected = selectionStore.get().find((s) => s.frameId === frame.id);
   const sameEl = selected?.loc === hit.loc && (selected.index ?? 0) === hit.index;
   // On the selected element: type into its text, when it holds only text.

@@ -235,6 +235,7 @@ export class CanvasEditor implements ToolHost {
   setTool(id: string) {
     const tool = toolOf(id);
     if (!tool.enabled) return;
+    toolOf(this.state.tool).deactivate?.(this);
     this.update({ tool: tool.id as ToolId, commentDraft: null, hover: null, ghost: null });
     tool.activate?.(this);
   }
@@ -651,7 +652,7 @@ export class CanvasEditor implements ToolHost {
       source,
       interact: this.state.tool === "interact",
       editing,
-      vector: false,
+      vector: this.state.tool === "vectorEdit",
     });
     if (!action) return false;
     if (action.kind === "tool") this.setTool(action.id);
