@@ -667,6 +667,86 @@ describe("insert", () => {
     expect(refused(run(APP, [root]))).toMatchObject({ code: "unsupported-style" });
   });
 
+  describe("beside an element a list renders", () => {
+    const LIST = `const items = ["a"];\nexport const A = () => (\n  <main>\n    {items.map((n) => (\n      <div key={n}>{n}</div>\n    ))}\n  </main>\n);\n`;
+    const item = { ...insert("before"), loc: `${FILE}:5:6`, tag: "div" };
+
+    it("goes before the {…} slot that renders it", () => {
+      const out = ok(run(LIST, [item]));
+      expect(out.code).toContain(`bg-[#d9d9d9]" />\n    {items.map((n) => (`);
+      expect(out.created).toEqual({ r: `${FILE}:4:4` });
+    });
+
+    it("goes after the slot, through a block body too", () => {
+      const block = LIST.replace(
+        "(n) => (\n      <div key={n}>{n}</div>\n    )",
+        "(n) => {\n      return <div key={n}>{n}</div>;\n    }",
+      );
+      const out = ok(run(block, [{ ...item, place: "after", loc: `${FILE}:5:13` }])).code;
+      expect(out).toContain(`})}\n    <div data-name="Rectangle"`);
+    });
+
+    it("still refuses a component root and an element inside a prop", () => {
+      const prop = `export const A = () => (\n  <main>\n    <X render={() => <div />} />\n  </main>\n);\n`;
+      expect(refused(run(prop, [{ ...item, loc: `${FILE}:3:21` }])).code).toBe("unsupported-style");
+    });
+  });
+
+  describe("values that would break out of the source", () => {
+    const noClass = `export const A = () => (\n  <div>\n    <p>x</p>\n  </div>\n);\n`;
+
+    it("keeps a double quote inside a new className", () => {
+      const out = ok(
+        run(noClass, [
+          {
+            kind: "style",
+            locs: [`${FILE}:3:4`],
+            tag: "p",
+            styles: { width: '10px"{...{onClick:()=>alert(1)}}data-x="' },
+          },
+        ]),
+      );
+      expect(out.code).toMatch(/<p className="[^"]*">x<\/p>/);
+    });
+
+    it('writes font-family: "Inter" as a class', () => {
+      const node = { tag: "div", styles: { "font-family": '"Inter"' } };
+      expect(ok(run(APP, [insert("end", node)])).code).toContain(
+        `className="font-[family-name:'Inter']"`,
+      );
+    });
+
+    it("prints name, attributes and text as data", () => {
+      const evil = '"{...{onClick:alert}}x="';
+      const node = { tag: "div", name: evil, attrs: { title: evil }, text: `{alert(1)}<b/>` };
+      const out = ok(run(APP, [insert("end", node)])).code;
+      expect(out).not.toMatch(/\{\.\.\.\{onClick:alert\}\}x=""/);
+      expect(out).toContain(`data-name={${JSON.stringify(evil)}}`);
+      expect(out).toContain(`title={${JSON.stringify(evil)}}`);
+      expect(out).toContain(`>{${JSON.stringify("{alert(1)}<b/>")}}</div>`);
+    });
+
+    it("refuses a tag, a style name or a CSS value that isn't one", () => {
+      for (const node of [
+        { tag: "div onClick" },
+        { tag: "div", styles: { "a: alert(1), b": "x" } },
+        { tag: "div", styles: { color: "red; } .x { color: blue" } },
+      ]) {
+        for (const convention of conventions) {
+          expect(refused(run(APP, [insert("end", node)], convention)).code).toBe("invalid");
+        }
+      }
+    });
+
+    it("lets a semicolon through inside a string or url()", () => {
+      const node = {
+        tag: "div",
+        styles: { "background-image": 'url("data:image/png;base64,AA==")' },
+      };
+      expect(ok(run(APP, [insert("end", node)], "inline")).code).toContain("base64,AA==");
+    });
+  });
+
   it("refuses attributes a string can't set", () => {
     for (const name of ["onClick", "className", "style", "dangerouslySetInnerHTML"]) {
       const node = { tag: "div", attrs: { [name]: "x" } };

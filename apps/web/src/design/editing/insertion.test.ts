@@ -99,6 +99,41 @@ describe("planInsert", () => {
     });
   });
 
+  it.each(["table", "thead", "tbody", "tfoot", "tr", "colgroup"])(
+    "skips %s, where the parser would move a div out",
+    (tag) => {
+      const chain = [node(`${OWN}:5:4`, { tag }), node(`${OWN}:4:2`)];
+      expect(planInsert(chain, OWN, box, opts)).toMatchObject({ anchor: { loc: `${OWN}:4:2` } });
+    },
+  );
+
+  it.each(["h1", "h6", "span", "label", "button", "strong", "em", "b", "i", "small"])(
+    "skips %s, which can't validly hold a div",
+    (tag) => {
+      const chain = [node(`${OWN}:5:4`, { tag }), node(`${OWN}:4:2`)];
+      expect(planInsert(chain, OWN, box, opts)).toMatchObject({ anchor: { loc: `${OWN}:4:2` } });
+    },
+  );
+
+  it("draws inside a link and a table cell", () => {
+    for (const tag of ["a", "td"]) {
+      expect(planInsert([node(`${OWN}:4:2`, { tag })], OWN, box, opts)).toMatchObject({
+        anchor: { loc: `${OWN}:4:2`, place: "end" },
+      });
+    }
+  });
+
+  it("refuses a route whose only root is a heading, and says what to do", () => {
+    const layout = node("src/Layout.tsx:3:2", {
+      children: [child(`${OWN}:7:4`, 0)],
+    });
+    layout.children[0]!.tag = "h1";
+    expect(planInsert([layout], OWN, box, opts)).toEqual({
+      refuse:
+        "Nothing here can hold a new element. Draw inside a container like a div, or ask the agent to add one.",
+    });
+  });
+
   it("climbs out of another file to the frame's own", () => {
     const chain = [node("src/Card.tsx:3:2"), node(`${OWN}:4:2`)];
     expect(planInsert(chain, OWN, box, opts)).toMatchObject({ anchor: { loc: `${OWN}:4:2` } });

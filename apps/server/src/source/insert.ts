@@ -1,4 +1,5 @@
-import { Refused, type InsertPlace, type NewNode, type Styling } from "@finite/protocol";
+import type * as t from "@babel/types";
+import { type InsertPlace, NEW_TAG, type NewNode, Refused, type Styling } from "@finite/protocol";
 import type MagicString from "magic-string";
 import { cssModules } from "./imports.ts";
 import {
@@ -6,10 +7,12 @@ import {
   attribute,
   attrText,
   indentAt,
+  isChild,
   jsxText,
   type Element,
   type Parsed,
   tagName,
+  walk,
 } from "./jsx.ts";
 
 /** A printed element, in document order: its key in the position map, and what styles it. */
@@ -44,6 +47,11 @@ const VOID = new Set([
 ]);
 const ATTR_NAME = /^[A-Za-z_][\w:.-]*$/;
 /** Attributes a string can't set: styling goes through `styles`, and the rest need an expression. */
+/** A CSS property as it's printed unquoted into an object key or a sheet. */
+const STYLE_NAME = /^(--[\w-]+|-?[A-Za-z][A-Za-z-]*)$/;
+/** Whether a CSS value, printed raw into a sheet, would end its declaration or rule. */
+const leavesDeclaration = (value: string) =>
+  /[;{}]/.test(value.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|url\([^)]*\)/g, ""));
 const NOT_AN_ATTR = /^(className|style|key|ref|dangerouslySetInnerHTML|on[A-Z].*)$/;
 
 /**
@@ -60,18 +68,18 @@ export function insert(
   const out: Printing = { nodes: [], classes: new Set() };
   const el = element.node;
   if (place === "before" || place === "after") {
-    const child = asChild(element, "add a sibling to");
-    const i = child.parent.children.indexOf(child.node);
-    const ws = child.parent.children[i - 1];
+    const beside = slotOf(s, element);
+    const i = beside.parent.children.indexOf(beside.node as never);
+    const ws = beside.parent.children[i - 1];
     const sep =
       ws?.type === "JSXText" && ws.value.trim() === ""
         ? ws.value.includes("\n")
           ? `\n${ws.value.split("\n").at(-1)}`
           : ws.value
         : "";
-    const text = print(s, node, indentAt(s.code, el.start!), out);
-    if (place === "before") s.ms.appendLeft(el.start!, text + sep);
-    else s.ms.appendLeft(el.end!, sep + text);
+    const text = print(s, node, indentAt(s.code, beside.node.start!), out);
+    if (place === "before") s.ms.appendLeft(beside.node.start!, text + sep);
+    else s.ms.appendLeft(beside.node.end!, sep + text);
     return out.nodes;
   }
 
@@ -123,9 +131,32 @@ export function insert(
   return out.nodes;
 }
 
+/**
+ * What `before` and `after` sit beside: the element when it's a JSX child, else the `{…}` child
+ * that renders it, like `{items.map(…)}`. A component's root has neither.
+ */
+function slotOf(
+  s: InsertStep,
+  element: Element,
+): { node: t.Node; parent: t.JSXElement | t.JSXFragment } {
+  if (isChild(element)) return element;
+  const parents = new Map<t.Node, t.Node | undefined>();
+  walk(s.parsed.ast, (node, parent) => parents.set(node, parent));
+  for (let up = parents.get(element.node); up; up = parents.get(up)) {
+    if (up.type === "JSXAttribute") break;
+    if (up.type !== "JSXExpressionContainer") continue;
+    const owner = parents.get(up);
+    if (owner?.type === "JSXElement" || owner?.type === "JSXFragment")
+      return { node: up, parent: owner };
+    break;
+  }
+  return asChild(element, "add a sibling to");
+}
+
 type Printing = { nodes: Printed[]; classes: Set<string> };
 
 function print(s: InsertStep, node: NewNode, indent: string, out: Printing): string {
+  if (!NEW_TAG.test(node.tag)) throw new Refused(`${node.tag} isn't an element's name`, "invalid");
   if (node.src)
     throw new Refused("Adding images by hand isn't built yet. Ask the agent.", "not-implemented");
   const attrs: string[] = [];
@@ -136,6 +167,10 @@ function print(s: InsertStep, node: NewNode, indent: string, out: Printing): str
     attrs.push(`${name}=${attrText(value)}`);
   }
   const styles = node.styles ?? {};
+  for (const [name, value] of Object.entries(styles)) {
+    if (!STYLE_NAME.test(name) || leavesDeclaration(value))
+      throw new Refused(`A new element can't set the style ${name}: ${value}`, "invalid");
+  }
   const cls = Object.keys(styles).length > 0 ? moduleClass(s, node, out) : undefined;
   if (cls) attrs.push(`className={${cls}}`);
   const key = node.ref ?? `#${out.nodes.length}`;

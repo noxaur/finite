@@ -358,7 +358,8 @@ function style(s: StepCtx, el: t.JSXElement, styles: Record<string, string | nul
 
   if (!cls) {
     const classes = editClasses("", styles, s.ctx.theme, s.ctx.tailwind);
-    if (classes !== "") s.ms.appendLeft(attributeInsertAt(el), ` className="${classes}"`);
+    if (classes !== "")
+      s.ms.appendLeft(attributeInsertAt(el), ` className="${classes.replaceAll('"', "'")}"`);
     return;
   }
   const value = cls.value;

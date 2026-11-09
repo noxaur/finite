@@ -356,6 +356,44 @@ describe("SourceEditor inserting an element", () => {
     expect(await get("src/Card.module.css")).toContain(".box {");
   });
 
+  it("undoes and redoes around another actor's edit to the same file", async () => {
+    await put("src/App.tsx", APP);
+    const d = design();
+    const source = createSourceEditor();
+    await source.apply(
+      open(d),
+      [
+        await edit("src/App.tsx", {
+          kind: "insert",
+          loc: "src/App.tsx:5:4",
+          tag: "main",
+          place: "end",
+          node,
+        }),
+      ],
+      ana,
+      page,
+    );
+    expect(await get("src/App.tsx")).toContain(`data-name="Box"`);
+    await source.apply(
+      open(d),
+      [await edit("src/App.tsx", { kind: "text", loc: "src/App.tsx:6:6", tag: "h1", text: "Hi" })],
+      bo,
+      page,
+    );
+    await source.undo(open(d), ana);
+    const undone = await get("src/App.tsx");
+    expect(undone).not.toContain(`data-name="Box"`);
+    expect(undone).toContain(">Hi</h1>");
+    await source.redo(open(d), ana);
+    const redone = await get("src/App.tsx");
+    expect(redone).toContain(`data-name="Box"`);
+    expect(redone).toContain(">Hi</h1>");
+    await source.undo(open(d), bo);
+    expect(await get("src/App.tsx")).toContain(">Hello</h1>");
+    expect(await get("src/App.tsx")).toContain(`data-name="Box"`);
+  });
+
   it("refuses inside a prototype when the file is production", async () => {
     await put("src/App.tsx", APP);
     const source = createSourceEditor();

@@ -13,27 +13,50 @@ export type InsertPlan = {
 const fileOf = (loc: Loc) => loc.replace(/:\d+:\d+$/, "");
 const baseName = (file: string) => file.slice(file.lastIndexOf("/") + 1);
 
-/** Elements that can't hold a drawn element: void, replaced, text-only, or inside an SVG. */
+/**
+ * Elements that can't hold a drawn element: void, replaced, phrasing-only (a `div` there is
+ * invalid), table parts (the parser moves a `div` out, a hydration mismatch), or inside an SVG.
+ */
 const NO_CHILDREN = new Set([
   "area",
   "audio",
+  "b",
   "base",
   "br",
+  "button",
   "canvas",
   "col",
+  "colgroup",
+  "em",
   "embed",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
   "hr",
+  "i",
   "iframe",
   "img",
   "input",
+  "label",
   "link",
   "meta",
   "object",
   "p",
   "param",
   "select",
+  "small",
   "source",
+  "span",
+  "strong",
+  "table",
+  "tbody",
   "textarea",
+  "tfoot",
+  "thead",
+  "tr",
   "track",
   "video",
   "wbr",
@@ -92,7 +115,10 @@ export function planInsert(
     if (accepts(kid.tag, opts.nodeTag))
       return place({ ...kid, children: [] }, null, box, opts.alt, true);
   }
-  return { refuse: "Nothing here can hold a new element. Try drawing inside another container." };
+  return {
+    refuse:
+      "Nothing here can hold a new element. Draw inside a container like a div, or ask the agent to add one.",
+  };
 }
 
 function place(
