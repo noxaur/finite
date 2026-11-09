@@ -10,6 +10,7 @@ import { colors, fonts, radii, size, space } from "@/styles/tokens.stylex";
 import { IconButton } from "./Button";
 import { CommandMenu } from "./CommandMenu";
 import { Kbd } from "./CommandParts";
+import { DesignIcon } from "./DesignIcon";
 import { Icon } from "./Icons";
 import { Menu } from "./Menu";
 import { NameInput } from "./NameInput";
@@ -114,7 +115,7 @@ function DesignCard({ design }: { design: DesignEntry }) {
       {renaming ? (
         <div {...stylex.props(styles.card)}>
           <span {...stylex.props(styles.cardIcon)}>
-            <Icon name={connected ? "folder" : "artboard"} size={15} />
+            <DesignIcon design={design} size={20} />
           </span>
           <span {...stylex.props(styles.meta)}>
             <NameInput
@@ -138,7 +139,7 @@ function DesignCard({ design }: { design: DesignEntry }) {
           {...stylex.props(styles.card)}
         >
           <span {...stylex.props(styles.cardIcon)}>
-            <Icon name={connected ? "folder" : "artboard"} size={15} />
+            <DesignIcon design={design} size={20} />
           </span>
           <span {...stylex.props(styles.meta)}>
             <span {...stylex.props(styles.name)}>{design.name}</span>

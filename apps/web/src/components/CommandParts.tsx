@@ -68,6 +68,7 @@ export function CommandGroup({ children }: { children: ReactNode }) {
  */
 export function CommandItem({
   icon,
+  lead,
   label,
   note,
   on,
@@ -76,6 +77,8 @@ export function CommandItem({
   onHover,
 }: {
   icon: IconName;
+  /** Replaces the icon, for a row with its own picture. */
+  lead?: ReactNode;
   label: string;
   note?: string | undefined;
   on?: boolean | undefined;
@@ -95,9 +98,7 @@ export function CommandItem({
       onMouseMove={onHover}
       {...stylex.props(styles.item, on && styles.itemOn, onClick && styles.clickable)}
     >
-      <span {...stylex.props(styles.icon)}>
-        <Icon name={icon} size={15} />
-      </span>
+      <span {...stylex.props(styles.icon)}>{lead ?? <Icon name={icon} size={15} />}</span>
       <span {...stylex.props(styles.label)}>{label}</span>
       {note && <span {...stylex.props(styles.note)}>{note}</span>}
       {open && (

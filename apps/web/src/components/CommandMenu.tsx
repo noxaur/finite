@@ -8,6 +8,7 @@ import { finite, useDesigns } from "@/client/finite";
 import type { IconName } from "@/lib/icons";
 import { colors, fonts, radii, shadows, space } from "@/styles/tokens.stylex";
 import { CommandGroup, CommandHints, CommandItem, CommandSearch } from "./CommandParts";
+import { DesignIcon } from "./DesignIcon";
 import { connectFolder, cloneRepo, createBlank, createImport } from "./startDesign";
 
 type Repo = {
@@ -31,6 +32,8 @@ type Row = {
   key: string;
   group: string;
   icon: IconName;
+  /** Replaces the icon. */
+  lead?: ReactNode;
   label: string;
   note?: string | undefined;
   /** A folder row, which shows the chevron. */
@@ -224,6 +227,7 @@ export function CommandMenu({ onClose }: { onClose: () => void }) {
                 key: d.id,
                 group: "Designs",
                 icon: d.origin === "connected" ? "folder" : "artboard",
+                lead: <DesignIcon design={d} size={15} />,
                 label: d.name,
                 note: d.origin === "connected" ? d.root : undefined,
                 run: () => {
@@ -426,6 +430,7 @@ export function CommandMenu({ onClose }: { onClose: () => void }) {
                 <CommandItem
                   key={row.key}
                   icon={row.icon}
+                  lead={row.lead}
                   label={row.label}
                   note={row.note}
                   open={row.open}
