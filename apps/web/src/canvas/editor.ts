@@ -666,6 +666,7 @@ export class CanvasEditor implements ToolHost {
 
   /** Backs out of whatever's open, one step at a time. */
   escape() {
+    if (this.current) return this.cancelPress();
     if (this.state.tool === "interact") return this.setTool("select");
     if (this.state.commentDraft || this.state.openComment) {
       return this.update({ commentDraft: null, openComment: null });

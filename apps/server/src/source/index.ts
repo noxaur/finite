@@ -271,6 +271,7 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
           const result = rewrite(code, file, edits, design.styling, {
             theme,
             tailwind,
+            router: design.router,
             files: extra,
             variables,
             stylexVars: stylex,
@@ -326,8 +327,15 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
     },
 
     inline: (open, loc) => readInline(open, loc),
-    draw: (open, input, by) => boardFile(open, input, by),
-    addAsset: (open, attachment) => addAsset(open, attachment),
+    async draw(open, input, by) {
+      const design = open.design;
+      const styled =
+        design.styling === "tailwind"
+          ? await tailwindTheme(design)
+          : { theme: {}, tailwind: 4 as const };
+      return boardFile(open, input, by, { ...styled, locked });
+    },
+    addAsset: (open, attachment) => addAsset(open, attachment, locked),
     exportSlice: (open, input) => exportSlice(open, input),
 
     tokens: allTokens,

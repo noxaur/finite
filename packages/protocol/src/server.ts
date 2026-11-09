@@ -154,7 +154,7 @@ export interface SourceEditor {
     by: Actor,
   ): Promise<{ canvas: Canvas; frameId: string; file: string; created: Record<string, Loc> }>;
   /** Copies an attachment into the design's brand folder. */
-  addAsset(open: OpenDesign, attachment: string): Promise<{ asset: string; url: string }>;
+  addAsset(open: OpenDesign, attachment: string): Promise<{ asset: string }>;
   /** Renders a slice to a file and says where it is. */
   exportSlice(
     open: OpenDesign,

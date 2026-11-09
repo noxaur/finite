@@ -1,5 +1,13 @@
 import type * as t from "@babel/types";
-import { type InsertPlace, NEW_TAG, type NewNode, Refused, type Styling } from "@finite/protocol";
+import path from "node:path";
+import {
+  type InsertPlace,
+  NEW_TAG,
+  type NewNode,
+  Refused,
+  type Router,
+  type Styling,
+} from "@finite/protocol";
 import type MagicString from "magic-string";
 import postcss from "postcss";
 import { cssModules } from "./imports.ts";
@@ -15,6 +23,7 @@ import {
   tagName,
   walk,
 } from "./jsx.ts";
+import { freeNames, head } from "./stylex.ts";
 
 /** A printed element, in document order: its key in the position map, and what styles it. */
 export type Printed = { key: string; tag: string; styles: Record<string, string> };
@@ -27,6 +36,7 @@ export type InsertStep = {
   parsed: Parsed;
   files: Record<string, string>;
   convention: Styling;
+  router: Router | undefined;
 };
 
 /** Elements with no children, so nothing can go inside them. */
@@ -63,7 +73,7 @@ export function insert(
   place: InsertPlace,
   node: NewNode,
 ): Printed[] {
-  const out: Printing = { nodes: [], classes: new Set() };
+  const out = printing(s);
   const el = element.node;
   if (place === "before" || place === "after") {
     const beside = slotOf(s, element);
@@ -163,14 +173,42 @@ function slotOf(
   return asChild(element, "add a sibling to");
 }
 
-type Printing = { nodes: Printed[]; classes: Set<string> };
+type Printing = {
+  nodes: Printed[];
+  classes: Set<string>;
+  /** The binding each asset is imported under. */
+  assets: Map<string, string>;
+  free: (base: string) => string;
+};
+
+const printing = (s: InsertStep): Printing => ({
+  nodes: [],
+  classes: new Set(),
+  assets: new Map(),
+  free: freeNames(s.parsed.ast),
+});
+
+/** Prints `node` as a whole expression, for a file it's the root of. */
+export function printRoot(
+  s: InsertStep,
+  node: NewNode,
+  indent: string,
+): {
+  text: string;
+  nodes: Printed[];
+} {
+  const out = printing(s);
+  return { text: print(s, node, indent, out), nodes: out.nodes };
+}
 
 function print(s: InsertStep, node: NewNode, indent: string, out: Printing): string {
   if (!NEW_TAG.test(node.tag)) throw new Refused(`${node.tag} isn't an element's name`, "invalid");
-  if (node.src)
-    throw new Refused("Adding images by hand isn't built yet. Ask the agent.", "not-implemented");
   const attrs: string[] = [];
   if (node.name !== undefined) attrs.push(`data-name=${attrText(node.name)}`);
+  if (node.src) {
+    attrs.push(`src={${assetBinding(s, node.src.asset, out)}}`);
+    if (node.tag === "video") attrs.push("controls");
+  }
   for (const [name, value] of Object.entries(node.attrs ?? {})) {
     if (!ATTR_NAME.test(name) || NOT_AN_ATTR.test(name))
       throw new Refused(`A new element can't set ${name} as an attribute`, "invalid");
@@ -197,6 +235,36 @@ function print(s: InsertStep, node: NewNode, indent: string, out: Printing): str
   const lines = kids.map((kid) => `\n${inner}${print(s, kid, inner, out)}`).join("");
   const text = node.text === undefined ? "" : `\n${inner}${jsxText(node.text)}`;
   return `${open}>${text}${lines}\n${indent}</${node.tag}>`;
+}
+
+/**
+ * The expression that holds `asset`'s URL, importing it when the file doesn't yet. In Next.js a
+ * static import is an object, whose URL is `.src`.
+ */
+function assetBinding(s: InsertStep, asset: string, out: Printing): string {
+  if (!/^[\w ./@+-]+$/.test(asset) || asset.split("/").includes(".."))
+    throw new Refused(`${asset} isn't a file in the design`, "invalid");
+  const relative = path.posix.relative(path.posix.dirname(s.file), asset);
+  const from = relative.startsWith(".") ? relative : `./${relative}`;
+  let binding = out.assets.get(asset) ?? importedFrom(s, from);
+  if (binding === undefined) {
+    const stem = path.posix.basename(asset, path.posix.extname(asset));
+    binding = out.free(`${className(stem)}Asset`);
+    for (const p of head(s.code, s.parsed.ast, [{ names: binding, from }]))
+      s.ms.appendLeft(p.start, p.text);
+  }
+  out.assets.set(asset, binding);
+  return s.router === "next-app" || s.router === "next-pages" ? `${binding}.src` : binding;
+}
+
+/** The local name of the file's default import of `from`, if it has one. */
+function importedFrom(s: InsertStep, from: string): string | undefined {
+  for (const stmt of s.parsed.ast.program.body) {
+    if (stmt.type !== "ImportDeclaration" || stmt.source.value !== from) continue;
+    const def = stmt.specifiers.find((sp) => sp.type === "ImportDefaultSpecifier");
+    if (def) return def.local.name;
+  }
+  return undefined;
 }
 
 /**

@@ -594,6 +594,95 @@ describe("insert", () => {
     });
   });
 
+  describe.each(conventions)("an svg shape (%s)", (convention) => {
+    it("keeps its geometry as attributes and its paint in the convention", () => {
+      const shape: NewNode = {
+        tag: "svg",
+        ref: "s",
+        name: "Star",
+        attrs: { viewBox: "0 0 10 10", preserveAspectRatio: "none" },
+        styles: { position: "absolute", overflow: "visible" },
+        children: [
+          {
+            tag: "path",
+            attrs: { d: "M0 0L10 10Z", vectorEffect: "non-scaling-stroke" },
+            styles: { fill: "none", stroke: "#1e1e1e", "stroke-width": "2px" },
+          },
+        ],
+      };
+      const out = ok(run(APP, [insert("end", shape)], convention, { files: {} }));
+      expect(out.code).toContain(`viewBox="0 0 10 10"`);
+      expect(out.code).toContain(`d="M0 0L10 10Z"`);
+      expect(out.code).toContain(`vectorEffect="non-scaling-stroke"`);
+      expect(out.created.s).toBeDefined();
+      if (convention === "tailwind") {
+        expect(out.code).toContain(`className="fill-none stroke-[#1e1e1e] stroke-2"`);
+        expect(out.code).toContain(`className="absolute overflow-visible"`);
+      } else if (convention === "stylex") {
+        expect(out.code).toMatch(/strokeWidth: "2px"/);
+      } else expect(out.code).toMatch(/strokeWidth: "2px"/);
+    });
+  });
+
+  describe("an imported file", () => {
+    const image: NewNode = {
+      tag: "img",
+      ref: "i",
+      name: "hero",
+      attrs: { alt: "" },
+      src: { asset: "src/assets/brand/hero.png" },
+      styles: { "object-fit": "cover" },
+    };
+
+    it.each([
+      ["react-router", "src={heroAsset}"],
+      ["tanstack", "src={heroAsset}"],
+      ["next-app", "src={heroAsset.src}"],
+      ["next-pages", "src={heroAsset.src}"],
+    ] as const)("under %s writes %s", (router, expr) => {
+      const out = ok(run(APP, [insert("end", image)], "tailwind", { router }));
+      expect(out.code).toContain(`import heroAsset from "./assets/brand/hero.png";`);
+      expect(out.code).toContain(
+        `<img data-name="hero" ${expr} alt="" className="object-cover" />`,
+      );
+      expect(out.created.i).toBeDefined();
+    });
+
+    it("goes after the file's last import, and everything else moves down", () => {
+      const out = ok(run(APP, [insert("end", image)], "inline"));
+      expect(out.code.split("\n")[1]).toBe(`import heroAsset from "./assets/brand/hero.png";`);
+    });
+
+    it("reuses the file's import of the same asset", () => {
+      const code = `import pic from "./assets/brand/hero.png";\n${APP}`;
+      const out = ok(run(code, [{ ...insert("end", image), loc: `${FILE}:6:4` }], "inline")).code;
+      expect(out.match(/hero\.png/g)).toHaveLength(1);
+      expect(out).toContain("src={pic}");
+    });
+
+    it("names the import what nothing else binds", () => {
+      const code = `const heroAsset = 1;\n${APP}`;
+      const out = ok(run(code, [{ ...insert("end", image), loc: `${FILE}:6:4` }], "inline")).code;
+      expect(out).toContain("import heroAsset2 from");
+      expect(out).toContain("src={heroAsset2}");
+    });
+
+    it("gives a video controls", () => {
+      const clip: NewNode = { tag: "video", src: { asset: "src/assets/brand/clip.mp4" } };
+      expect(ok(run(APP, [insert("end", clip)], "inline")).code).toContain(
+        "<video src={clipAsset} controls />",
+      );
+    });
+
+    it("refuses an asset that leaves the design or could break the import", () => {
+      for (const asset of ["../secret.png", 'a"b.png']) {
+        expect(
+          refused(run(APP, [insert("end", { tag: "img", src: { asset } })], "inline")).code,
+        ).toBe("invalid");
+      }
+    });
+  });
+
   it("goes first when asked", () => {
     const out = ok(run(APP, [insert("start")])).code;
     expect(out).toContain(`<main className="flex p-4">\n      <div data-name="Rectangle"`);

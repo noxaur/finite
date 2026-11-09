@@ -12,6 +12,7 @@ import {
 import { carrySelection, setupReason, startSetup, startThread } from "./agent/index.ts";
 import { setupPrompt } from "./agent/instructions.ts";
 import type { Context, Handlers } from "./hub.ts";
+import { ensureBrandBoard } from "./store/brand.ts";
 import { installOf } from "./store/index.ts";
 import { syncRoutes } from "./store/routes.ts";
 
@@ -128,7 +129,10 @@ export const handlers: Handlers = {
     return ctx.modules.source.exportSlice(await ctx.hub.open(designId), input);
   },
   async "asset.add"({ designId, attachment }, ctx) {
-    return ctx.modules.source.addAsset(await ctx.hub.open(designId), attachment);
+    const open = await ctx.hub.open(designId);
+    const added = await ctx.modules.source.addAsset(open, attachment);
+    await ensureBrandBoard(open, ctx.by);
+    return added;
   },
 
   "comment.add": ({ designId, canvasId, anchor, text }, ctx) =>

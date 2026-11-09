@@ -671,7 +671,7 @@ type Import = { names: string; from: string };
  * imports (or its directives), then `decl` after a blank line. A file with neither gets them
  * before its first statement.
  */
-function head(code: string, ast: t.File, imports: Import[], decl?: string): Patch[] {
+export function head(code: string, ast: t.File, imports: Import[], decl?: string): Patch[] {
   if (imports.length === 0 && decl === undefined) return [];
   const last = ast.program.body.filter((s) => s.type === "ImportDeclaration").at(-1);
   const quote = last ? code[last.source.start!] : '"';
@@ -691,7 +691,7 @@ function head(code: string, ast: t.File, imports: Import[], decl?: string): Patc
  * A `free(base)` that returns `base`, numbered (`base2`) when the module's top level already binds
  * it or an earlier call returned it.
  */
-function freeNames(ast: t.File): (base: string) => string {
+export function freeNames(ast: t.File): (base: string) => string {
   const given = new Set<string>();
   return (base) => {
     let name = base;
