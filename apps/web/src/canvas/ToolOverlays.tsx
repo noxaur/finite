@@ -3,6 +3,7 @@
 import * as stylex from "@stylexjs/stylex";
 import { colors } from "@/styles/tokens.stylex";
 import type { CanvasEditor, EditorState } from "./editor";
+import { LayoutHandles } from "./LayoutHandles";
 import { toolOf } from "./tools/registry";
 
 /** What tools draw over the frames: the shape being dragged out, and the current tool's own overlay. */
@@ -32,6 +33,7 @@ export function ToolOverlays({ editor, state }: { editor: CanvasEditor; state: E
           />
         ))}
       {Overlay && <Overlay host={editor} state={state} />}
+      {state.tool === "select" && <LayoutHandles host={editor} state={state} />}
     </>
   );
 }

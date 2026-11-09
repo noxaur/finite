@@ -186,7 +186,7 @@ An agent on a workspace design runs with the workspace root as its working direc
 
 ## Hand edits: the source editor
 
-`source/` turns a hand edit into a change to the TSX. A `SourceEdit` is `style`, `text`, `reorder`, `remove`, `duplicate`, `attr` or `insert`, and names the locs it touches plus the rev of each file. `wrap`, `unwrap` and `inline` are declared too and refuse with `not-implemented` until they're built. `rewrite.ts` parses the file with Babel, finds the opening element at each loc, checks its tag, and splices the change in with `magic-string`, so the file's formatting survives. It returns a remap of old locs to new ones, so the selection follows the element.
+`source/` turns a hand edit into a change to the TSX. A `SourceEdit` is `style`, `text`, `reorder`, `remove`, `duplicate`, `attr`, `insert`, `wrap` or `unwrap`, and names the locs it touches plus the rev of each file. `inline` is declared too and refuses with `not-implemented` until it's built. `rewrite.ts` parses the file with Babel, finds the opening element at each loc, checks its tag, and splices the change in with `magic-string`, so the file's formatting survives. It returns a remap of old locs to new ones, so the selection follows the element.
 
 A style edit follows the design's convention:
 
@@ -282,6 +282,16 @@ Image or video opens a file picker, uploads through `POST /api/designs/:id/attac
 ### Rich text
 
 ### Auto layout
+
+Shift+A wraps the selected siblings in a flex `div` named `Auto layout` (a `span` inside text, and refused inside a list, a table or an SVG). `inferAutoLayout` in `design/editing/autoLayout.ts` reads the boxes through the bridge and picks the direction, gap, padding, alignment and child order from them. A selected element with stamped children gets flex in place instead, and a leaf gets a wrapper. Positioned children come out of `position: absolute` and the wrapper takes their spot.
+
+The `wrap` edit (`source/wrap.ts`) puts the wrapper at the first child's place, moves any child that isn't next to the others, indents the children and leaves strings alone. It takes one `SourceEdit`, so undo takes it back in one step. It refuses elements in two files or two JSX parents, and a component's root or a child inside `{…}`.
+
+Shift+Alt+A is the way out. A wrapper Shift+A made is removed with `unwrap`, and when it was positioned its children stay where they measured, as `absolute`. Any other flex element stays and loses `display: flex`, with its children absolute inside it. `unwrap` refuses a root or an element inside code that holds anything but one element.
+
+The Layout handles (`canvas/LayoutHandles.tsx`) sit over a selected flex element: a bar per side for padding and a bar in each gap. They preview through the bridge and send one `style` edit on release. Alt moves the opposite side too, and Shift all four. Its Hug and Fill pills sit under the selection, on a flex element or a flex child. The bridge's `inspect` measures each axis as `fit-content` and `auto` inside one task, so `sizing.ts` can tell Fixed from Hug.
+
+A drag in Move depends on what's pressed. An `absolute` or `fixed` element moves by `left` and `top`, every selected one in the frame together, with Shift locking the axis. A flex or grid child reorders, and in a flex row its neighbors slide out of the way until release. The Scale tool (K) writes CSS `zoom` from a handle or the element itself, and refuses a whole frame. Agents get all of this by writing the same TSX.
 
 ### Canvas and agent
 

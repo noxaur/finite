@@ -67,7 +67,20 @@ describe("resolveKey", () => {
   it("keeps tool keys out of a text editor, and hidden tools off the keyboard", () => {
     expect(resolveKey(press("v"), { ...page, editing: true })).toBeNull();
     expect(resolveKey(press("p"), page)).toBeNull();
-    expect(resolveKey(press("a", { shiftKey: true }), page)).toBeNull();
+  });
+});
+
+describe("auto layout's shortcuts", () => {
+  it("adds with Shift+A and removes with Shift+Alt+A, on the canvas only", () => {
+    const shiftA = press("A", { shiftKey: true });
+    expect(resolveKey(shiftA, page)).toEqual({ kind: "command", id: "autoLayout" });
+    expect(resolveKey(press("Å", { code: "KeyA", shiftKey: true, altKey: true }), page)).toEqual({
+      kind: "command",
+      id: "unwrap",
+    });
+    expect(resolveKey(shiftA, inFrame)).toBeNull();
+    expect(resolveKey(shiftA, { ...page, editing: true })).toBeNull();
+    expect(resolveKey(press("k"), page)).toEqual({ kind: "tool", id: "scale" });
   });
 });
 
@@ -109,7 +122,7 @@ describe("the registry", () => {
   });
 
   it("shows only the tools that work", () => {
-    expect(toolsIn("move").map((t) => t.id)).toEqual(["select", "hand", "interact"]);
+    expect(toolsIn("move").map((t) => t.id)).toEqual(["select", "hand", "scale", "interact"]);
     expect(toolsIn("shape").map((t) => t.id)).toEqual([
       "rectangle",
       "line",

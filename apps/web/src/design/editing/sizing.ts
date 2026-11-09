@@ -25,9 +25,14 @@ export interface SizeContext {
   readonly grow: number;
   /** The element's computed `align-self`. */
   readonly alignSelf: string;
+  /** What the bridge measured about each axis in a flex layout, when it did. */
+  readonly sized?: Readonly<Partial<Record<Axis, string>>>;
 }
 
-type Computed = Pick<CSSStyleDeclaration, "display" | "position" | "flexGrow" | "alignSelf">;
+type Computed = Pick<CSSStyleDeclaration, "display" | "position" | "flexGrow" | "alignSelf"> & {
+  readonly sizedWidth?: string;
+  readonly sizedHeight?: string;
+};
 type ParentComputed = Pick<CSSStyleDeclaration, "display" | "flexDirection" | "alignItems">;
 
 /** The context from the element's and its parent's computed styles. An out-of-flow element has no parent layout. */
@@ -39,6 +44,9 @@ export function sizeContextOf(own: Computed, parent: ParentComputed | null): Siz
     display: own.display,
     grow: parseFloat(own.flexGrow) || 0,
     alignSelf: own.alignSelf,
+    ...(own.sizedWidth && own.sizedHeight
+      ? { sized: { width: own.sizedWidth, height: own.sizedHeight } }
+      : {}),
   };
 }
 
@@ -65,6 +73,8 @@ export function sizeModeOf(
   if (v && /^(fit|max|min)-content\b/.test(v)) return "hug";
   if (main === axis && ctx.grow > 0) return "fill";
   if (v !== undefined && v !== "auto") return "fixed";
+  if (ctx.sized?.[axis] === "fixed" || ctx.sized?.[axis] === "hug")
+    return ctx.sized[axis] as SizeMode;
   if (main === axis || ctx.parent === "none") return "hug";
   if (main) {
     const self =

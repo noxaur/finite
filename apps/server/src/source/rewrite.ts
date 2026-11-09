@@ -65,10 +65,12 @@ const ASK = "Ask the agent to change this";
 type Op =
   | { kind: "style"; at: string; tag: string; styles: Record<string, string | null> }
   | { kind: "text"; at: string; tag: string; text: string }
-  | { kind: "reorder"; at: string; tag: string; before: string | null }
+  | { kind: "reorder"; at: string; tag?: string; before: string | null }
   | { kind: "remove" | "duplicate"; at: string }
   | { kind: "attr"; at: string; name: string; value: string | null }
-  | { kind: "insert"; at: string; tag: string; place: InsertPlace; node: NewNode };
+  | { kind: "insert"; at: string; tag: string; place: InsertPlace; node: NewNode }
+  | { kind: "wrap"; at: string; children: string[]; wrapper: NewNode }
+  | { kind: "unwrap"; at: string; tag: string };
 
 /** In the position map, the keys of elements a batch created: a client `ref` or a printed index. */
 const NEW = "new:";
@@ -82,6 +84,7 @@ export function parseLoc(loc: Loc): { file: string; key: string } {
 /** Every style map the edit writes, a new node's and its children's included. */
 export function editStyles(edit: SourceEdit): Record<string, string | null>[] {
   if (edit.kind === "style") return [edit.styles];
+  if (edit.kind === "wrap") return edit.wrapper.styles ? [edit.wrapper.styles] : [];
   if (edit.kind !== "insert") return [];
   const all: Record<string, string>[] = [];
   const visit = (node: NewNode) => {
@@ -244,10 +247,26 @@ function toOps(edit: SourceEdit, file: string): Op[] {
         place: edit.place,
         node: edit.node,
       }));
-    case "wrap":
-      return wrap();
+    case "wrap": {
+      const keys = edit.locs.map(parseLoc);
+      if (keys.some((k) => k.file !== keys[0]!.file))
+        throw new Refused(
+          "These elements come from different files, so Finite can't wrap them together by hand. Ask the agent to change this.",
+          "unsupported-style",
+        );
+      if (new Set(edit.locs).size !== edit.locs.length)
+        throw new Refused("The same element is listed twice", "invalid");
+      if (keys[0]!.file !== file) return [];
+      const children = keys.map((k) => k.key);
+      // `locs` is the children's new order; a move that changes nothing writes nothing.
+      const order: Op[] = children
+        .slice(0, -1)
+        .map((at, i) => ({ kind: "reorder" as const, at, before: children[i + 1]! }))
+        .reverse();
+      return [{ kind: "wrap", at: children[0]!, children, wrapper: edit.wrapper }, ...order];
+    }
     case "unwrap":
-      return unwrap();
+      return here(edit.loc).map((at) => ({ kind: "unwrap", at, tag: edit.tag }));
     case "inline":
       return setInline();
     case "reorder": {
@@ -325,6 +344,19 @@ function applyOp(s: StepCtx, element: Element, op: Op): Printed[] | void {
       return attr(s, element.node, op.name, op.value);
     case "insert":
       return insert(s, element, op.place, op.node);
+    case "wrap":
+      return wrap(
+        s,
+        op.children.map((key) => {
+          const at = s.where.get(key);
+          const child = at === undefined ? undefined : s.parsed.elements.get(at);
+          if (!child) throw new Refused(STALE, "stale");
+          return child;
+        }),
+        op.wrapper,
+      );
+    case "unwrap":
+      return unwrap(s, element);
   }
 }
 

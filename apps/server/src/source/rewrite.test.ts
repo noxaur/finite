@@ -924,12 +924,8 @@ describe("insert", () => {
     expect(refused(run(APP, [{ ...insert("end"), tag: "section" }])).code).toBe("stale");
   });
 
-  it("refuses wrap, unwrap and inline until they're built", () => {
-    const edits = [
-      { kind: "wrap" as const, locs: [L(7)], wrapper: { tag: "div" } },
-      { kind: "unwrap" as const, loc: L(7), tag: "p" },
-      { kind: "inline" as const, loc: L(7), tag: "p", content: [] },
-    ];
-    for (const edit of edits) expect(refused(run(APP, [edit])).code).toBe("not-implemented");
+  it("refuses inline until it's built", () => {
+    const edit = { kind: "inline" as const, loc: L(7), tag: "p", content: [] };
+    expect(refused(run(APP, [edit])).code).toBe("not-implemented");
   });
 });

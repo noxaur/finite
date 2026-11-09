@@ -209,6 +209,10 @@ const requests: Record<string, (params: Request) => unknown> = {
     const computed: Record<string, string> = {};
     for (const key of COMPUTED) computed[key] = style[key];
     const parent = element.parentElement ? getComputedStyle(element.parentElement) : undefined;
+    Object.assign(
+      computed,
+      style.display.includes("flex") || parent?.display.includes("flex") ? sizing(element) : {},
+    );
     const text = ownText(element);
     return {
       tag: element.tagName.toLowerCase(),
@@ -272,6 +276,32 @@ const requests: Record<string, (params: Request) => unknown> = {
     };
   },
 };
+
+/**
+ * How each axis sizes an element in a flex layout, which its computed size can't say: `hug` when it
+ * measures as its content, `auto` as without a size of its own (stretched), else `fixed`. It
+ * applies each size and measures it inside this one task, so nothing paints.
+ */
+function sizing(element: Element): Record<string, string> {
+  if (!(element instanceof HTMLElement)) return {};
+  const now = rectOf(element);
+  const before = element.getAttribute("style");
+  const measure = (value: string) => {
+    element.style.setProperty("width", value, "important");
+    element.style.setProperty("height", value, "important");
+    return rectOf(element);
+  };
+  const hug = measure("fit-content");
+  const auto = measure("auto");
+  if (before === null) element.removeAttribute("style");
+  else element.setAttribute("style", before);
+  const read = (size: number, fit: number, free: number) =>
+    Math.abs(size - fit) < 0.5 ? "hug" : Math.abs(size - free) < 0.5 ? "auto" : "fixed";
+  return {
+    sizedWidth: read(now.width, hug.width, auto.width),
+    sizedHeight: read(now.height, hug.height, auto.height),
+  };
+}
 
 function dropChild(element: Element): DropChild {
   const style = getComputedStyle(element);

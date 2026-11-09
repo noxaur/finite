@@ -162,3 +162,44 @@ describe("aspect ratio", () => {
     expect(ratioOf("auto")).toBeNull();
   });
 });
+
+describe("sizes the bridge measured", () => {
+  const flexRow = {
+    parent: "row" as const,
+    parentAlign: "stretch",
+    display: "block",
+    grow: 0,
+    alignSelf: "auto",
+  };
+
+  it("tells a fixed size from a hugging one along the row", () => {
+    const fixed = { ...flexRow, sized: { width: "fixed", height: "auto" } };
+    const hug = { ...flexRow, sized: { width: "hug", height: "auto" } };
+    expect(sizeModeOf("width", {}, fixed)).toBe("fixed");
+    expect(sizeModeOf("width", {}, hug)).toBe("hug");
+    expect(sizeModeOf("height", {}, hug)).toBe("fill");
+  });
+
+  it("still reads a growing child as Fill, and needs both axes", () => {
+    expect(
+      sizeModeOf("width", {}, { ...flexRow, grow: 1, sized: { width: "fixed", height: "auto" } }),
+    ).toBe("fill");
+    expect(
+      sizeContextOf({ display: "flex", position: "static", flexGrow: "0", alignSelf: "auto" }, null)
+        .sized,
+    ).toBeUndefined();
+    expect(
+      sizeContextOf(
+        {
+          display: "flex",
+          position: "static",
+          flexGrow: "0",
+          alignSelf: "auto",
+          sizedWidth: "hug",
+          sizedHeight: "fixed",
+        },
+        null,
+      ).sized,
+    ).toEqual({ width: "hug", height: "fixed" });
+  });
+});

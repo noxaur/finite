@@ -1,4 +1,10 @@
-import type { Frame, Hit, LayerNode, Loc, Rect } from "@finite/protocol";
+import type { Frame, Hit, Inspection, LayerNode, Loc, Rect, SourceEdit } from "@finite/protocol";
+import {
+  barelyMoved,
+  movedInsets,
+  movesAbsolutely,
+  reorderShifts,
+} from "../../design/editing/autoLayout";
 import { bridgeOf } from "../bridge";
 import {
   chainOf,
@@ -258,7 +264,10 @@ async function beginResize(
   };
 }
 
-/** A drag that starts inside a frame: reorders the selected element within its flex or grid parent. */
+/**
+ * A drag that starts inside a frame. A positioned element moves by its insets; a child of a flex
+ * or grid parent reorders, with its neighbors sliding out of the way.
+ */
 async function beginDragInFrame(
   host: ToolHost,
   frame: Frame,
@@ -284,9 +293,14 @@ async function beginDragInFrame(
   if (!bridge || !facts || item.loc === undefined) return null;
   const loc = item.loc;
   const inspection = await bridge.inspect(loc, item.index ?? 0).catch(() => null);
+  if (inspection && movesAbsolutely(inspection.computed.position)) {
+    return beginMoveAbsolute(host, frame, item, inspection, from);
+  }
   const axis = inspection ? flowAxis(inspection.parent) : null;
   if (!axis) {
-    host.say("Only children of a flex or grid layout can be dragged into a new order.");
+    host.say(
+      "Only positioned elements and children of a flex or grid layout can be dragged. Press Shift+A to give this one auto layout.",
+    );
     return null;
   }
   const parent = facts.path[0];
@@ -298,10 +312,49 @@ async function beginDragInFrame(
     .map((l) => ({ loc: l, rect: rects[l]?.[0] }))
     .filter((s): s is { loc: Loc; rect: Rect } => s.rect !== undefined);
   let before: Loc | null | undefined;
+  let shown: Loc | null | undefined;
+  // In a grid the slots aren't one line, so only the drop line shows there.
+  const flex = inspection?.parent.display.includes("flex") ?? false;
+  const key = keyOf(item);
+  const start = host.state.rects[key];
+  const slide = (next: Loc | null | undefined) => {
+    if (!flex) return;
+    const shifts = reorderShifts(loc, siblings, next, axis);
+    const translate = axis === "x" ? "translateX" : "translateY";
+    for (const s of siblings) {
+      if (s.loc === loc) continue;
+      const by = shifts[s.loc];
+      bridge.preview(
+        s.loc,
+        by === undefined
+          ? null
+          : { transform: `${translate}(${by}px)`, transition: "transform 120ms ease" },
+      );
+    }
+  };
+  const clear = () => {
+    bridge.preview(loc, null);
+    for (const s of siblings) if (s.loc !== loc) bridge.preview(s.loc, null);
+  };
   return {
     move: (_, world) => {
       const p = host.local(frame, world);
       before = reorderBefore(loc, siblings, p, axis);
+      if (start) {
+        const d = { x: world.x - from.x, y: world.y - from.y };
+        bridge.preview(loc, {
+          transform: `translate(${d.x}px, ${d.y}px)`,
+          opacity: "0.72",
+          "z-index": "1000",
+        });
+        host.update({
+          rects: { ...host.state.rects, [key]: { ...start, x: start.x + d.x, y: start.y + d.y } },
+        });
+      }
+      if (before !== shown) {
+        slide(before);
+        shown = before;
+      }
       if (before === undefined) return host.update({ dropLine: null });
       const target =
         before === null ? siblings.at(-1)?.rect : siblings.find((s) => s.loc === before)?.rect;
@@ -325,10 +378,104 @@ async function beginDragInFrame(
     },
     end: async (commit) => {
       host.update({ dropLine: null });
-      if (!commit || before === undefined) return;
-      await host.edit([
-        { kind: "reorder", loc, tag: facts.tag, before, revs: revsOf([{ loc, rev: facts.rev }]) },
-      ]);
+      const moved =
+        commit && before !== undefined
+          ? await host.edit([
+              {
+                kind: "reorder",
+                loc,
+                tag: facts.tag,
+                before,
+                revs: revsOf([{ loc, rev: facts.rev }]),
+              },
+            ])
+          : false;
+      // An HMR update clears the previews of an edit that landed.
+      if (!moved) clear();
+      void host.refreshSelection();
+    },
+  };
+}
+
+/** Drags the positioned elements selected in this frame, the pressed one among them. */
+async function beginMoveAbsolute(
+  host: ToolHost,
+  frame: Frame,
+  pressed: SelectionItem,
+  inspection: Inspection,
+  from: Point,
+): Promise<Gesture | null> {
+  const bridge = bridgeOf(frame.id);
+  if (!bridge) return null;
+  const selected = selectionStore
+    .get()
+    .filter((s) => s.frameId === frame.id && s.loc !== undefined && keyOf(s) !== keyOf(pressed));
+  const others = await Promise.all(
+    selected.map(async (s) => ({
+      item: s,
+      inspection: await bridge.inspect(s.loc!, s.index ?? 0).catch(() => null),
+    })),
+  );
+  const moving = [
+    { item: pressed, inspection },
+    ...others.flatMap((o) =>
+      o.inspection && movesAbsolutely(o.inspection.computed.position)
+        ? [{ item: o.item, inspection: o.inspection }]
+        : [],
+    ),
+  ].flatMap(({ item, inspection: found }) => {
+    const key = keyOf(item);
+    const facts = host.facts.get(key);
+    const rect = host.state.rects[key];
+    if (!facts || !rect || item.loc === undefined) return [];
+    const inset = (side: "left" | "top") => parseFloat(found.computed[side] ?? "") || 0;
+    return [
+      {
+        key,
+        loc: item.loc,
+        rect,
+        facts,
+        start: {
+          left: inset("left"),
+          top: inset("top"),
+          zoom: parseFloat(found.computed.zoom ?? "") || 1,
+        },
+      },
+    ];
+  });
+  if (moving.length === 0) return null;
+  let d = { x: 0, y: 0 };
+  return {
+    move: (_, world, e) => {
+      const raw = { x: world.x - from.x, y: world.y - from.y };
+      // Shift holds it to the axis it has moved furthest along.
+      d = e.shiftKey
+        ? Math.abs(raw.x) > Math.abs(raw.y)
+          ? { x: raw.x, y: 0 }
+          : { x: 0, y: raw.y }
+        : raw;
+      const rects: Record<string, Rect> = {};
+      for (const m of moving) {
+        const { left, top } = movedInsets(m.start, d);
+        bridge.preview(m.loc, { left, top, right: "auto", bottom: "auto" });
+        rects[m.key] = { ...m.rect, x: m.rect.x + d.x, y: m.rect.y + d.y };
+      }
+      host.update({ rects: { ...host.state.rects, ...rects } });
+    },
+    end: async (commit) => {
+      const edits: SourceEdit[] =
+        commit && !barelyMoved(d)
+          ? moving.map((m) => ({
+              kind: "style",
+              locs: [m.loc],
+              tag: m.facts.tag,
+              styles: movedInsets(m.start, d),
+              revs: revsOf([{ loc: m.loc, rev: m.facts.rev }]),
+            }))
+          : [];
+      const ok = edits.length > 0 && (await host.edit(edits));
+      if (!ok) for (const m of moving) bridge.preview(m.loc, null);
+      void host.refreshSelection();
     },
   };
 }
