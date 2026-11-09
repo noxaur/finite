@@ -64,7 +64,7 @@ Left out: `editQueued` (inside the lock, only removes or rewrites), `writing` fi
 
 ## Coverage
 
-**Last synced:** `51ee6f77f44453401756379b78aca7017ee11950`
+**Last synced:** `d30a9cd8229bbd1aaa14a0a6fa10d74b9bbb34e8`
 
 | File                                   | Function                                             | Backs                                                                    |
 | -------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------ |
