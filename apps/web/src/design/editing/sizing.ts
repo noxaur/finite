@@ -105,6 +105,8 @@ export function sizeModeStyles(
     for (const p of props) if (styles[p] !== undefined) out[p] = null;
   };
   if (mode === "fill") {
+    // A size the bridge measured holding it (Hug or Fixed) has to come off for it to fill.
+    if (ctx.sized && ctx.sized[axis] !== "auto") out[axis] = null;
     if (main === axis) {
       out.flex = "1 1 0";
       drop("flex-grow", "flex-shrink", "flex-basis", axis);

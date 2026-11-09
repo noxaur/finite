@@ -298,20 +298,33 @@ export function draggedZoom(
 export const movesAbsolutely = (position: string | undefined) =>
   position === "absolute" || position === "fixed";
 
+/** How many frame pixels one of an element's own CSS pixels covers, as the bridge measured it. */
+export const frameScaleOf = (computed: Readonly<Record<string, string>>) =>
+  parseFloat(computed.effectiveZoom ?? "") || parseFloat(computed.zoom ?? "") || 1;
+
 /**
  * The `left`, `top` a positioned element gets after moving by `d`: computed insets are in the
- * element's own zoom, while `d` is in the frame's pixels. Opposite insets come off, so it keeps
- * its size and moves rather than stretching.
+ * element's own pixels, while `d` is in the frame's, and `zoom` is how many of those one covers.
+ * Opposite insets come off so it moves rather than stretches, and a size they were giving it
+ * (`keep`, in its own pixels) is written instead.
  */
 export function movedInsets(
-  start: { left: number; top: number; zoom: number },
+  start: {
+    left: number;
+    top: number;
+    zoom: number;
+    keep?: { width?: number; height?: number };
+  },
   d: { x: number; y: number },
 ): Record<string, string | null> {
+  const { width, height } = start.keep ?? {};
   return {
     left: `${Math.round(start.left + d.x / start.zoom)}px`,
     top: `${Math.round(start.top + d.y / start.zoom)}px`,
     right: null,
     bottom: null,
+    ...(width === undefined ? {} : { width: `${Math.round(width)}px` }),
+    ...(height === undefined ? {} : { height: `${Math.round(height)}px` }),
   };
 }
 

@@ -1,6 +1,7 @@
 import type { Frame, Hit, Inspection, LayerNode, Loc, Rect, SourceEdit } from "@finite/protocol";
 import {
   barelyMoved,
+  frameScaleOf,
   movedInsets,
   movesAbsolutely,
   reorderShifts,
@@ -429,6 +430,7 @@ async function beginMoveAbsolute(
     const rect = host.state.rects[key];
     if (!facts || !rect || item.loc === undefined) return [];
     const inset = (side: "left" | "top") => parseFloat(found.computed[side] ?? "") || 0;
+    const zoom = frameScaleOf(found.computed);
     return [
       {
         key,
@@ -438,7 +440,11 @@ async function beginMoveAbsolute(
         start: {
           left: inset("left"),
           top: inset("top"),
-          zoom: parseFloat(found.computed.zoom ?? "") || 1,
+          zoom,
+          keep: {
+            ...(found.computed.sizedWidth === "auto" ? { width: rect.width / zoom } : {}),
+            ...(found.computed.sizedHeight === "auto" ? { height: rect.height / zoom } : {}),
+          },
         },
       },
     ];
@@ -456,8 +462,7 @@ async function beginMoveAbsolute(
         : raw;
       const rects: Record<string, Rect> = {};
       for (const m of moving) {
-        const { left, top } = movedInsets(m.start, d);
-        bridge.preview(m.loc, { left, top, right: "auto", bottom: "auto" });
+        bridge.preview(m.loc, { ...movedInsets(m.start, d), right: "auto", bottom: "auto" });
         rects[m.key] = { ...m.rect, x: m.rect.x + d.x, y: m.rect.y + d.y };
       }
       host.update({ rects: { ...host.state.rects, ...rects } });

@@ -821,6 +821,32 @@ describe.skipIf(!chromePath)("bridge in Chrome", () => {
       () => (window as unknown as { bridge: { events: { type: string }[] } }).bridge.events,
     ) as Promise<({ type: string } & Record<string, unknown>)[]>;
 
+  test("inspect reads a size its insets give and the zoom above an element", async () => {
+    const { page, frame } = await open(`${urls["rr-spa"]}/`);
+    await frame.evaluate(() => {
+      const add = (parent: Element, loc: string, css: string) => {
+        const el = document.createElement("div");
+        el.setAttribute("data-finite-loc", loc);
+        el.setAttribute("data-finite-rev", "test");
+        el.style.cssText = css;
+        parent.append(el);
+        return el;
+      };
+      const box = add(document.body, "t:1:0", "position:relative;width:400px;height:200px");
+      add(box, "t:2:0", "position:absolute;left:20px;top:20px;right:20px;bottom:20px");
+      const zoomed = add(box, "t:3:0", "zoom:2");
+      add(zoomed, "t:4:0", "position:absolute;left:10px;top:0;width:5px;height:5px");
+    });
+    const read = async (loc: string) =>
+      (
+        (await ask(page, "inspect", { loc, index: 0 })).value as {
+          computed: Record<string, string>;
+        }
+      ).computed;
+    expect(await read("t:2:0")).toMatchObject({ sizedWidth: "auto", sizedHeight: "auto" });
+    expect(await read("t:4:0")).toMatchObject({ sizedWidth: "fixed", effectiveZoom: "2" });
+  });
+
   test("hit, rects, inspect, layers, errors and HMR on a route frame", async () => {
     const { page, frame } = await open(`${urls["rr-spa"]}/`);
     const heading = await frame.$eval("h1", (h) => {

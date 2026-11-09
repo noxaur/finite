@@ -96,9 +96,13 @@ export function wrap(s: InsertStep, elements: Element[], wrapper: NewNode): Prin
  */
 export function unwrap(s: InsertStep, element: Element): void {
   const el = element.node;
-  const kids = el.children.filter((k) => !isWhitespaceText(k));
+  const solid = el.children.filter((k) => !isWhitespaceText(k));
+  // JSX drops whitespace with a line break in it; a space on the line with its neighbors shows.
+  const kept = isChild(element)
+    ? el.children.filter((k) => !isWhitespaceText(k) || !k.value.includes("\n"))
+    : solid;
   if (!isChild(element)) {
-    if (kids.length !== 1 || kids[0]!.type !== "JSXElement")
+    if (solid.length !== 1 || solid[0]!.type !== "JSXElement")
       throw new Refused(
         `This element is a component's root or sits inside code, and it holds more than one element. Removing it would leave nothing to return. ${ASK}`,
         "unsupported-style",
@@ -109,13 +113,13 @@ export function unwrap(s: InsertStep, element: Element): void {
         "unsupported-style",
       );
   }
-  if (kids.length === 0) {
+  if (kept.length === 0) {
     const range = slot(asChild(element, "remove").parent, el);
     s.ms.remove(range.start, range.end);
     return;
   }
-  const first = kids[0] as t.Node;
-  const last = kids.at(-1) as t.Node;
+  const first = kept[0] as t.Node;
+  const last = kept.at(-1) as t.Node;
   s.ms.remove(el.start!, first.start!);
   s.ms.remove(last.end!, el.end!);
   if (!startsLine(s.code, first.start!)) return;

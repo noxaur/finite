@@ -221,6 +221,14 @@ describe("unwrap", () => {
     });
   });
 
+  it("keeps spaces JSX shows, and drops indentation", () => {
+    const code = `export const A = () => <p>Hello<span> <b>world</b> </span>again</p>;\n`;
+    const loc = `${FILE}:1:${code.indexOf("<span")}`;
+    expect(ok(run(code, [{ kind: "unwrap", loc, tag: "span" }])).code).toBe(
+      `export const A = () => <p>Hello <b>world</b> again</p>;\n`,
+    );
+  });
+
   it("restyles the children in the same batch", () => {
     const out = ok(
       run(WRAPPED, [

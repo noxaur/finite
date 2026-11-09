@@ -209,9 +209,15 @@ const requests: Record<string, (params: Request) => unknown> = {
     const computed: Record<string, string> = {};
     for (const key of COMPUTED) computed[key] = style[key];
     const parent = element.parentElement ? getComputedStyle(element.parentElement) : undefined;
+    computed.effectiveZoom = String(effectiveZoom(element));
     Object.assign(
       computed,
-      style.display.includes("flex") || parent?.display.includes("flex") ? sizing(element) : {},
+      style.display.includes("flex") ||
+        parent?.display.includes("flex") ||
+        style.position === "absolute" ||
+        style.position === "fixed"
+        ? sizing(element)
+        : {},
     );
     const text = ownText(element);
     return {
@@ -277,10 +283,20 @@ const requests: Record<string, (params: Request) => unknown> = {
   },
 };
 
+/** How many frame pixels one of the element's CSS pixels covers: `zoom` multiplies down the tree. */
+function effectiveZoom(element: Element): number {
+  let zoom = 1;
+  for (let up: Element | null = element; up; up = up.parentElement) {
+    zoom *= parseFloat(getComputedStyle(up).zoom) || 1;
+  }
+  return zoom;
+}
+
 /**
- * How each axis sizes an element in a flex layout, which its computed size can't say: `hug` when it
- * measures as its content, `auto` as without a size of its own (stretched), else `fixed`. It
- * applies each size and measures it inside this one task, so nothing paints.
+ * How each axis sizes an element in a flex layout or out of flow, which its computed size can't
+ * say: `hug` when it measures as its content, `auto` as without a size of its own (stretched by a
+ * parent or its insets), else `fixed`. It applies each size and measures it inside this one task,
+ * so nothing paints.
  */
 function sizing(element: Element): Record<string, string> {
   if (!(element instanceof HTMLElement)) return {};

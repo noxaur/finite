@@ -4,6 +4,7 @@ import {
   autoLayoutStyles,
   boundsOf,
   FLOW_STYLES,
+  frameScaleOf,
   inferAutoLayout,
   movesAbsolutely,
   NO_FLEX,
@@ -212,17 +213,25 @@ async function flexContainer(host: ToolHost, frameId: string, el: El, kids: read
   ]);
 }
 
-const sizeOf = (kid: Read): Record<string, string> => ({
-  ...(kid.computed.sizedWidth === "fixed" ? {} : { width: `${Math.round(kid.rect.width)}px` }),
-  ...(kid.computed.sizedHeight === "fixed" ? {} : { height: `${Math.round(kid.rect.height)}px` }),
+/** The element's measured size where nothing fixes it, in pixels of `scale` frame pixels each. */
+const sizeOf = (el: Read, scale: number): Record<string, string> => ({
+  ...(el.computed.sizedWidth === "fixed"
+    ? {}
+    : { width: `${Math.round(el.rect.width / scale)}px` }),
+  ...(el.computed.sizedHeight === "fixed"
+    ? {}
+    : { height: `${Math.round(el.rect.height / scale)}px` }),
 });
 
-/** The insets that put `kid` where it's measured, in the containing block whose origin is `at`. */
-const placed = (kid: Read, at: { x: number; y: number }, position: string) => ({
+/**
+ * The insets that put `kid` where it's measured, in the containing block whose origin is `at` in
+ * frame pixels. `scale` is how many frame pixels one of its pixels will cover there.
+ */
+const placed = (kid: Read, at: { x: number; y: number }, position: string, scale: number) => ({
   position,
-  left: `${Math.round(kid.rect.x - at.x)}px`,
-  top: `${Math.round(kid.rect.y - at.y)}px`,
-  ...sizeOf(kid),
+  left: `${Math.round((kid.rect.x - at.x) / scale)}px`,
+  top: `${Math.round((kid.rect.y - at.y) / scale)}px`,
+  ...sizeOf(kid, scale),
 });
 
 /**
@@ -250,10 +259,13 @@ export async function removeAutoLayout(host: ToolHost) {
   const unique = new Set(kids.map((k) => k.loc)).size === kids.length;
   if (layerNameAt(layers, item.loc, index) === WRAPPER) {
     const floating = movesAbsolutely(own.computed.position);
+    const scale = frameScaleOf(own.computed);
     const origin = {
-      x: own.rect.x - num(own.computed.left),
-      y: own.rect.y - num(own.computed.top),
+      x: own.rect.x - num(own.computed.left) * scale,
+      y: own.rect.y - num(own.computed.top) * scale,
     };
+    // Without the wrapper, a child keeps every zoom above it but the wrapper's own.
+    const without = (k: Read) => frameScaleOf(k.computed) / (num(own.computed.zoom) || 1);
     const before = selectionStore.get();
     const children = kids.map((k) => host.selectHit(frameId, k, k.index, facts.path));
     selectionStore.set(children);
@@ -261,7 +273,7 @@ export async function removeAutoLayout(host: ToolHost) {
       [
         { kind: "unwrap", loc: el.loc, tag: el.tag, revs: revsOf([el]) },
         ...(floating && unique
-          ? kids.map((k) => styleEdit(k, placed(k, origin, own.computed.position!)))
+          ? kids.map((k) => styleEdit(k, placed(k, origin, own.computed.position!, without(k))))
           : []),
       ],
       [...facts.path].reverse(),
@@ -269,16 +281,21 @@ export async function removeAutoLayout(host: ToolHost) {
     if (!ok) selectionStore.set(before);
     return;
   }
+  const scale = frameScaleOf(own.computed);
   const inner = {
-    x: own.rect.x + num(own.computed.borderLeftWidth),
-    y: own.rect.y + num(own.computed.borderTopWidth),
+    x: own.rect.x + num(own.computed.borderLeftWidth) * scale,
+    y: own.rect.y + num(own.computed.borderTopWidth) * scale,
   };
   await host.edit([
     styleEdit(el, {
       ...NO_FLEX,
       ...(unique && own.computed.position === "static" ? { position: "relative" } : {}),
+      // With its children out of the flow, nothing holds it open but this.
+      ...(unique ? sizeOf(own, scale) : {}),
     }),
-    ...(unique ? kids.map((k) => styleEdit(k, placed(k, inner, "absolute"))) : []),
+    ...(unique
+      ? kids.map((k) => styleEdit(k, placed(k, inner, "absolute", frameScaleOf(k.computed))))
+      : []),
   ]);
 }
 

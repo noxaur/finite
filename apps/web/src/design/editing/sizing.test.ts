@@ -203,3 +203,20 @@ describe("sizes the bridge measured", () => {
     ).toEqual({ width: "hug", height: "fixed" });
   });
 });
+
+describe("leaving Hug for Fill", () => {
+  it("clears the size that held it, across a flex row", () => {
+    const ctx = {
+      parent: "row" as const,
+      parentAlign: "stretch",
+      display: "block",
+      grow: 0,
+      alignSelf: "auto",
+      sized: { width: "auto", height: "hug" },
+    };
+    expect(sizeModeStyles("height", "fill", {}, ctx, 18)).toEqual({
+      "align-self": "stretch",
+      height: null,
+    });
+  });
+});
