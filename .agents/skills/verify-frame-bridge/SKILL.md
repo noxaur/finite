@@ -68,7 +68,7 @@ Left out: a page whose `load` never fires, which only the 5 s timer ends; a `loa
 
 ## Coverage
 
-Last synced: 51ee6f77f44453401756379b78aca7017ee11950. Move this forward only after confirming the model describes the code at the new commit. To see what changed since: `git diff <sha> -- <files below>`. To catch up after unchecked changes, use `/maintain-formal-verification-skill`.
+Last synced: 4025ebd6712ebb76e092381adc0457c218cd56de. Move this forward only after confirming the model describes the code at the new commit. To see what changed since: `git diff <sha> -- <files below>`. To catch up after unchecked changes, use `/maintain-formal-verification-skill`.
 
 | File                                        | Function                                                                                                       | Backs                                                                                |
 | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
@@ -83,3 +83,4 @@ Last synced: 51ee6f77f44453401756379b78aca7017ee11950. Move this forward only af
 | `packages/vite-plugin/src/client/bridge.ts` | `post`, `reportError`                                                                                          | `FrameReportsError`, `BufferedErrorsFlushOnConnect`                                  |
 | `packages/vite-plugin/src/client/bridge.ts` | `start`: the CONNECT listener, HELLO, `pagehide`                                                               | `BridgeSaysHello`, `FrameTakesConnect`, `ConnectReportsSize`, `FrameReloads`         |
 | `packages/vite-plugin/src/client/bridge.ts` | `receive`                                                                                                      | `FrameAnswers`                                                                       |
+| `packages/protocol/src/bridge.ts`           | `FrameMessage` (`leaving`), the request list                                                                   | `FrameReloads` (`NoticeUnload`), `FrameAnswers`                                      |

@@ -65,7 +65,7 @@ Init ==
 
 \* ---- Source requests: source/index.ts:apply ----
 
-\* source/index.ts:240-256. The request has arrived; theme and CSS-module reads are awaited before the lock.
+\* source/index.ts:238-262. The request has arrived; theme, CSS-module and variable-sheet reads are awaited before the lock.
 YouStartEdit ==
   /\ editsMade < YouEdits
   /\ MayRequest
@@ -186,9 +186,9 @@ CanvasPress(dir) ==
                   THEN canUndo' = [canUndo EXCEPT !["you"] = Pop(@)] /\ UNCHANGED canRedo
                   ELSE canRedo' = [canRedo EXCEPT !["you"] = Pop(@)] /\ UNCHANGED canUndo
 
-\* ---- The page's order: undoOrder.ts, editor.ts:862-887 ----
+\* ---- The page's order: undoOrder.ts, editor.ts:891-916 ----
 
-KindOf(s) == IF s = <<>> THEN "S" ELSE Last(s)   \* editor.ts:867, `?? {kind: "source"}`
+KindOf(s) == IF s = <<>> THEN "S" ELSE Last(s)   \* editor.ts:896, `?? {kind: "source"}`
 
 \* The fix variant only: a canvas step the server will refuse never reaches the other side.
 ForgetsNow(dir, k) ==
@@ -197,7 +197,7 @@ ForgetsNow(dir, k) ==
   /\ CanvasStack(dir) # <<>>
   /\ ~CanvasFits(Last(CanvasStack(dir)))
 
-\* undoOrder.ts:undo moves the step before editor.ts:870 sends the request. One WebSocket keeps
+\* undoOrder.ts:undo moves the step before editor.ts:899 sends the request. One WebSocket keeps
 \* one person's requests in order, so the key press and the server's pop are one step.
 PressStep(dir) ==
   LET from == IF dir = "undo" THEN done ELSE undone
@@ -227,7 +227,7 @@ YouPressRedo ==
   /\ UNCHANGED tookOlder
   /\ PressStep("redo")
 
-\* editor.ts:984 and :1029 call did only after the reply, inside inTurn.
+\* editor.ts:1060 and :1108 call did only after the reply, inside inTurn.
 ReplyArrives ==
   /\ replies # <<>>
   /\ done' = Append(done, Head(replies))
