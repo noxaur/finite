@@ -41,6 +41,9 @@ async function place(host: ToolHost, paths: SubPath[], name: string) {
   if (svg && path) host.select([host.selectHit(placed.frameId, path, path.index, [svg])]);
 }
 
+/** The canvas the pen's draft was started on. */
+let draftOwner: ToolHost | null = null;
+
 /** Writes the pen's path, if it has one, and hands back to Move unless asked to stay out of it. */
 async function finish(host: ToolHost, closed: boolean, leave = true) {
   const draft = penDraft.get();
@@ -67,7 +70,11 @@ export const pen = {
   cursor: "crosshair",
   enabled: true,
   sticky: true,
-  activate: () => penDraft.set(null),
+  activate(host) {
+    // A held key picks the tool again, and that mustn't cost the draft.
+    if (draftOwner !== host) penDraft.set(null);
+    draftOwner = host;
+  },
   deactivate: (host) => void finish(host, false, false),
   down(host, p) {
     const anchors = penDraft.get()?.anchors ?? [];
