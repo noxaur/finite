@@ -225,6 +225,7 @@ The **canvas tools** are an in-process MCP server named `finite` (`agent/tools.t
 | `add_brand_asset`             | Copy a file or URL into the brand folder and list it on the Brand page.                                                                                                                                |
 | `spawn_thread`, `name_thread` | Start a child thread; name this one.                                                                                                                                                                   |
 | `screenshot`, `frame_errors`  | A PNG of a frame (or with `region`, a box of it in the frame's pixels), taken in the system Chrome with puppeteer-core; the errors its bridge reported, or the preview's log when the preview is down. |
+| `measure`                     | One element's box model, real gaps and computed style as JSON, plus a PNG crop with the boxes and distances drawn on it. See Measure below.                                                            |
 | `finish_setup`                | Check `finite.json` and connect its apps, then start the next design's preview and report it.                                                                                                          |
 
 ## External agents over MCP
@@ -233,7 +234,7 @@ The **canvas tools** are an in-process MCP server named `finite` (`agent/tools.t
 
 `mcp/index.ts` keeps one transport and one `McpServer` per session, and forgets a session after an hour without a call. A session's actor is `mcp-<session id>`, named after the client, so its undo and comments are its own. A client that sends an `X-Finite-Agent` header takes that as its id and name, which keeps its undo across reconnects. Every call goes through `hub.open`, so viewers see the changes live.
 
-`mcp/tools.ts` declares six tools, with input shapes in `packages/protocol/src/tools.ts`. They share `canvasOps` in `agent/tools.ts` with the thread tools, so placing a frame behaves the same from either side.
+`mcp/tools.ts` declares seven tools, with input shapes in `packages/protocol/src/tools.ts`. They share `canvasOps` in `agent/tools.ts` with the thread tools, so placing a frame behaves the same from either side.
 
 | Tool       | What it does                                                                                                                                                                 |
 | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -241,6 +242,7 @@ The **canvas tools** are an in-process MCP server named `finite` (`agent/tools.t
 | `read`     | A design's overview, a canvas, a frame's rendered elements, a file, or its tokens, components or routes.                                                                     |
 | `edit`     | Run a list of ops: make a canvas, write files, place frames, add notes and sections, set tokens, and change rendered elements.                                               |
 | `render`   | A PNG of each frame with its runtime errors, at most six per call. With `region`, one frame cropped to a box.                                                                |
+| `measure`  | One element's size, padding, border, margin, radius, gaps between its children and computed style, with a PNG crop drawn on it.                                              |
 | `comments` | List, add (also as an `annotation`), reply to, resolve and reopen comments. `wait` is a long poll of up to 55 seconds for a comment a person wrote; annotations don't count. |
 | `undo`     | Take back the session's last file change, or with `canvasId` its last change to that canvas, such as a frame, a label or a section.                                          |
 
@@ -251,6 +253,16 @@ The permission fence applies here too, since an external agent has no thread to 
 A call that loads a frame starts the design's preview, then calls `hub.release`, which starts the 60-second idle grace period unless a page is subscribed. The next call's `Previews.ensure`, or a page subscribing, cancels that timer. `render` reports the errors of its own headless load, merged with what an open page's bridge reported, so a broken frame doesn't read as clean when no page is open. Those errors stay in the result and never reach `previews.reportError`, so they can't go stale after a fix.
 
 A prototype is listed by its thread, so the `canvas` op makes a thread along with a new prototype. That thread holds no agent session. If a person sends it a message, Finite starts a local Claude Code session there, as in any other thread.
+
+## Measure
+
+Inspect (M) shows one element's box model and spacing, and pins to compare within a frame; Measurement (Shift+M) draws distances between any two boxes on the canvas, frames included. This section covers Inspect and the `measure` agent tool, which read the frame the same way. Measurement is a page-only overlay (`tools/measure.ts`, `MeasureOverlay`), described under Canvas and agent.
+
+Measure answers "how far apart are these, really" with numbers the browser computed, for people and for agents. The frame does the measuring: `measureElements` in `packages/vite-plugin/src/client/bridge.ts` finds an element (by a point, a loc and instance, or a CSS selector), reads its border box, padding, border, margin and radius (scaled for a CSS `transform`, with `axisAligned: false` under a rotate or skew), its in-flow children, the computed properties in `SPEC` (`packages/protocol/src/measure.ts`), and the gaps between neighbouring children. Each gap is a real distance whatever produced it, and its `cause` is `gap` (the parent's CSS gap), `margin` (a child's margin) or `free` (alignment or leftover space), which tells an agent what to edit. Both hosts parse the reply with the `Measurement` schema.
+
+There is one drawing. `drawFigure` in `packages/protocol/src/figure.ts` turns a `Measurement` (or two, for a distance) into markup in frame pixels: padding and margin bands, hatched gaps, outlines and size pills in `MEASURE_PURPLE`. The web app draws it over the frame's iframe, and the server draws the same markup onto a headless page. A person uses the Inspect tool (`tools/inspect.ts`, press M): hover for the box model card, click to pin an element, then hover another in the same frame to see the distance between them. An agent calls `measure` with `frameId`, `select`, and optionally `index`, `to` (a second selector, for the distance) and `image: false`.
+
+For the agent, `Screenshots.measureElement` loads the frame once in headless Chrome and calls `window.__finiteMeasure`, which the bridge sets on a top-level page. It refuses in words when the bridge is missing, a selector is invalid, or nothing matches, and when `index` is past the matches it says how many there are. With an image, it appends a root with `figureRootCss` and the drawing to the page and captures a clip around the elements, 40 px out and clamped to the page, at twice a zoom chosen so the long edge is about 1,568 px. When several elements match, the result's `note` says how many. The thread tool and the `/mcp` tool both call `canvasOps.measure`.
 
 ## The web app
 
@@ -267,7 +279,7 @@ The bottom toolbar has one split button per group: Move, Frame, Shape, Pen, Text
 
 `resolveKey` in `tools/registry.ts` turns a key press into a tool or command from one table, with a test that catches duplicate shortcuts. Escape and mod combos always work. A key forwarded out of a frame in Interact mode belongs to the app in the frame, and the rest of the table ignores it.
 
-A tool draws through `host.draw` (`tools/draw.ts`). It sends `drop` over the bridge for the stamped chain at the box's center, picks a container with `planInsert` (`design/editing/insertion.ts`), sends one atomic `source.edit`, and selects the new element once it reaches the frame. The frame's own file wins over a shared component's, and ⌘ takes the nearest element whatever its file. A flex or grid container gets a flow child in its slot, and anything else an absolute child; Alt inverts that. Over empty page, `drop` answers the top-level stamped elements. Move, Hand, Interact, Comment, Annotation, Measurement, Section, Slice, Frame, Text, Text on path and the shape tools work today. Esc during a drag cancels it.
+A tool draws through `host.draw` (`tools/draw.ts`). It sends `drop` over the bridge for the stamped chain at the box's center, picks a container with `planInsert` (`design/editing/insertion.ts`), sends one atomic `source.edit`, and selects the new element once it reaches the frame. The frame's own file wins over a shared component's, and ⌘ takes the nearest element whatever its file. A flex or grid container gets a flow child in its slot, and anything else an absolute child; Alt inverts that. Over empty page, `drop` answers the top-level stamped elements. Move, Hand, Interact, Comment, Annotation, Inspect, Measurement, Section, Slice, Frame, Text, Text on path and the shape tools work today. Esc during a drag cancels it.
 
 ### Shapes
 

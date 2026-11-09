@@ -97,13 +97,24 @@ export interface ToolDef<Id extends string = string> {
   readonly pan?: "empty" | "always";
   /** Outlines what's under the pointer. */
   readonly hover?: true;
+  /** A short note the toolbar shows while the tool is on. */
+  readonly hint?: string;
   activate?(host: ToolHost): void;
+  /** The tool is being left, or the editor closed. */
   deactivate?(host: ToolHost): void;
   /** A press on the canvas; `"pass"` leaves it alone. Without it, every press passes. */
   down?(host: ToolHost, p: Down): PressPlan | "pass";
   doubleClick?(host: ToolHost, e: MouseEvent, target: Element | null): void | Promise<void>;
   /** A key, before the shortcuts. Returns whether it was used. */
   key?(host: ToolHost, e: KeyInput): boolean;
+  /** The pointer moved with nothing pressed. */
+  pointerMove?(host: ToolHost, e: PointerEvent): void;
+  /** The pointer left the canvas. */
+  pointerLeave?(host: ToolHost): void;
+  /** A frame loaded or applied an HMR update. */
+  frameUpdated?(host: ToolHost): void;
+  /** The canvas changed: frames may be gone. */
+  canvasChanged?(host: ToolHost): void;
   Overlay?: ComponentType<{ host: ToolHost; state: EditorState }>;
 }
 
@@ -118,6 +129,8 @@ export interface ToolHost {
   readonly sections: readonly Section[];
   readonly slices: readonly Slice[];
   readonly facts: Map<string, ElementFacts>;
+  /** A press is down on the canvas. */
+  readonly pressing: boolean;
   frame(id: string): Frame | undefined;
   frameAt(p: Point): Frame | null;
   boxOf(f: Frame): Rect;

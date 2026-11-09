@@ -4,6 +4,8 @@ Finite is a design canvas for real React projects. Each design is a React and Ty
 
 You edit frames like in Figma: select an element, move and resize it, change its text and styles in the inspector, undo with ⌘Z. Finite writes each edit back to the TSX in the project's own convention, so a Tailwind project gets Tailwind classes, a CSS-modules project (plain CSS, Sass or Less) gets a changed rule and a StyleX project gets a changed or new `stylex.create` entry. Agents work beside you. On the Prototypes tab, a message to the composer starts a thread, which runs your local Claude Code CLI on the project. The agent writes prototype components onto a canvas, labels each one with what it tried and why, and leaves comments. It can read all of production but writes only prototypes and brand assets, until you ask it to move a prototype to prod.
 
+Two canvas tools read spacing without changing anything. Inspect (M) shows one element's box model and spacing, and pins to compare within a frame; Measurement (Shift+M) draws distances between any two boxes on the canvas, frames included.
+
 For a tour of the internals, read [How Finite works](docs/how-finite-works.md).
 
 ## Setup
@@ -32,7 +34,7 @@ Claude Code, Cursor, a chat app or any other MCP client can work in Finite throu
 claude mcp add --transport http finite http://127.0.0.1:4100/mcp
 ```
 
-The client gets six tools. `designs` lists, creates, connects, renames and removes designs. `read` shows a design, a canvas, a file, or a frame's rendered elements. `edit` runs a list of ops that make canvases, write TSX, place frames and change rendered elements, which it addresses with CSS selectors. `render` returns each frame, or one cropped region of it, as a PNG with its runtime errors. `comments` answers what people pin to frames, and its `wait` blocks until someone writes. `edit` also draws named sections around frames. `undo` takes back that client's own last step.
+The client gets seven tools. `designs` lists, creates, connects, renames and removes designs. `read` shows a design, a canvas, a file, or a frame's rendered elements. `edit` runs a list of ops that make canvases, write TSX, place frames and change rendered elements, which it addresses with CSS selectors. `render` returns each frame, or one cropped region of it, as a PNG with its runtime errors. `measure` returns one element's real padding, gaps, sizes and computed style, with a PNG of them drawn on it. `comments` answers what people pin to frames, and its `wait` blocks until someone writes. `edit` also draws named sections around frames. `undo` takes back that client's own last step.
 
 People see every change live. Production code is refused unless a call to `edit` passes `production: true`, which the agent should do only when you asked it to ship. A prototype made this way shows up in the Prototypes tab as a thread. Send the header `X-Finite-Agent: <name>` to keep a client's undo history across reconnects. The endpoint has no login, so anything that can reach the port can use it.
 

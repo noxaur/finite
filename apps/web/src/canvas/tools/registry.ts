@@ -4,6 +4,7 @@ import { comment, annotation } from "./comment";
 import { frame } from "./frame";
 import { hand } from "./hand";
 import type { KeyCombo, KeyInput, ToolDef, ToolGroup } from "./host";
+import { inspect } from "./inspect";
 import { interact } from "./interact";
 import { measure } from "./measure";
 import { select } from "./move";
@@ -41,6 +42,7 @@ export const TOOLS = [
   comment,
   annotation,
   measure,
+  inspect,
 ] as const satisfies readonly ToolDef[];
 
 export type ToolId = (typeof TOOLS)[number]["id"];

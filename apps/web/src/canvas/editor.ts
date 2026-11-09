@@ -19,6 +19,7 @@ import type { Camera } from "@/design/camera";
 import { hasText, normalize, sameContent } from "@/design/editing/inline";
 import { bridgeOf, mountedBridges } from "./bridge";
 import { draw } from "./tools/draw";
+import { type InspectState, NO_INSPECT } from "./tools/inspect";
 import type { Ghost, Gesture, KeyInput, Placed, PressPlan, ToolDef, ToolHost } from "./tools/host";
 import { ALL_COMMANDS, type KeyEnv, resolveKey, type ToolId, toolOf } from "./tools/registry";
 import { placeText } from "./tools/text";
@@ -111,6 +112,8 @@ export interface EditorState {
   readonly sizes: Readonly<Record<string, number>>;
   /** Counts frame loads and HMR updates, so what's measured in frames measures again. */
   readonly updates: number;
+  /** The inspect tool's element under the pointer and its pin; empty in the other tools. */
+  readonly inspect: InspectState;
 }
 
 const initial: EditorState = {
@@ -133,6 +136,7 @@ const initial: EditorState = {
   openComment: null,
   sizes: {},
   updates: 0,
+  inspect: NO_INSPECT,
 };
 
 type Press = {
@@ -188,7 +192,14 @@ export class CanvasEditor implements ToolHost {
     viewport.addEventListener("pointermove", (e) => this.onMove(e), capture);
     viewport.addEventListener("pointerup", (e) => void this.onUp(e), capture);
     viewport.addEventListener("pointercancel", () => this.cancelPress(), capture);
-    viewport.addEventListener("pointerleave", () => this.setHover(null), { signal });
+    viewport.addEventListener(
+      "pointerleave",
+      () => {
+        this.setHover(null);
+        toolOf(this.state.tool).pointerLeave?.(this);
+      },
+      { signal },
+    );
     window.addEventListener("keydown", (e) => this.onKey(e), { signal });
     window.addEventListener(
       "keyup",
@@ -217,10 +228,16 @@ export class CanvasEditor implements ToolHost {
     this.offSelection();
     clearTimeout(this.noticeTimer);
     cancelAnimationFrame(this.hoverFrame);
+    toolOf(this.state.tool).deactivate?.(this);
   }
 
   get state() {
     return this.store.get();
+  }
+
+  /** A press is down on the canvas. */
+  get pressing() {
+    return this.current !== null;
   }
 
   update(patch: Partial<EditorState>) {
@@ -236,6 +253,7 @@ export class CanvasEditor implements ToolHost {
     if (this.state.selectedText && !canvas.texts.some((t) => t.id === this.state.selectedText)) {
       this.update({ selectedText: null });
     }
+    toolOf(this.state.tool).canvasChanged?.(this);
     const picked = this.state.selectedObject;
     if (
       picked &&
@@ -281,6 +299,7 @@ export class CanvasEditor implements ToolHost {
   setTool(id: string) {
     const tool = toolOf(id);
     if (!tool.enabled) return;
+    toolOf(this.state.tool).deactivate?.(this);
     // A key held down repeats, and that same tool's press has to survive it.
     if (tool.id !== this.state.tool) {
       this.cancelPress();
@@ -298,6 +317,7 @@ export class CanvasEditor implements ToolHost {
   frameChanged() {
     this.update({ updates: this.state.updates + 1 });
     void this.refreshSelection();
+    toolOf(this.state.tool).frameUpdated?.(this);
   }
 
   setSize(frameId: string, height: number) {
@@ -625,7 +645,10 @@ export class CanvasEditor implements ToolHost {
   private onMove(e: PointerEvent) {
     const press = this.current;
     if (!press || press.pointerId !== e.pointerId) {
-      if (!press && toolOf(this.state.tool).hover) this.hoverAt(e);
+      if (press) return;
+      const tool = toolOf(this.state.tool);
+      if (tool.hover) this.hoverAt(e);
+      tool.pointerMove?.(this, e);
       return;
     }
     const screen = { x: e.clientX, y: e.clientY };

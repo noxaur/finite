@@ -1,9 +1,11 @@
 /// <reference lib="dom" />
 /**
  * The iframe half of the bridge (`@finite/protocol` bridge.ts), loaded into every page the design's
- * dev server renders. The plugin serves it with its types stripped, so it imports nothing: the
- * constants below mirror the protocol and a test keeps them equal.
+ * dev server renders. The plugin serves it with its types stripped, so it imports nothing at
+ * runtime: the constants below mirror the protocol and a test keeps them equal.
  */
+
+import type { Measurement, MeasuredGap, MeasureTarget } from "@finite/protocol";
 
 export const HELLO = "finite:hello";
 export const CONNECT = "finite:connect";
@@ -11,6 +13,13 @@ const LOC = "data-finite-loc";
 const REV = "data-finite-rev";
 const MAX_PENDING = 100;
 const MAX_MESSAGE = 4_000;
+const MAX_CHILDREN = 200;
+/** How far apart two lengths can be and still be the same CSS value after layout rounding. */
+const SAME_LENGTH = 0.5;
+/** Layout works in fractions of a pixel, so neighbours can overlap by this much and still touch. */
+const TOUCHING = 0.02;
+/** How far two rects must overlap across an axis to count as facing each other. */
+const MIN_SHARED = 0.5;
 /**
  * How long `updated` waits: React Refresh applies an update a moment after Vite's
  * `vite:afterUpdate`, and under Next the DOM must go quiet.
@@ -135,6 +144,10 @@ declare global {
     /** Vite's HMR API; written out as `import.meta.hot` so Vite sees it. */
     readonly hot?: { on(event: string, fn: () => void): void };
   }
+  interface Window {
+    /** Set only in a top-level page: how headless Chrome reaches the measuring code. */
+    __finiteMeasure?: typeof measureElements;
+  }
 }
 
 let port: MessagePort | null = null;
@@ -203,6 +216,318 @@ function layerName(element: Element): string {
   return element.tagName.toLowerCase();
 }
 
+export type Cut = { axis: "x" | "y"; size: number; rect: Rect; between: [number, number] };
+
+const round = (n: number) => Math.round(n * 100) / 100;
+
+function roundRect({ x, y, width, height }: Rect): Rect {
+  return { x: round(x), y: round(y), width: round(width), height: round(height) };
+}
+
+function spanOf(rect: Rect, axis: "x" | "y"): [number, number] {
+  return axis === "x" ? [rect.x, rect.x + rect.width] : [rect.y, rect.y + rect.height];
+}
+
+function strip(axis: "x" | "y", start: number, size: number, from: number, to: number): Rect {
+  const rect =
+    axis === "x"
+      ? { x: start, y: from, width: size, height: to - from }
+      : { x: from, y: start, width: to - from, height: size };
+  return roundRect(rect);
+}
+
+function groupsAlong(rects: readonly Rect[], indices: number[], axis: "x" | "y"): number[][] {
+  const sorted = [...indices].sort((a, b) => spanOf(rects[a], axis)[0] - spanOf(rects[b], axis)[0]);
+  const groups: number[][] = [];
+  let end = 0;
+  for (const i of sorted) {
+    const [start, stop] = spanOf(rects[i], axis);
+    if (groups.length === 0 || start >= end - TOUCHING) {
+      groups.push([i]);
+      end = stop;
+    } else {
+      groups[groups.length - 1].push(i);
+      end = Math.max(end, stop);
+    }
+  }
+  return groups;
+}
+
+/** The channel between two neighbouring groups, across everything in both. */
+function channel(rects: readonly Rect[], a: number[], b: number[], axis: "x" | "y"): Cut {
+  const cross = axis === "x" ? "y" : "x";
+  const end = (i: number) => spanOf(rects[i], axis)[1];
+  const start = (i: number) => spanOf(rects[i], axis)[0];
+  const last = a.reduce((best, i) => (end(i) > end(best) ? i : best));
+  const first = b.reduce((best, i) => (start(i) < start(best) ? i : best));
+  const across = [...a, ...b].map((i) => spanOf(rects[i], cross));
+  const size = Math.max(0, start(first) - end(last));
+  return {
+    axis,
+    size: round(size),
+    rect: strip(
+      axis,
+      end(last),
+      size,
+      Math.min(...across.map((s) => s[0])),
+      Math.max(...across.map((s) => s[1])),
+    ),
+    between: [last, first],
+  };
+}
+
+/**
+ * For a group no channel splits, as a spanning grid cell does: each rect's nearest neighbours to
+ * the right and below, if nothing else sits in the strip between them. Grid cells share tracks, so
+ * several neighbours are often equally near; they're all kept.
+ */
+function nearestNeighbours(rects: readonly Rect[], group: number[]): Cut[] {
+  const cuts: Cut[] = [];
+  for (const axis of ["x", "y"] as const) {
+    const cross = axis === "x" ? "y" : "x";
+    for (const i of group) {
+      const end = spanOf(rects[i], axis)[1];
+      const [low, high] = spanOf(rects[i], cross);
+      const shared = (j: number) => {
+        const [jLow, jHigh] = spanOf(rects[j], cross);
+        return { from: Math.max(low, jLow), to: Math.min(high, jHigh) };
+      };
+      const candidates = group.filter((j) => {
+        if (j === i || spanOf(rects[j], axis)[0] < end - TOUCHING) return false;
+        const { from, to } = shared(j);
+        return to - from > MIN_SHARED;
+      });
+      const nearest = Math.min(...candidates.map((j) => spanOf(rects[j], axis)[0]));
+      for (const j of candidates) {
+        const start = spanOf(rects[j], axis)[0];
+        if (start > nearest + TOUCHING) continue;
+        const { from, to } = shared(j);
+        const size = Math.max(0, start - end);
+        const rect = strip(axis, end, size, from, to);
+        const blocked = group.some(
+          (k) =>
+            k !== i &&
+            k !== j &&
+            rects[k].x < rect.x + rect.width - TOUCHING &&
+            rects[k].x + rects[k].width > rect.x + TOUCHING &&
+            rects[k].y < rect.y + rect.height - TOUCHING &&
+            rects[k].y + rects[k].height > rect.y + TOUCHING,
+        );
+        if (!blocked) cuts.push({ axis, size: round(size), rect, between: [i, j] });
+      }
+    }
+  }
+  return cuts;
+}
+
+/**
+ * Recursive XY-cut (Nagy & Seth, 1984): split the rects into groups along the empty channels on
+ * y, else on x, and recurse into each group. It reads only final rects, so flex, wrap, grid,
+ * margin stacks and space-between are one code path and every gap is a measured distance.
+ */
+export function xyCut(rects: readonly Rect[]): Cut[] {
+  const solve = (indices: number[]): Cut[] => {
+    if (indices.length < 2) return [];
+    for (const axis of ["y", "x"] as const) {
+      const groups = groupsAlong(rects, indices, axis);
+      if (groups.length < 2) continue;
+      const cuts = groups.slice(1).map((group, g) => channel(rects, groups[g], group, axis));
+      return [...cuts, ...groups.flatMap(solve)];
+    }
+    return nearestNeighbours(rects, indices);
+  };
+  return solve(rects.map((_, i) => i));
+}
+
+type InFlowChild = { node: Element | Text; rect: Rect; inline: boolean };
+
+/** What the parent lays out: `display: contents` wrappers are replaced by their own children. */
+function inFlowChildren(parent: Element): InFlowChild[] {
+  return Array.from(parent.childNodes).flatMap((node): InFlowChild[] => {
+    if (node instanceof Text) {
+      if (!node.textContent?.trim()) return [];
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      const { x, y, width, height } = range.getBoundingClientRect();
+      return width > 0 && height > 0
+        ? [{ node, rect: roundRect({ x, y, width, height }), inline: true }]
+        : [];
+    }
+    if (!(node instanceof Element)) return [];
+    const style = getComputedStyle(node);
+    if (style.display === "none") return [];
+    if (style.display === "contents") return inFlowChildren(node);
+    if (style.position === "absolute" || style.position === "fixed") return [];
+    const rect = roundRect(rectOf(node));
+    if (rect.width === 0 || rect.height === 0) return [];
+    return [{ node, rect, inline: style.display.startsWith("inline") }];
+  });
+}
+
+const px = (value: string) => parseFloat(value) || 0;
+
+/** A computed corner radius, which can be elliptical ("20px 50%"), as its horizontal radius. */
+export function horizontalRadius(value: string, width: number, scale: number): number {
+  const [horizontal = ""] = value.split(" ");
+  return horizontal.endsWith("%") ? (px(horizontal) / 100) * width : px(horizontal) * scale;
+}
+
+/** A computed gap in pixels. A percentage resolves against the content box along its axis. */
+export function gapLength(value: string, contentSize: number, scale: number): number {
+  return value.endsWith("%") ? (px(value) / 100) * contentSize : px(value) * scale;
+}
+
+function isAxisAligned(style: CSSStyleDeclaration): boolean {
+  if (style.rotate && style.rotate !== "none") return false;
+  const matrix = /matrix(3d)?\(([^)]+)\)/.exec(style.transform);
+  if (!matrix) return true;
+  const values = matrix[2].split(",").map(Number);
+  // The off-diagonal terms; translation is fine and scale is handled by measureOne.
+  const terms = matrix[1] ? [1, 2, 3, 4, 6, 7, 8, 9, 11] : [1, 2];
+  return terms.every((i) => Math.abs(values[i]) < 1e-4);
+}
+
+function measureOne(element: Element, matches: Element[], props: readonly string[]): Measurement {
+  const raw = rectOf(element);
+  const style = getComputedStyle(element);
+  const axisAligned = isAxisAligned(style);
+  // offsetWidth is an integer, so a difference under a pixel is rounding and not a scale.
+  const ratio = (size: number, offset: number) =>
+    offset === 0 || Math.abs(size - offset) < 1 ? 1 : size / offset;
+  const html = axisAligned && element instanceof HTMLElement ? element : null;
+  const scaleX = html ? ratio(raw.width, html.offsetWidth) : 1;
+  const scaleY = html ? ratio(raw.height, html.offsetHeight) : 1;
+
+  const edges = (prefix: string, suffix = "") => {
+    const read = (side: string, scale: number) =>
+      round(px(style.getPropertyValue(`${prefix}-${side}${suffix}`)) * scale);
+    return {
+      top: read("top", scaleY),
+      right: read("right", scaleX),
+      bottom: read("bottom", scaleY),
+      left: read("left", scaleX),
+    };
+  };
+  const corner = (name: string) =>
+    round(horizontalRadius(style.getPropertyValue(`border-${name}-radius`), raw.width, scaleX));
+  const padding = edges("padding");
+  const border = edges("border", "-width");
+
+  const all = inFlowChildren(element);
+  const items = all.slice(0, MAX_CHILDREN);
+  const flow: Measurement["flow"] = style.display.endsWith("flex")
+    ? "flex"
+    : style.display.endsWith("grid")
+      ? "grid"
+      : items.some((item) => item.inline)
+        ? "inline"
+        : "block";
+
+  const margin = (index: number, side: string) => {
+    const { node } = items[index];
+    return node instanceof Element ? px(getComputedStyle(node).getPropertyValue(side)) : 0;
+  };
+  const causeOf = ({ axis, size, between: [a, b] }: Cut): MeasuredGap["cause"] => {
+    const scale = axis === "x" ? scaleX : scaleY;
+    const cssGap =
+      axis === "x"
+        ? gapLength(
+            style.columnGap,
+            raw.width - padding.left - padding.right - border.left - border.right,
+            scale,
+          )
+        : gapLength(
+            style.rowGap,
+            raw.height - padding.top - padding.bottom - border.top - border.bottom,
+            scale,
+          );
+    const before = margin(a, axis === "x" ? "margin-right" : "margin-bottom") * scale;
+    const after = margin(b, axis === "x" ? "margin-left" : "margin-top") * scale;
+    const same = (length: number) => Math.abs(size - length) < SAME_LENGTH;
+    if (cssGap > 0 && same(cssGap)) return "gap";
+    if (before + after > 0 && (same(cssGap + before + after) || same(Math.max(before, after))))
+      return "margin";
+    return "free";
+  };
+  const gaps =
+    flow === "inline"
+      ? []
+      : xyCut(items.map((item) => item.rect)).map((cut) => ({ ...cut, cause: causeOf(cut) }));
+
+  const computed = style as unknown as Record<string, unknown>;
+  const reported: Record<string, string> = {};
+  for (const prop of props) {
+    const value = computed[prop];
+    if (typeof value === "string") reported[prop] = value;
+  }
+
+  const hit = describe(element);
+  const stamp = element.getAttribute(LOC);
+  const text = ownText(element);
+  return {
+    tag: hit.tag,
+    name: layerName(element),
+    ...(stamp === null ? {} : { loc: stamp }),
+    ...(element.hasAttribute(REV) ? { rev: hit.rev } : {}),
+    index: matches.indexOf(element),
+    count: matches.length,
+    box: roundRect(raw),
+    padding,
+    border,
+    margin: edges("margin"),
+    radius: {
+      topLeft: corner("top-left"),
+      topRight: corner("top-right"),
+      bottomRight: corner("bottom-right"),
+      bottomLeft: corner("bottom-left"),
+    },
+    axisAligned,
+    flow,
+    children: items.map(({ node, rect }) => {
+      if (node instanceof Element) {
+        const loc = node.getAttribute(LOC);
+        return {
+          tag: node.tagName.toLowerCase(),
+          name: layerName(node),
+          ...(loc === null ? {} : { loc }),
+          rect,
+        };
+      }
+      const run = (node.textContent ?? "").trim();
+      return { tag: "#text", name: run.length > 40 ? `${run.slice(0, 39)}…` : run, rect };
+    }),
+    childCount: all.length,
+    gaps,
+    style: reported,
+    ...(text === undefined ? {} : { text }),
+  };
+}
+
+/** Resolves each target and measures it; `null` where nothing matched. Reads layout, writes nothing. */
+export function measureElements(
+  targets: readonly MeasureTarget[],
+  props: readonly string[],
+): (Measurement | null)[] {
+  return targets.map((target) => {
+    if ("at" in target) {
+      let element = stamped(document.elementFromPoint(target.at.x, target.at.y));
+      for (let up = target.up ?? 0; element && up > 0; up--) {
+        const parent = stamped(element.parentElement);
+        if (!parent) break;
+        element = parent;
+      }
+      if (!element) return null;
+      return measureOne(element, instances(element.getAttribute(LOC) ?? ""), props);
+    }
+    const matches =
+      "loc" in target
+        ? instances(target.loc)
+        : Array.from(document.querySelectorAll(target.select));
+    const element = matches[target.index];
+    return element ? measureOne(element, matches, props) : null;
+  });
+}
+
 const requests: Record<string, (params: Request) => unknown> = {
   hit({ x, y }) {
     const element = stamped(document.elementFromPoint(x as number, y as number));
@@ -261,6 +586,10 @@ const requests: Record<string, (params: Request) => unknown> = {
       return nodes;
     };
     return visit(document.body);
+  },
+
+  measure({ targets, props }) {
+    return measureElements(targets as MeasureTarget[], props as string[]);
   },
 
   /** The stamped chain at a point, nearest first, with what placing a new element there needs. */
@@ -523,4 +852,8 @@ function start(): void {
   window.parent.postMessage({ type: HELLO }, "*");
 }
 
-if (typeof window !== "undefined" && window.parent !== window) start();
+if (typeof window !== "undefined") {
+  if (window.parent !== window) start();
+  // A top-level load is headless Chrome measuring for an agent; it has no parent to connect to.
+  else window.__finiteMeasure = measureElements;
+}

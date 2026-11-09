@@ -20,6 +20,7 @@ export type IconName =
   | "comment"
   | "annotation"
   | "measure"
+  | "inspect"
   | "section"
   | "slice"
   | "line"
@@ -160,6 +161,9 @@ const SHAPES: Record<IconName, string | ((s: number) => string)> = {
   ),
   annotation: path("M4 5.6h16M4 10.4h10.4M4 15.2h6.4M16.8 13.6v6.4M13.6 16.8h6.4"),
   measure: path("M4 8.8h16v6.4H4zM8 8.8v2.4M12 8.8v3.2M16 8.8v2.4"),
+  // A box model: margin box, content box, and the spacing between them.
+  inspect:
+    square + rect(8.8, 8.8, 6.4, 6.4, 1.2) + path("M12 4v4.8M12 15.2V20M4 12h4.8M15.2 12H20"),
   section: path(
     "M4 8.8V18.4a1.6 1.6 0 0 0 1.6 1.6h12.8a1.6 1.6 0 0 0 1.6-1.6V8.8zM4 8.8V5.6A1.6 1.6 0 0 1 5.6 4h4.8v4.8",
   ),

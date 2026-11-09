@@ -47,7 +47,7 @@ Read `docs/how-finite-works.md` before you change the server, the plugin or the 
   - `store/`: the registry, settings, `.finite/` files, project detection (`detect.ts`), installs and the Routes page (`routes.ts`).
   - `preview/`: the dev servers; `vite-host.mjs` and `next-host.mjs` are the children.
   - `source/`: `rewrite.ts` (the edit kinds), `tailwind.ts`, `css.ts`, `stylex.ts`, `tokens.ts`, `history.ts` (undo), `imports.ts` and `components.ts` (copying and detaching files).
-  - `mcp/`: the six tools external agents use at `/mcp`. `index.ts` (Streamable HTTP and sessions), `tools.ts` (`designs`, `read`, `edit`, `render`, `comments`, `undo`), `instructions.ts`.
+  - `mcp/`: the seven tools external agents use at `/mcp`. `index.ts` (Streamable HTTP and sessions), `tools.ts` (`designs`, `read`, `edit`, `render`, `measure`, `comments`, `undo`), `instructions.ts`.
   - `agent/`: `index.ts` (sessions, steer and queue), `policy.ts` (the fence), `tools.ts` (canvas tools, and `canvasOps`, which `/mcp` shares), `instructions.ts` (the system prompt addition; keep it under 2,500 characters), `events.ts`, `status.ts`, `screenshot.ts`.
   - `scaffold/` (the blank design) and `fixtures/` (test apps).
 - `apps/web/`: the Next.js static export, styled with StyleX. `src/client/finite.ts` (the socket and live state), `src/canvas/` (camera world, frames, editor, bridge, selection), `src/components/` (design list, design screen, sidebars, thread list, composer, ✱ menu, comments, settings, `inspector/`), `src/design/editing/` (control values to CSS), `src/styles/tokens.stylex.ts` (the theme tokens).
