@@ -10,9 +10,14 @@ import type {
   Frame,
   FrameError,
   FrameSource,
+  Inline,
   InstallState,
+  Loc,
+  NewNode,
   PreviewState,
+  Rect,
   Remap,
+  Rev,
   Route,
   Selection,
   SendMode,
@@ -117,7 +122,7 @@ export interface Previews {
   close(): Promise<void>;
 }
 
-export type SourceResult = { ok: true; remap: Remap };
+export type SourceResult = { ok: true; remap: Remap; created: Record<string, Loc> };
 
 /** Hand edits to TSX, tokens, and copying files between production and prototypes. */
 export interface SourceEditor {
@@ -133,6 +138,28 @@ export interface SourceEditor {
     input: { canvasId: string; file: string; importer: string },
     by: Actor,
   ): Promise<{ file: string }>;
+  /** The element's children as editable runs. */
+  inline(
+    open: OpenDesign,
+    loc: Loc,
+  ): Promise<{
+    rev: Rev;
+    content: Inline[];
+    keeps: { id: number; kind: string; label: string; loc?: Loc | undefined }[];
+  }>;
+  /** Writes a board file that renders `node`; the caller adds its frame. */
+  draw(
+    open: OpenDesign,
+    input: { canvasId: string; box: Rect; name: string; node: NewNode },
+    by: Actor,
+  ): Promise<{ canvas: Canvas; frameId: string; file: string; created: Record<string, Loc> }>;
+  /** Copies an attachment into the design's brand folder. */
+  addAsset(open: OpenDesign, attachment: string): Promise<{ asset: string; url: string }>;
+  /** Renders a slice to a file and says where it is. */
+  exportSlice(
+    open: OpenDesign,
+    input: { canvasId: string; sliceId: string },
+  ): Promise<{ url: string }>;
   tokens(design: Design): Promise<Token[]>;
   setToken(
     design: Design,

@@ -54,14 +54,17 @@ export function FrameView({
           editor.frameChanged();
           break;
         case "key":
-          editor.key({
-            key: event.key,
-            code: event.code,
-            metaKey: event.meta,
-            ctrlKey: event.ctrl,
-            shiftKey: event.shift,
-            altKey: event.alt,
-          });
+          editor.key(
+            {
+              key: event.key,
+              code: event.code,
+              metaKey: event.meta,
+              ctrlKey: event.ctrl,
+              shiftKey: event.shift,
+              altKey: event.alt,
+            },
+            "frame",
+          );
           break;
         case "error":
           void finite

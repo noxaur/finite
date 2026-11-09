@@ -1,4 +1,5 @@
 import { type Canvas, type CanvasPatch, type Frame, Refused } from "@finite/protocol";
+import { refuseSections } from "./sections.ts";
 
 type LocalPatch = Exclude<CanvasPatch, { op: "moveFramesTo" }>;
 
@@ -77,6 +78,11 @@ export function applyPatch(canvas: Canvas, patch: LocalPatch): Canvas {
       }
       return { ...canvas, texts: canvas.texts.filter((t) => t.id !== patch.textId) };
     }
+    case "setSection":
+    case "removeSection":
+    case "setSlice":
+    case "removeSlice":
+      return refuseSections();
   }
 }
 
@@ -166,5 +172,10 @@ export function inversePatch(before: Canvas, patch: CanvasPatch): Step {
       const old = before.texts.find((t) => t.id === patch.textId)!;
       return on({ op: "setText", text: old });
     }
+    case "setSection":
+    case "removeSection":
+    case "setSlice":
+    case "removeSlice":
+      return refuseSections();
   }
 }

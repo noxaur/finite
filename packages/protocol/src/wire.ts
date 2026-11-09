@@ -11,10 +11,14 @@ import {
   EffortLevel,
   Id,
   InstallState,
+  Inline,
   Loc,
+  NewNode,
   PreviewState,
   RefusalCode,
+  Rect,
   Remap,
+  Rev,
   Route,
   Selection,
   SendMode,
@@ -89,7 +93,8 @@ export const requests = {
   "source.edit": {
     /** `canvasId` is the canvas the edit was made on: a prototype refuses edits outside `.finite/`. */
     params: { designId, canvasId: Id, edits: z.array(SourceEdit).min(1) },
-    result: z.object({ remap: Remap }),
+    /** `created` is the loc of each new node that named a `ref`. */
+    result: z.object({ remap: Remap, created: z.record(z.string(), Loc) }),
   },
   "source.undo": { params: { designId }, result: z.null() },
   "source.redo": { params: { designId }, result: z.null() },
@@ -97,6 +102,42 @@ export const requests = {
   "source.detach": {
     params: { designId, canvasId: Id, file: z.string(), importer: z.string() },
     result: z.object({ file: z.string() }),
+  },
+  /** The element's children as editable runs. `keeps` lists what the runs hold but can't change. */
+  "source.inline": {
+    params: { designId, loc: Loc },
+    result: z.object({
+      rev: Rev,
+      content: z.array(Inline),
+      keeps: z.array(
+        z.object({
+          id: z.number().int().min(0),
+          kind: z.string(),
+          label: z.string(),
+          loc: Loc.optional(),
+        }),
+      ),
+    }),
+  },
+
+  /** Writes a board file holding `node` and adds a frame for it at `box`. */
+  "canvas.draw": {
+    params: { designId, canvasId: Id, box: Rect, name: z.string(), node: NewNode },
+    result: z.object({
+      canvas: Canvas,
+      frameId: Id,
+      file: z.string(),
+      created: z.record(z.string(), Loc),
+    }),
+  },
+  "canvas.exportSlice": {
+    params: { designId, canvasId: Id, sliceId: Id },
+    result: z.object({ url: z.string() }),
+  },
+  /** Copies an attachment into the design's brand folder. `asset` is what `NewNode.src` names. */
+  "asset.add": {
+    params: { designId, attachment: z.string() },
+    result: z.object({ asset: z.string(), url: z.string() }),
   },
 
   "comment.add": {

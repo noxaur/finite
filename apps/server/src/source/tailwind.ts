@@ -226,6 +226,19 @@ const PROPS: Record<string, { toClass: ToClass; sample: string }> = {
   "border-bottom-right-radius": radius("rounded-br"),
   "border-bottom-left-radius": radius("rounded-bl"),
   "background-color": color("bg"),
+  fill: paint("fill"),
+  stroke: paint("stroke"),
+  "stroke-width": {
+    sample: "1px",
+    toClass(value, _theme, v3) {
+      const step = /^(\d+)(px)?$/.exec(value.trim())?.[1];
+      // v3's stroke-width scale stops at 2.
+      if (step !== undefined && (!v3 || Number(step) <= 2)) return `stroke-${step}`;
+      // A bare number in brackets would read as a color.
+      return `stroke-${arbitrary(/^[\d.]+$/.test(value.trim()) ? `${value.trim()}px` : value)}`;
+    },
+  },
+  zoom: { sample: "1", toClass: (value) => `[zoom:${value.trim().replace(/\s+/g, "_")}]` },
   color: color("text"),
   "font-size": themed("text", "--text", "1px", arbitrary),
   "font-weight": themed("font", "--font-weight", "100", arbitrary),
@@ -563,6 +576,16 @@ function color(prefix: string) {
       const key = v3 ? undefined : keys[normalize(value)];
       return key ? `${prefix}-${key}` : `${prefix}-${arbitrary(value)}`;
     },
+  };
+}
+
+/** An SVG paint: a color, or `none`, which is its own class on v4. */
+function paint(prefix: string) {
+  const asColor = color(prefix);
+  return {
+    sample: asColor.sample,
+    toClass: (value: string, theme: Theme, v3: boolean) =>
+      value.trim() === "none" && !v3 ? `${prefix}-none` : asColor.toClass(value, theme, v3),
   };
 }
 

@@ -67,7 +67,11 @@ describe("SourceEditor.apply", () => {
       ana,
       page,
     );
-    expect(result).toEqual({ ok: true, remap: { "src/App.tsx:7:6": "src/App.tsx:8:6" } });
+    expect(result).toEqual({
+      ok: true,
+      remap: { "src/App.tsx:7:6": "src/App.tsx:8:6" },
+      created: {},
+    });
     expect(await get("src/App.tsx")).toContain(
       `<h1 className="text-sm">Hello</h1>\n      <h1 className="text-sm">Hello</h1>`,
     );
@@ -315,6 +319,122 @@ describe("SourceEditor.apply", () => {
     expect(await get("src/Card.module.css")).toBe(`.card {\n  color: blue;\n}\n`);
     await source.undo(open(d), ana);
     expect(await get("src/Card.module.css")).toBe(`.card {\n  color: red;\n}\n`);
+  });
+});
+
+describe("SourceEditor inserting an element", () => {
+  const node = { tag: "div", ref: "n", name: "Box", styles: { width: "10px" } };
+
+  it("adds a CSS-module rule in the same edit, and undo takes back both files", async () => {
+    const d = design("css-modules");
+    const code = `import s from "./Card.module.css";\nexport const Card = () => <main className={s.card}>x</main>;\n`;
+    const sheet = `.card {\n  color: red;\n}\n`;
+    await put("src/Card.tsx", code);
+    await put("src/Card.module.css", sheet);
+    const source = createSourceEditor();
+    const result = await source.apply(
+      open(d),
+      [
+        await edit("src/Card.tsx", {
+          kind: "insert",
+          loc: "src/Card.tsx:2:26",
+          tag: "main",
+          place: "end",
+          node,
+        }),
+      ],
+      ana,
+      page,
+    );
+    expect(result.created.n).toMatch(/^src\/Card\.tsx:\d+:\d+$/);
+    expect(await get("src/Card.tsx")).toContain("className={s.box}");
+    expect(await get("src/Card.module.css")).toContain(".box {\n  width: 10px;\n}");
+    await source.undo(open(d), ana);
+    expect(await get("src/Card.tsx")).toBe(code);
+    expect(await get("src/Card.module.css")).toBe(sheet);
+    await source.redo(open(d), ana);
+    expect(await get("src/Card.module.css")).toContain(".box {");
+  });
+
+  it("undoes and redoes around another actor's edit to the same file", async () => {
+    await put("src/App.tsx", APP);
+    const d = design();
+    const source = createSourceEditor();
+    await source.apply(
+      open(d),
+      [
+        await edit("src/App.tsx", {
+          kind: "insert",
+          loc: "src/App.tsx:5:4",
+          tag: "main",
+          place: "end",
+          node,
+        }),
+      ],
+      ana,
+      page,
+    );
+    expect(await get("src/App.tsx")).toContain(`data-name="Box"`);
+    await source.apply(
+      open(d),
+      [await edit("src/App.tsx", { kind: "text", loc: "src/App.tsx:6:6", tag: "h1", text: "Hi" })],
+      bo,
+      page,
+    );
+    await source.undo(open(d), ana);
+    const undone = await get("src/App.tsx");
+    expect(undone).not.toContain(`data-name="Box"`);
+    expect(undone).toContain(">Hi</h1>");
+    await source.redo(open(d), ana);
+    const redone = await get("src/App.tsx");
+    expect(redone).toContain(`data-name="Box"`);
+    expect(redone).toContain(">Hi</h1>");
+    await source.undo(open(d), bo);
+    expect(await get("src/App.tsx")).toContain(">Hello</h1>");
+    expect(await get("src/App.tsx")).toContain(`data-name="Box"`);
+  });
+
+  it("refuses inside a prototype when the file is production", async () => {
+    await put("src/App.tsx", APP);
+    const source = createSourceEditor();
+    await expect(
+      source.apply(
+        open(design()),
+        [
+          await edit("src/App.tsx", {
+            kind: "insert",
+            loc: "src/App.tsx:5:4",
+            tag: "main",
+            place: "end",
+            node,
+          }),
+        ],
+        ana,
+        { ...page, kind: "prototype" },
+      ),
+    ).rejects.toMatchObject({ code: "outside-prototype" });
+  });
+
+  it("refuses the parts that aren't built yet, saying so", async () => {
+    const source = createSourceEditor();
+    const o = open(design());
+    for (const call of [
+      source.inline(o, "src/App.tsx:5:4"),
+      source.addAsset(o, "a.png"),
+      source.exportSlice(o, { canvasId: "c", sliceId: "s" }),
+      source.draw(
+        o,
+        {
+          canvasId: "c",
+          box: { x: 0, y: 0, width: 1, height: 1 },
+          name: "Box",
+          node: { tag: "div" },
+        },
+        ana,
+      ),
+    ]) {
+      await expect(call).rejects.toMatchObject({ code: "not-implemented" });
+    }
   });
 });
 

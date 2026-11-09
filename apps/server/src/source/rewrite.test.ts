@@ -1,6 +1,8 @@
-import { Refused, type SourceEdit, type Styling } from "@finite/protocol";
+import { type NewNode, Refused, type SourceEdit, type Styling } from "@finite/protocol";
+import type * as t from "@babel/types";
 import { describe, expect, it } from "vite-plus/test";
 import { rev } from "./files.ts";
+import { parseTsx } from "./jsx.ts";
 import { rewrite, type RewriteContext } from "./rewrite.ts";
 
 const FILE = "src/App.tsx";
@@ -517,5 +519,301 @@ describe("refusals and batches", () => {
       ),
     );
     expect(result.code).toBe(APP);
+  });
+});
+
+describe("insert", () => {
+  const rect = {
+    tag: "div",
+    ref: "r",
+    name: "Rectangle",
+    styles: { position: "absolute", left: "40px", width: "200px", "background-color": "#d9d9d9" },
+  };
+  const insert = (place: "start" | "end" | "before" | "after", node: NewNode = rect) => ({
+    kind: "insert" as const,
+    loc: L(5, 4),
+    tag: "main",
+    place,
+    node,
+  });
+
+  it("writes classes in a Tailwind file and answers the new loc", () => {
+    const out = ok(run(APP, [insert("end")]));
+    expect(out.code).toContain(
+      `<span style={{ color: "red" }}>Two</span>\n      <div data-name="Rectangle" className="absolute left-10 w-50 bg-[#d9d9d9]" />\n    </main>`,
+    );
+    expect(out.created).toEqual({ r: `${FILE}:9:6` });
+  });
+
+  it("writes an inline style in an inline file", () => {
+    expect(ok(run(APP, [insert("end")], "inline")).code).toContain(
+      `<div data-name="Rectangle" style={{ position: "absolute", left: "40px", width: "200px", backgroundColor: "#d9d9d9" }} />`,
+    );
+  });
+
+  it("adds a stylex.create entry in a StyleX file", () => {
+    const out = ok(run(APP, [insert("end")], "stylex")).code;
+    expect(out).toMatch(/<div data-name="Rectangle" \{\.\.\.stylex\.props\(styles2\.div\)\} \/>/);
+    expect(out).toMatch(/backgroundColor: "#d9d9d9"/);
+  });
+
+  describe("CSS modules", () => {
+    const sheet = "src/App.module.css";
+    const css = ".title { color: red; }\n";
+    const files = { [sheet]: css };
+
+    it("gives the element a class in the one sheet the file imports", () => {
+      const out = ok(run(APP, [insert("end")], "css-modules", { files }));
+      expect(out.code).toContain(`<div data-name="Rectangle" className={styles.rectangle} />`);
+      expect(out.files[sheet]).toMatch(/\.rectangle \{[^}]*background-color: #d9d9d9/s);
+    });
+
+    it("picks a class name nothing uses", () => {
+      const taken = { [sheet]: `${css}.rectangle { color: blue; }\n` };
+      const out = ok(run(APP, [insert("end")], "css-modules", { files: taken }));
+      expect(out.code).toContain("className={styles.rectangle2}");
+    });
+
+    it("stays inline when the file imports no sheet", () => {
+      const bare = APP.replace(`import styles from "./App.module.css";\n`, "");
+      const out = ok(
+        run(bare, [{ ...insert("end"), loc: `${FILE}:4:4` }], "css-modules", { files }),
+      );
+      expect(out.code).toContain(`<div data-name="Rectangle" style={{`);
+      expect(out.files[sheet]).toBe(css);
+    });
+
+    it("stays inline when the file imports two sheets", () => {
+      const two = `import other from "./Other.module.css";\n${APP}`;
+      const out = ok(
+        run(two, [{ ...insert("end"), loc: `${FILE}:6:4` }], "css-modules", {
+          files: { ...files, "src/Other.module.css": "" },
+        }),
+      );
+      expect(out.code).toContain(`<div data-name="Rectangle" style={{`);
+    });
+  });
+
+  it("goes first when asked", () => {
+    const out = ok(run(APP, [insert("start")])).code;
+    expect(out).toContain(`<main className="flex p-4">\n      <div data-name="Rectangle"`);
+  });
+
+  it("goes beside an element, and the elements after it move", () => {
+    const edit = { ...insert("before"), loc: L(7), tag: "p" };
+    const out = ok(run(APP, [edit]));
+    expect(out.code).toContain(`bg-[#d9d9d9]" />\n      <p>One</p>`);
+    expect(out.remap).toEqual({ [L(7)]: `${FILE}:8:6`, [L(8)]: `${FILE}:9:6` });
+    const after = ok(run(APP, [{ ...edit, place: "after" }])).code;
+    expect(after).toContain(`<p>One</p>\n      <div data-name="Rectangle"`);
+  });
+
+  it("opens up a self-closing element", () => {
+    const code = `export const A = () => (\n  <div>\n    <section />\n  </div>\n);\n`;
+    const out = ok(run(code, [{ ...insert("end"), loc: `${FILE}:3:4`, tag: "section" }]));
+    expect(out.code).toContain(
+      `    <section>\n      <div data-name="Rectangle" className="absolute left-10 w-50 bg-[#d9d9d9]" />\n    </section>`,
+    );
+    expect(out.created).toEqual({ r: `${FILE}:4:6` });
+  });
+
+  it("fills an empty element", () => {
+    const code = `export const A = () => (\n  <div></div>\n);\n`;
+    const out = ok(run(code, [{ ...insert("end"), loc: `${FILE}:2:2`, tag: "div" }])).code;
+    expect(out).toContain(`  <div>\n    <div data-name="Rectangle"`);
+    expect(out).toContain(`/>\n  </div>\n);`);
+  });
+
+  it("keeps children on the tag's line on it", () => {
+    const code = `export const A = () => <p>Hello</p>;\n`;
+    const node = { tag: "span", text: "x" };
+    expect(
+      ok(run(code, [{ ...insert("end", node), loc: `${FILE}:1:23`, tag: "p" }])).code,
+    ).toContain(`<p>Hello<span>x</span></p>`);
+  });
+
+  it("prints children, text and attributes, and answers each ref", () => {
+    const node: NewNode = {
+      tag: "svg",
+      ref: "s",
+      attrs: { viewBox: "0 0 10 10" },
+      children: [
+        { tag: "path", ref: "p", attrs: { d: "M0 0L10 10" }, styles: { fill: "#123456" } },
+      ],
+    };
+    const out = ok(run(APP, [insert("end", node)]));
+    expect(out.code).toContain(
+      `      <svg viewBox="0 0 10 10">\n        <path d="M0 0L10 10" className="fill-[#123456]" />\n      </svg>`,
+    );
+    expect(out.created).toEqual({ s: `${FILE}:9:6`, p: `${FILE}:10:8` });
+  });
+
+  it("applies a style edit and an insert on one element in one batch", () => {
+    const relative = {
+      kind: "style" as const,
+      locs: [L(5, 4)],
+      tag: "main",
+      styles: { position: "relative" },
+    };
+    const out = ok(run(APP, [relative, insert("end")]));
+    expect(out.code).toContain(`<main className="flex p-4 relative">`);
+    expect(out.created.r).toBe(`${FILE}:9:6`);
+  });
+
+  it("refuses what can't take a child, or a sibling", () => {
+    const img = `export const A = () => (\n  <div>\n    <img src="a.png" />\n  </div>\n);\n`;
+    expect(refused(run(img, [{ ...insert("end"), loc: `${FILE}:3:4`, tag: "img" }]))).toMatchObject(
+      { code: "invalid" },
+    );
+    const root = { ...insert("after"), loc: L(5, 4) };
+    expect(refused(run(APP, [root]))).toMatchObject({ code: "unsupported-style" });
+  });
+
+  describe("beside an element a list renders", () => {
+    const LIST = `const items = ["a"];\nexport const A = () => (\n  <main>\n    {items.map((n) => (\n      <div key={n}>{n}</div>\n    ))}\n  </main>\n);\n`;
+    const item = { ...insert("before"), loc: `${FILE}:5:6`, tag: "div" };
+
+    it("goes before the {…} slot that renders it", () => {
+      const out = ok(run(LIST, [item]));
+      expect(out.code).toContain(`bg-[#d9d9d9]" />\n    {items.map((n) => (`);
+      expect(out.created).toEqual({ r: `${FILE}:4:4` });
+    });
+
+    it("goes after the slot, through a block body too", () => {
+      const block = LIST.replace(
+        "(n) => (\n      <div key={n}>{n}</div>\n    )",
+        "(n) => {\n      return <div key={n}>{n}</div>;\n    }",
+      );
+      const out = ok(run(block, [{ ...item, place: "after", loc: `${FILE}:5:13` }])).code;
+      expect(out).toContain(`})}\n    <div data-name="Rectangle"`);
+    });
+
+    it("refuses an element inside a spread attribute", () => {
+      const line = "  <main>{<Widget {...{ header: <div /> }} />}</main>";
+      const code = `export const A = () => (\n${line}\n);\n`;
+      const inSpread = { ...item, loc: `${FILE}:2:${line.indexOf("<div")}` };
+      expect(refused(run(code, [inSpread])).code).toBe("unsupported-style");
+    });
+
+    it("still refuses a component root and an element inside a prop", () => {
+      const prop = `export const A = () => (\n  <main>\n    <X render={() => <div />} />\n  </main>\n);\n`;
+      expect(refused(run(prop, [{ ...item, loc: `${FILE}:3:21` }])).code).toBe("unsupported-style");
+    });
+  });
+
+  describe("values that would break out of the source", () => {
+    const noClass = `export const A = () => (\n  <div>\n    <p>x</p>\n  </div>\n);\n`;
+
+    const styleP = (styles: Record<string, string>) =>
+      ok(run(noClass, [{ kind: "style", locs: [`${FILE}:3:4`], tag: "p", styles }])).code;
+    const classOf = (code: string) => {
+      const el = parseTsx(code, FILE).elements.get("3:4")!.node.openingElement;
+      expect(el.attributes).toHaveLength(1);
+      const attr = el.attributes[0]!;
+      if (attr.type !== "JSXAttribute") throw new Error("expected an attribute");
+      expect(attr.name.name).toBe("className");
+      return attr.value;
+    };
+
+    it("keeps round 1's injection inside the one className attribute", () => {
+      const code = styleP({ width: '10px"{...{onClick:()=>alert(1)}}data-x="' });
+      expect(classOf(code)).toMatchObject({
+        type: "StringLiteral",
+        value: `w-[10px"{...{onClick:()=>alert(1)}}data-x="]`,
+      });
+    });
+
+    it("picks the className quoting from the classes", () => {
+      expect(styleP({ "font-family": "Bob's Font" })).toContain(
+        `<p className="font-[family-name:Bob's_Font]">`,
+      );
+      expect(styleP({ "font-family": '"Inter"' })).toContain(
+        `<p className='font-[family-name:"Inter"]'>`,
+      );
+      expect(styleP({ "font-family": `"Bob's Font"` })).toContain(
+        'className={`font-[family-name:"Bob\'s_Font"]`}',
+      );
+    });
+
+    it("escapes a template literal's own syntax", () => {
+      const family = `"a'b\`c\\\${d}"`;
+      const value = classOf(styleP({ "font-family": family }));
+      if (value?.type !== "JSXExpressionContainer") throw new Error("expected {`…`}");
+      expect(value.expression).toMatchObject({ type: "TemplateLiteral", expressions: [] });
+      const cooked = (value.expression as t.TemplateLiteral).quasis[0]!.value.cooked;
+      expect(cooked).toBe(`font-[family-name:${family}]`);
+    });
+
+    it('writes font-family: "Inter" on a new element', () => {
+      const node = { tag: "div", styles: { "font-family": '"Inter"' } };
+      expect(ok(run(APP, [insert("end", node)])).code).toContain(
+        `className='font-[family-name:"Inter"]'`,
+      );
+    });
+
+    it("prints name, attributes and text as data", () => {
+      const evil = '"{...{onClick:alert}}x="';
+      const node = { tag: "div", name: evil, attrs: { title: evil }, text: `{alert(1)}<b/>` };
+      const out = ok(run(APP, [insert("end", node)])).code;
+      expect(out).not.toMatch(/\{\.\.\.\{onClick:alert\}\}x=""/);
+      expect(out).toContain(`data-name={${JSON.stringify(evil)}}`);
+      expect(out).toContain(`title={${JSON.stringify(evil)}}`);
+      expect(out).toContain(`>{${JSON.stringify("{alert(1)}<b/>")}}</div>`);
+    });
+
+    it("refuses a tag, a style name or a CSS value that isn't one", () => {
+      for (const node of [
+        { tag: "div onClick" },
+        { tag: "div", styles: { "a: alert(1), b": "x" } },
+        { tag: "div", styles: { color: "red; } .x { color: blue" } },
+      ]) {
+        for (const convention of conventions) {
+          expect(refused(run(APP, [insert("end", node)], convention)).code).toBe("invalid");
+        }
+      }
+    });
+
+    it("refuses a CSS value that hides a rule behind a comment or isn't one value", () => {
+      for (const value of [
+        `red/*"*/; } .evil{color:blue} .tail{ color: green/*"*/`,
+        "red /* note */",
+        "red; color: blue",
+        "}a{color:red",
+        '"unclosed',
+      ]) {
+        const node = { tag: "div", styles: { color: value } };
+        expect(refused(run(APP, [insert("end", node)], "inline"))).toEqual({
+          reason: `A new element can't set the style color: ${value}`,
+          code: "invalid",
+        });
+      }
+    });
+
+    it("lets punctuation through inside a string or url()", () => {
+      for (const image of ['url("data:image/png;base64,AA==")', 'url("a)b;c.png")']) {
+        const node = { tag: "div", styles: { "background-image": image } };
+        expect(ok(run(APP, [insert("end", node)], "inline")).code).toContain(JSON.stringify(image));
+      }
+    });
+  });
+
+  it("refuses attributes a string can't set", () => {
+    for (const name of ["onClick", "className", "style", "dangerouslySetInnerHTML"]) {
+      const node = { tag: "div", attrs: { [name]: "x" } };
+      expect(refused(run(APP, [insert("end", node)]))).toMatchObject({ code: "invalid" });
+    }
+  });
+
+  it("refuses when the file changed or the element isn't what the edit says", () => {
+    expect(refused(run(APP, [{ ...insert("end"), tag: "section" }])).code).toBe("stale");
+  });
+
+  it("refuses wrap, unwrap and inline until they're built", () => {
+    const edits = [
+      { kind: "wrap" as const, locs: [L(7)], wrapper: { tag: "div" } },
+      { kind: "unwrap" as const, loc: L(7), tag: "p" },
+      { kind: "inline" as const, loc: L(7), tag: "p", content: [] },
+    ];
+    for (const edit of edits) expect(refused(run(APP, [edit])).code).toBe("not-implemented");
   });
 });
