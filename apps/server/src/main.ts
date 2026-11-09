@@ -1,4 +1,5 @@
 import { createAgents } from "./agent/index.ts";
+import { createScreenshots } from "./agent/screenshot.ts";
 import { startServer } from "./app.ts";
 import { readConfig } from "./config.ts";
 import { createPreviews } from "./preview/index.ts";
@@ -14,7 +15,9 @@ const previews = createPreviews({
   relink: (id) => store.relink(id),
 });
 const source = createSourceEditor({ routes: (design) => previews.routes(design.id) });
-const agents = createAgents({ store, previews, source });
+// `agents.close()` closes it, once, when the server shuts down.
+const screenshots = createScreenshots();
+const agents = createAgents({ store, previews, source, screenshots });
 
 const server = await startServer({
   port: config.port,
@@ -22,6 +25,7 @@ const server = await startServer({
   allowedHosts: config.allowedHosts,
   staticDir: config.staticDir,
   modules: { store, previews, source, agents },
+  screenshots,
 });
 console.log(`finite server on ${server.url} (data in ${config.dataDir})`);
 

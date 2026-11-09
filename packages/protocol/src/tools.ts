@@ -60,6 +60,121 @@ export const canvasTools = {
   finish_setup: {},
 } as const satisfies Record<string, z.ZodRawShape>;
 
+const elementOp = { frameId: z.string(), select: z.string().min(1) };
+const onCanvas = { canvasId: z.string().optional() };
+const { canvasId: _textCanvas, ...textFields } = canvasTools.write_text;
+
+/** One step of the `/mcp` `edit` tool. */
+export const editOp = z.discriminatedUnion("op", [
+  z.object({ op: z.literal("canvas"), name: z.string().min(1) }),
+  z.object({
+    op: z.literal("write"),
+    ...onCanvas,
+    file: z.string().min(1),
+    content: z.string().min(1),
+  }),
+  z.object({
+    op: z.literal("place"),
+    ...onCanvas,
+    frames: canvasTools.place_frames.frames,
+    rightOf: z.string().optional(),
+  }),
+  z.object({
+    op: z.literal("remove_frames"),
+    ...onCanvas,
+    frameIds: canvasTools.remove_frames.frameIds,
+  }),
+  z.object({ op: z.literal("text"), ...onCanvas, ...textFields }),
+  z.object({
+    op: z.literal("copy_production"),
+    ...onCanvas,
+    name: z.string().optional(),
+    route: z.string().optional(),
+  }),
+  z.object({
+    op: z.literal("brand_asset"),
+    path: z.string().optional(),
+    url: z.string().optional(),
+  }),
+  z.object({
+    op: z.literal("token"),
+    name: z.string().min(1),
+    mode: z.enum(["light", "dark"]),
+    value: z.string().nullable(),
+  }),
+  z.object({
+    op: z.literal("style"),
+    ...elementOp,
+    styles: z.record(z.string(), z.string().nullable()),
+  }),
+  z.object({ op: z.literal("content"), ...elementOp, text: z.string() }),
+  z.object({
+    op: z.literal("attr"),
+    ...elementOp,
+    name: z.string().min(1),
+    value: z.string().nullable(),
+  }),
+  z.object({ op: z.literal("remove"), ...elementOp }),
+  z.object({ op: z.literal("duplicate"), ...elementOp }),
+  z.object({ op: z.literal("reorder"), ...elementOp, before: z.string().min(1).nullable() }),
+]);
+export type EditOp = z.infer<typeof editOp>;
+
+/** Input shapes of the six tools external agents call at `/mcp`. */
+export const mcpTools = {
+  designs: {
+    action: z.enum(["list", "create", "connect", "rename", "remove"]).optional(),
+    designId: z.string().optional(),
+    name: z.string().min(1).optional(),
+    path: z.string().min(1).optional(),
+    offset: z.number().int().min(0).optional(),
+  },
+  read: {
+    designId: z.string(),
+    canvasId: z.string().optional(),
+    frameId: z.string().optional(),
+    select: z.string().min(1).optional(),
+    file: z.string().min(1).optional(),
+    what: z.enum(["tokens", "components", "routes"]).optional(),
+    offset: z.number().int().min(0).optional(),
+  },
+  edit: {
+    designId: z.string(),
+    canvasId: z.string().optional(),
+    production: z.boolean().optional(),
+    ops: z.array(editOp).min(1),
+  },
+  render: {
+    designId: z.string(),
+    frameIds: z.array(z.string()).min(1).optional(),
+    canvasId: z.string().optional(),
+  },
+  comments: {
+    designId: z.string(),
+    canvasId: z.string().optional(),
+    wait: z.union([z.number().positive(), z.boolean()]).optional(),
+    add: z.object(canvasTools.comment).optional(),
+    reply: z
+      .array(
+        z.object({
+          commentId: z.string(),
+          text: z.string().min(1),
+          resolve: z.boolean().optional(),
+        }),
+      )
+      .min(1)
+      .optional(),
+    resolve: z.array(z.string()).min(1).optional(),
+    reopen: z.array(z.string()).min(1).optional(),
+    offset: z.number().int().min(0).optional(),
+  },
+  undo: {
+    designId: z.string(),
+    canvasId: z.string().optional(),
+    redo: z.boolean().optional(),
+  },
+} as const satisfies Record<string, z.ZodRawShape>;
+
 export type CanvasToolName = keyof typeof canvasTools;
 export type CanvasToolInput<K extends CanvasToolName> = z.infer<
   z.ZodObject<(typeof canvasTools)[K]>

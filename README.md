@@ -24,6 +24,18 @@ Designs you create in dev go to `apps/server/.finite-data/`. A connected codebas
 
 In [T3 Code](https://t3.codes), `t3.json` starts each new thread in a separate worktree and runs `vp install` there. Its scripts menu has Dev and Ready.
 
+## Use Finite from another agent
+
+Claude Code, Cursor, a chat app or any other MCP client can work in Finite through the server's Streamable HTTP endpoint. Start Finite, then add it:
+
+```bash
+claude mcp add --transport http finite http://127.0.0.1:4100/mcp
+```
+
+The client gets six tools. `designs` lists, creates, connects, renames and removes designs. `read` shows a design, a canvas, a file, or a frame's rendered elements. `edit` runs a list of ops that make canvases, write TSX, place frames and change rendered elements, which it addresses with CSS selectors. `render` returns each frame as a PNG with its runtime errors. `comments` answers what people pin to frames, and its `wait` blocks until someone writes. `undo` takes back that client's own last step.
+
+People see every change live. Production code is refused unless a call to `edit` passes `production: true`, which the agent should do only when you asked it to ship. A prototype made this way shows up in the Prototypes tab as a thread. Send the header `X-Finite-Agent: <name>` to keep a client's undo history across reconnects. The endpoint has no login, so anything that can reach the port can use it.
+
 ## Desktop app
 
 ```bash

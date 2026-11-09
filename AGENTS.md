@@ -40,14 +40,15 @@ Read `docs/how-finite-works.md` before you change the server, the plugin or the 
 
 ## Code map
 
-- `packages/protocol/`: the contract. `model.ts` (designs, canvases, threads, settings, refusal codes), `wire.ts` (every `/api/ws` request and event), `bridge.ts` (page and frame), `tools.ts` (canvas tool inputs), `server.ts` (the server modules' interfaces).
+- `packages/protocol/`: the contract. `model.ts` (designs, canvases, threads, settings, refusal codes), `wire.ts` (every `/api/ws` request and event), `bridge.ts` (page and frame), `tools.ts` (canvas and `/mcp` tool inputs), `server.ts` (the server modules' interfaces).
 - `packages/vite-plugin/`: `@finite/vite-plugin`. `stamp.ts` (JSX locs and revs), `routes.ts` (the Vite router adapters), `frame.ts` (file frames), `html.ts` (bridge injection into server-rendered HTML, and streamed into Next's), `tailwind.ts` (`@source` for `.finite/`), `client/bridge.ts` (the frame's half of the bridge), `next/` (Next.js: `adapter.ts` sets the config through `NEXT_ADAPTER_PATH`, `loader.ts` stamps JSX in Turbopack and webpack, `index.ts` writes `.finite/runtime/` and the frame mount and fronts Next's requests, `routes.ts` scans `app/` and `pages/`).
 - `apps/server/`: the Node server, run from TypeScript source with Node 22's type stripping, so only erasable TS and `.ts` extensions in relative imports.
   - `main.ts`, `config.ts` (every `FINITE_*` variable), `app.ts`, `hub.ts`, `handlers.ts`, `http.ts` (attachments, the export zip, static files), `guard.ts` (Host and Origin checks).
   - `store/`: the registry, settings, `.finite/` files, project detection (`detect.ts`), installs and the Routes page (`routes.ts`).
   - `preview/`: the dev servers; `vite-host.mjs` and `next-host.mjs` are the children.
   - `source/`: `rewrite.ts` (the edit kinds), `tailwind.ts`, `css.ts`, `stylex.ts`, `tokens.ts`, `history.ts` (undo), `imports.ts` and `components.ts` (copying and detaching files).
-  - `agent/`: `index.ts` (sessions, steer and queue), `policy.ts` (the fence), `tools.ts` (canvas tools), `instructions.ts` (the system prompt addition; keep it under 2,500 characters), `events.ts`, `status.ts`, `screenshot.ts`.
+  - `mcp/`: the six tools external agents use at `/mcp`. `index.ts` (Streamable HTTP and sessions), `tools.ts` (`designs`, `read`, `edit`, `render`, `comments`, `undo`), `instructions.ts`.
+  - `agent/`: `index.ts` (sessions, steer and queue), `policy.ts` (the fence), `tools.ts` (canvas tools, and `canvasOps`, which `/mcp` shares), `instructions.ts` (the system prompt addition; keep it under 2,500 characters), `events.ts`, `status.ts`, `screenshot.ts`.
   - `scaffold/` (the blank design) and `fixtures/` (test apps).
 - `apps/web/`: the Next.js static export, styled with StyleX. `src/client/finite.ts` (the socket and live state), `src/canvas/` (camera world, frames, editor, bridge, selection), `src/components/` (design list, design screen, sidebars, thread list, composer, ✱ menu, comments, settings, `inspector/`), `src/design/editing/` (control values to CSS), `src/styles/tokens.stylex.ts` (the theme tokens).
 - `apps/desktop/`: the Electron app that runs the server bundle and shows the web app, with restarts and updates.

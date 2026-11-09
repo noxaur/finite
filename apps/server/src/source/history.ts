@@ -1,7 +1,14 @@
 import { Refused } from "@finite/protocol";
 
 /** One file's change: `before` became `after` at offset `at`. Spans are whole lines plus a line of context each side. */
-export type Patch = { file: string; before: string; after: string; at: number };
+export type Patch = {
+  file: string;
+  before: string;
+  after: string;
+  at: number;
+  /** The change made the file, so undoing it deletes the file and redoing it starts from nothing. */
+  created?: boolean;
+};
 
 /** The smallest whole-line span that turns `oldCode` into `newCode`, or undefined when they're equal. */
 export function diffPatch(file: string, oldCode: string, newCode: string): Patch | undefined {

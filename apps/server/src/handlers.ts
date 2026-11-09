@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  type Actor,
   type Canvas,
   type Comment,
   type OpenDesign,
@@ -126,21 +127,18 @@ export const handlers: Handlers = {
         { id: randomUUID(), anchor, author: ctx.by, text, replies: [], createdAt: Date.now() },
       ],
     })),
-  "comment.reply": ({ designId, canvasId, commentId, text }, ctx) =>
-    updateComment(ctx, designId, canvasId, commentId, (comment) => ({
-      ...comment,
-      replies: [
-        ...comment.replies,
-        { id: randomUUID(), author: ctx.by, text, createdAt: Date.now() },
-      ],
-    })),
-  "comment.resolve": ({ designId, canvasId, commentId }, ctx) =>
-    updateComment(ctx, designId, canvasId, commentId, (comment) => ({
-      ...comment,
-      resolvedAt: Date.now(),
-    })),
-  "comment.reopen": ({ designId, canvasId, commentId }, ctx) =>
-    updateComment(ctx, designId, canvasId, commentId, (comment) => without(comment, "resolvedAt")),
+  async "comment.reply"({ designId, canvasId, commentId, text }, ctx) {
+    const open = await ctx.hub.open(designId);
+    return updateComment(open, canvasId, commentId, commentEdit.reply(text, ctx.by), ctx.by);
+  },
+  async "comment.resolve"({ designId, canvasId, commentId }, ctx) {
+    const open = await ctx.hub.open(designId);
+    return updateComment(open, canvasId, commentId, commentEdit.resolve, ctx.by);
+  },
+  async "comment.reopen"({ designId, canvasId, commentId }, ctx) {
+    const open = await ctx.hub.open(designId);
+    return updateComment(open, canvasId, commentId, commentEdit.reopen, ctx.by);
+  },
 
   async "thread.send"(params, ctx) {
     const { designId, text, attachments, selection, model, effort, fast, mode } = params;
@@ -237,19 +235,35 @@ async function updateCanvas(
   return (await ctx.hub.open(designId)).updateCanvas(canvasId, fn, ctx.by);
 }
 
-function updateComment(
-  ctx: Context,
-  designId: string,
+/** The changes a comment takes, for the wire and for `/mcp`. */
+export const commentEdit = {
+  reply:
+    (text: string, by: Actor) =>
+    (comment: Comment): Comment => ({
+      ...comment,
+      replies: [...comment.replies, { id: randomUUID(), author: by, text, createdAt: Date.now() }],
+    }),
+  resolve: (comment: Comment): Comment => ({ ...comment, resolvedAt: Date.now() }),
+  reopen: (comment: Comment): Comment => without(comment, "resolvedAt"),
+};
+
+export function updateComment(
+  open: OpenDesign,
   canvasId: string,
   commentId: string,
   fn: (comment: Comment) => Comment,
+  by: Actor,
 ): Promise<Canvas> {
-  return updateCanvas(ctx, designId, canvasId, (canvas) => {
-    if (!canvas.comments.some((c) => c.id === commentId)) {
-      throw new Refused(`no comment ${commentId} on this canvas`, "not-found");
-    }
-    return { ...canvas, comments: canvas.comments.map((c) => (c.id === commentId ? fn(c) : c)) };
-  });
+  return open.updateCanvas(
+    canvasId,
+    (canvas) => {
+      if (!canvas.comments.some((c) => c.id === commentId)) {
+        throw new Refused(`no comment ${commentId} on this canvas`, "not-found");
+      }
+      return { ...canvas, comments: canvas.comments.map((c) => (c.id === commentId ? fn(c) : c)) };
+    },
+    by,
+  );
 }
 
 async function updateThread(
