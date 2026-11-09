@@ -1,7 +1,15 @@
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { Actor, Canvas, Design, OpenDesign, SourceEdit, Styling } from "@finite/protocol";
+import type {
+  Actor,
+  Canvas,
+  CanvasPatch,
+  Design,
+  OpenDesign,
+  SourceEdit,
+  Styling,
+} from "@finite/protocol";
 import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 import { createFileLocks, lockKey, rev } from "./files.ts";
 import { createSourceEditor } from "./index.ts";
@@ -418,22 +426,220 @@ describe("SourceEditor inserting an element", () => {
   it("refuses the parts that aren't built yet, saying so", async () => {
     const source = createSourceEditor();
     const o = open(design());
-    for (const call of [
-      source.inline(o, "src/App.tsx:5:4"),
-      source.addAsset(o, "a.png"),
-      source.draw(
-        o,
-        {
-          canvasId: "c",
-          box: { x: 0, y: 0, width: 1, height: 1 },
-          name: "Box",
-          node: { tag: "div" },
-        },
-        ana,
-      ),
-    ]) {
+    for (const call of [source.inline(o, "src/App.tsx:5:4")]) {
       await expect(call).rejects.toMatchObject({ code: "not-implemented" });
     }
+  });
+});
+
+describe("drawing on empty canvas", () => {
+  const box = { x: 40, y: 60, width: 200, height: 120 };
+  const rectangle = { tag: "div", ref: "new", name: "Rectangle", styles: { color: "#111111" } };
+  const star = {
+    tag: "svg",
+    ref: "new",
+    name: "Star",
+    attrs: { viewBox: "0 0 10 10", preserveAspectRatio: "none" },
+    styles: { overflow: "visible" },
+    children: [{ tag: "path", attrs: { d: "M0 0L10 10Z" }, styles: { fill: "#d9d9d9" } }],
+  };
+  function drawing(d: Design) {
+    const canvas = { id: "c1", kind: "page", frames: [] } as unknown as Canvas;
+    const patches: CanvasPatch[] = [];
+    const o = {
+      design: d,
+      canvases: async () => [canvas],
+      patchCanvas: async (_id: string, patch: CanvasPatch) => {
+        patches.push(patch);
+        return canvas;
+      },
+    } as unknown as OpenDesign;
+    return { o, patches };
+  }
+  const placed = (patches: CanvasPatch[]) => {
+    const patch = patches[0];
+    if (patch?.op !== "addFrames") throw new Error("expected addFrames");
+    return patch.frames[0]!;
+  };
+
+  it("writes a board file that fills its frame, with classes, and adds the frame", async () => {
+    const { o, patches } = drawing(design("tailwind"));
+    await put("src/index.css", `@import "tailwindcss";\n`);
+    const out = await createSourceEditor().draw(
+      o,
+      { canvasId: "c1", box, name: "Rectangle", node: rectangle },
+      ana,
+    );
+    expect(out.file).toBe(".finite/boards/c1/Rectangle.tsx");
+    expect(await get(out.file)).toBe(
+      `export default function Rectangle() {\n  return <div data-name="Rectangle" className="absolute left-0 top-0 w-full h-screen text-[#111111]" />;\n}\n`,
+    );
+    expect(out.created.new).toBe(`${out.file}:2:9`);
+    expect(placed(patches)).toMatchObject({
+      name: "Rectangle",
+      x: 40,
+      y: 60,
+      width: 200,
+      height: 120,
+      source: { kind: "file", file: out.file },
+    });
+  });
+
+  it("writes an inline style with no sheet to put a rule in, in CSS modules too", async () => {
+    for (const styling of ["inline", "css-modules"] as const) {
+      const { o } = drawing(design(styling));
+      const out = await createSourceEditor().draw(
+        o,
+        { canvasId: "c1", box, name: "Star", node: star },
+        ana,
+      );
+      const code = await get(out.file);
+      expect(code).toContain(
+        `<svg data-name="Star" viewBox="0 0 10 10" preserveAspectRatio="none" style={{ position: "absolute", left: "0", top: "0", width: "100%", height: "100vh", display: "block", overflow: "visible" }}>`,
+      );
+      expect(code).toContain(`<path d="M0 0L10 10Z" style={{ fill: "#d9d9d9" }} />`);
+      await rm(path.join(root, out.file));
+    }
+  });
+
+  it("adds stylex.create entries in a StyleX design", async () => {
+    const { o } = drawing(design("stylex"));
+    const out = await createSourceEditor().draw(
+      o,
+      { canvasId: "c1", box, name: "Star", node: star },
+      ana,
+    );
+    const code = await get(out.file);
+    expect(code).toMatch(/import \* as stylex from "@stylexjs\/stylex"/);
+    expect(code).toMatch(/\{\.\.\.stylex\.props\(styles\.svg\)\}/);
+    expect(code).toMatch(/\{\.\.\.stylex\.props\(styles\.path\)\}/);
+    expect(code).toMatch(/fill: "#d9d9d9"/);
+    expect(out.created.new).toMatch(/Star\.tsx:\d+:\d+$/);
+  });
+
+  it("numbers a second one", async () => {
+    const { o, patches } = drawing(design("inline"));
+    const source = createSourceEditor();
+    const input = { canvasId: "c1", box, name: "Rectangle", node: rectangle };
+    await source.draw(o, input, ana);
+    const out = await source.draw(o, input, ana);
+    expect(out.file).toBe(".finite/boards/c1/Rectangle-2.tsx");
+    expect(await get(out.file)).toContain("export default function Rectangle2()");
+    expect(patches[1]).toMatchObject({ frames: [{ name: "Rectangle 2" }] });
+  });
+
+  it("imports the asset of a loose image, under Next.js through .src", async () => {
+    for (const [router, expr] of [
+      ["react-router", "src={heroShotAsset}"],
+      ["next-app", "src={heroShotAsset.src}"],
+    ] as const) {
+      const { o } = drawing({ ...design("inline"), router });
+      const out = await createSourceEditor().draw(
+        o,
+        {
+          canvasId: "c1",
+          box,
+          name: "hero shot",
+          node: {
+            tag: "img",
+            src: { asset: "src/assets/brand/hero-shot.png" },
+            attrs: { alt: "" },
+          },
+        },
+        ana,
+      );
+      expect(out.file).toBe(".finite/boards/c1/HeroShot.tsx");
+      const code = await get(out.file);
+      expect(code).toMatch(
+        /^import heroShotAsset from "\.\.\/\.\.\/\.\.\/src\/assets\/brand\/hero-shot\.png";\n/,
+      );
+      expect(code).toContain(expr);
+      await rm(path.join(root, out.file));
+    }
+  });
+
+  it("works from a prototype, and refuses a canvas that isn't there", async () => {
+    const { o } = drawing(design("inline"));
+    await expect(
+      createSourceEditor().draw(
+        o,
+        { canvasId: "gone", box, name: "Rectangle", node: rectangle },
+        ana,
+      ),
+    ).rejects.toMatchObject({ code: "not-found" });
+    await expect(
+      createSourceEditor().draw(
+        o,
+        { canvasId: "../x", box, name: "Rectangle", node: rectangle },
+        ana,
+      ),
+    ).rejects.toMatchObject({ code: "invalid" });
+  });
+});
+
+describe("adding an asset", () => {
+  const attach = async (name: string) => {
+    await put(`.finite/attachments/a1b2c3d4-${name}`, "bytes");
+    return `.finite/attachments/a1b2c3d4-${name}`;
+  };
+
+  it("copies into the brand folder under the attached name, and numbers a second", async () => {
+    const source = createSourceEditor();
+    const o = open(design());
+    const first = await attach("hero.png");
+    expect(await source.addAsset(o, first)).toEqual({ asset: "src/assets/brand/hero.png" });
+    expect(await get("src/assets/brand/hero.png")).toBe("bytes");
+    expect(await source.addAsset(o, first)).toEqual({ asset: "src/assets/brand/hero-2.png" });
+  });
+
+  it("refuses what isn't an attachment, an image or a video", async () => {
+    const source = createSourceEditor();
+    const o = open(design());
+    await expect(source.addAsset(o, "src/App.tsx")).rejects.toMatchObject({ code: "invalid" });
+    await expect(source.addAsset(o, ".finite/attachments/../../src/App.tsx")).rejects.toMatchObject(
+      { code: "invalid" },
+    );
+    await expect(source.addAsset(o, await attach("notes.pdf"))).rejects.toMatchObject({
+      code: "invalid",
+    });
+    await expect(source.addAsset(o, ".finite/attachments/none.png")).rejects.toMatchObject({
+      code: "not-found",
+    });
+  });
+
+  it("refuses a video in a Next.js design, and takes it elsewhere", async () => {
+    const source = createSourceEditor();
+    const clip = await attach("clip.mp4");
+    await expect(
+      source.addAsset(open({ ...design(), router: "next-app" }), clip),
+    ).rejects.toMatchObject({ code: "not-implemented" });
+    expect(await source.addAsset(open(design()), clip)).toEqual({
+      asset: "src/assets/brand/clip.mp4",
+    });
+  });
+
+  it("writes an insert's import in a production file, undoably", async () => {
+    await put("src/App.tsx", APP);
+    const source = createSourceEditor();
+    await source.apply(
+      open(design("inline")),
+      [
+        await edit("src/App.tsx", {
+          kind: "insert",
+          loc: "src/App.tsx:5:4",
+          tag: "main",
+          place: "end",
+          node: { tag: "img", src: { asset: "src/assets/brand/a.png" }, attrs: { alt: "" } },
+        }),
+      ],
+      ana,
+      page,
+    );
+    const code = await get("src/App.tsx");
+    expect(code).toContain(`import aAsset from "./assets/brand/a.png";`);
+    expect(code).toContain(`<img src={aAsset} alt="" />`);
+    await source.undo(open(design("inline")), ana);
+    expect(await get("src/App.tsx")).toBe(APP);
   });
 });
 

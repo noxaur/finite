@@ -265,6 +265,8 @@ export class CanvasEditor implements ToolHost {
   setTool(id: string) {
     const tool = toolOf(id);
     if (!tool.enabled) return;
+    // A key held down repeats, and that same tool's press has to survive it.
+    if (tool.id !== this.state.tool) this.cancelPress();
     this.update({ tool: tool.id as ToolId, commentDraft: null, hover: null, ghost: null });
     tool.activate?.(this);
   }
@@ -704,6 +706,7 @@ export class CanvasEditor implements ToolHost {
 
   /** Backs out of whatever's open, one step at a time. */
   escape() {
+    if (this.current) return this.cancelPress();
     if (this.state.tool === "interact") return this.setTool("select");
     if (this.state.commentDraft || this.state.openComment) {
       return this.update({ commentDraft: null, openComment: null });

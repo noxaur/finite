@@ -64,7 +64,12 @@ export type Down = {
 };
 
 /** A shape being drawn, in canvas units. Page-level, so it costs no bridge traffic. */
-export type Ghost = { box: Rect; round?: boolean };
+export type Ghost = {
+  box: Rect;
+  round?: boolean;
+  /** An outline drawn instead of the box, in the box's own units. */
+  d?: string;
+};
 
 /** Where a drawn shape landed. */
 export type Placed = { frameId: string; loc: Loc; index: number };

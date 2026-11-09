@@ -138,7 +138,7 @@ export const requests = {
   /** Copies an attachment into the design's brand folder. `asset` is what `NewNode.src` names. */
   "asset.add": {
     params: { designId, attachment: z.string() },
-    result: z.object({ asset: z.string(), url: z.string() }),
+    result: z.object({ asset: z.string() }),
   },
 
   "comment.add": {
