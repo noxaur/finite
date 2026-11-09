@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "stylex-framework",
+  "router": "react-router",
+  "styling": "stylex",
+  "css": [],
+  "brandDir": "app/assets/brand"
+}

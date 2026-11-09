@@ -37,6 +37,17 @@ export function frameHref(previewUrl: string, source: FrameSource): string {
   return href === "/" && new URL(base).pathname !== "/" ? base : base + href;
 }
 
+/**
+ * The dynamic segments of `routePath`, read the way `routeHref` reads them: `/users/:userId` →
+ * `[{ name: "userId", optional: false }]`. A splat's name is `*` (React Router) or `_splat` (TanStack).
+ */
+export function routeParams(routePath: string): { name: string; optional: boolean }[] {
+  return routePath.split("/").flatMap((segment) => {
+    const param = parseSegment(segment);
+    return param ? [{ name: param.name, optional: param.optional }] : [];
+  });
+}
+
 function parseSegment(
   segment: string,
 ): { name: string; optional: boolean; splat: boolean } | undefined {

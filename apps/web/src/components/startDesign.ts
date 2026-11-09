@@ -49,8 +49,15 @@ async function upload(designId: string, files: ReadonlyArray<File>) {
   return paths;
 }
 
-/** A connected or cloned codebase gets a thread that imports its brand assets. */
+/**
+ * A connected or cloned codebase gets a thread that imports its brand assets. One Finite can't
+ * run yet gets the setup thread that writes its finite.json instead.
+ */
 async function withBrand(design: DesignEntry, threadId: string | null = null) {
+  if (design.setup) {
+    const setup = await finite.request("design.setup", { designId: design.id });
+    return href(design, setup.threadId);
+  }
   const brand = await startThread(design.id, BRAND_PROMPT);
   return href(design, threadId ?? brand);
 }

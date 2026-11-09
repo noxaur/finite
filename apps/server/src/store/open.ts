@@ -29,6 +29,11 @@ const WATCH_DEBOUNCE_MS = 100;
 export type OpenedDesign = OpenDesign & {
   /** Sends a change to every listener. The store also uses it for install progress. */
   emit(change: DesignChange): void;
+  /**
+   * Replaces the design's fields in place (same root), after setup rewrote its row or config, so
+   * everyone holding `design` sees the change.
+   */
+  setDesign(next: Design): void;
   close(): void;
 };
 
@@ -207,8 +212,14 @@ export async function openDesign(design: Design): Promise<OpenedDesign> {
     design,
     emit,
 
+    setDesign(next) {
+      for (const key of Object.keys(design)) delete (design as Record<string, unknown>)[key];
+      Object.assign(design, next);
+    },
+
     async canvases() {
-      return [...canvases.values()];
+      // A canvas a git pull adds may be older than the ones already here.
+      return [...canvases.values()].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
     },
 
     createCanvas({ kind, name, threadId }, _by) {
@@ -226,6 +237,13 @@ export async function openDesign(design: Design): Promise<OpenedDesign> {
           frames: [],
           texts: [],
           comments: [],
+          sections: [],
+          slices: [],
+          // Strictly after every other canvas, so pages made in the same millisecond keep their order.
+          createdAt: Math.max(
+            Date.now(),
+            ...[...canvases.values()].map((c) => (c.createdAt ?? 0) + 1),
+          ),
           updatedAt: Date.now(),
         });
       });

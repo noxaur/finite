@@ -91,6 +91,24 @@ export function DesignScreen({ id }: { id: string }) {
 
   // When a thread opens its first prototype, the screen follows it there.
   const seenCanvases = useRef<{ thread: string | null; count: number }>({ thread: null, count: 0 });
+  const dock = useRef<HTMLDivElement>(null);
+
+  // The canvas's toolbar sits just above the composer, whose height follows what's typed.
+  useEffect(() => {
+    const el = dock.current;
+    const main = el?.parentElement;
+    if (!el || !main) return;
+    const measure = () =>
+      main.style.setProperty(
+        "--dock-clearance",
+        `${main.getBoundingClientRect().bottom - el.getBoundingClientRect().top}px`,
+      );
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    observer.observe(main);
+    return () => observer.disconnect();
+  }, []);
   useEffect(() => {
     if (!thread) return;
     const seen = seenCanvases.current;
@@ -177,6 +195,25 @@ export function DesignScreen({ id }: { id: string }) {
     a.download = "";
     a.click();
   };
+
+  // A setup thread in this design opens instead of starting a second one.
+  const setupThread = threads.find((t) => t.setup && t.running);
+  const setUp = async () => {
+    const threadId =
+      setupThread?.id ?? (await finite.request("design.setup", { designId: id })).threadId;
+    go({ tab: "design", thread: threadId, canvas: place.canvas });
+  };
+
+  // When setup turned this design into other ones (a monorepo's apps), the screen follows.
+  useEffect(
+    () =>
+      finite.on("setup.done", (event) => {
+        if (event.designId === id && event.next !== id) {
+          router.push(`/design/?id=${encodeURIComponent(event.next)}`);
+        }
+      }),
+    [id, router],
+  );
 
   // A thread without a canvas talks in the side panel; a canvas thread does when History is on.
   const chat: ThreadMeta | null =
@@ -267,7 +304,14 @@ export function DesignScreen({ id }: { id: string }) {
             canvas={canvas}
             mode={place.tab === "design" ? "design" : "prototypes"}
           />
-          <Preview state={state?.preview} install={state?.install} />
+          <Preview
+            state={state?.preview}
+            install={state?.install}
+            setupThread={setupThread ?? null}
+            onSetup={() =>
+              void setUp().catch((e: unknown) => toast(e instanceof Error ? e.message : String(e)))
+            }
+          />
           {place.tab === "prototypes" && !thread && (
             <div {...stylex.props(styles.hello)}>
               <p {...stylex.props(styles.helloTitle)}>Describe something to prototype</p>
@@ -296,7 +340,7 @@ export function DesignScreen({ id }: { id: string }) {
             onAsk={focusComposer}
             onExport={exportSelection}
           />
-          <div {...stylex.props(styles.dock)}>
+          <div ref={dock} {...stylex.props(styles.dock)}>
             <Composer
               designId={id}
               thread={thread}
@@ -329,32 +373,69 @@ export function DesignScreen({ id }: { id: string }) {
   );
 }
 
-/** While a new design's dependencies install, its dev server starts, or either fails. */
+/**
+ * While a new design's dependencies install, its dev server starts, or either fails. A failed
+ * preview, or a folder Finite can't run yet, offers a setup thread that writes its finite.json. A
+ * running preview with a log has an invalid finite.json, and keeps running as it was.
+ */
 function Preview({
   state,
   install,
+  setupThread,
+  onSetup,
 }: {
   state: PreviewState | undefined;
   install: InstallState | undefined;
+  setupThread: ThreadMeta | null;
+  onSetup: () => void;
 }) {
   const installing = install && install.status !== "done" ? install : undefined;
-  if (!installing && (!state || state.status === "ready" || state.status === "stopped")) {
+  const ready = state?.status === "ready";
+  if (!installing && (!state || (ready && !state.log) || state.status === "stopped")) {
     return null;
   }
   const failed = installing ? installing.status === "error" : state?.status === "error";
+  const needsSetup = !installing && state?.status === "needs-setup";
   const title = installing
     ? failed
       ? "Installing dependencies failed"
       : "Installing dependencies…"
-    : failed
-      ? "The dev server stopped"
-      : "Starting the dev server…";
-  const log = installing ? installing.log : state?.log;
+    : ready
+      ? "finite.json isn’t valid, so the preview runs as it was"
+      : needsSetup
+        ? "Finite can’t run this folder yet"
+        : failed
+          ? "The dev server stopped"
+          : "Starting the dev server…";
+  let log = installing ? installing.log : state?.log?.trim();
+  // A setup design's log is its reason. A failed preview's starts with what went wrong and what
+  // to do, then the output.
+  let reason: string | undefined;
+  if (needsSetup) {
+    reason = log;
+    log = undefined;
+  } else if (!installing && failed && log?.includes("\n\n")) {
+    reason = log.slice(0, log.indexOf("\n\n"));
+    log = log.slice(reason.length);
+  }
   const tail = log?.trim().split("\n").slice(-6).join("\n");
   return (
     <div role="status" {...stylex.props(styles.preview)}>
       <p {...stylex.props(styles.previewTitle)}>{title}</p>
+      {reason && <p {...stylex.props(styles.reason)}>{reason}</p>}
       {tail && <pre {...stylex.props(styles.log)}>{tail}</pre>}
+      {!installing && (failed || needsSetup) && (
+        <div {...stylex.props(styles.previewActions)}>
+          <span {...stylex.props(styles.previewNote)}>
+            {setupThread
+              ? "Claude is writing finite.json."
+              : "Claude can write a finite.json that tells Finite how to run it."}
+          </span>
+          <Button size="small" variant="brand" onClick={onSetup}>
+            {setupThread ? "Open setup thread" : "Set up with Claude"}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -438,6 +519,23 @@ const styles = stylex.create({
     boxShadow: shadows.raised,
   },
   previewTitle: { margin: 0, fontSize: 13, fontWeight: 500 },
+  previewActions: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: space.md,
+    marginTop: space.ms,
+  },
+  previewNote: { fontSize: 12, color: colors.muted },
+  reason: {
+    marginTop: space.sm,
+    marginBottom: 0,
+    fontSize: 12,
+    lineHeight: "17px",
+    color: colors.muted,
+    whiteSpace: "pre-line",
+    overflowWrap: "anywhere",
+  },
   log: {
     marginTop: space.sm,
     marginBottom: 0,

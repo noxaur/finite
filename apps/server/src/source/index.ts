@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import {
   Refused,
@@ -6,10 +6,14 @@ import {
   type Canvas,
   type Design,
   type Frame,
+  type Loc,
   type Remap,
   type Route,
   type SourceEditor,
+  type Token,
 } from "@finite/protocol";
+import { addAsset } from "./assets.ts";
+import { boardFile } from "./boardFile.ts";
 import { listComponents } from "./components.ts";
 import {
   fileLocks,
@@ -32,8 +36,13 @@ import {
   sheetSpecifiers,
   specifiers,
 } from "./imports.ts";
+import { readInline } from "./inline.ts";
 import { parseModule } from "./jsx.ts";
-import { editFiles, rewrite } from "./rewrite.ts";
+import { editFiles, editStyles, rewrite } from "./rewrite.ts";
+import { exportSlice, type SliceRenderer } from "./sliceExport.ts";
+import { isStylexVar, mentionsVar, readVars, writeVar } from "./stylex.ts";
+import type { TailwindVersion, Theme } from "./tailwind.ts";
+import { configTheme, tailwind3Config } from "./tailwind3.ts";
 import {
   hasToken,
   isVariable,
@@ -54,6 +63,8 @@ export type SourceEditorOptions = {
   routes?: (design: Design) => Promise<Route[]>;
   /** The file locks to share with other writers (default: the process's `fileLocks`). */
   locks?: Locked;
+  /** The preview and Chrome that `exportSlice` renders with; without them it refuses. */
+  render?: SliceRenderer;
 };
 
 const PROTOTYPE_DIR = ".finite/";
@@ -91,11 +102,65 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
     return out;
   }
 
-  /** Reads `files`, lets `change` produce new contents, writes what changed. All under the files' locks. */
+  /** The theme hand edits match values to: `tailwind.config.*` on v3, else the sheets' `@theme`. */
+  async function tailwindTheme(
+    design: Design,
+  ): Promise<{ theme: Theme; tailwind: TailwindVersion }> {
+    const all = await sheets(design);
+    const config = await tailwind3Config(design.root, all);
+    if (config) return { theme: await configTheme(design.root, config), tailwind: 3 };
+    return { theme: lightTheme(readTokens(all)), tailwind: 4 };
+  }
+
+  /**
+   * A StyleX design's `defineVars` tokens, from its `*.stylex.ts` (or `.js`, `.tsx`…) files under
+   * `src/` and `app/`, with the file that defines each token and each group. The first file to
+   * define a group wins.
+   */
+  async function stylexVars(design: Design): Promise<{
+    tokens: Token[];
+    homes: Record<string, string>;
+    groups: Map<string, string>;
+  }> {
+    const tokens: Token[] = [];
+    const homes: Record<string, string> = {};
+    const groups = new Map<string, string>();
+    if (design.styling !== "stylex") return { tokens, homes, groups };
+    for (const dir of ["src", "app"]) {
+      const entries = await readdir(inRoot(design.root, dir), { recursive: true }).catch(() => []);
+      for (const entry of entries.sort((a, b) => a.localeCompare(b))) {
+        const file = `${dir}/${entry.split(path.sep).join("/")}`;
+        if (!/\.stylex\.[cm]?[jt]sx?$/.test(file) || file.includes("node_modules/")) continue;
+        let read: ReturnType<typeof readVars>;
+        try {
+          read = readVars(file, (await readText(inRoot(design.root, file))) ?? "");
+        } catch {
+          continue; // a file that doesn't parse has no tokens to show
+        }
+        for (const group of read.groups) if (!groups.has(group)) groups.set(group, file);
+        for (const token of read.tokens) {
+          if (groups.get(token.name.split(".")[0]!) !== file) continue;
+          homes[token.name] = file;
+          tokens.push(token);
+        }
+      }
+    }
+    return { tokens, homes, groups };
+  }
+
+  async function allTokens(design: Design): Promise<Token[]> {
+    return [...readTokens(await sheets(design)), ...(await stylexVars(design)).tokens];
+  }
+
+  /**
+   * Reads `files`, lets `change` produce new contents, writes what changed. All under the files'
+   * locks. A file in `deleteEmpty` that ends up empty is deleted instead.
+   */
   async function transact(
     root: string,
     files: string[],
     change: (contents: Map<string, string>) => Map<string, string> | Promise<Map<string, string>>,
+    deleteEmpty: ReadonlySet<string> = new Set(),
   ): Promise<Patch[]> {
     return locked(
       files.map((f) => inRoot(root, f)),
@@ -117,7 +182,10 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
             throw new Refused(`${file} changed while this edit ran; try again`, "stale");
           }
         }
-        for (const { file, code } of writes) await writeAtomic(inRoot(root, file), code);
+        for (const { file, code } of writes) {
+          if (code === "" && deleteEmpty.has(file)) await rm(inRoot(root, file), { force: true });
+          else await writeAtomic(inRoot(root, file), code);
+        }
         return writes.map((w) => w.patch);
       },
     );
@@ -182,13 +250,18 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
         modules = [...new Set(modules)];
         guardPrototype(design.root, canvas, modules);
       }
-      const theme =
-        design.styling === "tailwind" ? lightTheme(readTokens(await sheets(design))) : {};
-      const variables = edits.some((e) => e.kind === "style" && variableRefs(e.styles).length > 0)
+      const { theme, tailwind } =
+        design.styling === "tailwind"
+          ? await tailwindTheme(design)
+          : { theme: {}, tailwind: 4 as const };
+      const styles = edits.flatMap(editStyles);
+      const variables = styles.some((s) => variableRefs(s).length > 0)
         ? variableSheets(await sheets(design))
         : {};
+      const stylex = styles.some(mentionsVar) ? (await stylexVars(design)).homes : {};
 
       const remap: Remap = {};
+      const created: Record<string, Loc> = {};
       const patches = await transact(design.root, [...files, ...modules], (contents) => {
         const out = new Map(contents);
         let extra = Object.fromEntries(
@@ -199,19 +272,37 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
           if (code === undefined) throw new Refused(`${file} doesn't exist`, "not-found");
           const result = rewrite(code, file, edits, design.styling, {
             theme,
+            tailwind,
+            router: design.router,
             files: extra,
             variables,
+            stylexVars: stylex,
           });
           if (result instanceof Refused) throw result;
           out.set(file, result.code);
           Object.assign(remap, result.remap);
+          Object.assign(created, result.created);
           extra = result.files;
         }
         for (const [file, css] of Object.entries(extra)) out.set(file, css);
         return out;
       });
       if (patches.length > 0) history.push(actorKey(design, by), patches);
-      return { ok: true, remap };
+      return { ok: true, remap, created };
+    },
+
+    async write(open, file, content, by) {
+      let created = false;
+      const patches = await transact(open.design.root, [file], (contents) => {
+        created = !contents.has(file);
+        return new Map([[file, content]]);
+      });
+      if (patches.length > 0) {
+        history.push(
+          actorKey(open.design, by),
+          patches.map((p) => ({ ...p, created })),
+        );
+      }
     },
 
     undo: (open, by) => step(open.design, by, "undo"),
@@ -237,13 +328,48 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
       return { file: copy };
     },
 
-    async tokens(design) {
-      return readTokens(await sheets(design));
+    inline: (open, loc) => readInline(open, loc),
+    async draw(open, input, by) {
+      const design = open.design;
+      const styled =
+        design.styling === "tailwind"
+          ? await tailwindTheme(design)
+          : { theme: {}, tailwind: 4 as const };
+      return boardFile(open, input, by, { ...styled, locked });
     },
+    addAsset: (open, attachment) => addAsset(open, attachment, locked),
+    exportSlice: (open, input) => exportSlice(options.render, open, input),
+
+    tokens: allTokens,
 
     async setToken(design, { name, mode, value }) {
       const prop = tokenName(name);
+      if (isStylexVar(prop)) {
+        const [group, key] = prop.split(".") as [string, string];
+        const { groups } = await stylexVars(design);
+        const file = groups.get(group);
+        if (!file)
+          throw new Refused(
+            design.styling !== "stylex"
+              ? `${prop} is a StyleX token, but this design isn't styled with StyleX. Use a CSS custom property (--${key}) instead.`
+              : groups.size === 0
+                ? `${prop} is a StyleX token, but this design has no stylex.defineVars yet. Add a src/tokens.stylex.ts with export const ${group} = stylex.defineVars({ … }), or ask the agent.`
+                : `This design has no defineVars named ${group}. Add it to ${[...groups.keys()].map((g) => `${g}.${key}`).join(" or ")}, or ask the agent to add a ${group} group.`,
+            "invalid",
+          );
+        await transact(design.root, [file], (contents) => {
+          return new Map([[file, writeVar(file, contents.get(file) ?? "", prop, mode, value)]]);
+        });
+        return allTokens(design);
+      }
       const all = await sheets(design);
+      const config =
+        design.styling === "tailwind" ? await tailwind3Config(design.root, all) : undefined;
+      if (config && !isVariable(prop) && !all.some((s) => hasToken(s.file, s.css, prop, mode)))
+        throw new Refused(
+          `This design uses Tailwind v3, whose theme lives in ${path.basename(config)}, so a new token there wouldn't make a class. Add it to theme.extend in ${path.basename(config)}, or ask the agent to.`,
+          "invalid",
+        );
       const globals = all.filter((s) => !s.partial);
       const target = isVariable(prop)
         ? variableHome(prop, all)
@@ -273,7 +399,7 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
           ],
         ]);
       });
-      return readTokens(await sheets(design));
+      return allTokens(design);
     },
 
     components: (design) => listComponents(design.root),
@@ -323,11 +449,28 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
   async function step(design: Design, by: Actor, direction: "undo" | "redo"): Promise<void> {
     await history.step(actorKey(design, by), direction, async (patches) => {
       let moved: Patch[] = [];
-      await transact(design.root, [...new Set(patches.map((p) => p.file))], (contents) => {
-        const result = stepPatches(contents, patches, direction);
-        moved = result.patches;
-        return result.contents;
-      });
+      const created = new Set(patches.filter((p) => p.created).map((p) => p.file));
+      await transact(
+        design.root,
+        [...new Set(patches.map((p) => p.file))],
+        (contents) => {
+          for (const file of created) {
+            if (direction === "redo" && contents.has(file)) {
+              throw new Refused(
+                `${file} exists again since, so Finite can't redo making it. It was skipped; redo again to go further back.`,
+                "stale",
+              );
+            }
+          }
+          // A redo of a deleted file starts from nothing.
+          const seeded = new Map(contents);
+          for (const file of created) if (!seeded.has(file)) seeded.set(file, "");
+          const result = stepPatches(seeded, patches, direction);
+          moved = result.patches;
+          return result.contents;
+        },
+        created,
+      );
       return moved;
     });
   }

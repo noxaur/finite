@@ -1,13 +1,27 @@
 import type * as t from "@babel/types";
-import { Refused, type Loc, type Remap, type SourceEdit, type Styling } from "@finite/protocol";
+import {
+  type Inline,
+  type InsertPlace,
+  type Loc,
+  type NewNode,
+  Refused,
+  type Remap,
+  type Router,
+  type SourceEdit,
+  type Styling,
+} from "@finite/protocol";
 import MagicString from "magic-string";
 import { editRule } from "./css.ts";
 import { rev } from "./files.ts";
 import { cssModules } from "./imports.ts";
+import { type Kept, setInline } from "./inline.ts";
+import { insert } from "./insert.ts";
 import {
+  asChild,
   attribute,
   attributeInsertAt,
-  isChild,
+  attrText,
+  indentAt,
   isWhitespaceText,
   parseTsx,
   siblings,
@@ -16,16 +30,23 @@ import {
   type Element,
   type Parsed,
 } from "./jsx.ts";
-import { stylexEdit } from "./stylex.ts";
-import { editClasses, kebab, stripClasses, type Theme } from "./tailwind.ts";
+import { stylexEdit, varRefs } from "./stylex.ts";
+import { editClasses, kebab, stripClasses, type TailwindVersion, type Theme } from "./tailwind.ts";
 import { useVariables, variableRefs, type VariableHome } from "./tokens.ts";
+import { unwrap, wrap } from "./wrap.ts";
 
 export type RewriteContext = {
   theme: Theme;
+  /** Tailwind's major version (default 4); v3 writes only the config's scales. */
+  tailwind?: TailwindVersion;
   /** Other files an edit may change (the `*.module.{css,scss,sass,less}` files this file imports), by root-relative path. */
   files: Record<string, string>;
   /** The file that defines each Sass `$var` and Less `@var` token (`variableSheets`). */
   variables?: Record<string, VariableHome>;
+  /** The `*.stylex.ts` file that defines each StyleX `defineVars` token (`group.key`). */
+  stylexVars?: Record<string, string>;
+  /** Which router the design uses: a new element's file import reads differently under Next.js. */
+  router?: Router;
 };
 
 export type Rewritten = {
@@ -33,6 +54,8 @@ export type Rewritten = {
   remap: Remap;
   /** The context files after the edit; only changed ones differ. */
   files: Record<string, string>;
+  /** The loc of each new node that named a `ref`. */
+  created: Record<string, Loc>;
 };
 
 const STALE = "The file changed; try again";
@@ -41,15 +64,39 @@ const ASK = "Ask the agent to change this";
 /** One edit applied to one element. */
 type Op =
   | { kind: "style"; at: string; tag: string; styles: Record<string, string | null> }
-  | { kind: "text"; at: string; tag: string; text: string }
-  | { kind: "reorder"; at: string; tag: string; before: string | null }
+  | { kind: "inline"; at: string; tag: string; content: Inline[] }
+  | { kind: "reorder"; at: string; tag?: string; before: string | null }
   | { kind: "remove" | "duplicate"; at: string }
-  | { kind: "attr"; at: string; name: string; value: string | null };
+  | { kind: "attr"; at: string; name: string; value: string | null }
+  | { kind: "insert"; at: string; tag: string; place: InsertPlace; node: NewNode }
+  | { kind: "wrap"; at: string; children: string[]; wrapper: NewNode }
+  | { kind: "unwrap"; at: string; tag: string };
+
+/** In the position map, the keys of elements a batch created: a client `ref` or a printed index. */
+const NEW = "new:";
 
 export function parseLoc(loc: Loc): { file: string; key: string } {
   const m = /^(.*):(\d+):(\d+)$/.exec(loc);
   if (!m) throw new Refused(`${loc} isn't a loc (file:line:col)`, "invalid");
   return { file: m[1]!, key: `${m[2]}:${m[3]}` };
+}
+
+/** Every style map the edit writes, a new node's and its children's included. */
+export function editStyles(edit: SourceEdit): Record<string, string | null>[] {
+  if (edit.kind === "style") return [edit.styles];
+  if (edit.kind === "wrap") return edit.wrapper.styles ? [edit.wrapper.styles] : [];
+  if (edit.kind === "inline")
+    return edit.content.flatMap((item) =>
+      (item.marks ?? []).flatMap((mark) => (mark.m === "span" ? [mark.styles] : [])),
+    );
+  if (edit.kind !== "insert") return [];
+  const all: Record<string, string>[] = [];
+  const visit = (node: NewNode) => {
+    if (node.styles) all.push(node.styles);
+    node.children?.forEach(visit);
+  };
+  visit(edit.node);
+  return all;
 }
 
 /** The files the edit's locs point into. */
@@ -102,7 +149,8 @@ function rewriteOrThrow(
   const where = new Map<string, string>([...original].map((k) => [k, k]));
   const files = { ...ctx.files };
 
-  for (const op of ops) {
+  for (let i = 0; i < ops.length; i++) {
+    const op = ops[i]!;
     const at = where.get(op.at);
     if (at === undefined) {
       if (original.has(op.at)) continue; // an earlier op in this batch removed it (its parent went)
@@ -113,8 +161,18 @@ function rewriteOrThrow(
       throw new Refused(STALE, "stale");
 
     const ms = new MagicString(code);
-    const s: StepCtx = { ms, code, file, parsed, where, ctx, files, convention };
-    applyOp(s, element, op);
+    const s: StepCtx = {
+      ms,
+      code,
+      file,
+      parsed,
+      where,
+      ctx,
+      files,
+      convention,
+      router: ctx.router,
+    };
+    const made = applyOp(s, element, op);
     const next = ms.toString();
     if (next === code) continue;
     const nextParsed = parseTsx(next, file);
@@ -124,13 +182,49 @@ function rewriteOrThrow(
       if (to === undefined) where.delete(orig);
       else where.set(orig, to);
     }
+    if (made) ops.splice(i + 1, 0, ...track(made, moved, nextParsed, where));
     code = next;
     parsed = nextParsed;
   }
 
   const remap: Remap = {};
-  for (const [orig, cur] of where) if (orig !== cur) remap[`${file}:${orig}`] = `${file}:${cur}`;
-  return { code, remap, files };
+  const created: Record<string, Loc> = {};
+  for (const [orig, cur] of where) {
+    if (orig.startsWith(`${NEW}#`)) continue;
+    if (orig.startsWith(NEW)) created[orig.slice(NEW.length)] = `${file}:${cur}`;
+    else if (orig !== cur) remap[`${file}:${orig}`] = `${file}:${cur}`;
+  }
+  return { code, remap, files, created };
+}
+
+/**
+ * Enters what an insert printed into the position map, so later ops find it like any other
+ * element, and returns the style ops that dress it. An element that was only reprinted goes back
+ * under its original key. The elements no earlier position maps to are
+ * the printed ones, and both lists are in document order.
+ */
+function track(
+  made: Kept[],
+  moved: Map<string, string>,
+  parsed: Parsed,
+  where: Map<string, string>,
+): Op[] {
+  const old = new Set(moved.values());
+  const fresh = [...parsed.elements.keys()]
+    .filter((key) => !old.has(key))
+    .sort((a, b) => {
+      const [al, ac] = a.split(":").map(Number) as [number, number];
+      const [bl, bc] = b.split(":").map(Number) as [number, number];
+      return al - bl || ac - bc;
+    });
+  if (fresh.length !== made.length)
+    throw new Error(`printed ${made.length} elements, parsed ${fresh.length} new ones`);
+  return made.flatMap((node, i): Op[] => {
+    where.set(node.orig ?? `${NEW}${node.key}`, fresh[i]!);
+    return Object.keys(node.styles).length === 0
+      ? []
+      : [{ kind: "style", at: `${NEW}${node.key}`, tag: node.tag, styles: node.styles }];
+  });
 }
 
 function toOps(edit: SourceEdit, file: string): Op[] {
@@ -146,10 +240,43 @@ function toOps(edit: SourceEdit, file: string): Op[] {
     case "remove":
     case "duplicate":
       return edit.locs.flatMap(here).map((at) => ({ kind: edit.kind, at }));
-    case "text":
-      return here(edit.loc).map((at) => ({ kind: "text", at, tag: edit.tag, text: edit.text }));
     case "attr":
       return here(edit.loc).map((at) => ({ kind: "attr", at, name: edit.name, value: edit.value }));
+    case "insert":
+      return here(edit.loc).map((at) => ({
+        kind: "insert",
+        at,
+        tag: edit.tag,
+        place: edit.place,
+        node: edit.node,
+      }));
+    case "wrap": {
+      const keys = edit.locs.map(parseLoc);
+      if (keys.some((k) => k.file !== keys[0]!.file))
+        throw new Refused(
+          "These elements come from different files, so Finite can't wrap them together by hand. Ask the agent to change this.",
+          "unsupported-style",
+        );
+      if (new Set(edit.locs).size !== edit.locs.length)
+        throw new Refused("The same element is listed twice", "invalid");
+      if (keys[0]!.file !== file) return [];
+      const children = keys.map((k) => k.key);
+      // `locs` is the children's new order; a move that changes nothing writes nothing.
+      const order: Op[] = children
+        .slice(0, -1)
+        .map((at, i) => ({ kind: "reorder" as const, at, before: children[i + 1]! }))
+        .reverse();
+      return [{ kind: "wrap", at: children[0]!, children, wrapper: edit.wrapper }, ...order];
+    }
+    case "unwrap":
+      return here(edit.loc).map((at) => ({ kind: "unwrap", at, tag: edit.tag }));
+    case "inline":
+      return here(edit.loc).map((at) => ({
+        kind: "inline",
+        at,
+        tag: edit.tag,
+        content: edit.content,
+      }));
     case "reorder": {
       const before = edit.before ? parseLoc(edit.before) : null;
       if (before && before.file !== parseLoc(edit.loc).file) {
@@ -191,14 +318,16 @@ type StepCtx = {
   ctx: RewriteContext;
   files: Record<string, string>;
   convention: Styling;
+  router: Router | undefined;
 };
 
-function applyOp(s: StepCtx, element: Element, op: Op): void {
+/** Applies the op; an insert says what it printed. */
+function applyOp(s: StepCtx, element: Element, op: Op): Kept[] | void {
   switch (op.kind) {
     case "style":
       return style(s, element.node, op.styles);
-    case "text":
-      return text(s, element.node, op.text);
+    case "inline":
+      return setInline(s, element, op.content);
     case "reorder":
       return reorder(s, element, op.before);
     case "remove": {
@@ -221,17 +350,22 @@ function applyOp(s: StepCtx, element: Element, op: Op): void {
     }
     case "attr":
       return attr(s, element.node, op.name, op.value);
+    case "insert":
+      return insert(s, element, op.place, op.node);
+    case "wrap":
+      return wrap(
+        s,
+        op.children.map((key) => {
+          const at = s.where.get(key);
+          const child = at === undefined ? undefined : s.parsed.elements.get(at);
+          if (!child) throw new Refused(STALE, "stale");
+          return child;
+        }),
+        op.wrapper,
+      );
+    case "unwrap":
+      return unwrap(s, element);
   }
-}
-
-function asChild(element: Element, what: string) {
-  if (!isChild(element)) {
-    throw new Refused(
-      `This element is a component's root or sits inside code, so Finite can't ${what} it by hand. ${ASK}.`,
-      "unsupported-style",
-    );
-  }
-  return element;
 }
 
 // Styles
@@ -240,6 +374,16 @@ const CLASS_FNS = new Set(["cn", "clsx", "twMerge", "classnames", "classNames", 
 
 function style(s: StepCtx, el: t.JSXElement, styles: Record<string, string | null>): void {
   const cls = attribute(el, "className");
+  const token = varRefs(styles)[0];
+  if (token && s.convention !== "stylex") {
+    const how = { tailwind: "Tailwind classes", "css-modules": "a CSS module" }[
+      s.convention as string
+    ];
+    throw new Refused(
+      `${token} is a StyleX token, which only a stylex.create entry can use, and this element is styled with ${how ?? "inline styles"}. Pick a CSS custom property (--name) token instead, or ask the agent.`,
+      "unsupported-style",
+    );
+  }
   if (s.convention === "css-modules" && cls) return cssModule(s, cls, styles);
   const ref = variableRefs(styles)[0];
   if (ref) {
@@ -250,25 +394,39 @@ function style(s: StepCtx, el: t.JSXElement, styles: Record<string, string | nul
     );
   }
   if (s.convention === "stylex") {
-    const edit = stylexEdit(s.code, s.parsed.ast, el, styles);
-    if (!edit) return inline(s, el, styles);
-    return void s.ms.overwrite(edit.start, edit.end, edit.text);
+    const patches = stylexEdit(s.code, s.parsed.ast, el, styles, s.file, s.ctx.stylexVars ?? {});
+    if (patches) {
+      for (const p of patches)
+        if (p.start === p.end) s.ms.appendLeft(p.start, p.text);
+        else s.ms.overwrite(p.start, p.end, p.text);
+      return;
+    }
+    if (token)
+      throw new Refused(
+        `${token} is a StyleX token, which only a stylex.create entry can use, and this element has a style, a className or a spread but no stylex.props spread, so it would get an inline style. Give it a stylex.create entry, pick a CSS custom property (--name) token instead, or ask the agent.`,
+        "unsupported-style",
+      );
+    return inline(s, el, styles);
   }
   if (s.convention === "inline" || s.convention === "css-modules") return inline(s, el, styles);
 
   if (!cls) {
-    const classes = editClasses("", styles, s.ctx.theme);
-    if (classes !== "") s.ms.appendLeft(attributeInsertAt(el), ` className="${classes}"`);
+    const classes = editClasses("", styles, s.ctx.theme, s.ctx.tailwind);
+    if (classes !== "") s.ms.appendLeft(attributeInsertAt(el), ` className=${classAttr(classes)}`);
     return;
   }
   const value = cls.value;
   if (value?.type === "StringLiteral")
-    return setLiteral(s, value, editClasses(value.value, styles, s.ctx.theme));
+    return setLiteral(s, value, editClasses(value.value, styles, s.ctx.theme, s.ctx.tailwind));
   if (value?.type === "JSXExpressionContainer") {
     const expr = value.expression;
     const lit = literal(expr);
     if (lit !== undefined)
-      return setLiteral(s, expr as t.StringLiteral, editClasses(lit, styles, s.ctx.theme));
+      return setLiteral(
+        s,
+        expr as t.StringLiteral,
+        editClasses(lit, styles, s.ctx.theme, s.ctx.tailwind),
+      );
     if (
       expr.type === "CallExpression" &&
       expr.callee.type === "Identifier" &&
@@ -278,12 +436,23 @@ function style(s: StepCtx, el: t.JSXElement, styles: Record<string, string | nul
       const last = args.at(-1);
       if (last) {
         for (const arg of args.slice(0, -1))
-          setLiteral(s, arg, stripClasses(literal(arg)!, styles, s.ctx.theme));
-        return setLiteral(s, last, editClasses(literal(last)!, styles, s.ctx.theme));
+          setLiteral(s, arg, stripClasses(literal(arg)!, styles, s.ctx.theme, s.ctx.tailwind));
+        return setLiteral(
+          s,
+          last,
+          editClasses(literal(last)!, styles, s.ctx.theme, s.ctx.tailwind),
+        );
       }
     }
   }
   throw new Refused(ASK, "unsupported-style");
+}
+
+/** A new `className` value, quoted so it holds whatever the class list contains. */
+function classAttr(classes: string): string {
+  if (!classes.includes('"')) return `"${classes}"`;
+  if (!classes.includes("'")) return `'${classes}'`;
+  return `{\`${classes.replace(/[`\\]|\$\{/g, (m) => `\\${m}`)}\`}`;
 }
 
 /** The text of a string literal or a template literal without `${}`. */
@@ -407,51 +576,7 @@ function objectText(
   return `{\n${parts.map((p) => `${indent}${p},`).join("\n")}\n${closeIndent}}`;
 }
 
-function indentAt(code: string, offset: number): string {
-  const lineStart = code.lastIndexOf("\n", offset - 1) + 1;
-  return /^[ \t]*/.exec(code.slice(lineStart))![0];
-}
-
-// Text, order, attributes
-
-function text(s: StepCtx, el: t.JSXElement, value: string): void {
-  const opening = el.openingElement;
-  if (!el.closingElement) {
-    let start = opening.end! - 2;
-    while (/\s/.test(s.code[start - 1]!)) start--;
-    s.ms.overwrite(start, opening.end!, `>${jsxText(value)}</${tagName(opening.name)}>`);
-    return;
-  }
-  const kids = el.children;
-  if (kids.length === 0) return void s.ms.appendLeft(opening.end!, jsxText(value));
-  if (kids.every((k) => k.type === "JSXText")) {
-    const start = kids[0]!.start!;
-    const end = kids.at(-1)!.end!;
-    const raw = s.code.slice(start, end);
-    if (raw.trim() === "") return void s.ms.overwrite(start, end, jsxText(value));
-    const lead = /^\s*/.exec(raw)![0];
-    const trail = /\s*$/.exec(raw)![0];
-    s.ms.overwrite(start + lead.length, end - trail.length, jsxText(value));
-    return;
-  }
-  const solid = kids.filter((k) => !isWhitespaceText(k));
-  const only = solid[0];
-  if (
-    solid.length === 1 &&
-    only?.type === "JSXExpressionContainer" &&
-    literal(only.expression) !== undefined
-  ) {
-    s.ms.overwrite(only.expression.start!, only.expression.end!, JSON.stringify(value));
-    return;
-  }
-  throw new Refused(`This text is built from code or other elements. ${ASK}.`, "unsupported-style");
-}
-
-function jsxText(value: string): string {
-  return value === "" || /[{}<>&\n]/.test(value) || value !== value.trim()
-    ? `{${JSON.stringify(value)}}`
-    : value;
-}
+// Order, attributes
 
 function reorder(s: StepCtx, element: Element, beforeKey: string | null): void {
   const child = asChild(element, "move");
@@ -472,10 +597,21 @@ function reorder(s: StepCtx, element: Element, beforeKey: string | null): void {
   s.ms.move(from.start, from.end, slot(parent, before.node).start);
 }
 
+/** Whether an attribute's value is literal text, so writing over it loses no code. */
+function isLiteralValue(attr: t.JSXAttribute): boolean {
+  const value = attr.value;
+  if (!value || value.type === "StringLiteral") return true;
+  if (value.type !== "JSXExpressionContainer") return false;
+  const e = value.expression;
+  return e.type === "StringLiteral" || (e.type === "TemplateLiteral" && e.expressions.length === 0);
+}
+
 function attr(s: StepCtx, el: t.JSXElement, name: string, value: string | null): void {
   if (!/^[A-Za-z_][\w:.-]*$/.test(name))
     throw new Refused(`${name} isn't an attribute name`, "invalid");
   const existing = attribute(el, name);
+  if (existing && !isLiteralValue(existing))
+    throw new Refused("This value comes from code. Ask the agent.", "invalid");
   const attrs = el.openingElement.attributes;
   if (value === null) {
     if (!existing) return;
@@ -483,7 +619,7 @@ function attr(s: StepCtx, el: t.JSXElement, name: string, value: string | null):
     s.ms.remove(prev ? prev.end! : el.openingElement.name.end!, existing.end!);
     return;
   }
-  const textValue = /["\n]/.test(value) ? `{${JSON.stringify(value)}}` : `"${value}"`;
+  const textValue = attrText(value);
   if (existing) s.ms.overwrite(existing.start!, existing.end!, `${name}=${textValue}`);
   else s.ms.appendLeft(attributeInsertAt(el), ` ${name}=${textValue}`);
 }

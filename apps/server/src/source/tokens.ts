@@ -11,6 +11,7 @@ import postcss, {
 } from "postcss";
 import { BLOCK, parseCss, printCss, setDecls } from "./css.ts";
 import { importCandidates, resolveSpec } from "./imports.ts";
+import { isStylexVar } from "./stylex.ts";
 
 /**
  * Tokens are CSS custom properties. Light values come from `@theme` blocks (and `:root`/`html`,
@@ -285,11 +286,13 @@ function findVariable(file: string, root: Root, name: string): ChildNode | undef
   return root.nodes.findLast((n) => variableOf(file, n)?.name === name);
 }
 
+/** A typed token name as it's stored: `--x`, a Sass `$x`, a Less `@x` or a StyleX `group.key`. */
 export function tokenName(name: string): string {
   const n = name.trim();
+  if (isStylexVar(n)) return n;
   if (!/^(--|\$|@)?[A-Za-z_][\w-]*$/.test(n))
     throw new Refused(
-      `${name} isn't a CSS custom property, Sass variable or Less variable name`,
+      `${name} isn't a CSS custom property, Sass variable, Less variable or StyleX token (group.key) name`,
       "invalid",
     );
   return n.startsWith("--") || isVariable(n) ? n : `--${n}`;

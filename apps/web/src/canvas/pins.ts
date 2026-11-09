@@ -28,6 +28,8 @@ export function pinSpot(
 
 export function pinState(comment: Comment): PinState {
   if (comment.resolvedAt !== undefined) return "resolved";
+  // An annotation is for people; no agent is waiting on it.
+  if (comment.kind === "annotation") return "note";
   const last = comment.replies.at(-1)?.author ?? comment.author;
   return last.kind === "agent" ? "replied" : "waiting";
 }

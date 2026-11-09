@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import {
+  type Actor,
   type Canvas,
   type Comment,
   type OpenDesign,
@@ -9,10 +10,12 @@ import {
   type Route,
   type ThreadMeta,
 } from "@finite/protocol";
-import { carrySelection, startThread } from "./agent/index.ts";
+import { carrySelection, setupReason, startSetup, startThread } from "./agent/index.ts";
+import { setupPrompt } from "./agent/instructions.ts";
 import { expandHome, listDirs } from "./browse.ts";
 import type { Context, Handlers } from "./hub.ts";
 import { cloneRepo, searchRepos } from "./repos.ts";
+import { ensureBrandBoard } from "./store/brand.ts";
 import { installOf } from "./store/index.ts";
 import { syncRoutes } from "./store/routes.ts";
 
@@ -48,6 +51,21 @@ export const handlers: Handlers = {
     await Promise.all([modules.previews.stop(id), modules.agents.stopDesign(id)]);
     await modules.store.remove(id);
     return null;
+  },
+
+  async "design.setup"({ designId }, { hub, modules, by }) {
+    const open = await hub.open(designId);
+    const { model, effort, fast } = await modules.store.settings();
+    const thread = await startSetup(open, { model, effort, fast });
+    const reason = await setupReason(open.design, modules.previews.state(designId));
+    const text = setupPrompt(open.design.name, reason);
+    await modules.agents.send(
+      open,
+      thread.id,
+      { text, attachments: [], model, effort, fast, by },
+      "steer",
+    );
+    return { threadId: thread.id };
   },
 
   async subscribe({ designId }, { client, hub, modules }) {
@@ -102,8 +120,8 @@ export const handlers: Handlers = {
   async "source.edit"({ designId, canvasId, edits }, ctx) {
     const open = await ctx.hub.open(designId);
     const canvas = await findCanvas(open, canvasId);
-    const { remap } = await ctx.modules.source.apply(open, edits, ctx.by, canvas);
-    return { remap };
+    const { remap, created } = await ctx.modules.source.apply(open, edits, ctx.by, canvas);
+    return { remap, created };
   },
   async "source.undo"({ designId }, ctx) {
     await ctx.modules.source.undo(await ctx.hub.open(designId), ctx.by);
@@ -116,30 +134,50 @@ export const handlers: Handlers = {
   async "source.detach"({ designId, ...input }, ctx) {
     return ctx.modules.source.detach(await ctx.hub.open(designId), input, ctx.by);
   },
+  async "source.inline"({ designId, loc }, ctx) {
+    return ctx.modules.source.inline(await ctx.hub.open(designId), loc);
+  },
+  async "canvas.draw"({ designId, ...input }, ctx) {
+    return ctx.modules.source.draw(await ctx.hub.open(designId), input, ctx.by);
+  },
+  async "canvas.exportSlice"({ designId, ...input }, ctx) {
+    return ctx.modules.source.exportSlice(await ctx.hub.open(designId), input);
+  },
+  async "asset.add"({ designId, attachment }, ctx) {
+    const open = await ctx.hub.open(designId);
+    const added = await ctx.modules.source.addAsset(open, attachment);
+    await ensureBrandBoard(open, ctx.by);
+    return added;
+  },
 
-  "comment.add": ({ designId, canvasId, anchor, text }, ctx) =>
+  "comment.add": ({ designId, canvasId, anchor, text, kind }, ctx) =>
     updateCanvas(ctx, designId, canvasId, (c) => ({
       ...c,
       comments: [
         ...c.comments,
-        { id: randomUUID(), anchor, author: ctx.by, text, replies: [], createdAt: Date.now() },
+        {
+          id: randomUUID(),
+          anchor,
+          ...(kind === "annotation" ? { kind } : {}),
+          author: ctx.by,
+          text,
+          replies: [],
+          createdAt: Date.now(),
+        },
       ],
     })),
-  "comment.reply": ({ designId, canvasId, commentId, text }, ctx) =>
-    updateComment(ctx, designId, canvasId, commentId, (comment) => ({
-      ...comment,
-      replies: [
-        ...comment.replies,
-        { id: randomUUID(), author: ctx.by, text, createdAt: Date.now() },
-      ],
-    })),
-  "comment.resolve": ({ designId, canvasId, commentId }, ctx) =>
-    updateComment(ctx, designId, canvasId, commentId, (comment) => ({
-      ...comment,
-      resolvedAt: Date.now(),
-    })),
-  "comment.reopen": ({ designId, canvasId, commentId }, ctx) =>
-    updateComment(ctx, designId, canvasId, commentId, (comment) => without(comment, "resolvedAt")),
+  async "comment.reply"({ designId, canvasId, commentId, text }, ctx) {
+    const open = await ctx.hub.open(designId);
+    return updateComment(open, canvasId, commentId, commentEdit.reply(text, ctx.by), ctx.by);
+  },
+  async "comment.resolve"({ designId, canvasId, commentId }, ctx) {
+    const open = await ctx.hub.open(designId);
+    return updateComment(open, canvasId, commentId, commentEdit.resolve, ctx.by);
+  },
+  async "comment.reopen"({ designId, canvasId, commentId }, ctx) {
+    const open = await ctx.hub.open(designId);
+    return updateComment(open, canvasId, commentId, commentEdit.reopen, ctx.by);
+  },
 
   async "thread.send"(params, ctx) {
     const { designId, text, attachments, selection, model, effort, fast, mode } = params;
@@ -236,19 +274,35 @@ async function updateCanvas(
   return (await ctx.hub.open(designId)).updateCanvas(canvasId, fn, ctx.by);
 }
 
-function updateComment(
-  ctx: Context,
-  designId: string,
+/** The changes a comment takes, for the wire and for `/mcp`. */
+export const commentEdit = {
+  reply:
+    (text: string, by: Actor) =>
+    (comment: Comment): Comment => ({
+      ...comment,
+      replies: [...comment.replies, { id: randomUUID(), author: by, text, createdAt: Date.now() }],
+    }),
+  resolve: (comment: Comment): Comment => ({ ...comment, resolvedAt: Date.now() }),
+  reopen: (comment: Comment): Comment => without(comment, "resolvedAt"),
+};
+
+export function updateComment(
+  open: OpenDesign,
   canvasId: string,
   commentId: string,
   fn: (comment: Comment) => Comment,
+  by: Actor,
 ): Promise<Canvas> {
-  return updateCanvas(ctx, designId, canvasId, (canvas) => {
-    if (!canvas.comments.some((c) => c.id === commentId)) {
-      throw new Refused(`no comment ${commentId} on this canvas`, "not-found");
-    }
-    return { ...canvas, comments: canvas.comments.map((c) => (c.id === commentId ? fn(c) : c)) };
-  });
+  return open.updateCanvas(
+    canvasId,
+    (canvas) => {
+      if (!canvas.comments.some((c) => c.id === commentId)) {
+        throw new Refused(`no comment ${commentId} on this canvas`, "not-found");
+      }
+      return { ...canvas, comments: canvas.comments.map((c) => (c.id === commentId ? fn(c) : c)) };
+    },
+    by,
+  );
 }
 
 async function updateThread(

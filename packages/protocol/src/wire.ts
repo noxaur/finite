@@ -11,10 +11,14 @@ import {
   EffortLevel,
   Id,
   InstallState,
+  Inline,
   Loc,
+  NewNode,
   PreviewState,
   RefusalCode,
+  Rect,
   Remap,
+  Rev,
   Route,
   Selection,
   SendMode,
@@ -97,6 +101,8 @@ export const requests = {
   },
   "design.rename": { params: { id: designId, name: z.string().min(1) }, result: DesignEntry },
   "design.remove": { params: { id: designId }, result: z.null() },
+  /** Starts a setup thread on the design, which writes `finite.json` and calls `finish_setup`. */
+  "design.setup": { params: { designId }, result: z.object({ threadId: Id }) },
 
   subscribe: { params: { designId }, result: DesignState },
   unsubscribe: { params: { designId }, result: z.null() },
@@ -116,7 +122,8 @@ export const requests = {
   "source.edit": {
     /** `canvasId` is the canvas the edit was made on: a prototype refuses edits outside `.finite/`. */
     params: { designId, canvasId: Id, edits: z.array(SourceEdit).min(1) },
-    result: z.object({ remap: Remap }),
+    /** `created` is the loc of each new node that named a `ref`. */
+    result: z.object({ remap: Remap, created: z.record(z.string(), Loc) }),
   },
   "source.undo": { params: { designId }, result: z.null() },
   "source.redo": { params: { designId }, result: z.null() },
@@ -125,9 +132,53 @@ export const requests = {
     params: { designId, canvasId: Id, file: z.string(), importer: z.string() },
     result: z.object({ file: z.string() }),
   },
+  /** The element's children as editable runs. `keeps` lists what the runs hold but can't change. */
+  "source.inline": {
+    params: { designId, loc: Loc },
+    result: z.object({
+      rev: Rev,
+      content: z.array(Inline),
+      keeps: z.array(
+        z.object({
+          id: z.number().int().min(0),
+          kind: z.string(),
+          label: z.string(),
+          loc: Loc.optional(),
+        }),
+      ),
+    }),
+  },
+
+  /** Writes a board file holding `node` and adds a frame for it at `box`. */
+  "canvas.draw": {
+    params: { designId, canvasId: Id, box: Rect, name: z.string(), node: NewNode },
+    result: z.object({
+      canvas: Canvas,
+      frameId: Id,
+      file: z.string(),
+      created: z.record(z.string(), Loc),
+    }),
+  },
+  /** Renders a slice to a PNG in Chrome. `url` is a `data:` URL, ready for a download link. */
+  "canvas.exportSlice": {
+    params: { designId, canvasId: Id, sliceId: Id },
+    result: z.object({ url: z.string() }),
+  },
+  /** Copies an attachment into the design's brand folder. `asset` is what `NewNode.src` names. */
+  "asset.add": {
+    params: { designId, attachment: z.string() },
+    result: z.object({ asset: z.string() }),
+  },
 
   "comment.add": {
-    params: { designId, canvasId: Id, anchor: CommentAnchor, text: z.string().min(1) },
+    params: {
+      designId,
+      canvasId: Id,
+      anchor: CommentAnchor,
+      text: z.string().min(1),
+      /** An annotation is a note that stays on the canvas; no agent is asked to act on it. */
+      kind: z.enum(["comment", "annotation"]).optional(),
+    },
     result: Canvas,
   },
   "comment.reply": {
@@ -268,6 +319,8 @@ export const ServerEvent = z.discriminatedUnion("type", [
   /** A new design's dependency install (the designs list shows it through `installing`). */
   z.object({ type: z.literal("install"), designId, install: InstallState }),
   z.object({ type: z.literal("settings"), settings: Settings }),
+  /** A setup thread's `finish_setup` passed: the design to show now (`next`, maybe the same one). */
+  z.object({ type: z.literal("setup.done"), designId, next: Id }),
 ]);
 export type ServerEvent = z.infer<typeof ServerEvent>;
 

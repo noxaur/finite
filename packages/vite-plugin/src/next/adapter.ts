@@ -1,3 +1,5 @@
+import path from "node:path";
+
 /**
  * Finite's Next.js adapter. `next-host.mjs` sets `NEXT_ADAPTER_PATH` to this file before it loads
  * Next, and Next calls `modifyConfig` on the project's own config: the one hook a custom server
@@ -18,6 +20,8 @@ export type AdapterOptions = {
   distDir: string;
   /** Stylesheets to import in place of others, absolute, as the loader takes them. */
   sheets: Record<string, string>;
+  /** Tailwind v3 stylesheets and the config each should use, absolute, as the loader takes them. */
+  configs: Record<string, string>;
 };
 
 /** What Finite follows in the project's config, as Next resolved it. */
@@ -30,6 +34,11 @@ export type NextSettings = {
 
 type Rule = Record<string, unknown>;
 type Context = { phase?: string };
+type WebpackConfig = {
+  module: { rules: unknown[] };
+  watchOptions?: { ignored?: RegExp | string | string[] };
+};
+type Webpack = (config: WebpackConfig, context: unknown) => WebpackConfig;
 type Config = {
   basePath?: string;
   pageExtensions?: string[];
@@ -38,6 +47,7 @@ type Config = {
   devIndicators?: unknown;
   output?: string;
   turbopack?: { rules?: Record<string, unknown> };
+  webpack?: Webpack | null;
 };
 
 /** Next's default `pageExtensions`. */
@@ -45,6 +55,7 @@ export const NEXT_PAGE_EXTENSIONS = ["tsx", "ts", "jsx", "js"];
 
 /** The files that may hold JSX. Next compiles JSX in `.js` too. */
 const GLOBS = ["*.tsx", "*.jsx", "*.js"];
+const FILES = /\.(tsx|jsx|js)$/;
 
 /** A Next.js adapter module: `modifyConfig`, and hooks such as `onBuildComplete`. */
 export type Adapter = {
@@ -86,13 +97,50 @@ export function modifyConfig(config: Config, context?: Context): Config {
     basePath: config.basePath ?? "",
     pageExtensions: config.pageExtensions ?? NEXT_PAGE_EXTENSIONS,
   });
-  const ours: Rule = {
-    condition: { not: "foreign" },
-    loaders: [{ loader: options.loader, options: { root: options.root, sheets: options.sheets } }],
+  const loader = {
+    loader: options.loader,
+    options: { root: options.root, sheets: options.sheets, configs: options.configs },
   };
+  const ours: Rule = { condition: { not: "foreign" }, loaders: [loader] };
   const rules = { ...config.turbopack?.rules };
-  // All matching rules run, in order: ours first, so it sees the file as it is on disk.
-  for (const glob of GLOBS) rules[glob] = [ours, ...asRules(rules[glob])];
+  // All matching rules run, in order: ours first, so it sees the file as it is on disk. Both
+  // bundlers run PostCSS after the loaders on a stylesheet, so Tailwind v3 sees the `@config` it
+  // adds.
+  const css = Object.keys(options.configs).length > 0;
+  for (const glob of css ? [...GLOBS, "*.css"] : GLOBS)
+    rules[glob] = [ours, ...asRules(rules[glob])];
+  const projectWebpack = config.webpack;
+  const webpack: Webpack = (webpackConfig, webpackContext) => {
+    const result = projectWebpack ? projectWebpack(webpackConfig, webpackContext) : webpackConfig;
+    // Pre loaders run before normal ones (SWC, PostCSS), and the last pre rule runs first, so
+    // ours sees the file as it is on disk even when the project adds pre loaders of its own.
+    result.module.rules.push({
+      test: FILES,
+      enforce: "pre",
+      exclude: /node_modules/,
+      use: [loader],
+    });
+    // Only the Tailwind v3 sheets, by path: a rule whose `test` can match any `.css` file turns
+    // Next's built-in CSS support off.
+    if (css)
+      result.module.rules.push({
+        test: Object.keys(options.configs),
+        enforce: "pre",
+        use: [loader],
+      });
+    // Next ignores `.next` but not another distDir. Tailwind watches the whole root, so each
+    // build's output would start the next build, and every rebuild refreshes open pages.
+    const dist = path.join(options.root, options.distDir).split(path.sep).join("/");
+    const ignored = result.watchOptions?.ignored;
+    result.watchOptions = {
+      ...result.watchOptions,
+      ignored:
+        ignored instanceof RegExp
+          ? new RegExp(`${ignored.source}|^${dist.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(/|$)`)
+          : [...(ignored === undefined ? [] : [ignored].flat()), `${dist}/**`],
+    };
+    return result;
+  };
   // `output: "export"` forbids the Pages Router mount's getServerSideProps, and the preview is a
   // dev server, which never exports.
   const { output, ...rest } = config;
@@ -105,6 +153,7 @@ export function modifyConfig(config: Config, context?: Context): Config {
     // Next's badge would sit in the corner of every frame on the canvas.
     devIndicators: false,
     turbopack: { ...config.turbopack, rules },
+    webpack,
   };
 }
 

@@ -26,12 +26,17 @@ export function aliasOf(value: string | undefined): string | undefined {
 
 /**
  * What using a token writes: `var(--x)` for a custom property, and the name itself for a Sass
- * `$x` or Less `@x`, which only a `.module.scss` or `.module.less` rule can take.
+ * `$x` or Less `@x`, which only a `.module.scss` or `.module.less` rule can take, or a StyleX
+ * `colors.brand`, which only a `stylex.create` entry can take.
  */
 export const tokenRef = (name: string): string => (name.startsWith("--") ? `var(${name})` : name);
 
 /** Whether a token is a Sass `$x` or Less `@x`, which has one value and no dark mode. */
 export const isVariable = (name: string): boolean => name.startsWith("$") || name.startsWith("@");
+
+/** Whether a token is a StyleX `defineVars` variable, `<group>.<key>`. */
+export const isStylexVar = (name: string): boolean =>
+  /^[A-Za-z_$][\w$]*\.[A-Za-z_][\w-]*$/.test(name);
 
 /** A token's name as people read it, without the leading `--`. A `$` or `@` stays. */
 export const displayName = (name: string): string => name.replace(/^--/, "");

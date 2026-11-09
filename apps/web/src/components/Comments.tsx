@@ -12,9 +12,6 @@ import { Button, IconButton } from "./Button";
 import { PinFilters, PinIcon } from "./PinIcon";
 import { TimeAgo } from "./TimeAgo";
 
-/** The canvas tools the old tool rail switches between. */
-export type Mode = "pointer" | "interact" | "comment";
-
 /** How far right of its pin a popover starts, in pixels. */
 const POPOVER_GAP = 36;
 
@@ -105,7 +102,7 @@ export function CommentLayer({
           >
             <button
               type="button"
-              aria-label={`Comment by ${comment.author.name}`}
+              aria-label={`${comment.kind === "annotation" ? "Annotation" : "Comment"} by ${comment.author.name}`}
               title={spot.moved ? "Its element moved or is gone" : undefined}
               onClick={() => editor.openComment(open ? null : comment.id)}
               {...stylex.props(styles.pin)}
@@ -145,16 +142,21 @@ export function CommentLayer({
           <span {...stylex.props(styles.pin)}>
             <PinIcon state="draft" />
           </span>
-          <Popover label="New comment">
+          <Popover label={state.commentDraft.kind ? "New annotation" : "New comment"}>
             <Composer
-              placeholder="Add a comment"
+              placeholder={state.commentDraft.kind ? "Add a note for people" : "Add a comment"}
               autoFocus
               label="Post"
               onCancel={() => editor.cancelCommentDraft()}
               onSubmit={async (text) => {
-                const anchor = state.commentDraft!.anchor;
+                const { anchor, kind } = state.commentDraft!;
                 const failure = await request(() =>
-                  finite.request("comment.add", { ...ids, anchor, text }),
+                  finite.request("comment.add", {
+                    ...ids,
+                    anchor,
+                    text,
+                    ...(kind ? { kind } : {}),
+                  }),
                 );
                 if (failure === undefined) editor.cancelCommentDraft();
                 return failure;
@@ -194,7 +196,10 @@ function Thread({
   return (
     <Popover label="Comment thread">
       <div {...stylex.props(styles.threadHead)}>
-        <span {...stylex.props(styles.muted)}>{resolved ? "Resolved" : "Open"}</span>
+        <span {...stylex.props(styles.muted)}>
+          {comment.kind === "annotation" && "Annotation · "}
+          {resolved ? "Resolved" : "Open"}
+        </span>
         <span {...stylex.props(styles.spacer)} />
         <Button size="small" onClick={() => onResolve(!resolved)}>
           {resolved ? "Reopen" : "Resolve"}

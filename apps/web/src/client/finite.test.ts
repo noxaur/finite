@@ -149,6 +149,20 @@ describe("finite client", () => {
     expect(f.design("d").state?.preview).toEqual({ status: "ready", url: "http://p" });
     ws.push({ type: "install", designId: "d", install: { status: "running", log: "pnpm…" } });
     expect(f.design("d").state?.install).toEqual({ status: "running", log: "pnpm…" });
+    const page = (id: string, createdAt: number) => ({
+      id,
+      kind: "page" as const,
+      name: id,
+      threadIds: [],
+      frames: [],
+      texts: [],
+      comments: [],
+      createdAt,
+      updatedAt: createdAt,
+    });
+    ws.push({ type: "canvas", designId: "d", canvas: page("newer", 2) });
+    ws.push({ type: "canvas", designId: "d", canvas: page("older", 1) });
+    expect(f.design("d").state?.canvases.map((c) => c.id)).toEqual(["older", "newer"]);
 
     ws.close();
     expect(f.status()).toBe("closed");
@@ -165,6 +179,26 @@ describe("finite client", () => {
     await vi.advanceTimersByTimeAsync(20);
     expect(ws2.sent.map((m) => m.type)).toContain("unsubscribe");
     expect(f.design("d").state).toBeNull();
+  });
+
+  it("fetches a design again when setup turned it into an app, but not when it moved on", async () => {
+    const f = make();
+    f.holdDesign("d");
+    const ws = FakeSocket.all[0]!;
+    ws.greet();
+    await flush();
+    ws.reply("subscribe", state());
+    await flush();
+    const subscribes = () => ws.sent.filter((m) => m.type === "subscribe").length;
+    const before = subscribes();
+    ws.push({ type: "setup.done", designId: "d", next: "web" });
+    expect(subscribes()).toBe(before);
+    ws.push({ type: "setup.done", designId: "d", next: "d" });
+    await flush();
+    expect(subscribes()).toBe(before + 1);
+    ws.reply("subscribe", { ...state(), design: { ...state().design, app: "shop" } });
+    await flush();
+    expect(f.design("d").state?.design.app).toBe("shop");
   });
 
   it("keeps design events that arrive while subscribe waits, across a reconnect too", async () => {

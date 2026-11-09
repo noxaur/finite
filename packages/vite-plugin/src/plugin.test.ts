@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
@@ -105,6 +106,19 @@ describe("frames", () => {
     expect(code).toContain(`createMemoryRouter([{ path: "*", Component: element }])`);
   });
 
+  test("runs React Router's HMR preamble and gives its runtime a data router in framework mode", () => {
+    const config = { router: "react-router" as const, css: [], wrapper: undefined };
+    const input = {
+      file: "app/routes/home.tsx",
+      exportName: "default",
+      routerPackage: "react-router",
+    };
+    const code = frameEntry(config, { ...input, framework: true });
+    expect(code.indexOf(`import "virtual:react-router/inject-hmr-runtime";`)).toBe(0);
+    expect(code).toContain("window.__reactRouterDataRouter ??=");
+    expect(frameEntry(config, input)).not.toContain("__reactRouter");
+  });
+
   test("the file frame page has a light fill unless the design paints its own", () => {
     const html = frameHtml("/entry");
     expect(html).toContain(
@@ -136,6 +150,61 @@ describe("tailwind", () => {
       `@source "./.finite";`,
     );
     expect(addFiniteSource(`body { color: red }`, "/p/app.css", "/p")).toBeNull();
+  });
+
+  test("points a Tailwind v3 stylesheet at a config that adds .finite to the project's content", () => {
+    const root = fs.realpathSync(
+      project({
+        "tailwind.config.cjs": `module.exports = { content: { relative: true, files: ["./src/**/*.tsx", "!./src/old/**"] }, theme: { extend: { colors: { brand: "#95ced7" } } } };`,
+        "src/index.css": "@tailwind base;\n@tailwind utilities;\n",
+        "src/named.css": `@config "../tailwind.config.cjs";\n@tailwind utilities;\n`,
+        "src/imports.css": `@charset "utf-8";\n/* reset */\n@import "./reset.css";\n@import url("fonts.css") layer(base);\n@tailwind base;\n`,
+      }),
+    );
+    const tailwind = finite({ root, allowedHosts: [] }).find(
+      (p) => p.name === "finite:tailwind-source",
+    )!;
+    const load = (file: string) =>
+      (tailwind.load as (id: string) => { code: string } | null)(path.join(root, file))!.code;
+    const configFile = ".finite/runtime/css/src/index.css.tailwind.config.cjs";
+    expect(load("src/index.css")).toBe(
+      `@config "../.finite/runtime/css/src/index.css.tailwind.config.cjs";\n@tailwind base;\n@tailwind utilities;\n`,
+    );
+    expect(load("src/named.css")).toBe(
+      `\n@config "../.finite/runtime/css/src/named.css.tailwind.config.cjs";\n@tailwind utilities;\n`,
+    );
+    // `@import` must precede other statements, or postcss-import drops it.
+    expect(load("src/imports.css")).toBe(
+      `@charset "utf-8";\n/* reset */\n@import "./reset.css";\n@import url("fonts.css") layer(base);\n@config "../.finite/runtime/css/src/imports.css.tailwind.config.cjs";\n@tailwind base;\n`,
+    );
+    expect(fs.readFileSync(path.join(root, ".finite/runtime/.gitignore"), "utf8")).toBe("*\n");
+    const require = createRequire(import.meta.url);
+    const config = require(path.join(root, configFile));
+    expect(config).toEqual({
+      content: {
+        relative: true,
+        files: [
+          path.join(root, "src/**/*.tsx"),
+          `!${path.join(root, "src/old/**")}`,
+          path.join(root, ".finite/**/*.{tsx,jsx,ts,js}"),
+          `!${path.join(root, ".finite/runtime/**")}`,
+        ],
+      },
+      theme: { extend: { colors: { brand: "#95ced7" } } },
+    });
+
+    // Tailwind rebuilds when a file the config requires by a literal relative path changes: it
+    // clears those from the require cache and loads the config again.
+    const projectConfig = path.join(root, "tailwind.config.cjs");
+    expect(fs.readFileSync(path.join(root, configFile), "utf8")).toContain(
+      `require("../../../../tailwind.config.cjs")`,
+    );
+    fs.writeFileSync(
+      projectConfig,
+      fs.readFileSync(projectConfig, "utf8").replace("#95ced7", "#0a7f3e"),
+    );
+    for (const file of [projectConfig, path.join(root, configFile)]) delete require.cache[file];
+    expect(require(path.join(root, configFile)).theme.extend.colors.brand).toBe("#0a7f3e");
   });
 });
 

@@ -4,16 +4,22 @@ import * as stylex from "@stylexjs/stylex";
 import type { Canvas as CanvasDoc, Route } from "@finite/protocol";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { CommentLayer } from "@/components/Comments";
-import { InteractivePill } from "@/components/InteractivePill";
+import { InspectCard } from "@/components/InspectCard";
 import { SelectionLayer } from "@/components/SelectionLayer";
 import { Camera } from "@/design/camera";
 import { colors, fonts, radii, shadows, space } from "@/styles/tokens.stylex";
 import { Button } from "@/components/Button";
+import { Toolbar } from "@/components/Toolbar";
 import { useDesignState } from "@/client/finite";
 import { activeEditor, CanvasEditor, useEditorState } from "./editor";
+import { SectionsLayer, SlicesLayer } from "./CanvasObjects";
 import { FrameView } from "./FrameView";
+import { MeasureOverlay } from "./MeasureOverlay";
 import { useSelection } from "./selection";
-import { TextEditor, TextLabels } from "./TextLabels";
+import { RichTextEditor } from "./RichTextEditor";
+import { TextLabels } from "./TextLabels";
+import { ToolOverlays } from "./ToolOverlays";
+import { toolOf } from "./tools/registry";
 import { framesToMount } from "./virtualize";
 
 /**
@@ -59,6 +65,8 @@ const EMPTY: CanvasDoc = {
   frames: [],
   texts: [],
   comments: [],
+  sections: [],
+  slices: [],
   updatedAt: 0,
 };
 
@@ -129,6 +137,8 @@ function CanvasView({
       raf = requestAnimationFrame(() => {
         const boxes = editor.frames.map((f) => ({ id: f.id, ...editor.boxOf(f) }));
         const pinned = new Set(selection.map((s) => s.frameId));
+        const inspectPin = editor.state.inspect.pin;
+        if (inspectPin) pinned.add(inspectPin.frameId);
         setMounted((prev) => {
           const next = framesToMount(boxes, editor.camera.visibleWorld(1), prev, pinned);
           return next.length === prev.length && next.every((id, i) => id === prev[i]) ? prev : next;
@@ -144,16 +154,21 @@ function CanvasView({
   }, [editor, canvas.frames, selection]);
 
   const selectedFrames = new Set(selection.map((s) => s.frameId));
+  const cursor = state ? toolOf(state.tool).cursor : undefined;
 
   return (
     <div
       ref={viewport}
       data-canvas=""
-      {...stylex.props(styles.viewport, state?.tool === "comment" && styles.commentCursor)}
+      {...stylex.props(
+        styles.viewport,
+        cursor !== undefined && cursor !== "" && styles.toolCursor(cursor),
+      )}
     >
       <div ref={world} {...stylex.props(styles.world)}>
         {editor && state && (
           <>
+            <SectionsLayer editor={editor} state={state} />
             <TextLabels editor={editor} state={state} />
             {canvas.frames.map((frame) => {
               const box = editor.boxOf(frame);
@@ -188,13 +203,16 @@ function CanvasView({
                     height={box.height}
                     previewUrl={previewUrl}
                     mounted={mounted.includes(frame.id)}
-                    interact={state.interact}
+                    interact={state.tool === "interact"}
                     editor={editor}
                   />
                 </div>
               );
             })}
+            <SlicesLayer editor={editor} state={state} />
             <SelectionLayer editor={editor} state={state} selection={selection} />
+            <ToolOverlays editor={editor} state={state} />
+            {state.tool === "measure" && <MeasureOverlay host={editor} state={state} />}
             <CommentLayer
               designId={designId}
               canvasId={canvas.id}
@@ -202,7 +220,7 @@ function CanvasView({
               editor={editor}
               state={state}
             />
-            {state.editingText && <TextEditor editor={editor} editing={state.editingText} />}
+            {state.editingText && <RichTextEditor editor={editor} editing={state.editingText} />}
             {state.notice && (
               <div {...stylex.props(styles.noticeSpot(state.notice.at.x, state.notice.at.y))}>
                 <div
@@ -223,13 +241,9 @@ function CanvasView({
           </>
         )}
       </div>
-      {editor && state && (
-        <InteractivePill
-          tool={state.tool}
-          interact={state.interact}
-          onTool={(t) => editor.setTool(t)}
-          onInteract={(on) => editor.setInteract(on)}
-        />
+      {editor && state && <Toolbar editor={editor} state={state} />}
+      {editor && state?.tool === "inspect" && (
+        <InspectCard editor={editor} inspect={state.inspect} />
       )}
     </div>
   );
@@ -247,7 +261,8 @@ const styles = stylex.create({
     fontFamily: fonts.sans,
     outline: "none",
   },
-  commentCursor: { cursor: "crosshair" },
+  // A tool's cursor, kept off the inline `cursor` the camera sets while it pans.
+  toolCursor: (cursor: string) => ({ cursor }),
   world: {
     position: "absolute",
     left: 0,

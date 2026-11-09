@@ -52,6 +52,14 @@ export const DesignEntry = z.object({
   updatedAt: z.number().default(0),
   /** Set while a new design's dependencies install. Never stored. */
   installing: z.boolean().optional(),
+  /** The absolute folder holding the `finite.json` that lists this design's app. */
+  workspace: z.string().optional(),
+  /** The app's name in that `finite.json`. */
+  app: z.string().optional(),
+  /** A folder Finite couldn't run yet, waiting for its setup thread to write `finite.json`. */
+  setup: z.boolean().optional(),
+  /** A setup design whose `.finite/` Finite made when it connected; removing it deletes that folder. */
+  madeFinite: z.boolean().optional(),
 });
 export type DesignEntry = z.infer<typeof DesignEntry>;
 
@@ -77,6 +85,61 @@ export const Design = DesignEntry.omit({ updatedAt: true, installing: true }).ex
   brandDir: z.string(),
 });
 export type Design = z.infer<typeof Design>;
+
+// Workspaces
+
+/** An app or service name in `finite.json`. */
+const WorkspaceName = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9-]*$/, "a name is lowercase letters, digits and hyphens");
+const Env = z.record(z.string(), z.string());
+/** A route frame's values for its dynamic segments, like `{ "userId": "42" }`. */
+const RouteParams = z.record(z.string(), z.string());
+
+/** An app in `finite.json`: one design. `path` is relative to the workspace root (`"."` allowed). */
+export const FiniteApp = z.strictObject({
+  path: z.string().min(1),
+  /** Commands run in the app folder after the workspace `setup`. */
+  setup: z.array(z.string()).optional(),
+  /** The services its dev server needs. */
+  needs: z.array(z.string()).optional(),
+  env: Env.optional(),
+  /**
+   * Values for the routes' dynamic segments, keyed by the route path as the router reports it
+   * (`/users/:userId`): one params object, or an array for one frame each. A path the router
+   * doesn't report is added as a custom route.
+   */
+  routes: z.record(z.string(), z.union([RouteParams, z.array(RouteParams)])).optional(),
+});
+export type FiniteApp = z.infer<typeof FiniteApp>;
+
+/**
+ * A long-running process an app needs. `ready` is a URL (ready when a GET answers below 500) or a
+ * port (ready when a TCP connect to 127.0.0.1 succeeds); without it, ready once spawned.
+ */
+export const FiniteService = z.strictObject({
+  run: z.string().min(1),
+  /** Relative to the workspace root (default the root). */
+  cwd: z.string().optional(),
+  ready: z.union([z.string().min(1), z.number().int().min(1).max(65535)]).optional(),
+  needs: z.array(z.string()).optional(),
+  env: Env.optional(),
+});
+export type FiniteService = z.infer<typeof FiniteService>;
+
+/** `<workspace>/finite.json`, committed with the project: commands and non-secret env only. */
+export const FiniteJson = z.strictObject({
+  $schema: z.string().optional(),
+  /** Commands run in order in the workspace root before any app's dev server starts. */
+  setup: z.array(z.string()).optional(),
+  /** Added to every setup command, service and dev server. */
+  env: Env.optional(),
+  apps: z
+    .record(WorkspaceName, FiniteApp)
+    .refine((apps) => Object.keys(apps).length > 0, "list at least one app"),
+  services: z.record(WorkspaceName, FiniteService).optional(),
+});
+export type FiniteJson = z.infer<typeof FiniteJson>;
 
 // Canvases
 
@@ -136,6 +199,8 @@ export type CommentReply = z.infer<typeof CommentReply>;
 export const Comment = z.object({
   id: Id,
   anchor: CommentAnchor,
+  /** An annotation stays on the canvas as a note; absent means a comment. */
+  kind: z.enum(["comment", "annotation"]).optional(),
   author: Actor,
   text: z.string(),
   replies: z.array(CommentReply),
@@ -144,10 +209,37 @@ export const Comment = z.object({
 });
 export type Comment = z.infer<typeof Comment>;
 
+/** A named region of the canvas. Which frames it holds is geometry, read when it's dragged. */
+export const Section = z.object({
+  id: Id,
+  name: z.string(),
+  x: z.number(),
+  y: z.number(),
+  width: z.number().positive(),
+  height: z.number().positive(),
+  author: Actor,
+});
+export type Section = z.infer<typeof Section>;
+
+/** A region of one frame marked for export. Its box is in the frame's own CSS pixels. */
+export const Slice = z.object({
+  id: Id,
+  frameId: Id,
+  name: z.string(),
+  x: z.number(),
+  y: z.number(),
+  width: z.number().positive(),
+  height: z.number().positive(),
+});
+export type Slice = z.infer<typeof Slice>;
+
 export const CanvasKind = z.enum(["page", "prototype"]);
 export type CanvasKind = z.infer<typeof CanvasKind>;
 
-/** `<root>/.finite/canvases/<id>.json`. A removed canvas keeps `removedAt` for 30 days, then goes. */
+/**
+ * `<root>/.finite/canvases/<id>.json`. A removed canvas keeps `removedAt` for 30 days, then goes.
+ * Canvases list in `createdAt` order; files written before it existed have none and come first.
+ */
 export const Canvas = z.object({
   id: Id,
   kind: CanvasKind,
@@ -156,6 +248,9 @@ export const Canvas = z.object({
   frames: z.array(Frame),
   texts: z.array(TextLabel),
   comments: z.array(Comment),
+  sections: z.array(Section).default([]),
+  slices: z.array(Slice).default([]),
+  createdAt: z.number().optional(),
   updatedAt: z.number(),
   removedAt: z.number().optional(),
 });
@@ -186,6 +281,21 @@ export const CanvasPatch = z.discriminatedUnion("op", [
   /** Adds the text, or replaces the one with its id. */
   z.object({ op: z.literal("setText"), text: TextLabel }),
   z.object({ op: z.literal("removeText"), textId: Id }),
+  /** Adds the section, or replaces the one with its id. */
+  z.object({ op: z.literal("setSection"), section: Section }),
+  z.object({ op: z.literal("removeSection"), sectionId: Id }),
+  /** Moves a section with the frames and labels inside it, as one step. */
+  z.object({
+    op: z.literal("moveSection"),
+    sectionId: Id,
+    x: z.number(),
+    y: z.number(),
+    frames: z.array(z.object({ id: Id, x: z.number(), y: z.number() })),
+    texts: z.array(z.object({ id: Id, x: z.number(), y: z.number() })),
+  }),
+  /** Adds the slice, or replaces the one with its id. */
+  z.object({ op: z.literal("setSlice"), slice: Slice }),
+  z.object({ op: z.literal("removeSlice"), sliceId: Id }),
 ]);
 export type CanvasPatch = z.infer<typeof CanvasPatch>;
 
@@ -228,6 +338,8 @@ export const ThreadMeta = z.object({
   fast: z.boolean(),
   queued: z.array(Queued),
   sessionId: z.string().optional(),
+  /** A setup thread: it writes the workspace's `finite.json` and ends with `finish_setup`. */
+  setup: z.boolean().optional(),
   createdAt: z.number(),
   updatedAt: z.number(),
 });
@@ -329,7 +441,8 @@ export const Route = z.object({
 });
 export type Route = z.infer<typeof Route>;
 
-export const PreviewStatus = z.enum(["stopped", "starting", "ready", "error"]);
+/** `needs-setup`: a setup design, which has no preview until its `finite.json` is written. */
+export const PreviewStatus = z.enum(["stopped", "starting", "ready", "error", "needs-setup"]);
 export type PreviewStatus = z.infer<typeof PreviewStatus>;
 
 export const PreviewState = z.object({
@@ -357,6 +470,65 @@ export const FrameError = z.object({
 });
 export type FrameError = z.infer<typeof FrameError>;
 
+/** New JSX as data, never as code: nothing on the wire can become an expression. */
+export type NewNode = {
+  /** An intrinsic element's name. */
+  tag: string;
+  /** The client's name for this node, answered in `created` with its loc. */
+  ref?: string | undefined;
+  /** The layer name, written as `data-name`. */
+  name?: string | undefined;
+  /** Geometry and other non-CSS attributes: `d`, `viewBox`, `alt`. */
+  attrs?: Record<string, string> | undefined;
+  /** Applied through the same path as a style edit, so every styling convention works. */
+  styles?: Record<string, string> | undefined;
+  /** A file from `asset.add`, written as an ES import and `src={name}`. */
+  src?: { asset: string } | undefined;
+  text?: string | undefined;
+  children?: NewNode[] | undefined;
+};
+export const NEW_TAG = /^[a-z][a-zA-Z0-9]*$/;
+const newNodeFields = {
+  tag: z.string().regex(NEW_TAG, "a new element's tag is an intrinsic name, like div"),
+  ref: z.string().min(1).optional(),
+  name: z.string().optional(),
+  attrs: z.record(z.string(), z.string()).optional(),
+  styles: z.record(z.string(), z.string()).optional(),
+  src: z.object({ asset: z.string().min(1) }).optional(),
+};
+export const NewNode: z.ZodType<NewNode> = z.lazy(() =>
+  z.object({
+    ...newNodeFields,
+    text: z.string().optional(),
+    children: z.array(NewNode).optional(),
+  }),
+);
+
+/** Inside the anchor element at its `start` or `end`, or beside it `before` or `after`. */
+export const InsertPlace = z.enum(["start", "end", "before", "after"]);
+export type InsertPlace = z.infer<typeof InsertPlace>;
+
+/** One formatting wrapper on a run of inline text. `keep` reprints an existing wrapper verbatim. */
+export const Mark = z.discriminatedUnion("m", [
+  z.object({ m: z.enum(["strong", "b", "em", "i", "u", "s", "del"]) }),
+  z.object({
+    m: z.literal("span"),
+    styles: z.record(z.string(), z.string()),
+    ref: z.string().optional(),
+  }),
+  z.object({ m: z.literal("a"), href: z.string() }),
+  z.object({ m: z.literal("keep"), id: z.number().int().min(0) }),
+]);
+export type Mark = z.infer<typeof Mark>;
+
+/** Inline content as data. An `atom` is an expression, component or comment, kept verbatim. */
+export const Inline = z.discriminatedUnion("t", [
+  z.object({ t: z.literal("text"), text: z.string(), marks: z.array(Mark) }),
+  z.object({ t: z.literal("br"), marks: z.array(Mark).optional() }),
+  z.object({ t: z.literal("atom"), id: z.number().int().min(0), marks: z.array(Mark).optional() }),
+]);
+export type Inline = z.infer<typeof Inline>;
+
 /** A hand edit. `revs` holds the rev of every file the edit's locs point into. */
 const revs = z.record(z.string(), Rev);
 export const SourceEdit = z.discriminatedUnion("kind", [
@@ -367,7 +539,6 @@ export const SourceEdit = z.discriminatedUnion("kind", [
     styles: z.record(z.string(), z.string().nullable()),
     revs,
   }),
-  z.object({ kind: z.literal("text"), loc: Loc, tag: z.string(), text: z.string(), revs }),
   z.object({
     kind: z.literal("reorder"),
     loc: Loc,
@@ -384,6 +555,32 @@ export const SourceEdit = z.discriminatedUnion("kind", [
     value: z.string().nullable(),
     revs,
   }),
+  /** Adds `node` beside or inside the element at `loc`. */
+  z.object({
+    kind: z.literal("insert"),
+    loc: Loc,
+    tag: z.string(),
+    place: InsertPlace,
+    node: NewNode,
+    revs,
+  }),
+  /** Puts the elements at `locs` inside a new `wrapper`. */
+  z.object({
+    kind: z.literal("wrap"),
+    locs: z.array(Loc).min(1),
+    wrapper: z.object(newNodeFields),
+    revs,
+  }),
+  /** Replaces the element at `loc` with its children. */
+  z.object({ kind: z.literal("unwrap"), loc: Loc, tag: z.string(), revs }),
+  /** Replaces the children of the element at `loc` with `content`. */
+  z.object({
+    kind: z.literal("inline"),
+    loc: Loc,
+    tag: z.string(),
+    content: z.array(Inline),
+    revs,
+  }),
 ]);
 export type SourceEdit = z.infer<typeof SourceEdit>;
 
@@ -395,8 +592,9 @@ export const TokenMode = z.enum(["light", "dark"]);
 export type TokenMode = z.infer<typeof TokenMode>;
 
 /**
- * A CSS custom property from the design's `@theme` (light) and `.dark` (dark) blocks, or a
- * top-level Sass `$name` or Less `@name` from its global sheets, which has a light value only.
+ * A CSS custom property from the design's `@theme` (light) and `.dark` (dark) blocks, a top-level
+ * Sass `$name` or Less `@name` from its global sheets, which has a light value only, or a StyleX
+ * design's `defineVars` key, named `<group>.<key>`.
  */
 export const Token = z.object({
   name: z.string(),
@@ -422,6 +620,8 @@ export const RefusalCode = z.enum([
   "outside-prototype",
   "unsupported-style",
   "unsupported-project",
+  /** A `finite.json` that doesn't parse or validate; the reason lists every problem. */
+  "invalid-config",
   "not-logged-in",
   "not-implemented",
 ]);

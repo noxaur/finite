@@ -10,9 +10,14 @@ import type {
   Frame,
   FrameError,
   FrameSource,
+  Inline,
   InstallState,
+  Loc,
+  NewNode,
   PreviewState,
+  Rect,
   Remap,
+  Rev,
   Route,
   Selection,
   SendMode,
@@ -35,12 +40,27 @@ export type Unsubscribe = () => void;
 export interface Store {
   designs(): Promise<DesignEntry[]>;
   create(input: { name: string; kind: "blank" | "import"; source?: string }): Promise<DesignEntry>;
-  /** Refuses (`unsupported-project`) without a package.json, Vite, or a supported router. */
+  /**
+   * Connects a folder. With a `finite.json` at or above it, its workspace root connects every app
+   * it lists (returning the first) and an app folder connects that app; an invalid one is refused
+   * (`invalid-config`). Else a folder detection refuses becomes a setup design (`setup: true`).
+   */
   connect(path: string): Promise<DesignEntry>;
+  /**
+   * Reads the design's `finite.json` and connects every app in it, or refuses (`invalid-config`)
+   * listing what to fix. A setup design whose folder is one of the apps becomes it; otherwise
+   * `replaced` is set and the caller removes it. Emits `setup.done` with `next`.
+   */
+  finishSetup(id: string): Promise<{ apps: DesignEntry[]; next: DesignEntry; replaced: boolean }>;
   rename(id: string, name: string): Promise<DesignEntry>;
-  /** Forgets the design. A connected root stays on disk. */
+  /** Forgets the design. A connected root stays on disk; a setup design's `.finite/` is deleted. */
   remove(id: string): Promise<void>;
   open(id: string): Promise<OpenDesign>;
+  /**
+   * Looks the design's `finite.json` up again, giving it `workspace` and `app` when one lists it
+   * and taking them away when none does. An invalid `finite.json` leaves the design as it is.
+   */
+  relink(id: string): Promise<DesignEntry>;
   settings(): Promise<Settings>;
   setSettings(patch: Partial<Settings>): Promise<Settings>;
   /** The design list changed. */
@@ -51,7 +71,8 @@ export type DesignChange =
   | { type: "canvas"; canvas: Canvas }
   | { type: "thread"; meta: ThreadMeta }
   | { type: "thread.event"; threadId: string; event: ThreadEvent }
-  | { type: "install"; install: InstallState };
+  | { type: "install"; install: InstallState }
+  | { type: "setup.done"; next: string };
 
 /** One design's `.finite/` folder. Writes are serialized per design and atomic. */
 export interface OpenDesign {
@@ -69,7 +90,7 @@ export interface OpenDesign {
   threads(): Promise<ThreadMeta[]>;
   createThread(
     init: Pick<ThreadMeta, "model" | "fast"> &
-      Partial<Pick<ThreadMeta, "title" | "parentId" | "canvasIds" | "effort">>,
+      Partial<Pick<ThreadMeta, "title" | "parentId" | "canvasIds" | "effort" | "setup">>,
   ): Promise<ThreadMeta>;
   updateThread(threadId: string, fn: (meta: ThreadMeta) => ThreadMeta): Promise<ThreadMeta>;
   /** Stores the event (except `text.delta`) and emits it. */
@@ -101,7 +122,7 @@ export interface Previews {
   close(): Promise<void>;
 }
 
-export type SourceResult = { ok: true; remap: Remap };
+export type SourceResult = { ok: true; remap: Remap; created: Record<string, Loc> };
 
 /** Hand edits to TSX, tokens, and copying files between production and prototypes. */
 export interface SourceEditor {
@@ -109,12 +130,36 @@ export interface SourceEditor {
   apply(open: OpenDesign, edits: SourceEdit[], by: Actor, canvas: Canvas): Promise<SourceResult>;
   undo(open: OpenDesign, by: Actor): Promise<void>;
   redo(open: OpenDesign, by: Actor): Promise<void>;
+  /** Writes a whole file as one undo step of `by`'s. Undoing a file this made deletes it. */
+  write(open: OpenDesign, file: string, content: string, by: Actor): Promise<void>;
   /** Copies `file` into `.finite/boards/<canvasId>/` and rewrites `importer`'s import of it. */
   detach(
     open: OpenDesign,
     input: { canvasId: string; file: string; importer: string },
     by: Actor,
   ): Promise<{ file: string }>;
+  /** The element's children as editable runs. */
+  inline(
+    open: OpenDesign,
+    loc: Loc,
+  ): Promise<{
+    rev: Rev;
+    content: Inline[];
+    keeps: { id: number; kind: string; label: string; loc?: Loc | undefined }[];
+  }>;
+  /** Writes a board file that renders `node`; the caller adds its frame. */
+  draw(
+    open: OpenDesign,
+    input: { canvasId: string; box: Rect; name: string; node: NewNode },
+    by: Actor,
+  ): Promise<{ canvas: Canvas; frameId: string; file: string; created: Record<string, Loc> }>;
+  /** Copies an attachment into the design's brand folder. */
+  addAsset(open: OpenDesign, attachment: string): Promise<{ asset: string }>;
+  /** Renders a slice to a PNG and returns it as a `data:` URL. */
+  exportSlice(
+    open: OpenDesign,
+    input: { canvasId: string; sliceId: string },
+  ): Promise<{ url: string }>;
   tokens(design: Design): Promise<Token[]>;
   setToken(
     design: Design,

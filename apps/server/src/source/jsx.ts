@@ -125,6 +125,35 @@ export function slot(
   return { start: isWhitespaceText(before) ? before.start! : el.start!, end: el.end! };
 }
 
+/** `element` as a JSX child, or a refusal saying why it can't have `what` done to it. */
+export function asChild(element: Element, what: string) {
+  if (!isChild(element)) {
+    throw new Refused(
+      `This element is a component's root or sits inside code, so Finite can't ${what} it by hand. Ask the agent to change this.`,
+      "unsupported-style",
+    );
+  }
+  return element;
+}
+
+/** The whitespace that starts the line `offset` is on. */
+export function indentAt(code: string, offset: number): string {
+  const lineStart = code.lastIndexOf("\n", offset - 1) + 1;
+  return /^[ \t]*/.exec(code.slice(lineStart))![0];
+}
+
+/** `value` as JSX children: bare text when that's safe, else a string expression. */
+export function jsxText(value: string): string {
+  return value === "" || /[{}<>&\n]/.test(value) || value !== value.trim()
+    ? `{${JSON.stringify(value)}}`
+    : value;
+}
+
+/** `value` as the right side of a JSX attribute. */
+export function attrText(value: string): string {
+  return /["\n]/.test(value) ? `{${JSON.stringify(value)}}` : `"${value}"`;
+}
+
 /** The sibling children that aren't whitespace. */
 export function siblings(parent: t.JSXElement | t.JSXFragment): t.Node[] {
   return parent.children.filter((child) => !isWhitespaceText(child));

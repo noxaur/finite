@@ -488,6 +488,13 @@ const styles = stylex.create({
     overflowY: "auto",
     padding: space.sm,
   },
-  error: { margin: 0, padding: space.md, color: colors.danger, fontSize: 12 },
+  // An invalid finite.json's reason lists one problem per line.
+  error: {
+    margin: 0,
+    padding: space.md,
+    color: colors.danger,
+    fontSize: 12,
+    whiteSpace: "pre-wrap",
+  },
   status: { margin: 0, padding: space.md, color: colors.muted, fontSize: 12 },
 });

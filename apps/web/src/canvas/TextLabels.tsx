@@ -2,10 +2,9 @@
 
 import * as stylex from "@stylexjs/stylex";
 import type { TextLabel } from "@finite/protocol";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { colors, fonts, radii, space } from "@/styles/tokens.stylex";
-import { bridgeOf } from "./bridge";
-import type { CanvasEditor, EditorState, TextEdit } from "./editor";
+import type { CanvasEditor, EditorState } from "./editor";
 import { labelAnchor } from "./labelAnchor";
 
 /**
@@ -132,76 +131,6 @@ function LabelEditor({
   );
 }
 
-/**
- * Typing into an element's text, in place: an editable box over the element with its font,
- * while the element's own text is hidden through the bridge. Enter keeps it (one `text` edit),
- * Shift-Enter breaks the line, Escape puts it back.
- */
-export function TextEditor({ editor, editing }: { editor: CanvasEditor; editing: TextEdit }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const done = useRef(false);
-  const frame = editor.frame(editing.frameId);
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    el.textContent = editing.text;
-    el.focus();
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    getSelection()?.removeAllRanges();
-    getSelection()?.addRange(range);
-    bridgeOf(editing.frameId)?.preview(editing.loc, { color: "transparent" });
-  }, [editing]);
-  if (!frame) return null;
-  const b = editor.boxOf(frame);
-  const f = editing.font;
-  const finish = (keep: boolean) => {
-    if (done.current) return;
-    done.current = true;
-    void editor.finishText(keep ? (ref.current?.innerText ?? editing.text) : null);
-  };
-  return (
-    <div
-      ref={ref}
-      contentEditable="plaintext-only"
-      suppressContentEditableWarning
-      role="textbox"
-      aria-label="Text"
-      data-canvas-ui=""
-      data-camera-ignore=""
-      onBlur={() => finish(true)}
-      onKeyDown={(e) => {
-        e.stopPropagation();
-        if (e.key === "Escape") finish(false);
-        else if (e.key === "Enter" && !e.shiftKey) {
-          e.preventDefault();
-          finish(true);
-        }
-      }}
-      {...stylex.props(styles.inline)}
-      style={{
-        left: b.x + editing.rect.x,
-        top: b.y + editing.rect.y,
-        minWidth: editing.rect.width,
-        minHeight: editing.rect.height,
-        fontFamily: f.fontFamily,
-        fontSize: f.fontSize,
-        fontWeight: f.fontWeight,
-        fontStyle: f.fontStyle,
-        lineHeight: f.lineHeight,
-        letterSpacing: f.letterSpacing,
-        color: f.color,
-        textAlign: f.textAlign as React.CSSProperties["textAlign"],
-        textTransform: f.textTransform as React.CSSProperties["textTransform"],
-        paddingTop: f.paddingTop,
-        paddingRight: f.paddingRight,
-        paddingBottom: f.paddingBottom,
-        paddingLeft: f.paddingLeft,
-      }}
-    />
-  );
-}
-
 const styles = stylex.create({
   label: (x: number, y: number, width: number) => ({
     position: "absolute",
@@ -259,12 +188,4 @@ const styles = stylex.create({
   },
   attachedField: { outline: `1.5px solid ${colors.hover}` },
   attachedFieldBody: { fontSize: 12, lineHeight: "16px" },
-  inline: {
-    position: "absolute",
-    boxSizing: "border-box",
-    whiteSpace: "pre-wrap",
-    outline: `calc(1.5px * var(--inv-zoom, 1)) solid ${colors.hover}`,
-    caretColor: colors.hover,
-    cursor: "text",
-  },
 });

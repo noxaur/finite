@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vite-plus/test";
-import { aliasOf, bezierOf, displayName, resolveToken, tokenRef } from "./tokens";
+import { aliasOf, bezierOf, displayName, isStylexVar, resolveToken, tokenRef } from "./tokens";
 
 describe("aliasOf", () => {
   test("names the token a whole-value var() points at", () => {
@@ -30,6 +30,14 @@ test("tokenRef writes var() for a custom property and the bare name for a variab
   expect(tokenRef("--brand")).toBe("var(--brand)");
   expect(tokenRef("$brand")).toBe("$brand");
   expect(tokenRef("@brand")).toBe("@brand");
+  expect(tokenRef("colors.brand")).toBe("colors.brand");
+});
+
+test("isStylexVar is a defineVars group.key and nothing CSS writes", () => {
+  expect(isStylexVar("colors.brand")).toBe(true);
+  expect(isStylexVar("colors.line-soft")).toBe(true);
+  for (const name of ["--brand", "$brand", "1.5", "url(a.png)", "t.$gap"])
+    expect(isStylexVar(name)).toBe(false);
 });
 
 test("resolveToken follows a variable that names another", () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { frameHref, routeHref } from "./routes.ts";
+import { frameHref, routeHref, routeParams } from "./routes.ts";
 
 describe("routeHref", () => {
   it("fills React Router and TanStack params", () => {
@@ -73,5 +73,24 @@ describe("frameHref", () => {
     expect(frameHref(`${base}/`, { kind: "file", file: "src/Card.tsx" })).toBe(
       "http://127.0.0.1:5000/docs/__finite/frame?file=src%2FCard.tsx",
     );
+  });
+});
+
+describe("routeParams", () => {
+  it("reads every adapter's dynamic segments", () => {
+    expect(routeParams("/about")).toEqual([]);
+    expect(routeParams("/users/:userId/posts/:postId?")).toEqual([
+      { name: "userId", optional: false },
+      { name: "postId", optional: true },
+    ]);
+    expect(routeParams("/posts/$slug/{-$page}/$")).toEqual([
+      { name: "slug", optional: false },
+      { name: "page", optional: true },
+      { name: "_splat", optional: true },
+    ]);
+    expect(routeParams("/docs/[id]/[[...rest]]")).toEqual([
+      { name: "id", optional: false },
+      { name: "rest", optional: true },
+    ]);
   });
 });
