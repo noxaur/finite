@@ -1431,6 +1431,15 @@ describe("agents", () => {
 
     /** Stops the first turn, with its cancelled result still unread, and sends a second. */
     async function stoppedThenSent() {
+      // The 50 ms idle timer could close the session between Stop and the send on a slow machine.
+      await agents.close();
+      agents = createAgents({
+        store: {} as Store,
+        previews,
+        source,
+        query: sdk.query,
+        claudePath: async () => "/bin/claude",
+      });
       const canvas = await open.createCanvas({ kind: "prototype", name: "P" }, person);
       await open.patchCanvas(
         canvas.id,
