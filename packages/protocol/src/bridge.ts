@@ -81,6 +81,8 @@ export const VectorInfo = z.object({
   d: z.string(),
   ctm: z.tuple([z.number(), z.number(), z.number(), z.number(), z.number(), z.number()]),
   viewBox: z.string().nullable(),
+  /** The path's `id`, so text can point at it. */
+  id: z.string().nullable().optional(),
 });
 export type VectorInfo = z.infer<typeof VectorInfo>;
 

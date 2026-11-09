@@ -28,13 +28,15 @@ const CURSORS: Record<Handle, string> = {
 export function SelectionLayer({
   editor,
   state,
-  selection,
+  selection: selected,
 }: {
   editor: CanvasEditor;
   state: EditorState;
   selection: readonly SelectionItem[];
 }) {
   if (state.tool === "inspect") return null;
+  // Point editing draws its own handles over the path.
+  const selection = state.tool === "vectorEdit" ? [] : selected;
   const world = (frameId: string, r: Rect): Rect | null => {
     const frame = editor.frame(frameId);
     if (!frame) return null;
@@ -43,8 +45,11 @@ export function SelectionLayer({
   };
   const hover = state.hover && world(state.hover.frameId, state.hover.rect);
   const drop = state.dropLine && world(state.dropLine.frameId, state.dropLine.rect);
-  const resizable = selection.length === 1 && !state.dragging && state.tool !== "interact";
   const [first] = selection;
+  // Width and height mean nothing on a `<path>`: its box is drawn by its `d`.
+  const onPath = first && editor.facts.get(keyOf(first))?.tag === "path";
+  const resizable =
+    selection.length === 1 && !state.dragging && state.tool !== "interact" && !onPath;
   const firstRect = first && state.rects[keyOf(first)];
   const labelAt = first && firstRect ? world(first.frameId, firstRect) : null;
 

@@ -195,7 +195,7 @@ function boxPlan(
   };
 }
 
-function boxGesture(
+export function boxGesture(
   host: ToolHost,
   from: Point,
   ghost: (box: Rect) => Ghost,

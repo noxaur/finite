@@ -14,6 +14,25 @@ export function pathIn(layers: readonly LayerNode[], loc: Loc, index: number): H
   return walk(layers, []);
 }
 
+/** The one stamped `<path>` under the node at `loc`, at any depth, or `null` for none or several. */
+export function soleStampedPath(
+  layers: readonly LayerNode[],
+  loc: Loc,
+  index: number,
+): LayerNode | null {
+  const kids = childrenIn(layers, { loc, index });
+  if (!kids) return null;
+  const paths: LayerNode[] = [];
+  const visit = (nodes: readonly LayerNode[]) => {
+    for (const n of nodes) {
+      if (n.tag === "path") paths.push(n);
+      visit(n.children);
+    }
+  };
+  visit(kids);
+  return paths.length === 1 ? paths[0]! : null;
+}
+
 /** A node's children in a layer tree, found by the parent's loc and index; the top level for `null`. */
 export function childrenIn(
   layers: readonly LayerNode[],

@@ -56,13 +56,39 @@ const conventions: Styling[] = ["tailwind", "css-modules", "inline", "stylex"];
 describe.each(conventions)("structural edits (%s)", (convention) => {
   it("replaces plain text children", () => {
     expect(
-      ok(run(APP, [{ kind: "text", loc: L(7), tag: "p", text: "Uno" }], convention)).code,
+      ok(
+        run(
+          APP,
+          [
+            {
+              kind: "inline",
+              loc: L(7),
+              tag: "p",
+              content: [{ t: "text", text: "Uno", marks: [] }],
+            },
+          ],
+          convention,
+        ),
+      ).code,
     ).toBe(APP.replace("<p>One</p>", "<p>Uno</p>"));
   });
 
   it("writes text JSX can't hold raw as a string expression", () => {
     expect(
-      ok(run(APP, [{ kind: "text", loc: L(7), tag: "p", text: "a {b} <c>" }], convention)).code,
+      ok(
+        run(
+          APP,
+          [
+            {
+              kind: "inline",
+              loc: L(7),
+              tag: "p",
+              content: [{ t: "text", text: "a {b} <c>", marks: [] }],
+            },
+          ],
+          convention,
+        ),
+      ).code,
     ).toBe(APP.replace("<p>One</p>", `<p>{"a {b} <c>"}</p>`));
   });
 
@@ -118,6 +144,20 @@ export function App() {
     expect(
       ok(run(replaced, [{ kind: "attr", loc: L(7), name: "id", value: null }], convention)).code,
     ).toBe(APP);
+  });
+
+  it("writes over literal values only, not code", () => {
+    const code = (d: string) => APP.replace("<p>One</p>", `<p data-d=${d}>One</p>`);
+    const write = (src: string) =>
+      run(src, [{ kind: "attr", loc: L(7), name: "data-d", value: "M0 0" }], convention);
+    for (const literal of [`"M1 1"`, `{"M1 1"}`, "{`M1 1`}"]) {
+      expect(ok(write(code(literal))).code).toContain(`data-d="M0 0"`);
+    }
+    for (const computed of ["{shape}", "{`M${x} 0`}", `{"M" + x}`]) {
+      expect(refused(write(code(computed))).reason).toBe(
+        "This value comes from code. Ask the agent.",
+      );
+    }
   });
 });
 
@@ -451,7 +491,13 @@ describe("refusals and batches", () => {
   });
 
   it("refuses when the element at the loc has another tag", () => {
-    expect(refused(run(APP, [{ kind: "text", loc: L(7), tag: "h2", text: "x" }]))).toEqual({
+    expect(
+      refused(
+        run(APP, [
+          { kind: "inline", loc: L(7), tag: "h2", content: [{ t: "text", text: "x", marks: [] }] },
+        ]),
+      ),
+    ).toEqual({
       reason: "The file changed; try again",
       code: "stale",
     });
@@ -462,9 +508,9 @@ describe("refusals and batches", () => {
   });
 
   it("refuses text that mixes in elements", () => {
-    expect(refused(run(APP, [{ kind: "text", loc: L(5, 4), tag: "main", text: "x" }])).code).toBe(
-      "unsupported-style",
-    );
+    expect(
+      refused(run(APP, [{ kind: "inline", loc: L(5, 4), tag: "main", content: [] }])).code,
+    ).toBe("unsupported-style");
   });
 
   it("refuses removing a component's root", () => {
@@ -475,7 +521,12 @@ describe("refusals and batches", () => {
     const out = ok(
       run(APP, [
         { kind: "duplicate", locs: [L(6)] },
-        { kind: "text", loc: L(8), tag: "span", text: "Zwei" },
+        {
+          kind: "inline",
+          loc: L(8),
+          tag: "span",
+          content: [{ t: "text", text: "Zwei", marks: [] }],
+        },
         { kind: "style", locs: [L(7)], tag: "p", styles: { color: "#000" } },
       ]),
     );
@@ -924,11 +975,10 @@ describe("insert", () => {
     expect(refused(run(APP, [{ ...insert("end"), tag: "section" }])).code).toBe("stale");
   });
 
-  it("refuses wrap, unwrap and inline until they're built", () => {
+  it("refuses wrap and unwrap until they're built", () => {
     const edits = [
       { kind: "wrap" as const, locs: [L(7)], wrapper: { tag: "div" } },
       { kind: "unwrap" as const, loc: L(7), tag: "p" },
-      { kind: "inline" as const, loc: L(7), tag: "p", content: [] },
     ];
     for (const edit of edits) expect(refused(run(APP, [edit])).code).toBe("not-implemented");
   });

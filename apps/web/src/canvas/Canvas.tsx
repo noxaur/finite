@@ -16,7 +16,8 @@ import { SectionsLayer, SlicesLayer } from "./CanvasObjects";
 import { FrameView } from "./FrameView";
 import { MeasureOverlay } from "./MeasureOverlay";
 import { useSelection } from "./selection";
-import { TextEditor, TextLabels } from "./TextLabels";
+import { RichTextEditor } from "./RichTextEditor";
+import { TextLabels } from "./TextLabels";
 import { ToolOverlays } from "./ToolOverlays";
 import { toolOf } from "./tools/registry";
 import { framesToMount } from "./virtualize";
@@ -219,7 +220,7 @@ function CanvasView({
               editor={editor}
               state={state}
             />
-            {state.editingText && <TextEditor editor={editor} editing={state.editingText} />}
+            {state.editingText && <RichTextEditor editor={editor} editing={state.editingText} />}
             {state.notice && (
               <div {...stylex.props(styles.noticeSpot(state.notice.at.x, state.notice.at.y))}>
                 <div

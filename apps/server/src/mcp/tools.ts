@@ -605,7 +605,19 @@ Production code is refused unless you pass production: true, which you may do on
             }
             case "content":
               for (const e of perLoc(stamped)) {
-                edits.push({ kind: "text", loc: e.loc, tag: e.tag, text: op.text, revs });
+                const held = await modules.source.inline(open, e.loc);
+                if (held.content.some((c) => c.t !== "text" || c.marks.length > 0))
+                  throw new Refused(
+                    `This text is built from code or other elements. Edit ${parseLoc(e.loc).file} with a write op instead.`,
+                    "unsupported-style",
+                  );
+                edits.push({
+                  kind: "inline",
+                  loc: e.loc,
+                  tag: e.tag,
+                  content: op.text === "" ? [] : [{ t: "text", text: op.text, marks: [] }],
+                  revs,
+                });
               }
               break;
             case "attr":

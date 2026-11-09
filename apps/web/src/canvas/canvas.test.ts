@@ -1,7 +1,7 @@
 import type { LayerNode } from "@finite/protocol";
 import { describe, expect, it } from "vite-plus/test";
 import { ATTACH_RANGE, labelAnchor } from "./labelAnchor";
-import { childrenIn, layerName, layerNameAt, layerRows, pathIn } from "./layers";
+import { childrenIn, layerName, layerNameAt, layerRows, pathIn, soleStampedPath } from "./layers";
 import { pinSpot } from "./pins";
 import { keyOf, remapSelection, selectionStore, toggleItem } from "./selection";
 import { framesToMount } from "./virtualize";
@@ -185,5 +185,29 @@ describe("which frame a label sits over", () => {
     expect(labelAnchor({ x: 0, y: -ATTACH_RANGE - 1, width: 400 }, frames)).toBeNull();
     expect(labelAnchor({ x: 0, y: 600, width: 400 }, frames)).toBeNull();
     expect(labelAnchor({ x: 420, y: -120, width: 60 }, frames)).toBeNull();
+  });
+});
+
+describe("an svg's one stamped path", () => {
+  const node = (loc: string, tag: string, children: LayerNode[] = []): LayerNode => ({
+    loc,
+    rev: "r",
+    tag,
+    index: 0,
+    name: tag,
+    children,
+  });
+
+  it("finds it at any depth", () => {
+    const path = node("a:3:1", "path");
+    expect(soleStampedPath([node("a:1:1", "svg", [path])], "a:1:1", 0)).toBe(path);
+    const inGroup = [node("a:1:1", "svg", [node("a:2:1", "g", [path])])];
+    expect(soleStampedPath(inGroup, "a:1:1", 0)).toBe(path);
+  });
+
+  it("is none with no path, or several", () => {
+    expect(soleStampedPath([node("a:1:1", "svg", [node("a:2:1", "rect")])], "a:1:1", 0)).toBeNull();
+    const two = [node("a:1:1", "svg", [node("a:2:1", "path"), node("a:3:1", "path")])];
+    expect(soleStampedPath(two, "a:1:1", 0)).toBeNull();
   });
 });
