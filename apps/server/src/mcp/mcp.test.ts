@@ -657,6 +657,13 @@ describe("/mcp tools", () => {
       region: { ...region, x: 400 },
     });
     expect(outside.content[0]!.text).toContain("past the right edge");
+    const below = await call(client, "render", {
+      designId: "d1",
+      frameIds: [frame.id],
+      region: { x: 0, y: 400, width: 100, height: 50 },
+    });
+    expect(below.content[0]!.text).toContain("past the bottom of Card (300×200)");
+    expect(below.content.map((c) => c.type)).not.toContain("image");
   });
 
   it("wakes a waiting comments call when a person writes", async () => {

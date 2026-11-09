@@ -1,13 +1,13 @@
 "use client";
 
 import * as stylex from "@stylexjs/stylex";
-import type { Rect, Section, Slice } from "@finite/protocol";
+import { clampInside, MIN_OBJECT, type Rect, type Section, type Slice } from "@finite/protocol";
 import { useEffect, useRef, useState } from "react";
 import { finite } from "@/client/finite";
 import { colors, fonts, radii, shadows, space } from "@/styles/tokens.stylex";
 import type { CanvasEditor, EditorState } from "./editor";
 import { CORNERS, HANDLES, resizeBox, type Handle, type Point } from "./gestures";
-import { clampInside, MIN_OBJECT, membersOf, movedWith, rounded } from "./objects";
+import { membersOf, movedWith, rounded } from "./objects";
 import type { Gesture, PressPlan, ToolHost } from "./tools/host";
 
 /** A second click on a title this soon after the first renames the section. */

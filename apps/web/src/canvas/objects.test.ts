@@ -1,14 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import {
-  boxBetween,
-  clampInside,
-  contains,
-  freeName,
-  gaps,
-  membersOf,
-  movedWith,
-  rounded,
-} from "./objects";
+import { boxBetween, contains, freeName, gaps, membersOf, movedWith, rounded } from "./objects";
 
 const frame = (id: string, x: number, y: number, width = 100, height = 80) => ({
   id,
@@ -64,28 +55,6 @@ describe("object boxes", () => {
   it("names the next free section", () => {
     expect(freeName([], "Section")).toBe("Section 1");
     expect(freeName(["Section 1", "Section 3", "Flow"], "Section")).toBe("Section 2");
-  });
-
-  it("keeps a slice inside its frame", () => {
-    const bounds = { width: 300, height: 200 };
-    expect(clampInside({ x: -20, y: 190, width: 100, height: 50 }, bounds)).toEqual({
-      x: 0,
-      y: 150,
-      width: 100,
-      height: 50,
-    });
-    expect(clampInside({ x: 250, y: 0, width: 100, height: 10 }, bounds)).toEqual({
-      x: 200,
-      y: 0,
-      width: 100,
-      height: 24,
-    });
-    expect(clampInside({ x: 0, y: 0, width: 900, height: 900 }, bounds)).toEqual({
-      x: 0,
-      y: 0,
-      width: 300,
-      height: 200,
-    });
   });
 
   it("draws a box from any corner and rounds to whole units", () => {

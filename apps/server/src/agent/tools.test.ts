@@ -182,4 +182,32 @@ describe("canvas objects", () => {
     await ops.screenshot("a");
     expect(capture).toHaveBeenLastCalledWith("http://frame/x", 300, 200, undefined);
   });
+
+  it("refuses a screenshot region below a fixed-height frame, and lets a hugging frame grow", async () => {
+    const canvasId = await canvasWithFrames("prototype");
+    await open.patchCanvas(
+      canvasId,
+      { op: "addFrames", frames: [{ ...frame("h", 800), hug: true }] },
+      person,
+    );
+    const ops = opsFor(agent);
+    capture.mockClear();
+    await expect(ops.screenshot("a", { x: 0, y: 400, width: 100, height: 50 })).rejects.toThrow(
+      /past the bottom of .* \(300×200\)/,
+    );
+    // Starting inside, but ending below, is refused too; ending on the edge is fine.
+    await expect(ops.screenshot("a", { x: 0, y: 180, width: 100, height: 50 })).rejects.toThrow(
+      /past the bottom/,
+    );
+    await ops.screenshot("a", { x: 0, y: 150, width: 100, height: 50 });
+    expect(capture).toHaveBeenCalledTimes(1);
+
+    await ops.screenshot("h", { x: 0, y: 400, width: 100, height: 50 });
+    expect(capture).toHaveBeenLastCalledWith("http://frame/x", 300, 200, {
+      x: 0,
+      y: 400,
+      width: 100,
+      height: 50,
+    });
+  });
 });

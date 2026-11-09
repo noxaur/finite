@@ -1,9 +1,6 @@
 import type { Rect, TextLabel } from "@finite/protocol";
 import { labelAnchor } from "./labelAnchor";
 
-/** The smallest a section or slice gets, in canvas units. */
-export const MIN_OBJECT = 24;
-
 /** Whether `inner` lies wholly inside `outer`. */
 export function contains(outer: Rect, inner: Rect): boolean {
   return (
@@ -43,18 +40,6 @@ export function membersOf(
 export function freeName(taken: Iterable<string>, base: string): string {
   const used = new Set(taken);
   for (let n = 1; ; n++) if (!used.has(`${base} ${n}`)) return `${base} ${n}`;
-}
-
-/** `box` kept inside `bounds` (both from 0,0), at least `MIN_OBJECT` where there's room. */
-export function clampInside(box: Rect, bounds: { width: number; height: number }): Rect {
-  const width = Math.min(Math.max(box.width, MIN_OBJECT), bounds.width);
-  const height = Math.min(Math.max(box.height, MIN_OBJECT), bounds.height);
-  return {
-    x: Math.min(Math.max(box.x, 0), bounds.width - width),
-    y: Math.min(Math.max(box.y, 0), bounds.height - height),
-    width,
-    height,
-  };
 }
 
 /** The box of a drag from `a` to `b`, whichever corner it started at. */

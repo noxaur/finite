@@ -56,14 +56,41 @@ describe("exportSlice", () => {
     expect(url).toBe(`data:image/png;base64,${Buffer.from([137, 80, 78, 71]).toString("base64")}`);
   });
 
-  it("cuts a slice to the frame's width when the frame was narrowed since", async () => {
+  it("shifts a slice inside a frame that was narrowed since, as the page draws it", async () => {
     const r = renderer();
-    const narrow = canvas({ frames: [{ ...frame, width: 120 }] });
+    const slices = [
+      { id: "s1", frameId: "f1", name: "Hero", x: 300, y: 30, width: 100, height: 100 },
+    ];
+    const narrow = canvas({ frames: [{ ...frame, width: 200 }], slices });
     await exportSlice(r.render, open(narrow), { canvasId: "c1", sliceId: "s1" });
-    expect(r.capture).toHaveBeenCalledWith("http://preview/f1", 120, 300, {
-      x: 20,
+    expect(r.capture).toHaveBeenCalledWith("http://preview/f1", 200, 300, {
+      x: 100,
       y: 30,
       width: 100,
+      height: 100,
+    });
+  });
+
+  it("keeps a slice inside a frame that was shortened, and leaves a hugging frame's height open", async () => {
+    const r = renderer();
+    const slices = [
+      { id: "s1", frameId: "f1", name: "Hero", x: 20, y: 250, width: 200, height: 100 },
+    ];
+    const short = canvas({ frames: [{ ...frame, height: 200 }], slices });
+    await exportSlice(r.render, open(short), { canvasId: "c1", sliceId: "s1" });
+    expect(r.capture).toHaveBeenLastCalledWith("http://preview/f1", 400, 200, {
+      x: 20,
+      y: 100,
+      width: 200,
+      height: 100,
+    });
+
+    const hug = canvas({ frames: [{ ...frame, height: 200, hug: true }], slices });
+    await exportSlice(r.render, open(hug), { canvasId: "c1", sliceId: "s1" });
+    expect(r.capture).toHaveBeenLastCalledWith("http://preview/f1", 400, 200, {
+      x: 20,
+      y: 250,
+      width: 200,
       height: 100,
     });
   });

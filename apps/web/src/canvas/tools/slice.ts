@@ -1,5 +1,5 @@
-import type { Slice } from "@finite/protocol";
-import { clampInside, freeName, rounded } from "../objects";
+import { clampInside, type Slice } from "@finite/protocol";
+import { freeName, rounded } from "../objects";
 import type { ToolDef, ToolHost } from "./host";
 
 /** The size a click makes a slice, in the frame's own pixels. */

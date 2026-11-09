@@ -210,11 +210,21 @@ export function canvasOps(ctx: CanvasContext, names: ToolNames = THREAD_TOOLS) {
     };
   }
 
-  /** `region` cut to the frame's width, or a refusal when it starts outside it. */
+  /**
+   * `region` cut to the frame's width, or a refusal when it starts past the right edge or ends
+   * below the bottom of a fixed-height frame. A hugging frame has no fixed height, so only its
+   * width is checked.
+   */
   function cropped(frame: Frame, region: Region): Region {
+    const size = `${frame.width}×${frame.height}`;
     if (region.x >= frame.width) {
       throw new Refused(
-        `region starts at x ${region.x}, past the right edge of ${frame.name} (${frame.width} wide). Use the frame's own pixels.`,
+        `region starts at x ${region.x}, past the right edge of ${frame.name} (${size}). Use the frame's own pixels.`,
+      );
+    }
+    if (!frame.hug && region.y + region.height > frame.height) {
+      throw new Refused(
+        `region ends at y ${region.y + region.height}, past the bottom of ${frame.name} (${size}). Use the frame's own pixels.`,
       );
     }
     return { ...region, width: Math.min(region.width, frame.width - region.x) };

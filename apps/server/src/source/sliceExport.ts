@@ -1,4 +1,4 @@
-import { type OpenDesign, type Previews, Refused } from "@finite/protocol";
+import { clampInside, type OpenDesign, type Previews, Refused } from "@finite/protocol";
 import type { Screenshots } from "../agent/screenshot.ts";
 
 /** What exporting needs: the design's running preview and Chrome. */
@@ -27,15 +27,19 @@ export async function exportSlice(
       "not-found",
     );
   }
-  // A frame that was narrowed since leaves less of the slice to show.
-  const x = Math.min(Math.max(0, slice.x), frame.width - 1);
-  const width = Math.min(slice.width, frame.width - x);
+  // A frame that was narrowed or shortened since leaves less of the slice to show, kept by the
+  // same rule the page draws it with. A hugging frame has no fixed height here, so only its
+  // width bounds the slice.
+  const box = clampInside(slice, {
+    width: frame.width,
+    height: frame.hug ? Infinity : frame.height,
+  });
   await render.previews.ensure(open.design);
   const png = await render.screenshots.capture(
     render.previews.frameUrl(open.design.id, frame.source),
     frame.width,
     frame.height,
-    { x, y: Math.max(0, slice.y), width, height: slice.height },
+    box,
   );
   return { url: `data:image/png;base64,${Buffer.from(png).toString("base64")}` };
 }
