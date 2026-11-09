@@ -384,8 +384,12 @@ export function CommandMenu({ onClose }: { onClose: () => void }) {
           chips={chips}
           onChange={(v) => {
             setValue(v);
-            // A path ending in / has arrived in a folder, like opening one.
-            setActive(step.kind === "clone-dest" || (picksFolder && v.endsWith("/")) ? -1 : null);
+            // A path ending in / or a bare ~ has arrived in a folder, like opening one.
+            setActive(
+              step.kind === "clone-dest" || (picksFolder && (v.endsWith("/") || v === "~"))
+                ? -1
+                : null,
+            );
           }}
           onBack={step.kind === "root" ? undefined : back}
           inputRef={input}
