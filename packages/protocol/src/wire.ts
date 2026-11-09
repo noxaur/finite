@@ -70,6 +70,35 @@ export const requests = {
     result: DesignEntry,
   },
   "design.connect": { params: { path: z.string().min(1) }, result: DesignEntry },
+  /** Clones a git repo into `path` (a leading `~` is the home folder), then connects the clone. */
+  "design.clone": {
+    params: { url: z.string().min(1), path: z.string().min(1) },
+    result: DesignEntry,
+  },
+  /** The folders inside `path` (a leading `~` is the home folder), for the path picker. */
+  "fs.list": {
+    params: { path: z.string().min(1) },
+    result: z.object({
+      /** The folder that was listed, as an absolute path. */
+      path: z.string(),
+      /** Folder names, without the path, sorted, hidden ones left out. */
+      dirs: z.array(z.string()),
+    }),
+  },
+  /** GitHub repos matching `query`, or the one repo a pasted URL or `owner/name` names. */
+  "repo.search": {
+    params: { query: z.string().min(1) },
+    result: z.array(
+      z.object({
+        /** `owner/name`. */
+        name: z.string(),
+        url: z.string(),
+        description: z.string().optional(),
+        language: z.string().optional(),
+        stars: z.number().optional(),
+      }),
+    ),
+  },
   "design.rename": { params: { id: designId, name: z.string().min(1) }, result: DesignEntry },
   "design.remove": { params: { id: designId }, result: z.null() },
   /** Starts a setup thread on the design, which writes `finite.json` and calls `finish_setup`. */

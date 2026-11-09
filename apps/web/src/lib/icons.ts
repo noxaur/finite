@@ -129,7 +129,16 @@ export type IconName =
   | "spark"
   | "trash"
   | "more"
-  | "pencil";
+  | "pencil"
+  | "folderPlus"
+  | "importTray"
+  | "code"
+  | "gitFork"
+  | "arrowLeft"
+  | "chevronsUp"
+  | "arrowDown"
+  | "enter"
+  | "command";
 
 const path = (d: string, extra = "") => `<path d="${d}"${extra}/>`;
 const rect = (x: number, y: number, w: number, h: number, r: number, extra = "") =>
@@ -365,6 +374,24 @@ const SHAPES: Record<IconName, string | ((s: number) => string)> = {
   pencil: path("M15.6 4.8l3.6 3.6L8.4 19.2H4.8v-3.6zM13.2 7.2l3.6 3.6"),
   trash: path(
     "M4.8 7.2h14.4M9.6 7.2V5.6a1.6 1.6 0 0 1 1.6-1.6h1.6a1.6 1.6 0 0 1 1.6 1.6v1.6M6.4 7.2l.8 11.2a1.6 1.6 0 0 0 1.6 1.6h6.4a1.6 1.6 0 0 0 1.6-1.6l.8-11.2",
+  ),
+  // The command menu's glyphs, from coolicons (https://coolicons.cool, MIT), line set.
+  folderPlus: path(
+    "M12 6H19C20.1 6 21 6.9 21 8V18C21 19.1 20.1 20 19 20H5C3.9 20 3 19.1 3 18V6C3 4.9 3.9 4 5 4H10L12 6M9 13H15M12 10V16",
+  ),
+  importTray: path(
+    "M5 7C3.9 7 3 7.9 3 9V19C3 20.1 3.9 21 5 21H19C20.1 21 21 20.1 21 19V9C21 7.9 20.1 7 19 7M9 12L12 15L15 12M12 15V3",
+  ),
+  code: path("M15 7L20 12L15 17M9 17L4 12L9 7"),
+  gitFork: path(
+    "M3 6C3 7.1 3.9 8 5 8C6.1 8 7 7.1 7 6C7 4.9 6.1 4 5 4C3.9 4 3 4.9 3 6ZM17 6C17 7.1 17.9 8 19 8C20.1 8 21 7.1 21 6C21 4.9 20.1 4 19 4C17.9 4 17 4.9 17 6ZM10 18C10 19.1 10.9 20 12 20C13.1 20 14 19.1 14 18C14 16.9 13.1 16 12 16C10.9 16 10 16.9 10 18ZM12 12V16M5 8V10C5 11.1 5.9 12 7 12H17C18.1 12 19 11.1 19 10V8",
+  ),
+  arrowLeft: path("M10 7L5 12L10 17M5 12H19"),
+  chevronsUp: path("M16 11L12 7L8 11M16 17L12 13L8 17"),
+  arrowDown: path("M7 14L12 19L17 14M12 19V5"),
+  enter: path("M7 11L3 15L7 19M3 15H19C20.1 15 21 14.1 21 13V7C21 5.9 20.1 5 19 5H11"),
+  command: path(
+    "M9 9V6C9 4.3 7.7 3 6 3C4.3 3 3 4.3 3 6C3 7.7 4.3 9 6 9H9M15 9V6C15 4.3 16.3 3 18 3C19.7 3 21 4.3 21 6C21 7.7 19.7 9 18 9H15M15 15V18C15 19.7 16.3 21 18 21C19.7 21 21 19.7 21 18C21 16.3 19.7 15 18 15H15M9 15V18C9 19.7 7.7 21 6 21C4.3 21 3 19.7 3 18C3 16.3 4.3 15 6 15H9M9 9H15V15H9Z",
   ),
 };
 
