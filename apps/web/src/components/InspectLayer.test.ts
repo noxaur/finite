@@ -49,12 +49,20 @@ const other = { loc: "src/App.tsx:9:4" };
 
 describe("the figures the inspect tool draws", () => {
   it("draws nothing with nothing measured", () => {
-    expect(figuresOf({ hover: null, pin: null, up: 0 })).toEqual([]);
+    expect(figuresOf({ hover: null, pin: null, up: 0, area: null })).toEqual([]);
+  });
+
+  it("draws the area alone when one is set", () => {
+    const rect = { x: 0, y: 0, width: 50, height: 50 };
+    const area = { frameId: "a", rect, elements: [], total: 0 };
+    expect(figuresOf({ hover: probe("a"), pin: probe("a"), up: 0, area })).toEqual([
+      { frameId: "a", figure: { area: rect, elements: [] } },
+    ]);
   });
 
   it("draws the hovered element alone", () => {
     const hover = probe("a");
-    expect(figuresOf({ hover, pin: null, up: 0 })).toEqual([
+    expect(figuresOf({ hover, pin: null, up: 0, area: null })).toEqual([
       { frameId: "a", figure: { target: hover.m } },
     ]);
   });
@@ -62,14 +70,14 @@ describe("the figures the inspect tool draws", () => {
   it("compares the pin with another element in its frame", () => {
     const pin = probe("a");
     const hover = probe("a", other);
-    expect(figuresOf({ hover, pin, up: 0 })).toEqual([
+    expect(figuresOf({ hover, pin, up: 0, area: null })).toEqual([
       { frameId: "a", figure: { target: pin.m, other: hover.m } },
     ]);
   });
 
   it("draws the pin once when the pointer is on it", () => {
     const pin = probe("a");
-    expect(figuresOf({ hover: probe("a"), pin, up: 0 })).toEqual([
+    expect(figuresOf({ hover: probe("a"), pin, up: 0, area: null })).toEqual([
       { frameId: "a", figure: { target: pin.m } },
     ]);
   });
@@ -77,13 +85,16 @@ describe("the figures the inspect tool draws", () => {
   it("tells apart two instances of one loc", () => {
     const pin = probe("a");
     const hover = probe("a", { index: 1 });
-    expect(figuresOf({ hover, pin, up: 0 })[0]?.figure).toHaveProperty("other", hover.m);
+    expect(figuresOf({ hover, pin, up: 0, area: null })[0]?.figure).toHaveProperty(
+      "other",
+      hover.m,
+    );
   });
 
   it("shows a hover in another frame on its own", () => {
     const pin = probe("a");
     const hover = probe("b", other);
-    expect(figuresOf({ hover, pin, up: 0 })).toEqual([
+    expect(figuresOf({ hover, pin, up: 0, area: null })).toEqual([
       { frameId: "a", figure: { target: pin.m } },
       { frameId: "b", figure: { target: hover.m } },
     ]);

@@ -170,6 +170,9 @@ export function connectFrame(iframe: HTMLIFrameElement, frameId: string): FrameB
     // Parsed, unlike the rest: the overlay is innerHTML, and a design's JS can answer on this port.
     measure: async (targets) =>
       bridgeRequests.measure.result.parse(await send("measure", { targets, props: MEASURE_PROPS })),
+    // No style props: the area's card shows only geometry, and a drag sends many of these.
+    measureArea: async (rect, max) =>
+      bridgeRequests.measureArea.result.parse(await send("measureArea", { rect, props: [], max })),
     drop: (x, y) => send("drop", { x, y }) as Promise<{ chain: DropNode[] }>,
     vector: (loc, index) => send("vector", { loc, index }) as Promise<VectorInfo | null>,
     preview(loc, styles) {

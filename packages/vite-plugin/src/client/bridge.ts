@@ -147,6 +147,7 @@ declare global {
   interface Window {
     /** Set only in a top-level page: how headless Chrome reaches the measuring code. */
     __finiteMeasure?: typeof measureElements;
+    __finiteMeasureArea?: typeof measureArea;
   }
 }
 
@@ -528,6 +529,147 @@ export function measureElements(
   });
 }
 
+/** Whether two rects share any area; touching edges don't count. */
+export function overlapsArea(a: Rect, b: Rect): boolean {
+  return (
+    Math.min(a.x + a.width, b.x + b.width) > Math.max(a.x, b.x) &&
+    Math.min(a.y + a.height, b.y + b.height) > Math.max(a.y, b.y)
+  );
+}
+
+const NOT_DRAWN = new Set([
+  "script",
+  "style",
+  "link",
+  "meta",
+  "title",
+  "base",
+  "noscript",
+  "template",
+]);
+
+/** `box` cut to what `clip` leaves of it; null means nothing clips it. */
+function clipped(box: Rect, clip: Rect | null): Rect {
+  if (!clip) return box;
+  const x = Math.max(box.x, clip.x);
+  const y = Math.max(box.y, clip.y);
+  return {
+    x,
+    y,
+    width: Math.min(box.x + box.width, clip.x + clip.width) - x,
+    height: Math.min(box.y + box.height, clip.y + clip.height) - y,
+  };
+}
+
+/** The clip `style`'s own overflow adds to `clip`: axis by axis, at the padding edge of `box`. */
+function ownClip(
+  element: Element,
+  box: Rect,
+  clip: Rect | null,
+  style: CSSStyleDeclaration,
+): Rect | null {
+  const x = style.overflowX !== "visible";
+  const y = style.overflowY !== "visible";
+  // Overflow doesn't apply to an inline box.
+  if ((!x && !y) || style.display === "inline") return clip;
+  // `box` is after any transform and the computed widths are before it.
+  const scaleX =
+    element instanceof HTMLElement && element.offsetWidth ? box.width / element.offsetWidth : 1;
+  const scaleY =
+    element instanceof HTMLElement && element.offsetHeight ? box.height / element.offsetHeight : 1;
+  const left = (parseFloat(style.borderLeftWidth) || 0) * scaleX;
+  const top = (parseFloat(style.borderTopWidth) || 0) * scaleY;
+  const right = (parseFloat(style.borderRightWidth) || 0) * scaleX;
+  const bottom = (parseFloat(style.borderBottomWidth) || 0) * scaleY;
+  const far = 1e7;
+  return clipped(
+    {
+      x: x ? box.x + left : -far,
+      y: y ? box.y + top : -far,
+      width: x ? box.width - left - right : 2 * far,
+      height: y ? box.height - top - bottom : 2 * far,
+    },
+    clip,
+  );
+}
+
+/** Whether `style` makes its element the containing block of the fixed children inside it. */
+function holdsFixed(style: CSSStyleDeclaration): boolean {
+  return (
+    style.transform !== "none" ||
+    style.perspective !== "none" ||
+    style.filter !== "none" ||
+    style.backdropFilter !== "none" ||
+    /paint|layout|strict|content/.test(style.contain) ||
+    /transform|perspective|filter/.test(style.willChange)
+  );
+}
+
+/**
+ * Every element under `<body>` showing inside `rect`, in document order: one an ancestor's overflow
+ * has cut out of the area isn't there to see. Reads layout, writes nothing.
+ */
+export function measureArea(
+  rect: Rect,
+  props: readonly string[],
+  max: number,
+): { elements: Measurement[]; total: number } {
+  const instancesByLoc = new Map<string, Element[]>();
+  for (const element of Array.from(document.querySelectorAll(`[${LOC}]`))) {
+    const loc = element.getAttribute(LOC) ?? "";
+    const list = instancesByLoc.get(loc);
+    if (list) list.push(element);
+    else instancesByLoc.set(loc, [element]);
+  }
+  const elements: Measurement[] = [];
+  let total = 0;
+  // `clip` cuts in-flow children; `positioned` and `fixed` are the clips at the containing blocks
+  // of absolute and fixed children, the only ones those answer to.
+  const visit = (
+    parent: Element,
+    clip: Rect | null,
+    positioned: Rect | null,
+    fixed: Rect | null,
+  ) => {
+    for (const element of Array.from(parent.children)) {
+      if (NOT_DRAWN.has(element.tagName.toLowerCase())) continue;
+      const style = getComputedStyle(element);
+      // `display: contents` makes no box, so it can't clip or contain anything.
+      if (style.display === "contents") {
+        visit(element, clip, positioned, fixed);
+        continue;
+      }
+      const box = rectOf(element);
+      const outer =
+        style.position === "fixed" ? fixed : style.position === "absolute" ? positioned : clip;
+      if (
+        box.width > 0 &&
+        box.height > 0 &&
+        overlapsArea(clipped(box, outer), rect) &&
+        style.visibility !== "hidden"
+      ) {
+        total++;
+        if (elements.length < max) {
+          const loc = element.getAttribute(LOC);
+          const matches = loc === null ? [element] : (instancesByLoc.get(loc) ?? [element]);
+          elements.push(measureOne(element, matches, props));
+        }
+      }
+      if (element instanceof SVGSVGElement) continue;
+      const inner = ownClip(element, box, outer, style);
+      const holds = holdsFixed(style);
+      visit(
+        element,
+        inner,
+        holds || style.position !== "static" ? inner : positioned,
+        holds ? inner : fixed,
+      );
+    }
+  };
+  if (document.body) visit(document.body, null, null, null);
+  return { elements, total };
+}
+
 const requests: Record<string, (params: Request) => unknown> = {
   hit({ x, y }) {
     const element = stamped(document.elementFromPoint(x as number, y as number));
@@ -600,6 +742,10 @@ const requests: Record<string, (params: Request) => unknown> = {
 
   measure({ targets, props }) {
     return measureElements(targets as MeasureTarget[], props as string[]);
+  },
+
+  measureArea({ rect, props, max }) {
+    return measureArea(rect as Rect, props as string[], max as number);
   },
 
   /** The stamped chain at a point, nearest first, with what placing a new element there needs. */
@@ -918,5 +1064,8 @@ function start(): void {
 if (typeof window !== "undefined") {
   if (window.parent !== window) start();
   // A top-level load is headless Chrome measuring for an agent; it has no parent to connect to.
-  else window.__finiteMeasure = measureElements;
+  else {
+    window.__finiteMeasure = measureElements;
+    window.__finiteMeasureArea = measureArea;
+  }
 }

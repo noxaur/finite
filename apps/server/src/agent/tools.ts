@@ -36,6 +36,8 @@ export const DEFAULT_SIZE = { width: 480, height: 320 };
 export const MIN_HUG = { width: 200, height: 120 };
 /** How far above its frame a label's top sits. */
 export const LABEL_OFFSET = 120;
+/** How many elements a `measure` region lists. */
+const REGION_MAX = 60;
 const NOTE_WIDTH = 480;
 /** Room a section built around frames leaves on every side. */
 const SECTION_PAD = 40;
@@ -228,6 +230,21 @@ export function canvasOps(ctx: CanvasContext, names: ToolNames = THREAD_TOOLS) {
       );
     }
     return { ...region, width: Math.min(region.width, frame.width - region.x) };
+  }
+
+  /** `region` cut to the frame, or refused when none of it is inside. A hug frame has no fixed bottom. */
+  function regionInFrame(frame: Frame, region: Region): Region {
+    const bottom = frame.hug ? Infinity : frame.height;
+    const x = Math.max(0, region.x);
+    const y = Math.max(0, region.y);
+    const right = Math.min(frame.width, region.x + region.width);
+    const lower = Math.min(bottom, region.y + region.height);
+    if (right <= x || lower <= y) {
+      throw new Refused(
+        `That region is outside ${frame.name}, which is ${frame.width}×${frame.height}. Pass a region in the frame's own CSS pixels, overlapping it.`,
+      );
+    }
+    return { x, y, width: right - x, height: lower - y };
   }
 
   /** Below everything on the canvas, at the left edge. */
@@ -496,13 +513,50 @@ export function canvasOps(ctx: CanvasContext, names: ToolNames = THREAD_TOOLS) {
       return ctx.screenshots.capture(url, frame.width, frame.height, crop);
     },
 
-    async measure({ frameId, select, index = 0, to, image = true }: CanvasToolInput<"measure">) {
+    async measure({
+      frameId,
+      select,
+      region,
+      index,
+      to,
+      image = true,
+    }: CanvasToolInput<"measure">) {
+      if ((select === undefined) === (region === undefined)) {
+        throw new Refused(
+          "Pass exactly one of select (a CSS selector, for one element) and region ({ x, y, width, height } in the frame's CSS pixels, for everything under it).",
+        );
+      }
+      if (region && (index !== undefined || to !== undefined)) {
+        throw new Refused(
+          "index and to only work with select. Remove them, or pass select instead of region.",
+        );
+      }
       const { frame } = await findFrame(frameId);
+      if (region) {
+        const inside = regionInFrame(frame, region);
+        await ctx.previews.ensure(design);
+        const url = ctx.previews.frameUrl(design.id, frame.source);
+        const { elements, total, png } = await ctx.screenshots.measureRegion(
+          url,
+          frame.width,
+          frame.height,
+          { region: inside, max: REGION_MAX, image },
+        );
+        const more = total - elements.length;
+        const note =
+          more > 0
+            ? `Listed the first ${elements.length} of ${total} elements; ${more} more aren't listed. Narrow the region to see them.`
+            : undefined;
+        return {
+          report: { region: inside, elements, total, ...(note ? { note } : {}) },
+          ...(png ? { png } : {}),
+        };
+      }
       await ctx.previews.ensure(design);
       const url = ctx.previews.frameUrl(design.id, frame.source);
       const got = await ctx.screenshots.measureElement(url, frame.width, frame.height, {
-        select,
-        index,
+        select: select!,
+        index: index ?? 0,
         ...(to === undefined ? {} : { to }),
         image,
       });
@@ -516,7 +570,7 @@ export function canvasOps(ctx: CanvasContext, names: ToolNames = THREAD_TOOLS) {
       }
       if ("count" in got) {
         throw new Refused(
-          `${JSON.stringify(select)} matches ${got.count} element${got.count === 1 ? "" : "s"} in ${frame.name}, so index ${index} is out of range. Pass index 0 to ${got.count - 1}.`,
+          `${JSON.stringify(select)} matches ${got.count} element${got.count === 1 ? "" : "s"} in ${frame.name}, so index ${index ?? 0} is out of range. Pass index 0 to ${got.count - 1}.`,
         );
       }
       const { element, to: other, distance, png } = got;
@@ -568,7 +622,7 @@ export function measureContent(result: {
 }
 
 export const MEASURE_DESCRIPTION =
-  "Measures one element of a frame, as a browser lays it out: size, padding, border, margin, radius, the real gaps between its children, and its computed type, layout and fill. Returns JSON and, unless image is false, a PNG crop with the same boxes and distances drawn on it. A gap is a real distance between neighbours, whatever made it; its `cause` says what to edit: `gap` is the parent's CSS gap, `margin` a child's margin, `free` neither (alignment or free space). select is a CSS selector, and [data-finite-loc=\"src/x.tsx:12:4\"] picks exactly one element. When several match, it measures the first; index picks another and the result's note says how many there are. to is a second selector: the result adds the distance between the two.";
+  "Measures one element of a frame, as a browser lays it out: size, padding, border, margin, radius, the real gaps between its children, and its computed type, layout and fill. Returns JSON and, unless image is false, a PNG crop with the same boxes and distances drawn on it. A gap is a real distance between neighbours, whatever made it; its `cause` says what to edit: `gap` is the parent's CSS gap, `margin` a child's margin, `free` neither (alignment or free space). select is a CSS selector, and [data-finite-loc=\"src/x.tsx:12:4\"] picks exactly one element. When several match, it measures the first; index picks another and the result's note says how many there are. to is a second selector: the result adds the distance between the two. Instead of select, pass region ({ x, y, width, height } in the frame's CSS pixels) to report everything under a rectangle: elements (each with its real padding, gaps and box), total, a note when the list is cut short, and a PNG with marks cut at the region's edges. An element only partly inside is still reported whole. Pass exactly one of select and region; index and to don't combine with region.";
 
 /** The `finite` MCP server one thread's query talks to. */
 export function canvasServer(ctx: ToolContext) {

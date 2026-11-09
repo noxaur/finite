@@ -83,7 +83,16 @@ export const canvasTools = {
   measure: {
     frameId: z.string(),
     /** CSS selector. `[data-finite-loc="src/x.tsx:12:4"]` picks exactly one element. */
-    select: z.string().min(1),
+    select: z.string().min(1).optional(),
+    /** A box in the frame's CSS pixels: reports everything under it, cut at its edges. Pass this or select. */
+    region: z
+      .object({
+        x: z.number(),
+        y: z.number(),
+        width: z.number().positive(),
+        height: z.number().positive(),
+      })
+      .optional(),
     /** Which match, default 0. */
     index: z.number().int().min(0).optional(),
     /** A second CSS selector: also report and draw the distance to its first match. */

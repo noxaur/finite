@@ -1,6 +1,7 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn, type ExecFileException } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 import { Refused } from "@finite/protocol";
 import { expandHome } from "./browse.ts";
 
@@ -39,30 +40,94 @@ type GitHubRepo = {
   stargazers_count: number;
 };
 
-/** Repos that match `query`: the one a URL names, else GitHub's public search (unauthenticated, rate limited). */
-export async function searchRepos(query: string): Promise<Repo[]> {
-  const named = parseRepo(query);
-  if (named && /[/:]/.test(query)) return [named];
-  const res = await fetch(
-    `https://api.github.com/search/repositories?per_page=8&q=${encodeURIComponent(query)}`,
-    { headers: { accept: "application/vnd.github+json", "user-agent": "finite" } },
-  ).catch(() => null);
-  if (!res?.ok) {
-    throw new Refused(
-      res?.status === 403
-        ? "GitHub's search limit is reached. Wait a minute, or paste the repo's URL."
-        : "Couldn't reach GitHub. Paste the repo's URL instead.",
-      "invalid",
-    );
-  }
-  const body = (await res.json()) as { items: GitHubRepo[] };
-  return body.items.map((r) => ({
+const SEARCH_LIMIT = "GitHub's search limit is reached. Wait a minute, or paste the repo's URL.";
+const SEARCH_UNREACHABLE = "Couldn't reach GitHub. Paste the repo's URL instead.";
+const GH_TIMEOUT_MS = 10_000;
+const GH_UNUSABLE_MS = 5 * 60_000;
+const SEARCH_CACHE_MS = 60_000;
+const SEARCH_CACHE_SIZE = 32;
+
+const execFileAsync = promisify(execFile);
+const recentSearches = new Map<string, { at: number; repos: Repo[] }>();
+let ghUnusableUntil = 0;
+
+function toRepo(r: GitHubRepo): Repo {
+  return {
     name: r.full_name,
     url: r.html_url,
     ...(r.description ? { description: r.description } : {}),
     ...(r.language ? { language: r.language } : {}),
     stars: r.stargazers_count,
-  }));
+  };
+}
+
+/** GitHub's search through the person's own `gh` login, or null when `gh` is missing or logged out. */
+async function searchWithGh(query: string): Promise<Repo[] | null> {
+  if (Date.now() < ghUnusableUntil) return null;
+  try {
+    const { stdout } = await execFileAsync(
+      "gh",
+      [
+        "api",
+        "--hostname",
+        "github.com",
+        "--method",
+        "GET",
+        "search/repositories",
+        // -f sends the query as raw text; -F would read a leading `@` as a file to upload.
+        "-f",
+        `q=${query}`,
+        "-F",
+        "per_page=8",
+      ],
+      {
+        env: { ...process.env, GH_PROMPT_DISABLED: "1" },
+        timeout: GH_TIMEOUT_MS,
+        killSignal: "SIGKILL",
+      },
+    );
+    return (JSON.parse(stdout) as { items: GitHubRepo[] }).items.map(toRepo);
+  } catch (error) {
+    const { code, stderr = "" } = error as ExecFileException & { stderr?: string };
+    // gh exits 4 when no account is logged in, and an expired token comes back as HTTP 401.
+    if (code === "ENOENT" || code === 4 || /HTTP 401/.test(stderr)) {
+      ghUnusableUntil = Date.now() + GH_UNUSABLE_MS;
+      return null;
+    }
+    throw new Refused(
+      /rate limit|HTTP 429/i.test(stderr) ? SEARCH_LIMIT : SEARCH_UNREACHABLE,
+      "invalid",
+    );
+  }
+}
+
+/**
+ * Repos that match `query`: the one a URL names, else GitHub's search, through `gh` when it's
+ * installed and logged in and unauthenticated (about 10 requests a minute) when it isn't.
+ */
+export async function searchRepos(query: string): Promise<Repo[]> {
+  const named = parseRepo(query);
+  if (named && /[/:]/.test(query)) return [named];
+  const recent = recentSearches.get(query);
+  if (recent && Date.now() - recent.at < SEARCH_CACHE_MS) return recent.repos;
+  let repos = await searchWithGh(query);
+  if (!repos) {
+    const res = await fetch(
+      `https://api.github.com/search/repositories?per_page=8&q=${encodeURIComponent(query)}`,
+      { headers: { accept: "application/vnd.github+json", "user-agent": "finite" } },
+    ).catch(() => null);
+    if (!res?.ok) {
+      throw new Refused(res?.status === 403 ? SEARCH_LIMIT : SEARCH_UNREACHABLE, "invalid");
+    }
+    const body = (await res.json()) as { items: GitHubRepo[] };
+    repos = body.items.map(toRepo);
+  }
+  recentSearches.delete(query);
+  if (recentSearches.size >= SEARCH_CACHE_SIZE) {
+    recentSearches.delete(recentSearches.keys().next().value!);
+  }
+  recentSearches.set(query, { at: Date.now(), repos });
+  return repos;
 }
 
 /**

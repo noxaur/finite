@@ -2,14 +2,16 @@ import {
   type Distance,
   distanceBetween,
   drawFigure,
+  type Figure,
   figureRootCss,
   MEASURE_PROPS,
+  MeasuredArea,
   Measurement,
   Refused,
   type Rect,
 } from "@finite/protocol";
 import { getChromePath } from "chrome-launcher";
-import puppeteer, { type Browser } from "puppeteer-core";
+import puppeteer, { type Browser, type Page } from "puppeteer-core";
 
 /** One element of a loaded frame. `loc` and `rev` are missing when nothing stamped it. */
 export type RenderedElement = {
@@ -32,6 +34,9 @@ export type Measured = {
   /** A crop around the elements with the overlay drawn on it, unless `image` was false. */
   png?: Uint8Array;
 };
+
+/** What's under a region of a frame, and a crop of it unless `image` was false. */
+export type MeasuredRegion = MeasuredArea & { png?: Uint8Array };
 
 /** Why nothing was measured: a selector matched nothing or isn't one, or `index` is past the matches. */
 export type MeasureMiss =
@@ -94,6 +99,16 @@ export type Screenshots = {
     query: MeasureQuery,
   ): Promise<Measured | MeasureMiss>;
   /**
+   * One fresh load of `url`: what overlaps `region` through the frame's bridge, at most `max`
+   * measured, and unless `image` is false a crop with the figure drawn on it.
+   */
+  measureRegion(
+    url: string,
+    width: number,
+    height: number,
+    query: { region: Region; max: number; image: boolean },
+  ): Promise<MeasuredRegion>;
+  /**
    * One fresh load of `url`, and for each selector what it matches (with no selector, every
    * stamped element), or `invalid` when it isn't a CSS selector.
    */
@@ -106,8 +121,30 @@ export type Screenshots = {
   close(): Promise<void>;
 };
 
+/** Draws `figure` on the page and captures the crop around `boxes`. */
+async function drawAndCapture(
+  page: Page,
+  figure: Figure,
+  boxes: readonly Rect[],
+  size: { width: number; height: number },
+): Promise<Uint8Array> {
+  const { crop, zoom, scale } = figureView(boxes, size);
+  // The page is thrown away after this, so the root can't reach anything a person sees.
+  await page.evaluate(
+    (css, markup) => {
+      const root = document.createElement("div");
+      root.style.cssText = `position:absolute;left:0;top:0;width:0;height:0;overflow:visible;pointer-events:none;z-index:2147483647;${css}`;
+      root.innerHTML = markup;
+      document.documentElement.append(root);
+    },
+    figureRootCss(zoom),
+    drawFigure(figure, zoom).html,
+  );
+  return page.screenshot({ type: "png", clip: { ...crop, scale }, captureBeyondViewport: true });
+}
+
 /** Screenshots in the system Chrome, one headless browser shared by every thread. */
-export function createScreenshots(): Screenshots {
+export function createScreenshots(args: string[] = []): Screenshots {
   let browser: Promise<Browser> | undefined;
 
   function launch(): Promise<Browser> {
@@ -118,7 +155,7 @@ export function createScreenshots(): Screenshots {
       } catch {
         throw new Refused("Screenshots need Google Chrome. Install it, then try again.");
       }
-      browser = puppeteer.launch({ executablePath, headless: true });
+      browser = puppeteer.launch({ executablePath, headless: true, args });
       browser.then(
         (b) => b.once("disconnected", () => (browser = undefined)),
         () => (browser = undefined),
@@ -241,31 +278,51 @@ export function createScreenshots(): Screenshots {
         };
         if (!query.image) return result;
 
-        const { crop, zoom, scale } = figureView(
+        const png = await drawAndCapture(
+          page,
+          to ? { target: element, other: to } : { target: element },
           to ? [element.box, to.box] : [element.box],
           raw.page,
         );
-        const html = drawFigure(
-          to ? { target: element, other: to } : { target: element },
-          zoom,
-        ).html;
-        // The page is thrown away after this, so the root can't reach anything a person sees.
-        await page.evaluate(
-          (css, markup) => {
-            const root = document.createElement("div");
-            root.style.cssText = `position:absolute;left:0;top:0;width:0;height:0;overflow:visible;pointer-events:none;z-index:2147483647;${css}`;
-            root.innerHTML = markup;
-            document.documentElement.append(root);
-          },
-          figureRootCss(zoom),
-          html,
-        );
-        const png = await page.screenshot({
-          type: "png",
-          clip: { ...crop, scale },
-          captureBeyondViewport: true,
-        });
         return { ...result, png };
+      } finally {
+        await page.close().catch(() => {});
+      }
+    },
+    async measureRegion(url, width, height, { region, max, image }) {
+      const page = await (await launch()).newPage();
+      try {
+        await page.setViewport({ width: Math.round(width), height: Math.round(height) });
+        await page.goto(url, { waitUntil: "networkidle0", timeout: 20_000 });
+        const raw = await page.evaluate(
+          (rect, limit) => {
+            const measure = (
+              window as unknown as {
+                __finiteMeasureArea?: (r: typeof rect, p: string[], m: number) => unknown;
+              }
+            ).__finiteMeasureArea;
+            if (!measure) return { bridge: false as const };
+            const doc = document.documentElement;
+            return {
+              bridge: true as const,
+              area: measure(rect, [], limit),
+              page: {
+                width: Math.max(doc.scrollWidth, doc.clientWidth),
+                height: Math.max(doc.scrollHeight, doc.clientHeight),
+              },
+            };
+          },
+          region,
+          max,
+        );
+        if (!raw.bridge) {
+          throw new Refused("This frame's page has no Finite bridge. Restart its preview.");
+        }
+        const area = MeasuredArea.parse(raw.area);
+        if (!image) return area;
+        const figure = { area: region, elements: area.elements };
+        const png = await drawAndCapture(page, figure, [region], raw.page);
+        return { ...area, png };
       } finally {
         await page.close().catch(() => {});
       }

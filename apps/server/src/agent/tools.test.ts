@@ -102,7 +102,10 @@ describe("canvasOps measure", () => {
     box: { x: 0, y: 0, width: 10, height: 10 },
   } as Measured["element"];
 
-  function ops(result: Awaited<ReturnType<Screenshots["measureElement"]>>) {
+  function ops(
+    result: Awaited<ReturnType<Screenshots["measureElement"]>>,
+    measureRegion: Screenshots["measureRegion"] = async () => ({ elements: [], total: 0 }),
+  ) {
     const open = {
       design: { id: "d1" },
       canvases: async () => [{ id: "c1", frames: [frame] } as unknown as Canvas],
@@ -112,7 +115,7 @@ describe("canvasOps measure", () => {
       actor: { kind: "agent", id: "a", name: "A" } as never,
       previews: { ensure: async () => {}, frameUrl: () => "http://frame" } as never,
       source: {} as never,
-      screenshots: { measureElement: async () => result } as never,
+      screenshots: { measureElement: async () => result, measureRegion } as never,
     });
   }
 
@@ -126,6 +129,38 @@ describe("canvasOps measure", () => {
       note: "2 elements match h1. Pass index for another.",
     });
     expect(measureContent(got).map((c) => c.type)).toEqual(["text", "image"]);
+  });
+
+  it("measures a region, clamped to the frame, with a truncation note", async () => {
+    let asked: unknown;
+    const got = await ops({ element }, async (_url, _w, _h, query) => {
+      asked = query;
+      return { elements: [element], total: 61, png: new Uint8Array([1]) };
+    }).measure({ frameId: "f1", region: { x: 280, y: -5, width: 40, height: 10 } });
+    expect(asked).toEqual({
+      region: { x: 280, y: 0, width: 20, height: 5 },
+      max: 60,
+      image: true,
+    });
+    expect(got.report).toMatchObject({
+      region: { x: 280, y: 0, width: 20, height: 5 },
+      total: 61,
+      note: "Listed the first 1 of 61 elements; 60 more aren't listed. Narrow the region to see them.",
+    });
+    expect(measureContent(got).map((c) => c.type)).toEqual(["text", "image"]);
+  });
+
+  it("refuses select with region, neither, and a region off the frame", async () => {
+    const region = { x: 0, y: 0, width: 10, height: 10 };
+    await expect(ops({ element }).measure({ frameId: "f1", select: "h1", region })).rejects.toThrow(
+      /exactly one of select/,
+    );
+    await expect(ops({ element }).measure({ frameId: "f1" })).rejects.toThrow(
+      /exactly one of select/,
+    );
+    await expect(
+      ops({ element }).measure({ frameId: "f1", region: { ...region, x: 900 } }),
+    ).rejects.toThrow(/300×200/);
   });
 
   it("refuses a missing match by naming read_canvas", async () => {
