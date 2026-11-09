@@ -192,7 +192,7 @@ type Printing = {
   at: t.JSXElement | undefined;
 };
 
-function printing(s: InsertStep, at?: t.JSXElement): Printing {
+export function printing(s: InsertStep, at?: t.JSXElement): Printing {
   const names = new Set<string>();
   walk(s.parsed.ast, (node) => {
     if (node.type === "Identifier" || node.type === "JSXIdentifier") names.add(node.name);
@@ -213,7 +213,7 @@ export function printRoot(
   return { text: print(s, node, indent, out), nodes: out.nodes };
 }
 
-function print(s: InsertStep, node: NewNode, indent: string, out: Printing): string {
+export function print(s: InsertStep, node: NewNode, indent: string, out: Printing): string {
   if (!NEW_TAG.test(node.tag)) throw new Refused(`${node.tag} isn't an element's name`, "invalid");
   const attrs: string[] = [];
   if (node.name !== undefined) attrs.push(`data-name=${attrText(node.name)}`);

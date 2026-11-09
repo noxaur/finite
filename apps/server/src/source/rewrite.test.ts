@@ -974,12 +974,4 @@ describe("insert", () => {
   it("refuses when the file changed or the element isn't what the edit says", () => {
     expect(refused(run(APP, [{ ...insert("end"), tag: "section" }])).code).toBe("stale");
   });
-
-  it("refuses wrap and unwrap until they're built", () => {
-    const edits = [
-      { kind: "wrap" as const, locs: [L(7)], wrapper: { tag: "div" } },
-      { kind: "unwrap" as const, loc: L(7), tag: "p" },
-    ];
-    for (const edit of edits) expect(refused(run(APP, [edit])).code).toBe("not-implemented");
-  });
 });

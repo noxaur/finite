@@ -4,6 +4,7 @@ import * as stylex from "@stylexjs/stylex";
 import { InspectLayer } from "@/components/InspectLayer";
 import { colors } from "@/styles/tokens.stylex";
 import type { CanvasEditor, EditorState } from "./editor";
+import { LayoutHandles } from "./LayoutHandles";
 import { toolOf } from "./tools/registry";
 import { VECTOR_OVERLAYS } from "./tools/VectorOverlay";
 
@@ -34,6 +35,7 @@ export function ToolOverlays({ editor, state }: { editor: CanvasEditor; state: E
           />
         ))}
       {Overlay && <Overlay host={editor} state={state} />}
+      {state.tool === "select" && <LayoutHandles host={editor} state={state} />}
       {state.tool === "inspect" && <InspectLayer editor={editor} inspect={state.inspect} />}
     </>
   );
