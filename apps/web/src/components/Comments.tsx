@@ -149,7 +149,8 @@ export function CommentLayer({
               label="Post"
               onCancel={() => editor.cancelCommentDraft()}
               onSubmit={async (text) => {
-                const { anchor, kind } = state.commentDraft!;
+                const draft = state.commentDraft!;
+                const { anchor, kind } = draft;
                 const failure = await request(() =>
                   finite.request("comment.add", {
                     ...ids,
@@ -158,7 +159,7 @@ export function CommentLayer({
                     ...(kind ? { kind } : {}),
                   }),
                 );
-                if (failure === undefined) editor.cancelCommentDraft();
+                if (failure === undefined) editor.cancelCommentDraft(draft);
                 return failure;
               }}
             />
@@ -250,7 +251,7 @@ function Composer({
     setSending(true);
     const failure = await onSubmit(text.trim());
     // Keep the text after a failure, so it can be sent again.
-    if (failure === undefined) setText("");
+    if (failure === undefined) setText((now) => (now === text ? "" : now));
     setFailed(failure);
     setSending(false);
   };

@@ -2,7 +2,16 @@ import type * as t from "@babel/types";
 import { type Inline, type Loc, type Mark, type OpenDesign, Refused } from "@finite/protocol";
 import { mustRead, rev } from "./files.ts";
 import { checkStyles, moduleClass, type InsertStep, type Printed, VOID } from "./insert.ts";
-import { attribute, attrText, type Element, parseTsx, tagName, walk } from "./jsx.ts";
+import {
+  attribute,
+  attrText,
+  type Element,
+  isChild,
+  parseTsx,
+  siblings,
+  tagName,
+  walk,
+} from "./jsx.ts";
 
 /** Something the runs hold but can't change, as the page shows it. */
 export type Keep = { id: number; kind: string; label: string; loc?: Loc | undefined };
@@ -118,7 +127,7 @@ const LABEL_MAX = 28;
 export async function readInline(
   open: OpenDesign,
   loc: Loc,
-): Promise<{ rev: string; content: Inline[]; keeps: Keep[] }> {
+): Promise<{ rev: string; identity: string; content: Inline[]; keeps: Keep[] }> {
   const m = /^(.*):(\d+:\d+)$/.exec(loc);
   if (!m) throw new Refused(`${loc} isn't a loc (file:line:col)`, "invalid");
   const file = m[1]!;
@@ -128,6 +137,7 @@ export async function readInline(
   const { content, sources } = read(element.node, code, file);
   return {
     rev: rev(code),
+    identity: identityOf(element, code),
     content,
     keeps: [...sources.values()].map(({ id, kind, label, loc: at }) => ({
       id,
@@ -136,6 +146,20 @@ export async function readInline(
       ...(at ? { loc: at } : {}),
     })),
   };
+}
+
+/** What sets an element apart from one that later sits at its line and column; not its children. */
+function identityOf(element: Element, code: string): string {
+  const opening = (el: t.JSXElement) =>
+    code.slice(el.openingElement.start!, el.openingElement.end!);
+  if (!isChild(element)) return opening(element.node);
+  const around = siblings(element.parent);
+  return JSON.stringify([
+    element.parent.type === "JSXElement" ? opening(element.parent) : "<>",
+    around.indexOf(element.node),
+    around.length,
+    opening(element.node),
+  ]);
 }
 
 function read(el: t.JSXElement, code: string, file: string): Read {

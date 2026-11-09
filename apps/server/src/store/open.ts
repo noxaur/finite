@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import {
   type Actor,
   Canvas,
@@ -13,7 +14,7 @@ import {
   ThreadMeta,
 } from "@finite/protocol";
 import type { z } from "zod";
-import { applyPatch, inversePatch, moveFramesTo, type Step } from "./canvas.ts";
+import { applyPatch, inversePatch, moveFramesTo, overwritten, type Step } from "./canvas.ts";
 import { readText, serial, toJson, writeAtomic } from "./files.ts";
 
 /** A removed canvas is kept this long, then deleted when the design opens. */
@@ -156,13 +157,17 @@ export async function openDesign(design: Design): Promise<OpenedDesign> {
   }
 
   /** Applies one patch; returns the canvas it named and the step that takes it back. */
-  async function apply({ canvasId, patch }: Step): Promise<{ canvas: Canvas; step: Step }> {
+  async function apply({ canvasId, patch, found }: Step): Promise<{ canvas: Canvas; step: Step }> {
     const canvas = canvasOf(canvasId);
     // Applying first refuses a patch that doesn't fit, before its inverse is worked out.
     if (patch.op !== "moveFramesTo") {
       const next = applyPatch(canvas, patch);
+      if (found !== undefined && !isDeepStrictEqual(overwritten(canvas, patch), found)) {
+        throw new Refused("it no longer has the value this step left", "stale");
+      }
       const step = inversePatch(canvas, patch);
-      return { canvas: await putCanvas(next), step };
+      const saved = await putCanvas(next);
+      return { canvas: saved, step: { ...step, found: overwritten(saved, step.patch) } };
     }
     const moved = moveFramesTo(canvas, canvasOf(patch.toCanvasId), patch.frameIds);
     const step = inversePatch(canvas, patch);
@@ -278,7 +283,7 @@ export async function openDesign(design: Design): Promise<OpenedDesign> {
         } catch (error) {
           if (!(error instanceof Refused)) throw error;
           throw new Refused(
-            `Can't ${redo ? "redo" : "undo"} that: ${error.message}. Someone else changed it since.`,
+            `Can't ${redo ? "redo" : "undo"} that: ${error.message}. Someone else changed it since. It was skipped; ${redo ? "redo" : "undo"} again to go further back.`,
             error.code,
           );
         }

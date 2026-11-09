@@ -2,6 +2,7 @@ import type { NewNode } from "@finite/protocol";
 import { fitStroke } from "../../design/vector/fit";
 import { snapAngle } from "../../design/vector/edit";
 import { reframe, type SubPath } from "../../design/vector/path";
+import { selectionStore } from "../selection";
 import type { Gesture, ToolDef, ToolHost } from "./host";
 import { findNode, penDraft, pencilStroke } from "./vectorState";
 
@@ -31,14 +32,17 @@ function vectorNode(name: string, d: string, viewBox: string): NewNode {
 async function place(host: ToolHost, paths: SubPath[], name: string) {
   const { box, d, viewBox } = reframe(paths);
   const placed = await host.draw({ box, node: vectorNode(name, d, viewBox) });
-  if (!placed) return;
+  if (!placed?.selected) return;
+  const landed = selectionStore.get();
   const layers = await host
     .bridge(placed.frameId)
     ?.layers()
     .catch(() => null);
   const svg = layers && findNode(layers, placed.loc, placed.index);
   const path = svg?.children.find((c) => c.tag === "path");
-  if (svg && path) host.select([host.selectHit(placed.frameId, path, path.index, [svg])]);
+  if (svg && path && selectionStore.get() === landed) {
+    host.select([host.selectHit(placed.frameId, path, path.index, [svg])]);
+  }
 }
 
 /** The canvas the pen's draft was started on. */
@@ -50,7 +54,8 @@ async function finish(host: ToolHost, closed: boolean, leave = true) {
   penDraft.set(null);
   if (!draft || draft.anchors.length < 2) return;
   await place(host, [{ anchors: draft.anchors, closed }], "Vector");
-  if (leave && host.state.tool === "pen") host.setTool("select");
+  // A new draft started while this one landed keeps the pen.
+  if (leave && host.state.tool === "pen" && !penDraft.get()) host.setTool("select");
 }
 
 /** Removes the anchor placed last. */

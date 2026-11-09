@@ -11,7 +11,7 @@ import puppeteer, { type Browser, type Frame, type Page } from "puppeteer-core";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vite-plus/test";
 import { createScreenshots } from "../agent/screenshot.ts";
 import { BRAND_BOARD, brandBoard } from "../store/brand.ts";
-import { prepareFixture } from "./fixtures.ts";
+import { prepareFixture, viewed } from "./fixtures.ts";
 import { createPreviews } from "./index.ts";
 
 const FIXTURES = [
@@ -58,7 +58,7 @@ async function get(url: string, accept = "text/html") {
 }
 
 beforeAll(async () => {
-  previews = createPreviews({ host: "127.0.0.1", graceMs: 100 });
+  previews = viewed(createPreviews({ host: "127.0.0.1", graceMs: 100 }));
   previews.on("rr-spa", (event) => events.push(event));
   await Promise.all(
     FIXTURES.map(async (name) => {

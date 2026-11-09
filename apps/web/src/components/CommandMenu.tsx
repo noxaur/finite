@@ -110,14 +110,25 @@ export function CommandMenu({ onClose }: { onClose: () => void }) {
     input.current?.focus();
   };
 
+  // Backing out abandons the work in flight: its answer must not navigate or set an error.
+  const run = useRef(0);
+  const cancel = () => {
+    run.current += 1;
+    setBusy(false);
+  };
+
   const finish = async (work: () => Promise<string>) => {
     if (busy) return;
+    const id = ++run.current;
     setBusy(true);
     setError(null);
     try {
-      router.push(await work());
+      const url = await work();
+      if (run.current !== id) return;
+      router.push(url);
       onClose();
     } catch (e) {
+      if (run.current !== id) return;
       setBusy(false);
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -314,7 +325,10 @@ export function CommandMenu({ onClose }: { onClose: () => void }) {
     target?.run();
   };
 
-  const back = () => (step.kind === "root" ? onClose() : go({ kind: "root" }));
+  const back = () => {
+    cancel();
+    return step.kind === "root" ? onClose() : go({ kind: "root" });
+  };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -374,7 +388,11 @@ export function CommandMenu({ onClose }: { onClose: () => void }) {
   return createPortal(
     <div
       role="presentation"
-      onPointerDown={(e) => e.target === e.currentTarget && onClose()}
+      onPointerDown={(e) => {
+        if (e.target !== e.currentTarget) return;
+        cancel();
+        onClose();
+      }}
       {...stylex.props(styles.scrim)}
     >
       <div role="dialog" aria-label="Command menu" {...stylex.props(styles.panel)}>

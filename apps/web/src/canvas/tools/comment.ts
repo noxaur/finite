@@ -47,7 +47,12 @@ async function placeComment(
   const draft = (d: { anchor: CommentAnchor; at: Point }) => ({
     commentDraft: kind ? { ...d, kind } : d,
   });
-  if (!frame) return host.update(draft({ anchor: { x: world.x, y: world.y }, at: world }));
+  if (!frame) {
+    return host.update({
+      ...draft({ anchor: { x: world.x, y: world.y }, at: world }),
+      openComment: null,
+    });
+  }
   const p = host.local(frame, world);
   const hit = await bridgeOf(frame.id)
     ?.hit(p.x, p.y)

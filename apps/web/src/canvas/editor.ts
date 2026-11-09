@@ -8,6 +8,7 @@ import type {
   Loc,
   Inline,
   Rect,
+  Remap,
   Rev,
   Section,
   SourceEdit,
@@ -16,7 +17,7 @@ import type {
 } from "@finite/protocol";
 import { useSyncExternalStore } from "react";
 import type { Camera } from "@/design/camera";
-import { hasText, normalize, sameContent } from "@/design/editing/inline";
+import { hasText, normalize, plainText, sameContent } from "@/design/editing/inline";
 import { bridgeOf, mountedBridges } from "./bridge";
 import { draw } from "./tools/draw";
 import { type InspectState, NO_INSPECT } from "./tools/inspect";
@@ -58,6 +59,8 @@ export type TextTarget =
       loc: Loc;
       tag: string;
       rev: Rev;
+      /** How the server tells this element from another that later sits at the same loc. */
+      identity: string;
       /** The stamped path to the element, outermost first, for the detach offer. */
       chain: readonly HitElement[];
     }
@@ -74,6 +77,8 @@ export type TextEdit = {
   /** SVG text: no format bar, no line breaks. */
   plain: boolean;
   target: TextTarget;
+  /** `content` is words a refused edit put back: keeping them writes them, untouched or not. */
+  unsaved?: true;
 };
 
 /** A section or slice the person picked, which the selection store (elements and frames) doesn't hold. */
@@ -162,6 +167,12 @@ const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
  * `source.edit` or `canvas.patch`. Selection lives in `selectionStore`, so the layers, the
  * inspector, the composer and the ✱ menu all read the same one.
  */
+/** Whether two reads of a text hold the same expressions at the same atoms. */
+function sameKeeps(a: TextEdit["keeps"], b: TextEdit["keeps"]) {
+  const names = (keeps: TextEdit["keeps"]) => keeps.map((k) => [k.id, k.kind, k.label]);
+  return JSON.stringify(names(a)) === JSON.stringify(names(b));
+}
+
 export class CanvasEditor implements ToolHost {
   readonly store: Store<EditorState> = createStore(initial);
   /** rev, tag and stamped ancestors of each selected element, by selection key. */
@@ -213,8 +224,11 @@ export class CanvasEditor implements ToolHost {
       return pan === "always" || (pan === "empty" && this.frameAt(this.worldOf(e)) === null);
     };
     this.offSelection = selectionStore.subscribe(() => {
-      if (this.state.selectedObject && selectionStore.get().length > 0) {
-        this.update({ selectedObject: null });
+      if (
+        (this.state.selectedObject || this.state.selectedText) &&
+        selectionStore.get().length > 0
+      ) {
+        this.update({ selectedObject: null, selectedText: null });
       }
       void this.refreshSelection();
     });
@@ -297,8 +311,7 @@ export class CanvasEditor implements ToolHost {
   setTool(id: string) {
     const tool = toolOf(id);
     if (!tool.enabled) return;
-    toolOf(this.state.tool).deactivate?.(this);
-    // A key held down repeats, and that same tool's press has to survive it.
+    // A key held down repeats, and that same tool's press and draft have to survive it.
     if (tool.id !== this.state.tool) {
       this.cancelPress();
       toolOf(this.state.tool).deactivate?.(this);
@@ -327,7 +340,8 @@ export class CanvasEditor implements ToolHost {
     this.update({ openComment: id, commentDraft: null });
   }
 
-  cancelCommentDraft() {
+  cancelCommentDraft(draft?: EditorState["commentDraft"]) {
+    if (draft && this.state.commentDraft !== draft) return;
     this.update({ commentDraft: null });
   }
 
@@ -579,6 +593,7 @@ export class CanvasEditor implements ToolHost {
       if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
       return;
     }
+    if (this.taken(e)) return;
     // A press that isn't on a section's or slice's own controls lets go of it.
     if (this.state.selectedObject) this.update({ selectedObject: null });
     // A press on the canvas takes the keys back from a field outside it, like the composer, so
@@ -617,6 +632,18 @@ export class CanvasEditor implements ToolHost {
     this.press(e, plan, tool, target, world);
   }
 
+  /**
+   * Whether a press is already running for another pointer: the canvas takes one at a time, or the
+   * first press's `end` would never run. The same pointer going down again means its release never
+   * reached the canvas, so that press is over.
+   */
+  private taken(e: PointerEvent) {
+    if (!this.current) return false;
+    if (this.current.pointerId !== e.pointerId) return true;
+    this.cancelPress();
+    return false;
+  }
+
   /** Takes the pointer and turns the press into `plan`: a drag past the slop, else a click. */
   press(
     e: PointerEvent,
@@ -625,6 +652,7 @@ export class CanvasEditor implements ToolHost {
     target: Element | null = e.target instanceof Element ? e.target : null,
     world: Point = this.worldOf(e),
   ) {
+    if (this.taken(e)) return;
     e.preventDefault();
     e.stopPropagation();
     this.viewport.setPointerCapture(e.pointerId);
@@ -655,7 +683,8 @@ export class CanvasEditor implements ToolHost {
       press.started = true;
       press.gesture = press.begin();
       void press.gesture.then((g) => {
-        if (g) this.update({ dragging: true, hover: null });
+        // Escape or a release may have come first while `begin` waited.
+        if (g && this.current === press) this.update({ dragging: true, hover: null });
       });
     }
     const world = this.worldOf(e);
@@ -693,9 +722,9 @@ export class CanvasEditor implements ToolHost {
     this.backToMove(press.tool);
   }
 
-  /** A tool that isn't sticky hands back to Move after one use. */
+  /** A tool that isn't sticky hands back to Move after one use, unless it's in use again already. */
   private backToMove(tool: ToolDef) {
-    if (!tool.sticky && this.state.tool === tool.id) this.setTool("select");
+    if (!tool.sticky && this.state.tool === tool.id && !this.current) this.setTool("select");
   }
 
   private cancelPress() {
@@ -861,23 +890,29 @@ export class CanvasEditor implements ToolHost {
   /** Takes back (or redoes) this person's last source edit or canvas patch, whichever came last. */
   async undo(which: "undo" | "redo") {
     const order = undoOrderFor(this.designId);
-    // Nothing recorded (the page reloaded): the server still has the source edits.
-    const step = (which === "undo" ? order.undo() : order.redo()) ?? { kind: "source" };
-    try {
-      if (step.kind === "source") {
-        await finite.request(which === "undo" ? "source.undo" : "source.redo", {
+    await order.inTurn(async () => {
+      const moved = which === "undo" ? order.undo() : order.redo();
+      // Nothing recorded (the page reloaded): the server still has the source edits.
+      const step = moved ?? { kind: "source" };
+      try {
+        if (step.kind === "source") {
+          await finite.request(which === "undo" ? "source.undo" : "source.redo", {
+            designId: this.designId,
+          });
+          return;
+        }
+        const canvas = await finite.request(which === "undo" ? "canvas.undo" : "canvas.redo", {
           designId: this.designId,
+          canvasId: step.canvasId,
         });
-        return;
+        if (canvas.id === this.canvas.id) this.setCanvas(canvas);
+      } catch (e) {
+        // A reply with a code means the server popped the step and refused it. Without one the
+        // request was lost, and the step may still be there.
+        if (moved && errorCode(e)) order.forget(which);
+        this.say(errorText(e));
       }
-      const canvas = await finite.request(which === "undo" ? "canvas.undo" : "canvas.redo", {
-        designId: this.designId,
-        canvasId: step.canvasId,
-      });
-      if (canvas.id === this.canvas.id) this.setCanvas(canvas);
-    } catch (e) {
-      this.say(errorText(e));
-    }
+    });
   }
 
   /** Ends a text edit: writes the runs when they changed; `null` puts the text back. */
@@ -891,19 +926,62 @@ export class CanvasEditor implements ToolHost {
       return;
     }
     bridgeOf(target.frameId)?.preview(target.loc, null);
-    if (content === null || sameContent(content, normalize(editing.content))) return;
-    await this.edit(
-      [
-        {
-          kind: "inline",
-          loc: target.loc,
-          tag: target.tag,
-          content,
-          revs: revsOf([{ loc: target.loc, rev: target.rev }]),
-        },
-      ],
-      target.chain,
-    );
+    if (content === null) return;
+    if (!editing.unsaved && sameContent(content, normalize(editing.content))) return;
+    const write = (rev: Rev, stale: () => Promise<void>) =>
+      this.edit(
+        [
+          {
+            kind: "inline",
+            loc: target.loc,
+            tag: target.tag,
+            content,
+            revs: revsOf([{ loc: target.loc, rev }]),
+          },
+        ],
+        target.chain,
+        stale,
+      );
+    const keep = (rev: Rev, why: string) => this.keepTyped(editing, target, content, rev, why);
+    await write(target.rev, async () => {
+      // A rev covers the whole file. If this text is still what the box opened on, the change was
+      // elsewhere in the file and the words can go in over the new rev.
+      const now = await this.readInline(target.loc).catch(() => null);
+      if (!now)
+        return keep(target.rev, "That text moved. Copy your words, press Esc, and open it again.");
+      if (now.identity !== target.identity) return this.notSaved(content);
+      // An atom is a place in `keeps`: under a new list the words would name other expressions,
+      // or drop one written since.
+      if (!sameKeeps(now.keeps, editing.keeps)) return this.notSaved(content);
+      const changed = "That text changed while you typed. Enter replaces it; Esc drops your words.";
+      if (!sameContent(normalize(now.content), normalize(editing.content))) {
+        return keep(now.rev, changed);
+      }
+      await write(now.rev, async () => keep(now.rev, changed));
+    });
+  }
+
+  /** Puts words a stale edit refused back in front of the person: in the box, unless it's taken. */
+  private keepTyped(
+    editing: TextEdit,
+    target: Extract<TextTarget, { kind: "element" }>,
+    content: Inline[],
+    rev: Rev,
+    why: string,
+  ) {
+    if (this.state.editingText) return this.notSaved(content);
+    this.update({
+      editingText: { ...editing, content, target: { ...target, rev }, unsaved: true },
+    });
+    this.say(why);
+  }
+
+  /** Shows words that have nowhere safe to go, since no box can write them. */
+  private notSaved(content: Inline[]) {
+    this.say(`Not saved, because the file changed: "${plainText(content)}"`, {
+      label: "Dismiss",
+      run: () => this.update({ notice: null }),
+    });
   }
 
   /**
@@ -962,18 +1040,26 @@ export class CanvasEditor implements ToolHost {
   /**
    * Sends source edits; keeps the selection on the elements through `remap`, or says why not.
    * `chain` is the stamped path to a new element's parent, outermost first, for the detach offer.
+   * `stale` takes over when the file changed since the edit's rev, instead of saying so.
    */
   async edit(
     edits: SourceEdit[],
     chain?: readonly HitElement[],
-  ): Promise<{ created: Record<string, Loc> } | false> {
+    stale?: () => Promise<void>,
+  ): Promise<{ created: Record<string, Loc>; remap: Remap } | false> {
     try {
-      const { remap, created } = await finite.request("source.edit", {
-        designId: this.designId,
-        canvasId: this.canvas.id,
-        edits,
+      const order = undoOrderFor(this.designId);
+      // The canvas it was asked on, even if the turn starts after a switch.
+      const canvasId = this.canvas.id;
+      const { remap, created } = await order.inTurn(async () => {
+        const reply = await finite.request("source.edit", {
+          designId: this.designId,
+          canvasId,
+          edits,
+        });
+        order.did({ kind: "source" });
+        return reply;
       });
-      undoOrderFor(this.designId).did({ kind: "source" });
       const before = selectionStore.get();
       const after = remapSelection(before, remap);
       after.forEach((item, i) => {
@@ -981,11 +1067,12 @@ export class CanvasEditor implements ToolHost {
         if (facts) this.facts.set(keyOf(item), facts);
       });
       selectionStore.set(after);
-      return { created };
+      return { created, remap };
     } catch (e) {
       for (const el of this.selectedElements())
         bridgeOf(el.item.frameId)?.preview(el.item.loc, null);
-      this.refused(e, edits, chain);
+      if (stale && errorCode(e) === "stale") await stale();
+      else this.refused(e, edits, chain);
       return false;
     }
   }
@@ -1009,13 +1096,19 @@ export class CanvasEditor implements ToolHost {
 
   async patch(patch: CanvasPatch) {
     try {
-      const canvas = await finite.request("canvas.patch", {
-        designId: this.designId,
-        canvasId: this.canvas.id,
-        patch,
+      const order = undoOrderFor(this.designId);
+      // The canvas it was asked on, even if the turn starts after a switch.
+      const canvasId = this.canvas.id;
+      const canvas = await order.inTurn(async () => {
+        const reply = await finite.request("canvas.patch", {
+          designId: this.designId,
+          canvasId,
+          patch,
+        });
+        order.did({ kind: "canvas", canvasId });
+        return reply;
       });
-      undoOrderFor(this.designId).did({ kind: "canvas", canvasId: this.canvas.id });
-      this.setCanvas(canvas);
+      if (canvas.id === this.canvas.id) this.setCanvas(canvas);
     } catch (e) {
       this.say(errorText(e));
     }

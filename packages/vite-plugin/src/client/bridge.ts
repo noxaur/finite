@@ -1038,6 +1038,8 @@ function start(): void {
     reportSize(true);
   });
 
+  window.addEventListener("pagehide", () => post({ type: "leaving" }));
+
   const observer = new ResizeObserver(scheduleSize);
   observer.observe(document.documentElement);
   if (document.body) observer.observe(document.body);

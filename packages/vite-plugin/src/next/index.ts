@@ -71,6 +71,8 @@ export function finiteNext(options: FiniteNextOptions) {
 
   /** The files the frame registry imports, starting with those of the last run. */
   const registered = new Set<string>();
+  /** Files just added to the registry that Next hasn't compiled yet; their requests all wait. */
+  const compiling = new Map<string, Promise<void>>();
   if (fs.existsSync(at(`${RUNTIME}/frames.ts`))) {
     const code = fs.readFileSync(at(`${RUNTIME}/frames.ts`), "utf8");
     for (const [, file] of code.matchAll(/^ {2}("[^"\n]+"): \(\) => import/gm)) {
@@ -341,8 +343,15 @@ export function finiteNext(options: FiniteNextOptions) {
         if (!registered.has(checked.file)) {
           registered.add(checked.file);
           writeRegistry();
-          await untilRegistered(`http://${req.headers.host}${req.url}`);
+          const file = checked.file;
+          compiling.set(
+            file,
+            untilRegistered(`http://${req.headers.host}${req.url}`).finally(() =>
+              compiling.delete(file),
+            ),
+          );
         }
+        await compiling.get(checked.file);
       }
       if (req.method === "GET" && !req.headers.rsc) {
         const bridge = `<script type="module" src="${basePath}${BRIDGE_URL}"></script>`;

@@ -137,6 +137,8 @@ export type ParentMessage = z.infer<typeof ParentMessage>;
 
 /** Iframe → parent. */
 export const FrameMessage = z.discriminatedUnion("type", [
+  /** The document is unloading; a request sent after this would go to nothing. */
+  z.object({ type: z.literal("leaving") }),
   z.object({
     type: z.literal("reply"),
     id: z.number().int(),
