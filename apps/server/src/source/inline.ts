@@ -90,6 +90,22 @@ const BLOCK = new Set([
   "ul",
 ]);
 
+/** The page's own structure: replacing what's inside one takes the page with it. */
+const DOCUMENT = new Set(["html", "head", "body"]);
+/** Components that render the route inside a layout, the same job `{children}` does. */
+const SLOT_TAGS = new Set(["Outlet"]);
+
+/** `{children}` or `{props.children}`: where a layout's page goes. */
+function isSlot(node: t.Node): boolean {
+  if (node.type === "Identifier") return node.name === "children";
+  return (
+    node.type === "MemberExpression" &&
+    !node.computed &&
+    node.property.type === "Identifier" &&
+    node.property.name === "children"
+  );
+}
+
 /** JSX's own whitespace: a non-breaking space is text. */
 const BLANK = /^[ \t\r\n]*$/;
 
@@ -123,6 +139,11 @@ export async function readInline(
 function read(el: t.JSXElement, code: string, file: string): Read {
   const name = tagName(el.openingElement.name);
   if (VOID.has(name)) throw new Refused(`<${name}> can't hold text`, "invalid");
+  if (DOCUMENT.has(name))
+    throw new Refused(
+      `<${name}> is the page's own structure, so it can't be edited as text. Select an element inside the page, or ask the agent to change this.`,
+      "invalid",
+    );
   if (attribute(el, "dangerouslySetInnerHTML") || attribute(el, "children"))
     throw new Refused(
       "This element's content comes from code. Ask the agent to change this.",
@@ -152,7 +173,11 @@ function read(el: t.JSXElement, code: string, file: string): Read {
         if (value !== undefined) pushText(value, marks);
         else if (child.expression.type === "JSXEmptyExpression")
           atom(add(child, "comment", "comment"), marks);
-        else atom(add(child, "expression", labelOf(code, child)), marks);
+        else
+          atom(
+            add(child, isSlot(child.expression) ? "slot" : "expression", labelOf(code, child)),
+            marks,
+          );
       } else if (child.type !== "JSXElement") {
         atom(add(child, "expression", labelOf(code, child)), marks);
       } else {
@@ -174,6 +199,8 @@ function read(el: t.JSXElement, code: string, file: string): Read {
             const id = add(child, "wrapper", `<${tag}>`, `${file}:${start.line}:${start.column}`);
             visit(child.children, [...marks, { m: "keep", id }]);
           }
+        } else if (SLOT_TAGS.has(tag)) {
+          atom(add(child, "slot", `<${tag}>`), marks);
         } else {
           const kind = /^[A-Z]/.test(tag) || tag.includes(".") ? "component" : "element";
           atom(add(child, kind, `<${tag}>`), marks);
@@ -251,6 +278,14 @@ export function setInline(s: Step, element: Element, content: Inline[]): Kept[] 
   const el = element.node;
   const { content: held, sources } = read(el, s.code, s.file);
   if (JSON.stringify(content) === JSON.stringify(held)) return [];
+  const keptIds = new Set(content.flatMap((item) => (item.t === "atom" ? [item.id] : [])));
+  for (const source of sources.values()) {
+    if (source.kind === "slot" && !keptIds.has(source.id))
+      throw new Refused(
+        `This edit would remove ${source.label}, where the page's content goes. Keep it in the text, or ask the agent to change this.`,
+        "unsupported-style",
+      );
+  }
   const opening = el.openingElement;
   const close = el.closingElement;
   const inner = close ? s.code.slice(opening.end!, close.start!) : "";

@@ -6,16 +6,20 @@ import { select } from "./move";
 
 const inspection = { current: {} as Record<string, string> };
 const previews: Array<Record<string, string | null> | null> = [];
-const bridge = {
-  hit: async () => ({
+const pressed = {
+  current: {
     loc: "a.tsx:1:0",
     rev: "r1",
     tag: "div",
-    rect,
+    rect: { x: 0, y: 0, width: 1, height: 1 },
     index: 0,
     count: 1,
-    path: [],
-  }),
+    path: [] as { loc: string; rev: string; tag: string }[],
+  },
+};
+const bridge = {
+  hit: async () => pressed.current,
+  rects: async (locs: string[]) => Object.fromEntries(locs.map((l) => [l, [rect]])),
   inspect: async () => ({
     tag: "div",
     rev: "r1",
@@ -35,12 +39,21 @@ async function drag(computed: Record<string, string>, by: { x: number; y: number
   const frame = { id: "f" } as Frame;
   const item = { frameId: "f", loc: "a.tsx:1:0", index: 0 };
   const sent: SourceEdit[][] = [];
+  const facts = new Map([[keyOf(item), { rev: "r1", tag: "div", path: [] as unknown[] }]]);
   const host = {
-    facts: new Map([[keyOf(item), { rev: "r1", tag: "div", path: [] }]]),
-    state: { rects: { [keyOf(item)]: measured.current } },
+    facts,
+    state: {
+      get rects() {
+        return Object.fromEntries([...facts.keys()].map((k) => [k, measured.current]));
+      },
+    },
     local: (_: Frame, p: { x: number; y: number }) => p,
     update: () => {},
-    selectHit: () => item,
+    selectHit: (_: string, el: { loc: string; tag: string }, index: number) => {
+      const picked = { frameId: "f", loc: el.loc, index };
+      if (!facts.has(keyOf(picked))) facts.set(keyOf(picked), { rev: "r1", tag: el.tag, path: [] });
+      return picked;
+    },
     frameItem: () => ({ frameId: "f" }),
     refreshSelection: async () => {},
     edit: async (edits: SourceEdit[]) => {
@@ -65,13 +78,14 @@ async function drag(computed: Record<string, string>, by: { x: number; y: number
   await gesture.end(true);
   const [edit] = sent[0]!;
   if (edit?.kind !== "style") throw new Error("expected a style edit");
-  return edit.styles;
+  return { ...edit.styles, locs: edit.locs };
 }
 
 afterEach(() => {
   selectionStore.set([]);
   previews.length = 0;
   measured.current = rect;
+  pressed.current = { ...pressed.current, loc: "a.tsx:1:0", tag: "div", path: [] };
 });
 
 describe("moving a positioned element", () => {
@@ -159,5 +173,29 @@ describe("moving a positioned element", () => {
       { x: 20, y: 0 },
     );
     expect(styles).toMatchObject({ left: "20px", top: "0px" });
+  });
+});
+
+describe("dragging a drawn vector", () => {
+  const svg = { loc: "a.tsx:2:0", rev: "r1", tag: "svg" };
+  const body = { loc: "a.tsx:1:0", rev: "r1", tag: "body" };
+
+  it("moves the <svg> when the press lands on the <path> inside it", async () => {
+    pressed.current = { ...pressed.current, loc: "a.tsx:3:0", tag: "path", path: [svg, body] };
+    const styles = await drag(
+      { position: "absolute", left: "20px", top: "20px", zoom: "1" },
+      { x: 10, y: 10 },
+    );
+    expect(styles).toMatchObject({ left: "30px", top: "30px", locs: ["a.tsx:2:0"] });
+  });
+
+  it("moves the <svg> when the <path> was selected by an earlier click", async () => {
+    pressed.current = { ...pressed.current, loc: "a.tsx:3:0", tag: "path", path: [svg, body] };
+    selectionStore.set([{ frameId: "f", loc: "a.tsx:3:0", index: 0 }]);
+    const styles = await drag(
+      { position: "absolute", left: "20px", top: "20px", zoom: "1" },
+      { x: 10, y: 10 },
+    );
+    expect(styles).toMatchObject({ locs: ["a.tsx:2:0"] });
   });
 });

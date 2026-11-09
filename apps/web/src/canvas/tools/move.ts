@@ -239,18 +239,27 @@ async function beginResize(
   const bridge = bridgeOf(frame.id);
   if (!facts || !rect || !bridge) return null;
   const el = { loc: item.loc, rev: facts.rev, tag: facts.tag };
+  const seen = await bridge.inspect(item.loc, item.index ?? 0).catch(() => null);
+  const at =
+    seen && movesAbsolutely(seen.computed.position)
+      ? {
+          left: parseFloat(seen.computed.left ?? "") || 0,
+          top: parseFloat(seen.computed.top ?? "") || 0,
+          zoom: frameScaleOf(seen.computed),
+        }
+      : undefined;
   let d = { x: 0, y: 0 };
   return {
     move: (screen) => {
       d = { x: (screen.x - from.x) / zoom(), y: (screen.y - from.y) / zoom() };
-      bridge.preview(item.loc!, resizeStyles(rect, handle, d));
+      bridge.preview(item.loc!, resizeStyles(rect, handle, d, at));
       void bridge.rects([item.loc!]).then((r) => {
         const now = r[item.loc!]?.[item.index ?? 0];
         if (now) host.update({ rects: { ...host.state.rects, [key]: now } });
       });
     },
     end: async (commit) => {
-      const edit = commit ? resizeEdit(el, rect, handle, d) : null;
+      const edit = commit ? resizeEdit(el, rect, handle, d, at) : null;
       if (edit) await host.edit([edit]);
       else bridge.preview(item.loc!, null);
       void host.refreshSelection();
@@ -283,8 +292,29 @@ async function beginDragInFrame(
     selectionStore.set([item]);
   }
   const bridge = bridgeOf(frame.id);
+  if (!bridge) return null;
+  // A shape inside an <svg> moves with it: the press stays on the path only for a click.
+  const at = chain.findIndex((c) => c.loc === item!.loc);
+  const svg = at < 0 ? undefined : chain.slice(0, at).findLast((c) => c.tag === "svg");
+  if (svg) {
+    const within = chain.slice(0, chain.indexOf(svg)).reverse();
+    const local = host.local(frame, from);
+    const rects = await bridge.rects([svg.loc]).catch(() => ({}) as Record<string, Rect[]>);
+    const index = Math.max(
+      rects[svg.loc]?.findIndex(
+        (r) =>
+          local.x >= r.x && local.x < r.x + r.width && local.y >= r.y && local.y < r.y + r.height,
+      ) ?? 0,
+      0,
+    );
+    item = host.selectHit(frame.id, svg, index, within);
+    selectionStore.set([item]);
+    // The drag starts from this box: the selection's own measure would land too late.
+    const box = rects[svg.loc]?.[index];
+    if (box) host.update({ rects: { ...host.state.rects, [keyOf(item)]: box } });
+  }
   const facts = host.facts.get(keyOf(item));
-  if (!bridge || !facts || item.loc === undefined) return null;
+  if (!facts || item.loc === undefined) return null;
   const loc = item.loc;
   const inspection = await bridge.inspect(loc, item.index ?? 0).catch(() => null);
   if (inspection && movesAbsolutely(inspection.computed.position)) {

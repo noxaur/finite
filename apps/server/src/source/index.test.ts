@@ -1301,6 +1301,18 @@ export function Card() {
     );
   });
 
+  it("detaches a production route file without an importer", async () => {
+    await put("src/routes/Home.tsx", CARD);
+    const source = createSourceEditor();
+    const { file } = await source.detach(
+      open(design()),
+      { canvasId: "c1", file: "src/routes/Home.tsx" },
+      ana,
+    );
+    expect(file).toBe(".finite/boards/c1/Home.tsx");
+    expect(await get("src/routes/Home.tsx")).toBe(CARD);
+  });
+
   it("refuses to detach a file the importer doesn't import", async () => {
     await put("src/components/Card.tsx", CARD);
     await put(".finite/boards/c1/Home.tsx", `export default () => null;\n`);

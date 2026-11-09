@@ -142,6 +142,12 @@ const PROPS: Record<string, { toClass: ToClass; sample: string }> = {
     nowrap: "flex-nowrap",
     "wrap-reverse": "flex-wrap-reverse",
   }),
+  flex: {
+    // Not a class anyone writes, so `flex: null` takes off a `flex-1` the way it takes off any other.
+    sample: "0 0 1px",
+    toClass: (value) =>
+      /^1\s+1\s+0%?$/.test(value.trim()) ? "flex-1" : `flex-${arbitrary(value)}`,
+  },
   "flex-grow": keywords({ "0": "grow-0", "1": "grow" }, "grow"),
   "flex-shrink": keywords({ "0": "shrink-0", "1": "shrink" }, "shrink"),
   "justify-content": keywords({

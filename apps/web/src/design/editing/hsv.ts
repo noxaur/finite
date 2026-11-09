@@ -82,6 +82,12 @@ export function parseHex(text: string): { hex: string; alpha: number | null } | 
 }
 
 /** Whether `text` is typed as a hex, `#` first, so it's read as one or not at all. */
+/** A bare hex as a person types it, with its `#`; anything else as it was. */
+export function withHash(text: string): string {
+  const value = text.trim();
+  return /^[0-9a-f]+$/i.test(value) && [3, 4, 6, 8].includes(value.length) ? `#${value}` : text;
+}
+
 export const isHexLike = (text: string): boolean => /^\s*#/.test(text);
 
 /**

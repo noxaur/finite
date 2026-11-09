@@ -124,6 +124,35 @@ describe("reading an element's children", () => {
   });
 });
 
+describe("the page's own structure", () => {
+  it.each(["html", "head", "body"])("refuses to read <%s> as text", async (tag) => {
+    await expect(read(app(`<${tag}>{children}</${tag}>`))).rejects.toMatchObject({
+      code: "invalid",
+      message: expect.stringContaining(`<${tag}>`),
+    });
+  });
+
+  it.each(["html", "body"])("refuses an inline edit of <%s>", (tag) => {
+    expect(() => edit(app(`<${tag}><main>x</main></${tag}>`), [text("Wiped")])).toThrow(
+      new RegExp(`refused: .*<${tag}>`),
+    );
+  });
+
+  it("reads {children} and <Outlet /> as layout slots, not editable text", async () => {
+    expect((await read(app(`<div>{children}</div>`))).keeps[0]?.kind).toBe("slot");
+    expect((await read(app(`<div>{props.children}</div>`))).keeps[0]?.kind).toBe("slot");
+    expect((await read(app(`<div><Outlet /></div>`))).keeps[0]?.kind).toBe("slot");
+    expect((await read(app(`<p>{name}</p>`))).keeps[0]?.kind).toBe("expression");
+  });
+
+  it("refuses an edit that would drop a layout slot, and keeps one that stays", () => {
+    const code = app(`<div>{children}</div>`);
+    expect(() => edit(code, [text("Bold word here")])).toThrow(/refused: .*\{children\}/);
+    const kept = edit(code, [text("Above "), { t: "atom", id: 0 }]);
+    expect(kept.code).toContain("<div>Above {children}</div>");
+  });
+});
+
 describe("writing an element's children", () => {
   it("keeps every expression and component verbatim around changed text", async () => {
     const code = app(

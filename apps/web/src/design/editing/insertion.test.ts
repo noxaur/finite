@@ -89,6 +89,13 @@ describe("planInsert", () => {
     });
   });
 
+  it("never puts an element in <html> or <head>, even as the frame's own file", () => {
+    const page = [node(`${OWN}:3:2`, { tag: "html" })];
+    expect(planInsert(page, OWN, box, opts)).toHaveProperty("refuse");
+    const head = [node(`${OWN}:4:2`, { tag: "head" }), node(`${OWN}:3:2`, { tag: "html" })];
+    expect(planInsert(head, OWN, box, { ...opts, deep: true })).toHaveProperty("refuse");
+  });
+
   it("skips what can't hold children", () => {
     const chain = [node(`${OWN}:5:4`, { tag: "img" }), node(`${OWN}:4:2`)];
     expect(planInsert(chain, OWN, box, opts)).toMatchObject({ anchor: { loc: `${OWN}:4:2` } });

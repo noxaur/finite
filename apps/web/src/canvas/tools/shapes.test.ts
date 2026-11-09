@@ -25,6 +25,17 @@ describe("dragging out a line", () => {
     });
   });
 
+  it("rounds the box and the ends from the same numbers, so an end can't leave the box", () => {
+    const line = dragLine({ x: 0.4, y: 0.4 }, { x: 81.6, y: 44.2 }, false, false);
+    expect(line.b.x).toBeLessThanOrEqual(line.box.width);
+    expect(line.b.y).toBeLessThanOrEqual(line.box.height);
+    expect(line.a.x).toBeGreaterThanOrEqual(0);
+    expect(line.box.width).toBe(line.b.x - line.a.x);
+    const back = dragLine({ x: 81.6, y: 44.2 }, { x: 0.4, y: 0.4 }, false, false);
+    expect(back.a.x).toBe(back.box.width);
+    expect(back.b.x).toBe(0);
+  });
+
   it("snaps to 45° steps with Shift", () => {
     const flat = dragLine(from, { x: 60, y: 12 }, true, false);
     expect(flat.a).toEqual({ x: 0, y: 0 });

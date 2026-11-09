@@ -652,6 +652,14 @@ function sizing(element: Element): Record<string, string> {
   if (!(element instanceof HTMLElement)) return {};
   const now = rectOf(element);
   const before = element.getAttribute("style");
+  const restore = () => {
+    if (before === null) element.removeAttribute("style");
+    else element.setAttribute("style", before);
+  };
+  // With no box, the computed width and height are what the element declares, not its layout.
+  element.style.setProperty("display", "none", "important");
+  const { width: ownWidth, height: ownHeight } = getComputedStyle(element);
+  restore();
   const measure = (value: string) => {
     element.style.setProperty("width", value, "important");
     element.style.setProperty("height", value, "important");
@@ -659,14 +667,21 @@ function sizing(element: Element): Record<string, string> {
   };
   const hug = measure("fit-content");
   const auto = measure("auto");
-  if (before === null) element.removeAttribute("style");
-  else element.setAttribute("style", before);
-  const read = (size: number, fit: number, free: number) =>
-    Math.abs(size - fit) < 0.5 ? "hug" : Math.abs(size - free) < 0.5 ? "auto" : "fixed";
+  restore();
   return {
-    sizedWidth: read(now.width, hug.width, auto.width),
-    sizedHeight: read(now.height, hug.height, auto.height),
+    sizedWidth: readSize(now.width, hug.width, auto.width, ownWidth),
+    sizedHeight: readSize(now.height, hug.height, auto.height, ownHeight),
   };
+}
+
+/**
+ * Which of the bridge's three ways an axis is sized: a pixel size the element declares is fixed,
+ * however its layout happens to match it; otherwise `hug` when it measures as its content, `auto`
+ * when it measures as without a size of its own, else `fixed`.
+ */
+export function readSize(size: number, fit: number, free: number, declared: string): string {
+  if (/^-?[\d.]+px$/.test(declared)) return "fixed";
+  return Math.abs(size - fit) < 0.5 ? "hug" : Math.abs(size - free) < 0.5 ? "auto" : "fixed";
 }
 
 function dropChild(element: Element): DropChild {

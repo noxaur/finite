@@ -174,3 +174,79 @@ describe("the inspector's style edits", () => {
     editor.dispose();
   });
 });
+
+describe("a refused edit on a production frame in a prototype", () => {
+  const FILE = "src/routes/Home.tsx";
+  const proto = {
+    ...canvas,
+    kind: "prototype",
+    frames: [{ id: "f1", source: { kind: "route", path: "/" } }],
+  } as unknown as Canvas;
+  const edits = [
+    { kind: "insert", loc: `${FILE}:3:2`, tag: "main", place: "end", node: {}, revs: {} },
+  ] as never;
+  const refusal = Object.assign(new Error(`${FILE} is production code.`), {
+    code: "outside-prototype",
+  });
+  const request = vi.mocked(finite.request);
+
+  function prototypeEditor() {
+    const camera = {
+      view: { zoom: 1 },
+      visibleWorld: () => ({ x: 0, y: 0, width: 800, height: 600 }),
+    } as unknown as Camera;
+    const viewport = new EventTarget() as EventTarget & Record<string, unknown>;
+    Object.assign(viewport, { contains: () => true });
+    const editor = new CanvasEditor("d1", proto, "prototype", viewport as never, camera);
+    editor.routeFile = () => FILE;
+    return editor;
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal("window", new EventTarget());
+    vi.stubGlobal("document", { activeElement: null });
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    request.mockReset();
+    request.mockRejectedValueOnce(refusal);
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("offers to copy the frame's file, and keeps the offer until it's used", async () => {
+    const editor = prototypeEditor();
+    await editor.edit(edits);
+    expect(editor.state.notice?.action?.label).toBe("Copy Home.tsx into this prototype");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(editor.state.notice?.action).toBeDefined();
+    editor.dispose();
+  });
+
+  it("copies the file and points the frame at the copy", async () => {
+    const editor = prototypeEditor();
+    await editor.edit(edits);
+    request.mockImplementation(async (type: string) =>
+      type === "source.detach"
+        ? ({ file: ".finite/boards/c1/Home.tsx" } as never)
+        : (proto as never),
+    );
+    await editor.state.notice!.action!.run();
+    expect(request).toHaveBeenCalledWith("source.detach", {
+      designId: "d1",
+      canvasId: "c1",
+      file: FILE,
+    });
+    expect(request).toHaveBeenCalledWith("canvas.patch", {
+      designId: "d1",
+      canvasId: "c1",
+      patch: {
+        op: "setFrameSources",
+        frames: [{ id: "f1", source: { kind: "file", file: ".finite/boards/c1/Home.tsx" } }],
+      },
+    });
+    expect(editor.state.notice).toBeNull();
+    editor.dispose();
+  });
+});

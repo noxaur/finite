@@ -73,6 +73,19 @@ const cases: [string, string, string][] = [
   ["overflow-y", "auto", "overflow-y-auto"],
 ];
 
+describe("the flex shorthand", () => {
+  it.each([4, 3] as const)("writes Fill as flex-1 on v%i and takes it off with null", (version) => {
+    expect(editClasses("p-2", { flex: "1 1 0" }, {}, version)).toBe("p-2 flex-1");
+    expect(editClasses("p-2", { flex: "1 1 0%" }, {}, version)).toBe("p-2 flex-1");
+    expect(editClasses("p-2", { flex: "2 2 10px" }, {}, version)).toBe("p-2 flex-[2_2_10px]");
+    expect(editClasses("flex flex-1 p-2", { flex: null }, {}, version)).toBe("flex p-2");
+  });
+
+  it("replaces a size class's shrink when Fill goes on, and back", () => {
+    expect(editClasses("w-40 shrink-0", { flex: "1 1 0", width: null }, {})).toBe("flex-1");
+  });
+});
+
 describe("editClasses", () => {
   it.each(cases)("%s: %s → %s", (prop, value, cls) => {
     expect(editClasses("", { [prop]: value }, theme)).toBe(cls);

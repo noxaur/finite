@@ -1,8 +1,9 @@
 import type { Frame, Hit, HitElement, Inline, Rect } from "@finite/protocol";
-import { hasText, isPlain, plainText } from "../../design/editing/inline";
+import { isPlain, plainText } from "../../design/editing/inline";
 import type { TextTarget } from "../editor";
 import { chainOf, fileOf } from "../gestures";
 import { keyOf, selectionStore } from "../selection";
+import { planIn } from "./draw";
 import type { Down, ToolDef, ToolHost } from "./host";
 import { boxGesture } from "./shapes";
 
@@ -95,7 +96,7 @@ export async function editText(
     return false;
   }
   if (
-    !hasText(value.content) &&
+    !value.content.some((item) => item.t === "text" && item.text.trim() !== "") &&
     !value.keeps.some((k) => k.kind === "expression") &&
     !(value.content.length === 0 && TEXT_TAGS.has(element.tag))
   ) {
@@ -141,6 +142,9 @@ async function openNew(host: ToolHost, p: Down, box: Rect, fixed: boolean) {
   const frame = host.frameAt({ x: box.x, y: box.y });
   let font: Record<string, string> = DEFAULT_FONT;
   if (frame) {
+    // Refused here, before anything is typed that couldn't be kept.
+    const planned = await planIn(host, frame, box, { deep: p.deep, alt: p.alt, nodeTag: "p" });
+    if ("refuse" in planned) return host.say(planned.refuse);
     const at = host.local(frame, box);
     const bridge = host.bridge(frame.id);
     const hit = await bridge?.hit(at.x, at.y).catch(() => null);

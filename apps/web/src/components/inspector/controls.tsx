@@ -4,7 +4,7 @@ import * as stylex from "@stylexjs/stylex";
 import { Children, type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { alphaOf, hexOf, opaque, paintedHex, resolveVars, setAlpha } from "@/design/editing/colors";
-import { isHexLike, typedHex } from "@/design/editing/hsv";
+import { isHexLike, typedHex, withHash } from "@/design/editing/hsv";
 import type { StyleEditor as Editor } from "./styleEditor";
 import {
   bare,
@@ -421,11 +421,12 @@ export function ColorField({
           : undefined
       }
       // A hex is read only once it's whole: `#1f3a` on the way to `#1f3a44` isn't a color with 67% opacity.
-      toChanges={(typed, done) =>
-        isHexLike(typed) && typedHex(typed, done) === null
+      toChanges={(typed, done) => {
+        const value = withHash(typed);
+        return isHexLike(value) && typedHex(value, done) === null
           ? null
-          : toChanges(keep(parseInput("color", typed)))
-      }
+          : toChanges(keep(parseInput("color", value)));
+      }}
       lead={
         swatchButton ? (
           swatchButton(isColor(resolved) ? resolved : undefined)
