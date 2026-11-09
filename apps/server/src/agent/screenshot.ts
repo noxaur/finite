@@ -16,14 +16,18 @@ export type RenderedElement = {
 /** What went wrong while a headless load ran. */
 export type LoadError = { kind: "error" | "console"; message: string; stack?: string };
 
+/** A box in a frame's own CSS pixels. */
+export type Region = { x: number; y: number; width: number; height: number };
+
 export type Screenshots = {
-  /** A PNG of `url` in a `width`×`height` viewport. */
-  capture(url: string, width: number, height: number): Promise<Uint8Array>;
+  /** A PNG of `url` in a `width`×`height` viewport, or of `region` of it. */
+  capture(url: string, width: number, height: number, region?: Region): Promise<Uint8Array>;
   /** `capture`, plus the uncaught errors and `console.error` calls of that load. */
   captureWithErrors(
     url: string,
     width: number,
     height: number,
+    region?: Region,
   ): Promise<{ png: Uint8Array; errors: LoadError[] }>;
   /**
    * How big `url`'s content is: its height at `width`, or with no `width` its natural
@@ -64,7 +68,7 @@ export function createScreenshots(): Screenshots {
     return browser;
   }
 
-  async function captureWithErrors(url: string, width: number, height: number) {
+  async function captureWithErrors(url: string, width: number, height: number, region?: Region) {
     const page = await (await launch()).newPage();
     const errors: LoadError[] = [];
     page.on("pageerror", (error) => {
@@ -75,17 +79,23 @@ export function createScreenshots(): Screenshots {
       if (message.type() === "error") errors.push({ kind: "console", message: message.text() });
     });
     try {
-      await page.setViewport({ width: Math.round(width), height: Math.round(height) });
+      // The viewport reaches the region's bottom, so a frame that hugs its content isn't cut short.
+      const bottom = region ? Math.ceil(region.y + region.height) : 0;
+      await page.setViewport({
+        width: Math.round(width),
+        height: Math.max(Math.round(height), bottom),
+      });
       await page.goto(url, { waitUntil: "networkidle0", timeout: 20_000 });
-      return { png: await page.screenshot({ type: "png" }), errors };
+      const png = await page.screenshot({ type: "png", ...(region ? { clip: region } : {}) });
+      return { png, errors };
     } finally {
       await page.close().catch(() => {});
     }
   }
 
   return {
-    async capture(url, width, height) {
-      return (await captureWithErrors(url, width, height)).png;
+    async capture(url, width, height, region) {
+      return (await captureWithErrors(url, width, height, region)).png;
     },
     captureWithErrors,
     async measure(url, width) {

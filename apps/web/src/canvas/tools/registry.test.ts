@@ -20,6 +20,14 @@ describe("resolveKey", () => {
     expect(resolveKey(press("v"), page)).toEqual({ kind: "tool", id: "select" });
     expect(resolveKey(press("h"), page)).toEqual({ kind: "tool", id: "hand" });
     expect(resolveKey(press("r"), page)).toEqual({ kind: "tool", id: "rectangle" });
+    expect(resolveKey(press("f"), page)).toEqual({ kind: "tool", id: "frame" });
+    expect(resolveKey(press("o"), page)).toEqual({ kind: "tool", id: "ellipse" });
+    expect(resolveKey(press("l"), page)).toEqual({ kind: "tool", id: "line" });
+    expect(resolveKey(press("l", { shiftKey: true }), page)).toEqual({ kind: "tool", id: "arrow" });
+    expect(resolveKey(press("k", { shiftKey: true, metaKey: true }), page)).toEqual({
+      kind: "tool",
+      id: "image",
+    });
     expect(resolveKey(press("z", { metaKey: true }), page)).toEqual({
       kind: "command",
       id: "undo",
@@ -118,10 +126,18 @@ describe("the registry", () => {
 
   it("shows only the tools that work", () => {
     expect(toolsIn("move").map((t) => t.id)).toEqual(["select", "hand", "interact"]);
-    expect(toolsIn("shape").map((t) => t.id)).toEqual(["rectangle"]);
-    expect(toolsIn("comment").map((t) => t.id)).toEqual(["comment"]);
+    expect(toolsIn("shape").map((t) => t.id)).toEqual([
+      "rectangle",
+      "line",
+      "arrow",
+      "ellipse",
+      "polygon",
+      "star",
+      "image",
+    ]);
+    expect(toolsIn("comment").map((t) => t.id)).toEqual(["comment", "annotation", "measure"]);
     expect(toolsIn("pen").map((t) => t.id)).toEqual(["pen", "pencil"]);
-    expect(toolsIn("frame")).toEqual([]);
+    expect(toolsIn("frame").map((t) => t.id)).toEqual(["frame", "section", "slice"]);
   });
 
   it("writes a shortcut the way the menu shows it", () => {

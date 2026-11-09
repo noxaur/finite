@@ -1,6 +1,7 @@
 import { autoLayoutCommands } from "./autoLayout";
 import { COMMANDS, type CommandDef, type KeyEnv } from "./commands";
 import { comment, annotation } from "./comment";
+import { frame } from "./frame";
 import { hand } from "./hand";
 import type { KeyCombo, KeyInput, ToolDef, ToolGroup } from "./host";
 import { interact } from "./interact";
@@ -9,7 +10,7 @@ import { select } from "./move";
 import { pen, pencil } from "./pen";
 import { scale } from "./scale";
 import { section } from "./section";
-import { arrow, ellipse, frame, image, line, polygon, rectangle, star } from "./shapes";
+import { arrow, ellipse, image, line, polygon, rectangle, star } from "./shapes";
 import { slice } from "./slice";
 import { text, textOnPath } from "./text";
 import { vectorCommands, vectorEdit } from "./vectorEdit";

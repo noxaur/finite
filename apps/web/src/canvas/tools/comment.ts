@@ -2,9 +2,8 @@ import type { CommentAnchor, Frame } from "@finite/protocol";
 import { bridgeOf } from "../bridge";
 import type { Point } from "../gestures";
 import type { ToolDef, ToolHost } from "./host";
-import { notBuilt } from "./host";
 
-/** Places a comment on what's clicked, or on the canvas. */
+/** Places a comment on what's clicked, or on the canvas. An agent is asked to act on it. */
 export const comment = {
   id: "comment",
   group: "comment",
@@ -20,6 +19,7 @@ export const comment = {
   },
 } as const satisfies ToolDef<"comment">;
 
+/** Places a note for people, which no agent acts on. */
 export const annotation = {
   id: "annotation",
   group: "comment",
@@ -27,14 +27,27 @@ export const annotation = {
   keys: { key: "y" },
   icon: "annotation",
   cursor: "crosshair",
-  enabled: false,
+  enabled: true,
   sticky: true,
-  down: notBuilt("Annotation"),
+  hover: true,
+  down(host, p) {
+    return {
+      begin: async () => null,
+      click: () => placeComment(host, p.world, p.frame, "annotation"),
+    };
+  },
 } as const satisfies ToolDef<"annotation">;
 
-async function placeComment(host: ToolHost, world: Point, frame: Frame | null) {
-  if (!frame)
-    return host.update({ commentDraft: { anchor: { x: world.x, y: world.y }, at: world } });
+async function placeComment(
+  host: ToolHost,
+  world: Point,
+  frame: Frame | null,
+  kind?: "annotation",
+) {
+  const draft = (d: { anchor: CommentAnchor; at: Point }) => ({
+    commentDraft: kind ? { ...d, kind } : d,
+  });
+  if (!frame) return host.update(draft({ anchor: { x: world.x, y: world.y }, at: world }));
   const p = host.local(frame, world);
   const hit = await bridgeOf(frame.id)
     ?.hit(p.x, p.y)
@@ -46,5 +59,5 @@ async function placeComment(host: ToolHost, world: Point, frame: Frame | null) {
   const at = hit
     ? { x: b.x + hit.rect.x + hit.rect.width, y: b.y + hit.rect.y }
     : { x: b.x + b.width, y: b.y };
-  host.update({ commentDraft: { anchor, at }, openComment: null });
+  host.update({ ...draft({ anchor, at }), openComment: null });
 }

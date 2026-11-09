@@ -9,7 +9,9 @@ import type {
   NewNode,
   Rect,
   Rev,
+  Section,
   SourceEdit,
+  Slice,
   TextLabel,
 } from "@finite/protocol";
 import { useSyncExternalStore } from "react";
@@ -59,6 +61,9 @@ export type TextEdit = {
   font: Record<string, string>;
 };
 
+/** A section or slice the person picked, which the selection store (elements and frames) doesn't hold. */
+export type ObjectSelection = { kind: "section" | "slice"; id: string };
+
 export interface EditorState {
   /** The current tool. On Interact, the pointer reaches into the frames, into the real app. */
   readonly tool: ToolId;
@@ -74,14 +79,17 @@ export interface EditorState {
   /** Frames shown somewhere else than the canvas says, while a gesture runs. */
   readonly frameOverrides: Readonly<Record<string, Rect>>;
   readonly textOverrides: Readonly<Record<string, Point>>;
+  /** Sections and slices shown somewhere else than the canvas says, while a gesture runs. */
+  readonly objectOverrides: Readonly<Record<string, Rect>>;
   /** Where a reorder drops, in the frame's CSS pixels. */
   readonly dropLine: { frameId: string; rect: Rect } | null;
   readonly notice: Notice | null;
   readonly editingText: TextEdit | null;
   readonly selectedText: string | null;
+  readonly selectedObject: ObjectSelection | null;
   readonly editingLabel: string | null;
-  /** A comment being written: its anchor and where its pin sits, in canvas units. */
-  readonly commentDraft: { anchor: CommentAnchor; at: Point } | null;
+  /** A comment (or annotation) being written: its anchor and where its pin sits, in canvas units. */
+  readonly commentDraft: { anchor: CommentAnchor; at: Point; kind?: "annotation" } | null;
   readonly openComment: string | null;
   /** Heights hug frames report, so their box follows their content. */
   readonly sizes: Readonly<Record<string, number>>;
@@ -98,10 +106,12 @@ const initial: EditorState = {
   dragging: false,
   frameOverrides: {},
   textOverrides: {},
+  objectOverrides: {},
   dropLine: null,
   notice: null,
   editingText: null,
   selectedText: null,
+  selectedObject: null,
   editingLabel: null,
   commentDraft: null,
   openComment: null,
@@ -177,7 +187,12 @@ export class CanvasEditor implements ToolHost {
       const pan = toolOf(this.state.tool).pan;
       return pan === "always" || (pan === "empty" && this.frameAt(this.worldOf(e)) === null);
     };
-    this.offSelection = selectionStore.subscribe(() => void this.refreshSelection());
+    this.offSelection = selectionStore.subscribe(() => {
+      if (this.state.selectedObject && selectionStore.get().length > 0) {
+        this.update({ selectedObject: null });
+      }
+      void this.refreshSelection();
+    });
     void this.refreshSelection();
   }
 
@@ -205,6 +220,13 @@ export class CanvasEditor implements ToolHost {
     if (this.state.selectedText && !canvas.texts.some((t) => t.id === this.state.selectedText)) {
       this.update({ selectedText: null });
     }
+    const picked = this.state.selectedObject;
+    if (
+      picked &&
+      !(picked.kind === "section" ? canvas.sections : canvas.slices).some((o) => o.id === picked.id)
+    ) {
+      this.update({ selectedObject: null });
+    }
     void this.refreshSelection();
   }
 
@@ -214,6 +236,14 @@ export class CanvasEditor implements ToolHost {
 
   get canvasId(): string {
     return this.canvas.id;
+  }
+
+  get sections(): readonly Section[] {
+    return this.canvas.sections;
+  }
+
+  get slices(): readonly Slice[] {
+    return this.canvas.slices;
   }
 
   get texts(): readonly TextLabel[] {
@@ -235,7 +265,11 @@ export class CanvasEditor implements ToolHost {
   setTool(id: string) {
     const tool = toolOf(id);
     if (!tool.enabled) return;
-    toolOf(this.state.tool).deactivate?.(this);
+    // A key held down repeats, and that same tool's press has to survive it.
+    if (tool.id !== this.state.tool) {
+      this.cancelPress();
+      toolOf(this.state.tool).deactivate?.(this);
+    }
     this.update({ tool: tool.id as ToolId, commentDraft: null, hover: null, ghost: null });
     tool.activate?.(this);
   }
@@ -265,7 +299,13 @@ export class CanvasEditor implements ToolHost {
 
   selectText(id: string | null) {
     if (id) selectionStore.set([]);
-    this.update({ selectedText: id });
+    this.update({ selectedText: id, ...(id ? { selectedObject: null } : {}) });
+  }
+
+  /** Picks a section or slice (or nothing), taking the selection off elements, frames and labels. */
+  selectObject(picked: ObjectSelection | null) {
+    if (picked) selectionStore.set([]);
+    this.update({ selectedObject: picked, ...(picked ? { selectedText: null } : {}) });
   }
 
   editLabel(id: string | null) {
@@ -501,6 +541,8 @@ export class CanvasEditor implements ToolHost {
   private onDown(e: PointerEvent) {
     if (e.button !== 0 || this.space || this.ignored(e)) return;
     if (this.state.editingText) return;
+    // A press that isn't on a section's or slice's own controls lets go of it.
+    if (this.state.selectedObject) this.update({ selectedObject: null });
     // A press on the canvas takes the keys back from a field outside it, like the composer, so
     // canvas shortcuts don't type into it. The camera's own handling keeps focus from moving.
     const active = document.activeElement;
@@ -667,19 +709,23 @@ export class CanvasEditor implements ToolHost {
 
   /** Backs out of whatever's open, one step at a time. */
   escape() {
+    if (this.current) return this.cancelPress();
     if (this.state.tool === "interact") return this.setTool("select");
     if (this.state.commentDraft || this.state.openComment) {
       return this.update({ commentDraft: null, openComment: null });
     }
     if (this.state.tool !== "select") return this.setTool("select");
     if (this.state.selectedText) return this.selectText(null);
+    if (this.state.selectedObject) return this.selectObject(null);
     this.selectParent();
   }
 
   fitAll() {
     // Text labels have no height of their own; a label's box ends where the frame below it starts.
     const labels = this.canvas.texts.map((t) => ({ x: t.x, y: t.y, width: t.width, height: 100 }));
-    this.camera.fitTo(union([...this.canvas.frames.map((f) => this.boxOf(f)), ...labels]));
+    this.camera.fitTo(
+      union([...this.canvas.frames.map((f) => this.boxOf(f)), ...labels, ...this.canvas.sections]),
+    );
   }
 
   fitSelection() {
@@ -703,6 +749,15 @@ export class CanvasEditor implements ToolHost {
   }
 
   async remove() {
+    const picked = this.state.selectedObject;
+    if (picked) {
+      this.update({ selectedObject: null });
+      return this.patch(
+        picked.kind === "section"
+          ? { op: "removeSection", sectionId: picked.id }
+          : { op: "removeSlice", sliceId: picked.id },
+      );
+    }
     if (this.state.selectedText) {
       const textId = this.state.selectedText;
       this.update({ selectedText: null });
