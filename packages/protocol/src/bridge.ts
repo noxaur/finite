@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { Measurement, MeasureTarget } from "./measure.ts";
 import { Loc, Rect, Rev } from "./model.ts";
 
 /**
@@ -91,6 +92,10 @@ export const bridgeRequests = {
   rects: { params: { locs: z.array(Loc) }, result: z.record(z.string(), z.array(Rect)) },
   inspect: { params: { loc: Loc, index: z.number().int().min(0) }, result: Inspection.nullable() },
   layers: { params: {}, result: z.array(LayerNode) },
+  measure: {
+    params: { targets: z.array(MeasureTarget), props: z.array(z.string()) },
+    result: z.array(Measurement.nullable()),
+  },
   /** The stamped chain at a point, nearest first; over empty page, the top-level stamped elements. */
   drop: {
     params: { x: z.number(), y: z.number() },
@@ -113,6 +118,7 @@ export const ParentMessage = z.discriminatedUnion("type", [
   request("rects"),
   request("inspect"),
   request("layers"),
+  request("measure"),
   request("drop"),
   request("vector"),
   z.object({
@@ -167,6 +173,8 @@ export interface FrameBridge {
   rects(locs: Loc[]): Promise<Record<Loc, Rect[]>>;
   inspect(loc: Loc, index: number): Promise<Inspection | null>;
   layers(): Promise<LayerNode[]>;
+  /** One Measurement per target, `null` where nothing matched. */
+  measure(targets: MeasureTarget[]): Promise<(Measurement | null)[]>;
   drop(x: number, y: number): Promise<{ chain: DropNode[] }>;
   vector(loc: Loc, index: number): Promise<VectorInfo | null>;
   preview(loc: Loc, styles: Record<string, string | null> | null): void;

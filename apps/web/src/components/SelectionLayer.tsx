@@ -34,6 +34,7 @@ export function SelectionLayer({
   state: EditorState;
   selection: readonly SelectionItem[];
 }) {
+  if (state.tool === "inspect") return null;
   // Point editing draws its own handles over the path.
   const selection = state.tool === "vectorEdit" ? [] : selected;
   const world = (frameId: string, r: Rect): Rect | null => {

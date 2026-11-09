@@ -19,7 +19,7 @@ const titleOf = (tool: ToolDef) =>
  */
 export function Toolbar({ editor, state }: { editor: CanvasEditor; state: EditorState }) {
   const [last, setLast] = useState<Partial<Record<ToolGroup, string>>>({});
-  const group = toolOf(state.tool).group;
+  const { group, hint } = toolOf(state.tool);
   // The last-used tool follows the current one, so a group's button shows what it'll pick.
   if (last[group] !== state.tool) setLast({ ...last, [group]: state.tool });
   return (
@@ -45,7 +45,7 @@ export function Toolbar({ editor, state }: { editor: CanvasEditor; state: Editor
           />
         );
       })}
-      {state.tool === "interact" && <span {...stylex.props(styles.note)}>Esc to edit</span>}
+      {hint && <span {...stylex.props(styles.note)}>{hint}</span>}
     </div>
   );
 }

@@ -273,7 +273,7 @@ export function canvasOps(ctx: CanvasContext, names: ToolNames = THREAD_TOOLS) {
           frameSize(f, async (width) => {
             await ctx.previews.ensure(design);
             const url = ctx.previews.frameUrl(design.id, { kind: "file", file: files[i]! });
-            return ctx.screenshots.measure(url, width);
+            return ctx.screenshots.hugSize(url, width);
           }),
         ),
       );
@@ -496,6 +496,45 @@ export function canvasOps(ctx: CanvasContext, names: ToolNames = THREAD_TOOLS) {
       return ctx.screenshots.capture(url, frame.width, frame.height, crop);
     },
 
+    async measure({ frameId, select, index = 0, to, image = true }: CanvasToolInput<"measure">) {
+      const { frame } = await findFrame(frameId);
+      await ctx.previews.ensure(design);
+      const url = ctx.previews.frameUrl(design.id, frame.source);
+      const got = await ctx.screenshots.measureElement(url, frame.width, frame.height, {
+        select,
+        index,
+        ...(to === undefined ? {} : { to }),
+        image,
+      });
+      if ("invalid" in got) {
+        throw new Refused(`${JSON.stringify(got.select)} isn't a CSS selector: ${got.invalid}`);
+      }
+      if ("missing" in got) {
+        throw new Refused(
+          `${JSON.stringify(got.missing)} matches nothing in ${frame.name}. Call ${names.read} with frameId ${frame.id} to list its elements, then try a selector from there.`,
+        );
+      }
+      if ("count" in got) {
+        throw new Refused(
+          `${JSON.stringify(select)} matches ${got.count} element${got.count === 1 ? "" : "s"} in ${frame.name}, so index ${index} is out of range. Pass index 0 to ${got.count - 1}.`,
+        );
+      }
+      const { element, to: other, distance, png } = got;
+      const note =
+        element.count > 1
+          ? `${element.count} elements match ${select}. Pass index for another.`
+          : undefined;
+      return {
+        report: {
+          element,
+          ...(other ? { to: other } : {}),
+          ...(distance ? { distance } : {}),
+          ...(note ? { note } : {}),
+        },
+        ...(png ? { png } : {}),
+      };
+    },
+
     async frameErrors(frameId: string) {
       await findFrame(frameId);
       const preview = ctx.previews.state(design.id);
@@ -508,6 +547,28 @@ export function canvasOps(ctx: CanvasContext, names: ToolNames = THREAD_TOOLS) {
     },
   };
 }
+
+/** The tool result `measure` returns on both surfaces: the report as JSON, then the PNG. */
+export function measureContent(result: {
+  report: object;
+  png?: Uint8Array | undefined;
+}): CallToolResult["content"] {
+  return [
+    { type: "text", text: JSON.stringify(result.report) },
+    ...(result.png
+      ? [
+          {
+            type: "image" as const,
+            data: Buffer.from(result.png).toString("base64"),
+            mimeType: "image/png",
+          },
+        ]
+      : []),
+  ];
+}
+
+export const MEASURE_DESCRIPTION =
+  "Measures one element of a frame, as a browser lays it out: size, padding, border, margin, radius, the real gaps between its children, and its computed type, layout and fill. Returns JSON and, unless image is false, a PNG crop with the same boxes and distances drawn on it. A gap is a real distance between neighbours, whatever made it; its `cause` says what to edit: `gap` is the parent's CSS gap, `margin` a child's margin, `free` neither (alignment or free space). select is a CSS selector, and [data-finite-loc=\"src/x.tsx:12:4\"] picks exactly one element. When several match, it measures the first; index picks another and the result's note says how many there are. to is a second selector: the result adds the distance between the two.";
 
 /** The `finite` MCP server one thread's query talks to. */
 export function canvasServer(ctx: ToolContext) {
@@ -687,6 +748,10 @@ export function canvasServer(ctx: ToolContext) {
         };
       },
     ),
+
+    safeTool("measure", MEASURE_DESCRIPTION, canvasTools.measure, async (input) => ({
+      content: measureContent(await ops.measure(input)),
+    })),
 
     safeTool(
       "finish_setup",

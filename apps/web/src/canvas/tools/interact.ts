@@ -12,6 +12,7 @@ export const interact = {
   enabled: true,
   sticky: true,
   pan: "empty",
+  hint: "Esc to edit",
   down(host, p) {
     const { handle, titleId } = pressTargets(p.target);
     return p.frame && !handle && !titleId ? "pass" : select.down(host, p);

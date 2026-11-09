@@ -4,6 +4,7 @@ import * as stylex from "@stylexjs/stylex";
 import type { Canvas as CanvasDoc, Route } from "@finite/protocol";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { CommentLayer } from "@/components/Comments";
+import { InspectCard } from "@/components/InspectCard";
 import { SelectionLayer } from "@/components/SelectionLayer";
 import { Camera } from "@/design/camera";
 import { colors, fonts, radii, shadows, space } from "@/styles/tokens.stylex";
@@ -136,6 +137,8 @@ function CanvasView({
       raf = requestAnimationFrame(() => {
         const boxes = editor.frames.map((f) => ({ id: f.id, ...editor.boxOf(f) }));
         const pinned = new Set(selection.map((s) => s.frameId));
+        const inspectPin = editor.state.inspect.pin;
+        if (inspectPin) pinned.add(inspectPin.frameId);
         setMounted((prev) => {
           const next = framesToMount(boxes, editor.camera.visibleWorld(1), prev, pinned);
           return next.length === prev.length && next.every((id, i) => id === prev[i]) ? prev : next;
@@ -239,6 +242,9 @@ function CanvasView({
         )}
       </div>
       {editor && state && <Toolbar editor={editor} state={state} />}
+      {editor && state?.tool === "inspect" && (
+        <InspectCard editor={editor} inspect={state.inspect} />
+      )}
     </div>
   );
 }

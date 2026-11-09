@@ -20,6 +20,11 @@ describe("resolveKey", () => {
     expect(resolveKey(press("v"), page)).toEqual({ kind: "tool", id: "select" });
     expect(resolveKey(press("h"), page)).toEqual({ kind: "tool", id: "hand" });
     expect(resolveKey(press("r"), page)).toEqual({ kind: "tool", id: "rectangle" });
+    expect(resolveKey(press("m"), page)).toEqual({ kind: "tool", id: "inspect" });
+    expect(resolveKey(press("m", { shiftKey: true }), page)).toEqual({
+      kind: "tool",
+      id: "measure",
+    });
     expect(resolveKey(press("f"), page)).toEqual({ kind: "tool", id: "frame" });
     expect(resolveKey(press("o"), page)).toEqual({ kind: "tool", id: "ellipse" });
     expect(resolveKey(press("l"), page)).toEqual({ kind: "tool", id: "line" });
@@ -134,6 +139,7 @@ describe("the registry", () => {
       "comment",
       "annotation",
       "measure",
+      "inspect",
     ]);
     for (const tool of TOOLS) expect(GROUPS).toContain(tool.group);
   });
@@ -149,7 +155,12 @@ describe("the registry", () => {
       "star",
       "image",
     ]);
-    expect(toolsIn("comment").map((t) => t.id)).toEqual(["comment", "annotation", "measure"]);
+    expect(toolsIn("comment").map((t) => t.id)).toEqual([
+      "comment",
+      "annotation",
+      "measure",
+      "inspect",
+    ]);
     expect(toolsIn("pen").map((t) => t.id)).toEqual(["pen", "pencil"]);
     expect(toolsIn("text").map((t) => t.id)).toEqual(["text", "textOnPath"]);
     expect(toolsIn("frame").map((t) => t.id)).toEqual(["frame", "section", "slice"]);
