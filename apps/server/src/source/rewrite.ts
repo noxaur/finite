@@ -6,6 +6,7 @@ import {
   type NewNode,
   Refused,
   type Remap,
+  type Router,
   type SourceEdit,
   type Styling,
 } from "@finite/protocol";
@@ -44,6 +45,8 @@ export type RewriteContext = {
   variables?: Record<string, VariableHome>;
   /** The `*.stylex.ts` file that defines each StyleX `defineVars` token (`group.key`). */
   stylexVars?: Record<string, string>;
+  /** Which router the design uses: a new element's file import reads differently under Next.js. */
+  router?: Router;
 };
 
 export type Rewritten = {
@@ -155,7 +158,17 @@ function rewriteOrThrow(
       throw new Refused(STALE, "stale");
 
     const ms = new MagicString(code);
-    const s: StepCtx = { ms, code, file, parsed, where, ctx, files, convention };
+    const s: StepCtx = {
+      ms,
+      code,
+      file,
+      parsed,
+      where,
+      ctx,
+      files,
+      convention,
+      router: ctx.router,
+    };
     const made = applyOp(s, element, op);
     const next = ms.toString();
     if (next === code) continue;
@@ -286,6 +299,7 @@ type StepCtx = {
   ctx: RewriteContext;
   files: Record<string, string>;
   convention: Styling;
+  router: Router | undefined;
 };
 
 /** Applies the op; an insert says what it printed. */

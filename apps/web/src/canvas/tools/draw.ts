@@ -2,6 +2,7 @@ import { finite } from "@/client/finite";
 import type { Rect } from "@finite/protocol";
 import { planInsert } from "@/design/editing/insertion";
 import { revsOf } from "../gestures";
+import { undoOrderFor } from "../undoOrder";
 import type { Placed, ToolHost } from "./host";
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -30,8 +31,9 @@ export async function draw(
         canvasId: host.canvasId,
         box,
         name: node.name ?? node.tag,
-        node,
+        node: { ...node, ref: REF },
       });
+      undoOrderFor(host.designId).did({ kind: "canvas", canvasId: host.canvasId });
       host.select([{ frameId: made.frameId, name: node.name ?? node.tag }]);
       return { frameId: made.frameId, loc: made.created[REF] ?? "", index: 0 };
     } catch (e) {

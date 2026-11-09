@@ -221,9 +221,10 @@ export const Section = z.object({
 });
 export type Section = z.infer<typeof Section>;
 
-/** A region of a frame marked for export. */
+/** A region of one frame marked for export. Its box is in the frame's own CSS pixels. */
 export const Slice = z.object({
   id: Id,
+  frameId: Id,
   name: z.string(),
   x: z.number(),
   y: z.number(),
@@ -283,6 +284,15 @@ export const CanvasPatch = z.discriminatedUnion("op", [
   /** Adds the section, or replaces the one with its id. */
   z.object({ op: z.literal("setSection"), section: Section }),
   z.object({ op: z.literal("removeSection"), sectionId: Id }),
+  /** Moves a section with the frames and labels inside it, as one step. */
+  z.object({
+    op: z.literal("moveSection"),
+    sectionId: Id,
+    x: z.number(),
+    y: z.number(),
+    frames: z.array(z.object({ id: Id, x: z.number(), y: z.number() })),
+    texts: z.array(z.object({ id: Id, x: z.number(), y: z.number() })),
+  }),
   /** Adds the slice, or replaces the one with its id. */
   z.object({ op: z.literal("setSlice"), slice: Slice }),
   z.object({ op: z.literal("removeSlice"), sliceId: Id }),

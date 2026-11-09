@@ -112,7 +112,9 @@ function tree(elements: readonly RenderedElement[]): string {
 /** Whether a person wrote the comment's latest message, so an agent owes it an answer. */
 function isWaiting(comment: Comment): boolean {
   return (
-    !comment.resolvedAt && (comment.replies.at(-1)?.author ?? comment.author).kind === "person"
+    comment.kind !== "annotation" &&
+    !comment.resolvedAt &&
+    (comment.replies.at(-1)?.author ?? comment.author).kind === "person"
   );
 }
 
@@ -368,6 +370,8 @@ Puts written files on the canvas in a row. Leave width out for a component (it t
 {"op": "remove_frames", "frameIds": ["…"]}
 {"op": "text", "title": "…", "body": "…"}
 A note on the canvas. textId rewrites one; x, y and width place it.
+{"op": "section", "name": "Onboarding", "frameIds": ["…"]}
+A named rectangle that groups frames: people drag it and the frames inside move with it. Give frameIds to size it around them, or x, y, width and height. sectionId changes one (the rectangle only); {"op": "section", "sectionId": "…", "remove": true} removes it and keeps the frames. read lists a canvas's sections.
 {"op": "copy_production", "name": "Button"} or {"op": "copy_production", "route": "/cart"}
 {"op": "brand_asset", "path": "logo.svg"} or {"op": "brand_asset", "url": "https://…"}
 {"op": "token", "name": "--brand", "mode": "light", "value": "#123456"}
@@ -476,6 +480,10 @@ Production code is refused unless you pass production: true, which you may do on
           case "text": {
             const { op: _op, canvasId: given, ...fields } = op;
             return ops.writeText({ ...fields, canvasId: targetCanvas(given) });
+          }
+          case "section": {
+            const { op: _op, canvasId: given, ...fields } = op;
+            return ops.writeSection({ ...fields, canvasId: targetCanvas(given) });
           }
           case "copy_production": {
             const { op: _op, canvasId: given, ...from } = op;
@@ -677,13 +685,16 @@ Production code is refused unless you pass production: true, which you may do on
 
   register(
     "render",
-    `A PNG of each frame at its size, with the runtime errors it reported. Pass frameIds, or canvasId for its frames. At most ${MAX_RENDER} per call.`,
+    `A PNG of each frame at its size, with the runtime errors it reported. Pass frameIds, or canvasId for its frames. At most ${MAX_RENDER} per call. region ({"x": 0, "y": 0, "width": 320, "height": 200}, in the frame's own pixels) crops one frame to a part of it, to check a detail up close.`,
     mcpTools.render,
-    async ({ designId, frameIds, canvasId }) => {
+    async ({ designId, frameIds, canvasId, region }) => {
       const open = await designOf(designId);
       const ops = opsOf(open);
       if ((frameIds === undefined) === (canvasId === undefined)) {
         throw new Refused("Pass exactly one of frameIds and canvasId.");
+      }
+      if (region && frameIds?.length !== 1) {
+        throw new Refused("region crops one frame: pass a single frame in frameIds.");
       }
       const frames =
         frameIds === undefined
@@ -700,6 +711,7 @@ Production code is refused unless you pass production: true, which you may do on
               url,
               frame.width,
               frame.height,
+              region && ops.cropped(frame, region),
             );
             // This load's errors first, then what an open page's bridge reported.
             const seen = new Set<string>();
@@ -740,7 +752,7 @@ Production code is refused unless you pass production: true, which you may do on
 
 - {"designId": "…"}: open comments on every canvas; canvasId limits it to one. "waiting": true means a person spoke last.
 - {"designId": "…", "wait": 55}: blocks until a comment is waiting, up to 55 seconds. Call it again to keep listening.
-- {"designId": "…", "add": {"frameId": "…", "text": "…", "loc": "src/x.tsx:12:4"}}: pins one. Leave loc out to pin it to the frame.
+- {"designId": "…", "add": {"frameId": "…", "text": "…", "loc": "src/x.tsx:12:4"}}: pins one. Leave loc out to pin it to the frame. "annotation": true leaves a note that stays on the canvas for people; it never counts as waiting.
 - {"designId": "…", "reply": [{"commentId": "…", "text": "Made it a link.", "resolve": true}]}.
 - {"designId": "…", "resolve": ["…"]} or {"designId": "…", "reopen": ["…"]}.`,
     mcpTools.comments,
@@ -760,6 +772,7 @@ Production code is refused unless you pass production: true, which you may do on
             .map((m) => ({
               id: m.id,
               canvasId: c.id,
+              ...(m.kind === "annotation" ? { kind: m.kind } : {}),
               anchor: m.anchor,
               author: m.author.name,
               messages: [
@@ -854,7 +867,7 @@ Production code is refused unless you pass production: true, which you may do on
 
   register(
     "undo",
-    "Takes back your own last step; never anyone else's. Without canvasId it undoes your last file change (a write or a batch of element ops). With canvasId it undoes your last change to that canvas (one frame or label placed, moved or removed). redo: true redoes.",
+    "Takes back your own last step; never anyone else's. Without canvasId it undoes your last file change (a write or a batch of element ops). With canvasId it undoes your last change to that canvas (one frame, label or section placed, moved or removed). redo: true redoes.",
     mcpTools.undo,
     async ({ designId, canvasId, redo = false }) => {
       const open = await designOf(designId);

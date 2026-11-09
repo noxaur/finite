@@ -199,9 +199,14 @@ export const text = {
     return {
       click: () => clickText(host, p),
       begin: async () =>
-        boxGesture(host, p.world, false, async (box) => {
-          await openNew(host, p, box, true);
-        }),
+        boxGesture(
+          host,
+          p.world,
+          (box) => ({ box }),
+          async (box) => {
+            await openNew(host, p, box, true);
+          },
+        ),
     };
   },
 } as const satisfies ToolDef<"text">;

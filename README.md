@@ -32,7 +32,7 @@ Claude Code, Cursor, a chat app or any other MCP client can work in Finite throu
 claude mcp add --transport http finite http://127.0.0.1:4100/mcp
 ```
 
-The client gets six tools. `designs` lists, creates, connects, renames and removes designs. `read` shows a design, a canvas, a file, or a frame's rendered elements. `edit` runs a list of ops that make canvases, write TSX, place frames and change rendered elements, which it addresses with CSS selectors. `render` returns each frame as a PNG with its runtime errors. `comments` answers what people pin to frames, and its `wait` blocks until someone writes. `undo` takes back that client's own last step.
+The client gets six tools. `designs` lists, creates, connects, renames and removes designs. `read` shows a design, a canvas, a file, or a frame's rendered elements. `edit` runs a list of ops that make canvases, write TSX, place frames and change rendered elements, which it addresses with CSS selectors. `render` returns each frame, or one cropped region of it, as a PNG with its runtime errors. `comments` answers what people pin to frames, and its `wait` blocks until someone writes. `edit` also draws named sections around frames. `undo` takes back that client's own last step.
 
 People see every change live. Production code is refused unless a call to `edit` passes `production: true`, which the agent should do only when you asked it to ship. A prototype made this way shows up in the Prototypes tab as a thread. Send the header `X-Finite-Agent: <name>` to keep a client's undo history across reconnects. The endpoint has no login, so anything that can reach the port can use it.
 
