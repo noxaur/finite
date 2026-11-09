@@ -1,7 +1,7 @@
 import type { Frame, Hit } from "@finite/protocol";
 import { describe, expect, it, vi } from "vite-plus/test";
 import type { Down, ToolHost } from "./host";
-import { placeText, text, textOnPath } from "./text";
+import { editText, placeText, text, textOnPath } from "./text";
 
 const LOC = "src/App.tsx:3:30";
 const RECT = { x: 0, y: 0, width: 10, height: 10 };
@@ -51,6 +51,47 @@ describe("text on a path", () => {
     await plan.click();
     expect(edit).toHaveBeenCalledTimes(1);
     expect(say).not.toHaveBeenCalled();
+  });
+});
+
+describe("opening the text editor", () => {
+  it("lets one open finish before another starts, so nothing stays hidden", async () => {
+    let read!: (value: { rev: string; content: never[]; keeps: never[] }) => void;
+    const readInline = vi.fn(() => new Promise((resolve) => (read = resolve)));
+    const bridge = {
+      inspect: async () => ({ computed: {} }),
+      rects: async () => ({}),
+    };
+    const update = vi.fn();
+    const host = {
+      bridge: () => bridge,
+      boxOf: () => RECT,
+      readInline,
+      update,
+    } as unknown as ToolHost;
+    const first: Hit = {
+      loc: LOC,
+      rev: "aaaaaaaa",
+      tag: "p",
+      rect: RECT,
+      index: 0,
+      count: 1,
+      path: [],
+    };
+    const second: Hit = { ...first, loc: "src/App.tsx:9:4" };
+
+    const opening = editText(host, FRAME, first);
+    expect(await editText(host, FRAME, second)).toBe(true);
+    expect(readInline).toHaveBeenCalledTimes(1);
+    read({ rev: first.rev, content: [], keeps: [] });
+    expect(await opening).toBe(true);
+    expect(update).toHaveBeenCalledTimes(1);
+
+    // Once the first has opened, the next one runs.
+    const next = editText(host, FRAME, second);
+    expect(readInline).toHaveBeenCalledTimes(2);
+    read({ rev: first.rev, content: [], keeps: [] });
+    await next;
   });
 });
 

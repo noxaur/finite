@@ -24,6 +24,8 @@ const previews: Previews = {
   routes: async () => [],
   frameUrl: () => "",
   stop: async () => {},
+  remove: async () => {},
+  watch: () => {},
   idle: (designId) => void idled.push(designId),
   on: (_designId, fn) => (previewListeners.add(fn), () => void previewListeners.delete(fn)),
   reportError: () => {},

@@ -36,7 +36,9 @@ export function FrameView({
 }) {
   const ref = useRef<HTMLIFrameElement>(null);
   const src = previewUrl ? frameHref(previewUrl, frame.source) : undefined;
-  const hug = frame.hug ?? false;
+  // Read through a ref: a dep here would reconnect a loaded iframe, and it wouldn't say hello again.
+  const hug = useRef(false);
+  hug.current = frame.hug ?? false;
 
   useEffect(() => {
     const iframe = ref.current;
@@ -45,7 +47,7 @@ export function FrameView({
     const off = bridge.on((event) => {
       switch (event.type) {
         case "size":
-          if (hug) editor.setSize(frame.id, Math.max(20, Math.round(event.height)));
+          if (hug.current) editor.setSize(frame.id, Math.max(20, Math.round(event.height)));
           // The content laid out (or rendered for the first time, after the bridge answered):
           // measure the selection and comment pins again.
           editor.frameChanged();
@@ -88,7 +90,7 @@ export function FrameView({
       off();
       bridge.close();
     };
-  }, [designId, frame.id, src, hug, editor, mounted]);
+  }, [designId, frame.id, src, editor, mounted]);
 
   if (!mounted || !src) {
     return (

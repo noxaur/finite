@@ -5,7 +5,7 @@ import { getChromePath } from "chrome-launcher";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
 import { rev } from "../source/files.ts";
-import { prepareFixture } from "./fixtures.ts";
+import { prepareFixture, viewed } from "./fixtures.ts";
 import { createPreviews } from "./index.ts";
 
 const FIXTURES = ["stylex", "stylex-framework"] as const;
@@ -17,7 +17,7 @@ const urls = {} as Record<FixtureName, string>;
 const cleanups: (() => void)[] = [];
 
 beforeAll(async () => {
-  previews = createPreviews({ host: "127.0.0.1", graceMs: 100 });
+  previews = viewed(createPreviews({ host: "127.0.0.1", graceMs: 100 }));
   await Promise.all(
     FIXTURES.map(async (name) => {
       const fixture = await prepareFixture(name);

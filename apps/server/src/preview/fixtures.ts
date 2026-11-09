@@ -4,6 +4,18 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import type { Previews } from "@finite/protocol";
+
+/** Previews with a page open on every design a test starts, so none goes on the idle timer. */
+export function viewed(previews: Previews): Previews {
+  return {
+    ...previews,
+    ensure(design) {
+      previews.watch(design.id);
+      return previews.ensure(design);
+    },
+  };
+}
 
 const FIXTURES = fileURLToPath(new URL("../../fixtures/", import.meta.url));
 

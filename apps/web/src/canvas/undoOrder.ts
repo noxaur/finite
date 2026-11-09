@@ -16,11 +16,16 @@ export interface UndoOrder {
   undo(): UndoStep | undefined;
   /** The step ⇧⌘Z redoes, moved back to the undo side. */
   redo(): UndoStep | undefined;
+  /** The server refused the step `undo` or `redo` just moved and dropped it, so it goes here too. */
+  forget(which: "undo" | "redo"): void;
+  /** Runs `request` after every earlier one has its reply, so ⌘Z always sees the newest edit. */
+  inTurn<T>(request: () => Promise<T>): Promise<T>;
 }
 
 export function createUndoOrder(): UndoOrder {
   const done: UndoStep[] = [];
   const undone: UndoStep[] = [];
+  let last: Promise<unknown> = Promise.resolve();
   return {
     did(step) {
       done.push(step);
@@ -36,6 +41,14 @@ export function createUndoOrder(): UndoOrder {
       const step = undone.pop();
       if (step) done.push(step);
       return step;
+    },
+    forget(which) {
+      (which === "undo" ? undone : done).pop();
+    },
+    inTurn(request) {
+      const result = last.then(request);
+      last = result.catch(() => {});
+      return result;
     },
   };
 }

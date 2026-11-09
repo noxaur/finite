@@ -1,7 +1,8 @@
 import { finite } from "@/client/finite";
-import type { Frame, FrameBridge, Rect } from "@finite/protocol";
+import type { Frame, FrameBridge, Rect, Remap } from "@finite/protocol";
 import { planInsert } from "@/design/editing/insertion";
 import { type Point, revsOf } from "../gestures";
+import { remapSelection, sameItem, selectionStore } from "../selection";
 import { undoOrderFor } from "../undoOrder";
 import type { Placed, ToolHost } from "./host";
 
@@ -14,6 +15,24 @@ const REF = "new";
 
 function withoutSides(styles: Record<string, string>, hug: readonly string[]) {
   return Object.fromEntries(Object.entries(styles).filter(([name]) => !hug.includes(name)));
+}
+
+const pickOf = (host: ToolHost) => ({
+  items: selectionStore.get(),
+  text: host.state.selectedText,
+  object: host.state.selectedObject,
+});
+
+/** Whether someone picked something since `was`. `remap` is how this draw's own edit moved locs. */
+function pickedSince(host: ToolHost, was: ReturnType<typeof pickOf>, remap: Remap = {}) {
+  const items = remapSelection(was.items, remap);
+  const now = selectionStore.get();
+  return (
+    now.length !== items.length ||
+    now.some((item, i) => !sameItem(item, items[i]!)) ||
+    host.state.selectedText !== was.text ||
+    host.state.selectedObject !== was.object
+  );
 }
 
 type Planned = {
@@ -51,6 +70,7 @@ export async function draw(
   const { box, node, deep = false, alt = false, hug = [] } = input;
   const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
   const frame = host.frameAt(center);
+  const was = pickOf(host);
   if (!frame) {
     try {
       const made = await finite.request("canvas.draw", {
@@ -61,8 +81,9 @@ export async function draw(
         node: { ...node, ref: REF },
       });
       undoOrderFor(host.designId).did({ kind: "canvas", canvasId: host.canvasId });
-      host.select([{ frameId: made.frameId, name: node.name ?? node.tag }]);
-      return { frameId: made.frameId, loc: made.created[REF] ?? "", index: 0 };
+      const selected = !pickedSince(host, was);
+      if (selected) host.select([{ frameId: made.frameId, name: node.name ?? node.tag }]);
+      return { frameId: made.frameId, loc: made.created[REF] ?? "", index: 0, selected };
     } catch (e) {
       host.say(errorText(e));
       return null;
@@ -114,8 +135,9 @@ export async function draw(
         (r) => at.x >= r.x && at.x < r.x + r.width && at.y >= r.y && at.y < r.y + r.height,
       );
       const index = Math.max(hit, 0);
-      host.select([{ frameId: frame.id, loc, index, name: node.name ?? node.tag }]);
-      return { frameId: frame.id, loc, index };
+      const selected = !pickedSince(host, was, done.remap);
+      if (selected) host.select([{ frameId: frame.id, loc, index, name: node.name ?? node.tag }]);
+      return { frameId: frame.id, loc, index, selected };
     }
     await new Promise((resolve) => setTimeout(resolve, LANDING_STEP_MS));
   }

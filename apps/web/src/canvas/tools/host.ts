@@ -8,6 +8,7 @@ import type {
   Loc,
   NewNode,
   Rect,
+  Remap,
   Rev,
   Section,
   SourceEdit,
@@ -73,8 +74,8 @@ export type Ghost = {
   d?: string;
 };
 
-/** Where a drawn shape landed. */
-export type Placed = { frameId: string; loc: Loc; index: number };
+/** Where a drawn shape landed, and whether it took the selection: someone may have picked since. */
+export type Placed = { frameId: string; loc: Loc; index: number; selected: boolean };
 
 export type ToolGroup = "move" | "frame" | "shape" | "pen" | "text" | "comment";
 
@@ -154,7 +155,7 @@ export interface ToolHost {
   edit(
     edits: SourceEdit[],
     chain?: readonly HitElement[],
-  ): Promise<{ created: Record<string, Loc> } | false>;
+  ): Promise<{ created: Record<string, Loc>; remap: Remap } | false>;
   /** The element's children as editable runs, and the rev they belong to. */
   readInline(loc: Loc): Promise<{
     rev: Rev;

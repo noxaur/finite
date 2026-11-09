@@ -102,6 +102,12 @@ export function createPreviews(options: PreviewsOptions): Previews {
   const idleTimers = new Map<string, NodeJS.Timeout>();
   /** Designs whose run is stopping to start again; a stop meanwhile cancels the start. */
   const restarting = new Set<string>();
+  /** Designs a client views. Any other run goes on the idle timer once its `ensure` settles. */
+  const watched = new Set<string>();
+  /** Failed runs being replaced: callers during the old child's exit share the one new run. */
+  const replacing = new Map<string, Promise<{ url: string }>>();
+  /** Designs that are going away, which never start again. */
+  const removed = new Set<string>();
   const workspaces = createWorkspaces({ startTimeoutMs });
 
   const emit = (designId: string, event: PreviewEvent) => {
@@ -127,6 +133,20 @@ export function createPreviews(options: PreviewsOptions): Previews {
   const cancelIdle = (designId: string) => {
     clearTimeout(idleTimers.get(designId));
     idleTimers.delete(designId);
+  };
+
+  const startIdle = (designId: string) => {
+    if (!runs.has(designId)) return;
+    cancelIdle(designId);
+    const timer = setTimeout(() => void stopRun(designId), graceMs);
+    timer.unref();
+    idleTimers.set(designId, timer);
+  };
+
+  const refuseRemoved = (designId: string) => {
+    if (removed.has(designId)) {
+      throw new Refused("The design was removed, so its preview won't start.", "not-found");
+    }
   };
 
   const releaseRun = (run: Run) => {
@@ -204,6 +224,7 @@ export function createPreviews(options: PreviewsOptions): Previews {
       releaseRun(run);
       if (runs.get(design.id) === run && run.state.status !== "error") {
         setState(design.id, run, { status: "error", log: error.message });
+        if (run.child) void stopChild(run.child);
       }
     };
     workspaces
@@ -339,13 +360,14 @@ export function createPreviews(options: PreviewsOptions): Previews {
 
   /** Starts the design's preview again, unless it's idle (nobody views it), which only stops it. */
   async function restart(design: Design, run: Run) {
-    const idle = idleTimers.has(design.id);
     const release = run.release ?? (() => {});
     run.release = undefined;
     const stopped = stopRun(design.id);
     restarting.add(design.id);
     await stopped;
-    if (!restarting.delete(design.id) || idle || runs.has(design.id)) return release();
+    if (!restarting.delete(design.id) || !watched.has(design.id) || runs.has(design.id)) {
+      return release();
+    }
     start(design, release);
   }
 
@@ -369,18 +391,10 @@ export function createPreviews(options: PreviewsOptions): Previews {
     emit(designId, { type: "routes", routes });
   }
 
-  async function stopRun(designId: string): Promise<void> {
-    cancelIdle(designId);
-    restarting.delete(designId);
-    const run = runs.get(designId);
-    if (!run) return;
-    setState(designId, run, { status: "stopped" });
-    runs.delete(designId);
-    run.cancel("The design's preview was stopped before it was ready.");
-    releaseRun(run);
-    const { child } = run;
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
-    await new Promise<void>((resolve) => {
+  /** SIGTERM, then SIGKILL if the child is still there after `KILL_AFTER_MS`. */
+  function stopChild(child: ChildProcess): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+    return new Promise<void>((resolve) => {
       const kill = setTimeout(() => child.kill("SIGKILL"), KILL_AFTER_MS);
       child.once("exit", () => {
         clearTimeout(kill);
@@ -390,16 +404,47 @@ export function createPreviews(options: PreviewsOptions): Previews {
     });
   }
 
+  async function stopRun(designId: string): Promise<void> {
+    cancelIdle(designId);
+    restarting.delete(designId);
+    const run = runs.get(designId);
+    if (!run) return;
+    setState(designId, run, { status: "stopped" });
+    runs.delete(designId);
+    run.cancel("The design's preview was stopped before it was ready.");
+    releaseRun(run);
+    if (run.child) await stopChild(run.child);
+  }
+
+  /** The design's run, started if need be; a failed one is replaced once its child has exited. */
+  function up(design: Design): Promise<{ url: string }> {
+    const pending = replacing.get(design.id);
+    if (pending) return pending;
+    const run = runs.get(design.id);
+    // A failed preview starts again, and a setup design detects again once its last detection ended.
+    const done =
+      run?.state.status === "error" || (run?.state.status === "needs-setup" && run.state.log);
+    if (run && !done) return run.ready;
+    if (!run) return start(design).ready;
+    const replacement = stopRun(design.id)
+      .then(() => {
+        refuseRemoved(design.id);
+        return start(design).ready;
+      })
+      .finally(() => replacing.delete(design.id));
+    replacing.set(design.id, replacement);
+    return replacement;
+  }
+
   return {
     async ensure(design) {
+      refuseRemoved(design.id);
       cancelIdle(design.id);
-      const run = runs.get(design.id);
-      // A failed preview starts again, and a setup design detects again once its last detection ended.
-      const done =
-        run?.state.status === "error" || (run?.state.status === "needs-setup" && run.state.log);
-      if (run && !done) return run.ready;
-      if (run) await stopRun(design.id);
-      return start(design).ready;
+      try {
+        return await up(design);
+      } finally {
+        if (!watched.has(design.id)) startIdle(design.id);
+      }
     },
 
     state: (designId) => runs.get(designId)?.state ?? { status: "stopped" },
@@ -419,12 +464,18 @@ export function createPreviews(options: PreviewsOptions): Previews {
 
     stop: stopRun,
 
+    remove(designId) {
+      removed.add(designId);
+      return stopRun(designId);
+    },
+
+    watch(designId) {
+      watched.add(designId);
+    },
+
     idle(designId) {
-      if (!runs.has(designId)) return;
-      cancelIdle(designId);
-      const timer = setTimeout(() => void stopRun(designId), graceMs);
-      timer.unref();
-      idleTimers.set(designId, timer);
+      watched.delete(designId);
+      startIdle(designId);
     },
 
     on(designId, fn): Unsubscribe {

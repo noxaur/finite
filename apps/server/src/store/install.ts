@@ -53,13 +53,15 @@ export function install(root: string, onProgress: (state: InstallState) => void)
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    let finished = false;
     const append = (chunk: Buffer) => {
+      // Node can deliver output after `exit`; the install has already reported how it ended.
+      if (finished) return;
       log = (log + chunk.toString("utf8")).slice(-LOG_TAIL);
       report({ status: "running", log });
     };
     child.stdout.on("data", append);
     child.stderr.on("data", append);
-    let finished = false;
     const finish = (error: string | undefined) => {
       if (finished) return;
       finished = true;

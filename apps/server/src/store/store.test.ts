@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Actor, Canvas, DesignChange, Frame } from "@finite/protocol";
+import type { Actor, Canvas, CanvasPatch, DesignChange, Frame } from "@finite/protocol";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 import { BRAND_BOARD, brandBoard, ensureBrandBoard } from "./brand.ts";
 import { detectProject } from "./detect.ts";
@@ -686,6 +686,67 @@ describe("canvases", () => {
         by,
       ),
     ).rejects.toMatchObject({ code: "not-found" });
+  });
+
+  describe("undo beside someone else's work", () => {
+    const ana = { kind: "person", id: "u2", name: "Ana" } as const;
+    async function canvasWithFrame() {
+      const { open } = await connected();
+      const { id } = await open.createCanvas({ kind: "page", name: "Flows" }, by);
+      await open.patchCanvas(id, { op: "addFrames", frames: [frame("a")] }, ana);
+      return { open, id };
+    }
+    const move = (x: number): CanvasPatch => ({
+      op: "moveFrames",
+      frames: [{ id: "a", x, y: 0 }],
+    });
+    const stale = { code: "stale", message: expect.stringContaining("Someone else") };
+
+    it("refuses an undo of a move someone else has moved again, and keeps their value", async () => {
+      const { open, id } = await canvasWithFrame();
+      await open.patchCanvas(id, move(50), by);
+      await open.patchCanvas(id, move(200), ana);
+      await expect(open.undoCanvas(id, by)).rejects.toMatchObject(stale);
+      const [a] = (await open.canvases()).find((c) => c.id === id)!.frames;
+      expect(a!.x).toBe(200);
+      await expect(open.undoCanvas(id, by)).rejects.toMatchObject({ code: "not-found" });
+    });
+
+    it("refuses an undo of a resize or a text someone else has changed since", async () => {
+      const { open, id } = await canvasWithFrame();
+      const size = (width: number): CanvasPatch => ({
+        op: "resizeFrames",
+        frames: [{ id: "a", x: 0, y: 0, width, height: 100 }],
+      });
+      await open.patchCanvas(id, size(300), by);
+      await open.patchCanvas(id, size(500), ana);
+      await expect(open.undoCanvas(id, by)).rejects.toMatchObject(stale);
+
+      const text = { id: "t", x: 0, y: 0, width: 300, title: "Mine", body: "", author: by };
+      await open.patchCanvas(id, { op: "setText", text }, by);
+      await open.patchCanvas(id, { op: "setText", text: { ...text, title: "Ana's" } }, ana);
+      await expect(open.undoCanvas(id, by)).rejects.toMatchObject(stale);
+      const after = (await open.canvases()).find((c) => c.id === id)!;
+      expect(after.frames[0]!.width).toBe(500);
+      expect(after.texts[0]!.title).toBe("Ana's");
+    });
+
+    it("still undoes when someone changed a different property of the frame", async () => {
+      const { open, id } = await canvasWithFrame();
+      await open.patchCanvas(id, move(50), by);
+      await open.patchCanvas(id, { op: "renameFrame", frameId: "a", name: "Ana's" }, ana);
+      const canvas = await open.undoCanvas(id, by);
+      expect(canvas.frames[0]).toMatchObject({ x: 0, name: "Ana's" });
+    });
+
+    it("refuses a redo over a value someone else set after the undo", async () => {
+      const { open, id } = await canvasWithFrame();
+      await open.patchCanvas(id, move(50), by);
+      await open.undoCanvas(id, by);
+      await open.patchCanvas(id, move(200), ana);
+      await expect(open.undoCanvas(id, by, true)).rejects.toMatchObject(stale);
+      expect((await open.canvases()).find((c) => c.id === id)!.frames[0]!.x).toBe(200);
+    });
   });
 
   it("saves to disk, survives a reopen, and purges canvases removed over 30 days ago", async () => {

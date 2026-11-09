@@ -296,8 +296,15 @@ function fakeSdk() {
         out.push(message);
         wake?.();
       },
-      interrupt: vi.fn(async () => {
-        fake.emit(result({ subtype: "error_during_execution", is_error: true, errors: ["x"] }));
+      interrupt: vi.fn(async (_options?: { cancelQueued?: boolean }) => {
+        fake.emit(
+          result({
+            subtype: "error_during_execution",
+            is_error: true,
+            errors: ["x"],
+            user_message_uuid: fake.sent.at(-1)?.uuid,
+          }),
+        );
         return undefined;
       }),
       setModel: vi.fn(async () => {}),
@@ -338,6 +345,15 @@ function result(extra: object = {}): SDKMessage {
     ...extra,
   } as unknown as SDKMessage;
 }
+
+/** The result of a turn Stop cancelled, answering the message that started it. */
+const cancelled = (m: SDKUserMessage) =>
+  result({
+    subtype: "error_during_execution",
+    is_error: true,
+    errors: ["x"],
+    user_message_uuid: m.uuid,
+  });
 
 const textOf = (m: SDKUserMessage) => {
   const content = m.message.content;
@@ -579,6 +595,186 @@ describe("agents", () => {
     );
     expect(q.sent).toHaveLength(1);
     expect((await meta(thread.id)).queued).toHaveLength(1);
+  });
+
+  it("counts a steer once when the result already counted its turn", async () => {
+    const thread = await newThread("first");
+    const q = sdk.queries[0]!;
+    await agents.send(open, thread.id, turn("steer one"), "steer");
+    await agents.send(open, thread.id, turn("steer two"), "steer");
+    // One of the two steers was in the CLI's queue when the result was written.
+    q.emit(result({ queued_turn_count: 1 }));
+    q.emit({ type: "system", subtype: "init", session_id: "s1" } as unknown as SDKMessage);
+    q.emit(result());
+    await new Promise((r) => setTimeout(r, 20));
+    // The last steer's turn hasn't started: its result holds the thread open.
+    expect((await meta(thread.id)).running).toBe(true);
+  });
+
+  it("doesn't take a queued message's turn for a steer's", async () => {
+    const thread = await newThread("first");
+    const q = sdk.queries[0]!;
+    await agents.send(open, thread.id, turn("queued"), "queue");
+    q.emit(result());
+    await vi.waitFor(() => expect(q.sent).toHaveLength(2));
+    // A steer lands before the queued message's turn starts, then cuts it.
+    await agents.send(open, thread.id, turn("steer"), "steer");
+    q.emit({ type: "system", subtype: "init", session_id: "s1" } as unknown as SDKMessage);
+    q.emit(result());
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await meta(thread.id)).running).toBe(true);
+  });
+
+  it("keeps waiting when another steer arrives during a steer's wait", async () => {
+    await agents.close();
+    agents = createAgents({
+      store: {} as Store,
+      previews,
+      source,
+      query: sdk.query,
+      claudePath: async () => "/bin/claude",
+      idleMs: 50,
+      steerGraceMs: 80,
+    });
+    const thread = await newThread("first");
+    const q = sdk.queries[0]!;
+    await agents.send(open, thread.id, turn("steer one"), "steer");
+    q.emit(result());
+    await new Promise((r) => setTimeout(r, 50));
+    await agents.send(open, thread.id, turn("steer two"), "steer");
+    await new Promise((r) => setTimeout(r, 50));
+    expect((await meta(thread.id)).running).toBe(true);
+    q.emit({ type: "system", subtype: "init", session_id: "s1" } as unknown as SDKMessage);
+    q.emit(result());
+    await vi.waitFor(async () => expect((await meta(thread.id)).running).toBe(false));
+  });
+
+  it("takes a queued steer back on Stop, so it doesn't run after the thread says stopped", async () => {
+    const thread = await newThread("first");
+    const q = sdk.queries[0]!;
+    await agents.send(open, thread.id, turn("steer"), "steer");
+    await vi.waitFor(() => expect(q.sent).toHaveLength(2));
+    expect(q.sent[1]!.uuid).toBeDefined();
+    await agents.interrupt(open, thread.id);
+    expect(q.interrupt).toHaveBeenCalledWith({ cancelQueued: true });
+  });
+
+  it("keeps a message sent right after Stop running through the cancelled turn's result", async () => {
+    const thread = await newThread("first");
+    const q = sdk.queries[0]!;
+    await vi.waitFor(() => expect(q.sent).toHaveLength(1));
+    // The receipt comes before the cancelled result, as it does from the real CLI.
+    q.interrupt.mockImplementationOnce(async () => undefined);
+    await agents.interrupt(open, thread.id);
+    await agents.send(open, thread.id, turn("again"), "steer");
+    await vi.waitFor(() => expect(q.sent).toHaveLength(2));
+    q.emit(cancelled(q.sent[0]!));
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await meta(thread.id)).running).toBe(true);
+    q.emit(result({ user_message_uuid: q.sent[1]!.uuid }));
+    await vi.waitFor(async () => expect((await meta(thread.id)).running).toBe(false));
+  });
+
+  it("doesn't send the queue when the results of a cut and a cancelled turn follow Stop", async () => {
+    const thread = await newThread("first");
+    const q = sdk.queries[0]!;
+    await agents.send(open, thread.id, turn("steer"), "steer");
+    await agents.send(open, thread.id, turn("later"), "queue");
+    await vi.waitFor(() => expect(q.sent).toHaveLength(2));
+    let receipt!: () => void;
+    q.interrupt.mockImplementationOnce(
+      () => new Promise<undefined>((r) => (receipt = () => r(undefined))),
+    );
+    const stopping = agents.interrupt(open, thread.id);
+    await vi.waitFor(() => expect(q.interrupt).toHaveBeenCalled());
+    // The steer cut the first turn just before Stop: that result waits behind Stop.
+    q.emit(result({ user_message_uuid: q.sent[0]!.uuid }));
+    await new Promise((r) => setTimeout(r, 10));
+    receipt();
+    await stopping;
+    q.emit(cancelled(q.sent[1]!));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(q.sent).toHaveLength(2);
+    const after = await meta(thread.id);
+    expect(after.queued.map((m) => m.text)).toEqual(["later"]);
+    expect(after.running).toBe(false);
+  });
+
+  it("sends the queue normally after a Stop during a steer's wait", async () => {
+    const thread = await newThread("first");
+    const q = sdk.queries[0]!;
+    await agents.send(open, thread.id, turn("steer"), "steer");
+    await vi.waitFor(() => expect(q.sent).toHaveLength(2));
+    q.emit(result({ user_message_uuid: q.sent[0]!.uuid }));
+    await new Promise((r) => setTimeout(r, 10));
+    // The turn is over and the steer's never starts, so this Stop has no cancelled result.
+    q.interrupt.mockImplementationOnce(async () => undefined);
+    await agents.interrupt(open, thread.id);
+    await agents.send(open, thread.id, turn("again"), "steer");
+    await agents.send(open, thread.id, turn("queued"), "queue");
+    await vi.waitFor(() => expect(q.sent).toHaveLength(3));
+    q.emit(result({ user_message_uuid: q.sent[2]!.uuid }));
+    await vi.waitFor(() => expect(q.sent.at(-1) && textOf(q.sent.at(-1)!)).toBe("queued"));
+    expect((await meta(thread.id)).queued).toEqual([]);
+  });
+
+  it("keeps a queued message when the session dies during a steer's wait", async () => {
+    await agents.close();
+    agents = createAgents({
+      store: {} as Store,
+      previews,
+      source,
+      query: sdk.query,
+      claudePath: async () => "/bin/claude",
+      idleMs: 50,
+      steerGraceMs: 20,
+    });
+    const thread = await newThread("first");
+    const q = sdk.queries[0]!;
+    await agents.send(open, thread.id, turn("steer"), "steer");
+    await agents.send(open, thread.id, turn("later"), "queue");
+    q.emit(result());
+    await new Promise((r) => setTimeout(r, 5));
+    q.close();
+    await vi.waitFor(async () => expect((await meta(thread.id)).running).toBe(false));
+    await new Promise((r) => setTimeout(r, 40));
+    const after = await meta(thread.id);
+    expect(after.queued.map((m) => m.text)).toEqual(["later"]);
+    expect(after.running).toBe(false);
+  });
+
+  it("closes an idle session whose next message was refused", async () => {
+    await agents.close();
+    agents = createAgents({
+      store: {} as Store,
+      previews,
+      source,
+      query: sdk.query,
+      claudePath: async () => "/bin/claude",
+      idleMs: 100,
+    });
+    const thread = await newThread("first");
+    const q = sdk.queries[0]!;
+    q.emit(result());
+    await vi.waitFor(async () => expect((await meta(thread.id)).running).toBe(false));
+    q.setModel.mockRejectedValueOnce(new Error("no such model"));
+    await expect(
+      agents.send(open, thread.id, turn("again", { model: "nope" }), "steer"),
+    ).rejects.toThrow("no such model");
+    await vi.waitFor(() => expect(q.closed).toBe(true), { timeout: 1000 });
+  });
+
+  it("closes a new session whose first message couldn't be built", async () => {
+    const t = turn("first");
+    const thread = await startThread(open, {}, t);
+    const broken: OpenDesign = {
+      ...open,
+      canvases: async () => {
+        throw new Error("the design's files are gone");
+      },
+    };
+    await expect(agents.send(broken, thread.id, t, "steer")).rejects.toThrow("files are gone");
+    await vi.waitFor(() => expect(sdk.queries[0]!.closed).toBe(true), { timeout: 1000 });
   });
 
   it("closes an idle session and resumes it on the next message", async () => {
@@ -1130,6 +1326,91 @@ describe("agents", () => {
     expect((await canUse("Edit", write, opts))?.behavior).toBe("deny");
   });
 
+  it("revokes move_to_prod when a steer cuts the turn, and still settles if its turn never starts", async () => {
+    await agents.close();
+    agents = createAgents({
+      store: {} as Store,
+      previews,
+      source,
+      query: sdk.query,
+      claudePath: async () => "/bin/claude",
+      idleMs: 50,
+      steerGraceMs: 150,
+    });
+    const canvas = await open.createCanvas({ kind: "prototype", name: "P" }, person);
+    await open.patchCanvas(
+      canvas.id,
+      {
+        op: "addFrames",
+        frames: [
+          {
+            id: "f1",
+            name: "Cart",
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+            source: { kind: "file", file: "a.tsx" },
+          },
+        ],
+      },
+      person,
+    );
+    const thread = await newThread("Ship it", canvas.id);
+    const q = sdk.queries[0]!;
+    const canUse = q.options.canUseTool!;
+    const opts = { signal: new AbortController().signal, toolUseID: "t", requestId: "r" };
+    const write = { file_path: path.join(root, "src/App.tsx") };
+    await (
+      await connectTools(q)
+    )("move_to_prod", { frameIds: ["f1"] });
+    expect((await canUse("Edit", write, opts))?.behavior).toBe("allow");
+
+    await agents.send(open, thread.id, turn("also do this"), "steer");
+    q.emit(result());
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await meta(thread.id)).running).toBe(true);
+    expect((await canUse("Edit", write, opts))?.behavior).toBe("deny");
+    await vi.waitFor(async () => expect((await meta(thread.id)).settledAt).toBeGreaterThan(0));
+  });
+
+  it("revokes a move_to_prod that lands while Stop winds the turn down", async () => {
+    const canvas = await open.createCanvas({ kind: "prototype", name: "P" }, person);
+    await open.patchCanvas(
+      canvas.id,
+      {
+        op: "addFrames",
+        frames: [
+          {
+            id: "f1",
+            name: "Cart",
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+            source: { kind: "file", file: "a.tsx" },
+          },
+        ],
+      },
+      person,
+    );
+    const thread = await newThread("Ship it", canvas.id);
+    const q = sdk.queries[0]!;
+    await vi.waitFor(() => expect(q.sent).toHaveLength(1));
+    const canUse = q.options.canUseTool!;
+    const opts = { signal: new AbortController().signal, toolUseID: "t", requestId: "r" };
+    const write = { file_path: path.join(root, "src/App.tsx") };
+    q.interrupt.mockImplementationOnce(async () => undefined);
+    await agents.interrupt(open, thread.id);
+    await (
+      await connectTools(q)
+    )("move_to_prod", { frameIds: ["f1"] });
+    q.emit(cancelled(q.sent[0]!));
+    await vi.waitFor(async () =>
+      expect((await canUse("Edit", write, opts))?.behavior).toBe("deny"),
+    );
+  });
+
   it("spawns a child thread that starts on its prompt", async () => {
     const thread = await newThread("Parent");
     const call = await connectTools(sdk.queries[0]!);
@@ -1229,7 +1510,7 @@ describe("setup threads", () => {
     const ensure = vi.fn(async () => ({ url: "http://127.0.0.1:5555" }));
     const agents = agentsWith(
       { finishSetup, remove, open: async () => ({ design: { ...web } }) as unknown as OpenDesign },
-      { stop, ensure },
+      { stop, ensure, remove: async () => {} },
     );
     await startIn(open, agents);
     const q = sdk.queries[0]!;
@@ -1261,6 +1542,51 @@ describe("setup threads", () => {
     expect(q.closed).toBe(true);
     await agents.close();
   });
+
+  it.each(["the session dies", "the person presses Stop"])(
+    "removes a replaced setup design when %s",
+    async (how) => {
+      const open = await openAt(workspace, {
+        id: "setup",
+        router: "none",
+        styling: "inline",
+        brandDir: "assets/brand",
+        workspace,
+        setup: true,
+      });
+      const web: DesignEntry = {
+        id: "web",
+        name: "@acme/web",
+        root: path.join(workspace, "apps/web"),
+        origin: "connected",
+        updatedAt: 1,
+        workspace,
+        app: "web",
+      };
+      const remove = vi.fn(async () => {});
+      const agents = agentsWith(
+        {
+          finishSetup: async () => ({ apps: [web], next: web, replaced: true }) as never,
+          remove,
+          open: async () => ({ design: { ...web } }) as unknown as OpenDesign,
+        },
+        {
+          stop: async () => {},
+          remove: async () => {},
+          ensure: async () => ({ url: "http://127.0.0.1:5555" }) as never,
+        },
+      );
+      const thread = await startIn(open, agents);
+      const q = sdk.queries[0]!;
+      await (
+        await connectTools(q)
+      )("finish_setup", {});
+      if (how === "the session dies") q.close();
+      else await agents.interrupt(open, thread.id);
+      await vi.waitFor(() => expect(remove).toHaveBeenCalledWith("setup"));
+      await agents.close();
+    },
+  );
 
   it("restarts a connected design's preview and reports why it still fails", async () => {
     const open = await openAt(workspace, {});

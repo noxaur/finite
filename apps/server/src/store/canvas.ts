@@ -149,8 +149,74 @@ function byId(canvas: Canvas, ids: string[]): void {
   }
 }
 
-/** A patch and the canvas it applies to. */
-export type Step = { canvasId: string; patch: CanvasPatch };
+/**
+ * A patch and the canvas it applies to. An undo or redo also carries `found`, what `patch` should
+ * find there, from `overwritten`.
+ */
+export type Step = { canvasId: string; patch: CanvasPatch; found?: unknown };
+
+/** What `patch` would replace on `canvas`, to tell whether someone changed it since. */
+export function overwritten(canvas: Canvas, patch: CanvasPatch): unknown {
+  const frames = (ids: string[], read: (frame: Frame) => unknown) =>
+    ids.map((id) => {
+      const frame = canvas.frames.find((f) => f.id === id);
+      return frame && read(frame);
+    });
+  const at = ({ x, y }: { x: number; y: number }) => ({ x, y });
+  const text = (id: string) => canvas.texts.find((t) => t.id === id);
+  const section = (id: string) => canvas.sections.find((s) => s.id === id);
+  const slice = (id: string) => canvas.slices.find((s) => s.id === id);
+  switch (patch.op) {
+    case "moveFrames":
+      return frames(
+        patch.frames.map((f) => f.id),
+        at,
+      );
+    case "resizeFrames":
+      return frames(
+        patch.frames.map((f) => f.id),
+        ({ x, y, width, height, hug }) => ({ x, y, width, height, hug: hug ?? false }),
+      );
+    case "removeFrames":
+      return frames(patch.frameIds, (frame) => frame);
+    case "renameFrame":
+      return frames([patch.frameId], (frame) => frame.name);
+    case "setFrameSources":
+      return frames(
+        patch.frames.map((f) => f.id),
+        (frame) => frame.source,
+      );
+    case "setText":
+      return text(patch.text.id);
+    case "removeText":
+      return text(patch.textId);
+    case "setSection":
+      return section(patch.section.id);
+    case "removeSection":
+      return section(patch.sectionId);
+    case "moveSection": {
+      const box = section(patch.sectionId);
+      return {
+        section: box && at(box),
+        frames: frames(
+          patch.frames.map((f) => f.id),
+          at,
+        ),
+        texts: patch.texts.map(({ id }) => {
+          const label = text(id);
+          return label && at(label);
+        }),
+      };
+    }
+    case "setSlice":
+      return slice(patch.slice.id);
+    case "removeSlice":
+      return slice(patch.sliceId);
+    case "addFrames":
+    case "moveFramesTo":
+      return undefined;
+  }
+}
 
 /** The patch that takes `patch` back, given the canvas before it was applied. */
 export function inversePatch(before: Canvas, patch: CanvasPatch): Step {

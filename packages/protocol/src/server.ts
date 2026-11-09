@@ -114,6 +114,10 @@ export interface Previews {
   /** Where an iframe loads a frame from. */
   frameUrl(designId: string, source: FrameSource): string;
   stop(designId: string): Promise<void>;
+  /** Stops the design's dev server for good: the design is going away, so `ensure` refuses it. */
+  remove(designId: string): Promise<void>;
+  /** A client views the design, so its dev server stays up. */
+  watch(designId: string): void;
   /** Nobody views the design any more: stops its dev server after a grace period. */
   idle(designId: string): void;
   on(designId: string, fn: (event: PreviewEvent) => void): Unsubscribe;

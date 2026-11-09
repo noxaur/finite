@@ -46,7 +46,8 @@ export interface PanelRun {
 }
 
 export interface StyleEditor {
-  begin(options?: { onLost?: (reason: string) => void }): Draft;
+  /** `onLost` runs when something else takes over, while the draft can still preview and commit. */
+  begin(options?: { onLost?: () => void }): Draft;
   drive(e: PointerEvent, element: HTMLElement, run: PanelRun): () => void;
   commit(edits: ReadonlyArray<StyleEdit>): Promise<void>;
 }
@@ -61,7 +62,8 @@ export function createStyleEditor(
   locate: (id: string) => Located | undefined,
   send: (groups: Array<{ locs: Loc[]; styles: Record<string, string | null> }>) => Promise<unknown>,
 ): StyleEditor {
-  let open: { edits: ReadonlyArray<StyleEdit> | null } | null = null;
+  let open: { edits: ReadonlyArray<StyleEdit> | null; onLost: (() => void) | undefined } | null =
+    null;
   let shown = new Map<string, Located>();
 
   const show = (edits: ReadonlyArray<StyleEdit> | null) => {
@@ -95,6 +97,8 @@ export function createStyleEditor(
   };
 
   const finishOpen = () => {
+    // Its owner may know better than the last preview what it ends on.
+    open?.onLost?.();
     const o = open;
     open = null;
     if (o?.edits) void commit(o.edits);
@@ -102,9 +106,12 @@ export function createStyleEditor(
   };
 
   const editor: StyleEditor = {
-    begin() {
+    begin(options) {
       finishOpen();
-      const mine = { edits: null as ReadonlyArray<StyleEdit> | null };
+      const mine = {
+        edits: null as ReadonlyArray<StyleEdit> | null,
+        onLost: options?.onLost,
+      };
       open = mine;
       const live = () => open === mine;
       return {

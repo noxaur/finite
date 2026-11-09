@@ -276,7 +276,7 @@ export function finiteMcpServer(ctx: McpContext): McpServer {
             throw new Refused(`Removing a design takes its exact id, and ${id} isn't one.`);
           }
           // Sessions working in the design stop first, so none writes into a folder on its way out.
-          await Promise.all([modules.previews.stop(id), modules.agents.stopDesign(id)]);
+          await Promise.all([modules.previews.remove(id), modules.agents.stopDesign(id)]);
           await modules.store.remove(id);
           return json({ removed: id });
         }

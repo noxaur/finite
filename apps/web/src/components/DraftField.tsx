@@ -37,17 +37,11 @@ export function useDraftField(
   const draft = useRef<Draft | null>(null);
   const latest = useRef(toEdits);
   latest.current = toEdits;
-  // A field that goes away keeps what was typed, as leaving it does.
-  useEffect(() => () => draft.current?.commit(), []);
 
   const show = (text: string) => {
     setTyping(text);
-    draft.current ??= editor.begin({
-      onLost: () => {
-        draft.current = null;
-        setTyping(null);
-      },
-    });
+    // A draft something else takes over keeps what was typed, as leaving the field does.
+    draft.current ??= editor.begin({ onLost: () => finishRef.current(true) });
     // What's typed stays as typed; the design gets it held to the limits.
     draft.current.preview(latest.current(clampedText(text, min, max), false));
   };
@@ -61,6 +55,10 @@ export function useDraftField(
     if (final) open?.preview(final);
     open?.commit();
   };
+  const finishRef = useRef(finish);
+  finishRef.current = finish;
+  // A field that goes away keeps what was typed, as leaving it does.
+  useEffect(() => () => finishRef.current(true), []);
   return {
     typing: typing !== null,
     props: {

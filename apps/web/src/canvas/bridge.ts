@@ -17,7 +17,7 @@ import {
   type VectorInfo,
 } from "@finite/protocol";
 
-/** How long a request waits for the frame before it gives up. */
+/** How long a request waits for the frame, its hello included, before it gives up. */
 const TIMEOUT_MS = 5000;
 
 type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void };
@@ -56,27 +56,40 @@ function listen() {
 /**
  * The parent half of the bridge for one iframe. The frame says hello on every load (a reload or
  * a full HMR reload included); each hello opens a new MessageChannel, and requests made before it
- * wait for it. Requests in flight when the frame reloads are refused.
+ * wait for it. Requests in flight when the frame reloads are refused: the frame says when it's
+ * leaving, and a next hello refuses anything a frame left without saying so.
  */
 export function connectFrame(iframe: HTMLIFrameElement, frameId: string): FrameBridge {
   listen();
   let port: MessagePort | null = null;
-  let waiting: Array<() => void> = [];
+  /** Requests made before a hello, by id. Each is in `pending` too, so its timer and `close` reach it. */
+  const waiting = new Map<number, () => void>();
   let nextId = 0;
   const pending = new Map<number, Pending>();
   const listeners = new Set<(event: BridgeEvent) => void>();
   let closed = false;
 
   const dropPending = (reason: string) => {
-    for (const p of pending.values()) p.reject(new Error(reason));
-    pending.clear();
+    for (const [id, p] of pending) {
+      if (waiting.has(id)) continue;
+      pending.delete(id);
+      p.reject(new Error(reason));
+    }
   };
 
   /** Whether this document said hello; a load without one (it said it too early) connects anyway. */
   let greeted = false;
-  const onHello = (source: Window) => {
+  /** `port` came from that load, so its document's own hello may still be on the way. */
+  let helloDue = false;
+  const onHello = (source: Window, fromLoad = false) => {
     if (closed) return;
+    // Not `greeted`: if this was a next document's hello after all, its load connects it.
+    if (port && helloDue && !fromLoad) {
+      helloDue = false;
+      return;
+    }
     greeted = true;
+    helloDue = fromLoad;
     port?.close();
     dropPending("The frame reloaded");
     const channel = new MessageChannel();
@@ -85,6 +98,14 @@ export function connectFrame(iframe: HTMLIFrameElement, frameId: string): FrameB
       const parsed = FrameMessage.safeParse(m.data);
       if (!parsed.success) return;
       const msg = parsed.data;
+      if (msg.type === "leaving") {
+        port?.close();
+        port = null;
+        greeted = false;
+        helloDue = false;
+        dropPending("The frame reloaded");
+        return;
+      }
       if (msg.type === "reply" || msg.type === "refused") {
         const p = pending.get(msg.id);
         pending.delete(msg.id);
@@ -95,9 +116,8 @@ export function connectFrame(iframe: HTMLIFrameElement, frameId: string): FrameB
       for (const fn of listeners) fn(msg);
     };
     source.postMessage({ type: BRIDGE_CONNECT, frameId }, "*", [channel.port2]);
-    const ready = waiting;
-    waiting = [];
-    for (const fn of ready) fn();
+    for (const fn of waiting.values()) fn();
+    waiting.clear();
   };
 
   const register = () => {
@@ -109,7 +129,7 @@ export function connectFrame(iframe: HTMLIFrameElement, frameId: string): FrameB
   // Module scripts run before `load`, so a frame that said hello before we listened is caught here.
   const onLoad = () => {
     register();
-    if (!greeted && iframe.contentWindow) onHello(iframe.contentWindow);
+    if (!greeted && iframe.contentWindow) onHello(iframe.contentWindow, true);
     greeted = false;
   };
   iframe.addEventListener("load", onLoad);
@@ -120,26 +140,25 @@ export function connectFrame(iframe: HTMLIFrameElement, frameId: string): FrameB
   ): Promise<BridgeResult<K>> => {
     if (closed) return Promise.reject(new Error("The frame is gone"));
     return new Promise((resolve, reject) => {
-      const go = () => {
-        const id = ++nextId;
-        const timer = setTimeout(() => {
-          pending.delete(id);
-          reject(new Error("The frame didn't answer"));
-        }, TIMEOUT_MS);
-        pending.set(id, {
-          resolve: (v) => {
-            clearTimeout(timer);
-            resolve(v as BridgeResult<K>);
-          },
-          reject: (e) => {
-            clearTimeout(timer);
-            reject(e);
-          },
-        });
-        port!.postMessage({ type, id, ...params });
-      };
+      const id = ++nextId;
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        waiting.delete(id);
+        reject(new Error("The frame didn't answer"));
+      }, TIMEOUT_MS);
+      pending.set(id, {
+        resolve: (v) => {
+          clearTimeout(timer);
+          resolve(v as BridgeResult<K>);
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+      });
+      const go = () => port!.postMessage({ type, id, ...params });
       if (port) go();
-      else waiting.push(go);
+      else waiting.set(id, go);
     });
   };
 
@@ -165,6 +184,7 @@ export function connectFrame(iframe: HTMLIFrameElement, frameId: string): FrameB
       iframe.removeEventListener("load", onLoad);
       for (const [win, fn] of byWindow) if (fn === onHello) byWindow.delete(win);
       port?.close();
+      waiting.clear();
       dropPending("The frame is gone");
       if (live.get(frameId) === bridge) {
         live.delete(frameId);

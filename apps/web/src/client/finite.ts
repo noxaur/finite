@@ -117,6 +117,23 @@ const BACKOFF_MS = [250, 500, 1000, 2000, 5000];
 const NO_DESIGN: DesignView = { state: null, error: null };
 const NO_THREAD: ThreadView = { events: [], streaming: "", loaded: false };
 
+/**
+ * Partial text beside the finished turn is a second, cut-off copy of the reply.
+ * A later partial stays: its `text` or `result` is not in the history yet.
+ */
+function streamingAfter(view: ThreadView, history: readonly ThreadEvent[]): string {
+  if (view.streaming === "") return "";
+  const known = new Set(view.events.map((event) => JSON.stringify(event)));
+  const tail = history.findLastIndex((event) => event.type === "user") + 1;
+  const missed = history
+    .slice(tail)
+    .some(
+      (event) =>
+        (event.type === "text" || event.type === "result") && !known.has(JSON.stringify(event)),
+    );
+  return missed ? "" : view.streaming;
+}
+
 export type Finite = ReturnType<typeof createFinite>;
 
 export function createFinite(options: FiniteOptions) {
@@ -185,11 +202,12 @@ export function createFinite(options: FiniteOptions) {
     }
     socket = ws;
     ws.onopen = () => {
-      attempt = 0;
       const rid = `r${nextRid++}`;
       track(rid, "hello")
         .then(() => {
           if (socket !== ws) return;
+          // Reset only once hello is accepted, so a drop before that still backs off.
+          attempt = 0;
           ready = true;
           setStatus("open");
           for (const w of waiting.splice(0)) w.send();
@@ -216,7 +234,12 @@ export function createFinite(options: FiniteOptions) {
       for (const [rid, p] of pending) {
         clearTimeout(p.timer);
         pending.delete(rid);
-        p.reject(new FiniteError("Lost the connection to Finite. Try again in a moment."));
+        // The server may have run it and lost only the reply, so this can't claim it failed.
+        p.reject(
+          new FiniteError(
+            "Lost the connection to Finite before it answered. This may have gone through, so check before you try again.",
+          ),
+        );
       }
       retry();
     };
@@ -243,7 +266,12 @@ export function createFinite(options: FiniteOptions) {
       const timer = setTimeout(
         () => {
           pending.delete(rid);
-          reject(new FiniteError(`Finite didn't answer ${type} in time. Try again.`));
+          // A slow server can still run it, and `receive` drops a reply that comes after this.
+          reject(
+            new FiniteError(
+              `Finite didn't answer ${type} in time. It may still have gone through, so check before you try again.`,
+            ),
+          );
         },
         SLOW.has(type) ? Math.max(timeoutMs, SLOW_TIMEOUT_MS) : timeoutMs,
       );
@@ -377,7 +405,11 @@ export function createFinite(options: FiniteOptions) {
     set.add(buffer);
     try {
       const snapshot = await request("subscribe", { designId });
-      if (!holds.has(designId)) return;
+      if (!holds.has(designId)) {
+        // The screen let go while subscribe waited. Drop the subscription this reply created.
+        request("unsubscribe", { designId }).catch(() => {});
+        return;
+      }
       // Replaying in arrival order is safe: every design event replaces what it names.
       views.set(designId, { state: buffer.reduce(reduceDesign, snapshot), error: null });
     } catch (error) {
@@ -434,12 +466,12 @@ export function createFinite(options: FiniteOptions) {
       const live = view.events.filter((e) => !stored.has(JSON.stringify(e)));
       threads.set(threadId, {
         events: [...history, ...live],
-        streaming: view.streaming,
+        streaming: streamingAfter(view, history),
         loaded: true,
       });
     } catch {
-      const view = threads.get(threadId);
-      if (view) threads.set(threadId, { ...view, loaded: true });
+      // The history never arrived. Leave `loaded` false: a drop asks again on
+      // reconnect, and a refusal must not show the thread as empty.
     }
     notify();
   }

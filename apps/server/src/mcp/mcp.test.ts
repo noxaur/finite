@@ -76,6 +76,8 @@ async function start(overrides: { idleMs?: number; styling?: Design["styling"] }
     on: () => () => {},
     idle,
     stop: async () => {},
+    remove: async () => {},
+    watch: () => {},
     reportError: () => {},
     close: async () => {},
   } as unknown as Previews;

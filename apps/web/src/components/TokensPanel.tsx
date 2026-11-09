@@ -185,7 +185,7 @@ function NewToken({
   );
 }
 
-function ColorSwatch({
+export function ColorSwatch({
   name,
   color,
   onPick,
@@ -199,10 +199,13 @@ function ColorSwatch({
   // What the picker shows until it closes: a token is saved once, not on every drag.
   const [picked, setPicked] = useState<string | null>(null);
   const kept = useRef<string | null>(null);
+  // `close` saves the pick, and the picker finishes its open gesture only after that, as it unmounts.
+  const closed = useRef(false);
   const parsed = typeof document === "undefined" ? undefined : hexOf(picked ?? color);
   const toColor = (pick: ColorPick) =>
     pick.alpha < 100 ? setAlpha(pick.hex, pick.alpha) : pick.hex;
   const close = () => {
+    closed.current = true;
     setOpen(false);
     setPicked(null);
     kept.current = null;
@@ -216,7 +219,11 @@ function ColorSwatch({
         aria-label={`Pick a color for ${name}`}
         aria-haspopup="dialog"
         aria-expanded={open}
-        onClick={() => (open ? close() : setOpen(true))}
+        onClick={() => {
+          if (open) return close();
+          closed.current = false;
+          setOpen(true);
+        }}
         {...stylex.props(styles.swatch, open && styles.swatchOpen)}
         style={{ background: picked ?? color }}
       />
@@ -229,6 +236,7 @@ function ColorSwatch({
           edit={{
             preview: (pick) => setPicked(toColor(pick)),
             commit: (pick) => {
+              if (closed.current) return;
               kept.current = toColor(pick);
               setPicked(kept.current);
             },

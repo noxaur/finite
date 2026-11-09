@@ -94,6 +94,8 @@ function serverOrigin(): Promise<string> {
 
 async function startServer(): Promise<string> {
   const [port, PATH] = await Promise.all([freePort(), (shellPath ??= loginShellPath())]);
+  // A quit that began during the awaits has already let the app exit, so a server started now would outlive it.
+  if (quitting) throw new Error("Finite is quitting");
   spawnServer(port, PATH);
   const url = `http://127.0.0.1:${port}`;
   await waitFor(`${url}/api/health`);
@@ -108,7 +110,7 @@ async function startServer(): Promise<string> {
 function spawnServer(port: number, PATH: string) {
   const { serverEntry, staticDir } = resources();
   // Electron's own binary, run as plain Node: no second runtime to ship.
-  server = spawn(process.execPath, [serverEntry], {
+  const child = spawn(process.execPath, [serverEntry], {
     env: {
       ...process.env,
       PATH,
@@ -119,7 +121,9 @@ function spawnServer(port: number, PATH: string) {
     },
     stdio: "inherit",
   });
-  server.once("exit", (code, signal) => {
+  server = child;
+  /** The server stopped, or never started: `spawn` fails with ENOENT or EAGAIN and emits `error`, never `exit`. */
+  const stopped = (code: number | null, signal: NodeJS.Signals | null) => {
     server = undefined;
     if (quitting) return;
     const next = afterStop(stops, Date.now());
@@ -134,6 +138,12 @@ function spawnServer(port: number, PATH: string) {
       `It stopped ${stops.length} times in a minute (last exit: code ${code}, signal ${signal}). Your designs are saved. Finite will quit; try opening it again.`,
     );
     app.quit();
+  };
+  child.once("exit", stopped);
+  child.on("error", (error) => {
+    console.error("Finite's server hit an error:", error);
+    // Without a pid the process never started, so no `exit` will follow.
+    if (child.pid === undefined) stopped(null, null);
   });
 }
 

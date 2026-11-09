@@ -45,6 +45,8 @@ export function focusComposer(text?: string): void {
 }
 
 interface Attachment {
+  /** Tells this chip apart from another upload of a file with the same name. */
+  readonly id: number;
   readonly name: string;
   /** The stored path, once uploaded. */
   readonly path: string | null;
@@ -80,6 +82,7 @@ export function Composer({
   const box = useRef<HTMLTextAreaElement>(null);
   const card = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const nextUpload = useRef(0);
 
   useEffect(() => setOpen(!pill), [pill]);
 
@@ -126,7 +129,8 @@ export function Composer({
 
   const upload = async (list: FileList) => {
     for (const file of Array.from(list)) {
-      setFiles((f) => [...f, { name: file.name, path: null }]);
+      const id = nextUpload.current++;
+      setFiles((f) => [...f, { id, name: file.name, path: null }]);
       try {
         const body = new FormData();
         body.append("file", file, file.name);
@@ -137,11 +141,9 @@ export function Composer({
         const json = (await res.json()) as { path?: string; reason?: string };
         if (!res.ok || !json.path) throw new Error(json.reason ?? `Upload failed (${res.status})`);
         const path = json.path;
-        setFiles((f) =>
-          f.map((a) => (a.name === file.name && a.path === null ? { ...a, path } : a)),
-        );
+        setFiles((f) => f.map((a) => (a.id === id ? { ...a, path } : a)));
       } catch (e) {
-        setFiles((f) => f.filter((a) => !(a.name === file.name && a.path === null)));
+        setFiles((f) => f.filter((a) => a.id !== id));
         toast(`Couldn't attach ${file.name}: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
@@ -162,7 +164,7 @@ export function Composer({
         fast,
         mode: sendModeFor(running, defaultMode, alt),
       });
-      setText("");
+      setText((now) => (now === text ? "" : now));
       setFiles([]);
       selectionStore.set([]);
       // The thread now runs with what was sent; a new thread starts from the defaults again.
@@ -220,10 +222,7 @@ export function Composer({
               </span>
             ))}
             {files.map((f, i) => (
-              <span
-                key={`${f.name}:${i}`}
-                {...stylex.props(styles.chip, !f.path && styles.uploading)}
-              >
+              <span key={f.id} {...stylex.props(styles.chip, !f.path && styles.uploading)}>
                 <Icon name="paperclip" size={12} />
                 <span {...stylex.props(styles.chipText)}>{f.name}</span>
                 <button
@@ -413,7 +412,7 @@ function QueuedChip({
         variant="ghost"
         size="small"
         onClick={async () => {
-          await edit(null);
+          if (!(await edit(null))) return;
           await finite
             .request("thread.send", {
               designId,

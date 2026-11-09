@@ -63,15 +63,34 @@ export function textRootOf(hit: Hit): HitElement {
 
 type Read = Awaited<ReturnType<ToolHost["readInline"]>>;
 
+/** The canvases with a text editor on its way, which takes a file read and two bridge trips. */
+const opening = new WeakSet<ToolHost>();
+
 /**
  * Opens the rich text editor on the text under `hit`. Returns whether it opened; a quiet caller
- * has something else to do when it can't, and everyone else hears why.
+ * has something else to do when it can't, and everyone else hears why. Another open already under
+ * way counts as opened: a second box would replace the first and leave its element hidden.
  */
 export async function editText(
   host: ToolHost,
   frame: Frame,
   hit: Hit,
   opts: { quiet?: boolean } = {},
+): Promise<boolean> {
+  if (opening.has(host)) return true;
+  opening.add(host);
+  try {
+    return await openEditor(host, frame, hit, opts);
+  } finally {
+    opening.delete(host);
+  }
+}
+
+async function openEditor(
+  host: ToolHost,
+  frame: Frame,
+  hit: Hit,
+  opts: { quiet?: boolean },
 ): Promise<boolean> {
   const bridge = host.bridge(frame.id);
   if (!bridge) return false;

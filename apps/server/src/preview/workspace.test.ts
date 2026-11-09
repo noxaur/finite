@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import type { Design, PreviewEvent, Previews } from "@finite/protocol";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
-import { prepareFixture } from "./fixtures.ts";
+import { prepareFixture, viewed } from "./fixtures.ts";
 import { createPreviews } from "./index.ts";
 import { createWorkspaces } from "./workspace.ts";
 
@@ -86,7 +86,7 @@ describe("a finite.json workspace", () => {
     config.setup.push("echo ran >> setup-runs.txt");
     config.services.api.run = `echo $$ >> api-starts.txt; ${config.services.api.run}`;
     fs.writeFileSync(file(), JSON.stringify(config));
-    previews = createPreviews({ host: "127.0.0.1" });
+    previews = viewed(createPreviews({ host: "127.0.0.1" }));
     cleanups.push(() => previews.close());
     previews.on("web-a", (event) => events.push(event));
     previews.on("web-b", (event) => others.push(event));

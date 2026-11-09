@@ -7,6 +7,7 @@ import {
   type Query,
   query as sdkQuery,
   type SDKMessage,
+  type SDKResultMessage,
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import {
@@ -38,7 +39,10 @@ import { boardDir, canvasServer, LABEL_OFFSET, layoutRow } from "./tools.ts";
 
 /** The part of the SDK's `Query` the agents use; tests pass a fake. */
 export type QueryLike = AsyncIterable<SDKMessage> &
-  Pick<Query, "interrupt" | "setModel" | "applyFlagSettings" | "supportedModels" | "close">;
+  Pick<Query, "setModel" | "applyFlagSettings" | "supportedModels" | "close"> & {
+    /** The SDK honors `cancelQueued` (CLI capability `interrupt_cancel_queued_v1`) but doesn't type it. */
+    interrupt(options?: { cancelQueued?: boolean }): ReturnType<Query["interrupt"]>;
+  };
 export type QueryFn = (params: {
   prompt: AsyncIterable<SDKUserMessage>;
   options: Options;
@@ -231,7 +235,6 @@ type Live = {
   prodWrite: boolean;
   /** finish_setup replaced this setup design with the apps: it's removed when the turn ends. */
   replaced: boolean;
-  interrupted: boolean;
   closing: boolean;
   /** The session reported its id (so resuming worked). */
   started: boolean;
@@ -250,6 +253,10 @@ type Live = {
   steerWait: NodeJS.Timeout | undefined;
   /** A result came and no turn has started since. */
   betweenTurns: boolean;
+  /** The uuids of the messages sent since the last Stop. */
+  sent: Set<string>;
+  /** The uuids of the messages sent before a Stop: a result answering one changes nothing. */
+  stopped: Set<string>;
 };
 
 export function createAgents(options: AgentsOptions): Agents {
@@ -312,7 +319,6 @@ export function createAgents(options: AgentsOptions): Agents {
       running: false,
       prodWrite: false,
       replaced: false,
-      interrupted: false,
       closing: false,
       started: false,
       idle: undefined,
@@ -321,6 +327,8 @@ export function createAgents(options: AgentsOptions): Agents {
       steers: 0,
       steerWait: undefined,
       betweenTurns: false,
+      sent: new Set(),
+      stopped: new Set(),
     };
     const fence = (name: string, toolInput: Record<string, unknown>) =>
       policy(name, toolInput, {
@@ -453,20 +461,27 @@ export function createAgents(options: AgentsOptions): Agents {
           live.steerWait = undefined;
         }
         const now = Date.now();
-        // A turn a steer cut short isn't a failure.
-        for (const event of map(message, now, live.interrupted || live.steers > 0)) {
+        const stopped = message.type === "result" && answersStop(live, message);
+        // A turn a steer cut short or Stop cancelled isn't a failure.
+        for (const event of map(message, now, stopped || !live.running || live.steers > 0)) {
           await open.appendEvent(threadId, event);
         }
         if (message.type === "result") {
-          live.betweenTurns = true;
           const ok = message.subtype === "success" && !message.is_error;
           const queuedTurns = message.queued_turn_count ?? 0;
           const more = queuedTurns > 0;
+          // A turn this result counted is not a steer's to count again when it starts.
+          if (!stopped && !more) live.betweenTurns = true;
           await inThread(threadId, async () => {
             if (live.closing) return;
+            // Stop already handed the thread back, and a message sent since has its own result.
+            if (!live.running || answersStop(live, message)) {
+              live.prodWrite = false;
+              return;
+            }
             // Claude Code counted those steers itself.
             live.steers = Math.max(0, live.steers - queuedTurns);
-            if (live.steers > 0 && !live.interrupted && !more) return holdForSteer(live, ok);
+            if (live.steers > 0 && !more) return holdForSteer(live, ok);
             return finishTurn(live, ok, { more });
           });
         }
@@ -485,6 +500,8 @@ export function createAgents(options: AgentsOptions): Agents {
     const { open, threadId } = live;
     if (lives.get(threadId) === live) lives.delete(threadId);
     clearTimeout(live.idle);
+    clearTimeout(live.steerWait);
+    live.steerWait = undefined;
     live.input.end();
     // A session that can't be resumed (moved project, deleted transcript) starts fresh next time.
     const fresh = resumed !== undefined && !live.started;
@@ -503,6 +520,7 @@ export function createAgents(options: AgentsOptions): Agents {
         return next;
       })
       .catch(() => {});
+    if (live.replaced) await removeSetup(live);
   }
 
   function releaseWrites(live: Live): void {
@@ -510,14 +528,19 @@ export function createAgents(options: AgentsOptions): Agents {
   }
 
   /** Waits for a steer's turn to start; if it doesn't in time, the result was the end after all. */
-  function holdForSteer(live: Live, ok: boolean): void {
+  function holdForSteer(live: Live, ok: boolean, granted = live.prodWrite): void {
+    // The grant ends with this turn, and the steer's may start before the timer decides.
+    live.prodWrite = false;
     clearTimeout(live.steerWait);
+    const steers = live.steers;
     const timer = setTimeout(() => {
       void inThread(live.threadId, async () => {
         if (live.steerWait !== timer) return;
+        // Another steer came during the wait: it gets its own time to start.
+        if (live.steers > steers) return holdForSteer(live, ok, granted);
         live.steerWait = undefined;
         live.steers = 0;
-        await finishTurn(live, ok, { more: false });
+        await finishTurn(live, ok, { more: false, granted });
       });
     }, steerGraceMs);
     timer.unref?.();
@@ -525,16 +548,18 @@ export function createAgents(options: AgentsOptions): Agents {
   }
 
   /** After a turn's result: revoke prod writes, settle, send the next queued message or hand back. */
-  async function finishTurn(live: Live, ok: boolean, { more }: { more: boolean }): Promise<void> {
+  async function finishTurn(
+    live: Live,
+    ok: boolean,
+    { more, granted = false }: { more: boolean; granted?: boolean },
+  ): Promise<void> {
     const { open, threadId } = live;
-    const settle = ok && live.prodWrite;
-    const interrupted = live.interrupted;
+    const settle = ok && (live.prodWrite || granted);
     live.prodWrite = false;
-    live.interrupted = false;
     if (more) return;
-    const thread = interrupted ? undefined : await meta(open, threadId);
-    const next = thread?.queued[0];
-    if (thread && next) {
+    const thread = await meta(open, threadId);
+    const next = thread.queued[0];
+    if (next) {
       // The thread isn't done while queued messages remain, so it doesn't settle yet.
       await open.updateThread(threadId, (m) => ({
         ...m,
@@ -560,16 +585,18 @@ export function createAgents(options: AgentsOptions): Agents {
       updatedAt: Date.now(),
       ...(settle ? { settledAt: Date.now() } : {}),
     }));
-    if (live.replaced) {
-      // The apps took over: the setup design, this thread with it, goes once its turn is done.
-      shut(live);
-      await options.previews.stop(open.design.id).catch(() => {});
-      await options.store.remove(open.design.id).catch((error: unknown) => {
-        console.error(`removing setup design ${open.design.id} failed:`, error);
-      });
-      return;
-    }
+    if (live.replaced) return removeSetup(live);
     armIdle(live);
+  }
+
+  /** The apps took over: the setup design, this thread with it, goes once its turn is done. */
+  async function removeSetup(live: Live): Promise<void> {
+    const { open } = live;
+    shut(live);
+    await options.previews.remove(open.design.id).catch(() => {});
+    await options.store.remove(open.design.id).catch((error: unknown) => {
+      console.error(`removing setup design ${open.design.id} failed:`, error);
+    });
   }
 
   /**
@@ -618,6 +645,7 @@ export function createAgents(options: AgentsOptions): Agents {
     live.closing = true;
     clearTimeout(live.idle);
     clearTimeout(live.steerWait);
+    live.steerWait = undefined;
     if (lives.get(live.threadId) === live) lives.delete(live.threadId);
     live.input.end();
     live.query.close();
@@ -628,16 +656,25 @@ export function createAgents(options: AgentsOptions): Agents {
   async function deliver(live: Live, turn: Turn, priority?: "now"): Promise<void> {
     const { open, threadId } = live;
     clearTimeout(live.idle);
-    if (turn.model !== live.model) {
-      await live.query.setModel(turn.model);
-      live.model = turn.model;
+    let message: SDKUserMessage;
+    try {
+      if (turn.model !== live.model) {
+        await live.query.setModel(turn.model);
+        live.model = turn.model;
+      }
+      if (turn.effort !== live.effort || turn.fast !== live.fast) {
+        await live.query.applyFlagSettings({
+          effortLevel: turn.effort ?? null,
+          fastMode: turn.fast,
+        });
+        live.effort = turn.effort;
+        live.fast = turn.fast;
+      }
+      message = await userMessage(open.design.root, turn, await open.canvases());
+    } catch (error) {
+      if (!live.running) armIdle(live);
+      throw error;
     }
-    if (turn.effort !== live.effort || turn.fast !== live.fast) {
-      await live.query.applyFlagSettings({ effortLevel: turn.effort ?? null, fastMode: turn.fast });
-      live.effort = turn.effort;
-      live.fast = turn.fast;
-    }
-    const message = await userMessage(open.design.root, turn, await open.canvases());
     live.running = true;
     await open.updateThread(threadId, (m) => {
       const next: ThreadMeta = {
@@ -658,7 +695,12 @@ export function createAgents(options: AgentsOptions): Agents {
       by: turn.by,
       at: Date.now(),
     });
-    live.input.push(priority ? { ...message, priority } : message);
+    // Without a uuid Claude Code can't take the message back on Stop or say which result answers it.
+    const uuid = randomUUID();
+    live.sent.add(uuid);
+    // The next turn to start is this message's, so it can't be a waiting steer's.
+    if (!priority) live.betweenTurns = false;
+    live.input.push({ ...message, uuid, ...(priority ? { priority } : {}) });
   }
 
   /** One send, inside the thread's turn: queue it, steer it in, or start a session for it. */
@@ -730,13 +772,15 @@ export function createAgents(options: AgentsOptions): Agents {
       inThread(threadId, async () => {
         const live = lives.get(threadId);
         if (live?.running) {
-          live.interrupted = true;
           live.running = false;
           live.prodWrite = false;
           live.steers = 0;
           clearTimeout(live.steerWait);
           live.steerWait = undefined;
-          await live.query.interrupt();
+          for (const uuid of live.sent) live.stopped.add(uuid);
+          live.sent.clear();
+          // A steer still waiting behind a tool call would otherwise run after Stop.
+          await live.query.interrupt({ cancelQueued: true });
           armIdle(live);
         } else {
           await meta(open, threadId);
@@ -747,6 +791,7 @@ export function createAgents(options: AgentsOptions): Agents {
           awaitingSince: Date.now(),
           updatedAt: Date.now(),
         }));
+        if (live?.replaced) await removeSetup(live);
       }),
 
     editQueued: (open, threadId, queuedId, text) =>
@@ -826,6 +871,11 @@ function context(open: OpenDesign, thread: ThreadMeta): string {
     lines.push("This thread has no canvas. open_canvas makes or opens one when you need it.");
   }
   return lines.join("\n");
+}
+
+/** Whether a result answers a message sent before a Stop: the turn was cancelled or already over. */
+function answersStop(live: Live, result: SDKResultMessage): boolean {
+  return result.user_message_uuid !== undefined && live.stopped.has(result.user_message_uuid);
 }
 
 function realpath(dir: string): string {

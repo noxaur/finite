@@ -48,7 +48,7 @@ export const handlers: Handlers = {
   "design.rename": ({ id, name }, { modules }) => modules.store.rename(id, name),
   async "design.remove"({ id }, { modules }) {
     // Sessions working in the design stop first, so none writes into a folder on its way out.
-    await Promise.all([modules.previews.stop(id), modules.agents.stopDesign(id)]);
+    await Promise.all([modules.previews.remove(id), modules.agents.stopDesign(id)]);
     await modules.store.remove(id);
     return null;
   },
@@ -71,6 +71,7 @@ export const handlers: Handlers = {
   async subscribe({ designId }, { client, hub, modules }) {
     const open = await hub.open(designId);
     client.subscriptions.add(designId);
+    modules.previews.watch(designId);
     // A new blank design installs its dependencies first; the dev server starts after.
     const install = installOf(open);
     (install?.done ?? Promise.resolve())
