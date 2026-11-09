@@ -3,6 +3,7 @@ import {
   type AutoLayout,
   autoLayoutStyles,
   boundsOf,
+  computedSizeOf,
   FLOW_STYLES,
   frameScaleOf,
   inferAutoLayout,
@@ -213,15 +214,18 @@ async function flexContainer(host: ToolHost, frameId: string, el: El, kids: read
   ]);
 }
 
-/** The element's measured size where nothing fixes it, in pixels of `scale` frame pixels each. */
-const sizeOf = (el: Read, scale: number): Record<string, string> => ({
-  ...(el.computed.sizedWidth === "fixed"
-    ? {}
-    : { width: `${Math.round(el.rect.width / scale)}px` }),
-  ...(el.computed.sizedHeight === "fixed"
-    ? {}
-    : { height: `${Math.round(el.rect.height / scale)}px` }),
-});
+/** The element's computed size on each axis nothing fixes. */
+function sizeOf(el: Read): Record<string, string> {
+  const { width, height } = computedSizeOf(el.computed);
+  return {
+    ...(el.computed.sizedWidth === "fixed" || width === undefined
+      ? {}
+      : { width: `${Math.round(width)}px` }),
+    ...(el.computed.sizedHeight === "fixed" || height === undefined
+      ? {}
+      : { height: `${Math.round(height)}px` }),
+  };
+}
 
 /**
  * The insets that put `kid` where it's measured, in the containing block whose origin is `at` in
@@ -231,7 +235,7 @@ const placed = (kid: Read, at: { x: number; y: number }, position: string, scale
   position,
   left: `${Math.round((kid.rect.x - at.x) / scale)}px`,
   top: `${Math.round((kid.rect.y - at.y) / scale)}px`,
-  ...sizeOf(kid, scale),
+  ...sizeOf(kid),
 });
 
 /**
@@ -291,7 +295,7 @@ export async function removeAutoLayout(host: ToolHost) {
       ...NO_FLEX,
       ...(unique && own.computed.position === "static" ? { position: "relative" } : {}),
       // With its children out of the flow, nothing holds it open but this.
-      ...(unique ? sizeOf(own, scale) : {}),
+      ...(unique ? sizeOf(own) : {}),
     }),
     ...(unique
       ? kids.map((k) => styleEdit(k, placed(k, inner, "absolute", frameScaleOf(k.computed))))

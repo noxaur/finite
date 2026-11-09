@@ -303,6 +303,23 @@ export const frameScaleOf = (computed: Readonly<Record<string, string>>) =>
   parseFloat(computed.effectiveZoom ?? "") || parseFloat(computed.zoom ?? "") || 1;
 
 /**
+ * An element's computed `width` and `height`, in its own pixels. Unlike its measured box they
+ * match its `box-sizing` and ignore transforms, so they can be written back as they are. An
+ * axis with no pixel value, like an inline element's `auto`, is left out.
+ */
+export function computedSizeOf(computed: Readonly<Record<string, string>>): {
+  width?: number;
+  height?: number;
+} {
+  const width = parseFloat(computed.width ?? "");
+  const height = parseFloat(computed.height ?? "");
+  return {
+    ...(Number.isNaN(width) ? {} : { width }),
+    ...(Number.isNaN(height) ? {} : { height }),
+  };
+}
+
+/**
  * The `left`, `top` a positioned element gets after moving by `d`: computed insets are in the
  * element's own pixels, while `d` is in the frame's, and `zoom` is how many of those one covers.
  * Opposite insets come off so it moves rather than stretches, and a size they were giving it

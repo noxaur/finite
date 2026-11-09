@@ -26,6 +26,7 @@ const bridge = {
   preview: (_: string, styles: Record<string, string | null> | null) => previews.push(styles),
 };
 const rect: Rect = { x: 20, y: 20, width: 360, height: 160 };
+const measured = { current: rect };
 
 vi.mock("../bridge", () => ({ bridgeOf: () => bridge }));
 
@@ -36,7 +37,7 @@ async function drag(computed: Record<string, string>, by: { x: number; y: number
   const sent: SourceEdit[][] = [];
   const host = {
     facts: new Map([[keyOf(item), { rev: "r1", tag: "div", path: [] }]]),
-    state: { rects: { [keyOf(item)]: rect } },
+    state: { rects: { [keyOf(item)]: measured.current } },
     local: (_: Frame, p: { x: number; y: number }) => p,
     update: () => {},
     selectHit: () => item,
@@ -70,6 +71,7 @@ async function drag(computed: Record<string, string>, by: { x: number; y: number
 afterEach(() => {
   selectionStore.set([]);
   previews.length = 0;
+  measured.current = rect;
 });
 
 describe("moving a positioned element", () => {
@@ -80,6 +82,8 @@ describe("moving a positioned element", () => {
         left: "20px",
         top: "20px",
         zoom: "1",
+        width: "360px",
+        height: "160px",
         sizedWidth: "auto",
         sizedHeight: "auto",
       },
@@ -94,6 +98,43 @@ describe("moving a positioned element", () => {
       height: "160px",
     });
     expect(previews.at(-1)).toMatchObject({ width: "360px", height: "160px" });
+  });
+
+  it("writes the computed size, which matches its box-sizing", async () => {
+    // A content-box element: the measured 360×160 box holds 12px of padding and border a side.
+    const styles = await drag(
+      {
+        position: "absolute",
+        left: "20px",
+        top: "20px",
+        zoom: "1",
+        boxSizing: "content-box",
+        width: "336px",
+        height: "136px",
+        sizedWidth: "auto",
+        sizedHeight: "auto",
+      },
+      { x: 10, y: 10 },
+    );
+    expect(styles).toMatchObject({ width: "336px", height: "136px" });
+  });
+
+  it("writes the computed size under a transform, which doesn't change it", async () => {
+    measured.current = { x: 20, y: 20, width: 720, height: 320 };
+    const styles = await drag(
+      {
+        position: "absolute",
+        left: "20px",
+        top: "20px",
+        zoom: "1",
+        width: "360px",
+        height: "160px",
+        sizedWidth: "auto",
+        sizedHeight: "auto",
+      },
+      { x: 10, y: 10 },
+    );
+    expect(styles).toMatchObject({ width: "360px", height: "160px" });
   });
 
   it("leaves a size that isn't from its insets alone", async () => {

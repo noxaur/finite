@@ -836,6 +836,11 @@ describe.skipIf(!chromePath)("bridge in Chrome", () => {
       add(box, "t:2:0", "position:absolute;left:20px;top:20px;right:20px;bottom:20px");
       const zoomed = add(box, "t:3:0", "zoom:2");
       add(zoomed, "t:4:0", "position:absolute;left:10px;top:0;width:5px;height:5px");
+      add(
+        box,
+        "t:5:0",
+        "position:absolute;inset:20px;box-sizing:content-box;padding:10px;border:2px solid;transform:scale(2)",
+      );
     });
     const read = async (loc: string) =>
       (
@@ -844,7 +849,18 @@ describe.skipIf(!chromePath)("bridge in Chrome", () => {
         }
       ).computed;
     expect(await read("t:2:0")).toMatchObject({ sizedWidth: "auto", sizedHeight: "auto" });
-    expect(await read("t:4:0")).toMatchObject({ sizedWidth: "fixed", effectiveZoom: "2" });
+    expect(await read("t:4:0")).toMatchObject({
+      sizedWidth: "fixed",
+      effectiveZoom: "2",
+      width: "5px",
+    });
+    // Its box is 360×160 and scaled twice over; its own width and height are what's left inside.
+    expect(await read("t:5:0")).toMatchObject({
+      width: "336px",
+      height: "136px",
+      sizedWidth: "auto",
+      sizedHeight: "auto",
+    });
   });
 
   test("hit, rects, inspect, layers, errors and HMR on a route frame", async () => {

@@ -10,6 +10,7 @@ import {
   type SourceEdit,
   type Styling,
 } from "@finite/protocol";
+import * as t from "@babel/types";
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 import { rev } from "./files.ts";
 import { createSourceEditor } from "./index.ts";
@@ -266,6 +267,89 @@ describe("unwrap", () => {
     expect(ok(run(code, [{ kind: "unwrap", loc: `${FILE}:3:4`, tag: "div" }])).code).toBe(
       `export const A = () => (\n  <main>\n    <p />\n  </main>\n);\n`,
     );
+  });
+});
+
+/** What the outermost element renders as text, by Babel's own JSX whitespace rules. */
+function shownText(code: string): string {
+  const read = (el: t.JSXElement): string =>
+    t.react
+      .buildChildren(el)
+      .map((child) =>
+        child.type === "StringLiteral"
+          ? child.value
+          : child.type === "JSXElement"
+            ? read(child)
+            : "",
+      )
+      .join("");
+  const [root] = [...parseTsx(code, FILE).elements.values()].sort(
+    (a, b) => a.node.start! - b.node.start!,
+  );
+  return read(root!.node);
+}
+
+describe("unwrap and the text around it", () => {
+  const unwrapSpan = (code: string) => {
+    const at = code.indexOf("<span");
+    const line = code.slice(0, at).split("\n").length;
+    const col = at - (code.lastIndexOf("\n", at - 1) + 1);
+    return ok(run(code, [{ kind: "unwrap", loc: `${FILE}:${line}:${col}`, tag: "span" }])).code;
+  };
+  const wrapped = (inner: string, close = "") =>
+    `export const A = () => <p>Hello\n<span>${inner}</span>\nagain${close}</p>;\n`;
+
+  for (const [name, inner] of [
+    ["an element", ` <b>world</b> `],
+    ["an expression", ` {"world"} `],
+    ["plain text", ` world `],
+  ] as const) {
+    it(`keeps the spaces around ${name} when newlines follow`, () => {
+      const code = wrapped(inner);
+      expect(shownText(code)).toBe("Hello world again");
+      expect(shownText(unwrapSpan(code))).toBe("Hello world again");
+    });
+  }
+
+  it("keeps them on indented lines", () => {
+    const code = `export const A = () => (
+  <p>
+    Hello
+    <span> <b>world</b> </span>
+    again
+  </p>
+);
+`;
+    expect(shownText(code)).toBe("Hello world again");
+    expect(shownText(unwrapSpan(code))).toBe("Hello world again");
+  });
+
+  it("prints a lone space once, between two newlines", () => {
+    const code = wrapped(" ");
+    expect(shownText(code)).toBe("Hello again");
+    const out = unwrapSpan(code);
+    expect(shownText(out)).toBe("Hello again");
+    expect(out.match(/\{" "\}/g)).toHaveLength(1);
+  });
+
+  it("writes no expression where a space stays on the line with its text", () => {
+    const code = `export const A = () => <p>Hello<span> <b>world</b> </span>again</p>;\n`;
+    const out = unwrapSpan(code);
+    expect(shownText(out)).toBe("Hello world again");
+    expect(out).not.toContain(`{" "}`);
+  });
+
+  it("still drops indentation-only whitespace", () => {
+    const code = `export const A = () => (
+  <p>
+    <span>
+      <b>world</b>
+    </span>
+  </p>
+);
+`;
+    expect(shownText(unwrapSpan(code))).toBe("world");
+    expect(unwrapSpan(code)).not.toContain(`{" "}`);
   });
 });
 

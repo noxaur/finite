@@ -122,6 +122,18 @@ export function unwrap(s: InsertStep, element: Element): void {
   const last = kept.at(-1) as t.Node;
   s.ms.remove(el.start!, first.start!);
   s.ms.remove(last.end!, el.end!);
+  if (isChild(element)) {
+    // Beside a newline in JSX text, a kept space would join that text and be trimmed with it.
+    const i = element.parent.children.indexOf(el);
+    const before = element.parent.children[i - 1];
+    const after = element.parent.children[i + 1];
+    const opens = before?.type === "JSXText" && /\n[ \t]*$/.test(before.value);
+    const closes = after?.type === "JSXText" && /^[ \t]*\n/.test(after.value);
+    if (isWhitespaceText(first) && (opens || (first === last && closes)))
+      s.ms.overwrite(first.start!, first.end!, `{" "}`);
+    if (first !== last && isWhitespaceText(last) && closes)
+      s.ms.overwrite(last.start!, last.end!, `{" "}`);
+  }
   if (!startsLine(s.code, first.start!)) return;
   const inner = indentAt(s.code, first.start!);
   const drop = inner.length - indentAt(s.code, el.start!).length;

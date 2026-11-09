@@ -1,6 +1,7 @@
 import type { Frame, Hit, Inspection, LayerNode, Loc, Rect, SourceEdit } from "@finite/protocol";
 import {
   barelyMoved,
+  computedSizeOf,
   frameScaleOf,
   movedInsets,
   movesAbsolutely,
@@ -423,6 +424,7 @@ async function beginMoveAbsolute(
     if (!facts || !rect || item.loc === undefined) return [];
     const inset = (side: "left" | "top") => parseFloat(found.computed[side] ?? "") || 0;
     const zoom = frameScaleOf(found.computed);
+    const size = computedSizeOf(found.computed);
     return [
       {
         key,
@@ -434,8 +436,12 @@ async function beginMoveAbsolute(
           top: inset("top"),
           zoom,
           keep: {
-            ...(found.computed.sizedWidth === "auto" ? { width: rect.width / zoom } : {}),
-            ...(found.computed.sizedHeight === "auto" ? { height: rect.height / zoom } : {}),
+            ...(found.computed.sizedWidth === "auto" && size.width !== undefined
+              ? { width: size.width }
+              : {}),
+            ...(found.computed.sizedHeight === "auto" && size.height !== undefined
+              ? { height: size.height }
+              : {}),
           },
         },
       },

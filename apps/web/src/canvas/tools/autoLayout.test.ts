@@ -72,7 +72,14 @@ describe("Shift+Alt+A on an ordinary flex container", () => {
       {
         "a.tsx:1:0": {
           rect: { x: 0, y: 0, width: 300, height: 80 },
-          computed: { display: "flex", position: "static", sizedWidth: "auto", sizedHeight: "hug" },
+          computed: {
+            display: "flex",
+            position: "static",
+            width: "300px",
+            height: "80px",
+            sizedWidth: "auto",
+            sizedHeight: "hug",
+          },
         },
         "a.tsx:2:0": {
           rect: { x: 0, y: 0, width: 300, height: 80 },
@@ -113,6 +120,81 @@ describe("Shift+Alt+A on an ordinary flex container", () => {
   });
 });
 
+describe("the sizes Shift+Alt+A writes", () => {
+  const flex = (extra: Record<string, string>) => ({
+    display: "flex",
+    position: "static",
+    sizedWidth: "auto",
+    sizedHeight: "hug",
+    ...extra,
+  });
+  const kid = {
+    rect: { x: 0, y: 0, width: 10, height: 10 },
+    computed: { position: "static", sizedWidth: "fixed", sizedHeight: "fixed" },
+  };
+
+  it("uses the computed size of a content-box element, not its box", async () => {
+    const { host, sent } = setup(
+      "a.tsx:1:0",
+      "div",
+      {
+        "a.tsx:1:0": {
+          rect: { x: 0, y: 0, width: 360, height: 160 },
+          computed: flex({ boxSizing: "content-box", width: "336px", height: "136px" }),
+        },
+        "a.tsx:2:0": kid,
+      },
+      ["a.tsx:2:0"],
+    );
+    await removeAutoLayout(host);
+    expect(styleOf(sent[0]!, "a.tsx:1:0")).toMatchObject({ width: "336px", height: "136px" });
+  });
+
+  it("uses the computed size under a transform", async () => {
+    const { host, sent } = setup(
+      "a.tsx:1:0",
+      "div",
+      {
+        "a.tsx:1:0": {
+          rect: { x: 0, y: 0, width: 720, height: 320 },
+          computed: flex({ width: "360px", height: "160px" }),
+        },
+        "a.tsx:2:0": kid,
+      },
+      ["a.tsx:2:0"],
+    );
+    await removeAutoLayout(host);
+    expect(styleOf(sent[0]!, "a.tsx:1:0")).toMatchObject({ width: "360px", height: "160px" });
+  });
+
+  it("uses a child's computed size when unwrapping leaves it absolute", async () => {
+    const { host, sent } = setup(
+      "a.tsx:1:0",
+      "Auto layout",
+      {
+        "a.tsx:1:0": {
+          rect: { x: 0, y: 0, width: 400, height: 100 },
+          computed: { display: "flex", position: "absolute", left: "0px", top: "0px" },
+        },
+        "a.tsx:2:0": {
+          rect: { x: 10, y: 10, width: 360, height: 160 },
+          computed: {
+            position: "static",
+            boxSizing: "content-box",
+            width: "336px",
+            height: "136px",
+            sizedWidth: "auto",
+            sizedHeight: "auto",
+          },
+        },
+      },
+      ["a.tsx:2:0"],
+    );
+    await removeAutoLayout(host);
+    expect(styleOf(sent[0]!, "a.tsx:2:0")).toMatchObject({ width: "336px", height: "136px" });
+  });
+});
+
 describe("unwrapping under an ancestor's zoom", () => {
   it("writes the measured displacement in the child's own pixels", async () => {
     const { host, sent } = setup(
@@ -136,6 +218,8 @@ describe("unwrapping under an ancestor's zoom", () => {
             position: "static",
             zoom: "1",
             effectiveZoom: "2",
+            width: "20px",
+            height: "20px",
             sizedWidth: "auto",
             sizedHeight: "auto",
           },
