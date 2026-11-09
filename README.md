@@ -46,7 +46,7 @@ vp run start:desktop    # builds everything, then Electron with the bundled serv
 vp run package:desktop  # packages the app for this machine into apps/desktop/release
 ```
 
-The packaged app runs the server bundle (`apps/server/dist/main.mjs`) with Electron's own Node, on port 4100 or a free port when that's taken, and keeps its designs in Electron's user data folder. It passes your login shell's `PATH` to the server, so it finds `claude` and `pnpm` the way a terminal does. Connect a codebase there with **Choose…**, which opens a folder picker. If the server stops on its own, Electron starts it again on the same port and open pages reconnect. After three stops in a minute it shows an error and quits (`apps/desktop/src/restarts.ts`).
+The packaged app runs the server bundle (`apps/server/dist/main.mjs`) with Electron's own Node, on port 4100 or a free port when that's taken, and keeps its designs in Electron's user data folder. It passes your login shell's `PATH` to the server, so it finds `claude` and `pnpm` the way a terminal does. Connect a codebase there from the ⌘K menu: **Add production environment**, then type a path, click down through the folders, or use **Choose folder…** for the system folder picker. If the server stops on its own, Electron starts it again on the same port and open pages reconnect. After three stops in a minute it shows an error and quits (`apps/desktop/src/restarts.ts`).
 
 ## Commands
 
