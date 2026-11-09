@@ -1,6 +1,7 @@
 import type * as t from "@babel/types";
 import { type InsertPlace, NEW_TAG, type NewNode, Refused, type Styling } from "@finite/protocol";
 import type MagicString from "magic-string";
+import postcss from "postcss";
 import { cssModules } from "./imports.ts";
 import {
   asChild,
@@ -49,9 +50,6 @@ const ATTR_NAME = /^[A-Za-z_][\w:.-]*$/;
 /** Attributes a string can't set: styling goes through `styles`, and the rest need an expression. */
 /** A CSS property as it's printed unquoted into an object key or a sheet. */
 const STYLE_NAME = /^(--[\w-]+|-?[A-Za-z][A-Za-z-]*)$/;
-/** Whether a CSS value, printed raw into a sheet, would end its declaration or rule. */
-const leavesDeclaration = (value: string) =>
-  /[;{}]/.test(value.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|url\([^)]*\)/g, ""));
 const NOT_AN_ATTR = /^(className|style|key|ref|dangerouslySetInnerHTML|on[A-Z].*)$/;
 
 /**
@@ -131,6 +129,18 @@ export function insert(
   return out.nodes;
 }
 
+/** Whether a CSS value, printed raw into a sheet, stays one declaration's value and nothing more. */
+function isOneValue(value: string): boolean {
+  try {
+    const [rule, ...others] = postcss.parse(`a{x:${value}}`).nodes;
+    if (others.length > 0 || rule?.type !== "rule" || rule.nodes.length !== 1) return false;
+    const [decl] = rule.nodes;
+    return decl?.type === "decl" && decl.prop === "x" && decl.value === value.trim();
+  } catch {
+    return false;
+  }
+}
+
 /**
  * What `before` and `after` sit beside: the element when it's a JSX child, else the `{…}` child
  * that renders it, like `{items.map(…)}`. A component's root has neither.
@@ -143,7 +153,7 @@ function slotOf(
   const parents = new Map<t.Node, t.Node | undefined>();
   walk(s.parsed.ast, (node, parent) => parents.set(node, parent));
   for (let up = parents.get(element.node); up; up = parents.get(up)) {
-    if (up.type === "JSXAttribute") break;
+    if (up.type === "JSXAttribute" || up.type === "JSXSpreadAttribute") break;
     if (up.type !== "JSXExpressionContainer") continue;
     const owner = parents.get(up);
     if (owner?.type === "JSXElement" || owner?.type === "JSXFragment")
@@ -168,7 +178,7 @@ function print(s: InsertStep, node: NewNode, indent: string, out: Printing): str
   }
   const styles = node.styles ?? {};
   for (const [name, value] of Object.entries(styles)) {
-    if (!STYLE_NAME.test(name) || leavesDeclaration(value))
+    if (!STYLE_NAME.test(name) || !isOneValue(value))
       throw new Refused(`A new element can't set the style ${name}: ${value}`, "invalid");
   }
   const cls = Object.keys(styles).length > 0 ? moduleClass(s, node, out) : undefined;

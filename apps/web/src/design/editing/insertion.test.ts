@@ -107,13 +107,36 @@ describe("planInsert", () => {
     },
   );
 
-  it.each(["h1", "h6", "span", "label", "button", "strong", "em", "b", "i", "small"])(
-    "skips %s, which can't validly hold a div",
-    (tag) => {
-      const chain = [node(`${OWN}:5:4`, { tag }), node(`${OWN}:4:2`)];
-      expect(planInsert(chain, OWN, box, opts)).toMatchObject({ anchor: { loc: `${OWN}:4:2` } });
-    },
-  );
+  it.each([
+    "h1",
+    "h6",
+    "span",
+    "label",
+    "button",
+    "strong",
+    "em",
+    "b",
+    "i",
+    "small",
+    "abbr",
+    "cite",
+    "code",
+    "dfn",
+    "kbd",
+    "mark",
+    "pre",
+    "q",
+    "s",
+    "samp",
+    "sub",
+    "sup",
+    "time",
+    "u",
+    "var",
+  ])("skips %s, which can't validly hold a div", (tag) => {
+    const chain = [node(`${OWN}:5:4`, { tag }), node(`${OWN}:4:2`)];
+    expect(planInsert(chain, OWN, box, opts)).toMatchObject({ anchor: { loc: `${OWN}:4:2` } });
+  });
 
   it("draws inside a link and a table cell", () => {
     for (const tag of ["a", "td"]) {

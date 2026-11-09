@@ -1,6 +1,8 @@
 import { type NewNode, Refused, type SourceEdit, type Styling } from "@finite/protocol";
+import type * as t from "@babel/types";
 import { describe, expect, it } from "vite-plus/test";
 import { rev } from "./files.ts";
+import { parseTsx } from "./jsx.ts";
 import { rewrite, type RewriteContext } from "./rewrite.ts";
 
 const FILE = "src/App.tsx";
@@ -686,6 +688,13 @@ describe("insert", () => {
       expect(out).toContain(`})}\n    <div data-name="Rectangle"`);
     });
 
+    it("refuses an element inside a spread attribute", () => {
+      const line = "  <main>{<Widget {...{ header: <div /> }} />}</main>";
+      const code = `export const A = () => (\n${line}\n);\n`;
+      const inSpread = { ...item, loc: `${FILE}:2:${line.indexOf("<div")}` };
+      expect(refused(run(code, [inSpread])).code).toBe("unsupported-style");
+    });
+
     it("still refuses a component root and an element inside a prop", () => {
       const prop = `export const A = () => (\n  <main>\n    <X render={() => <div />} />\n  </main>\n);\n`;
       expect(refused(run(prop, [{ ...item, loc: `${FILE}:3:21` }])).code).toBe("unsupported-style");
@@ -695,24 +704,50 @@ describe("insert", () => {
   describe("values that would break out of the source", () => {
     const noClass = `export const A = () => (\n  <div>\n    <p>x</p>\n  </div>\n);\n`;
 
-    it("keeps a double quote inside a new className", () => {
-      const out = ok(
-        run(noClass, [
-          {
-            kind: "style",
-            locs: [`${FILE}:3:4`],
-            tag: "p",
-            styles: { width: '10px"{...{onClick:()=>alert(1)}}data-x="' },
-          },
-        ]),
-      );
-      expect(out.code).toMatch(/<p className="[^"]*">x<\/p>/);
+    const styleP = (styles: Record<string, string>) =>
+      ok(run(noClass, [{ kind: "style", locs: [`${FILE}:3:4`], tag: "p", styles }])).code;
+    const classOf = (code: string) => {
+      const el = parseTsx(code, FILE).elements.get("3:4")!.node.openingElement;
+      expect(el.attributes).toHaveLength(1);
+      const attr = el.attributes[0]!;
+      if (attr.type !== "JSXAttribute") throw new Error("expected an attribute");
+      expect(attr.name.name).toBe("className");
+      return attr.value;
+    };
+
+    it("keeps round 1's injection inside the one className attribute", () => {
+      const code = styleP({ width: '10px"{...{onClick:()=>alert(1)}}data-x="' });
+      expect(classOf(code)).toMatchObject({
+        type: "StringLiteral",
+        value: `w-[10px"{...{onClick:()=>alert(1)}}data-x="]`,
+      });
     });
 
-    it('writes font-family: "Inter" as a class', () => {
+    it("picks the className quoting from the classes", () => {
+      expect(styleP({ "font-family": "Bob's Font" })).toContain(
+        `<p className="font-[family-name:Bob's_Font]">`,
+      );
+      expect(styleP({ "font-family": '"Inter"' })).toContain(
+        `<p className='font-[family-name:"Inter"]'>`,
+      );
+      expect(styleP({ "font-family": `"Bob's Font"` })).toContain(
+        'className={`font-[family-name:"Bob\'s_Font"]`}',
+      );
+    });
+
+    it("escapes a template literal's own syntax", () => {
+      const family = `"a'b\`c\\\${d}"`;
+      const value = classOf(styleP({ "font-family": family }));
+      if (value?.type !== "JSXExpressionContainer") throw new Error("expected {`…`}");
+      expect(value.expression).toMatchObject({ type: "TemplateLiteral", expressions: [] });
+      const cooked = (value.expression as t.TemplateLiteral).quasis[0]!.value.cooked;
+      expect(cooked).toBe(`font-[family-name:${family}]`);
+    });
+
+    it('writes font-family: "Inter" on a new element', () => {
       const node = { tag: "div", styles: { "font-family": '"Inter"' } };
       expect(ok(run(APP, [insert("end", node)])).code).toContain(
-        `className="font-[family-name:'Inter']"`,
+        `className='font-[family-name:"Inter"]'`,
       );
     });
 
@@ -738,12 +773,27 @@ describe("insert", () => {
       }
     });
 
-    it("lets a semicolon through inside a string or url()", () => {
-      const node = {
-        tag: "div",
-        styles: { "background-image": 'url("data:image/png;base64,AA==")' },
-      };
-      expect(ok(run(APP, [insert("end", node)], "inline")).code).toContain("base64,AA==");
+    it("refuses a CSS value that hides a rule behind a comment or isn't one value", () => {
+      for (const value of [
+        `red/*"*/; } .evil{color:blue} .tail{ color: green/*"*/`,
+        "red /* note */",
+        "red; color: blue",
+        "}a{color:red",
+        '"unclosed',
+      ]) {
+        const node = { tag: "div", styles: { color: value } };
+        expect(refused(run(APP, [insert("end", node)], "inline"))).toEqual({
+          reason: `A new element can't set the style color: ${value}`,
+          code: "invalid",
+        });
+      }
+    });
+
+    it("lets punctuation through inside a string or url()", () => {
+      for (const image of ['url("data:image/png;base64,AA==")', 'url("a)b;c.png")']) {
+        const node = { tag: "div", styles: { "background-image": image } };
+        expect(ok(run(APP, [insert("end", node)], "inline")).code).toContain(JSON.stringify(image));
+      }
     });
   });
 

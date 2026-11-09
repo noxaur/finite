@@ -358,8 +358,7 @@ function style(s: StepCtx, el: t.JSXElement, styles: Record<string, string | nul
 
   if (!cls) {
     const classes = editClasses("", styles, s.ctx.theme, s.ctx.tailwind);
-    if (classes !== "")
-      s.ms.appendLeft(attributeInsertAt(el), ` className="${classes.replaceAll('"', "'")}"`);
+    if (classes !== "") s.ms.appendLeft(attributeInsertAt(el), ` className=${classAttr(classes)}`);
     return;
   }
   const value = cls.value;
@@ -393,6 +392,13 @@ function style(s: StepCtx, el: t.JSXElement, styles: Record<string, string | nul
     }
   }
   throw new Refused(ASK, "unsupported-style");
+}
+
+/** A new `className` value, quoted so it holds whatever the class list contains. */
+function classAttr(classes: string): string {
+  if (!classes.includes('"')) return `"${classes}"`;
+  if (!classes.includes("'")) return `'${classes}'`;
+  return `{\`${classes.replace(/[`\\]|\$\{/g, (m) => `\\${m}`)}\`}`;
 }
 
 /** The text of a string literal or a template literal without `${}`. */
