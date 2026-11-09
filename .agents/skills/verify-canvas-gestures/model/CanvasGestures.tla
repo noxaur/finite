@@ -13,17 +13,17 @@ CONSTANTS
   \* What the person can physically do
   MultiPointer,     \* a second pointer can go down during a press (touch or pen plus mouse)
   \* The code as it stands is the setting named in current.cfg; the others are variants
-  Line300,          \* setTool (editor.ts:303) deactivates even when the tool isn't changing
-  DraggingGuard,    \* the begin callback checks the press is still current (editor.ts:676)
-  BackToMoveGuard,  \* backToMove leaves a newer press alone (editor.ts:718)
+  Line300,          \* setTool (editor.ts:315) deactivates even when the tool isn't changing
+  DraggingGuard,    \* the begin callback checks the press is still current (editor.ts:687)
+  BackToMoveGuard,  \* backToMove leaves a newer press alone (editor.ts:727)
   PenLeaveGuard,    \* the pen's trailing setTool leaves a newer draft alone (pen.ts:58)
-  DownGuard,        \* onDown ignores a press while another is current (editor.ts:631)
-  UpClearsCurrent,  \* onUp clears this.current (editor.ts:690)
-  CancelEndsGesture,\* cancelPress ends the gesture (editor.ts:725)
+  DownGuard,        \* onDown ignores a press while another pointer's is current (editor.ts:642)
+  UpClearsCurrent,  \* onUp clears this.current (editor.ts:699)
+  CancelEndsGesture,\* cancelPress ends the gesture (editor.ts:734)
   DoneGuard,        \* RichTextEditor's done ref and finishText's null check (RichTextEditor.tsx:247)
   OpenGuard,        \* a second editText waits for the first to open (tools/text.ts:80)
-  KeepsStaleText,   \* a refused text edit keeps what was typed (editor.ts:931)
-  OutsideClearsText,\* a selection from outside the canvas clears selectedText (editor.ts:218)
+  KeepsStaleText,   \* a refused text edit keeps what was typed (editor.ts:946)
+  OutsideClearsText,\* a selection from outside the canvas clears selectedText (editor.ts:228)
   OffFrameClearsOpen,\* a comment placed off any frame closes the open one (tools/comment.ts:50)
   LandingKeepsPick, \* draw selects its shape only if nobody picked since (tools/draw.ts, land)
   LandingsKnowEachOther \* a landing rebases newer draws and overtakes older ones (tools/draw.ts, land)
@@ -33,7 +33,7 @@ Draws == 1..2                 \* the older and the newer of two draws on their w
 Sticky(t) == t # "rect"       \* tools/shapes.ts has no `sticky`; move, pen and vectorEdit do
 
 VARIABLES
-  \* The press (editor.ts:143, Press and this.current)
+  \* The press (editor.ts:145, Press and this.current)
   tool, current, nextPress,
   phase,      \* per press: unused, armed, started, clicking, awaitingBegin, cancelled, ending, done
   gesture,    \* per press: none, pending (begin() unresolved), live, ended
@@ -89,7 +89,7 @@ Init ==
 
 Vector(p) == IF pressTool[p] = "vector" THEN 1 ELSE 0
 
-\* cancelPress (editor.ts:721): clears current and dragging, then ends the gesture when it resolves.
+\* cancelPress (editor.ts:730): clears current and dragging, then ends the gesture when it resolves.
 ApplyCancel ==
   /\ current' = 0
   /\ dragging' = FALSE
@@ -108,8 +108,8 @@ ApplyCancel ==
 
 PhysicallyPressed == current # 0 /\ phase[current] \in {"armed", "started"}
 
-\* onDown then press() (editor.ts:580, :639). tool.down adds the pen's anchor synchronously.
-\* A press whose release never arrived is CancelPress then PressDown (editor.ts:634).
+\* onDown then press() (editor.ts:589, :648). tool.down adds the pen's anchor synchronously.
+\* A press whose release never arrived is CancelPress then PressDown (taken, editor.ts:640).
 PressDown ==
   /\ InPointer
   /\ nextPress <= MaxPress
@@ -125,7 +125,7 @@ PressDown ==
   /\ UNCHANGED <<tool, gesture, endCount, dragging, killed, placing, repickCost, draftKilled,
                  vecGestures>>
 
-\* onMove past the slop (editor.ts:672). A point-edit gesture counts itself as begin() runs.
+\* onMove past the slop (editor.ts:681). A point-edit gesture counts itself as begin() runs.
 \* Only Move's begin() waits on anything (tools/move.ts, the frame's hit). The shape, pen and point
 \* tools' begin() is `async () => gesture`, so it resolves in the same step.
 DragPastSlop ==
@@ -141,7 +141,7 @@ DragPastSlop ==
   /\ UNCHANGED <<tool, current, nextPress, pressTool, endCount, killed, anchors, placing,
                  repickCost, draftKilled>>
 
-\* The begin() promise resolves: editor.ts:676 and whichever of onUp or cancelPress waits on it.
+\* The begin() promise resolves: editor.ts:687 and whichever of onUp or cancelPress waits on it.
 BeginResolves(p) ==
   /\ InPointer
   /\ gesture[p] = "pending"
@@ -149,13 +149,13 @@ BeginResolves(p) ==
         /\ gesture' = [gesture EXCEPT ![p] = "live"]
         /\ dragging' = IF DraggingGuard /\ current # p THEN dragging ELSE TRUE
         /\ UNCHANGED <<phase, endCount, vecGestures>>
-     \/ /\ phase[p] = "awaitingBegin"   \* onUp (editor.ts:710-712)
+     \/ /\ phase[p] = "awaitingBegin"   \* onUp (editor.ts:719-721)
         /\ gesture' = [gesture EXCEPT ![p] = "ended"]
         /\ phase' = [phase EXCEPT ![p] = "ending"]
         /\ endCount' = [endCount EXCEPT ![p] = @ + 1]
         /\ dragging' = FALSE
         /\ vecGestures' = vecGestures - Vector(p)
-     \/ /\ phase[p] = "cancelled"       \* cancelPress (editor.ts:725)
+     \/ /\ phase[p] = "cancelled"       \* cancelPress (editor.ts:734)
         /\ gesture' = [gesture EXCEPT ![p] = "ended"]
         /\ phase' = [phase EXCEPT ![p] = "done"]
         /\ endCount' = [endCount EXCEPT ![p] = @ + 1]
@@ -164,7 +164,7 @@ BeginResolves(p) ==
   /\ UNCHANGED <<tool, current, nextPress, pressTool, killed, anchors, placing, repickCost,
                  draftKilled>>
 
-\* onUp (editor.ts:687). The awaits on an already-resolved gesture are microtasks.
+\* onUp (editor.ts:696). The awaits on an already-resolved gesture are microtasks.
 PressUp ==
   /\ InPointer
   /\ current # 0 /\ phase[current] \in {"armed", "started"}
@@ -184,7 +184,7 @@ PressUp ==
            /\ vecGestures' = vecGestures - Vector(c)
   /\ UNCHANGED <<tool, nextPress, pressTool, killed, anchors, placing, repickCost, draftKilled>>
 
-\* The click or g.end(true) has landed; backToMove runs (editor.ts:694-713, :717).
+\* The click or g.end(true) has landed; backToMove runs (editor.ts:702-722, :726).
 Finished(p) ==
   /\ InPointer
   /\ phase[p] \in {"clicking", "ending"}
@@ -206,7 +206,7 @@ Finished(p) ==
           /\ UNCHANGED <<tool, killed, current, dragging, gesture, endCount, vecGestures>>
   /\ UNCHANGED <<nextPress, pressTool, anchors, placing, repickCost, draftKilled>>
 
-\* setTool (editor.ts:303) from a key or the toolbar. Key repeat isn't filtered (registry.ts:87).
+\* setTool (editor.ts:311) from a key or the toolbar. Key repeat isn't filtered (registry.ts:87).
 PickTool(t) ==
   /\ InPointer
   /\ t # "vector"
@@ -219,11 +219,12 @@ PickTool(t) ==
                    ELSE ApplyCancel
   /\ UNCHANGED <<nextPress, pressTool, killed, placing, draftKilled>>
 
-\* pointercancel (editor.ts:195), or Escape reaching escape() (editor.ts:772).
+\* pointercancel (editor.ts:203), Escape reaching escape() (editor.ts:782), or the same pointer going
+\* down again (taken, editor.ts:640). A pen draft takes Escape first (tools/pen.ts:116), so only the
+\* other two reach this then; the model lets all three, which covers more.
 CancelPress ==
   /\ InPointer
   /\ current # 0
-  /\ ~(tool = "pen" /\ anchors > 0)
   /\ ApplyCancel
   /\ UNCHANGED <<tool, nextPress, pressTool, killed, anchors, placing, repickCost, draftKilled>>
 
@@ -266,8 +267,8 @@ LeavePointEditing ==
   /\ ApplyCancel
   /\ UNCHANGED <<nextPress, pressTool, killed, anchors, placing, repickCost, draftKilled>>
 
-\* The double-click reaches editText, which awaits readInline and the bridge (tools/text.ts:89).
-\* A press while the box is open only blurs it (editor.ts:582), so this needs editing = none.
+\* The double-click reaches editText, which awaits readInline and the bridge (tools/text.ts:102).
+\* A press while the box is open only blurs it (editor.ts:591), so this needs editing = none.
 DoubleClickText(e) ==
   /\ InText
   /\ editing = "none" /\ opens[e] = 0
@@ -300,7 +301,7 @@ OutsideEdit ==
   /\ fileRev' = 1
   /\ UNCHANGED <<editing, opening, opens, hidden, typed, targetRev, landing, finishes, lostTyped>>
 
-\* Enter, or blur by clicking away: finish(true), finishText up to its await (editor.ts:904-931).
+\* Enter, or blur by clicking away: finish(true), finishText up to its await (editor.ts:919-946).
 KeepText ==
   /\ InText
   /\ editing # "none"
@@ -329,9 +330,10 @@ LateBlur(e) ==
   /\ finishes' = [finishes EXCEPT ![e] = 2]
   /\ UNCHANGED <<editing, opening, opens, hidden, typed, fileRev, targetRev, landing, lostTyped>>
 
-\* source.edit answers: rewrite.ts:142 refuses a stale rev. finishText (editor.ts:931) writes the
+\* source.edit answers: rewrite.ts:142 refuses a stale rev. finishText (editor.ts:946) writes the
 \* words over the new rev when only the rest of the file changed, else keepTyped puts them back
-\* in the box (editor.ts:946). If another element took the loc, the words go in a notice instead.
+\* in the box (editor.ts:965). If another element took the loc or the keeps changed, the words go
+\* in a notice instead (editor.ts:980).
 EditLands(e) ==
   /\ InText
   /\ e \in landing
@@ -346,7 +348,7 @@ ClickElementOnCanvas ==
   /\ pickedWhileDrawing' = [d \in Draws |-> pickedWhileDrawing[d] \/ d \in drawing]
   /\ UNCHANGED <<commentDraft, commentOpen, drawing, landedAsPick, newerSelected, newestLost, stolen>>
 
-\* selectionStore.set from the layers panel (components/LayersTree.tsx:102); editor.ts:218 reacts.
+\* selectionStore.set from the layers panel (components/LayersTree.tsx:102); editor.ts:226 reacts.
 PickInLayers ==
   /\ InSelection
   /\ elementsSelected' = TRUE /\ objectSelected' = FALSE
@@ -354,14 +356,14 @@ PickInLayers ==
   /\ pickedWhileDrawing' = [d \in Draws |-> pickedWhileDrawing[d] \/ d \in drawing]
   /\ UNCHANGED <<commentDraft, commentOpen, drawing, landedAsPick, newerSelected, newestLost, stolen>>
 
-\* selectText (editor.ts:339).
+\* selectText (editor.ts:348).
 ClickTextLabel ==
   /\ InSelection
   /\ textSelected' = TRUE /\ elementsSelected' = FALSE /\ objectSelected' = FALSE
   /\ pickedWhileDrawing' = [d \in Draws |-> pickedWhileDrawing[d] \/ d \in drawing]
   /\ UNCHANGED <<commentDraft, commentOpen, drawing, landedAsPick, newerSelected, newestLost, stolen>>
 
-\* selectObject (editor.ts:345).
+\* selectObject (editor.ts:354).
 ClickSection ==
   /\ InSelection
   /\ objectSelected' = TRUE /\ elementsSelected' = FALSE /\ textSelected' = FALSE
@@ -418,7 +420,7 @@ PlaceCommentOnFrame ==
   /\ commentDraft' = TRUE /\ commentOpen' = FALSE
   /\ UNCHANGED <<elementsSelected, textSelected, objectSelected, drawVars>>
 
-\* openComment (editor.ts:331).
+\* openComment (editor.ts:339).
 OpenAComment ==
   /\ InSelection
   /\ commentOpen' = TRUE /\ commentDraft' = FALSE

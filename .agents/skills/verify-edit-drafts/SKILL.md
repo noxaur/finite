@@ -9,7 +9,7 @@ description: TLA+ model of half-finished work in Finite's web UI. Use when a cha
 
 ## Check a change
 
-1. Run `git diff --name-only 51ee6f77f44453401756379b78aca7017ee11950 -- apps/web/src apps/server/src/agent/index.ts`. If nothing in the coverage table appears, you're done.
+1. Run `git diff --name-only 4025ebd6712ebb76e092381adc0457c218cd56de -- apps/web/src apps/server/src/agent/index.ts`. If nothing in the coverage table appears, you're done.
 2. Read the changed code against the actions the table names. Each action is one synchronous stretch of code, split at every `await`.
 3. Make the model say what the code now does: edit that action, or add a change name to `Changes` in `model/current.cfg` when the code now matches a variant.
 4. Run `.agents/skills/verify-edit-drafts/check.sh`. It takes about a minute. Exit 0 means every row of `model/expected.tsv` matched. Exit 1 prints `MISMATCH` rows and the folder holding TLC's output. Exit 2 means TLC couldn't run.
@@ -56,11 +56,11 @@ None open. Every rule holds on `current`; the regression tests are `editDrafts.t
 
 Two messages, two presses of Send now, two uploads, two comment drafts, one DraftField, one scrub label. The areas don't interact, so each is explored alone.
 
-Left out: a reply that's lost after the server applied the request (`verify-client-sync`), the agent's own turn lifecycle (`verify-agent-sessions`), editing a queued chip's text, a Send now whose requeue also fails (the words are lost then), removing a chip mid-upload, the system folder picker, and the inspector rebuilding its editor on a selection change. A pass covers these orders of these steps, and says nothing about rendering or real network timing.
+Left out: a reply that's lost after the server applied the request (`verify-client-sync`), the agent's own turn lifecycle (`verify-agent-sessions`), editing a queued chip's text, the comment box's own text (Comments.tsx:254 keeps what's typed during a Post), a Send now whose requeue also fails (the words are lost then), removing a chip mid-upload, the system folder picker, and the inspector rebuilding its editor on a selection change. A pass covers these orders of these steps, and says nothing about rendering or real network timing.
 
 ## Coverage
 
-Last synced: 51ee6f77f44453401756379b78aca7017ee11950. Move this forward only after confirming the model describes the code at the new commit.
+Last synced: 4025ebd6712ebb76e092381adc0457c218cd56de. Move this forward only after confirming the model describes the code at the new commit.
 
 | File                                               | Function                                           | Actions                                                                     | Rules                                                                                                        |
 | -------------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |

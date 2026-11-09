@@ -147,8 +147,8 @@ YouEscapeTheScrub ==
                           !.preview = IF insp.scrub = "moving" THEN "none" ELSE @]
   /\ OnlyInsp
 
-\* DraftField.tsx:48 finish(true), from onBlur or Enter. styleEditor.ts:124 draft.commit: `live()`
-\* makes a stale handle do nothing.
+\* DraftField.tsx:48 finish(true), from onBlur, Enter or unmounting (:61). styleEditor.ts:124 draft.commit:
+\* `live()` makes a stale handle do nothing.
 LeaveAndKeep ==
   LET expected == IF insp.typed = "partial" THEN "final" ELSE "whole"
       live == insp.handle /\ (insp.open = "field" \/ Has("no-live-guard"))
@@ -265,7 +265,7 @@ YouAttachDuringTheSend ==
   /\ send' = [send EXCEPT !.attached = TRUE]
   /\ OnlySend
 
-\* Composer.tsx:150 send(), lib/composer.ts:7 sendModeFor. Alt picks the other mode while running.
+\* Composer.tsx:152 send(), lib/composer.ts:7 sendModeFor. Alt picks the other mode while running.
 Press(mode) ==
   /\ send.text # ""
   /\ send.flight = "none" \/ (Has("no-send-guard") /\ ~send.doubled)   \* the variant gets one extra press, to stay finite
@@ -281,7 +281,7 @@ YouQueueForTheNextTurn ==
 
 Deliver(s, m) == [s.delivered EXCEPT ![m] = @ + 1]
 
-\* apps/server/src/agent/index.ts:665 sendNow, serial per thread.
+\* apps/server/src/agent/index.ts:707 sendNow, serial per thread.
 TheServerQueuesIt ==
   /\ area = "composer" /\ send.flight = "pending" /\ send.running /\ send.mode = "queue"
   /\ send' = [send EXCEPT !.flight = "answered", !.queued = Append(@, send.flightText)]
@@ -293,8 +293,8 @@ TheServerDeliversIt ==
                           !.delivered = Deliver(send, send.flightText)]
   /\ OnlySend
 
-\* Composer.tsx:167 takes the sent text out of the box after the await: all of it if nothing was typed
-\* (send-keeps-new-text), and only the sent part when more came after it (send-strips-sent). :168
+\* Composer.tsx:168 takes the sent text out of the box after the await: all of it if nothing was typed
+\* (send-keeps-new-text), and only the sent part when more came after it (send-strips-sent). :169
 \* clears the files that were sent, and a file attached since stays (send-clears-only-sent).
 TheSendIsAnswered ==
   /\ area = "composer" /\ send.flight = "answered"
@@ -307,13 +307,13 @@ TheSendIsAnswered ==
                              !.attached = FALSE]
   /\ OnlySend
 
-\* Composer.tsx:171 the catch keeps the text and shows a toast.
+\* Composer.tsx:173 the catch keeps the text and shows a toast.
 TheSendFails ==
   /\ area = "composer" /\ send.flight = "pending"
   /\ send' = [send EXCEPT !.flight = "none"]
   /\ OnlySend
 
-\* apps/server/src/agent/index.ts:536 finishTurn pops the queue's head and delivers it.
+\* apps/server/src/agent/index.ts:551 finishTurn pops the queue's head and delivers it.
 TheTurnEndsAndTakesTheQueue ==
   /\ area = "composer" /\ send.running /\ send.queued # <<>>
   /\ send' = [send EXCEPT !.queued = Tail(@), !.delivered = Deliver(send, Head(send.queued))]
@@ -324,7 +324,7 @@ TheTurnEnds ==
   /\ send' = [send EXCEPT !.running = FALSE]
   /\ OnlySend
 
-\* apps/server/src/agent/index.ts:729 interrupt; the queue stays.
+\* apps/server/src/agent/index.ts:771 interrupt; the queue stays.
 YouPressStop ==
   /\ area = "composer" /\ send.running
   /\ send' = [send EXCEPT !.running = FALSE]
@@ -339,7 +339,7 @@ YouPressSendNow(r) ==
 InQueue(m) == \E i \in 1..Len(send.queued) : send.queued[i] = m
 Without(q, m) == SelectSeq(q, LAMBDA x : x # m)
 
-\* apps/server/src/agent/index.ts:752 editQueued refuses an id that's gone.
+\* apps/server/src/agent/index.ts:797 editQueued refuses an id that's gone.
 TheServerAnswersTheDequeue(r) ==
   /\ area = "composer" /\ send.chip[r] = "dequeuing"
   /\ LET m == send.chipMsg[r]
@@ -353,7 +353,7 @@ TheDequeueIsLost(r) ==
   /\ send' = [send EXCEPT !.chip[r] = "refused"]
   /\ OnlySend
 
-\* Composer.tsx:416 returns when edit's .catch(fail) took a refusal (dequeue-failure-stops), else :417 thread.send runs.
+\* Composer.tsx:416 returns when edit's .catch(fail) took a refusal (dequeue-failure-stops), else :430 thread.send runs.
 TheChipGoesOnToSend(r) ==
   /\ area = "composer" /\ send.chip[r] \in {"dequeued", "refused"}
   /\ send' = [send EXCEPT !.chip[r] =
@@ -366,7 +366,7 @@ TheServerSteersItIn(r) ==
                           !.delivered = Deliver(send, send.chipMsg[r])]
   /\ OnlySend
 
-\* Composer.tsx:420 the steer is refused or lost, after the message left the queue. The catch sends it
+\* Composer.tsx:430 the steer is refused or lost, after the message left the queue. The catch sends it
 \* again in queue mode (requeue-on-failure); without that it's gone.
 TheSteerFails(r) ==
   /\ area = "composer" /\ send.chip[r] = "steering"
@@ -410,9 +410,9 @@ TheUploadFails(u) ==
                 net |-> [upload.net EXCEPT ![u] = "over"]]
   /\ OnlyUpload
 
-(* ---- Comment draft: Comments.tsx, canvas/tools/comment.ts:48, canvas/editor.ts:330 ---- *)
+(* ---- Comment draft: Comments.tsx, canvas/tools/comment.ts:47, canvas/editor.ts:343 ---- *)
 
-\* canvas/tools/comment.ts:48, a click with the Comment tool.
+\* canvas/tools/comment.ts:47, a click with the Comment tool.
 YouPlaceACommentDraft(d) ==
   /\ area = "comment" /\ d \notin comment.used
   /\ comment' = [comment EXCEPT !.draft = d, !.used = @ \union {d}]
@@ -466,7 +466,8 @@ YouConfirmTheFolder ==
   /\ menu' = [menu EXCEPT !.busy = TRUE, !.works = @ + 1, !.backed = FALSE, !.error = FALSE]
   /\ OnlyMenu
 
-\* CommandMenu.tsx:328 back(); `busy` cancels the work in flight (menu-cancels).
+\* CommandMenu.tsx:328 back(), or a press on the scrim (:391); cancel() (:115) drops the work in flight
+\* (menu-cancels).
 YouGoBack ==
   /\ area = "menu" /\ ~menu.closed
   /\ LET cancels == menu.works > 0 /\ Has("menu-cancels")

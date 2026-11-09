@@ -298,7 +298,7 @@ AgentFinishesSetup ==
   /\ SetupThread /\ s.cli = "working" /\ s.live /\ ~s.replaced
   /\ s' = [s EXCEPT !.replaced = TRUE, !.replacedEver = TRUE]
 
-\* The server process restarts. store/open.ts:123 repairs a thread still marked running on load.
+\* The server process restarts. store/open.ts:124 repairs a thread still marked running on load.
 ServerRestarts ==
   /\ s.restarts < MaxRestarts /\ s.sessions > 0 /\ ~s.removed
   /\ s' = [s EXCEPT

@@ -28,7 +28,7 @@ A rule is checked only while no lock section is running or waiting, except where
 | `ShownRunningHasATurn`           | A thread shown running has a session with a turn in it.                                                                                                   | holds |
 | `TurnInFlightIsShown`            | A turn Claude Code is working on is shown running.                                                                                                        | holds |
 | `NoQueuedMessageLost`            | A message taken off the queue reaches a session.                                                                                                          | holds |
-| `QueueOnlyWaitsAfterStopOrCrash` | A queued message waits only because you pressed Stop or the session crashed. The chips at `Composer.tsx:196` keep it visible and sendable in those cases. | holds |
+| `QueueOnlyWaitsAfterStopOrCrash` | A queued message waits only because you pressed Stop or the session crashed. The chips at `Composer.tsx:199` keep it visible and sendable in those cases. | holds |
 | `StopNeverSendsTheQueue`         | Stop never sends the next queued message.                                                                                                                 | holds |
 | `StopFlagEndsWithItsTurn`        | What Stop recorded for a turn ends with that turn; the next turn is unaffected.                                                                           | holds |
 | `ProdGrantEndsWithItsTurn`       | A `move_to_prod` grant applies to the turn that asked for it.                                                                                             | holds |
@@ -58,18 +58,18 @@ The `current` row covers 3 sends, 1 Stop and 1 crash. `current-four-sends` cover
 
 Timing assumptions: a steer's turn starts well inside the 3 s grace (measured 37 ms), and a crash doesn't land on the 10-minute idle timer.
 
-Left out: `editQueued` (inside the lock, only removes or rewrites), `writing` file locks, `sessionId` and resume, spawned child threads, `stopDesign` (ends in the design's removal), `awaitingSince`, event mapping and which errors are suppressed, a deliver that rejects while taking a message off the queue, and a store write that fails after deliver marks running. A server restart appears only in `fixed`: `store/open.ts:123` repairs `running` before anything reads it.
+Left out: `editQueued` (inside the lock, only removes or rewrites), `writing` file locks, `sessionId` and resume, spawned child threads, `stopDesign` (ends in the design's removal), `awaitingSince`, `settledAt` (`settle`, `granted`), event mapping and which errors are suppressed, a deliver that rejects while taking a message off the queue, and a store write that fails after deliver marks running. A server restart appears only in `fixed`: `store/open.ts:124` repairs `running` before anything reads it.
 
 ## Coverage
 
-**Last synced:** `51ee6f77f44453401756379b78aca7017ee11950`
+**Last synced:** `4025ebd6712ebb76e092381adc0457c218cd56de`
 
 | File                                   | Function                                             | Backs                                                     |
 | -------------------------------------- | ---------------------------------------------------- | --------------------------------------------------------- |
 | `apps/server/src/agent/index.ts`       | `Live`, `inThread`                                   | the state record and lock                                 |
 |                                        | `sendNow`, `start`                                   | `RunSend`                                                 |
 |                                        | `deliver`                                            | `DeliverPrepares`, `DeliverPushes`, `DeliverRejects`      |
-|                                        | `consume`                                            | `ConsumeInit`, `ConsumeResult`, `ConsumeEnd`, `RunResult` |
+|                                        | `consume`, `answersStop`                             | `ConsumeInit`, `ConsumeResult`, `ConsumeEnd`, `RunResult` |
 |                                        | `holdForSteer`                                       | `RunResult`, `RunGrace`                                   |
 |                                        | `finishTurn`, `removeSetup`                          | `FinishTurn`, `RemoveSetup`                               |
 |                                        | `ended`                                              | `RunEnded`                                                |
