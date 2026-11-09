@@ -9,6 +9,9 @@ current	INVARIANT	ClosingNeverRewrites	holds
 current	INVARIANT	TextTypedDuringSendSurvives	holds
 current	INVARIANT	OneSendAtATime	holds
 current	INVARIANT	QueuedMessageDeliveredOnce	holds
+current	INVARIANT	SentTextLeavesTheBox	holds
+current	INVARIANT	AttachmentAddedDuringSendSurvives	holds
+current	INVARIANT	FailedSendNowKeepsTheMessage	holds
 current	INVARIANT	UploadsStayApart	holds
 current	INVARIANT	NewerDraftSurvives	holds
 current	INVARIANT	CommentPostedOnce	holds
@@ -21,6 +24,9 @@ fixed	INVARIANT	ClosedPickerHoldsNothing	holds
 fixed	INVARIANT	ClosingNeverRewrites	holds
 fixed	INVARIANT	TextTypedDuringSendSurvives	holds
 fixed	INVARIANT	QueuedMessageDeliveredOnce	holds
+fixed	INVARIANT	SentTextLeavesTheBox	holds
+fixed	INVARIANT	AttachmentAddedDuringSendSurvives	holds
+fixed	INVARIANT	FailedSendNowKeepsTheMessage	holds
 fixed	INVARIANT	UploadsStayApart	holds
 fixed	INVARIANT	NewerDraftSurvives	holds
 fixed	INVARIANT	BackingOutStopsNavigation	holds
@@ -41,3 +47,6 @@ no-upload-ids	INVARIANT	UploadsStayApart	breaks
 send-wipes-text	INVARIANT	TextTypedDuringSendSurvives	breaks
 dequeue-failure-sends	INVARIANT	QueuedMessageDeliveredOnce	breaks
 post-cancels-any-draft	INVARIANT	NewerDraftSurvives	breaks
+send-keeps-sent-text	INVARIANT	SentTextLeavesTheBox	breaks
+send-drops-new-files	INVARIANT	AttachmentAddedDuringSendSurvives	breaks
+send-now-drops	INVARIANT	FailedSendNowKeepsTheMessage	breaks

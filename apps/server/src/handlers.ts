@@ -24,9 +24,9 @@ import { syncRoutes } from "./store/routes.ts";
  * source/ and agent/. Logic that's more than a line or two belongs in the module.
  */
 export const handlers: Handlers = {
-  async hello({ user }, { client }) {
+  async hello({ user }, { client, hub }) {
     client.user = user;
-    return { version: PROTOCOL_VERSION, user };
+    return { version: PROTOCOL_VERSION, user, memory: hub.memory() };
   },
 
   "designs.list": (_, { modules }) => modules.store.designs(),

@@ -37,8 +37,9 @@ Never weaken a rule to get a pass. Add a rule with a row in `model/expected.tsv`
 | `OneKindOfSelection`            | One kind of thing is selected at a time.                                       | selection, holds                        |
 | `OneCommentSurface`             | A comment draft and an open comment never show together.                       | selection, holds                        |
 | `LandingKeepsYourPick`          | A shape that lands doesn't replace what you picked while it was on its way.    | selection, holds                        |
+| `NewestLandingIsSelected`       | Of two shapes landing at once, the newest ends up selected unless you picked.  | selection, holds                        |
 
-`model/expected.tsv` records each rule's result per variant. `current`, `pen`, `text`, `selection` and `two-pointers` are the code as it stands. `fixed`, `pen-fixed`, `text-fixed` and `selection-fixed` set the guards the fixes added. `up-keeps-current`, `cancel-no-end` and `no-done-guard` show the holding rules can fail.
+`model/expected.tsv` records each rule's result per variant. `current`, `pen`, `text`, `selection` and `two-pointers` are the code as it stands. `fixed`, `pen-fixed`, `text-fixed` and `selection-fixed` set the guards the fixes added. `up-keeps-current`, `cancel-no-end`, `no-done-guard` and `landings-blind` show the holding rules can fail.
 
 ## Findings (the code breaks these today)
 
@@ -46,11 +47,11 @@ None.
 
 ## Bounds and what's left out
 
-- Pointer scope: 2 presses, tools Move, a shape tool, Pen, point editing (`pen.cfg`: 3 presses, Move and Pen). Pen draft: up to 2 anchors. Text: 2 elements, each opened once, one outside edit. Selection: unbounded picks, one draw at a time.
+- Pointer scope: 2 presses, tools Move, a shape tool, Pen, point editing (`pen.cfg`: 3 presses, Move and Pen). Pen draft: up to 2 anchors. Text: 2 elements, each opened once, one outside edit. Selection: unbounded picks, up to two draws at a time.
 - `begin()` is modelled as always resolving to a gesture, never `null`. Only Move's `begin()` waits; every other tool's resolves in the same step.
 - Left out: `dispose()` mid-gesture (rare unmount), the override maps' ownership, hover, Inspect, the image tool, new text from the Text tool (`target.kind === "new"`), frame reloads and HMR during a text edit, the vector edit queue's rejection path, undo order (`verify-undo-history` covers it). A pass says nothing about these.
-- `EditLands` is one step for what's several in `finishText`: the second read, the retry over the new rev, and `keepTyped`. If a second text box opened while a refused edit was on its way, the words go in a notice instead of a box, and the model doesn't tell those apart.
-- Two draws landing at once aren't modelled (one draw at a time above). The first to land counts as a pick for the second, so the first stays selected.
+- `EditLands` is one step for what's several in `finishText`: the second read, the retry over the new rev, and `keepTyped`. If a second text box opened while a refused edit was on its way, the words go in a notice instead of a box, and the same goes when another element has taken the loc. The model doesn't tell those apart.
+- `onPath` in `tools/text.ts` lands through the same `land` as `draw`, and isn't modelled separately.
 - Scopes run separately: a bug that needs a press and a text edit interleaved wouldn't show. The code keeps them apart at `editor.ts:582`, where a press during a text edit only blurs.
 
 ## Coverage

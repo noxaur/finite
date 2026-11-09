@@ -1,4 +1,4 @@
-import type { DesignState, ThreadMeta } from "@finite/protocol";
+import { type DesignState, REPLY_KEPT_MS, type ThreadMeta } from "@finite/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { createFinite, FiniteError, type SocketLike } from "./finite";
 
@@ -33,9 +33,9 @@ class FakeSocket implements SocketLike {
     this.push({ type: "reply", rid: m.rid, ok: true, value });
   }
   /** Opens and answers hello. */
-  greet() {
+  greet(memory = "m") {
     this.open();
-    this.reply("hello", { version: 1, user: { id: "u", name: "U" } });
+    this.reply("hello", { version: 1, user: { id: "u", name: "U" }, memory });
   }
 }
 
@@ -100,7 +100,7 @@ describe("finite client", () => {
     const ws = FakeSocket.all[0]!;
     ws.open();
     expect(ws.sent.map((m) => m.type)).toEqual(["hello"]);
-    ws.reply("hello", { version: 1, user: { id: "u", name: "U" } });
+    ws.reply("hello", { version: 1, user: { id: "u", name: "U" }, memory: "m" });
     await flush();
     expect(ws.sent.map((m) => m.type)).toEqual(["hello", "designs.list"]);
     ws.reply("designs.list", []);
@@ -139,39 +139,144 @@ describe("finite client", () => {
     expect(await caught).toBeInstanceOf(FiniteError);
   });
 
-  it("doesn't call a request failed when the socket drops after sending it", async () => {
+  /** An open client with one state-changing request on the wire. */
+  async function sentInterrupt() {
     const f = make();
     f.request("settings.get", {}).catch(() => {});
     const ws = FakeSocket.all[0]!;
     ws.greet();
     await flush();
-    const caught = f
-      .request("thread.interrupt", { designId: "d", threadId: "t1" })
-      .catch((e: unknown) => e);
+    const result = f.request("thread.interrupt", { designId: "d", threadId: "t1" });
+    const caught = result.catch((e: unknown) => e as FiniteError);
     await flush();
-    expect(ws.sent.at(-1)!.type).toBe("thread.interrupt");
+    return { f, ws, result, caught, frame: ws.sent.at(-1)! };
+  }
+
+  const reconnect = async (memory = "m") => {
+    await vi.advanceTimersByTimeAsync(300);
+    const ws = FakeSocket.all.at(-1)!;
+    ws.greet(memory);
+    await flush();
+    return ws;
+  };
+
+  it("asks again with the same id after a reconnect and settles with the answer", async () => {
+    const { ws, result, frame } = await sentInterrupt();
+    expect(frame.once).toBe(true);
     ws.close();
+    const ws2 = await reconnect();
+    const again = ws2.sent.find((m) => m.type === "thread.interrupt")!;
+    expect(again).toEqual(frame);
+    ws2.push({ type: "reply", rid: again.rid, ok: true, value: null });
+    await expect(result).resolves.toBeNull();
+  });
+
+  it("gives the server's refusal after a reconnect, not a guess", async () => {
+    const { ws, caught, frame } = await sentInterrupt();
+    ws.close();
+    const ws2 = await reconnect();
+    ws2.push({ type: "reply", rid: frame.rid, ok: false, reason: "No such thread" });
+    expect(((await caught) as FiniteError).message).toBe("No such thread");
+  });
+
+  it("asks again before it sends what queued while the socket was down", async () => {
+    const { f, ws } = await sentInterrupt();
+    ws.close();
+    f.request("thread.settle", { designId: "d", threadId: "t1", settled: true }).catch(() => {});
+    const ws2 = await reconnect();
+    expect(ws2.sent.map((m) => m.type)).toEqual(["hello", "thread.interrupt", "thread.settle"]);
+  });
+
+  it("says the outcome is unknown, and doesn't ask again, when the server's memory changed", async () => {
+    const { ws, caught } = await sentInterrupt();
+    ws.close();
+    const ws2 = await reconnect("after-a-restart");
     const error = (await caught) as FiniteError;
     expect(error).toBeInstanceOf(FiniteError);
     expect(error.message).toMatch(/may have gone through/);
-    expect(error.message).not.toMatch(/Try again/);
+    expect(ws2.sent.map((m) => m.type)).not.toContain("thread.interrupt");
   });
 
-  it("doesn't call a request failed when its reply comes after the timeout", async () => {
+  it("still sends a request that never left when the server restarted", async () => {
+    const { f, ws } = await sentInterrupt();
+    ws.close();
+    f.request("thread.settle", { designId: "d", threadId: "t1", settled: true }).catch(() => {});
+    const ws2 = await reconnect("after-a-restart");
+    expect(ws2.sent.map((m) => m.type)).toContain("thread.settle");
+  });
+
+  it("says the outcome is unknown after a disconnect longer than the server remembers", async () => {
+    const { ws, caught } = await sentInterrupt();
+    ws.close();
+    await vi.advanceTimersByTimeAsync(REPLY_KEPT_MS);
+    const ws2 = FakeSocket.all.at(-1)!;
+    ws2.greet();
+    await flush();
+    expect(((await caught) as FiniteError).message).toMatch(/may have gone through/);
+    expect(ws2.sent.map((m) => m.type)).not.toContain("thread.interrupt");
+  });
+
+  it("asks again when the reply is late, and takes the late reply", async () => {
+    const { ws, result, frame } = await sentInterrupt();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(ws.sent.filter((m) => m.rid === frame.rid)).toHaveLength(2);
+    ws.push({ type: "reply", rid: frame.rid, ok: true, value: null });
+    await expect(result).resolves.toBeNull();
+  });
+
+  it("keeps waiting while the server says it's still running, up to a limit", async () => {
+    const { ws, caught, frame } = await sentInterrupt();
+    let settled = false;
+    void caught.then(() => (settled = true));
+    // Each overdue round asks; the server's `running` means the socket is fine.
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+      ws.push({ type: "running", rid: frame.rid });
+    }
+    expect(settled).toBe(false);
+    expect(FakeSocket.all).toHaveLength(1);
+    for (let waited = 0; !settled && waited < REPLY_KEPT_MS; waited += 1000) {
+      await vi.advanceTimersByTimeAsync(1000);
+      ws.push({ type: "running", rid: frame.rid });
+    }
+    expect(FakeSocket.all).toHaveLength(1);
+    expect(((await caught) as FiniteError).message).toMatch(/may still have gone through/);
+  });
+
+  it("reconnects when the socket stays silent after asking again", async () => {
+    const { ws, result, frame } = await sentInterrupt();
+    await vi.advanceTimersByTimeAsync(2100);
+    expect(ws.readyState).toBe(3);
+    const ws2 = await reconnect();
+    ws2.push({ type: "reply", rid: frame.rid, ok: true, value: null });
+    await expect(result).resolves.toBeNull();
+  });
+
+  it("rejects a read when the socket drops, because it can simply be asked again", async () => {
     const f = make();
     f.request("settings.get", {}).catch(() => {});
     const ws = FakeSocket.all[0]!;
     ws.greet();
     await flush();
-    const caught = f
-      .request("thread.interrupt", { designId: "d", threadId: "t1" })
-      .catch((e: unknown) => e);
+    const caught = f.request("tokens.get", { designId: "d" }).catch((e: unknown) => e);
     await flush();
-    await vi.advanceTimersByTimeAsync(1500);
+    expect(ws.sent.at(-1)!.once).toBeUndefined();
+    ws.close();
     const error = (await caught) as FiniteError;
-    expect(error.message).toMatch(/may still have gone through/);
-    expect(error.message).not.toMatch(/Try again/);
-    ws.reply("thread.interrupt", {});
+    expect(error).toBeInstanceOf(FiniteError);
+    expect(error.message).not.toMatch(/gone through/);
+  });
+
+  it("uses ids a later page load won't repeat", async () => {
+    const rid = async () => {
+      const f = make();
+      void f.request("settings.get", {}).catch(() => {});
+      const ws = FakeSocket.all.at(-1)!;
+      ws.greet();
+      await flush();
+      return ws.sent.at(-1)!.rid;
+    };
+    expect(await rid()).not.toBe(await rid());
   });
 
   it("applies design events and resubscribes after a reconnect", async () => {

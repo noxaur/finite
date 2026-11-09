@@ -2,6 +2,7 @@
 current	INVARIANT	BackoffGrows	holds
 current	INVARIANT	ReleasedDesignUnsubscribed	holds
 current	INVARIANT	FailedMeansNotApplied	holds
+current	INVARIANT	AtMostOnce	holds
 current	INVARIANT	NoStaleStreaming	holds
 current	INVARIANT	LoadedMeansHistory	holds
 current	INVARIANT	HeldDesignSubscribed	holds
@@ -10,6 +11,7 @@ current	PROPERTY	RequestSettles	holds
 fixed	INVARIANT	BackoffGrows	holds
 fixed	INVARIANT	ReleasedDesignUnsubscribed	holds
 fixed	INVARIANT	FailedMeansNotApplied	holds
+fixed	INVARIANT	AtMostOnce	holds
 fixed	INVARIANT	NoStaleStreaming	holds
 fixed	INVARIANT	LoadedMeansHistory	holds
 fixed	INVARIANT	HeldDesignSubscribed	holds
@@ -19,3 +21,5 @@ no-resume	INVARIANT	HeldDesignSubscribed	breaks
 no-flush	PROPERTY	RequestSettles	breaks
 early-send	INVARIANT	NoRequestBeforeHello	breaks
 reports-failed	INVARIANT	FailedMeansNotApplied	breaks
+forgets-replies	INVARIANT	AtMostOnce	breaks
+trusts-restart	INVARIANT	AtMostOnce	breaks

@@ -59,6 +59,8 @@ export type TextTarget =
       loc: Loc;
       tag: string;
       rev: Rev;
+      /** How the server tells this element from another that later sits at the same loc. */
+      identity: string;
       /** The stamped path to the element, outermost first, for the detach offer. */
       chain: readonly HitElement[];
     }
@@ -941,6 +943,7 @@ export class CanvasEditor implements ToolHost {
       const now = await this.readInline(target.loc).catch(() => null);
       if (!now)
         return keep(target.rev, "That text moved. Copy your words, press Esc, and open it again.");
+      if (now.identity !== target.identity) return this.notSaved(content);
       const changed = "That text changed while you typed. Enter replaces it; Esc drops your words.";
       if (!sameContent(normalize(now.content), normalize(editing.content))) {
         return keep(now.rev, changed);
@@ -957,17 +960,19 @@ export class CanvasEditor implements ToolHost {
     rev: Rev,
     why: string,
   ) {
-    if (this.state.editingText) {
-      this.say(`Not saved, because the file changed: "${plainText(content)}"`, {
-        label: "Dismiss",
-        run: () => this.update({ notice: null }),
-      });
-      return;
-    }
+    if (this.state.editingText) return this.notSaved(content);
     this.update({
       editingText: { ...editing, content, target: { ...target, rev }, unsaved: true },
     });
     this.say(why);
+  }
+
+  /** Shows words that have nowhere safe to go, since no box can write them. */
+  private notSaved(content: Inline[]) {
+    this.say(`Not saved, because the file changed: "${plainText(content)}"`, {
+      label: "Dismiss",
+      run: () => this.update({ notice: null }),
+    });
   }
 
   /**

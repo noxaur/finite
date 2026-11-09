@@ -24,24 +24,27 @@ description: TLA+ model of half-finished work in Finite's web UI. Use when a cha
 
 ## Rules
 
-| Rule                          | Promise                                                      | Harm when broken                      | Now   |
-| ----------------------------- | ------------------------------------------------------------ | ------------------------------------- | ----- |
-| `LeftTextReachesSource`       | Text you typed and left reaches the source, read as finished | A typed value silently vanishes       | holds |
-| `SupersededFieldIsTold`       | A field whose draft was taken over knows it                  | Field keeps typing into a dead draft  | holds |
-| `OnePreviewDriver`            | A typing field and a scrub never both drive the preview      | Each wipes the other's preview        | holds |
-| `OneSendPerTyping`            | One typing session sends one source edit                     | Two undo steps, double write          | holds |
-| `NoOrphanPreview`             | Escape leaves no preview behind                              | Frame shows a value that isn't saved  | holds |
-| `ClosedPickerHoldsNothing`    | A closed picker holds no pick                                | Swatch shows a stale colour           | holds |
-| `ClosingNeverRewrites`        | Closing never saves an old pick over a newer value           | Someone's token edit is overwritten   | holds |
-| `TextTypedDuringSendSurvives` | Text typed after Send stays in the box                       | Text is wiped                         | holds |
-| `OneSendAtATime`              | One press starts one send                                    | Duplicate message                     | holds |
-| `QueuedMessageDeliveredOnce`  | A queued message reaches the agent once                      | The agent acts on it twice            | holds |
-| `UploadsStayApart`            | Each chip holds its own upload                               | An attachment is lost or duplicated   | holds |
-| `NewerDraftSurvives`          | Finishing a comment never cancels a newer draft              | The new draft disappears              | holds |
-| `CommentPostedOnce`           | One Post makes one comment                                   | Duplicate comment                     | holds |
-| `BackingOutStopsNavigation`   | Backing out stops the pending work from navigating           | The page jumps away after you left    | holds |
-| `ErrorStaysOnItsStep`         | An error shows on the step that caused it                    | A confusing error on the wrong screen | holds |
-| `OneMenuWorkAtATime`          | One action at a time from the menu                           | Two designs get connected             | holds |
+| Rule                                | Promise                                                      | Harm when broken                      | Now   |
+| ----------------------------------- | ------------------------------------------------------------ | ------------------------------------- | ----- |
+| `LeftTextReachesSource`             | Text you typed and left reaches the source, read as finished | A typed value silently vanishes       | holds |
+| `SupersededFieldIsTold`             | A field whose draft was taken over knows it                  | Field keeps typing into a dead draft  | holds |
+| `OnePreviewDriver`                  | A typing field and a scrub never both drive the preview      | Each wipes the other's preview        | holds |
+| `OneSendPerTyping`                  | One typing session sends one source edit                     | Two undo steps, double write          | holds |
+| `NoOrphanPreview`                   | Escape leaves no preview behind                              | Frame shows a value that isn't saved  | holds |
+| `ClosedPickerHoldsNothing`          | A closed picker holds no pick                                | Swatch shows a stale colour           | holds |
+| `ClosingNeverRewrites`              | Closing never saves an old pick over a newer value           | Someone's token edit is overwritten   | holds |
+| `TextTypedDuringSendSurvives`       | Text typed after Send stays in the box                       | Text is wiped                         | holds |
+| `SentTextLeavesTheBox`              | After a send, the box holds only what was typed after it     | The sent words come back in the box   | holds |
+| `AttachmentAddedDuringSendSurvives` | A file attached during a send is still attached after it     | The file vanishes before it's sent    | holds |
+| `FailedSendNowKeepsTheMessage`      | A Send now that fails leaves the message on the queue        | A queued message vanishes             | holds |
+| `OneSendAtATime`                    | One press starts one send                                    | Duplicate message                     | holds |
+| `QueuedMessageDeliveredOnce`        | A queued message reaches the agent once                      | The agent acts on it twice            | holds |
+| `UploadsStayApart`                  | Each chip holds its own upload                               | An attachment is lost or duplicated   | holds |
+| `NewerDraftSurvives`                | Finishing a comment never cancels a newer draft              | The new draft disappears              | holds |
+| `CommentPostedOnce`                 | One Post makes one comment                                   | Duplicate comment                     | holds |
+| `BackingOutStopsNavigation`         | Backing out stops the pending work from navigating           | The page jumps away after you left    | holds |
+| `ErrorStaysOnItsStep`               | An error shows on the step that caused it                    | A confusing error on the wrong screen | holds |
+| `OneMenuWorkAtATime`                | One action at a time from the menu                           | Two designs get connected             | holds |
 
 Every `breaks` row has a `fixed` row where the rule holds. Every `holds` row has a broken variant where it fails.
 
@@ -53,26 +56,26 @@ None open. Every rule holds on `current`; the regression tests are `editDrafts.t
 
 Two messages, two presses of Send now, two uploads, two comment drafts, one DraftField, one scrub label. The areas don't interact, so each is explored alone.
 
-Left out: a reply that's lost after the server applied the request (`verify-client-sync`), the agent's own turn lifecycle (`verify-agent-sessions`), editing a queued chip's text, removing a chip mid-upload, the system folder picker, and the inspector rebuilding its editor on a selection change. A pass covers these orders of these steps, and says nothing about rendering or real network timing.
+Left out: a reply that's lost after the server applied the request (`verify-client-sync`), the agent's own turn lifecycle (`verify-agent-sessions`), editing a queued chip's text, a Send now whose requeue also fails (the words are lost then), removing a chip mid-upload, the system folder picker, and the inspector rebuilding its editor on a selection change. A pass covers these orders of these steps, and says nothing about rendering or real network timing.
 
 ## Coverage
 
 Last synced: 51ee6f77f44453401756379b78aca7017ee11950. Move this forward only after confirming the model describes the code at the new commit.
 
-| File                                               | Function                                           | Actions                                                                     | Rules                                              |
-| -------------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------- | -------------------------------------------------- |
-| `apps/web/src/components/inspector/styleEditor.ts` | `begin`, `finishOpen`, `drive`, `commit`           | `Type`, `YouPressAScrubLabel`, scrub actions, `LeaveAndKeep`                | inspector rules                                    |
-| `apps/web/src/components/DraftField.tsx`           | `useDraftField`, `ScrubLabel`                      | `Type`, `LeaveAndKeep`, `YouEscapeTheField`, `YouPressAScrubLabel`          | inspector rules                                    |
-| `apps/web/src/components/ColorPicker.tsx`          | `show`, `finish`, `cancel`, unmount effect, `away` | token actions                                                               | `ClosedPickerHoldsNothing`, `ClosingNeverRewrites` |
-| `apps/web/src/components/TokensPanel.tsx`          | `ColorSwatch`, `close`                             | `YouCloseThePicker`, `TheClosedPickerUnmounts`                              | `ClosedPickerHoldsNothing`, `ClosingNeverRewrites` |
-| `apps/web/src/components/Composer.tsx`             | `send`                                             | `Press`, `TheSendIsAnswered`, `TheSendFails`                                | `TextTypedDuringSendSurvives`, `OneSendAtATime`    |
-| `apps/web/src/components/Composer.tsx`             | `QueuedChip`                                       | `YouPressSendNow` and the chip actions                                      | `QueuedMessageDeliveredOnce`                       |
-| `apps/web/src/components/Composer.tsx`             | `upload`                                           | `YouDropAFile`, `TheUploadLands`, `TheUploadFails`                          | `UploadsStayApart`                                 |
-| `apps/web/src/lib/composer.ts`                     | `sendModeFor`                                      | `YouPressSendWhileIdle`, `YouSteerTheRunningTurn`, `YouQueueForTheNextTurn` | `OneSendAtATime`                                   |
-| `apps/server/src/agent/index.ts`                   | `sendNow`, `finishTurn`, `editQueued`, `interrupt` | `TheServer*`, `TheTurnEnds*`, `YouPressStop`                                | `QueuedMessageDeliveredOnce`                       |
-| `apps/web/src/components/Comments.tsx`             | `CommentLayer` draft, `Composer.submit`            | comment actions                                                             | `NewerDraftSurvives`, `CommentPostedOnce`          |
-| `apps/web/src/canvas/tools/comment.ts`             | draft placement                                    | `YouPlaceACommentDraft`                                                     | `NewerDraftSurvives`                               |
-| `apps/web/src/canvas/editor.ts`                    | `cancelCommentDraft`                               | `ThePostIsAnswered`, `YouCancelTheDraft`                                    | `NewerDraftSurvives`                               |
-| `apps/web/src/components/CommandMenu.tsx`          | `finish`, `back`, `go`                             | menu actions                                                                | menu rules                                         |
+| File                                               | Function                                           | Actions                                                                     | Rules                                                                                                        |
+| -------------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `apps/web/src/components/inspector/styleEditor.ts` | `begin`, `finishOpen`, `drive`, `commit`           | `Type`, `YouPressAScrubLabel`, scrub actions, `LeaveAndKeep`                | inspector rules                                                                                              |
+| `apps/web/src/components/DraftField.tsx`           | `useDraftField`, `ScrubLabel`                      | `Type`, `LeaveAndKeep`, `YouEscapeTheField`, `YouPressAScrubLabel`          | inspector rules                                                                                              |
+| `apps/web/src/components/ColorPicker.tsx`          | `show`, `finish`, `cancel`, unmount effect, `away` | token actions                                                               | `ClosedPickerHoldsNothing`, `ClosingNeverRewrites`                                                           |
+| `apps/web/src/components/TokensPanel.tsx`          | `ColorSwatch`, `close`                             | `YouCloseThePicker`, `TheClosedPickerUnmounts`                              | `ClosedPickerHoldsNothing`, `ClosingNeverRewrites`                                                           |
+| `apps/web/src/components/Composer.tsx`             | `send`                                             | `Press`, `TheSendIsAnswered`, `TheSendFails`, `YouAttachDuringTheSend`      | `TextTypedDuringSendSurvives`, `SentTextLeavesTheBox`, `AttachmentAddedDuringSendSurvives`, `OneSendAtATime` |
+| `apps/web/src/components/Composer.tsx`             | `QueuedChip`                                       | `YouPressSendNow`, `TheSteerFails` and the chip actions                     | `QueuedMessageDeliveredOnce`, `FailedSendNowKeepsTheMessage`                                                 |
+| `apps/web/src/components/Composer.tsx`             | `upload`                                           | `YouDropAFile`, `TheUploadLands`, `TheUploadFails`                          | `UploadsStayApart`                                                                                           |
+| `apps/web/src/lib/composer.ts`                     | `sendModeFor`                                      | `YouPressSendWhileIdle`, `YouSteerTheRunningTurn`, `YouQueueForTheNextTurn` | `OneSendAtATime`                                                                                             |
+| `apps/server/src/agent/index.ts`                   | `sendNow`, `finishTurn`, `editQueued`, `interrupt` | `TheServer*`, `TheTurnEnds*`, `YouPressStop`                                | `QueuedMessageDeliveredOnce`                                                                                 |
+| `apps/web/src/components/Comments.tsx`             | `CommentLayer` draft, `Composer.submit`            | comment actions                                                             | `NewerDraftSurvives`, `CommentPostedOnce`                                                                    |
+| `apps/web/src/canvas/tools/comment.ts`             | draft placement                                    | `YouPlaceACommentDraft`                                                     | `NewerDraftSurvives`                                                                                         |
+| `apps/web/src/canvas/editor.ts`                    | `cancelCommentDraft`                               | `ThePostIsAnswered`, `YouCancelTheDraft`                                    | `NewerDraftSurvives`                                                                                         |
+| `apps/web/src/components/CommandMenu.tsx`          | `finish`, `back`, `go`                             | menu actions                                                                | menu rules                                                                                                   |
 
 To bring the model back in line after changes that skipped this check, use `/maintain-formal-verification-skill`.

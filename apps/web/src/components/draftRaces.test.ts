@@ -29,7 +29,12 @@ vi.mock("react", async (actual) => ({
       },
     ];
   },
-  useRef: () => ({ current: null }),
+  useRef: (initial: unknown = null) => {
+    const cells = hooks.current;
+    const i = hooks.cursor++;
+    if (!(i in cells)) cells[i] = { current: initial };
+    return cells[i];
+  },
   useEffect: () => {},
 }));
 vi.mock("@stylexjs/stylex", () => ({
@@ -132,10 +137,46 @@ describe("typing during a send", () => {
     onSend.mockReturnValue(answer.promise);
     type("first");
     void pressSend();
-    type("first, and then some");
+    type("something else");
     answer.resolve();
     await flush();
-    expect(box().props.value).toBe("first, and then some");
+    expect(box().props.value).toBe("something else");
+  });
+
+  it("drops the sent part when the text typed during the send continues it", async () => {
+    const answer = deferred<void>();
+    onSend.mockReturnValue(answer.promise);
+    type("first");
+    void pressSend();
+    type("first and more");
+    answer.resolve();
+    await flush();
+    expect(box().props.value).toBe(" and more");
+  });
+
+  it("keeps a file attached during the send and clears the ones sent", async () => {
+    const answer = deferred<void>();
+    onSend.mockReturnValue(answer.promise);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, json: async () => ({ path: "/a" }) })),
+    );
+    const attach = async (name: string) => {
+      must(find(composer(), (el) => el.type === "input")).props.onChange!({
+        target: { files: [new File(["x"], name)], value: "" },
+      });
+      await flush();
+    };
+    const removeButton = (name: string) =>
+      find(composer(), (el) => el.props["aria-label"] === `Remove ${name}`);
+    await attach("sent.png");
+    type("first");
+    void pressSend();
+    await attach("late.png");
+    answer.resolve();
+    await flush();
+    expect(removeButton("sent.png")).toBeUndefined();
+    expect(removeButton("late.png")).toBeDefined();
   });
 
   it("empties the box when nothing was typed during the send", async () => {
@@ -175,6 +216,20 @@ describe("Send now on a queued message", () => {
     await pressSendNow();
     expect(sends()).toEqual([]);
     expect(toast).toHaveBeenCalledWith("That queued message was already sent or removed.");
+  });
+
+  it("puts the message back on the queue when the steer fails", async () => {
+    request.mockImplementation(async (type: string, params: { mode?: string }) => {
+      if (type === "thread.send" && params.mode === "steer") throw new Error("Design removed.");
+      return thread;
+    });
+    await pressSendNow();
+    expect(sends().map(([, params]) => (params as { mode: string }).mode)).toEqual([
+      "steer",
+      "queue",
+    ]);
+    expect(sends()[1]![1]).toMatchObject({ text: "later", attachments: [] });
+    expect(toast).toHaveBeenCalledWith("Design removed.");
   });
 
   it("sends once when it's pressed twice", async () => {

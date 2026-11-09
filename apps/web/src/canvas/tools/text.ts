@@ -3,7 +3,7 @@ import { isPlain, plainText } from "../../design/editing/inline";
 import type { TextTarget } from "../editor";
 import { chainOf, fileOf } from "../gestures";
 import { keyOf, selectionStore } from "../selection";
-import { planIn } from "./draw";
+import { type Land, landing, planIn } from "./draw";
 import type { Down, ToolDef, ToolHost } from "./host";
 import { boxGesture } from "./shapes";
 
@@ -149,6 +149,7 @@ async function openEditor(
         loc: element.loc,
         tag: element.tag,
         rev: value.rev,
+        identity: value.identity,
         chain: chainOf(hit),
       },
     },
@@ -298,6 +299,16 @@ export const textOnPath = {
 /** Puts text along a `<path>`: a sibling `<text>` whose `<textPath>` points at the path's id. */
 async function onPath(host: ToolHost, frame: Frame, path: HitElement, index: number) {
   host.setTool("select");
+  await landing(host, (land) => writeOnPath(host, frame, path, index, land));
+}
+
+async function writeOnPath(
+  host: ToolHost,
+  frame: Frame,
+  path: HitElement,
+  index: number,
+  land: Land,
+) {
   const bridge = host.bridge(frame.id);
   const info = await bridge?.vector(path.loc, index).catch(() => null);
   if (!bridge || !info) return host.say("That path isn't in the frame any more.");
@@ -324,7 +335,8 @@ async function onPath(host: ToolHost, frame: Frame, path: HitElement, index: num
       revs,
     },
   ]);
-  const loc = done ? done.created.text : undefined;
+  if (!done) return;
+  const loc = done.created.text;
   if (!loc) return;
   for (const end = performance.now() + LANDING_MS; performance.now() < end;) {
     const rects = await bridge.rects([loc]).catch(() => null);
@@ -333,7 +345,11 @@ async function onPath(host: ToolHost, frame: Frame, path: HitElement, index: num
   }
   const inspection = await bridge.inspect(loc, 0).catch(() => null);
   if (!inspection) return;
-  host.select([{ frameId: frame.id, loc, index: 0, name: "Text on path" }]);
+  const selected = land(
+    () => host.select([{ frameId: frame.id, loc, index: 0, name: "Text on path" }]),
+    done.remap,
+  );
+  if (!selected) return;
   const rect = (await bridge.rects([loc]).catch(() => null))?.[loc]?.[0];
   if (rect)
     await editText(host, frame, {

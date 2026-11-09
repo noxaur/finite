@@ -29,3 +29,6 @@ selection	INVARIANT	OneCommentSurface	holds
 selection-fixed	INVARIANT	OneCommentSurface	holds
 selection	INVARIANT	LandingKeepsYourPick	holds
 selection-fixed	INVARIANT	LandingKeepsYourPick	holds
+selection	INVARIANT	NewestLandingIsSelected	holds
+selection-fixed	INVARIANT	NewestLandingIsSelected	holds
+landings-blind	INVARIANT	NewestLandingIsSelected	breaks

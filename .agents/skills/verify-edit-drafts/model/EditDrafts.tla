@@ -58,6 +58,10 @@ Init ==
              chip |-> [r \in Runs |-> "idle"],   \* each press of Send now, QueuedChip's onClick
              chipMsg |-> [r \in Runs |-> ""],
              lostText |-> FALSE,    \* a reply wiped text typed after the send
+             echo |-> FALSE,        \* a reply left the sent text in the box in front of what came after
+             attached |-> FALSE,    \* a file was attached while the send was under way
+             lostFile |-> FALSE,    \* a reply cleared a file it didn't send
+             vanished |-> FALSE,    \* a failed Send now lost the message it had taken off the queue
              doubled |-> FALSE]     \* a second send started while one was under way
   /\ upload = [chip |-> [u \in Uploads |-> "absent"],  \* absent | uploading | own | other (holds the other's path)
                net |-> [u \in Uploads |-> "idle"]]     \* idle | flying | over
@@ -249,9 +253,16 @@ YouWriteAMessage ==
      IN send' = [send EXCEPT !.text = m, !.used = @ \union {m}]
   /\ OnlySend
 
+\* "m2" is "m1" with more typed after it.
 YouKeepTypingDuringTheSend ==
   /\ area = "composer" /\ send.flight # "none" /\ send.text = "m1" /\ send.flightText = "m1"
   /\ send' = [send EXCEPT !.text = "m2", !.used = @ \union {"m2"}]
+  /\ OnlySend
+
+\* Composer.tsx:133 upload adds a chip while the send is under way.
+YouAttachDuringTheSend ==
+  /\ area = "composer" /\ send.flight # "none" /\ ~send.attached
+  /\ send' = [send EXCEPT !.attached = TRUE]
   /\ OnlySend
 
 \* Composer.tsx:150 send(), lib/composer.ts:7 sendModeFor. Alt picks the other mode while running.
@@ -282,13 +293,18 @@ TheServerDeliversIt ==
                           !.delivered = Deliver(send, send.flightText)]
   /\ OnlySend
 
-\* Composer.tsx:165 empties the box after the await, unless the text changed (send-keeps-new-text).
+\* Composer.tsx:167 takes the sent text out of the box after the await: all of it if nothing was typed
+\* (send-keeps-new-text), and only the sent part when more came after it (send-strips-sent). :168
+\* clears the files that were sent, and a file attached since stays (send-clears-only-sent).
 TheSendIsAnswered ==
   /\ area = "composer" /\ send.flight = "answered"
   /\ LET newer == send.text # send.flightText
          keep == newer /\ Has("send-keeps-new-text")
      IN send' = [send EXCEPT !.flight = "none", !.text = IF keep THEN @ ELSE "",
-                             !.lostText = @ \/ (newer /\ ~keep)]
+                             !.lostText = @ \/ (newer /\ ~keep),
+                             !.echo = @ \/ (keep /\ ~Has("send-strips-sent")),
+                             !.lostFile = @ \/ (send.attached /\ ~Has("send-clears-only-sent")),
+                             !.attached = FALSE]
   /\ OnlySend
 
 \* Composer.tsx:171 the catch keeps the text and shows a toast.
@@ -348,6 +364,23 @@ TheServerSteersItIn(r) ==
   /\ area = "composer" /\ send.chip[r] = "steering"
   /\ send' = [send EXCEPT !.chip[r] = "done", !.running = TRUE,
                           !.delivered = Deliver(send, send.chipMsg[r])]
+  /\ OnlySend
+
+\* Composer.tsx:420 the steer is refused or lost, after the message left the queue. The catch sends it
+\* again in queue mode (requeue-on-failure); without that it's gone.
+TheSteerFails(r) ==
+  /\ area = "composer" /\ send.chip[r] = "steering"
+  /\ send' = [send EXCEPT !.chip[r] = IF Has("requeue-on-failure") THEN "requeueing" ELSE "done",
+                          !.vanished = @ \/ ~Has("requeue-on-failure")]
+  /\ OnlySend
+
+\* apps/server/src/agent/index.ts:711 sendNow in queue mode: queue it while the turn runs, else start it.
+TheServerRequeuesIt(r) ==
+  /\ area = "composer" /\ send.chip[r] = "requeueing"
+  /\ send' = IF send.running
+       THEN [send EXCEPT !.chip[r] = "done", !.queued = Append(@, send.chipMsg[r])]
+       ELSE [send EXCEPT !.chip[r] = "done", !.running = TRUE,
+                         !.delivered = Deliver(send, send.chipMsg[r])]
   /\ OnlySend
 
 (* ---- Attachments: Composer.tsx:130 upload ---- *)
@@ -466,11 +499,12 @@ Moves ==
   \/ YouLeaveTheField \/ YouEscapeTheField \/ TheEditLands
   \/ YouOpenTheTokenPicker \/ YouChangeTheColor \/ YouFinishTheChange \/ YouEscapeTheChange
   \/ YouCloseThePicker \/ TheClosedPickerUnmounts \/ TheTokenChangesElsewhere
-  \/ YouWriteAMessage \/ YouKeepTypingDuringTheSend \/ YouPressSendWhileIdle
+  \/ YouWriteAMessage \/ YouKeepTypingDuringTheSend \/ YouAttachDuringTheSend \/ YouPressSendWhileIdle
   \/ YouSteerTheRunningTurn \/ YouQueueForTheNextTurn \/ TheServerQueuesIt \/ TheServerDeliversIt
   \/ TheSendIsAnswered \/ TheSendFails \/ TheTurnEndsAndTakesTheQueue \/ TheTurnEnds \/ YouPressStop
   \/ \E r \in Runs : \/ YouPressSendNow(r) \/ TheServerAnswersTheDequeue(r) \/ TheDequeueIsLost(r)
-                     \/ TheChipGoesOnToSend(r) \/ TheServerSteersItIn(r)
+                     \/ TheChipGoesOnToSend(r) \/ TheServerSteersItIn(r) \/ TheSteerFails(r)
+                     \/ TheServerRequeuesIt(r)
   \/ \E u \in Uploads : YouDropAFile(u) \/ TheUploadLands(u) \/ TheUploadFails(u)
   \/ \E d \in Drafts : YouPlaceACommentDraft(d)
   \/ YouPressPost \/ TheServerAddsTheComment \/ ThePostIsAnswered \/ ThePostFails \/ YouCancelTheDraft
@@ -502,6 +536,12 @@ ClosingNeverRewrites == ~token.rewrote
 
 \* What you typed after pressing Send is still in the box when the send finishes.
 TextTypedDuringSendSurvives == ~send.lostText
+\* What you typed after pressing Send is the whole box once the send finishes, not the sent text and more.
+SentTextLeavesTheBox == ~send.echo
+\* A file you attached while a send was under way is still attached when it finishes.
+AttachmentAddedDuringSendSurvives == ~send.lostFile
+\* A Send now that fails leaves the message on the queue, not nowhere.
+FailedSendNowKeepsTheMessage == ~send.vanished
 \* One press of Send starts one send.
 OneSendAtATime == ~send.doubled
 \* A queued message reaches the agent once.

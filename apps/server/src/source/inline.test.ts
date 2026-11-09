@@ -54,6 +54,29 @@ const text = (t: string, marks: Extract<Inline, { t: "text" }>["marks"] = []): I
 });
 
 describe("reading an element's children", () => {
+  describe("identity", () => {
+    const children = (...lines: string[]) =>
+      `export function App() {\n  return (<div>\n${lines.map((l) => `         ${l}`).join("\n")}\n  </div>);\n}\n`;
+
+    it("stays the same when only the words change", async () => {
+      const before = await read(children(`<p className="a">One</p>`));
+      const after = await read(children(`<p className="a">Other words</p>`));
+      expect(after.identity).toBe(before.identity);
+    });
+
+    it("differs for another element of the same tag at the same place", async () => {
+      const before = await read(children(`<p className="a">One</p>`));
+      const after = await read(children(`<p className="b">Two</p>`));
+      expect(after.identity).not.toBe(before.identity);
+    });
+
+    it("differs when a bare sibling slides up into the place", async () => {
+      const before = await read(children(`<p>One</p>`, `<p>Two</p>`));
+      const after = await read(children(`<p>Two</p>`));
+      expect(after.identity).not.toBe(before.identity);
+    });
+  });
+
   it("reads plain text as JSX renders it", async () => {
     const { content, keeps } = await read(
       app(`<p>

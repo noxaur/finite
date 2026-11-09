@@ -28,13 +28,14 @@ Read every result with `/statechart`: it turns a violation into its shortest pat
 | `BackoffGrows`               | The retry delay grows while connections keep failing             | The page hammers a failing server every 250 ms                           | holds |
 | `ReleasedDesignUnsubscribed` | A design nobody shows isn't subscribed once the page settles     | The server keeps sending its events and keeps its dev server from idling | holds |
 | `FailedMeansNotApplied`      | A request the page calls failed did not run                      | "Try again" sends a message twice                                        | holds |
+| `AtMostOnce`                 | However often the page asks, the server runs a request once      | A reconnect sends a message twice                                        | holds |
 | `NoStaleStreaming`           | A finished turn's partial text doesn't sit beside its final text | The thread shows the reply twice, one copy cut off                       | holds |
 | `LoadedMeansHistory`         | A thread with messages never shows as loaded and empty           | The thread looks empty                                                   | holds |
 | `HeldDesignSubscribed`       | A design on screen is subscribed once the page settles           | The design stops updating after a reconnect                              | holds |
 | `NoRequestBeforeHello`       | The server never gets a request before hello                     | The server refuses it with "send hello first"                            | holds |
 | `RequestSettles`             | A request settles once the server is back                        | A caller waits forever                                                   | holds |
 
-`RequestSettles` assumes the server comes back. With the server gone for good, a queued request waits forever; the header of `finite.ts` promises that.
+`RequestSettles` assumes the server comes back. With the server gone for good, a queued request waits forever; the header of `finite.ts` promises that. `FailedMeansNotApplied` stays true because a request that may have run settles as unknown: the page asks again after a reconnect, and says "may have gone through" only when hello shows the server's memory changed or the request got too old to ask about.
 
 ## Does your change touch this?
 
@@ -67,7 +68,10 @@ Last synced: `51ee6f77f44453401756379b78aca7017ee11950`
 | `apps/web/src/client/finite.ts` | `connect`, `ws.onopen`            | `SocketOpens`, `HelloAccepted`, `HelloRefused`                          | `BackoffGrows`, `NoRequestBeforeHello`                            |
 | `apps/web/src/client/finite.ts` | `ws.onclose`, `retry`             | `ConnectionDrops`, `ClosingCompletes`, `RetryFires`                     | `BackoffGrows`, `FailedMeansNotApplied`, `LoadedMeansHistory`     |
 | `apps/web/src/client/finite.ts` | `resume`                          | `HelloAccepted`                                                         | `HeldDesignSubscribed`, `NoStaleStreaming`                        |
-| `apps/web/src/client/finite.ts` | `request`, `track`, `receive`     | `YouSendRequest`, `ReplyArrives`, `RequestTimesOut`                     | `RequestSettles`, `FailedMeansNotApplied`, `NoRequestBeforeHello` |
+| `apps/web/src/client/finite.ts` | `request`, `track`, `receive`     | `YouSendRequest`, `ReplyArrives`                                        | `RequestSettles`, `FailedMeansNotApplied`, `NoRequestBeforeHello` |
+| `apps/web/src/client/finite.ts` | `overdue`, `askAgain`             | `RequestTimesOut`, `RequestGivesUp`, `HelloAccepted`                    | `AtMostOnce`, `FailedMeansNotApplied`, `RequestSettles`           |
+| `apps/server/src/hub.ts`        | `receive`                         | `ServerReceivesRequest`                                                 | `AtMostOnce`, `RequestSettles`                                    |
+| `apps/server/src/replies.ts`    | `ask`, `finish`                   | `ServerReceivesRequest`, `ServerFinishes`, `ServerForgets`              | `AtMostOnce`, `RequestSettles`                                    |
 | `apps/web/src/client/finite.ts` | `holdDesign` and its release      | `PageHolds`, `PageReleases`, `LingerExpires`                            | `HeldDesignSubscribed`, `ReleasedDesignUnsubscribed`              |
 | `apps/web/src/client/finite.ts` | `subscribeDesign`                 | `SnapshotArrives`                                                       | `ReleasedDesignUnsubscribed`                                      |
 | `apps/web/src/client/finite.ts` | `loadThread`, `appendThreadEvent` | `HistoryArrives`, `HistoryRefused`, `ServerStreamsText`, `TurnFinishes` | `NoStaleStreaming`, `LoadedMeansHistory`                          |
@@ -86,3 +90,6 @@ Last synced: `51ee6f77f44453401756379b78aca7017ee11950`
 - **A socket that is closing but hasn't fired `onclose`**, where `request` re-queues itself.
 - **`close()`**, which only tests call.
 - **Requests the server refuses**, apart from hello and history.
+- **The server forgetting a reply by count while a copy of the request or its reply is travelling.** That takes 1000 later replies inside one trip. A copy that arrived after that would run again.
+- **Forgetting by age**, which only happens after the page has stopped asking: `GIVE_UP_MS` is 10 minutes under `REPLY_KEPT_MS`, and the model's `RequestGivesUp` stands in for it.
+- **The server's `running` answer**, which only restarts the page's timer.

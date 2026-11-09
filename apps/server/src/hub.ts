@@ -19,6 +19,7 @@ import {
 } from "@finite/protocol";
 import type { WebSocket } from "ws";
 import { handlers } from "./handlers.ts";
+import { createReplyMemory } from "./replies.ts";
 import { syncRoutes } from "./store/routes.ts";
 
 export type Modules = {
@@ -61,6 +62,8 @@ export type Hub = {
   release(designId: string): void;
   /** The design, opened once and kept; its changes are broadcast to its subscribers. */
   open(designId: string): Promise<OpenDesign>;
+  /** Names what the hub remembers of `once` requests; `hello` tells each client. */
+  memory(): string;
   close(): Promise<void>;
 };
 
@@ -72,6 +75,7 @@ export function createHub(modules: Modules, handle: Handlers = handlers): Hub {
   const detach: Unsubscribe[] = [];
   /** Stops passing one open design's changes to its subscribers. */
   const perDesign = new Map<string, Unsubscribe>();
+  const replies = createReplyMemory();
   let nextId = 1;
 
   const hub: Hub = {
@@ -148,6 +152,8 @@ export function createHub(modules: Modules, handle: Handlers = handlers): Hub {
       return pending;
     },
 
+    memory: () => replies.name(),
+
     async close() {
       for (const off of detach.splice(0)) off();
       for (const off of perDesign.values()) off();
@@ -177,21 +183,28 @@ export function createHub(modules: Modules, handle: Handlers = handlers): Hub {
     if (message.type !== "hello" && !client.user) {
       return client.send(refusal(message.rid, "send hello first", "invalid"));
     }
+    if (!message.once) return client.send(await answer(client, message));
+    const known = replies.ask(message.rid, client);
+    if (known === "running") return client.send({ type: "running", rid: message.rid });
+    if (known) return client.send(known);
+    replies.finish(message.rid, await answer(client, message));
+  }
+
+  /** Runs one request. Everything that goes wrong becomes a refusal. */
+  async function answer(client: Client, message: ClientMessage): Promise<Reply> {
     try {
       const value = await dispatch(client, message);
-      client.send({ type: "reply", rid: message.rid, ok: true, value: value ?? null });
+      return { type: "reply", rid: message.rid, ok: true, value: value ?? null };
     } catch (error) {
-      if (error instanceof Refused) {
-        return client.send(refusal(message.rid, error.message, error.code));
-      }
+      if (error instanceof Refused) return refusal(message.rid, error.message, error.code);
       console.error(`${message.type} failed:`, error);
       const reason = error instanceof Error ? error.message : String(error);
-      client.send(refusal(message.rid, `${message.type} failed: ${reason}`));
+      return refusal(message.rid, `${message.type} failed: ${reason}`);
     }
   }
 
   function dispatch(client: Client, message: ClientMessage): Promise<unknown> {
-    const { type, rid: _rid, ...params } = message;
+    const { type, rid: _rid, once: _once, ...params } = message;
     const user = client.user ?? (message.type === "hello" ? message.user : undefined);
     const by: Actor = { kind: "person", id: user?.id ?? "anonymous", name: user?.name ?? "" };
     const run = handle[type] as (params: unknown, ctx: Context) => Promise<unknown>;

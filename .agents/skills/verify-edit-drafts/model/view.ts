@@ -15,6 +15,9 @@ const composerState = ({ send: s }: V) => {
   if (Object.values(s.delivered as Record<string, number>).some((n) => n > 1))
     return "Agent got the message twice";
   if (s.lostText) return "What you typed during the send is gone";
+  if (s.echo) return "The sent text is still in the box";
+  if (s.lostFile) return "A file attached during the send is gone";
+  if (s.vanished) return "A failed Send now lost the message";
   const chipBusy = Object.values(s.chip as Record<string, string>).some(
     (c) => c !== "idle" && c !== "done",
   );
@@ -42,6 +45,7 @@ const labels: Record<string, string | null> = {
   TheEditLands: null,
   YouWriteAMessage: "you write a message",
   YouKeepTypingDuringTheSend: "you keep typing",
+  YouAttachDuringTheSend: "you attach a file",
   YouPressSendWhileIdle: "you press Send",
   YouSteerTheRunningTurn: "you steer",
   YouQueueForTheNextTurn: "you queue",
@@ -57,6 +61,8 @@ const labels: Record<string, string | null> = {
   TheDequeueIsLost: "the connection drops",
   TheChipGoesOnToSend: "Finite sends it anyway",
   TheServerSteersItIn: "the agent gets it",
+  TheSteerFails: "the steer fails",
+  TheServerRequeuesIt: "the server queues it again",
   Finished: null,
 };
 

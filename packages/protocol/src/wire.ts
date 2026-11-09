@@ -36,6 +36,9 @@ export const PROTOCOL_VERSION = 1;
 /** The path of the one WebSocket each tab opens. */
 export const WS_PATH = "/api/ws";
 
+/** How long the server remembers the reply to a request sent with `once`. */
+export const REPLY_KEPT_MS = 30 * 60_000;
+
 const designId = Id;
 
 /** What `subscribe` returns: everything a design screen needs to draw. */
@@ -54,10 +57,21 @@ const ref = { designId, threadId: Id };
 
 /**
  * Every request a client sends on `/api/ws`, keyed by `type`, with the shape of its reply value.
- * `rid` is added by {@link ClientMessage}.
+ * `rid` and `once` are added by {@link ClientMessage}.
  */
 export const requests = {
-  hello: { params: { user: User }, result: z.object({ version: z.number(), user: User }) },
+  hello: {
+    params: { user: User },
+    result: z.object({
+      version: z.number(),
+      user: User,
+      /**
+       * Names what the server remembers of `once` requests. A new name means it restarted or
+       * forgot a reply early, so asking again could run a request a second time.
+       */
+      memory: z.string(),
+    }),
+  },
 
   "designs.list": { params: {}, result: z.array(DesignEntry) },
   "design.create": {
@@ -132,11 +146,15 @@ export const requests = {
     params: { designId, canvasId: Id, file: z.string(), importer: z.string().optional() },
     result: z.object({ file: z.string() }),
   },
-  /** The element's children as editable runs. `keeps` lists what the runs hold but can't change. */
+  /**
+   * The element's children as editable runs. `keeps` lists what the runs hold but can't change.
+   * `identity` differs when another element comes to sit at `loc`; it ignores the children.
+   */
   "source.inline": {
     params: { designId, loc: Loc },
     result: z.object({
       rev: Rev,
+      identity: z.string(),
       content: z.array(Inline),
       keeps: z.array(
         z.object({
@@ -252,16 +270,44 @@ export const requests = {
 
 export type RequestType = keyof typeof requests;
 
+/**
+ * Requests that are safe to run again, so the page never sends them with `once`: they read, they
+ * only touch this socket, or they only report. Anything else applies at most once.
+ */
+export const repeatable: ReadonlySet<RequestType> = new Set<RequestType>([
+  "hello",
+  "subscribe",
+  "unsubscribe",
+  "designs.list",
+  "fs.list",
+  "repo.search",
+  "source.inline",
+  "canvas.exportSlice",
+  "thread.history",
+  "settings.get",
+  "claude.status",
+  "tokens.get",
+  "components.list",
+  "frame.error",
+]);
+
 type RequestShape<K extends RequestType> = {
   type: z.ZodLiteral<K>;
   rid: z.ZodString;
+  once: z.ZodOptional<z.ZodLiteral<true>>;
 } & (typeof requests)[K]["params"] extends infer S extends z.ZodRawShape
   ? S
   : never;
 type RequestSchema<K extends RequestType> = z.ZodObject<RequestShape<K>>;
 
 function requestSchema<K extends RequestType>(type: K): RequestSchema<K> {
-  const shape = { type: z.literal(type), rid: z.string().min(1), ...requests[type].params };
+  const shape = {
+    type: z.literal(type),
+    rid: z.string().min(1),
+    // The server remembers this `rid` and its reply, so asking again can't run it twice.
+    once: z.literal(true).optional(),
+    ...requests[type].params,
+  };
   return z.object(shape) as unknown as RequestSchema<K>;
 }
 
@@ -285,8 +331,8 @@ export type ClientMessage = { [K in RequestType]: z.infer<RequestSchema<K>> }[Re
 
 /** A request of one type, `rid` and `type` included. */
 export type Request<K extends RequestType> = Extract<ClientMessage, { type: K }>;
-/** What a caller passes for a request: the message without `type` and `rid`. */
-export type Params<K extends RequestType> = Omit<Request<K>, "type" | "rid">;
+/** What a caller passes for a request: the message without `type`, `rid` and `once`. */
+export type Params<K extends RequestType> = Omit<Request<K>, "type" | "rid" | "once">;
 /** The reply value of a request. */
 export type Result<K extends RequestType> = z.infer<(typeof requests)[K]["result"]>;
 
@@ -324,7 +370,11 @@ export const ServerEvent = z.discriminatedUnion("type", [
 ]);
 export type ServerEvent = z.infer<typeof ServerEvent>;
 
-export const ServerMessage = z.union([Reply, ServerEvent]);
+/** A `once` request asked again while the server is still running it. Its reply comes later. */
+export const Running = z.object({ type: z.literal("running"), rid: z.string() });
+export type Running = z.infer<typeof Running>;
+
+export const ServerMessage = z.union([Reply, Running, ServerEvent]);
 export type ServerMessage = z.infer<typeof ServerMessage>;
 
 /** A readable one-line reason for a zod failure, e.g. `canvas.patch: patch.frames.0.x: expected number`. */

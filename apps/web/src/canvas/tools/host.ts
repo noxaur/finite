@@ -159,6 +159,7 @@ export interface ToolHost {
   /** The element's children as editable runs, and the rev they belong to. */
   readInline(loc: Loc): Promise<{
     rev: Rev;
+    identity: string;
     content: Inline[];
     keeps: { id: number; kind: string; label: string; loc?: Loc | undefined }[];
   }>;

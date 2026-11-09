@@ -25,9 +25,11 @@ CONSTANTS
   KeepsStaleText,   \* a refused text edit keeps what was typed (editor.ts:931)
   OutsideClearsText,\* a selection from outside the canvas clears selectedText (editor.ts:218)
   OffFrameClearsOpen,\* a comment placed off any frame closes the open one (tools/comment.ts:50)
-  LandingKeepsPick  \* draw selects its shape only if nobody picked since (tools/draw.ts:138)
+  LandingKeepsPick, \* draw selects its shape only if nobody picked since (tools/draw.ts, land)
+  LandingsKnowEachOther \* a landing rebases newer draws and overtakes older ones (tools/draw.ts, land)
 
 Presses == 1..MaxPress
+Draws == 1..2                 \* the older and the newer of two draws on their way at once
 Sticky(t) == t # "rect"       \* tools/shapes.ts has no `sticky`; move, pen and vectorEdit do
 
 VARIABLES
@@ -47,15 +49,20 @@ VARIABLES
   lostTyped,  \* history: text the person typed was refused and is gone
   \* Selection and comments (EditorState, selectionStore)
   elementsSelected, textSelected, objectSelected, commentDraft, commentOpen,
-  drawing, pickedWhileDrawing,
+  drawing,            \* the draws on their way
+  pickedWhileDrawing, \* per draw: the person picked something since it started
+  landedAsPick,       \* the older draw's own landing counted as a pick for the newer
+  newerSelected,      \* the newer draw landed and selected while the older was on its way
+  newestLost,         \* history: the newest shape wasn't selected, and nobody picked anything
   stolen      \* history: a landing shape replaced a selection the person had made
 
 pressVars == <<tool, current, nextPress, phase, gesture, pressTool, endCount, dragging, killed,
                anchors, placing, repickCost, draftKilled, vecGestures>>
 textVars == <<editing, opening, opens, hidden, typed, fileRev, targetRev, landing, finishes,
               lostTyped>>
+drawVars == <<drawing, pickedWhileDrawing, landedAsPick, newerSelected, newestLost, stolen>>
 selectVars == <<elementsSelected, textSelected, objectSelected, commentDraft, commentOpen,
-                drawing, pickedWhileDrawing, stolen>>
+                drawVars>>
 vars == <<pressVars, textVars, selectVars>>
 
 \* Each action names its third of the model and leaves the other two alone.
@@ -77,7 +84,8 @@ Init ==
   /\ finishes = [e \in Elements |-> 0] /\ lostTyped = FALSE
   /\ elementsSelected = FALSE /\ textSelected = FALSE /\ objectSelected = FALSE
   /\ commentDraft = FALSE /\ commentOpen = FALSE
-  /\ drawing = FALSE /\ pickedWhileDrawing = FALSE /\ stolen = FALSE
+  /\ drawing = {} /\ pickedWhileDrawing = [d \in Draws |-> FALSE] /\ stolen = FALSE
+  /\ landedAsPick = FALSE /\ newerSelected = FALSE /\ newestLost = FALSE
 
 Vector(p) == IF pressTool[p] = "vector" THEN 1 ELSE 0
 
@@ -323,7 +331,7 @@ LateBlur(e) ==
 
 \* source.edit answers: rewrite.ts:142 refuses a stale rev. finishText (editor.ts:931) writes the
 \* words over the new rev when only the rest of the file changed, else keepTyped puts them back
-\* in the box (editor.ts:946).
+\* in the box (editor.ts:946). If another element took the loc, the words go in a notice instead.
 EditLands(e) ==
   /\ InText
   /\ e \in landing
@@ -335,50 +343,66 @@ EditLands(e) ==
 ClickElementOnCanvas ==
   /\ InSelection
   /\ elementsSelected' = TRUE /\ textSelected' = FALSE /\ objectSelected' = FALSE
-  /\ pickedWhileDrawing' = (pickedWhileDrawing \/ drawing)
-  /\ UNCHANGED <<commentDraft, commentOpen, drawing, stolen>>
+  /\ pickedWhileDrawing' = [d \in Draws |-> pickedWhileDrawing[d] \/ d \in drawing]
+  /\ UNCHANGED <<commentDraft, commentOpen, drawing, landedAsPick, newerSelected, newestLost, stolen>>
 
 \* selectionStore.set from the layers panel (components/LayersTree.tsx:102); editor.ts:218 reacts.
 PickInLayers ==
   /\ InSelection
   /\ elementsSelected' = TRUE /\ objectSelected' = FALSE
   /\ textSelected' = IF OutsideClearsText THEN FALSE ELSE textSelected
-  /\ pickedWhileDrawing' = (pickedWhileDrawing \/ drawing)
-  /\ UNCHANGED <<commentDraft, commentOpen, drawing, stolen>>
+  /\ pickedWhileDrawing' = [d \in Draws |-> pickedWhileDrawing[d] \/ d \in drawing]
+  /\ UNCHANGED <<commentDraft, commentOpen, drawing, landedAsPick, newerSelected, newestLost, stolen>>
 
 \* selectText (editor.ts:339).
 ClickTextLabel ==
   /\ InSelection
   /\ textSelected' = TRUE /\ elementsSelected' = FALSE /\ objectSelected' = FALSE
-  /\ pickedWhileDrawing' = (pickedWhileDrawing \/ drawing)
-  /\ UNCHANGED <<commentDraft, commentOpen, drawing, stolen>>
+  /\ pickedWhileDrawing' = [d \in Draws |-> pickedWhileDrawing[d] \/ d \in drawing]
+  /\ UNCHANGED <<commentDraft, commentOpen, drawing, landedAsPick, newerSelected, newestLost, stolen>>
 
 \* selectObject (editor.ts:345).
 ClickSection ==
   /\ InSelection
   /\ objectSelected' = TRUE /\ elementsSelected' = FALSE /\ textSelected' = FALSE
-  /\ pickedWhileDrawing' = (pickedWhileDrawing \/ drawing)
-  /\ UNCHANGED <<commentDraft, commentOpen, drawing, stolen>>
+  /\ pickedWhileDrawing' = [d \in Draws |-> pickedWhileDrawing[d] \/ d \in drawing]
+  /\ UNCHANGED <<commentDraft, commentOpen, drawing, landedAsPick, newerSelected, newestLost, stolen>>
 
-\* A shape's edit is on its way; draw polls for it to land (tools/draw.ts:130).
-DrawStarts ==
+\* A shape's edit is on its way; draw polls for it to land (tools/draw.ts, place). The older of
+\* two starts first, and a third doesn't start until both have landed.
+DrawStarts(d) ==
   /\ InSelection
-  /\ ~drawing
-  /\ drawing' = TRUE /\ pickedWhileDrawing' = FALSE
-  /\ UNCHANGED <<elementsSelected, textSelected, objectSelected, commentDraft, commentOpen, stolen>>
+  /\ d \notin drawing
+  /\ IF d = 1 THEN drawing = {} ELSE 1 \in drawing
+  /\ drawing' = drawing \cup {d}
+  /\ pickedWhileDrawing' = [pickedWhileDrawing EXCEPT ![d] = FALSE]
+  /\ landedAsPick' = IF d = 1 THEN FALSE ELSE landedAsPick
+  /\ newerSelected' = IF d = 1 THEN FALSE ELSE newerSelected
+  /\ UNCHANGED <<elementsSelected, textSelected, objectSelected, commentDraft, commentOpen,
+                 newestLost, stolen>>
 
-\* tools/draw.ts:84, :138: host.select unless the selection changed since the draw started.
-DrawLands ==
+\* tools/draw.ts, land: host.select unless someone picked since this draw started or a newer one
+\* selected first. A landing rebases the newer draw, so it doesn't count as that draw's pick.
+DrawLands(d) ==
   /\ InSelection
-  /\ drawing
-  /\ drawing' = FALSE
-  /\ IF LandingKeepsPick /\ pickedWhileDrawing
-     THEN UNCHANGED <<elementsSelected, textSelected, objectSelected, stolen, pickedWhileDrawing>>
-     ELSE /\ elementsSelected' = TRUE
-          /\ objectSelected' = FALSE
-          /\ textSelected' = IF OutsideClearsText THEN FALSE ELSE textSelected
-          /\ stolen' = (stolen \/ pickedWhileDrawing)
-          /\ pickedWhileDrawing' = FALSE
+  /\ d \in drawing
+  /\ drawing' = drawing \ {d}
+  /\ LET picked == pickedWhileDrawing[d] \/ (d = 2 /\ landedAsPick)
+         keeps == (LandingKeepsPick /\ picked) \/
+                  (LandingsKnowEachOther /\ d = 1 /\ newerSelected)
+     IN
+     /\ newestLost' = (newestLost \/ (d = 2 /\ keeps /\ ~pickedWhileDrawing[2])
+                                  \/ (d = 1 /\ ~keeps /\ newerSelected))
+     /\ IF keeps
+        THEN UNCHANGED <<elementsSelected, textSelected, objectSelected, stolen,
+                         pickedWhileDrawing, landedAsPick, newerSelected>>
+        ELSE /\ elementsSelected' = TRUE
+             /\ objectSelected' = FALSE
+             /\ textSelected' = IF OutsideClearsText THEN FALSE ELSE textSelected
+             /\ stolen' = (stolen \/ pickedWhileDrawing[d])
+             /\ pickedWhileDrawing' = [pickedWhileDrawing EXCEPT ![d] = FALSE]
+             /\ landedAsPick' = (landedAsPick \/ (~LandingsKnowEachOther /\ d = 1 /\ 2 \in drawing))
+             /\ newerSelected' = (newerSelected \/ (d = 2 /\ 1 \in drawing))
   /\ UNCHANGED <<commentDraft, commentOpen>>
 
 \* tools/comment.ts:50, a comment placed on the empty canvas.
@@ -386,19 +410,19 @@ PlaceCommentOffFrame ==
   /\ InSelection
   /\ commentDraft' = TRUE
   /\ commentOpen' = IF OffFrameClearsOpen THEN FALSE ELSE commentOpen
-  /\ UNCHANGED <<elementsSelected, textSelected, objectSelected, drawing, pickedWhileDrawing, stolen>>
+  /\ UNCHANGED <<elementsSelected, textSelected, objectSelected, drawVars>>
 
 \* tools/comment.ts:67, a comment placed on a frame.
 PlaceCommentOnFrame ==
   /\ InSelection
   /\ commentDraft' = TRUE /\ commentOpen' = FALSE
-  /\ UNCHANGED <<elementsSelected, textSelected, objectSelected, drawing, pickedWhileDrawing, stolen>>
+  /\ UNCHANGED <<elementsSelected, textSelected, objectSelected, drawVars>>
 
 \* openComment (editor.ts:331).
 OpenAComment ==
   /\ InSelection
   /\ commentOpen' = TRUE /\ commentDraft' = FALSE
-  /\ UNCHANGED <<elementsSelected, textSelected, objectSelected, drawing, pickedWhileDrawing, stolen>>
+  /\ UNCHANGED <<elementsSelected, textSelected, objectSelected, drawVars>>
 
 Quiet ==
   /\ Scope = "text"
@@ -418,8 +442,10 @@ Next ==
   \/ \E e \in Elements: EditorOpens(e)
   \/ \E e \in Elements: LateBlur(e)
   \/ \E e \in Elements: EditLands(e)
-  \/ ClickElementOnCanvas \/ PickInLayers \/ ClickTextLabel \/ ClickSection \/ DrawStarts
-  \/ DrawLands \/ PlaceCommentOffFrame \/ PlaceCommentOnFrame \/ OpenAComment
+  \/ ClickElementOnCanvas \/ PickInLayers \/ ClickTextLabel \/ ClickSection
+  \/ \E d \in Draws: DrawStarts(d)
+  \/ \E d \in Draws: DrawLands(d)
+  \/ PlaceCommentOffFrame \/ PlaceCommentOnFrame \/ OpenAComment
   \/ Done
 
 Spec == Init /\ [][Next]_vars
@@ -478,4 +504,7 @@ OneCommentSurface == ~(commentDraft /\ commentOpen)
 
 \* A shape that lands doesn't replace what you picked while it was on its way.
 LandingKeepsYourPick == ~stolen
+
+\* Of two shapes landing at once, the newest ends up selected, unless you picked something.
+NewestLandingIsSelected == ~newestLost
 ====

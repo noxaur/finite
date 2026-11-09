@@ -148,6 +148,7 @@ export interface SourceEditor {
     loc: Loc,
   ): Promise<{
     rev: Rev;
+    identity: string;
     content: Inline[];
     keeps: { id: number; kind: string; label: string; loc?: Loc | undefined }[];
   }>;

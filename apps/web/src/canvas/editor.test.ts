@@ -276,7 +276,15 @@ describe("typed text when the file changes under it", () => {
     keeps: [],
     keepStyles: {},
     plain: false,
-    target: { kind: "element", frameId: "f1", loc: LOC, tag: "p", rev: "old", chain: [] },
+    target: {
+      kind: "element",
+      frameId: "f1",
+      loc: LOC,
+      tag: "p",
+      rev: "old",
+      identity: "the paragraph",
+      chain: [],
+    },
   };
   const stale = Object.assign(new Error("The file changed; try again"), { code: "stale" });
 
@@ -301,7 +309,10 @@ describe("typed text when the file changes under it", () => {
   }
 
   it("writes the words over the new rev when only the rest of the file changed", async () => {
-    const edits = serverWith(() => ({ rev: "new", content: words("Before"), keeps: [] }), 1);
+    const edits = serverWith(
+      () => ({ rev: "new", content: words("Before"), keeps: [], identity: "the paragraph" }),
+      1,
+    );
     const { editor } = editorOnViewport();
     editor.update({ editingText: edit });
     await editor.finishText(words("After"));
@@ -313,7 +324,10 @@ describe("typed text when the file changes under it", () => {
   });
 
   it("puts the words back in the box when the text itself changed", async () => {
-    const edits = serverWith(() => ({ rev: "new", content: words("Agent's"), keeps: [] }), 1);
+    const edits = serverWith(
+      () => ({ rev: "new", content: words("Agent's"), keeps: [], identity: "the paragraph" }),
+      1,
+    );
     const { editor } = editorOnViewport();
     editor.update({ editingText: edit });
     await editor.finishText(words("After"));
@@ -324,6 +338,33 @@ describe("typed text when the file changes under it", () => {
     await editor.finishText(words("After"));
     expect(edits()[1]?.revs).toEqual({ "src/a.tsx": "new" });
     expect(editor.state.editingText).toBeNull();
+    editor.dispose();
+  });
+
+  it("keeps the words without writing when another element took the same place", async () => {
+    const edits = serverWith(
+      () => ({ rev: "new", content: words("Agent's"), keeps: [], identity: "another paragraph" }),
+      1,
+    );
+    const { editor } = editorOnViewport();
+    editor.update({ editingText: edit });
+    await editor.finishText(words("After"));
+    expect(edits()).toHaveLength(1);
+    expect(editor.state.editingText).toBeNull();
+    expect(editor.state.notice?.text).toContain("After");
+    editor.dispose();
+  });
+
+  it("doesn't write over a different element whose text happens to match", async () => {
+    const edits = serverWith(
+      () => ({ rev: "new", content: words("Before"), keeps: [], identity: "another paragraph" }),
+      1,
+    );
+    const { editor } = editorOnViewport();
+    editor.update({ editingText: edit });
+    await editor.finishText(words("After"));
+    expect(edits()).toHaveLength(1);
+    expect(editor.state.notice?.text).toContain("After");
     editor.dispose();
   });
 
@@ -339,7 +380,8 @@ describe("typed text when the file changes under it", () => {
   it("shows the words when another box took the screen meanwhile", async () => {
     const landing = deferred<never>();
     vi.mocked(finite.request).mockImplementation((async (name: string) => {
-      if (name === "source.inline") return { rev: "new", content: words("Agent's"), keeps: [] };
+      if (name === "source.inline")
+        return { rev: "new", content: words("Agent's"), keeps: [], identity: "the paragraph" };
       await landing.promise.catch(() => {});
       throw stale;
     }) as never);

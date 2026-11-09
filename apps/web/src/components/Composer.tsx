@@ -164,8 +164,9 @@ export function Composer({
         fast,
         mode: sendModeFor(running, defaultMode, alt),
       });
-      setText((now) => (now === text ? "" : now));
-      setFiles([]);
+      // What was typed after Send continues the sent text, so only that part stays.
+      setText((now) => (now.startsWith(text) ? now.slice(text.length) : now));
+      setFiles((now) => now.filter((a) => !files.some((f) => f.id === a.id)));
       selectionStore.set([]);
       // The thread now runs with what was sent; a new thread starts from the defaults again.
       setChoice(null);
@@ -413,8 +414,8 @@ function QueuedChip({
         size="small"
         onClick={async () => {
           if (!(await edit(null))) return;
-          await finite
-            .request("thread.send", {
+          const send = (mode: SendMode) =>
+            finite.request("thread.send", {
               designId,
               threadId: thread.id,
               text: queued.text,
@@ -423,9 +424,13 @@ function QueuedChip({
               model: thread.model,
               ...(thread.effort ? { effort: thread.effort } : {}),
               fast: thread.fast,
-              mode: "steer",
-            })
-            .catch(fail);
+              mode,
+            });
+          // The message is off the queue, so a failed steer puts it back rather than losing it.
+          await send("steer").catch(async (e) => {
+            fail(e);
+            await send("queue").catch(fail);
+          });
         }}
       />
       <IconButton

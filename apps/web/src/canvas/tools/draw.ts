@@ -2,7 +2,7 @@ import { finite } from "@/client/finite";
 import type { Frame, FrameBridge, Rect, Remap } from "@finite/protocol";
 import { planInsert } from "@/design/editing/insertion";
 import { type Point, revsOf } from "../gestures";
-import { remapSelection, sameItem, selectionStore } from "../selection";
+import { remapSelection, sameItem, type SelectionItem, selectionStore } from "../selection";
 import { undoOrderFor } from "../undoOrder";
 import type { Placed, ToolHost } from "./host";
 
@@ -23,16 +23,51 @@ const pickOf = (host: ToolHost) => ({
   object: host.state.selectedObject,
 });
 
+const sameItems = (a: readonly SelectionItem[], b: readonly SelectionItem[]) =>
+  a.length === b.length && a.every((item, i) => sameItem(item, b[i]!));
+
 /** Whether someone picked something since `was`. `remap` is how this draw's own edit moved locs. */
-function pickedSince(host: ToolHost, was: ReturnType<typeof pickOf>, remap: Remap = {}) {
-  const items = remapSelection(was.items, remap);
+function pickedSince(host: ToolHost, was: ReturnType<typeof pickOf>, remap: Remap) {
   const now = selectionStore.get();
   return (
-    now.length !== items.length ||
-    now.some((item, i) => !sameItem(item, items[i]!)) ||
+    // Unmoved counts too: another draw can select a loc from before this draw's edit moved it.
+    (!sameItems(now, was.items) && !sameItems(now, remapSelection(was.items, remap))) ||
     host.state.selectedText !== was.text ||
     host.state.selectedObject !== was.object
   );
+}
+
+type Landing = { was: ReturnType<typeof pickOf>; overtaken: boolean };
+
+/** The new elements on their way to each canvas, oldest first. */
+const landings = new WeakMap<ToolHost, Landing[]>();
+
+/** Runs `select` unless someone picked something or a newer element took the selection. */
+export type Land = (select: () => void, remap?: Remap) => boolean;
+
+/** Runs `place`, which adds an element and selects it through `land` once it's there. */
+export async function landing<T>(host: ToolHost, place: (land: Land) => Promise<T>): Promise<T> {
+  const mine: Landing = { was: pickOf(host), overtaken: false };
+  const all = landings.get(host) ?? [];
+  landings.set(host, all);
+  all.push(mine);
+  const land: Land = (select, remap = {}) => {
+    if (mine.overtaken || pickedSince(host, mine.was, remap)) return false;
+    select();
+    // This selection is the app's, not a person's: newer elements aren't to read it as a pick.
+    const now = pickOf(host);
+    const at = all.indexOf(mine);
+    all.forEach((other, i) => {
+      if (i < at) other.overtaken = true;
+      else other.was = now;
+    });
+    return true;
+  };
+  try {
+    return await place(land);
+  } finally {
+    all.splice(all.indexOf(mine), 1);
+  }
 }
 
 type Planned = {
@@ -63,14 +98,21 @@ export async function planIn(
 }
 
 /** Adds `node` where `box` lands: into the frame under its center, or as a new one on empty canvas. */
-export async function draw(
+export function draw(
   host: ToolHost,
   input: Parameters<ToolHost["draw"]>[0],
+): Promise<Placed | null> {
+  return landing(host, (land) => place(host, input, land));
+}
+
+async function place(
+  host: ToolHost,
+  input: Parameters<ToolHost["draw"]>[0],
+  land: Land,
 ): Promise<Placed | null> {
   const { box, node, deep = false, alt = false, hug = [] } = input;
   const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
   const frame = host.frameAt(center);
-  const was = pickOf(host);
   if (!frame) {
     try {
       const made = await finite.request("canvas.draw", {
@@ -81,8 +123,9 @@ export async function draw(
         node: { ...node, ref: REF },
       });
       undoOrderFor(host.designId).did({ kind: "canvas", canvasId: host.canvasId });
-      const selected = !pickedSince(host, was);
-      if (selected) host.select([{ frameId: made.frameId, name: node.name ?? node.tag }]);
+      const selected = land(() =>
+        host.select([{ frameId: made.frameId, name: node.name ?? node.tag }]),
+      );
       return { frameId: made.frameId, loc: made.created[REF] ?? "", index: 0, selected };
     } catch (e) {
       host.say(errorText(e));
@@ -135,8 +178,10 @@ export async function draw(
         (r) => at.x >= r.x && at.x < r.x + r.width && at.y >= r.y && at.y < r.y + r.height,
       );
       const index = Math.max(hit, 0);
-      const selected = !pickedSince(host, was, done.remap);
-      if (selected) host.select([{ frameId: frame.id, loc, index, name: node.name ?? node.tag }]);
+      const selected = land(
+        () => host.select([{ frameId: frame.id, loc, index, name: node.name ?? node.tag }]),
+        done.remap,
+      );
       return { frameId: frame.id, loc, index, selected };
     }
     await new Promise((resolve) => setTimeout(resolve, LANDING_STEP_MS));

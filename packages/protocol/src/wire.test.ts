@@ -6,6 +6,7 @@ import {
   type Params,
   ParentMessage,
   parseClientMessage,
+  repeatable,
   type Result,
 } from "./index.ts";
 
@@ -85,6 +86,31 @@ describe("parseClientMessage", () => {
       reason: expect.stringContaining("edits.0.loc"),
     });
     expect(edit("src/App.tsx:1:1", "xyz").ok).toBe(false);
+  });
+});
+
+describe("once", () => {
+  it("is kept on a request and left out of what a caller passes", () => {
+    const parsed = parseClientMessage({
+      type: "source.undo",
+      rid: "p-1",
+      once: true,
+      designId: "d",
+    });
+    expect(parsed).toMatchObject({ ok: true, message: { rid: "p-1", once: true } });
+  });
+
+  it("marks only what must not repeat", () => {
+    for (const type of [
+      "hello",
+      "subscribe",
+      "unsubscribe",
+      "thread.history",
+      "tokens.get",
+    ] as const)
+      expect(repeatable.has(type)).toBe(true);
+    for (const type of ["thread.send", "canvas.patch", "design.create", "source.edit"] as const)
+      expect(repeatable.has(type)).toBe(false);
   });
 });
 

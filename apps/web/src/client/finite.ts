@@ -7,6 +7,8 @@ import {
   type DesignState,
   type Params,
   type RefusalCode,
+  repeatable,
+  REPLY_KEPT_MS,
   type RequestType,
   type Result,
   type ServerEvent,
@@ -24,7 +26,8 @@ import { useEffect, useSyncExternalStore } from "react";
  * itself, typed requests, server events, and the live state React reads through the hooks below.
  *
  * Requests made while the socket is down wait for it, and every design a screen shows is
- * subscribed again after a reconnect, so callers never see the socket come and go.
+ * subscribed again after a reconnect, so callers never see the socket come and go. A request that
+ * changes something is asked again under the same id until the server says what happened to it.
  */
 
 /** A refused or failed request. `message` is the reason, written to be shown to a person. */
@@ -113,6 +116,8 @@ const SLOW: ReadonlySet<RequestType> = new Set([
 ]);
 const SLOW_TIMEOUT_MS = 10 * 60_000;
 const BACKOFF_MS = [250, 500, 1000, 2000, 5000];
+/** How long a request may go unsettled, kept short of when the server could forget its reply. */
+const GIVE_UP_MS = REPLY_KEPT_MS - 10 * 60_000;
 
 const NO_DESIGN: DesignView = { state: null, error: null };
 const NO_THREAD: ThreadView = { events: [], streaming: "", loaded: false };
@@ -146,16 +151,24 @@ export function createFinite(options: FiniteOptions) {
   let started = false;
   let attempt = 0;
   let nextRid = 1;
+  // Unique per page load, so the server can't take a request from this load for one from another.
+  const page = crypto.randomUUID();
+  /** Hello's name for what the server remembers; a change means asking again isn't safe. */
+  let serverMemory: string | undefined;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
-  const pending = new Map<
-    string,
-    {
-      resolve: (value: unknown) => void;
-      reject: (error: Error) => void;
-      timer: ReturnType<typeof setTimeout>;
-    }
-  >();
+  type Pending = {
+    type: RequestType;
+    /** The frame to ask again with, for a request the server remembers. */
+    frame: string | undefined;
+    sentAt: number;
+    /** Already asked again on this socket, with no sign of life since. */
+    asked: boolean;
+    resolve: (value: unknown) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout> | undefined;
+  };
+  const pending = new Map<string, Pending>();
   /** Requests waiting for the socket to open and say hello. */
   const waiting: { send: () => void }[] = [];
   const handlers = new Map<EventType, Set<(event: ServerEvent) => void>>();
@@ -202,14 +215,15 @@ export function createFinite(options: FiniteOptions) {
     }
     socket = ws;
     ws.onopen = () => {
-      const rid = `r${nextRid++}`;
+      const rid = newRid();
       track(rid, "hello")
-        .then(() => {
+        .then((hello) => {
           if (socket !== ws) return;
           // Reset only once hello is accepted, so a drop before that still backs off.
           attempt = 0;
           ready = true;
           setStatus("open");
+          askAgain(ws, (hello as Result<"hello">).memory);
           for (const w of waiting.splice(0)) w.send();
           resume();
         })
@@ -233,13 +247,10 @@ export function createFinite(options: FiniteOptions) {
       ready = false;
       for (const [rid, p] of pending) {
         clearTimeout(p.timer);
+        // The server may have run it and lost only the reply: askAgain finds out after hello.
+        if (p.frame !== undefined) continue;
         pending.delete(rid);
-        // The server may have run it and lost only the reply, so this can't claim it failed.
-        p.reject(
-          new FiniteError(
-            "Lost the connection to Finite before it answered. This may have gone through, so check before you try again.",
-          ),
-        );
+        p.reject(new FiniteError("Lost the connection to Finite before it answered. Try again."));
       }
       retry();
     };
@@ -261,22 +272,79 @@ export function createFinite(options: FiniteOptions) {
     for (const [threadId, { designId }] of threadHolds) void loadThread(designId, threadId);
   }
 
-  function track(rid: string, type: RequestType): Promise<unknown> {
+  const newRid = () => `${page}-${nextRid++}`;
+
+  function track(rid: string, type: RequestType, frame?: string): Promise<unknown> {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(
-        () => {
-          pending.delete(rid);
-          // A slow server can still run it, and `receive` drops a reply that comes after this.
-          reject(
-            new FiniteError(
-              `Finite didn't answer ${type} in time. It may still have gone through, so check before you try again.`,
-            ),
-          );
-        },
-        SLOW.has(type) ? Math.max(timeoutMs, SLOW_TIMEOUT_MS) : timeoutMs,
-      );
-      pending.set(rid, { resolve, reject, timer });
+      const p: Pending = {
+        type,
+        frame,
+        sentAt: Date.now(),
+        asked: false,
+        resolve,
+        reject,
+        timer: undefined,
+      };
+      pending.set(rid, p);
+      wait(rid, p);
     });
+  }
+
+  function wait(rid: string, p: Pending) {
+    clearTimeout(p.timer);
+    p.timer = setTimeout(
+      () => overdue(rid, p),
+      SLOW.has(p.type) ? Math.max(timeoutMs, SLOW_TIMEOUT_MS) : timeoutMs,
+    );
+  }
+
+  function overdue(rid: string, p: Pending) {
+    if (p.frame === undefined) {
+      pending.delete(rid);
+      return p.reject(new FiniteError(`Finite didn't answer ${p.type} in time. Try again.`));
+    }
+    if (Date.now() - p.sentAt >= GIVE_UP_MS) {
+      pending.delete(rid);
+      // Still unanswered this late, so the server may yet finish it or has already forgotten it.
+      return p.reject(
+        new FiniteError(
+          `Finite didn't answer ${p.type} in time. It may still have gone through, so check before you try again.`,
+        ),
+      );
+    }
+    const ws = socket;
+    // The socket is going down, and its onclose keeps this for after the reconnect.
+    if (!ws || !ready || ws.readyState !== OPEN) return;
+    // Asked twice with no sign of life: a dead socket that hasn't noticed yet.
+    if (p.asked) return ws.close();
+    p.asked = true;
+    ws.send(p.frame);
+    wait(rid, p);
+  }
+
+  /**
+   * After hello: asks about every request whose outcome never arrived. The server answers with
+   * the stored reply, says it's still running, or runs it now if it never got it.
+   */
+  function askAgain(ws: SocketLike, memory: string) {
+    const sameMemory = memory === serverMemory;
+    serverMemory = memory;
+    for (const [rid, p] of pending) {
+      if (p.frame === undefined) continue;
+      if (sameMemory && Date.now() - p.sentAt < GIVE_UP_MS) {
+        p.asked = false;
+        ws.send(p.frame);
+        wait(rid, p);
+        continue;
+      }
+      // A server that doesn't remember it would run it again.
+      pending.delete(rid);
+      p.reject(
+        new FiniteError(
+          "Finite lost track of this while you were disconnected. It may have gone through, so check before you try again.",
+        ),
+      );
+    }
   }
 
   function receive(message: ServerMessage) {
@@ -288,6 +356,12 @@ export function createFinite(options: FiniteOptions) {
       if (message.ok) p.resolve(message.value);
       else p.reject(new FiniteError(message.reason, message.code));
       return;
+    }
+    if (message.type === "running") {
+      const p = pending.get(message.rid);
+      if (!p) return;
+      p.asked = false;
+      return wait(message.rid, p);
     }
     apply(message);
     for (const fn of handlers.get(message.type) ?? []) fn(message);
@@ -348,9 +422,11 @@ export function createFinite(options: FiniteOptions) {
           waiting.push({ send });
           return;
         }
-        const rid = `r${nextRid++}`;
-        track(rid, type).then((v) => resolve(v as Result<K>), reject);
-        ws.send(JSON.stringify({ ...params, type, rid }));
+        const rid = newRid();
+        const once = !repeatable.has(type);
+        const frame = JSON.stringify({ ...params, type, rid, ...(once ? { once } : {}) });
+        track(rid, type, once ? frame : undefined).then((v) => resolve(v as Result<K>), reject);
+        ws.send(frame);
       };
       send();
     });

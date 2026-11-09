@@ -44,9 +44,11 @@ function hostOn(
     remap: {},
   }),
 ) {
+  const notYet = new Set<string>();
   const bridge = {
     drop: async () => ({ chain: [container] }),
-    rects: async () => ({ [NEW_LOC]: [BOX] }),
+    rects: async (locs: string[]) =>
+      Object.fromEntries(locs.filter((loc) => !notYet.has(loc)).map((loc) => [loc, [BOX]])),
   };
   const state = { selectedText: null as string | null, selectedObject: null };
   const select = vi.fn((items: SelectionItem[]) => selectionStore.set(items));
@@ -62,7 +64,7 @@ function hostOn(
     edit,
     select,
   } as unknown as ToolHost;
-  return { host, select, state };
+  return { host, select, state, notYet };
 }
 
 describe("a shape landing", () => {
@@ -121,5 +123,66 @@ describe("a shape landing", () => {
     answer.resolve({ frameId: "new-frame", created: { new: NEW_LOC } });
     expect(await drawing).toMatchObject({ frameId: "new-frame", selected: false });
     expect(select).not.toHaveBeenCalled();
+  });
+
+  describe("while another shape is landing", () => {
+    const OLDER = `${OWN}:30:4`;
+    const NEWER = `${OWN}:40:4`;
+    type Answer = { created: Record<string, string>; remap: Record<string, string> };
+    const answerFor = (loc: string): Answer => ({ created: { new: loc }, remap: {} });
+    const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+    const selectedLocs = () => selectionStore.get().map((item) => item.loc);
+
+    async function twoDraws() {
+      const older = deferred<Answer>();
+      const newer = deferred<Answer>();
+      const answers = [older.promise, newer.promise];
+      const { host, notYet } = hostOn(FRAME, () => answers.shift()!);
+      const drawOlder = draw(host, { box: BOX, node: NODE });
+      await flush();
+      const drawNewer = draw(host, { box: BOX, node: NODE });
+      await flush();
+      return { older, newer, drawOlder, drawNewer, notYet };
+    }
+
+    it("ends on the newer shape when the older one lands first", async () => {
+      const { older, newer, drawOlder, drawNewer } = await twoDraws();
+      older.resolve(answerFor(OLDER));
+      await drawOlder;
+      newer.resolve(answerFor(NEWER));
+      expect(await drawNewer).toMatchObject({ selected: true });
+      expect(selectedLocs()).toEqual([NEWER]);
+    });
+
+    it("ends on the newer shape when the older one lands last", async () => {
+      const { older, newer, drawOlder, drawNewer } = await twoDraws();
+      newer.resolve(answerFor(NEWER));
+      await drawNewer;
+      older.resolve(answerFor(OLDER));
+      expect(await drawOlder).toMatchObject({ selected: false });
+      expect(selectedLocs()).toEqual([NEWER]);
+    });
+
+    it("keeps a real pick made between the two landings", async () => {
+      const { older, newer, drawOlder, drawNewer } = await twoDraws();
+      older.resolve(answerFor(OLDER));
+      await drawOlder;
+      selectionStore.set([picked]);
+      newer.resolve(answerFor(NEWER));
+      expect(await drawNewer).toMatchObject({ selected: false });
+      expect(selectedLocs()).toEqual([picked.loc]);
+    });
+
+    it("isn't fooled when the newer edit moved the older shape's loc", async () => {
+      const { older, newer, drawOlder, drawNewer, notYet } = await twoDraws();
+      notYet.add(NEWER);
+      newer.resolve({ created: { new: NEWER }, remap: { [OLDER]: `${OWN}:31:4` } });
+      await flush();
+      older.resolve(answerFor(OLDER));
+      await drawOlder;
+      notYet.delete(NEWER);
+      await drawNewer;
+      expect(selectedLocs()).toEqual([NEWER]);
+    });
   });
 });

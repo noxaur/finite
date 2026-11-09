@@ -1,5 +1,6 @@
 import type { Frame, Hit } from "@finite/protocol";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { type SelectionItem, selectionStore } from "../selection";
 import type { Down, ToolHost } from "./host";
 import { editText, placeText, text, textOnPath } from "./text";
 
@@ -20,18 +21,29 @@ function hostOver(instances: number) {
   const bridge = {
     hit: async () => hit,
     vector: async () => ({ d: "M0 0", ctm: [1, 0, 0, 1, 0, 0], viewBox: null, id: null }),
-    rects: async () => ({ [LOC]: Array.from({ length: instances }, () => RECT) }),
+    rects: async (locs: string[]) =>
+      Object.fromEntries(
+        locs.map((loc) => [loc, Array.from({ length: loc === LOC ? instances : 1 }, () => RECT)]),
+      ),
+    inspect: async () => ({ rev: "bbbbbbbb", tag: "textPath", computed: {} }),
   };
   const say = vi.fn();
-  const edit = vi.fn(async () => false as const);
+  const edit = vi.fn<ToolHost["edit"]>(async () => false as const);
+  const select = vi.fn((items: SelectionItem[]) => selectionStore.set(items));
+  const readInline = vi.fn(async () => {
+    throw new Error("not read");
+  });
   const host = {
+    state: { selectedText: null, selectedObject: null },
     bridge: () => bridge,
     local: () => ({ x: 5, y: 5 }),
     setTool: vi.fn(),
     say,
     edit,
+    select,
+    readInline,
   } as unknown as ToolHost;
-  return { host, say, edit };
+  return { host, say, edit, select, readInline };
 }
 
 describe("text on a path", () => {
@@ -51,6 +63,47 @@ describe("text on a path", () => {
     await plan.click();
     expect(edit).toHaveBeenCalledTimes(1);
     expect(say).not.toHaveBeenCalled();
+  });
+
+  describe("landing", () => {
+    const NEW = "src/App.tsx:4:30";
+    const picked: SelectionItem = { frameId: "f2", loc: "src/App.tsx:20:4", index: 0 };
+    afterEach(() => selectionStore.set([]));
+
+    function clickPath() {
+      const { host, edit, select, readInline } = hostOver(1);
+      let answer!: (value: {
+        created: Record<string, string>;
+        remap: Record<string, string>;
+      }) => void;
+      edit.mockImplementation(() => new Promise((resolve) => (answer = resolve)));
+      const plan = textOnPath.down(host, { frame: FRAME, world: { x: 5, y: 5 } } as Down);
+      if (plan === "pass") throw new Error("expected a press plan");
+      const clicked = plan.click();
+      const land = async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        answer({ created: { text: NEW }, remap: {} });
+        await clicked;
+      };
+      return { land, select, readInline };
+    }
+
+    it("selects the new text when nobody picked anything", async () => {
+      const { land, select } = clickPath();
+      await land();
+      expect(select).toHaveBeenCalledTimes(1);
+      expect(selectionStore.get().map((item) => item.loc)).toEqual([NEW]);
+    });
+
+    it("keeps a pick made while the text was on its way, and opens no editor", async () => {
+      const { land, select, readInline } = clickPath();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      selectionStore.set([picked]);
+      await land();
+      expect(select).not.toHaveBeenCalled();
+      expect(readInline).not.toHaveBeenCalled();
+      expect(selectionStore.get()).toEqual([picked]);
+    });
   });
 });
 

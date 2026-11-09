@@ -13,6 +13,8 @@ import WebSocket from "ws";
 import { createAgents } from "./agent/index.ts";
 import { type RunningServer, startServer } from "./app.ts";
 import { allowedHosts } from "./guard.ts";
+import { handlers } from "./handlers.ts";
+import type { Handlers } from "./hub.ts";
 import { createPreviews } from "./preview/index.ts";
 import { createSourceEditor } from "./source/index.ts";
 import { createStore } from "./store/index.ts";
@@ -27,7 +29,11 @@ afterEach(async () => {
   running = undefined;
 });
 
-async function start(store: Partial<Store> = {}, agents: Partial<Agents> = {}) {
+async function start(
+  store: Partial<Store> = {},
+  agents: Partial<Agents> = {},
+  handlers?: Handlers,
+) {
   const base = createStore({ dataDir: "/nonexistent" });
   const fake: Store = { ...base, designs: async () => designs, ...store };
   const previews = createPreviews({ host: "127.0.0.1" });
@@ -42,6 +48,7 @@ async function start(store: Partial<Store> = {}, agents: Partial<Agents> = {}) {
       source,
       agents: { ...createAgents({ store: fake, previews, source }), ...agents },
     },
+    ...(handlers ? { handlers } : {}),
   });
   return running.url.replace("http", "ws") + "/api/ws";
 }
@@ -84,7 +91,7 @@ describe("hub", () => {
       type: "reply",
       rid: "1",
       ok: true,
-      value: { version: 1, user: { id: "u", name: "Per" } },
+      value: { version: 1, user: { id: "u", name: "Per" }, memory: expect.any(String) },
     });
     expect(await client.request({ type: "designs.list", rid: "2" })).toEqual({
       type: "reply",
@@ -168,6 +175,82 @@ describe("hub", () => {
     emit?.(designs);
     expect(await client.next()).toEqual({ type: "designs", list: designs });
     client.ws.close();
+  });
+
+  describe("a request sent once", () => {
+    const hello = { type: "hello", rid: "h", user: { id: "u", name: "Per" } };
+    const set = { type: "settings.set", rid: "page-1", once: true, settings: {} };
+
+    /** A server whose `settings.set` counts its runs and finishes when `finish` is called. */
+    async function counting() {
+      let runs = 0;
+      let finish = () => {};
+      const url = await start(
+        {},
+        {},
+        {
+          ...handlers,
+          "settings.set": async () => {
+            runs++;
+            await new Promise<void>((resolve) => (finish = resolve));
+            return { model: `run ${runs}` } as never;
+          },
+        },
+      );
+      return { url, runs: () => runs, finish: () => finish() };
+    }
+
+    async function greeted(url: string) {
+      const client = connect(url);
+      await client.opened;
+      await client.request(hello);
+      return client;
+    }
+
+    it("gives a reconnected page the stored reply without running it again", async () => {
+      const { url, runs, finish } = await counting();
+      const first = await greeted(url);
+      const answer = first.request(set);
+      await vi.waitFor(() => expect(runs()).toBe(1));
+      finish();
+      const reply = await answer;
+      first.ws.close();
+
+      const second = await greeted(url);
+      expect(await second.request(set)).toEqual(reply);
+      expect(runs()).toBe(1);
+      second.ws.close();
+    });
+
+    it("runs it once and answers the new socket when it's still running", async () => {
+      const { url, runs, finish } = await counting();
+      const first = await greeted(url);
+      first.ws.send(JSON.stringify(set));
+      await vi.waitFor(() => expect(runs()).toBe(1));
+      first.ws.close();
+
+      const second = await greeted(url);
+      expect(await second.request(set)).toEqual({ type: "running", rid: "page-1" });
+      finish();
+      expect(await second.next()).toMatchObject({ type: "reply", rid: "page-1", ok: true });
+      expect(runs()).toBe(1);
+      second.ws.close();
+    });
+
+    it("runs a request again when it doesn't ask to be remembered", async () => {
+      const { url, runs, finish } = await counting();
+      const client = await greeted(url);
+      const { once: _once, ...plain } = set;
+      const first = client.request(plain);
+      await vi.waitFor(() => expect(runs()).toBe(1));
+      finish();
+      await first;
+      const second = client.request(plain);
+      await vi.waitFor(() => expect(runs()).toBe(2));
+      finish();
+      await second;
+      client.ws.close();
+    });
   });
 
   it("refuses a socket from another site", async () => {
