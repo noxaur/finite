@@ -107,6 +107,9 @@ const COMPUTED = [
   "boxShadow",
   "objectFit",
   "zoom",
+  "fill",
+  "stroke",
+  "strokeWidth",
 ] as const;
 
 type Rect = { x: number; y: number; width: number; height: number };

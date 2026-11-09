@@ -145,6 +145,20 @@ export function App() {
       ok(run(replaced, [{ kind: "attr", loc: L(7), name: "id", value: null }], convention)).code,
     ).toBe(APP);
   });
+
+  it("writes over literal values only, not code", () => {
+    const code = (d: string) => APP.replace("<p>One</p>", `<p data-d=${d}>One</p>`);
+    const write = (src: string) =>
+      run(src, [{ kind: "attr", loc: L(7), name: "data-d", value: "M0 0" }], convention);
+    for (const literal of [`"M1 1"`, `{"M1 1"}`, "{`M1 1`}"]) {
+      expect(ok(write(code(literal))).code).toContain(`data-d="M0 0"`);
+    }
+    for (const computed of ["{shape}", "{`M${x} 0`}", `{"M" + x}`]) {
+      expect(refused(write(code(computed))).reason).toBe(
+        "This value comes from code. Ask the agent.",
+      );
+    }
+  });
 });
 
 describe("tailwind styles", () => {

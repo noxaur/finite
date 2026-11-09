@@ -50,12 +50,13 @@ import {
   RowName,
   Section,
   Segments,
+  StyleField,
   Toggle,
   EyeToggle,
   MixedRow,
 } from "./controls";
 import { whenNumber } from "../DraftField";
-import { type Changes, isPainted, resolve, type Scope, swatchOf } from "./scope";
+import { type Changes, isPainted, rawOf, readOf, resolve, type Scope, swatchOf } from "./scope";
 
 /** The mockup's row of fill types. Conic is one level down, in a gradient's editor. */
 const TYPES: ReadonlyArray<readonly [FillType, IconName, string]> = [
@@ -127,6 +128,40 @@ function fillsOf(scope: Scope) {
   };
 }
 
+/** An SVG shape's one fill: a color, or none. */
+function VectorFill({ scope }: { scope: Scope }) {
+  const fill = readOf(scope, "fill");
+  const painted = fill.kind === "mixed" || isPainted(rawOf(fill), "none");
+  return (
+    <Section
+      title="Fill"
+      action={
+        !painted && (
+          <Toggle icon="plus" title="Add fill" onClick={() => scope.commit({ fill: "#d9d9d9" })} />
+        )
+      }
+    >
+      {painted && (
+        <Row
+          action={
+            <Toggle
+              icon="minus"
+              title="Remove fill"
+              onClick={() => scope.commit({ fill: "none" })}
+            />
+          }
+        >
+          <StyleField scope={scope} prop="fill" title="Fill color" color />
+        </Row>
+      )}
+    </Section>
+  );
+}
+
+export function FillSection({ scope }: { scope: Scope }) {
+  return scope.vector ? <VectorFill scope={scope} /> : <BoxFill scope={scope} />;
+}
+
 /** The color a fill carries over to a new type: its own, or its first stop's. */
 const colorOf = (fill: Fill | undefined): string =>
   fill?.type === "solid" ? fill.color : fill && "stops" in fill ? fill.stops[0]!.color : "#d9d9d9";
@@ -140,7 +175,7 @@ const colorOf = (fill: Fill | undefined): string =>
  * picker; a gradient's or image's opens its editor, with its stops and
  * angle or its URL, fit and position.
  */
-export function FillSection({ scope }: { scope: Scope }) {
+function BoxFill({ scope }: { scope: Scope }) {
   const { layers: read, drawn, of } = fillsOf(scope);
   const [open, setOpen] = useState<{ index: number; anchor: HTMLElement } | null>(null);
   const [picked, setPicked] = useState(0);

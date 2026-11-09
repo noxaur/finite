@@ -91,11 +91,14 @@ export interface ToolDef<Id extends string = string> {
   readonly enabled: boolean;
   /** Stays on after one use. Without it, the tool goes back to Move. */
   readonly sticky?: true;
+  /** A mode that's entered from the canvas, never picked from the toolbar. */
+  readonly hidden?: true;
   /** Where a drag pans the camera: on the empty canvas, or anywhere. */
   readonly pan?: "empty" | "always";
   /** Outlines what's under the pointer. */
   readonly hover?: true;
   activate?(host: ToolHost): void;
+  deactivate?(host: ToolHost): void;
   /** A press on the canvas; `"pass"` leaves it alone. Without it, every press passes. */
   down?(host: ToolHost, p: Down): PressPlan | "pass";
   doubleClick?(host: ToolHost, e: MouseEvent, target: Element | null): void | Promise<void>;

@@ -282,7 +282,10 @@ export class CanvasEditor implements ToolHost {
     const tool = toolOf(id);
     if (!tool.enabled) return;
     // A key held down repeats, and that same tool's press has to survive it.
-    if (tool.id !== this.state.tool) this.cancelPress();
+    if (tool.id !== this.state.tool) {
+      this.cancelPress();
+      toolOf(this.state.tool).deactivate?.(this);
+    }
     this.update({ tool: tool.id as ToolId, commentDraft: null, hover: null, ghost: null });
     tool.activate?.(this);
   }
@@ -711,7 +714,7 @@ export class CanvasEditor implements ToolHost {
       source,
       interact: this.state.tool === "interact",
       editing,
-      vector: false,
+      vector: this.state.tool === "vectorEdit",
     });
     if (!action) return false;
     if (action.kind === "tool") this.setTool(action.id);
@@ -882,22 +885,52 @@ export class CanvasEditor implements ToolHost {
     );
   }
 
-  /** Sends the inspector's style edits as one `source.edit`: each group sets `styles` on `locs`. */
-  styleEdits(groups: Array<{ locs: Loc[]; styles: Record<string, string | null> }>) {
-    const els = this.selectedElements();
+  /**
+   * Sends the inspector's style edits as one `source.edit`: each group sets `styles` on `locs`.
+   * `standIns` are elements edited for a selected one, like the `<path>` in a selected `<svg>`.
+   */
+  styleEdits(
+    groups: Array<{ locs: Loc[]; styles: Record<string, string | null> }>,
+    standIns: ReadonlyArray<{ of: SelectionItem & { loc: Loc } } & HitElement> = [],
+  ) {
+    const els: HitElement[] = [
+      ...this.selectedElements().map((e) => ({
+        loc: e.item.loc,
+        rev: e.facts.rev,
+        tag: e.facts.tag,
+      })),
+      ...standIns,
+    ];
     const edits: SourceEdit[] = [];
     for (const g of groups) {
-      const mine = els.filter((e) => g.locs.includes(e.item.loc));
-      if (mine.length === 0) continue;
-      edits.push({
-        kind: "style",
-        locs: [...new Set(mine.map((e) => e.item.loc))],
-        tag: mine[0]!.facts.tag,
-        styles: g.styles,
-        revs: revsOf(mine.map((e) => ({ loc: e.item.loc, rev: e.facts.rev }))),
-      });
+      const mine = els.filter((e) => g.locs.includes(e.loc));
+      for (const tag of new Set(mine.map((e) => e.tag))) {
+        const same = mine.filter((e) => e.tag === tag);
+        edits.push({
+          kind: "style",
+          locs: [...new Set(same.map((e) => e.loc))],
+          tag,
+          styles: g.styles,
+          revs: revsOf(same),
+        });
+      }
     }
-    return edits.length > 0 ? this.edit(edits) : Promise.resolve(false);
+    if (edits.length === 0) return Promise.resolve(false);
+    const used = standIns.filter((s) =>
+      edits.some((e) => e.kind === "style" && e.locs.includes(s.loc)),
+    );
+    if (used.length === 0) return this.edit(edits);
+    // A stand-in isn't selected, so the detach offer needs its ancestors from the selected one.
+    const [first] = used;
+    const facts = this.facts.get(keyOf(first!.of));
+    const chain = facts && [
+      ...[...facts.path].reverse(),
+      { loc: first!.of.loc, rev: facts.rev, tag: facts.tag },
+    ];
+    return this.edit(edits, chain).then((done) => {
+      if (!done) for (const s of used) bridgeOf(s.of.frameId)?.preview(s.loc, null);
+      return done;
+    });
   }
 
   /** Shows a frame somewhere else than the canvas says, while a field previews it; `null` puts it back. */
