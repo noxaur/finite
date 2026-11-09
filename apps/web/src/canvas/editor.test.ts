@@ -190,14 +190,14 @@ describe("a refused edit on a production frame in a prototype", () => {
   });
   const request = vi.mocked(finite.request);
 
-  function prototypeEditor() {
+  function prototypeEditor(doc: Canvas = proto) {
     const camera = {
       view: { zoom: 1 },
       visibleWorld: () => ({ x: 0, y: 0, width: 800, height: 600 }),
     } as unknown as Camera;
     const viewport = new EventTarget() as EventTarget & Record<string, unknown>;
     Object.assign(viewport, { contains: () => true });
-    const editor = new CanvasEditor("d1", proto, "prototype", viewport as never, camera);
+    const editor = new CanvasEditor("d1", doc, "prototype", viewport as never, camera);
     editor.routeFile = () => FILE;
     return editor;
   }
@@ -221,6 +221,20 @@ describe("a refused edit on a production frame in a prototype", () => {
     expect(editor.state.notice?.action?.label).toBe("Copy Home.tsx into this prototype");
     await vi.advanceTimersByTimeAsync(60_000);
     expect(editor.state.notice?.action).toBeDefined();
+    editor.dispose();
+  });
+
+  it("doesn't offer a copy of a route with params, and says to ask the agent", async () => {
+    const withParams = {
+      ...proto,
+      frames: [{ id: "f1", source: { kind: "route", path: "/users/:id", params: { id: "42" } } }],
+    } as unknown as Canvas;
+    const editor = prototypeEditor(withParams);
+    await editor.edit(edits);
+    expect(editor.state.notice?.action).toBeUndefined();
+    expect(editor.state.notice?.text).toContain(
+      "Ask the agent to bring that page into the prototype",
+    );
     editor.dispose();
   });
 

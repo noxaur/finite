@@ -189,6 +189,18 @@ describe("dragging a drawn vector", () => {
     expect(styles).toMatchObject({ left: "30px", top: "30px", locs: ["a.tsx:2:0"] });
   });
 
+  it("moves a selected inner <svg>, not the positioned <svg> around it", async () => {
+    const inner = { loc: "a.tsx:1:0", rev: "r1", tag: "svg" };
+    const outer = { loc: "a.tsx:0:0", rev: "r1", tag: "svg" };
+    pressed.current = { ...pressed.current, loc: "a.tsx:3:0", tag: "path", path: [inner, outer] };
+    selectionStore.set([{ frameId: "f", loc: inner.loc, index: 0 }]);
+    const styles = await drag(
+      { position: "absolute", left: "20px", top: "20px", zoom: "1" },
+      { x: 10, y: 10 },
+    );
+    expect(styles).toMatchObject({ locs: [inner.loc] });
+  });
+
   it("moves the <svg> when the <path> was selected by an earlier click", async () => {
     pressed.current = { ...pressed.current, loc: "a.tsx:3:0", tag: "path", path: [svg, body] };
     selectionStore.set([{ frameId: "f", loc: "a.tsx:3:0", index: 0 }]);

@@ -294,8 +294,12 @@ async function beginDragInFrame(
   const bridge = bridgeOf(frame.id);
   if (!bridge) return null;
   // A shape inside an <svg> moves with it: the press stays on the path only for a click.
+  // A selected <svg> is the one to drag, even inside another.
   const at = chain.findIndex((c) => c.loc === item!.loc);
-  const svg = at < 0 ? undefined : chain.slice(0, at).findLast((c) => c.tag === "svg");
+  const svg =
+    at < 0 || chain[at]!.tag === "svg"
+      ? undefined
+      : chain.slice(0, at).findLast((c) => c.tag === "svg");
   if (svg) {
     const within = chain.slice(0, chain.indexOf(svg)).reverse();
     const local = host.local(frame, from);

@@ -1034,6 +1034,11 @@ export class CanvasEditor implements ToolHost {
       ? []
       : this.frames.filter((f) => f.source.kind === "route" && this.ownFile(f) === file);
     if (!file || (!target && frames.length === 0)) return this.say(errorText(e));
+    // A file frame has no URL, so a copy would lose the params the route reads.
+    if (frames.some((f) => f.source.kind === "route" && Object.keys(f.source.params ?? {}).length))
+      return this.say(
+        `${file} is production code, and a copy would lose this frame's route params. Ask the agent to bring that page into the prototype.`,
+      );
     this.say(errorText(e), {
       label: `Copy ${baseName(file)} into this prototype`,
       run: async () => {

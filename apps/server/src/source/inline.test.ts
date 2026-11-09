@@ -143,6 +143,8 @@ describe("the page's own structure", () => {
     expect((await read(app(`<div>{props.children}</div>`))).keeps[0]?.kind).toBe("slot");
     expect((await read(app(`<div><Outlet /></div>`))).keeps[0]?.kind).toBe("slot");
     expect((await read(app(`<p>{name}</p>`))).keeps[0]?.kind).toBe("expression");
+    expect((await read(app(`<p>{stats.children}</p>`))).keeps[0]?.kind).toBe("expression");
+    expect((await read(app(`<p>{this.props.children}</p>`))).keeps[0]?.kind).toBe("expression");
   });
 
   it("refuses an edit that would drop a layout slot, and keeps one that stays", () => {

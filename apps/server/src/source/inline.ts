@@ -101,6 +101,8 @@ function isSlot(node: t.Node): boolean {
   return (
     node.type === "MemberExpression" &&
     !node.computed &&
+    node.object.type === "Identifier" &&
+    node.object.name === "props" &&
     node.property.type === "Identifier" &&
     node.property.name === "children"
   );
