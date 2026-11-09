@@ -277,6 +277,11 @@ export const CanvasPatch = z.discriminatedUnion("op", [
   z.object({ op: z.literal("addFrames"), frames: z.array(Frame) }),
   z.object({ op: z.literal("removeFrames"), frameIds: z.array(Id) }),
   z.object({ op: z.literal("renameFrame"), frameId: Id, name: z.string() }),
+  /** Points frames at other sources, as when a prototype takes its own copy of a route. */
+  z.object({
+    op: z.literal("setFrameSources"),
+    frames: z.array(z.object({ id: Id, source: FrameSource })),
+  }),
   z.object({ op: z.literal("moveFramesTo"), frameIds: z.array(Id), toCanvasId: Id }),
   /** Adds the text, or replaces the one with its id. */
   z.object({ op: z.literal("setText"), text: TextLabel }),

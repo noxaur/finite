@@ -6,7 +6,7 @@ import type { CanvasEditor, EditorState } from "@/canvas/editor";
 import type { ToolDef, ToolGroup } from "@/canvas/tools/host";
 import { GROUPS, keyHint, toolOf, toolsIn } from "@/canvas/tools/registry";
 import { colors, fonts, radii, shadows, space } from "@/styles/tokens.stylex";
-import { IconButton } from "./Button";
+import { Button, IconButton } from "./Button";
 import { Icon } from "./Icons";
 import { Menu, type MenuItem } from "./Menu";
 
@@ -30,6 +30,16 @@ export function Toolbar({ editor, state }: { editor: CanvasEditor; state: Editor
       data-camera-ignore=""
       {...stylex.props(styles.bar)}
     >
+      {state.notice && (
+        <div role="status" {...stylex.props(styles.notice)}>
+          <span>{state.notice.text}</span>
+          {state.notice.action && (
+            <Button size="small" variant="brand" onClick={() => state.notice?.action?.run()}>
+              {state.notice.action.label}
+            </Button>
+          )}
+        </div>
+      )}
       {GROUPS.map((g) => {
         const tools = toolsIn(g);
         if (tools.length === 0) return null;
@@ -116,6 +126,31 @@ function ToolGroupButton({
 }
 
 const styles = stylex.create({
+  /** Why something didn't happen: above the bar, clear of the tools and the composer. */
+  notice: {
+    position: "absolute",
+    bottom: `calc(100% + ${space.sm})`,
+    left: "50%",
+    transform: "translateX(-50%)",
+    display: "flex",
+    alignItems: "center",
+    gap: space.sm,
+    width: "max-content",
+    maxWidth: 420,
+    whiteSpace: "normal",
+    paddingBlock: space.xs,
+    paddingInline: space.sm,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderStyle: "solid",
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    color: colors.text,
+    boxShadow: shadows.raised,
+    fontFamily: fonts.sans,
+    fontSize: 13,
+    lineHeight: 1.4,
+  },
   bar: {
     position: "absolute",
     bottom: `calc(var(--dock-clearance, 0px) + ${space.sm})`,

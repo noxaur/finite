@@ -7,8 +7,7 @@ import { CommentLayer } from "@/components/Comments";
 import { InspectCard } from "@/components/InspectCard";
 import { SelectionLayer } from "@/components/SelectionLayer";
 import { Camera } from "@/design/camera";
-import { colors, fonts, radii, shadows, space } from "@/styles/tokens.stylex";
-import { Button } from "@/components/Button";
+import { colors, fonts } from "@/styles/tokens.stylex";
 import { Toolbar } from "@/components/Toolbar";
 import { useDesignState } from "@/client/finite";
 import { activeEditor, CanvasEditor, useEditorState } from "./editor";
@@ -221,23 +220,6 @@ function CanvasView({
               state={state}
             />
             {state.editingText && <RichTextEditor editor={editor} editing={state.editingText} />}
-            {state.notice && (
-              <div {...stylex.props(styles.noticeSpot(state.notice.at.x, state.notice.at.y))}>
-                <div
-                  role="status"
-                  data-canvas-ui=""
-                  data-camera-ignore=""
-                  {...stylex.props(styles.notice)}
-                >
-                  <span>{state.notice.text}</span>
-                  {state.notice.action && (
-                    <Button size="small" variant="brand" onClick={state.notice.action.run}>
-                      {state.notice.action.label}
-                    </Button>
-                  )}
-                </div>
-              </div>
-            )}
           </>
         )}
       </div>
@@ -296,31 +278,4 @@ const styles = stylex.create({
   },
   titleSelected: { color: colors.hover },
   gone: { color: colors.danger },
-  noticeSpot: (x: number, y: number) => ({
-    position: "absolute",
-    left: x,
-    top: y,
-    zIndex: 3,
-  }),
-  notice: {
-    display: "flex",
-    alignItems: "center",
-    gap: space.sm,
-    width: "max-content",
-    maxWidth: 420,
-    marginTop: space.sm,
-    transform: "scale(var(--inv-zoom, 1))",
-    transformOrigin: "0 0",
-    paddingBlock: space.xs,
-    paddingInline: space.sm,
-    borderRadius: radii.md,
-    borderWidth: 1,
-    borderStyle: "solid",
-    borderColor: colors.border,
-    backgroundColor: colors.surface,
-    color: colors.text,
-    boxShadow: shadows.raised,
-    fontSize: 13,
-    lineHeight: 1.4,
-  },
 });

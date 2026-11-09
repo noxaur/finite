@@ -38,16 +38,29 @@ export function resizeBox(box: Rect, handle: Handle, d: Point, min = 1): Rect {
   return { x, y, width, height };
 }
 
+/** Where a positioned element sits: its computed insets, and how many frame pixels one of its own covers. */
+export type ResizeInsets = { left: number; top: number; zoom: number };
+
 /**
  * The styles an element resize writes: the width and height its handle changes, in whole CSS
  * pixels. `rect` is the element's box in the frame (CSS pixels) and `d` the pointer's travel in
- * CSS pixels (screen travel over zoom).
+ * CSS pixels (screen travel over zoom). A positioned element also moves its `top` and `left` with
+ * the north and west handles, so the opposite edges stay put; a flow element has no insets to set.
  */
-export function resizeStyles(rect: Rect, handle: Handle, d: Point): Record<string, string> {
+export function resizeStyles(
+  rect: Rect,
+  handle: Handle,
+  d: Point,
+  at?: ResizeInsets,
+): Record<string, string> {
   const next = resizeBox(rect, handle, d);
   const out: Record<string, string> = {};
   if (handle.includes("e") || handle.includes("w")) out.width = `${Math.round(next.width)}px`;
   if (handle.startsWith("n") || handle.startsWith("s")) out.height = `${Math.round(next.height)}px`;
+  if (at && handle.includes("w"))
+    out.left = `${Math.round(at.left + (next.x - rect.x) / at.zoom)}px`;
+  if (at && handle.startsWith("n"))
+    out.top = `${Math.round(at.top + (next.y - rect.y) / at.zoom)}px`;
   return out;
 }
 
@@ -57,13 +70,14 @@ export function resizeEdit(
   rect: Rect,
   handle: Handle,
   d: Point,
+  at?: ResizeInsets,
 ): SourceEdit | null {
   if (Math.abs(d.x) < 0.5 && Math.abs(d.y) < 0.5) return null;
   return {
     kind: "style",
     locs: [el.loc],
     tag: el.tag,
-    styles: resizeStyles(rect, handle, d),
+    styles: resizeStyles(rect, handle, d, at),
     revs: revsOf([el]),
   };
 }

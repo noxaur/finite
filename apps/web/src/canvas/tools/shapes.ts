@@ -47,19 +47,22 @@ export function dragLine(from: Point, to: Point, snap: boolean, center: boolean)
     dx = Math.round(Math.cos(angle) * length);
     dy = Math.round(Math.sin(angle) * length);
   }
-  const start = center ? { x: from.x - dx, y: from.y - dy } : from;
-  const end = { x: from.x + dx, y: from.y + dy };
-  const left = Math.round(Math.min(start.x, end.x));
-  const top = Math.round(Math.min(start.y, end.y));
+  const start = {
+    x: Math.round(center ? from.x - dx : from.x),
+    y: Math.round(center ? from.y - dy : from.y),
+  };
+  const end = { x: Math.round(from.x + dx), y: Math.round(from.y + dy) };
+  const left = Math.min(start.x, end.x);
+  const top = Math.min(start.y, end.y);
   return {
     box: {
       x: left,
       y: top,
-      width: Math.max(1, Math.round(Math.abs(end.x - start.x))),
-      height: Math.max(1, Math.round(Math.abs(end.y - start.y))),
+      width: Math.max(1, Math.abs(end.x - start.x)),
+      height: Math.max(1, Math.abs(end.y - start.y)),
     },
-    a: { x: Math.round(start.x) - left, y: Math.round(start.y) - top },
-    b: { x: Math.round(end.x) - left, y: Math.round(end.y) - top },
+    a: { x: start.x - left, y: start.y - top },
+    b: { x: end.x - left, y: end.y - top },
   };
 }
 

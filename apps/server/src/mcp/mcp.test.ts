@@ -338,6 +338,23 @@ describe("/mcp tools", () => {
     expect(apply).not.toHaveBeenCalled();
   });
 
+  it("refuses a content op on the page's own <body>", async () => {
+    const client = await connect(await start());
+    const { frame, element, file } = await boardFrame();
+    await writeFile(
+      path.join(root, file),
+      `export default function Card() {\n  return <body>{children}</body>;\n}\n`,
+    );
+    elements = vi.fn(async (_url, _w, _h, selects) => selects.map(() => [element]));
+    const result = await call(client, "edit", {
+      designId: "d1",
+      ops: [{ op: "content", frameId: frame.id, select: "body", text: "Hello" }],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("<body> is the page's own structure");
+    expect(apply).not.toHaveBeenCalled();
+  });
+
   it("refuses a page frame's element op that would change a production CSS module", async () => {
     const client = await connect(await start({ styling: "css-modules" }));
     const css = ".title { color: red; }\n";

@@ -47,9 +47,7 @@ export type ElementFacts = { rev: Rev; tag: string; path: HitElement[] };
 
 export type Notice = {
   text: string;
-  /** Where it shows, in canvas units: under the selection. */
-  at: Point;
-  action?: { label: string; run: () => void };
+  action?: { label: string; run: () => void | Promise<void> };
 };
 
 /** What finishing a text edit writes to: an element that exists, or a new one to place. */
@@ -1030,17 +1028,32 @@ export class CanvasEditor implements ToolHost {
     const el = this.selectedElements().find((x) => x.item.loc === loc);
     const chain = passed ?? (el ? [...el.facts.path].reverse() : []);
     const target = loc ? detachTarget(chain, loc) : null;
-    if (!target) return this.say(errorText(e));
+    const file = target?.file ?? (loc && fileOf(loc));
+    // A production frame has no importer on the board: the copy replaces the frame's own file.
+    const frames = target
+      ? []
+      : this.frames.filter((f) => f.source.kind === "route" && this.ownFile(f) === file);
+    if (!file || (!target && frames.length === 0)) return this.say(errorText(e));
+    // A file frame has no URL, so a copy would lose the params the route reads.
+    if (frames.some((f) => f.source.kind === "route" && Object.keys(f.source.params ?? {}).length))
+      return this.say(
+        `${file} is production code, and a copy would lose this frame's route params. Ask the agent to bring that page into the prototype.`,
+      );
     this.say(errorText(e), {
-      label: `Copy ${baseName(target.file)} into this prototype`,
+      label: `Copy ${baseName(file)} into this prototype`,
       run: async () => {
         this.update({ notice: null });
         try {
-          await finite.request("source.detach", {
+          const { file: copy } = await finite.request("source.detach", {
             designId: this.designId,
             canvasId: this.canvas.id,
-            ...target,
+            ...(target ?? { file }),
           });
+          if (frames.length > 0)
+            await this.patch({
+              op: "setFrameSources",
+              frames: frames.map((f) => ({ id: f.id, source: { kind: "file", file: copy } })),
+            });
         } catch (err) {
           this.say(errorText(err));
         }
@@ -1048,27 +1061,14 @@ export class CanvasEditor implements ToolHost {
     });
   }
 
-  /** Shows why something didn't happen, under the selection, for a few seconds. */
+  /**
+   * Shows why something didn't happen above the toolbar: for a few seconds, or, with an action
+   * to take, until the action runs or the next press on the canvas.
+   */
   say(text: string, action?: Notice["action"]) {
     clearTimeout(this.noticeTimer);
-    this.update({ notice: { text, at: this.noticeSpot(), ...(action ? { action } : {}) } });
-    this.noticeTimer = setTimeout(
-      () => this.update({ notice: null }),
-      action ? NOTICE_MS * 2 : NOTICE_MS,
-    );
-  }
-
-  private noticeSpot(): Point {
-    for (const item of selectionStore.get()) {
-      const frame = this.frame(item.frameId);
-      const r = this.state.rects[keyOf(item)];
-      if (frame && r) {
-        const b = this.boxOf(frame);
-        return { x: b.x + r.x, y: b.y + r.y + r.height };
-      }
-    }
-    const c = this.camera.visibleWorld(0);
-    return { x: c.x + c.width / 2 - 150, y: c.y + c.height - 190 / this.camera.view.zoom };
+    this.update({ notice: { text, ...(action ? { action } : {}) } });
+    if (!action) this.noticeTimer = setTimeout(() => this.update({ notice: null }), NOTICE_MS);
   }
 }
 
