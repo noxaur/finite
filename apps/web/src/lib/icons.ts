@@ -82,6 +82,7 @@ export type IconName =
   | "fillRadial"
   | "button"
   | "rotate"
+  | "bold"
   | "italic"
   | "underline"
   | "strike"
@@ -263,6 +264,7 @@ const SHAPES: Record<IconName, string | ((s: number) => string)> = {
   button: rect(2.4, 7.2, 19.2, 9.6, 3.2),
   rotate: path("M19.2 12a7.2 7.2 0 1 1-1.6-4.8M17.6 3.2v4h-4"),
   italic: path("M10.4 4.8h7.2M6.4 19.2h7.2M14 4.8 10 19.2"),
+  bold: path("M8 5.6h5a3.2 3.2 0 0 1 0 6.4H8zM8 12h5.8a3.2 3.2 0 0 1 0 6.4H8z"),
   underline: path("M7.2 4.8v5.6a4.8 4.8 0 0 0 9.6 0V4.8M5.6 19.2h12.8"),
   strike: path(
     "M16.4 7.2c-.8-1.4-2.4-2.4-4.4-2.4-2.6 0-4.4 1.4-4.4 3.4 0 1.6 1 2.6 3.2 3.4M4.8 12h14.4M15.6 14.4c.5.6.8 1.3.8 2.2 0 2-1.9 3.2-4.4 3.2-2.2 0-3.8-.9-4.6-2.4",
