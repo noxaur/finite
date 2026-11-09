@@ -15,6 +15,10 @@ export function comparedPair({ hover, pin }: InspectState): [Probe, Probe] | nul
 }
 
 export function figuresOf(inspect: InspectState): { frameId: string; figure: Figure }[] {
+  if (inspect.area) {
+    const { frameId, rect, elements } = inspect.area;
+    return [{ frameId, figure: { area: rect, elements } }];
+  }
   const pair = comparedPair(inspect);
   if (pair) return [{ frameId: pair[0].frameId, figure: { target: pair[0].m, other: pair[1].m } }];
   const { hover, pin } = inspect;

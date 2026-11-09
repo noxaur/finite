@@ -1,10 +1,16 @@
 "use client";
 
 import * as stylex from "@stylexjs/stylex";
-import { distanceBetween, type Distance, type Measurement, SPEC } from "@finite/protocol";
+import {
+  areaSpacing,
+  distanceBetween,
+  type Distance,
+  type Measurement,
+  SPEC,
+} from "@finite/protocol";
 import { type ReactNode, useMemo } from "react";
 import type { CanvasEditor } from "@/canvas/editor";
-import type { InspectState } from "@/canvas/tools/inspect";
+import type { InspectArea, InspectState } from "@/canvas/tools/inspect";
 import { colors, fonts, radii, size, space } from "@/styles/tokens.stylex";
 import { comparedPair, drawingsOf, useZoomStep } from "./InspectLayer";
 
@@ -102,6 +108,13 @@ export function InspectCard({ editor, inspect }: { editor: CanvasEditor; inspect
   );
   const shown = inspect.pin ?? inspect.hover;
   const shell = { "data-canvas-ui": "", "data-camera-ignore": "", "data-inspect-card": "" };
+  if (inspect.area) {
+    return (
+      <aside {...shell} aria-label="Inspect" {...stylex.props(styles.card)}>
+        <AreaReadout area={inspect.area} hidden={hidden} />
+      </aside>
+    );
+  }
   if (!shown) {
     return (
       <aside {...shell} aria-label="Inspect" {...stylex.props(styles.card)}>
@@ -175,6 +188,59 @@ export function InspectCard({ editor, inspect }: { editor: CanvasEditor; inspect
         </Section>
       ))}
     </aside>
+  );
+}
+
+/** What the card shows for a dragged area: its size, what's in it, and its spacing. */
+function AreaReadout({ area, hidden }: { area: InspectArea; hidden: number }) {
+  const { rect, elements, total } = area;
+  const { gaps, padding } = areaSpacing({ area: rect, elements });
+  const chips = gapChips(gaps);
+  const count =
+    total > elements.length
+      ? `first ${elements.length} of ${total} elements`
+      : `${total} ${total === 1 ? "element" : "elements"}`;
+  return (
+    <>
+      <header {...stylex.props(styles.header)}>
+        <div {...stylex.props(styles.titleRow)}>
+          <span {...stylex.props(styles.name)}>Area</span>
+          <span {...stylex.props(styles.tag)}>
+            {num(rect.width)} × {num(rect.height)}
+          </span>
+        </div>
+        <div {...stylex.props(styles.loc)}>{count}</div>
+        {hidden > 0 && (
+          <p {...stylex.props(styles.hint)}>
+            {hidden} more {hidden === 1 ? "label" : "labels"} at higher zoom
+          </p>
+        )}
+      </header>
+      {chips.length > 0 && (
+        <Section title="Gaps">
+          <div {...stylex.props(styles.chips)}>
+            {chips.map((c) => (
+              <span key={`${c.axis}${c.size}${c.cause}`} {...stylex.props(styles.chip)}>
+                {c.axis === "x" ? "↔" : "↕"} {num(c.size)} {c.cause}
+                {c.count > 1 && ` ×${c.count}`}
+              </span>
+            ))}
+          </div>
+        </Section>
+      )}
+      {padding.length > 0 && (
+        <Section title="Padding">
+          <div {...stylex.props(styles.chips)}>
+            {padding.map((p) => (
+              <span key={p.size} {...stylex.props(styles.chip)}>
+                {num(p.size)}
+                {p.count > 1 && ` ×${p.count}`}
+              </span>
+            ))}
+          </div>
+        </Section>
+      )}
+    </>
   );
 }
 

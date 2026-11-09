@@ -3,6 +3,7 @@ export * from "./wire.ts";
 export * from "./bridge.ts";
 export * from "./measure.ts";
 export {
+  areaSpacing,
   distanceBetween,
   drawFigure,
   figureRootCss,

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vite-plus/test";
 import {
   annotate,
+  areaSpacing,
   distanceBetween,
   drawFigure,
   type Figure,
@@ -267,6 +268,117 @@ describe("drawFigure", () => {
     const html = paint([{ kind: "pill", at: { x: 0, y: 0 }, text: `<img src=x onerror="a">` }]);
     expect(html).not.toContain("<img");
     expect(html).toContain("&#60;img");
+  });
+});
+
+describe("an area figure", () => {
+  const area = rect(100, 100, 100, 100);
+  const pad = { top: 16, right: 16, bottom: 16, left: 16 };
+
+  test("cuts every shape inside one clipped wrapper and keeps pills outside it", () => {
+    const { html } = drawFigure({ area, elements: [element({ padding: pad })] }, 1);
+    expect(html).toContain("left:100px;top:100px;width:100px;height:100px;overflow:hidden;");
+    const [wrapper, pills] = [
+      html.indexOf("overflow:hidden"),
+      html.lastIndexOf("var(--measure-on)"),
+    ];
+    expect(wrapper).toBeLessThan(pills);
+    const clip = html.slice(0, html.indexOf("</div></div>"));
+    expect(clip).toContain("outline:calc(1px");
+    expect(clip).not.toContain("scale(var(--inv-zoom");
+  });
+
+  test("anchors a band pill at the centre of what's visible, keeping the real value", () => {
+    const figure: Figure = {
+      area: rect(0, 0, 50, 50),
+      elements: [element({ box: rect(40, 0, 100, 40), padding: { ...pad, top: 0, bottom: 0 } })],
+    };
+    const left = placePills(annotate(figure), 1).marks.find(
+      (mark) => mark.kind === "pill" && mark.text === "16",
+    );
+    expect(left).toMatchObject({ at: { x: 45, y: 20 } });
+  });
+
+  test("labels a uniform padding on a side that shows when the top is cut off", () => {
+    const figure: Figure = {
+      area: rect(120, 180, 100, 30),
+      elements: [element({ padding: pad })],
+    };
+    const labelled = annotate(figure).filter((mark) => mark.kind === "pill" && mark.text === "16");
+    expect(labelled).toHaveLength(1);
+    expect(labelled[0]).toMatchObject({ at: { y: 192 } });
+  });
+
+  test("drops marks with nothing inside, and doesn't count them hidden", () => {
+    const figure: Figure = {
+      area: rect(110, 120, 10, 10),
+      elements: [
+        element({
+          padding: { top: 8, right: 8, bottom: 8, left: 8 },
+          gaps: [
+            { axis: "x", size: 8, rect: rect(250, 110, 8, 80), between: [0, 1], cause: "gap" },
+          ],
+        }),
+      ],
+    };
+    expect(annotate(figure).filter((mark) => mark.kind === "gap")).toEqual([]);
+    expect(annotate(figure).some((mark) => mark.kind === "pill" && mark.text === "8")).toBe(false);
+    expect(drawFigure(figure, 1).hidden).toBe(0);
+  });
+
+  test("gives a partly inside element no size or radius pill", () => {
+    const radius = { topLeft: 12, topRight: 12, bottomRight: 12, bottomLeft: 12 };
+    const texts = pillTexts({
+      area: rect(100, 100, 50, 50),
+      elements: [element({ radius })],
+    });
+    expect(texts).toEqual(["50 × 50"]);
+  });
+
+  test("ranks the area's size first, then gaps, padding, margin, sizes and radius", () => {
+    const inner = element({
+      box: rect(110, 110, 80, 60),
+      padding: { top: 12, right: 12, bottom: 12, left: 12 },
+      margin: { top: 4, right: 4, bottom: 4, left: 4 },
+      radius: { topLeft: 6, topRight: 6, bottomRight: 6, bottomLeft: 6 },
+      gaps: [{ axis: "x", size: 7, rect: rect(130, 120, 7, 40), between: [0, 1], cause: "gap" }],
+    });
+    expect(pillTexts({ area, elements: [inner] })).toEqual([
+      "100 × 100",
+      "7",
+      "12",
+      "4",
+      "80 × 60",
+      "r 6",
+    ]);
+  });
+
+  test("does not draw children, and outlines elements in the child tone", () => {
+    const marks = annotate({
+      area,
+      elements: [
+        element({ children: [{ tag: "img", name: "Logo", rect: rect(110, 110, 40, 40) }] }),
+      ],
+    });
+    expect(marks.filter((mark) => mark.kind === "outline").map((m) => m.tone)).toEqual(["child"]);
+    expect(pillTexts({ area, elements: [] })).toEqual(["100 × 100"]);
+  });
+
+  test("areaSpacing reports only what's visible", () => {
+    const { gaps, padding } = areaSpacing({
+      area: rect(100, 100, 20, 200),
+      elements: [
+        element({
+          padding: { top: 0, right: 8, bottom: 0, left: 8 },
+          gaps: [
+            { axis: "x", size: 4, rect: rect(110, 110, 4, 80), between: [0, 1], cause: "gap" },
+            { axis: "x", size: 5, rect: rect(250, 110, 5, 80), between: [1, 2], cause: "gap" },
+          ],
+        }),
+      ],
+    });
+    expect(gaps.map((gap) => gap.size)).toEqual([4]);
+    expect(padding).toEqual([{ size: 8, count: 1 }]);
   });
 });
 

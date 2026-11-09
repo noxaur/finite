@@ -1,6 +1,6 @@
-import type { Frame, Measurement, MeasureTarget } from "@finite/protocol";
+import type { Frame, Measurement, MeasureTarget, Rect } from "@finite/protocol";
 import type { Point } from "../gestures";
-import type { ToolDef, ToolHost } from "./host";
+import type { Gesture, ToolDef, ToolHost } from "./host";
 
 /** One measured element and how to measure it again. */
 export type Probe = { frameId: string; target: MeasureTarget; m: Measurement };
@@ -10,9 +10,24 @@ export type InspectState = {
   readonly pin: Probe | null;
   /** How many stamped parents ↑ has walked from what the pointer is on. */
   readonly up: number;
+  /** A dragged rectangle and what's under it. While it's set, nothing is hovered or pinned. */
+  readonly area: InspectArea | null;
 };
 
-export const NO_INSPECT: InspectState = { hover: null, pin: null, up: 0 };
+export type InspectArea = {
+  frameId: string;
+  /** In frame CSS pixels. */
+  rect: Rect;
+  elements: Measurement[];
+  /** How many elements overlap it, which can be more than `elements`. */
+  total: number;
+};
+
+export const NO_INSPECT: InspectState = { hover: null, pin: null, up: 0, area: null };
+
+/** Under this on a side, a released drag is a sliver and clears. */
+const MIN_AREA = 2;
+const AREA_MAX = 150;
 
 export const sameElement = (a: Probe, b: Probe) =>
   a.frameId === b.frameId && a.m.loc === b.m.loc && a.m.index === b.m.index;
@@ -27,6 +42,14 @@ type Session = {
   pinSeq: number;
   /** Where the tool last probed, and the element right under that point. */
   pointer: { frameId: string; at: Point; leaf: string | null } | null;
+  /** The press drawing an area now; a gesture that isn't this one ignores its moves and release. */
+  drag: object | null;
+  /** Bumped when the area is cleared or replaced, so a measure in flight doesn't land after. */
+  areaSeq: number;
+  /** The newest rect to measure. One request runs at a time; drags replace this one. */
+  wanted: { frameId: string; rect: Rect } | null;
+  scheduled: boolean;
+  measuring: boolean;
 };
 
 const sessions = new WeakMap<ToolHost, Session>();
@@ -34,7 +57,17 @@ const sessions = new WeakMap<ToolHost, Session>();
 function sessionOf(host: ToolHost): Session {
   let session = sessions.get(host);
   if (!session) {
-    session = { raf: 0, seq: 0, pinSeq: 0, pointer: null };
+    session = {
+      raf: 0,
+      seq: 0,
+      pinSeq: 0,
+      pointer: null,
+      drag: null,
+      areaSeq: 0,
+      wanted: null,
+      scheduled: false,
+      measuring: false,
+    };
     sessions.set(host, session);
   }
   return session;
@@ -134,8 +167,98 @@ async function pinAt(host: ToolHost, world: Point, frame: Frame | null) {
   });
 }
 
+/** Drops the area and anything still measuring it. A press already down can't act on it after. */
+function clearArea(host: ToolHost) {
+  const session = sessionOf(host);
+  session.areaSeq++;
+  session.pinSeq++;
+  session.wanted = null;
+  session.drag = null;
+  if (host.state.inspect.area) host.update({ inspect: { ...host.state.inspect, area: null } });
+}
+
+function wantArea(host: ToolHost, frameId: string, rect: Rect) {
+  const session = sessionOf(host);
+  session.wanted = { frameId, rect };
+  scheduleArea(host);
+}
+
+function scheduleArea(host: ToolHost) {
+  const session = sessionOf(host);
+  if (session.scheduled || session.measuring) return;
+  session.scheduled = true;
+  requestAnimationFrame(() => {
+    session.scheduled = false;
+    void measureWanted(host);
+  });
+}
+
+async function measureWanted(host: ToolHost) {
+  const session = sessionOf(host);
+  const job = session.wanted;
+  if (!job || session.measuring) return;
+  session.wanted = null;
+  session.measuring = true;
+  const seq = session.areaSeq;
+  const reply = await host
+    .bridge(job.frameId)
+    ?.measureArea(job.rect, AREA_MAX)
+    .catch(() => null);
+  session.measuring = false;
+  const { area } = host.state.inspect;
+  if (reply && area && seq === session.areaSeq) {
+    host.update({ inspect: { ...host.state.inspect, area: { ...area, ...reply } } });
+  }
+  if (session.wanted) scheduleArea(host);
+}
+
+/** A press in `frame` that passed the slop: replaces what's shown and follows the pointer. */
+function startArea(host: ToolHost, frame: Frame, start: Point): Gesture {
+  stopProbing(host);
+  clearArea(host);
+  const session = sessionOf(host);
+  host.update({ inspect: NO_INSPECT });
+  const drag = {};
+  session.drag = drag;
+  const clamped = (p: Point) => {
+    const box = host.boxOf(frame);
+    const at = host.local(frame, p);
+    return {
+      x: Math.min(box.width, Math.max(0, at.x)),
+      y: Math.min(box.height, Math.max(0, at.y)),
+    };
+  };
+  return {
+    move(_screen, world) {
+      if (session.drag !== drag) return;
+      const a = clamped(start);
+      const b = clamped(world);
+      const rect = {
+        x: Math.min(a.x, b.x),
+        y: Math.min(a.y, b.y),
+        width: Math.abs(a.x - b.x),
+        height: Math.abs(a.y - b.y),
+      };
+      const { inspect: now } = host.state;
+      const area = now.area ?? { frameId: frame.id, rect, elements: [], total: 0 };
+      host.update({ inspect: { ...now, area: { ...area, rect } } });
+      wantArea(host, frame.id, rect);
+    },
+    end(commit) {
+      if (session.drag !== drag) return;
+      session.drag = null;
+      const { area } = host.state.inspect;
+      if (!commit || !area || area.rect.width < MIN_AREA || area.rect.height < MIN_AREA) {
+        clearArea(host);
+      }
+    },
+  };
+}
+
 /** A frame loaded or applied an HMR update: what's measured may have moved or gone. */
 async function remeasure(host: ToolHost) {
+  const { area } = host.state.inspect;
+  if (area) wantArea(host, area.frameId, area.rect);
   const { pointer } = sessionOf(host);
   if (pointer) void probe(host, pointer.frameId, pointer.at, host.state.inspect.up);
   const { pin } = host.state.inspect;
@@ -162,7 +285,7 @@ export const inspect = {
   cursor: "var(--cursor-inspect, crosshair)",
   enabled: true,
   sticky: true,
-  hint: "Click to pin · ↑ parent · Esc",
+  hint: "Drag an area · Click to pin · ↑ parent · Esc",
   activate(host) {
     // The inspect card scrolls itself; a pinch over it still zooms.
     host.camera.routeWheel = (e) =>
@@ -176,24 +299,36 @@ export const inspect = {
   deactivate(host) {
     host.camera.routeWheel = null;
     stopProbing(host);
-    sessionOf(host).pinSeq++;
+    clearArea(host);
     host.update({ inspect: NO_INSPECT });
   },
   down(host, p) {
     // Esc or a tool switch during the press cancels it, as it does a click already answering.
-    const seq = sessionOf(host).pinSeq;
+    const session = sessionOf(host);
+    const seq = session.pinSeq;
+    const hadArea = host.state.inspect.area !== null;
     return {
-      begin: async () => null,
-      click: () => (seq === sessionOf(host).pinSeq ? pinAt(host, p.world, p.frame) : undefined),
+      begin: async () =>
+        p.frame && seq === session.pinSeq && host.frame(p.frame.id)
+          ? startArea(host, p.frame, p.world)
+          : null,
+      click: () => {
+        if (seq !== session.pinSeq) return;
+        if (hadArea) return clearArea(host);
+        return pinAt(host, p.world, p.frame);
+      },
     };
   },
-  pointerMove: probeAt,
+  pointerMove(host, e) {
+    if (!host.state.inspect.area) probeAt(host, e);
+  },
   pointerLeave: clearProbe,
   frameUpdated(host) {
     void remeasure(host);
   },
   canvasChanged(host) {
-    const { hover, pin } = host.state.inspect;
+    const { hover, pin, area } = host.state.inspect;
+    if (area && !host.frame(area.frameId)) clearArea(host);
     const here = (p: Probe | null) => (p && host.frame(p.frameId) ? p : null);
     if (here(hover) !== hover || here(pin) !== pin) {
       host.update({ inspect: { ...host.state.inspect, hover: here(hover), pin: here(pin) } });
@@ -201,10 +336,16 @@ export const inspect = {
   },
   key(host, e) {
     if (e.key === "Escape") {
-      // A comment open over the canvas closes first; with no pin, Esc goes back to Select.
+      if (sessionOf(host).drag) {
+        clearArea(host);
+        host.escape();
+        return true;
+      }
+      // A comment open over the canvas closes first; with nothing shown, Esc goes back to Select.
       const { inspect: m, commentDraft, openComment } = host.state;
-      if (!m.pin || commentDraft || openComment) return false;
-      unpin(host);
+      if ((!m.area && !m.pin) || commentDraft || openComment) return false;
+      if (m.area) clearArea(host);
+      else unpin(host);
       return true;
     }
     const mod = e.metaKey || e.ctrlKey;

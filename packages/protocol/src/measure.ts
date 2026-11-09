@@ -82,6 +82,13 @@ export const Measurement = z.object({
 });
 export type Measurement = z.infer<typeof Measurement>;
 
+/** What overlaps a rectangle of a frame, in document order. `total` counts past the `max` returned. */
+export const MeasuredArea = z.object({
+  elements: z.array(Measurement),
+  total: z.number().int().min(0),
+});
+export type MeasuredArea = z.infer<typeof MeasuredArea>;
+
 type SpecRow = { label: string; prop: string; kind?: "color" | "font" };
 
 /** What's reported beyond geometry: the frame reads these, the card shows them, agents get them. */
