@@ -311,8 +311,9 @@ export function createSourceEditor(options: SourceEditorOptions = {}): SourceEdi
     async detach(open, { canvasId, file, importer }) {
       const root = open.design.root;
       if (!/^[\w-]+$/.test(canvasId)) throw new Refused(`${canvasId} isn't a canvas id`, "invalid");
-      const importerCode = await mustRead(root, importer);
       const toFile = `${PROTOTYPE_DIR}boards/${canvasId}/${path.posix.basename(file)}`;
+      if (importer === undefined) return { file: await copyInto(root, file, toFile) };
+      const importerCode = await mustRead(root, importer);
       if (retarget(importerCode, importer, file, toFile) === undefined) {
         throw new Refused(
           `${importer} doesn't import ${file} with a relative path, so there's no import to point at a copy.`,

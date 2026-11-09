@@ -55,8 +55,9 @@ describe("size modes", () => {
       "flex-shrink": "0",
       height: "100px",
     });
-    // A stylesheet makes it grow.
+    // A class or stylesheet makes it grow: `flex-1` has to come off too, or its 0 basis wins.
     expect(sizeModeStyles("height", "hug", {}, grown, 10)).toEqual({
+      flex: null,
       "flex-grow": "0",
       "flex-shrink": "0",
       height: "fit-content",

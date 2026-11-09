@@ -119,8 +119,12 @@ export function sizeModeStyles(
   if (main === axis) {
     const own = styles.flex !== undefined || styles["flex-grow"] !== undefined;
     drop("flex", "flex-grow", "flex-basis");
-    // A stylesheet makes it grow, which only an inline 0 can stop.
-    if (!own && ctx.grow > 0) out["flex-grow"] = "0";
+    // A class or stylesheet makes it grow: `flex-1` has to come off, or its 0 basis beats the
+    // size, and only a 0 stops a growth this can't see.
+    if (!own && ctx.grow > 0) {
+      out.flex = null;
+      out["flex-grow"] = "0";
+    }
     // A fixed or hugging size holds when the line runs short of room, as in a design tool.
     if (styles["flex-shrink"]?.trim() !== "0") out["flex-shrink"] = "0";
   } else if (main && styles["align-self"]?.trim() === "stretch") out["align-self"] = null;

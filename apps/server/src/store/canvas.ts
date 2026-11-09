@@ -63,6 +63,20 @@ export function applyPatch(canvas: Canvas, patch: LocalPatch): Canvas {
         frames: canvas.frames.map((f) => (f.id === patch.frameId ? { ...f, name: patch.name } : f)),
       };
     }
+    case "setFrameSources": {
+      byId(
+        canvas,
+        patch.frames.map((f) => f.id),
+      );
+      const sources = new Map(patch.frames.map((f) => [f.id, f.source]));
+      return {
+        ...canvas,
+        frames: canvas.frames.map((f) => {
+          const source = sources.get(f.id);
+          return source ? { ...f, source } : f;
+        }),
+      };
+    }
     case "setText": {
       const exists = canvas.texts.some((t) => t.id === patch.text.id);
       return {
@@ -162,6 +176,11 @@ export function inversePatch(before: Canvas, patch: CanvasPatch): Step {
       return on({ op: "addFrames", frames: patch.frameIds.map(frame) });
     case "renameFrame":
       return on({ op: "renameFrame", frameId: patch.frameId, name: frame(patch.frameId).name });
+    case "setFrameSources":
+      return on({
+        op: "setFrameSources",
+        frames: patch.frames.map((f) => ({ id: f.id, source: frame(f.id).source })),
+      });
     case "moveFramesTo":
       return {
         canvasId: patch.toCanvasId,

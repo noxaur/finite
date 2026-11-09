@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import { alphaOf, setAlpha } from "./colors";
-import { hexOfHsv, hsvOf, hueHex, isHexLike, parseHex, typedHex } from "./hsv";
+import { hexOfHsv, hsvOf, hueHex, isHexLike, parseHex, typedHex, withHash } from "./hsv";
 
 const hex = (r: number, g: number, b: number) =>
   `#${[r, g, b].map((n) => n.toString(16).padStart(2, "0")).join("")}`;
@@ -99,5 +99,17 @@ describe("typed hex", () => {
     expect(isHexLike("1f3a")).toBe(false);
     expect(isHexLike("red")).toBe(false);
     expect(isHexLike("--brand")).toBe(false);
+  });
+
+  it("gives a bare hex its #, and leaves everything else alone", () => {
+    expect(withHash("ff0000")).toBe("#ff0000");
+    expect(withHash(" 1F3 ")).toBe("#1F3");
+    expect(withHash("95ced780")).toBe("#95ced780");
+    expect(withHash("#ff0000")).toBe("#ff0000");
+    expect(withHash("red")).toBe("red");
+    expect(withHash("--brand")).toBe("--brand");
+    expect(withHash("ff00")).toBe("#ff00");
+    expect(withHash("ff00000")).toBe("ff00000");
+    expect(withHash("rgb(0 0 0)")).toBe("rgb(0 0 0)");
   });
 });

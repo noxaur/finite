@@ -644,6 +644,22 @@ describe("canvases", () => {
     await open.undoCanvas(id, by);
     expect((await open.canvases()).find((c) => c.id === id)!.slices).toEqual([slice]);
 
+    // A prototype can take its own copy of a route: the frame points at it, and undo points it back.
+    canvas = await open.patchCanvas(
+      id,
+      {
+        op: "setFrameSources",
+        frames: [{ id: "b", source: { kind: "file", file: ".finite/boards/c/Home.tsx" } }],
+      },
+      by,
+    );
+    expect(canvas.frames.find((f) => f.id === "b")?.source).toEqual({
+      kind: "file",
+      file: ".finite/boards/c/Home.tsx",
+    });
+    canvas = await open.undoCanvas(id, by);
+    expect(canvas.frames.find((f) => f.id === "b")?.source).toEqual(frame("b").source);
+
     // Removing is a patch too, so undo brings the section back, whoever made it.
     canvas = await open.patchCanvas(id, { op: "removeSlice", sliceId: "sl" }, by);
     expect(canvas.slices).toEqual([]);

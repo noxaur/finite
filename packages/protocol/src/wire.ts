@@ -127,9 +127,9 @@ export const requests = {
   },
   "source.undo": { params: { designId }, result: z.null() },
   "source.redo": { params: { designId }, result: z.null() },
-  /** Copies a production file into the prototype's board and points `importer` at the copy. */
+  /** Copies a production file into the prototype's board and, given an `importer`, points it at the copy. */
   "source.detach": {
-    params: { designId, canvasId: Id, file: z.string(), importer: z.string() },
+    params: { designId, canvasId: Id, file: z.string(), importer: z.string().optional() },
     result: z.object({ file: z.string() }),
   },
   /** The element's children as editable runs. `keeps` lists what the runs hold but can't change. */

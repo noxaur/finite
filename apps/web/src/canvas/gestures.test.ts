@@ -26,6 +26,40 @@ describe("resizing an element", () => {
     expect(resizeStyles(rect, "n", { x: 0, y: -10 })).toEqual({ height: "50px" });
   });
 
+  it("moves a positioned element's top and left with the handles that drag them", () => {
+    const at = { left: 40, top: 80, zoom: 1 };
+    expect(resizeStyles(rect, "n", { x: 0, y: -10 }, at)).toEqual({ height: "50px", top: "70px" });
+    expect(resizeStyles(rect, "w", { x: 30, y: 0 }, at)).toEqual({ width: "70px", left: "70px" });
+    expect(resizeStyles(rect, "nw", { x: 5, y: 5 }, at)).toEqual({
+      width: "95px",
+      height: "35px",
+      left: "45px",
+      top: "85px",
+    });
+    expect(resizeStyles(rect, "se", { x: 5, y: 5 }, at)).toEqual({
+      width: "105px",
+      height: "45px",
+    });
+  });
+
+  it("scales a positioned element's inset by its zoom, and stops at the smallest size", () => {
+    expect(resizeStyles(rect, "n", { x: 0, y: -10 }, { left: 0, top: 80, zoom: 2 })).toMatchObject({
+      top: "75px",
+    });
+    expect(resizeStyles(rect, "n", { x: 0, y: 999 }, { left: 0, top: 80, zoom: 1 })).toMatchObject({
+      height: "1px",
+      top: "119px",
+    });
+  });
+
+  it("carries the insets into the edit for a positioned element", () => {
+    const el = { loc: "src/App.tsx:4:6", rev: "0123abcd", tag: "svg" };
+    const at = { left: 0, top: 80, zoom: 1 };
+    expect(resizeEdit(el, rect, "n", { x: 0, y: -10 }, at)).toMatchObject({
+      styles: { height: "50px", top: "70px" },
+    });
+  });
+
   it("ends in one style edit carrying the file's rev, or none for no travel", () => {
     const el = { loc: "src/App.tsx:4:6", rev: "0123abcd", tag: "div" };
     expect(resizeEdit(el, rect, "e", { x: 0.2, y: 0 })).toBeNull();
