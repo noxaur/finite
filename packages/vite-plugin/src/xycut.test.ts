@@ -1,10 +1,22 @@
 import { describe, expect, test } from "vite-plus/test";
-import { type Cut, gapLength, horizontalRadius, xyCut } from "./client/bridge.ts";
+import { type Cut, gapLength, horizontalRadius, overlapsArea, xyCut } from "./client/bridge.ts";
 
 const rect = (x: number, y: number, width: number, height: number) => ({ x, y, width, height });
 const summary = (cuts: Cut[]) => cuts.map((c) => [c.axis, c.size, ...c.between]);
 const sorted = (rows: (string | number)[][]) =>
   rows.map((row) => row.join(" ")).sort((a, b) => a.localeCompare(b));
+
+describe("overlapsArea", () => {
+  test("is true when the rects share any area", () => {
+    expect(overlapsArea(rect(0, 0, 10, 10), rect(5, 5, 10, 10))).toBe(true);
+    expect(overlapsArea(rect(0, 0, 10, 10), rect(9.5, 9.5, 1, 1))).toBe(true);
+  });
+
+  test("is false for rects that only touch or are apart", () => {
+    expect(overlapsArea(rect(0, 0, 10, 10), rect(10, 0, 10, 10))).toBe(false);
+    expect(overlapsArea(rect(0, 0, 10, 10), rect(0, 20, 10, 10))).toBe(false);
+  });
+});
 
 describe("xyCut", () => {
   test("has nothing to cut in empty or single input", () => {

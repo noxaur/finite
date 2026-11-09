@@ -17,7 +17,13 @@ import type {
 } from "@finite/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import WebSocket from "ws";
-import type { LoadError, Measured, RenderedElement, Screenshots } from "../agent/screenshot.ts";
+import type {
+  LoadError,
+  Measured,
+  MeasuredRegion,
+  RenderedElement,
+  Screenshots,
+} from "../agent/screenshot.ts";
 import { type RunningServer, startServer } from "../app.ts";
 import { allowedHosts } from "../guard.ts";
 import type { Modules } from "../hub.ts";
@@ -39,6 +45,7 @@ let clients: Client[] = [];
 let preview: PreviewState;
 let elements: Screenshots["elements"];
 let measureElement: Screenshots["measureElement"];
+let measureRegion: Screenshots["measureRegion"];
 let loadErrors: LoadError[];
 let bridgeErrors: FrameError[];
 /** The arguments of each headless load. */
@@ -99,6 +106,7 @@ async function start(overrides: { idleMs?: number; styling?: Design["styling"] }
     },
     hugSize: async () => ({ width: 300, height: 200 }),
     measureElement: (...args) => measureElement(...args),
+    measureRegion: (...args) => measureRegion(...args),
     elements: (...args) => elements(...args),
     close: async () => {},
   };
@@ -163,6 +171,7 @@ beforeEach(async () => {
   preview = { status: "ready", url: "http://frame" };
   elements = async (_url, _w, _h, selects) => selects.map(() => []);
   measureElement = async () => ({ missing: "nothing" });
+  measureRegion = async () => ({ elements: [], total: 0 });
   loadErrors = [];
   loads = [];
   bridgeErrors = [];
@@ -528,6 +537,66 @@ describe("/mcp tools", () => {
       expect(body.element).toMatchObject({ tag: "h1", count: 3 });
       expect(body.note).toBe("3 elements match .card. Pass index for another.");
       expect(seen).toEqual([[300, 200, { select: ".card", index: 0, image: true }]]);
+    });
+
+    it("measures a region: JSON, then the PNG, and clamps it to the frame", async () => {
+      const client = await connect(await start());
+      await boardFrame();
+      const seen: unknown[] = [];
+      const reply: MeasuredRegion = {
+        elements: [measurement()],
+        total: 1,
+        png: new Uint8Array([9]),
+      };
+      measureRegion = async (_url, w, h, query) => {
+        seen.push([w, h, query]);
+        return reply;
+      };
+      const result = await call(client, "measure", {
+        designId: "d1",
+        frameId: "f1",
+        region: { x: -10, y: 50, width: 40, height: 400 },
+      });
+      expect(result.content.map((c) => c.type)).toEqual(["text", "image"]);
+      const body = value(result);
+      expect(body.region).toEqual({ x: 0, y: 50, width: 30, height: 150 });
+      expect(body.total).toBe(1);
+      expect(body.note).toBeUndefined();
+      expect(seen).toEqual([
+        [300, 200, { region: { x: 0, y: 50, width: 30, height: 150 }, max: 60, image: true }],
+      ]);
+    });
+
+    it("says how many more a truncated region left out", async () => {
+      const client = await connect(await start());
+      await boardFrame();
+      measureRegion = async () => ({ elements: [measurement()], total: 61 });
+      const result = await call(client, "measure", {
+        designId: "d1",
+        frameId: "f1",
+        region: { x: 0, y: 0, width: 10, height: 10 },
+        image: false,
+      });
+      expect(result.content.map((c) => c.type)).toEqual(["text"]);
+      expect(value(result).note).toMatch(/60 more aren't listed\. Narrow the region/);
+    });
+
+    it("refuses both select and region, neither, and a region off the frame", async () => {
+      const client = await connect(await start());
+      await boardFrame();
+      const refusal = async (args: Record<string, unknown>) => {
+        const result = await call(client, "measure", { designId: "d1", frameId: "f1", ...args });
+        expect(result.isError).toBe(true);
+        return result.content.map((c) => (c.type === "text" ? c.text : "")).join("");
+      };
+      expect(
+        await refusal({ select: "h1", region: { x: 0, y: 0, width: 10, height: 10 } }),
+      ).toMatch(/exactly one of select/);
+      expect(await refusal({})).toMatch(/exactly one of select/);
+      expect(await refusal({ region: { x: 0, y: 0, width: 10, height: 10 }, index: 1 })).toMatch(
+        /index and to only work with select/,
+      );
+      expect(await refusal({ region: { x: 900, y: 0, width: 10, height: 10 } })).toMatch(/300×200/);
     });
 
     it("skips the PNG with image: false", async () => {

@@ -1,4 +1,4 @@
-import type { Measurement } from "./measure.ts";
+import type { MeasuredGap, Measurement } from "./measure.ts";
 import type { Rect } from "./model.ts";
 
 /** The drawing's one literal for the purple. `colors.measure` in the web tokens must equal it. */
@@ -12,7 +12,9 @@ export type Figure =
   /** Everything about one element. */
   | { target: Measurement }
   /** Two elements in one frame: outlines, sizes and the distance between them. */
-  | { target: Measurement; other: Measurement };
+  | { target: Measurement; other: Measurement }
+  /** Everything under a rectangle of a frame, cut at the rectangle's edges. */
+  | { area: Rect; elements: Measurement[] };
 
 export type Distance = {
   relation: "apart" | "inside" | "overlap";
@@ -103,6 +105,8 @@ type Mark =
   | { kind: "gap"; rect: Rect; axis: "x" | "y" }
   | { kind: "outline"; rect: Rect; tone: "target" | "child" | "other"; radius?: Corners }
   | { kind: "line"; from: Point; to: Point }
+  /** Cuts every other non-pill mark at this rectangle. */
+  | { kind: "clip"; rect: Rect }
   | ({ kind: "pill" } & Pill);
 
 type Corners = Measurement["radius"];
@@ -126,29 +130,47 @@ function sizePill(box: Rect): Mark {
   };
 }
 
-/** The sides that get a pill: all equal is one, opposite equal is two, otherwise four. */
-function pillSides(e: Measurement["padding"]): Side[] {
+/** The sides that get a pill among those `shown`: all equal is one, opposite equal is two, otherwise four. */
+function pillSides(e: Measurement["padding"], shown: (side: Side) => boolean): Side[] {
+  const first = (...group: Side[]) => group.filter(shown).slice(0, 1);
   const sides: Side[] =
     e.top === e.right && e.top === e.bottom && e.top === e.left
-      ? ["top"]
+      ? first("top", "right", "bottom", "left")
       : e.top === e.bottom && e.left === e.right
-        ? ["top", "left"]
-        : ["top", "right", "bottom", "left"];
+        ? [...first("top", "bottom"), ...first("left", "right")]
+        : (["top", "right", "bottom", "left"] as const).filter(shown);
   return sides.filter((side) => e[side] > 0);
 }
+
+/** The part of `r` inside `clip`, or `null` when they share no area. */
+export function visiblePart(r: Rect, clip: Rect): Rect | null {
+  const x = Math.max(r.x, clip.x);
+  const y = Math.max(r.y, clip.y);
+  const right = Math.min(r.x + r.width, clip.x + clip.width);
+  const bottom = Math.min(r.y + r.height, clip.y + clip.height);
+  return right > x && bottom > y ? { x, y, width: right - x, height: bottom - y } : null;
+}
+
+const within = (r: Rect, clip: Rect) =>
+  r.x >= clip.x &&
+  r.y >= clip.y &&
+  r.x + r.width <= clip.x + clip.width &&
+  r.y + r.height <= clip.y + clip.height;
 
 function bandMarks(
   rects: Record<Side, Rect>,
   edges: Measurement["padding"],
   tone: "padding" | "margin",
+  clip: Rect | undefined,
 ): Mark[] {
+  const visible = (side: Side) => (clip ? visiblePart(rects[side], clip) : rects[side]);
   const sides = ["top", "right", "bottom", "left"] as const;
   const bands: Mark[] = sides
-    .filter((side) => edges[side] > 0)
+    .filter((side) => edges[side] > 0 && visible(side))
     .map((side) => ({ kind: "band", rect: rects[side], tone, side }));
-  const pills: Mark[] = pillSides(edges).map((side) => ({
+  const pills: Mark[] = pillSides(edges, (side) => visible(side) !== null).map((side) => ({
     kind: "pill",
-    at: centre(rects[side]),
+    at: centre(visible(side)!),
     text: num(edges[side]),
     band: edges[side],
     normal: side === "top" || side === "bottom" ? NORMAL_Y : NORMAL_X,
@@ -156,11 +178,151 @@ function bandMarks(
   return [...bands, ...pills];
 }
 
+/** The four padding bands, inside the border. */
+function paddingRects({ box, border: b, padding: p }: Measurement): Record<Side, Rect> {
+  const inner: Rect = {
+    x: box.x + b.left,
+    y: box.y + b.top,
+    width: box.width - b.left - b.right,
+    height: box.height - b.top - b.bottom,
+  };
+  return {
+    top: { x: inner.x, y: inner.y, width: inner.width, height: p.top },
+    right: {
+      x: inner.x + inner.width - p.right,
+      y: inner.y + p.top,
+      width: p.right,
+      height: inner.height - p.top - p.bottom,
+    },
+    bottom: {
+      x: inner.x,
+      y: inner.y + inner.height - p.bottom,
+      width: inner.width,
+      height: p.bottom,
+    },
+    left: {
+      x: inner.x,
+      y: inner.y + p.top,
+      width: p.left,
+      height: inner.height - p.top - p.bottom,
+    },
+  };
+}
+
+function marginRects({ box, margin: m }: Measurement): Record<Side, Rect> {
+  const left = Math.max(m.left, 0);
+  const right = Math.max(m.right, 0);
+  return {
+    top: { x: box.x - left, y: box.y - m.top, width: box.width + left + right, height: m.top },
+    right: { x: box.x + box.width, y: box.y, width: m.right, height: box.height },
+    bottom: {
+      x: box.x - left,
+      y: box.y + box.height,
+      width: box.width + left + right,
+      height: m.bottom,
+    },
+    left: { x: box.x - m.left, y: box.y, width: m.left, height: box.height },
+  };
+}
+
+/** One axis-aligned element's marks by kind. With `clip`, only what shows inside it. */
+function elementMarks(target: Measurement, clip?: Rect) {
+  const radius: Mark[] = [];
+  const { box } = target;
+  const { topLeft, topRight, bottomRight, bottomLeft } = target.radius;
+  if (Math.max(topLeft, topRight, bottomRight, bottomLeft) > 0) {
+    const uniform = topLeft === topRight && topLeft === bottomRight && topLeft === bottomLeft;
+    const text = uniform
+      ? `r ${num(topLeft)}`
+      : `r ${num(topLeft)} ${num(topRight)} ${num(bottomRight)} ${num(bottomLeft)}`;
+    radius.push({
+      kind: "pill",
+      at: point(box.x, box.y),
+      screenOffset: { x: pillWidth(text) / 2, y: -RADIUS_PILL_LIFT },
+      text,
+    });
+  }
+
+  const gaps: Mark[] = [];
+  for (const gap of target.gaps) {
+    if (gap.size < 1) continue;
+    const visible = clip ? visiblePart(gap.rect, clip) : gap.rect;
+    if (!visible) continue;
+    gaps.push(
+      { kind: "gap", rect: gap.rect, axis: gap.axis },
+      {
+        kind: "pill",
+        at: centre(visible),
+        text: num(gap.size),
+        band: gap.size,
+        normal: gap.axis === "x" ? NORMAL_X : NORMAL_Y,
+      },
+    );
+  }
+
+  return {
+    radius,
+    gaps,
+    padding: bandMarks(paddingRects(target), target.padding, "padding", clip),
+    margin: bandMarks(marginRects(target), target.margin, "margin", clip),
+  };
+}
+
+/** Pills out in the order the area's rules rank them; every shape sits under one clip. */
+function annotateArea({ area, elements }: Extract<Figure, { area: Rect }>): Mark[] {
+  const parts = elements.flatMap((el) => {
+    if (!visiblePart(el.box, area)) return [];
+    const inside = within(el.box, area);
+    const marks = el.axisAligned ? elementMarks(el, area) : null;
+    return [
+      {
+        gaps: marks?.gaps ?? [],
+        padding: marks?.padding ?? [],
+        margin: marks?.margin ?? [],
+        outline: { kind: "outline", rect: el.box, tone: "child", radius: el.radius } as Mark,
+        size: inside ? [sizePill(el.box)] : [],
+        radius: inside ? (marks?.radius ?? []) : [],
+      },
+    ];
+  });
+  return [
+    { kind: "clip", rect: area },
+    sizePill(area),
+    ...parts.flatMap((p) => p.gaps),
+    ...parts.flatMap((p) => p.padding),
+    ...parts.flatMap((p) => p.margin),
+    ...parts.map((p) => p.outline),
+    ...parts.flatMap((p) => p.size),
+    ...parts.flatMap((p) => p.radius),
+  ];
+}
+
+/** What an area shows of its elements' spacing: the gaps, and padding values with how many bands have each. */
+export function areaSpacing({ area, elements }: Extract<Figure, { area: Rect }>): {
+  gaps: MeasuredGap[];
+  padding: { size: number; count: number }[];
+} {
+  const aligned = elements.filter((el) => el.axisAligned && visiblePart(el.box, area));
+  const counts = new Map<number, number>();
+  for (const el of aligned) {
+    const rects = paddingRects(el);
+    for (const side of ["top", "right", "bottom", "left"] as const) {
+      const size = el.padding[side];
+      if (size > 0 && visiblePart(rects[side], area)) counts.set(size, (counts.get(size) ?? 0) + 1);
+    }
+  }
+  return {
+    gaps: aligned.flatMap((el) => el.gaps.filter((gap) => visiblePart(gap.rect, area))),
+    padding: [...counts].map(([size, count]) => ({ size, count })),
+  };
+}
+
 /**
  * What appears, for both the person and the PNG. Pills come out in priority order, so a new
  * annotation's rank is where it's written here. `paint` draws them over everything else.
  */
 export function annotate(figure: Figure): Mark[] {
+  if ("area" in figure) return annotateArea(figure);
   const { target } = figure;
   const { box } = target;
   if ("other" in figure) {
@@ -189,90 +351,8 @@ export function annotate(figure: Figure): Mark[] {
   const outline: Mark = { kind: "outline", rect: box, tone: "target", radius: target.radius };
   if (!target.axisAligned) return [outline, sizePill(box)];
 
-  const marks: Mark[] = [sizePill(box)];
-
-  const { topLeft, topRight, bottomRight, bottomLeft } = target.radius;
-  if (Math.max(topLeft, topRight, bottomRight, bottomLeft) > 0) {
-    const uniform = topLeft === topRight && topLeft === bottomRight && topLeft === bottomLeft;
-    const text = uniform
-      ? `r ${num(topLeft)}`
-      : `r ${num(topLeft)} ${num(topRight)} ${num(bottomRight)} ${num(bottomLeft)}`;
-    marks.push({
-      kind: "pill",
-      at: point(box.x, box.y),
-      screenOffset: { x: pillWidth(text) / 2, y: -RADIUS_PILL_LIFT },
-      text,
-    });
-  }
-
-  for (const gap of target.gaps) {
-    if (gap.size < 1) continue;
-    marks.push(
-      { kind: "gap", rect: gap.rect, axis: gap.axis },
-      {
-        kind: "pill",
-        at: centre(gap.rect),
-        text: num(gap.size),
-        band: gap.size,
-        normal: gap.axis === "x" ? NORMAL_X : NORMAL_Y,
-      },
-    );
-  }
-
-  const { padding: p, border: b, margin: m } = target;
-  const inner: Rect = {
-    x: box.x + b.left,
-    y: box.y + b.top,
-    width: box.width - b.left - b.right,
-    height: box.height - b.top - b.bottom,
-  };
-  marks.push(
-    ...bandMarks(
-      {
-        top: { x: inner.x, y: inner.y, width: inner.width, height: p.top },
-        right: {
-          x: inner.x + inner.width - p.right,
-          y: inner.y + p.top,
-          width: p.right,
-          height: inner.height - p.top - p.bottom,
-        },
-        bottom: {
-          x: inner.x,
-          y: inner.y + inner.height - p.bottom,
-          width: inner.width,
-          height: p.bottom,
-        },
-        left: {
-          x: inner.x,
-          y: inner.y + p.top,
-          width: p.left,
-          height: inner.height - p.top - p.bottom,
-        },
-      },
-      p,
-      "padding",
-    ),
-  );
-
-  const left = Math.max(m.left, 0);
-  const right = Math.max(m.right, 0);
-  marks.push(
-    ...bandMarks(
-      {
-        top: { x: box.x - left, y: box.y - m.top, width: box.width + left + right, height: m.top },
-        right: { x: box.x + box.width, y: box.y, width: m.right, height: box.height },
-        bottom: {
-          x: box.x - left,
-          y: box.y + box.height,
-          width: box.width + left + right,
-          height: m.bottom,
-        },
-        left: { x: box.x - m.left, y: box.y, width: m.left, height: box.height },
-      },
-      m,
-      "margin",
-    ),
-  );
+  const { radius, gaps, padding, margin } = elementMarks(target);
+  const marks: Mark[] = [sizePill(box), ...radius, ...gaps, ...padding, ...margin];
 
   for (const child of target.children) {
     marks.push(
@@ -358,7 +438,7 @@ function escapeHtml(text: string): string {
   return text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 }
 
-function paintMark(mark: Exclude<Mark, { kind: "pill" }>): string {
+function paintMark(mark: Exclude<Mark, { kind: "pill" } | { kind: "clip" }>): string {
   switch (mark.kind) {
     case "band": {
       const edge =
@@ -420,13 +500,23 @@ function paintPill(pill: Pill): string {
   );
 }
 
+/** The area's outline and its clip: an inner root at the frame's origin keeps marks in frame pixels. */
+function paintClip(area: Rect, shapes: string): string {
+  return (
+    `<div style="${boxCss(area)}overflow:hidden;outline:${screen(1)} solid var(--measure);">` +
+    `<div style="position:absolute;left:${-area.x}px;top:${-area.y}px;width:0;height:0;">${shapes}</div></div>`
+  );
+}
+
 /** Marks to markup: axis-aligned divs in the order given, with every pill on top. */
 export function paint(marks: readonly Mark[]): string {
   let shapes = "";
   let pills = "";
+  let clip: Rect | null = null;
   for (const mark of marks) {
     if (mark.kind === "pill") pills += paintPill(mark);
+    else if (mark.kind === "clip") clip = mark.rect;
     else shapes += paintMark(mark);
   }
-  return shapes + pills;
+  return (clip ? paintClip(clip, shapes) : shapes) + pills;
 }

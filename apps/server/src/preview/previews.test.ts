@@ -9,6 +9,7 @@ import type { Design, LayerNode, PreviewEvent, Previews } from "@finite/protocol
 import { getChromePath } from "chrome-launcher";
 import puppeteer, { type Browser, type Frame, type Page } from "puppeteer-core";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vite-plus/test";
+import { createScreenshots } from "../agent/screenshot.ts";
 import { BRAND_BOARD, brandBoard } from "../store/brand.ts";
 import { prepareFixture } from "./fixtures.ts";
 import { createPreviews } from "./index.ts";
@@ -820,6 +821,145 @@ describe.skipIf(!chromePath)("bridge in Chrome", () => {
     page.evaluate(
       () => (window as unknown as { bridge: { events: { type: string }[] } }).bridge.events,
     ) as Promise<({ type: string } & Record<string, unknown>)[]>;
+
+  test("measureArea reports what overlaps a rect, with the right index of each loc", async () => {
+    const { page, frame } = await open(`${urls["rr-spa"]}/`);
+    await frame.evaluate(() => {
+      const box = (css: string, loc?: string, parent: Element = document.body) => {
+        const el = document.createElement("div");
+        if (loc) el.setAttribute("data-finite-loc", loc);
+        el.style.cssText = `position:fixed;${css}`;
+        parent.append(el);
+        return el;
+      };
+      box("left:500px;top:500px;width:20px;height:20px", "a:1:0");
+      box("left:500px;top:530px;width:20px;height:20px", "a:1:0");
+      box("left:510px;top:560px;width:40px;height:20px"); // Unstamped and partly inside.
+      box("left:500px;top:590px;width:20px;height:20px;visibility:hidden", "a:2:0");
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("style", "position:fixed;left:500px;top:620px;width:20px;height:20px");
+      svg.append(document.createElementNS("http://www.w3.org/2000/svg", "rect"));
+      document.body.append(svg);
+    });
+    const { value } = await ask(page, "measureArea", {
+      rect: { x: 495, y: 495, width: 30, height: 190 },
+      props: [],
+      max: 150,
+    });
+    const { elements, total } = value as {
+      elements: { tag: string; loc?: string; index: number; count: number }[];
+      total: number;
+    };
+    const fixed = elements.filter((el) => el.loc === "a:1:0" || el.tag === "svg" || !el.loc);
+    expect(fixed.map((el) => [el.tag, el.loc, el.index, el.count])).toEqual([
+      ["div", "a:1:0", 0, 2],
+      ["div", "a:1:0", 1, 2],
+      ["div", undefined, 0, 1],
+      ["svg", undefined, 0, 1],
+    ]);
+    expect(elements.some((el) => el.tag === "rect")).toBe(false);
+    expect(total).toBe(elements.length);
+    const capped = await ask(page, "measureArea", {
+      rect: { x: 495, y: 495, width: 30, height: 190 },
+      props: [],
+      max: 1,
+    });
+    const reply = capped.value as { elements: unknown[]; total: number };
+    expect(reply.elements).toHaveLength(1);
+    expect(reply.total).toBe(total);
+    await page.close();
+  }, 60_000);
+
+  test("measureArea leaves out what an ancestor's overflow cuts away", async () => {
+    const { page, frame } = await open(`${urls["rr-spa"]}/`);
+    await frame.evaluate(() => {
+      const clip = document.createElement("div");
+      clip.style.cssText =
+        "position:fixed;left:700px;top:500px;width:100px;height:100px;overflow:hidden";
+      const child = (css: string, loc: string, parent: Element = clip) => {
+        const el = document.createElement("div");
+        el.setAttribute("data-finite-loc", loc);
+        el.style.cssText = `width:50px;height:50px;${css}`;
+        parent.append(el);
+      };
+      child("position:absolute;left:200px;top:0", "cut:1:0");
+      child("position:absolute;left:10px;top:0", "kept:1:0");
+      child("position:fixed;left:900px;top:520px", "fixed:1:0");
+      const plain = document.createElement("div");
+      plain.style.cssText = "position:static;width:10px;height:10px;overflow:hidden";
+      clip.append(plain);
+      child("position:absolute;left:220px;top:10px", "cut2:1:0", plain);
+      document.body.append(clip);
+    });
+    const { value } = await ask(page, "measureArea", {
+      rect: { x: 705, y: 495, width: 300, height: 90 },
+      props: [],
+      max: 150,
+    });
+    const locs = (value as { elements: { loc?: string }[] }).elements.map((el) => el.loc);
+    expect(locs).toContain("kept:1:0");
+    expect(locs).toContain("fixed:1:0");
+    expect(locs).not.toContain("cut:1:0");
+    expect(locs).not.toContain("cut2:1:0");
+    await page.close();
+  }, 60_000);
+
+  test("measureArea follows containing blocks, padding edges and boxless wrappers", async () => {
+    const { page, frame } = await open(`${urls["rr-spa"]}/`);
+    await frame.evaluate(() => {
+      const box = (css: string, loc: string, parent: Element = document.body) => {
+        const el = document.createElement("div");
+        el.setAttribute("data-finite-loc", loc);
+        el.style.cssText = css;
+        parent.append(el);
+        return el;
+      };
+      const held = box(
+        "position:fixed;left:700px;top:100px;width:100px;height:100px;overflow:hidden;transform:translateZ(0)",
+        "held:1:0",
+      );
+      box("position:fixed;left:200px;top:0;width:50px;height:50px", "fixedcut:1:0", held);
+      const contained = box(
+        "position:fixed;left:700px;top:300px;width:100px;height:100px;overflow:hidden;contain:layout",
+        "contained:1:0",
+      );
+      box("position:absolute;left:200px;top:0;width:50px;height:50px", "abscut:1:0", contained);
+      const bordered = box(
+        "position:fixed;left:700px;top:500px;width:100px;height:100px;overflow:hidden;border:20px solid;box-sizing:border-box",
+        "bordered:1:0",
+      );
+      box("position:absolute;left:60px;top:0;width:15px;height:50px", "edge:1:0", bordered);
+      const wrapper = box("display:contents;overflow:hidden", "wrapper:1:0");
+      box("position:fixed;left:1000px;top:100px;width:50px;height:50px", "shown:1:0", wrapper);
+    });
+    const measure = async (x: number, y: number) => {
+      const rect = { x, y, width: 8, height: 8 };
+      const { value } = await ask(page, "measureArea", { rect, props: [], max: 150 });
+      return (value as { elements: { loc?: string }[] }).elements.map((el) => el.loc);
+    };
+    expect(await measure(905, 110)).not.toContain("fixedcut:1:0");
+    expect(await measure(905, 310)).not.toContain("abscut:1:0");
+    expect(await measure(782, 525)).not.toContain("edge:1:0");
+    expect(await measure(1010, 110)).toContain("shown:1:0");
+    await page.close();
+  }, 60_000);
+
+  test("a headless region measure returns elements and a PNG", async () => {
+    const screenshots = createScreenshots(process.env.CI ? ["--no-sandbox"] : []);
+    try {
+      const got = await screenshots.measureRegion(`${urls["rr-spa"]}/`, 800, 600, {
+        region: { x: 0, y: 0, width: 200, height: 200 },
+        max: 5,
+        image: true,
+      });
+      expect(got.elements.length).toBeGreaterThan(0);
+      expect(got.elements.length).toBeLessThanOrEqual(5);
+      expect(got.total).toBeGreaterThanOrEqual(got.elements.length);
+      expect(got.png?.byteLength).toBeGreaterThan(0);
+    } finally {
+      await screenshots.close();
+    }
+  }, 60_000);
 
   test("inspect reads a size its insets give and the zoom above an element", async () => {
     const { page, frame } = await open(`${urls["rr-spa"]}/`);

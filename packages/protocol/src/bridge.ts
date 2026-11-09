@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { Measurement, MeasureTarget } from "./measure.ts";
+import { MeasuredArea, Measurement, MeasureTarget } from "./measure.ts";
 import { Loc, Rect, Rev } from "./model.ts";
 
 /**
@@ -96,6 +96,11 @@ export const bridgeRequests = {
     params: { targets: z.array(MeasureTarget), props: z.array(z.string()) },
     result: z.array(Measurement.nullable()),
   },
+  /** Every element overlapping `rect`, stamped or not; at most `max` are measured. */
+  measureArea: {
+    params: { rect: Rect, props: z.array(z.string()), max: z.number().int().min(1) },
+    result: MeasuredArea,
+  },
   /** The stamped chain at a point, nearest first; over empty page, the top-level stamped elements. */
   drop: {
     params: { x: z.number(), y: z.number() },
@@ -119,6 +124,7 @@ export const ParentMessage = z.discriminatedUnion("type", [
   request("inspect"),
   request("layers"),
   request("measure"),
+  request("measureArea"),
   request("drop"),
   request("vector"),
   z.object({
@@ -175,6 +181,8 @@ export interface FrameBridge {
   layers(): Promise<LayerNode[]>;
   /** One Measurement per target, `null` where nothing matched. */
   measure(targets: MeasureTarget[]): Promise<(Measurement | null)[]>;
+  /** Up to `max` Measurements of what overlaps `rect`, in document order. */
+  measureArea(rect: Rect, max: number): Promise<MeasuredArea>;
   drop(x: number, y: number): Promise<{ chain: DropNode[] }>;
   vector(loc: Loc, index: number): Promise<VectorInfo | null>;
   preview(loc: Loc, styles: Record<string, string | null> | null): void;

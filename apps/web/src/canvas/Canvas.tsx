@@ -136,8 +136,9 @@ function CanvasView({
       raf = requestAnimationFrame(() => {
         const boxes = editor.frames.map((f) => ({ id: f.id, ...editor.boxOf(f) }));
         const pinned = new Set(selection.map((s) => s.frameId));
-        const inspectPin = editor.state.inspect.pin;
+        const { pin: inspectPin, area: inspectArea } = editor.state.inspect;
         if (inspectPin) pinned.add(inspectPin.frameId);
+        if (inspectArea) pinned.add(inspectArea.frameId);
         setMounted((prev) => {
           const next = framesToMount(boxes, editor.camera.visibleWorld(1), prev, pinned);
           return next.length === prev.length && next.every((id, i) => id === prev[i]) ? prev : next;
