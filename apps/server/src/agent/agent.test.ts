@@ -346,6 +346,17 @@ function result(extra: object = {}): SDKMessage {
   } as unknown as SDKMessage;
 }
 
+/** Claude Code's record of a move_to_prod call; it's in the stream before the tool runs. */
+const moveToProdCall = (id: string) =>
+  ({
+    type: "assistant",
+    parent_tool_use_id: null,
+    session_id: "s1",
+    message: {
+      content: [{ type: "tool_use", id, name: "mcp__finite__move_to_prod", input: {} }],
+    },
+  }) as unknown as SDKMessage;
+
 /** The result of a turn Stop cancelled, answering the message that started it. */
 const cancelled = (m: SDKUserMessage) =>
   result({
@@ -368,8 +379,12 @@ async function connectTools(q: Fake) {
   await server.instance.connect(a);
   const client = new Client({ name: "test", version: "1" });
   await client.connect(b);
-  return async (name: string, args: object) => {
-    const res = (await client.callTool({ name, arguments: args as Record<string, unknown> })) as {
+  return async (name: string, args: object, toolUseId?: string) => {
+    const res = (await client.callTool({
+      name,
+      arguments: args as Record<string, unknown>,
+      ...(toolUseId === undefined ? {} : { _meta: { "claudecode/toolUseId": toolUseId } }),
+    })) as {
       isError?: boolean;
       content: { type: string; text?: string }[];
     };
@@ -1409,6 +1424,69 @@ describe("agents", () => {
     await vi.waitFor(async () =>
       expect((await canUse("Edit", write, opts))?.behavior).toBe("deny"),
     );
+  });
+
+  describe("a Stop racing the next turn's move_to_prod", () => {
+    const opts = { signal: new AbortController().signal, toolUseID: "t", requestId: "r" };
+
+    /** Stops the first turn, with its cancelled result still unread, and sends a second. */
+    async function stoppedThenSent() {
+      const canvas = await open.createCanvas({ kind: "prototype", name: "P" }, person);
+      await open.patchCanvas(
+        canvas.id,
+        {
+          op: "addFrames",
+          frames: [
+            {
+              id: "f1",
+              name: "Cart",
+              x: 0,
+              y: 0,
+              width: 100,
+              height: 100,
+              source: { kind: "file", file: "a.tsx" },
+            },
+          ],
+        },
+        person,
+      );
+      const thread = await newThread("Ship it", canvas.id);
+      const q = sdk.queries[0]!;
+      await vi.waitFor(() => expect(q.sent).toHaveLength(1));
+      q.interrupt.mockImplementationOnce(async () => undefined);
+      await agents.interrupt(open, thread.id);
+      await agents.send(open, thread.id, turn("Ship it again"), "steer");
+      await vi.waitFor(() => expect(q.sent).toHaveLength(2));
+      const edit = async () =>
+        (await q.options.canUseTool!("Edit", { file_path: path.join(root, "src/App.tsx") }, opts))
+          ?.behavior;
+      return { thread, q, edit, call: await connectTools(q) };
+    }
+
+    it("keeps the new turn's grant when the stopped turn's result is read after it", async () => {
+      const { thread, q, edit, call } = await stoppedThenSent();
+      await call("move_to_prod", { frameIds: ["f1"] }, "toolu_second");
+      expect(await edit()).toBe("allow");
+
+      q.emit(cancelled(q.sent[0]!));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(await edit()).toBe("allow");
+
+      q.emit(moveToProdCall("toolu_second"));
+      q.emit(result({ user_message_uuid: q.sent[1]!.uuid }));
+      await vi.waitFor(async () => expect((await meta(thread.id)).settledAt).toBeGreaterThan(0));
+      expect(await edit()).toBe("deny");
+    });
+
+    it("revokes the stopped turn's own late grant, even with the next turn already sent", async () => {
+      const { q, edit, call } = await stoppedThenSent();
+      q.emit(moveToProdCall("toolu_first"));
+      await call("move_to_prod", { frameIds: ["f1"] }, "toolu_first");
+      expect(await edit()).toBe("allow");
+
+      q.emit(cancelled(q.sent[0]!));
+      await vi.waitFor(async () => expect(await edit()).toBe("deny"));
+    });
   });
 
   it("spawns a child thread that starts on its prompt", async () => {

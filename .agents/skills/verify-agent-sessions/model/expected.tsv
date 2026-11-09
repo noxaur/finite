@@ -8,6 +8,7 @@ current	INVARIANT	OneSessionPerThread	holds
 current	PROPERTY	MessageRevivesThread	holds
 current-four-sends	INVARIANT	QueueOnlyWaitsAfterStopOrCrash	holds
 current-prod	INVARIANT	ProdGrantEndsWithItsTurn	holds
+current-prod	INVARIANT	StoppedResultLeavesLaterGrant	holds
 current-setup	INVARIANT	ReplacedSetupIsRemoved	holds
 current-reject	INVARIANT	EveryLiveHasATurnOrIdleTimer	holds
 fixed	INVARIANT	ShownRunningHasATurn	holds
@@ -17,7 +18,9 @@ fixed	INVARIANT	StopNeverSendsTheQueue	holds
 fixed	INVARIANT	StopFlagEndsWithItsTurn	holds
 fixed-three-sends	INVARIANT	QueueOnlyWaitsAfterStopOrCrash	holds
 fixed-prod	INVARIANT	ProdGrantEndsWithItsTurn	holds
+fixed-prod	INVARIANT	StoppedResultLeavesLaterGrant	holds
 fixed-setup	INVARIANT	ReplacedSetupIsRemoved	holds
 fixed-reject	INVARIANT	EveryLiveHasATurnOrIdleTimer	holds
 second-session	INVARIANT	OneSessionPerThread	breaks
 send-keeps-hidden	PROPERTY	MessageRevivesThread	breaks
+stale-result-revokes-grant	INVARIANT	StoppedResultLeavesLaterGrant	breaks

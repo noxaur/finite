@@ -233,6 +233,10 @@ type Live = {
   running: boolean;
   /** move_to_prod was called this turn. */
   prodWrite: boolean;
+  /** The tool call that set `prodWrite`, when Claude Code said which. */
+  prodWriteCall: string | undefined;
+  /** The tool calls `consume` has read. */
+  callsRead: Set<string>;
   /** finish_setup replaced this setup design with the apps: it's removed when the turn ends. */
   replaced: boolean;
   closing: boolean;
@@ -318,6 +322,8 @@ export function createAgents(options: AgentsOptions): Agents {
       fast: turn.fast,
       running: false,
       prodWrite: false,
+      prodWriteCall: undefined,
+      callsRead: new Set(),
       replaced: false,
       closing: false,
       started: false,
@@ -400,7 +406,10 @@ export function createAgents(options: AgentsOptions): Agents {
       previews: options.previews,
       source: options.source,
       screenshots,
-      grantProdWrite: () => (live.prodWrite = true),
+      grantProdWrite: (toolUseId) => {
+        live.prodWrite = true;
+        live.prodWriteCall = toolUseId;
+      },
       spawn: (prompt, canvasId) => spawn(open, thread.id, prompt, canvasId),
       finishSetup: () => finishSetup(live),
     });
@@ -460,6 +469,11 @@ export function createAgents(options: AgentsOptions): Agents {
           clearTimeout(live.steerWait);
           live.steerWait = undefined;
         }
+        if (message.type === "assistant") {
+          for (const block of message.message.content) {
+            if (block.type === "tool_use") live.callsRead.add(block.id);
+          }
+        }
         const now = Date.now();
         const stopped = message.type === "result" && answersStop(live, message);
         // A turn a steer cut short or Stop cancelled isn't a failure.
@@ -476,7 +490,7 @@ export function createAgents(options: AgentsOptions): Agents {
             if (live.closing) return;
             // Stop already handed the thread back, and a message sent since has its own result.
             if (!live.running || answersStop(live, message)) {
-              live.prodWrite = false;
+              if (!grantIsLater(live)) live.prodWrite = false;
               return;
             }
             // Claude Code counted those steers itself.
@@ -876,6 +890,15 @@ function context(open: OpenDesign, thread: ThreadMeta): string {
 /** Whether a result answers a message sent before a Stop: the turn was cancelled or already over. */
 function answersStop(live: Live, result: SDKResultMessage): boolean {
   return result.user_message_uuid !== undefined && live.stopped.has(result.user_message_uuid);
+}
+
+/**
+ * Whether the grant belongs to a later turn than the result being handled. A tool call comes before
+ * its turn's result in the stream, so a call not read yet is a later turn's, though its tool can
+ * run first when this loop falls behind. A grant with no call id counts as the result's turn.
+ */
+function grantIsLater(live: Live): boolean {
+  return live.prodWriteCall !== undefined && !live.callsRead.has(live.prodWriteCall);
 }
 
 function realpath(dir: string): string {
