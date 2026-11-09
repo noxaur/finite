@@ -30,7 +30,7 @@ export type InsertStep = {
 };
 
 /** Elements with no children, so nothing can go inside them. */
-const VOID = new Set([
+export const VOID = new Set([
   "area",
   "base",
   "br",
@@ -141,6 +141,14 @@ function isOneValue(value: string): boolean {
   }
 }
 
+/** Refuses a style that wouldn't print as one declaration. */
+export function checkStyles(styles: Record<string, string>): void {
+  for (const [name, value] of Object.entries(styles)) {
+    if (!STYLE_NAME.test(name) || !isOneValue(value))
+      throw new Refused(`A new element can't set the style ${name}: ${value}`, "invalid");
+  }
+}
+
 /**
  * What `before` and `after` sit beside: the element when it's a JSX child, else the `{…}` child
  * that renders it, like `{items.map(…)}`. A component's root has neither.
@@ -177,10 +185,7 @@ function print(s: InsertStep, node: NewNode, indent: string, out: Printing): str
     attrs.push(`${name}=${attrText(value)}`);
   }
   const styles = node.styles ?? {};
-  for (const [name, value] of Object.entries(styles)) {
-    if (!STYLE_NAME.test(name) || !isOneValue(value))
-      throw new Refused(`A new element can't set the style ${name}: ${value}`, "invalid");
-  }
+  checkStyles(styles);
   const cls = Object.keys(styles).length > 0 ? moduleClass(s, node, out) : undefined;
   if (cls) attrs.push(`className={${cls}}`);
   const key = node.ref ?? `#${out.nodes.length}`;
@@ -203,7 +208,11 @@ function print(s: InsertStep, node: NewNode, indent: string, out: Printing): str
  * The `binding.name` a new element in a CSS-modules file takes. A file importing exactly one
  * sheet gets a class there; any other file has nowhere obvious to put one, so it stays inline.
  */
-function moduleClass(s: InsertStep, node: NewNode, out: Printing): string | undefined {
+export function moduleClass(
+  s: InsertStep,
+  node: NewNode,
+  out: Pick<Printing, "classes">,
+): string | undefined {
   if (s.convention !== "css-modules") return undefined;
   const sheets = [...cssModules(s.parsed.ast, s.file)];
   if (sheets.length !== 1) return undefined;

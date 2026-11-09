@@ -104,6 +104,7 @@ describe("the registry", () => {
     expect(toolsIn("move").map((t) => t.id)).toEqual(["select", "hand", "interact"]);
     expect(toolsIn("shape").map((t) => t.id)).toEqual(["rectangle"]);
     expect(toolsIn("comment").map((t) => t.id)).toEqual(["comment"]);
+    expect(toolsIn("text").map((t) => t.id)).toEqual(["text", "textOnPath"]);
     expect(toolsIn("frame")).toEqual([]);
   });
 

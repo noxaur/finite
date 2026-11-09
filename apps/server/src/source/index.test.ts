@@ -172,16 +172,16 @@ describe("SourceEditor.apply", () => {
     await put("src/App.tsx", APP);
     const source = createSourceEditor();
     const a = await edit("src/App.tsx", {
-      kind: "text",
+      kind: "inline",
       loc: "src/App.tsx:7:6",
       tag: "p",
-      text: "A",
+      content: [{ t: "text", text: "A", marks: [] }],
     });
     const b = await edit("src/App.tsx", {
-      kind: "text",
+      kind: "inline",
       loc: "src/App.tsx:7:6",
       tag: "p",
-      text: "B",
+      content: [{ t: "text", text: "B", marks: [] }],
     });
     const results = await Promise.allSettled([
       source.apply(open(design()), [a], ana, page),
@@ -198,10 +198,10 @@ describe("SourceEditor.apply", () => {
     const locks = createFileLocks();
     const source = createSourceEditor({ locks });
     const e = await edit("src/App.tsx", {
-      kind: "text",
+      kind: "inline",
       loc: "src/App.tsx:7:6",
       tag: "p",
-      text: "Human",
+      content: [{ t: "text", text: "Human", marks: [] }],
     });
     // The agent's Write holds the lock from its PreToolUse hook to its PostToolUse hook.
     const release = await locks.acquire([path.join(root, "src/App.tsx")]);
@@ -233,10 +233,10 @@ describe("SourceEditor.apply", () => {
     const locks = createFileLocks();
     const source = createSourceEditor({ locks });
     const e = await edit(".finite/real/A.tsx", {
-      kind: "text",
+      kind: "inline",
       loc: ".finite/real/A.tsx:7:6",
       tag: "p",
-      text: "Human",
+      content: [{ t: "text", text: "Human", marks: [] }],
     });
     const release = await locks.acquire([path.join(root, ".finite/alias/A.tsx")]);
     let settled = false;
@@ -377,7 +377,14 @@ describe("SourceEditor inserting an element", () => {
     expect(await get("src/App.tsx")).toContain(`data-name="Box"`);
     await source.apply(
       open(d),
-      [await edit("src/App.tsx", { kind: "text", loc: "src/App.tsx:6:6", tag: "h1", text: "Hi" })],
+      [
+        await edit("src/App.tsx", {
+          kind: "inline",
+          loc: "src/App.tsx:6:6",
+          tag: "h1",
+          content: [{ t: "text", text: "Hi", marks: [] }],
+        }),
+      ],
       bo,
       page,
     );
@@ -419,7 +426,6 @@ describe("SourceEditor inserting an element", () => {
     const source = createSourceEditor();
     const o = open(design());
     for (const call of [
-      source.inline(o, "src/App.tsx:5:4"),
       source.addAsset(o, "a.png"),
       source.exportSlice(o, { canvasId: "c", sliceId: "s" }),
       source.draw(
@@ -781,7 +787,14 @@ export default function Home() {
     expect(p).toBe("src/pages/Home.tsx:19:6");
     await source.apply(
       open(sx()),
-      [await edit("src/pages/Home.tsx", { kind: "text", loc: p, tag: "p", text: "Other" })],
+      [
+        await edit("src/pages/Home.tsx", {
+          kind: "inline",
+          loc: p,
+          tag: "p",
+          content: [{ t: "text", text: "Other", marks: [] }],
+        }),
+      ],
       bo,
       page,
     );
@@ -948,7 +961,14 @@ export function Card() {
     expect(p).toBe("src/Card.tsx:13:6");
     await source.apply(
       sx,
-      [await edit("src/Card.tsx", { kind: "text", loc: p, tag: "p", text: "Two" })],
+      [
+        await edit("src/Card.tsx", {
+          kind: "inline",
+          loc: p,
+          tag: "p",
+          content: [{ t: "text", text: "Two", marks: [] }],
+        }),
+      ],
       bo,
       page,
     );
@@ -1005,7 +1025,14 @@ export function Card() {
     expect(h2).toBe("src/Card.tsx:15:6");
     await source.apply(
       sx,
-      [await edit("src/Card.tsx", { kind: "text", loc: h2, tag: "h2", text: "Heading" })],
+      [
+        await edit("src/Card.tsx", {
+          kind: "inline",
+          loc: h2,
+          tag: "h2",
+          content: [{ t: "text", text: "Heading", marks: [] }],
+        }),
+      ],
       bo,
       page,
     );
@@ -1022,7 +1049,14 @@ export function Card() {
     await source.undo(open(d()), ana);
     await source.apply(
       open(d()),
-      [await edit("src/App.tsx", { kind: "text", loc: "src/App.tsx:7:6", tag: "p", text: "Two" })],
+      [
+        await edit("src/App.tsx", {
+          kind: "inline",
+          loc: "src/App.tsx:7:6",
+          tag: "p",
+          content: [{ t: "text", text: "Two", marks: [] }],
+        }),
+      ],
       ana,
       page,
     );

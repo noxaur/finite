@@ -114,7 +114,7 @@ The child watches the project for source changes and any change in the brand fol
 
 A frame's source is a route (`{ kind: "route", path, params? }`, loaded at that path) or a file (`{ kind: "file", file, exportName? }`, loaded through `/__finite/frame`). `Previews.frameUrl` turns either into the iframe's URL.
 
-The **bridge** connects the page to each iframe over a `MessageChannel` (`packages/protocol/src/bridge.ts`; the iframe half is `packages/vite-plugin/src/client/bridge.ts`, the page half `apps/web/src/canvas/bridge.ts`). The iframe posts `finite:hello` to its parent, and the parent answers with `finite:connect` and the port. The bridge takes the port, and the dev server answers cross-origin requests, only from an origin whose host is a loopback name or one in `FINITE_ALLOWED_HOSTS` (a bare name allows any port, so `next dev` on 5310 connects too), the same rule the guard applies. The parent then asks `hit(x, y)` (the stamped element under a point, which instance of its loc it is, and its stamped ancestors), `rects(locs)`, `inspect(loc, index)` (computed styles and class names for the inspector), `layers()` (the stamped tree for the Layers panel), `drop(x, y)` (the stamped chain at a point, with what placing a new element needs) and `vector(loc, index)` (a `<path>`'s `d` and matrix), and sends `preview(loc, styles)` to show a style while a gesture runs. The iframe sends `size` (for frames whose height hugs their content), `updated` after HMR (under Next.js, after a DOM change), `key` (so canvas shortcuts work with focus inside a frame) and `error` (runtime errors, rejections and `console.error`).
+The **bridge** connects the page to each iframe over a `MessageChannel` (`packages/protocol/src/bridge.ts`; the iframe half is `packages/vite-plugin/src/client/bridge.ts`, the page half `apps/web/src/canvas/bridge.ts`). The iframe posts `finite:hello` to its parent, and the parent answers with `finite:connect` and the port. The bridge takes the port, and the dev server answers cross-origin requests, only from an origin whose host is a loopback name or one in `FINITE_ALLOWED_HOSTS` (a bare name allows any port, so `next dev` on 5310 connects too), the same rule the guard applies. The parent then asks `hit(x, y)` (the stamped element under a point, which instance of its loc it is, and its stamped ancestors), `rects(locs)`, `inspect(loc, index)` (computed styles, class names and, when the element holds only text and inline elements, its text, for the inspector), `layers()` (the stamped tree for the Layers panel), `drop(x, y)` (the stamped chain at a point, with what placing a new element needs) and `vector(loc, index)` (a `<path>`'s `d` and matrix), and sends `preview(loc, styles)` to show a style while a gesture runs. The iframe sends `size` (for frames whose height hugs their content), `updated` after HMR (under Next.js, after a DOM change), `key` (so canvas shortcuts work with focus inside a frame) and `error` (runtime errors, rejections and `console.error`).
 
 ## Workspaces and finite.json
 
@@ -186,7 +186,7 @@ An agent on a workspace design runs with the workspace root as its working direc
 
 ## Hand edits: the source editor
 
-`source/` turns a hand edit into a change to the TSX. A `SourceEdit` is `style`, `text`, `reorder`, `remove`, `duplicate`, `attr` or `insert`, and names the locs it touches plus the rev of each file. `wrap`, `unwrap` and `inline` are declared too and refuse with `not-implemented` until they're built. `rewrite.ts` parses the file with Babel, finds the opening element at each loc, checks its tag, and splices the change in with `magic-string`, so the file's formatting survives. It returns a remap of old locs to new ones, so the selection follows the element.
+`source/` turns a hand edit into a change to the TSX. A `SourceEdit` is `style`, `reorder`, `remove`, `duplicate`, `attr`, `insert` or `inline`, and names the locs it touches plus the rev of each file. `wrap` and `unwrap` are declared too and refuse with `not-implemented` until they're built. `rewrite.ts` parses the file with Babel, finds the opening element at each loc, checks its tag, and splices the change in with `magic-string`, so the file's formatting survives. It returns a remap of old locs to new ones, so the selection follows the element.
 
 A style edit follows the design's convention:
 
@@ -266,13 +266,29 @@ The bottom toolbar has one split button per group: Move, Frame, Shape, Pen, Text
 
 `resolveKey` in `tools/registry.ts` turns a key press into a tool or command from one table, with a test that catches duplicate shortcuts. Escape and mod combos always work. A key forwarded out of a frame in Interact mode belongs to the app in the frame, and the rest of the table ignores it.
 
-A tool draws through `host.draw` (`tools/draw.ts`). It sends `drop` over the bridge for the stamped chain at the box's center, picks a container with `planInsert` (`design/editing/insertion.ts`), sends one atomic `source.edit`, and selects the new element once it reaches the frame. The frame's own file wins over a shared component's, and ⌘ takes the nearest element whatever its file. A flex or grid container gets a flow child in its slot, and anything else an absolute child; Alt inverts that. Over empty page, `drop` answers the top-level stamped elements. Move, Hand, Interact, Comment and Rectangle work today. A shape drawn on empty canvas needs `canvas.draw`, which refuses with `not-implemented` until the board-file work lands.
+A tool draws through `host.draw` (`tools/draw.ts`). It sends `drop` over the bridge for the stamped chain at the box's center, picks a container with `planInsert` (`design/editing/insertion.ts`), sends one atomic `source.edit`, and selects the new element once it reaches the frame. The frame's own file wins over a shared component's, and ⌘ takes the nearest element whatever its file. A flex or grid container gets a flow child in its slot, and anything else an absolute child; Alt inverts that. Over empty page, `drop` answers the top-level stamped elements. Move, Hand, Interact, Comment, Rectangle, Text and Text on path work today. A shape drawn on empty canvas needs `canvas.draw`, which refuses with `not-implemented` until the board-file work lands.
 
 ### Shapes
 
 ### Vector
 
 ### Rich text
+
+A text edit replaces an element's children with runs: data on the wire, never code. Double-clicking a selected element asks `source.inline` for its children. The server (`source/inline.ts`) answers with `Inline` runs and the `keeps` it can't change, each with an id:
+
+- JSX text and string literals become `text` runs, with JSX's own whitespace rules applied.
+- `<strong>`, `<b>`, `<em>`, `<i>`, `<u>`, `<s>` and `<del>` without attributes, and an `<a>` with only a literal `href`, become marks.
+- Other inline wrappers, like `<span className="x">` or a styled link, become a `keep` mark: their text stays editable and their tag is reprinted verbatim.
+- Expressions, components and comments become atoms. The page shows each as an uneditable chip with a short label.
+- A block child (`<div>`, `<p>`, `<ul>` and the like) refuses the whole element with `unsupported-style`, and the reason says to select the block and edit it there.
+
+`RichTextEditor` is a `contentEditable` box on the page, over the element, with the element's computed font. Frames never take the pointer, and React inside a frame would fight DOM changes. So the frame's own text is only hidden while the box is up, through the bridge's `preview`. Runs stay in a side table next to the box's DOM. The format bar and ⌘B, ⌘I, ⌘U and ⌘K change the runs, then repaint the box. Enter keeps, Shift+Enter breaks the line, and Escape puts the text back.
+
+Enter sends one `inline` edit. Its `content` holds the runs, and atoms and `keep` marks go by id only, so nothing the page sends can become an expression. The server re-reads the element under the rev check, reprints each kept slice from the file, and writes text as bare JSX or as a string expression when it holds `{`, `<` or `&`. Deleting a chip deletes that expression.
+
+A size or color on part of the text is a `span` mark. `rewrite.ts` styles it through the same queued style edit a new element gets, so it's a Tailwind class, a rule in the file's one CSS module, a `stylex.create` entry or an inline style. Kept wrappers and the elements inside chips stay in the position map, so the selection follows them. `/mcp`'s `content` op also uses `inline`, and refuses text that holds code or other elements.
+
+The Text tool (T) waits to write anything. A click opens an empty box at the point, and a drag opens one as wide as the drag. Enter inserts a `<p>` through `host.draw`. A click makes it hug its text on both sides, and a drag gives it a fixed width and a height that hugs. Nothing lands if the box is empty or Escape closes it. Over existing text, a click edits that text. Text on path puts a `<text><textPath href="#id">` beside a selected or clicked `<path>`, adding an `id` to the path when it has none, and takes plain text only.
 
 ### Auto layout
 

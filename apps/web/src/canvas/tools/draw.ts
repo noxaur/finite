@@ -11,12 +11,16 @@ const LANDING_MS = 4000;
 const LANDING_STEP_MS = 150;
 const REF = "new";
 
+function withoutSides(styles: Record<string, string>, hug: readonly string[]) {
+  return Object.fromEntries(Object.entries(styles).filter(([name]) => !hug.includes(name)));
+}
+
 /** Adds `node` where `box` lands: into the frame under its center, or as a new one on empty canvas. */
 export async function draw(
   host: ToolHost,
   input: Parameters<ToolHost["draw"]>[0],
 ): Promise<Placed | null> {
-  const { box, node, deep = false, alt = false } = input;
+  const { box, node, deep = false, alt = false, hug = [] } = input;
   const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
   const frame = host.frameAt(center);
   if (!frame) {
@@ -72,7 +76,7 @@ export async function draw(
         loc: anchor.loc,
         tag: anchor.tag,
         place: anchor.place,
-        node: { ...node, ref: REF, styles: { ...plan.styles, ...node.styles } },
+        node: { ...node, ref: REF, styles: withoutSides({ ...plan.styles, ...node.styles }, hug) },
         revs: revsOf([anchor]),
       },
     ],

@@ -477,7 +477,7 @@ export type NewNode = {
   text?: string | undefined;
   children?: NewNode[] | undefined;
 };
-export const NEW_TAG = /^[a-z][a-z0-9]*$/;
+export const NEW_TAG = /^[a-z][a-zA-Z0-9]*$/;
 const newNodeFields = {
   tag: z.string().regex(NEW_TAG, "a new element's tag is an intrinsic name, like div"),
   ref: z.string().min(1).optional(),
@@ -506,6 +506,7 @@ export const Mark = z.discriminatedUnion("m", [
     styles: z.record(z.string(), z.string()),
     ref: z.string().optional(),
   }),
+  z.object({ m: z.literal("a"), href: z.string() }),
   z.object({ m: z.literal("keep"), id: z.number().int().min(0) }),
 ]);
 export type Mark = z.infer<typeof Mark>;
@@ -513,8 +514,8 @@ export type Mark = z.infer<typeof Mark>;
 /** Inline content as data. An `atom` is an expression, component or comment, kept verbatim. */
 export const Inline = z.discriminatedUnion("t", [
   z.object({ t: z.literal("text"), text: z.string(), marks: z.array(Mark) }),
-  z.object({ t: z.literal("br") }),
-  z.object({ t: z.literal("atom"), id: z.number().int().min(0) }),
+  z.object({ t: z.literal("br"), marks: z.array(Mark).optional() }),
+  z.object({ t: z.literal("atom"), id: z.number().int().min(0), marks: z.array(Mark).optional() }),
 ]);
 export type Inline = z.infer<typeof Inline>;
 
@@ -528,7 +529,6 @@ export const SourceEdit = z.discriminatedUnion("kind", [
     styles: z.record(z.string(), z.string().nullable()),
     revs,
   }),
-  z.object({ kind: z.literal("text"), loc: Loc, tag: z.string(), text: z.string(), revs }),
   z.object({
     kind: z.literal("reorder"),
     loc: Loc,

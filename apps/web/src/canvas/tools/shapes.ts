@@ -62,7 +62,7 @@ function shapeTool<Id extends string>(def: {
   };
 }
 
-function boxGesture(
+export function boxGesture(
   host: ToolHost,
   from: Point,
   round: boolean,
