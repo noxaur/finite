@@ -904,14 +904,16 @@ export class CanvasEditor implements ToolHost {
     const edits: SourceEdit[] = [];
     for (const g of groups) {
       const mine = els.filter((e) => g.locs.includes(e.loc));
-      if (mine.length === 0) continue;
-      edits.push({
-        kind: "style",
-        locs: [...new Set(mine.map((e) => e.loc))],
-        tag: mine[0]!.tag,
-        styles: g.styles,
-        revs: revsOf(mine),
-      });
+      for (const tag of new Set(mine.map((e) => e.tag))) {
+        const same = mine.filter((e) => e.tag === tag);
+        edits.push({
+          kind: "style",
+          locs: [...new Set(same.map((e) => e.loc))],
+          tag,
+          styles: g.styles,
+          revs: revsOf(same),
+        });
+      }
     }
     if (edits.length === 0) return Promise.resolve(false);
     const used = standIns.filter((s) =>
