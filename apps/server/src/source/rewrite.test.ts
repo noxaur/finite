@@ -667,6 +667,27 @@ describe("insert", () => {
       expect(out).toContain("src={heroAsset2}");
     });
 
+    it("names the import what no local in the file uses, so nothing hides it", () => {
+      const code = `export function App() {\n  const heroAsset = "wrong.png";\n  return <main />;\n}\n`;
+      const out = ok(run(code, [{ ...insert("end", image), loc: `${FILE}:3:9` }], "inline")).code;
+      expect(out).toContain("import heroAsset2 from");
+      expect(out).toContain("src={heroAsset2}");
+      expect(out).toContain(`const heroAsset = "wrong.png";`);
+    });
+
+    it("skips names that are only parameters or a nested function's locals", () => {
+      const code = `const f = (heroAsset: string) => {\n  const g = () => { const heroAsset2 = 1; return heroAsset2; };\n  return g() + heroAsset;\n};\nexport const App = () => <main />;\n`;
+      const out = ok(run(code, [{ ...insert("end", image), loc: `${FILE}:5:25` }], "inline")).code;
+      expect(out).toContain("src={heroAsset3}");
+    });
+
+    it("imports again when a local hides the file's import of the asset", () => {
+      const code = `import pic from "./assets/brand/hero.png";\nexport function App() {\n  const pic = "wrong.png";\n  return <main />;\n}\n`;
+      const out = ok(run(code, [{ ...insert("end", image), loc: `${FILE}:4:9` }], "inline")).code;
+      expect(out).toContain("import heroAsset from");
+      expect(out).toContain("src={heroAsset}");
+    });
+
     it("gives a video controls", () => {
       const clip: NewNode = { tag: "video", src: { asset: "src/assets/brand/clip.mp4" } };
       expect(ok(run(APP, [insert("end", clip)], "inline")).code).toContain(
@@ -675,7 +696,13 @@ describe("insert", () => {
     });
 
     it("refuses an asset that leaves the design or could break the import", () => {
-      for (const asset of ["../secret.png", 'a"b.png']) {
+      for (const asset of [
+        "../secret.png",
+        "src/../../secret.png",
+        "/tmp/private.png",
+        "//tmp/private.png",
+        'a"b.png',
+      ]) {
         expect(
           refused(run(APP, [insert("end", { tag: "img", src: { asset } })], "inline")).code,
         ).toBe("invalid");

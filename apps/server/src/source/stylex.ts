@@ -415,7 +415,7 @@ function conditional(node: t.Node): Ref[] {
  * `let`, `const` or class declaration counts only when its block encloses `el`; `var` and function
  * declarations are scoped to the whole function.
  */
-function shadowed(ast: t.File, el: t.JSXElement, name: string): boolean {
+export function shadowed(ast: t.File, el: t.JSXElement, name: string): boolean {
   const parents = new Map<t.Node, t.Node | undefined>();
   walk(ast, (node, parent) => void parents.set(node, parent));
   const above = new Set<t.Node>();
@@ -691,7 +691,7 @@ export function head(code: string, ast: t.File, imports: Import[], decl?: string
  * A `free(base)` that returns `base`, numbered (`base2`) when the module's top level already binds
  * it or an earlier call returned it.
  */
-export function freeNames(ast: t.File): (base: string) => string {
+function freeNames(ast: t.File): (base: string) => string {
   const given = new Set<string>();
   return (base) => {
     let name = base;
