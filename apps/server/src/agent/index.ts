@@ -277,6 +277,8 @@ export function createAgents(options: AgentsOptions): Agents {
   const screenshots = options.screenshots ?? createScreenshots();
   const status = createStatus(query, claudePath);
   const lives = new Map<string, Live>();
+  /** Every session's read loop until it ends, including sessions already shut and gone from `lives`. */
+  const reading = new Set<Promise<void>>();
   const locks = options.locks ?? fileLocks;
   const writeLockMs = options.writeLockMs ?? WRITE_LOCK_MS;
   const steerGraceMs = options.steerGraceMs ?? STEER_GRACE_MS;
@@ -447,6 +449,9 @@ export function createAgents(options: AgentsOptions): Agents {
     });
     lives.set(thread.id, live);
     live.done = consume(live, thread.sessionId);
+    reading.add(live.done);
+    const forget = () => void reading.delete(live.done);
+    live.done.then(forget, forget);
     return live;
   }
 
@@ -857,6 +862,8 @@ export function createAgents(options: AgentsOptions): Agents {
 
     async close() {
       for (const live of lives.values()) shut(live);
+      // A result still being recorded finishes its writes before the design's folder can go.
+      await Promise.allSettled(reading);
       await screenshots.close();
     },
   };
