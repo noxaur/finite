@@ -5,11 +5,13 @@ import type { Browser, Page } from "puppeteer-core";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
 import { rev } from "../source/files.ts";
 import {
-  chromePath,
+  closeChrome,
+  describeChrome,
   LAUNCH_HOOK_TIMEOUT_MS,
-  launchChrome,
   prepareFixture,
+  sharedChrome,
   viewed,
+  warmChrome,
 } from "./fixtures.ts";
 import { createPreviews } from "./index.ts";
 
@@ -19,9 +21,10 @@ type FixtureName = (typeof FIXTURES)[number];
 let previews: Previews;
 const roots = {} as Record<FixtureName, string>;
 const urls = {} as Record<FixtureName, string>;
-const cleanups: (() => void)[] = [];
+const cleanups: (() => Promise<void>)[] = [];
 
 beforeAll(async () => {
+  warmChrome();
   previews = viewed(createPreviews({ host: "127.0.0.1", graceMs: 100 }));
   await Promise.all(
     FIXTURES.map(async (name) => {
@@ -45,7 +48,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await previews?.close();
-  for (const cleanup of cleanups) cleanup();
+  await Promise.all(cleanups.map((cleanup) => cleanup()));
 });
 
 async function get(url: string, accept = "*/*") {
@@ -106,16 +109,14 @@ describe("a StyleX project in React Router framework mode", () => {
   });
 });
 
-describe.skipIf(!chromePath)("StyleX framework mode in Chrome", () => {
+describeChrome("StyleX framework mode in Chrome", () => {
   let browser: Browser;
 
   beforeAll(async () => {
-    browser = await launchChrome();
+    browser = await sharedChrome();
   }, LAUNCH_HOOK_TIMEOUT_MS);
 
-  afterAll(async () => {
-    await browser?.close();
-  });
+  afterAll(closeChrome, 30_000);
 
   const color = (page: Page) =>
     page.evaluate(() => getComputedStyle(document.querySelector("h1")!).color);
