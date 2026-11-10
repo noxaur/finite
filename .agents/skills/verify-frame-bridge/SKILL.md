@@ -12,10 +12,10 @@ The model explores every order of these events for one iframe: hello, the iframe
 1. Compare the diff with the coverage table. If it touches none of those functions, stop: this check says nothing about it.
 2. Read the changed code against the matching actions in `model/FrameBridge.tla`. Each action is one synchronous run of code, so a new `await` or a moved line changes an action.
 3. Make the model say what the code now does. A change that matches a toggle flips that toggle in `model/current.cfg`; anything else edits the action.
-4. Run `.agents/skills/verify-frame-bridge/check.sh`. It takes about 25 seconds and exits 0 when every row of `model/expected.tsv` matches, 1 on a mismatch, 2 when TLC couldn't run. TLC 2.19 lives at `$HOME/.local/share/tlaplus/tla2tools.jar`; `TLA2TOOLS` overrides that.
-5. Read each result with `/statechart`, using `model/FrameBridge.tla`, a config with the rule as an INVARIANT, and `model/view.ts`. It tells a counterexample as numbered steps in the canvas's words. `model/chart.cfg` draws the whole flow.
+4. Run `.agents/skills/verify-frame-bridge/check.sh`. It took 94 seconds on a busy Mac (load average 55) and exits 0 when every row of `model/expected.tsv` matches, 1 on a mismatch, 2 when TLC couldn't run. TLC 2.19 lives at `$HOME/.local/share/tlaplus/tla2tools.jar`; `TLA2TOOLS` overrides that.
+5. Read each counterexample in the kept `.out` file. It lists each state from the start to the broken rule.
 
-Done means `check.sh` exits 0 against a model that describes the new code, and the sync commit below is moved.
+Done means `check.sh` exits 0 against a model that describes the new code.
 
 ## Read a mismatch
 
@@ -67,8 +67,6 @@ Left out: a page whose `load` never fires, which only the 5 s timer ends; a `loa
 `NoticeUnload` treats the frame's `leaving` as arriving with the unload, which ignores the few milliseconds it takes to deliver. A page with no bridge, or one that never took the channel, can't send it, so `askedStale` doesn't count a request in that gap: it times out. `AskHelloOnRemount` is a sketch nothing in the code does.
 
 ## Coverage
-
-Last synced: 4025ebd6712ebb76e092381adc0457c218cd56de. Move this forward only after confirming the model describes the code at the new commit. To see what changed since: `git diff <sha> -- <files below>`. To catch up after unchecked changes, use `/maintain-formal-verification-skill`.
 
 | File                                        | Function                                                                                                       | Backs                                                                                |
 | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |

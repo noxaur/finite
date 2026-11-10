@@ -23,7 +23,7 @@ CONSTANTS
 
 VARIABLES
   phase,       \* socket, ready, retryTimer: dialing | handshaking | open | closing | backoff
-  attempt,     \* `attempt`, finite.ts:152
+  attempt,     \* `attempt`, finite.ts connect
   failures,    \* failed connections since the last accepted hello; the model's own count
   failsLeft,   \* the budget from MaxFails
   held,        \* holds + lingering + views: none | held | lingering
@@ -72,7 +72,7 @@ Init ==
 
 Lost == IF ReportUnknown THEN "unknown" ELSE "failed"
 
-\* ws.onopen, finite.ts:217. The hello goes out in the same callback.
+\* ws.onopen in finite.ts connect. The hello goes out in the same callback.
 \* ResetBackoffAtHello keeps `attempt` until hello; otherwise onopen zeroes it.
 SocketOpens ==
   /\ phase = "dialing"
@@ -80,11 +80,11 @@ SocketOpens ==
   /\ attempt' = IF ResetBackoffAtHello THEN attempt ELSE 0
   /\ UNCHANGED <<failures, failsLeft, designVars, reqVars, threadVars>>
 
-\* askAgain, finite.ts:334-353: the server still remembers everything the page sent. Age isn't a case here: the page
+\* askAgain in finite.ts: the server still remembers everything the page sent. Age isn't a case here: the page
 \* stops asking (GIVE_UP_MS) before the server forgets by age (REPLY_KEPT_MS); see RequestGivesUp.
 AskAgain == req = "lost" /\ (~forgotten \/ ~CheckMemory)
 
-\* The hello reply's .then, finite.ts:220-229: zero `attempt`, ready, askAgain, flush `waiting`, then resume().
+\* The hello reply's .then in finite.ts connect: zero `attempt`, ready, askAgain, flush `waiting`, then resume().
 HelloAccepted ==
   /\ phase = "handshaking"
   /\ phase' = "open"
@@ -104,16 +104,16 @@ HelloAccepted ==
   /\ UNCHANGED <<failsLeft, held, moves, opening, serverSub, replies, runs, ledger, answer, joined,
                  turn, deltaSent, streaming, final, loaded, history>>
 
-\* The .catch at finite.ts:230: hello was refused or timed out, so it calls ws.close().
+\* The .catch of the hello request in finite.ts connect: hello was refused or timed out, so it calls ws.close().
 HelloRefused ==
   /\ phase = "handshaking" /\ failsLeft > 0
   /\ phase' = "closing"
   /\ failsLeft' = failsLeft - 1
   /\ UNCHANGED <<attempt, failures, designVars, reqVars, threadVars>>
 
-\* ws.onclose, finite.ts:244-256, then retry() at :255. `once` requests stay in `pending` for
+\* ws.onclose in finite.ts connect, then retry(). `once` requests stay in `pending` for
 \* askAgain, the rest are rejected; `waiting` stays.
-\* The server drops this socket's subscriptions on its own close, hub.ts:105-109.
+\* The server drops this socket's subscriptions on its own close, hub.ts connect's close handler.
 Closed ==
   /\ phase' = "backoff"
   /\ attempt' = attempt + 1
@@ -123,7 +123,7 @@ Closed ==
   /\ frames' = 0 /\ answer' = FALSE /\ joined' = FALSE
   /\ tsub' = FALSE
   /\ hist' = IF hist = "sent" THEN "none" ELSE hist
-  /\ loaded' = IF hist = "sent" /\ ~KeepLoadingOnFailure THEN TRUE ELSE loaded \* finite.ts:553-556
+  /\ loaded' = IF hist = "sent" /\ ~KeepLoadingOnFailure THEN TRUE ELSE loaded \* finite.ts loadThread's catch
   /\ UNCHANGED <<held, moves, subWaiting, runs, turn, deltaSent, streaming, final, history>>
 
 \* Also the page closing a socket that stayed silent after a request was asked again.
@@ -146,13 +146,13 @@ ServerRestarts ==
   /\ ledger' = "none" /\ forgotten' = TRUE
   /\ Closed
 
-\* retryTimer, finite.ts:263, into connect().
+\* retryTimer, finite.ts retry(), into connect().
 RetryFires ==
   /\ phase = "backoff"
   /\ phase' = "dialing"
   /\ UNCHANGED <<attempt, failures, failsLeft, designVars, reqVars, threadVars>>
 
-\* holdDesign, finite.ts:510-518. A lingering design is still subscribed, so holding it sends nothing.
+\* holdDesign in finite.ts. A lingering design is still subscribed, so holding it sends nothing.
 PageHolds ==
   /\ D /\ moves > 0 /\ held # "held"
   /\ moves' = moves - 1
@@ -164,35 +164,35 @@ PageHolds ==
        ELSE UNCHANGED <<wire, subWaiting>>
   /\ UNCHANGED <<connVars, opening, serverSub, replies, reqVars, threadVars>>
 
-\* The release, finite.ts:519-537.
+\* The release holdDesign returns, finite.ts.
 PageReleases ==
   /\ D /\ moves > 0 /\ held = "held"
   /\ moves' = moves - 1
   /\ held' = "lingering"
   /\ UNCHANGED <<connVars, subWaiting, wire, opening, serverSub, replies, reqVars, threadVars>>
 
-\* The linger timer, finite.ts:525-535. `unsubscribe` goes only `if (ready)`, :532.
+\* The linger timer in holdDesign's release, finite.ts. `unsubscribe` goes only `if (ready)`.
 LingerExpires ==
   /\ held = "lingering"
   /\ held' = "none"
   /\ wire' = IF phase = "open" THEN Append(wire, "U") ELSE wire
   /\ UNCHANGED <<connVars, moves, subWaiting, opening, serverSub, replies, reqVars, threadVars>>
 
-\* hub.ts:101 runs each message as it arrives, with no queue. subscribe stops at `await hub.open`.
+\* hub.ts connect's message handler runs each message as it arrives, with no queue. subscribe stops at `await hub.open`.
 ServerReceivesSubscribe ==
   /\ phase = "open" /\ wire # <<>> /\ Head(wire) = "S"
   /\ wire' = Tail(wire)
   /\ opening' = opening + 1
   /\ UNCHANGED <<connVars, held, moves, subWaiting, serverSub, replies, reqVars, threadVars>>
 
-\* The unsubscribe handler has no await: handlers.ts:92-95.
+\* The unsubscribe handler has no await: handlers.ts unsubscribe.
 ServerReceivesUnsubscribe ==
   /\ phase = "open" /\ wire # <<>> /\ Head(wire) = "U"
   /\ wire' = Tail(wire)
   /\ serverSub' = FALSE
   /\ UNCHANGED <<connVars, held, moves, subWaiting, opening, replies, reqVars, threadVars>>
 
-\* After `await hub.open`, handlers.ts:73: `client.subscriptions.add(designId)`.
+\* After `await hub.open`, handlers.ts subscribe: `client.subscriptions.add(designId)`.
 ServerAddsSubscription ==
   /\ phase = "open" /\ opening > 0
   /\ opening' = opening - 1
@@ -200,7 +200,7 @@ ServerAddsSubscription ==
   /\ replies' = replies + 1
   /\ UNCHANGED <<connVars, held, moves, subWaiting, wire, reqVars, threadVars>>
 
-\* subscribeDesign after its await, finite.ts:488. Nobody holds it, so finite.ts:489-492
+\* subscribeDesign after its await, finite.ts. Nobody holds it, so it
 \* sends `unsubscribe` when UnsubscribeStale, and otherwise says nothing.
 SnapshotArrives ==
   /\ phase = "open" /\ replies > 0
@@ -208,7 +208,7 @@ SnapshotArrives ==
   /\ wire' = IF UnsubscribeStale /\ held = "none" THEN Append(wire, "U") ELSE wire
   /\ UNCHANGED <<connVars, held, moves, subWaiting, opening, serverSub, reqVars, threadVars>>
 
-\* request() in finite.ts:421-438. Its frame carries `once`, and track keeps the frame.
+\* request() in finite.ts. Its frame carries `once`, and track keeps the frame.
 YouSendRequest ==
   /\ Q /\ req = "none"
   /\ IF phase = "open" \/ (SendBeforeHello /\ phase = "handshaking")
@@ -216,7 +216,7 @@ YouSendRequest ==
        ELSE req' = "waiting" /\ frames' = frames
   /\ UNCHANGED <<connVars, designVars, runs, ledger, answer, joined, forgotten, threadVars>>
 
-\* hub.ts receive, :186-195, through replies.ask. Each frame is one synchronous run: new, running or done.
+\* hub.ts receive, through replies.ask. Each frame is one synchronous run: new, running or done.
 ServerReceivesRequest ==
   /\ phase = "open" /\ frames > 0
   /\ frames' = frames - 1
@@ -249,7 +249,7 @@ ReplyArrives ==
   /\ req' = "ok" /\ answer' = FALSE
   /\ UNCHANGED <<connVars, designVars, runs, ledger, frames, joined, forgotten, threadVars>>
 
-\* overdue() in finite.ts:306-328: asks again on the same socket.
+\* overdue() in finite.ts: asks again on the same socket.
 RequestTimesOut ==
   /\ phase = "open" /\ req = "sent" /\ failsLeft > 0
   /\ failsLeft' = failsLeft - 1
@@ -264,14 +264,14 @@ RequestGivesUp ==
   /\ req' = Lost
   /\ UNCHANGED <<phase, attempt, failures, designVars, runs, ledger, frames, answer, joined, forgotten, threadVars>>
 
-\* A text.delta thread event, finite.ts:412. Missed when the socket is down.
+\* A text.delta thread event, finite.ts appendThreadEvent. Missed when the socket is down.
 ServerStreamsText ==
   /\ T /\ turn = "running" /\ ~deltaSent
   /\ deltaSent' = TRUE
   /\ streaming' = (tsub \/ streaming)
   /\ UNCHANGED <<connVars, designVars, reqVars, turn, tsub, final, loaded, history, hist>>
 
-\* The `text`/`result` thread event, finite.ts:415. Missed when the socket is down.
+\* The `text`/`result` thread event, finite.ts appendThreadEvent. Missed when the socket is down.
 TurnFinishes ==
   /\ T /\ turn = "running"
   /\ turn' = "finished"
@@ -279,7 +279,7 @@ TurnFinishes ==
   /\ final' = (final \/ tsub)
   /\ UNCHANGED <<connVars, designVars, reqVars, deltaSent, tsub, loaded, history, hist>>
 
-\* loadThread after its await, finite.ts:540-552. streamingAfter (finite.ts:129)
+\* loadThread after its await, finite.ts. streamingAfter (finite.ts)
 \* drops `streaming` when ClearStreamingOnLoad and the history has the final text.
 \* The server's read and the reply are one step here; see "left out" in SKILL.md.
 HistoryArrives ==
@@ -290,7 +290,7 @@ HistoryArrives ==
   /\ streaming' = (streaming /\ ~(ClearStreamingOnLoad /\ turn = "finished"))
   /\ UNCHANGED <<connVars, designVars, reqVars, turn, deltaSent, tsub>>
 
-\* loadThread's catch, finite.ts:553-556. KeepLoadingOnFailure leaves `loaded` false.
+\* loadThread's catch, finite.ts. KeepLoadingOnFailure leaves `loaded` false.
 HistoryRefused ==
   /\ phase = "open" /\ hist = "sent" /\ failsLeft > 0
   /\ failsLeft' = failsLeft - 1

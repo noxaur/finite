@@ -1,4 +1,4 @@
-// The /statechart view for AgentSession.tla: one thread, in the words of the person using it.
+// The wording of AgentSession.tla's states for a chart: one thread, in the words of the person using it. check.sh doesn't read it.
 type S = Record<string, any>;
 const s = (v: any): S => v.s;
 

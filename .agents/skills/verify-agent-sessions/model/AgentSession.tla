@@ -1,11 +1,11 @@
 ---- MODULE AgentSession ----
-\* One thread and its Claude Code session, from apps/server/src/agent/index.ts at the commit in
-\* SKILL.md. `s` is one record so each action names only the fields it writes. Line numbers are
-\* that file's unless another file is named.
+\* One thread and its Claude Code session, from apps/server/src/agent/index.ts. `s` is one record so
+\* each action names only the fields it writes. Functions are that file's unless another file is
+\* named.
 \*
-\* Atomicity. `inThread` (:288) runs one thread's sends, results, interrupts and timers one at a
+\* Atomicity. `inThread` runs one thread's sends, results, interrupts and timers one at a
 \* time, so a section is cut only where something outside the lock can act: the CLI, the consume
-\* loop (:458) and snooze/settle. The awaits inside deliver before the push touch no field those
+\* loop (`consume`) and snooze/settle. The awaits inside deliver before the push touch no field those
 \* actors read, so they stay in DeliverPrepares.
 EXTENDS Naturals, Sequences
 
@@ -23,9 +23,9 @@ vars == <<s>>
 Results == {"result0", "result1", "cancelled"}
 
 Init == s = [
-  \* ThreadMeta, persisted (packages/protocol/src/model.ts:331)
+  \* ThreadMeta, persisted (packages/protocol/src/model.ts ThreadMeta)
   metaRunning |-> FALSE, queued |-> 0, snoozed |-> FALSE, settled |-> FALSE,
-  \* Live (:224)
+  \* Live (the `Live` type)
   live |-> FALSE, running |-> FALSE, steers |-> 0, steerWait |-> FALSE, heldSteers |-> 0,
   betweenTurns |-> FALSE, idleArmed |-> FALSE, prodWrite |-> FALSE, replaced |-> FALSE,
   \* `grantRead`: consume has read the tool call behind the grant (Live.callsRead).
@@ -49,7 +49,7 @@ Release(st) == [st EXCEPT !.lock = Tail(st.lock), !.pc = "free", !.popped = FALS
 \* The sections of one Live that no longer run once it's gone (`live.closing`, identity checks).
 NotOfLive(x) == x \notin (Results \cup {"ended", "grace", "idle"})
 
-\* shut (:658): a closing session; consume returns quietly (:490, :505).
+\* shut: a closing session; consume returns quietly (`live.closing`).
 Shut(st) == [st EXCEPT
   !.live = FALSE, !.running = FALSE, !.idleArmed = FALSE, !.steerWait = FALSE,
   !.steers = 0, !.prodWrite = FALSE, !.replaced = FALSE, !.turnOld = FALSE,
@@ -60,7 +60,7 @@ Shut(st) == [st EXCEPT
 \* removeSetup: the session ends with its design.
 RemoveSetup(st) == [Shut(Release(st)) EXCEPT !.removed = TRUE]
 
-\* finishTurn (:565), past the `more` return.
+\* finishTurn, past the `more` return.
 FinishTurn(st) ==
   LET base == [st EXCEPT !.prodWrite = FALSE]
   IN IF st.queued > 0
@@ -97,7 +97,7 @@ YouSettle == ~s.removed /\ s' = [s EXCEPT !.settled = ~s.settled]
 Free == s.pc = "free" /\ s.lock /= <<>> /\ ~s.removed
 Head1 == Head(s.lock)
 
-\* sendNow (:721)
+\* sendNow
 RunSend ==
   /\ Free /\ Head1 \in {"sendSteer", "sendQueue"}
   /\ IF s.live /\ s.running /\ Head1 = "sendQueue"
@@ -106,14 +106,14 @@ RunSend ==
      THEN s' = [s EXCEPT !.steers = s.steers + 1, !.pc = "deliverPrepares", !.priority = TRUE]
      ELSE IF s.live /\ Mutant /= "second-session"
      THEN s' = [s EXCEPT !.pc = "deliverPrepares", !.priority = FALSE]
-     ELSE \* start (:305), registered at :448 with no idle timer and running false
+     ELSE \* start, which registers `lives` with no idle timer and running false
           s' = [s EXCEPT
             !.live = TRUE, !.running = FALSE, !.steers = 0,
             !.betweenTurns = FALSE, !.idleArmed = FALSE, !.prodWrite = FALSE, !.replaced = FALSE,
             !.cli = "idle", !.inbox = 0, !.steerPending = 0, !.stream = <<>>,
             !.sessions = s.sessions + 1, !.pc = "deliverPrepares", !.priority = FALSE]
 
-\* deliver (:670) up to the thread write (:693): clears idle, marks running, then revives.
+\* deliver up to the thread write: clears idle, marks running, then revives.
 DeliverPrepares ==
   /\ s.pc = "deliverPrepares"
   /\ s' = [s EXCEPT
@@ -122,12 +122,12 @@ DeliverPrepares ==
        !.settled = IF Mutant = "send-keeps-hidden" THEN s.settled ELSE FALSE,
        !.pc = "deliverPushes"]
 
-\* setModel, applyFlagSettings or reading the canvases rejected (:689): idle goes back on.
+\* setModel, applyFlagSettings or reading the canvases rejected (deliver's catch): idle goes back on.
 DeliverRejects ==
   /\ MayReject /\ s.pc = "deliverPrepares" /\ ~s.popped
   /\ s' = Release([s EXCEPT !.idleArmed = s.live /\ ~s.running])
 
-\* :717. A Live that ended has an ended inbox, so the push does nothing (inbox(), push).
+\* deliver's `live.input.push`. A Live that ended has an ended inbox, so the push does nothing (inbox(), push).
 DeliverPushes ==
   /\ s.pc = "deliverPushes"
   /\ IF s.live
@@ -141,7 +141,7 @@ DeliverPushes ==
 Old(x) == IF x \in {"result0", "result1"} THEN "cancelled" ELSE x
 Olds(q) == [i \in 1..Len(q) |-> Old(q[i])]
 
-\* interrupt (:785), up to `await live.query.interrupt({ cancelQueued: true })` (:797)
+\* interrupt, up to `await live.query.interrupt({ cancelQueued: true })`
 RunInterrupt ==
   /\ Free /\ Head1 = "interrupt"
   /\ IF s.live /\ s.running
@@ -152,7 +152,7 @@ RunInterrupt ==
             !.turnOld = s.cli \in {"working", "winding"}]
      ELSE s' = Release([s EXCEPT !.metaRunning = FALSE, !.lastEnd = "stop"])
 
-\* :798-:808, once the CLI's receipt came back. A replaced setup design goes with its turn.
+\* interrupt after that await, once the CLI's receipt came back. A replaced setup design goes with its turn.
 InterruptAnswered ==
   /\ s.pc = "interruptWaits" /\ s.receipt
   /\ LET after == [s EXCEPT !.receipt = FALSE, !.metaRunning = FALSE, !.lastEnd = "stop"]
@@ -163,7 +163,7 @@ InterruptFails ==
   /\ s.pc = "interruptWaits" /\ s.cli = "none"
   /\ s' = Release([s EXCEPT !.interruptAsked = FALSE, !.receipt = FALSE])
 
-\* The result handler (:489), once it holds the lock.
+\* The result handler in consume, once it holds the lock.
 RunResult ==
   /\ Free /\ Head1 \in Results
   /\ LET more == Head1 = "result1"
@@ -178,15 +178,15 @@ RunResult ==
                   !.grantRobbed = s.grantRobbed \/
                     (s.prodWrite /\ ~keep /\ s.grantTurn > s.resultsRead)])
         ELSE IF steers > 0 /\ ~more
-        THEN s' = Release([s EXCEPT \* holdForSteer (:545)
+        THEN s' = Release([s EXCEPT \* holdForSteer
                !.steers = steers, !.steerWait = TRUE, !.heldSteers = steers,
                !.consumeBusy = FALSE, !.prodWrite = FALSE])
         ELSE IF more
-        THEN s' = Release([s EXCEPT \* finishTurn's `if (more) return` (:573)
+        THEN s' = Release([s EXCEPT \* finishTurn's `if (more) return`
                !.steers = steers, !.prodWrite = FALSE, !.consumeBusy = FALSE])
         ELSE s' = FinishTurn([s EXCEPT !.steers = steers])
 
-\* The steer grace timer's section (:551). :552 checks the timer is still this Live's.
+\* The steer grace timer's section in holdForSteer, which checks the timer is still this Live's.
 RunGrace ==
   /\ Free /\ Head1 = "grace"
   /\ IF ~s.steerWait
@@ -195,12 +195,12 @@ RunGrace ==
      THEN s' = Release([s EXCEPT !.heldSteers = s.steers]) \* another steer: wait for it too
      ELSE s' = FinishTurn([s EXCEPT !.steerWait = FALSE, !.steers = 0])
 
-\* armIdle's section (:651). A crash landing on this 10-minute timer is left out (`cli` guard).
+\* armIdle's section. A crash landing on this 10-minute timer is left out (`cli` guard).
 RunIdle ==
   /\ Free /\ Head1 = "idle"
   /\ IF s.live /\ ~s.running /\ s.cli /= "none" THEN s' = Shut(Release(s)) ELSE s' = Release(s)
 
-\* ended (:513)
+\* ended
 RunEnded ==
   /\ Free /\ Head1 = "ended"
   /\ s' = [s EXCEPT
@@ -224,7 +224,7 @@ SteerGraceExpires ==
   /\ s.cli \in {"idle", "none"} /\ s.inbox = 0 /\ \A i \in 1..Len(s.stream) : s.stream[i] /= "init"
   /\ s' = [s EXCEPT !.lock = Append(s.lock, "grace")]
 
-\* ---- The consume loop (:458): one message at a time, outside the lock until a result ----
+\* ---- The consume loop (`consume`): one message at a time, outside the lock until a result ----
 
 ConsumeInit ==
   /\ ~s.consumeBusy /\ s.stream /= <<>> /\ Head(s.stream) = "init" /\ ~s.removed
@@ -235,7 +235,7 @@ ConsumeInit ==
        !.initsRead = IF MaxGrants > 0 THEN s.initsRead + 1 ELSE 0,
        !.stream = Tail(s.stream)]
 
-\* :488 sets betweenTurns, then the handler waits its place in the lock.
+\* consume sets betweenTurns, then the handler waits its place in the lock.
 ConsumeResult ==
   /\ ~s.consumeBusy /\ s.stream /= <<>> /\ Head(s.stream) \in Results /\ ~s.removed
   /\ s' = [s EXCEPT
@@ -243,12 +243,12 @@ ConsumeResult ==
        !.resultsRead = IF MaxGrants > 0 THEN s.resultsRead + 1 ELSE 0,
        !.lock = Append(s.lock, Head(s.stream)), !.stream = Tail(s.stream)]
 
-\* An assistant message's tool_use block (:472).
+\* An assistant message's tool_use block (`consume`).
 ConsumeCall ==
   /\ ~s.consumeBusy /\ s.stream /= <<>> /\ Head(s.stream) = "call" /\ ~s.removed
   /\ s' = [s EXCEPT !.grantRead = TRUE, !.stream = Tail(s.stream)]
 
-\* The stream threw or ended (:503); the catch at :506 waits its place in the lock.
+\* The stream threw or ended (`consume`); its catch waits its place in the lock.
 ConsumeEnd ==
   /\ ~s.consumeBusy /\ s.stream /= <<>> /\ Head(s.stream) = "end" /\ ~s.removed
   /\ s' = [s EXCEPT
@@ -264,7 +264,7 @@ CliStartsTurn ==
        !.mayDrop = FALSE, !.stream = Append(s.stream, "init"), !.turnOld = s.interruptAsked,
        !.turnNo = IF MaxGrants > 0 THEN s.turnNo + 1 ELSE 0]
 
-\* A steer ends the running turn; the result counts it or doesn't (the comment at :251).
+\* A steer ends the running turn; the result counts it or doesn't (the comment on `steers` in the `Live` type).
 CliCutsTurnForSteer ==
   /\ s.cli = "working" /\ s.steerPending > 0
   /\ \E r \in {"result0", "result1"} :
@@ -301,7 +301,7 @@ CliCrashes ==
        !.cli = "none", !.inbox = 0, !.steerPending = 0, !.turnOld = FALSE,
        !.stream = Append(s.stream, "end"), !.crashes = s.crashes + 1]
 
-\* The move_to_prod tool (grantProdWrite, :409). The CLI puts the call in the stream first, and the
+\* The move_to_prod tool (grantProdWrite in `start`). The CLI puts the call in the stream first, and the
 \* tool runs without waiting for consume, so the grant can land before consume reads any of it.
 AgentMovesToProd ==
   /\ s.cli \in {"working", "winding"} /\ s.live /\ ~s.prodWrite /\ s.grants < MaxGrants
@@ -309,12 +309,12 @@ AgentMovesToProd ==
        !.prodWrite = TRUE, !.grantRead = FALSE, !.grants = s.grants + 1, !.grantTurn = s.turnNo,
        !.stream = Append(s.stream, "call")]
 
-\* finish_setup with a replaced setup design (:622)
+\* finish_setup with a replaced setup design (`finishSetup`)
 AgentFinishesSetup ==
   /\ SetupThread /\ s.cli = "working" /\ s.live /\ ~s.replaced
   /\ s' = [s EXCEPT !.replaced = TRUE, !.replacedEver = TRUE]
 
-\* The server process restarts. store/open.ts:124 repairs a thread still marked running on load.
+\* The server process restarts. store/open.ts openDesign repairs a thread still marked running on load.
 ServerRestarts ==
   /\ s.restarts < MaxRestarts /\ s.sessions > 0 /\ ~s.removed
   /\ s' = [s EXCEPT
@@ -344,7 +344,7 @@ Next ==
 
 Spec == Init /\ [][Next]_vars
 
-\* For the /statechart chart only: one thing in flight at a time, so the chart stays readable.
+\* For drawing a chart only: one thing in flight at a time, so the chart stays readable.
 ChartScope ==
   /\ ~s.snoozed /\ ~s.settled /\ Len(s.lock) <= 1 /\ Len(s.stream) <= 1 /\ s.inbox <= 1
   /\ (s.pc = "free" \/ s.stream = <<>>) /\ (s.lock = <<>> \/ s.stream = <<>>)

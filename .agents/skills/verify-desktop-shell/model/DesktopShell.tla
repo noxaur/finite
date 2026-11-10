@@ -5,22 +5,22 @@
 EXTENDS Naturals
 
 CONSTANTS
-    MaxStops,                  \* MAX_STOPS, restarts.ts:7
+    MaxStops,                  \* MAX_STOPS in restarts.ts
     SpawnCanFail,              \* spawn() can emit 'error' with no 'exit' (EAGAIN, ENOENT, ...)
-    HandleSpawnError,          \* fix: main.ts:143 listens for 'error' and treats a failed spawn as a stop
-    GateSpawnOnQuit,           \* fix: startServer checks `quitting` before spawnServer, main.ts:98
+    HandleSpawnError,          \* fix: main.ts spawnServer listens for 'error' and treats a failed spawn as a stop
+    GateSpawnOnQuit,           \* fix: startServer checks `quitting` before spawnServer
     LimitRestarts,             \* mutant when FALSE: afterStop always restarts
-    IgnoreExitWhileQuitting,   \* mutant when FALSE: main.ts:128 `if (quitting) return` removed
-    WaitForServerOnQuit        \* mutant when FALSE: before-quit doesn't preventDefault, main.ts:291
+    IgnoreExitWhileQuitting,   \* mutant when FALSE: main.ts spawnServer's `stopped` loses its `if (quitting) return`
+    WaitForServerOnQuit        \* mutant when FALSE: before-quit doesn't preventDefault, main.ts before-quit
 
 VARIABLES
     app,             \* "running", "closing" (quit went through, windows closing), "exited"
     boot,            \* startServer: "probing", "spawned", "loaded", "abandoned", "timedOut"
-    server,          \* main.ts:22 and the real process: "none", "live", "stale" (no process, never exits)
-    quitting,        \* main.ts:28
-    waiting,         \* before-quit prevented the quit and listens for the exit, main.ts:291-296
-    stops,           \* main.ts:30, as the number of stops still inside WINDOW_MS
-    errorShown,      \* dialog.showErrorBox ran, main.ts:136
+    server,          \* main.ts `server` and the real process: "none", "live", "stale" (no process, never exits)
+    quitting,        \* main.ts `quitting`
+    waiting,         \* before-quit prevented the quit and listens for the exit, main.ts before-quit
+    stops,           \* main.ts `stops`, as the number of stops still inside WINDOW_MS
+    errorShown,      \* dialog.showErrorBox ran, main.ts spawnServer's `stopped`
     errorEvent,      \* only with HandleSpawnError: the failed child's 'error' is on the next tick
     restartedInQuit  \* history: a server was started again after quitting began
 
@@ -28,7 +28,7 @@ vars == <<app, boot, server, quitting, waiting, stops, errorShown, errorEvent, r
 
 Init ==
     /\ app = "running"
-    /\ boot = "probing"     \* startServer awaits freePort and loginShellPath, main.ts:96
+    /\ boot = "probing"     \* startServer awaits freePort and loginShellPath, main.ts startServer
     /\ server = "none"
     /\ quitting = FALSE
     /\ waiting = FALSE
@@ -37,7 +37,7 @@ Init ==
     /\ errorEvent = FALSE
     /\ restartedInQuit = FALSE
 
-(* spawnServer's spawn call, main.ts:113. A failed spawn still assigns `server`; with HandleSpawnError the
+(* spawnServer's spawn call, main.ts spawnServer. A failed spawn still assigns `server`; with HandleSpawnError the
    'error' event on the next tick clears it, so the model holds `server` at "none" and leaves the event pending. *)
 Spawn ==
     \/ server' = "live" /\ errorEvent' = FALSE
@@ -46,16 +46,16 @@ Spawn ==
           THEN server' = "none" /\ errorEvent' = TRUE
           ELSE server' = "stale" /\ errorEvent' = FALSE
 
-(* before-quit, main.ts:287-298. `server` is truthy when stale, so a stale handle waits too. *)
+(* before-quit, main.ts before-quit handler. `server` is truthy when stale, so a stale handle waits too. *)
 BeforeQuit ==
     /\ quitting' = TRUE
     /\ IF server = "none" \/ ~WaitForServerOnQuit
        THEN app' = "closing" /\ UNCHANGED waiting
        ELSE waiting' = TRUE /\ UNCHANGED app
 
-(* The stop handler, main.ts:126-141, with afterStop, restarts.ts:11-17. The respawn runs inside
+(* The stop handler, main.ts spawnServer's `stopped`, with afterStop, restarts.ts afterStop. The respawn runs inside
    the handler, so no event can land between the stop and the new server. With `waiting`, the
-   listener at main.ts:293 calls app.quit(), and before-quit then finds no server. *)
+   listener in main.ts before-quit calls app.quit(), and before-quit then finds no server. *)
 OnStop ==
     LET recent == IF stops + 1 > MaxStops THEN MaxStops ELSE stops + 1
         restart == ~LimitRestarts \/ recent < MaxStops
@@ -77,8 +77,8 @@ OnStop ==
                     /\ waiting' = FALSE
                     /\ UNCHANGED restartedInQuit
 
-(* startServer resumes after its await, main.ts:96. With GateSpawnOnQuit it checks `quitting` first, main.ts:98,
-   and throws, so createWindow rejects and main.ts:276-279 quits again, which a quitting app ignores. *)
+(* startServer resumes after its await, main.ts startServer. With GateSpawnOnQuit it checks `quitting` first,
+   and throws, so createWindow rejects and the `.catch` of main.ts's `whenReady` chain quits again, which a quitting app ignores. *)
 ProbeFinishes ==
     /\ boot = "probing"
     /\ app /= "exited"
@@ -87,7 +87,7 @@ ProbeFinishes ==
        ELSE boot' = "spawned" /\ Spawn
     /\ UNCHANGED <<app, quitting, waiting, stops, errorShown, restartedInQuit>>
 
-(* waitFor sees /api/health answer, main.ts:101, and the window loads it, main.ts:257. *)
+(* waitFor sees /api/health answer, main.ts startServer, and the window loads it, main.ts createWindow. *)
 HealthAnswers ==
     /\ boot = "spawned"
     /\ app = "running"
@@ -96,7 +96,7 @@ HealthAnswers ==
     /\ boot' = "loaded"
     /\ UNCHANGED <<app, server, quitting, waiting, stops, errorShown, errorEvent, restartedInQuit>>
 
-(* waitFor gives up after 15 s; createWindow rejects and main.ts:276-279 quits. *)
+(* waitFor gives up after 15 s; createWindow rejects and the `.catch` of main.ts's `whenReady` chain quits. *)
 HealthTimesOut ==
     /\ boot = "spawned"
     /\ app = "running"
@@ -106,7 +106,7 @@ HealthTimesOut ==
     /\ BeforeQuit
     /\ UNCHANGED <<server, stops, errorShown, errorEvent, restartedInQuit>>
 
-(* A quit from the menu, or window-all-closed, main.ts:281. *)
+(* A quit from the menu, or window-all-closed, main.ts. *)
 YouQuit ==
     /\ app = "running"
     /\ ~quitting
@@ -114,7 +114,7 @@ YouQuit ==
     /\ BeforeQuit
     /\ UNCHANGED <<boot, server, stops, errorShown, errorEvent, restartedInQuit>>
 
-(* The server stops on its own, and main.ts:126 runs. *)
+(* The server stops on its own, and main.ts spawnServer's `stopped` runs. *)
 ServerCrashes ==
     /\ server = "live"
     /\ app /= "exited"
@@ -122,20 +122,20 @@ ServerCrashes ==
     /\ OnStop
     /\ UNCHANGED boot
 
-(* SIGTERM at main.ts:297, or SIGKILL 5 s later at main.ts:292, ends a live process. *)
+(* SIGTERM in main.ts before-quit, or SIGKILL 5 s later (SHUTDOWN_MS), ends a live process. *)
 ServerObeysQuit ==
     /\ waiting
     /\ server = "live"
     /\ OnStop
     /\ UNCHANGED boot
 
-(* Only with HandleSpawnError: the 'error' listener, main.ts:143-147, runs the same stop handling. *)
+(* Only with HandleSpawnError: the 'error' listener in main.ts spawnServer runs the same stop handling. *)
 SpawnErrorHandled ==
     /\ errorEvent
     /\ OnStop
     /\ UNCHANGED boot
 
-(* WINDOW_MS passes, so the oldest stop stops counting: restarts.ts:15. *)
+(* WINDOW_MS passes, so the oldest stop stops counting: restarts.ts afterStop. *)
 AMinutePasses ==
     /\ app = "running"
     /\ ~quitting

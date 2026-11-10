@@ -9,14 +9,14 @@ description: TLA+ model of the canvas's press, tool, pen, text-edit and selectio
 
 ## Check a change
 
-1. Run `git diff --name-only 4025ebd6712ebb76e092381adc0457c218cd56de -- apps/web/src/canvas apps/web/src/components/LayersTree.tsx` and compare it with the coverage table. No covered function changed: stop, nothing to check.
-2. Mirror each change in `model/CanvasGestures.tla`. A new `await` splits an action in two. A new or removed guard changes the action's enabling condition. Each action's comment names its `file:line`. Where a constant already describes the change, set it in `model/current.cfg` (or `text.cfg`, `selection.cfg`, `pen.cfg`, whichever the action's scope uses).
-3. Run `.agents/skills/verify-canvas-gestures/check.sh`. Done when it exits 0, or every `MISMATCH` line is explained by step 4. It takes about a minute.
-4. Read each `MISMATCH` with `/statechart`, on the printed `.cfg` plus that rule as an INVARIANT, with `model/view.ts` or `model/view-text.ts` for the wording. Then decide:
+1. Run `git diff --name-only $(git merge-base HEAD main) -- apps/web/src/canvas apps/web/src/components/LayersTree.tsx` and compare it with the coverage table. No covered function changed: stop, nothing to check.
+2. Mirror each change in `model/CanvasGestures.tla`. A new `await` splits an action in two. A new or removed guard changes the action's enabling condition. Each action's comment names the function it mirrors. Where a constant already describes the change, set it in `model/current.cfg` (or `text.cfg`, `selection.cfg`, `pen.cfg`, whichever the action's scope uses).
+3. Run `.agents/skills/verify-canvas-gestures/check.sh`. Done when it exits 0, or every `MISMATCH` line is explained by step 4. It took 277 seconds on a busy Mac (load average 30 to 70).
+4. Read each `MISMATCH` counterexample in the kept `.out` file; it lists each state from the start to the broken rule. Then decide:
    - **`expected holds, got breaks`**: replay the path against the real code, one step per action, with the `editorOnViewport` harness in `apps/web/src/canvas/editor.test.ts`. If it happens, your change introduced a bug. If it can't happen, the model mirrors the code wrongly: fix the model.
    - **`expected breaks, got holds`** on a `current`, `pen`, `text` or `selection` row: you fixed a finding. Flip the row to `holds`, and remove it from Findings.
    - **`got error`**: the model is broken (a TLC syntax error, a deadlock). Read the kept `.out` file.
-5. When the change is intended and verified, set **Last synced** to the new HEAD. Only do this after confirming the model describes the code at that commit. For drift from changes nobody rechecked, use `/maintain-formal-verification-skill`.
+5. When the change is intended and verified, confirm every row of the coverage table against the code.
 
 Never weaken a rule to get a pass. Add a rule with a row in `model/expected.tsv` and a variant showing it can fail.
 
@@ -51,12 +51,10 @@ None.
 - `begin()` is modelled as always resolving to a gesture, never `null`. Only Move's `begin()` waits; every other tool's resolves in the same step.
 - Left out: `dispose()` mid-gesture (rare unmount), the override maps' ownership, hover, Inspect, the image tool, new text from the Text tool (`target.kind === "new"`), frame reloads and HMR during a text edit, the vector edit queue's rejection path, undo order (`verify-undo-history` covers it). A pass says nothing about these.
 - `EditLands` is one step for what's several in `finishText`: the second read, the retry over the new rev, and `keepTyped`. If a second text box opened while a refused edit was on its way, the words go in a notice instead of a box, and the same goes when another element has taken the loc or the `keeps` changed. The model doesn't tell those apart, and a box that `keepTyped` puts back isn't a new `editing` state.
-- `onPath` in `tools/text.ts` lands through the same `land` as `draw`, and isn't modelled separately. The pen's second select of the path (`tools/pen.ts:43`) runs only while the selection is the one `land` set, so it isn't a pick either.
-- Scopes run separately: a bug that needs a press and a text edit interleaved wouldn't show. The code keeps them apart at `editor.ts:591`, where a press during a text edit only blurs.
+- `onPath` in `tools/text.ts` lands through the same `land` as `draw`, and isn't modelled separately. The pen's second select of the path (`place` in `tools/pen.ts`) runs only while the selection is the one `land` set, so it isn't a pick either.
+- Scopes run separately: a bug that needs a press and a text edit interleaved wouldn't show. The code keeps them apart in `onDown` in `editor.ts`, where a press during a text edit only blurs.
 
 ## Coverage
-
-Last synced: `4025ebd6712ebb76e092381adc0457c218cd56de`
 
 | File (under `apps/web/src/canvas/`)             | Functions                                                                                                             | Backs                                                                                                    |
 | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
