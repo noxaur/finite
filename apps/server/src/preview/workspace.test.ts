@@ -15,6 +15,11 @@ afterAll(async () => {
   for (const cleanup of cleanups.reverse()) await cleanup();
 }, 60_000);
 
+/** Resolves once the condition holds; if it never does, the test's own timeout ends the wait. */
+async function until(condition: () => boolean) {
+  while (!condition()) await new Promise((resolve) => setTimeout(resolve, 10));
+}
+
 async function freePort(): Promise<number> {
   const server = net.createServer().listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
@@ -401,15 +406,16 @@ describe("finite.json changes", () => {
 
   test("a setup command after one that exits on SIGTERM doesn't start after close", async () => {
     const config = {
-      setup: ["trap 'exit 0' TERM; sleep 2 & wait", "touch next"],
+      setup: ["trap 'exit 0' TERM; touch trapped; sleep 2 & wait", "touch next"],
       apps: { app: { path: "app" } },
     };
     const root = tinyWorkspace(config);
     const workspaces = createWorkspaces({ startTimeoutMs: 1_000 });
     const done = workspaces.prepare(workspaceDesign("trap", root, "app", "app"), () => {});
-    await new Promise((resolve) => setTimeout(resolve, 300));
     // It refuses while close runs, so the check is attached first.
     const refused = expect(done).rejects.toThrow(/shutting down/);
+    // A SIGTERM before the trap is set would kill the shell, which is a failed command instead.
+    await until(() => fs.existsSync(path.join(root, "trapped")));
     await workspaces.close();
     await refused;
     expect(fs.existsSync(path.join(root, "next"))).toBe(false);
@@ -419,18 +425,30 @@ describe("finite.json changes", () => {
     const config = { setup: ["sleep 1"], apps: { app: { path: "app" } } };
     const root = tinyWorkspace(config);
     const workspaces = createWorkspaces({ startTimeoutMs: 1_000 });
-    const first = workspaces.prepare(workspaceDesign("one", root, "app", "app"), () => {});
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    let output = "";
+    const first = workspaces.prepare(workspaceDesign("one", root, "app", "app"), (chunk) => {
+      output += chunk;
+    });
+    // Both refuse while close runs, so the checks are attached first.
+    const refused = [expect(first).rejects.toThrow()];
+    await until(() => output.includes("$ sleep 1"));
     config.setup = ["touch queued"];
     fs.writeFileSync(path.join(root, "finite.json"), JSON.stringify(config));
-    const second = workspaces.prepare(workspaceDesign("two", root, "app", "app"), () => {});
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    const refused = Promise.all([
-      expect(first).rejects.toThrow(),
-      expect(second).rejects.toThrow(/shutting down/),
-    ]);
+    // `wanted` runs once prepare has read finite.json, just before it queues its setup.
+    let reached!: () => void;
+    const reading = new Promise<void>((resolve) => (reached = resolve));
+    const second = workspaces.prepare(
+      workspaceDesign("two", root, "app", "app"),
+      () => {},
+      () => {
+        reached();
+        return true;
+      },
+    );
+    refused.push(expect(second).rejects.toThrow(/shutting down/));
+    await reading;
     await workspaces.close();
-    await refused;
+    await Promise.all(refused);
     expect(fs.existsSync(path.join(root, "queued"))).toBe(false);
   });
 

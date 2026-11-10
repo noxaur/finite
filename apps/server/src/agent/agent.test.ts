@@ -28,9 +28,11 @@ import { createEventMapper } from "./events.ts";
 import { BRAND_BOARD } from "../store/brand.ts";
 import {
   agentActor,
+  type AgentsOptions,
   BUILT_IN_TOOLS,
   carrySelection,
   createAgents,
+  IDLE_MS,
   type QueryFn,
   type QueryLike,
   shortTitle,
@@ -277,6 +279,8 @@ type Fake = QueryLike & {
   options: Options;
   sent: SDKUserMessage[];
   emit(message: SDKMessage): void;
+  /** Resolves once the agents have read and fully handled every message emitted so far. */
+  settled(): Promise<void>;
   closed: boolean;
   interrupt: ReturnType<typeof vi.fn>;
   setModel: ReturnType<typeof vi.fn>;
@@ -288,14 +292,20 @@ function fakeSdk() {
   const query: QueryFn = ({ prompt, options }) => {
     const out: SDKMessage[] = [];
     let wake: (() => void) | undefined;
+    let waiting = false;
+    const settle: (() => void)[] = [];
     const fake = {
       options,
       sent: [] as SDKUserMessage[],
       closed: false,
       emit(message: SDKMessage) {
         out.push(message);
+        waiting = false;
         wake?.();
       },
+      // The agents pull the next message only after the body for the last one has finished.
+      settled: () =>
+        waiting ? Promise.resolve() : new Promise<void>((resolve) => settle.push(resolve)),
       interrupt: vi.fn(async (_options?: { cancelQueued?: boolean }) => {
         fake.emit(
           result({
@@ -318,8 +328,12 @@ function fakeSdk() {
         while (true) {
           const next = out.shift();
           if (next) yield next;
-          else if (fake.closed) return;
-          else await new Promise<void>((r) => (wake = r));
+          else {
+            waiting = true;
+            for (const resolve of settle.splice(0)) resolve();
+            if (fake.closed) return;
+            await new Promise<void>((r) => (wake = r));
+          }
         }
       },
     };
@@ -372,6 +386,21 @@ const textOf = (m: SDKUserMessage) => {
   const first = content[0];
   return first?.type === "text" ? first.text : "";
 };
+
+/** A macrotask: every promise chain already under way has run by the time it resolves. */
+const flush = () => new Promise<void>((r) => setImmediate(r));
+
+/**
+ * Waits for a condition on the real event loop. `vi.waitFor` moves a fake clock on while it polls,
+ * which would run the timers a test is holding back.
+ */
+async function until(check: () => boolean | Promise<boolean>) {
+  const deadline = Date.now() + 4000;
+  while (!(await check())) {
+    if (Date.now() > deadline) throw new Error("the condition never held");
+    await flush();
+  }
+}
 
 async function connectTools(q: Fake) {
   const server = (q.options.mcpServers as Record<string, McpSdkServerConfigWithInstance>).finite!;
@@ -427,21 +456,39 @@ describe("agents", () => {
     };
     open = await openDesign(design);
     sdk = fakeSdk();
-    agents = createAgents({
-      store: {} as Store,
-      previews,
-      source,
-      query: sdk.query,
-      claudePath: async () => "/bin/claude",
-      idleMs: 50,
-    });
+    agents = createAgents(agentOptions());
   });
 
   afterEach(async () => {
     await agents.close();
+    vi.useRealTimers();
     open.close();
     await rm(root, { recursive: true, force: true });
   });
+
+  const agentOptions = (extra: Partial<AgentsOptions> = {}): AgentsOptions => ({
+    store: {} as Store,
+    previews,
+    source,
+    query: sdk.query,
+    claudePath: async () => "/bin/claude",
+    ...extra,
+  });
+
+  /** Replaces the agents with ones built with `extra`. */
+  async function restartWith(extra: Partial<AgentsOptions>) {
+    await agents.close();
+    agents = createAgents(agentOptions(extra));
+  }
+
+  /**
+   * Holds the idle and steer timers on a fake clock, so a test moves them on itself instead of
+   * racing a real one. Only timeouts are faked: file writes and promises run as usual.
+   */
+  const fakeClock = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+
+  /** Waits until the writes the thread has queued so far have landed. */
+  const written = (threadId: string) => open.updateThread(threadId, (m) => m);
 
   async function newThread(text: string, canvasId?: string) {
     const t = turn(text);
@@ -538,7 +585,7 @@ describe("agents", () => {
     expect(q.setModel).toHaveBeenCalledWith("sonnet");
     // The steer started its own turn: the first result says one more follows.
     q.emit(result({ queued_turn_count: 1 }));
-    await new Promise((r) => setTimeout(r, 10));
+    await q.settled();
     expect((await meta(thread.id)).running).toBe(true);
     q.emit(result());
     await vi.waitFor(async () => expect((await meta(thread.id)).running).toBe(false));
@@ -559,7 +606,7 @@ describe("agents", () => {
         usage: { input_tokens: 0, output_tokens: 0 },
       }),
     );
-    await new Promise((r) => setTimeout(r, 20));
+    await q.settled();
     expect((await meta(thread.id)).running).toBe(true);
     // ⌥⏎ right after the steer still queues.
     await agents.send(open, thread.id, turn("after that, labels"), "queue");
@@ -579,23 +626,18 @@ describe("agents", () => {
   });
 
   it("ends a steered turn when the steer's own turn never starts", async () => {
-    await agents.close();
-    agents = createAgents({
-      store: {} as Store,
-      previews,
-      source,
-      query: sdk.query,
-      claudePath: async () => "/bin/claude",
-      idleMs: 50,
-      steerGraceMs: 30,
-    });
+    fakeClock();
+    await restartWith({ steerGraceMs: 30 });
     const thread = await newThread("first");
     const q = sdk.queries[0]!;
     await agents.send(open, thread.id, turn("steer"), "steer");
     q.emit(result());
-    await new Promise((r) => setTimeout(r, 5));
+    await q.settled();
+    await vi.advanceTimersByTimeAsync(29);
+    await written(thread.id);
     expect((await meta(thread.id)).running).toBe(true);
-    await vi.waitFor(async () => expect((await meta(thread.id)).running).toBe(false));
+    await vi.advanceTimersByTimeAsync(1);
+    await until(async () => !(await meta(thread.id)).running);
   });
 
   it("interrupts without sending the queue", async () => {
@@ -621,7 +663,7 @@ describe("agents", () => {
     q.emit(result({ queued_turn_count: 1 }));
     q.emit({ type: "system", subtype: "init", session_id: "s1" } as unknown as SDKMessage);
     q.emit(result());
-    await new Promise((r) => setTimeout(r, 20));
+    await q.settled();
     // The last steer's turn hasn't started: its result holds the thread open.
     expect((await meta(thread.id)).running).toBe(true);
   });
@@ -636,32 +678,30 @@ describe("agents", () => {
     await agents.send(open, thread.id, turn("steer"), "steer");
     q.emit({ type: "system", subtype: "init", session_id: "s1" } as unknown as SDKMessage);
     q.emit(result());
-    await new Promise((r) => setTimeout(r, 20));
+    await q.settled();
     expect((await meta(thread.id)).running).toBe(true);
   });
 
   it("keeps waiting when another steer arrives during a steer's wait", async () => {
-    await agents.close();
-    agents = createAgents({
-      store: {} as Store,
-      previews,
-      source,
-      query: sdk.query,
-      claudePath: async () => "/bin/claude",
-      idleMs: 50,
-      steerGraceMs: 80,
-    });
+    fakeClock();
+    await restartWith({ steerGraceMs: 80 });
     const thread = await newThread("first");
     const q = sdk.queries[0]!;
     await agents.send(open, thread.id, turn("steer one"), "steer");
     q.emit(result());
-    await new Promise((r) => setTimeout(r, 50));
+    await q.settled();
+    await vi.advanceTimersByTimeAsync(50);
     await agents.send(open, thread.id, turn("steer two"), "steer");
-    await new Promise((r) => setTimeout(r, 50));
+    // The first steer's grace runs out at 80, but steer two gets its own 80 from 50.
+    await vi.advanceTimersByTimeAsync(50);
+    await written(thread.id);
     expect((await meta(thread.id)).running).toBe(true);
     q.emit({ type: "system", subtype: "init", session_id: "s1" } as unknown as SDKMessage);
     q.emit(result());
-    await vi.waitFor(async () => expect((await meta(thread.id)).running).toBe(false));
+    await q.settled();
+    // Steer two's turn started; steer one's never does, so its wait runs out.
+    await vi.advanceTimersByTimeAsync(80);
+    await until(async () => !(await meta(thread.id)).running);
   });
 
   it("takes a queued steer back on Stop, so it doesn't run after the thread says stopped", async () => {
@@ -684,7 +724,7 @@ describe("agents", () => {
     await agents.send(open, thread.id, turn("again"), "steer");
     await vi.waitFor(() => expect(q.sent).toHaveLength(2));
     q.emit(cancelled(q.sent[0]!));
-    await new Promise((r) => setTimeout(r, 20));
+    await q.settled();
     expect((await meta(thread.id)).running).toBe(true);
     q.emit(result({ user_message_uuid: q.sent[1]!.uuid }));
     await vi.waitFor(async () => expect((await meta(thread.id)).running).toBe(false));
@@ -704,11 +744,10 @@ describe("agents", () => {
     await vi.waitFor(() => expect(q.interrupt).toHaveBeenCalled());
     // The steer cut the first turn just before Stop: that result waits behind Stop.
     q.emit(result({ user_message_uuid: q.sent[0]!.uuid }));
-    await new Promise((r) => setTimeout(r, 10));
     receipt();
     await stopping;
     q.emit(cancelled(q.sent[1]!));
-    await new Promise((r) => setTimeout(r, 20));
+    await q.settled();
     expect(q.sent).toHaveLength(2);
     const after = await meta(thread.id);
     expect(after.queued.map((m) => m.text)).toEqual(["later"]);
@@ -721,7 +760,7 @@ describe("agents", () => {
     await agents.send(open, thread.id, turn("steer"), "steer");
     await vi.waitFor(() => expect(q.sent).toHaveLength(2));
     q.emit(result({ user_message_uuid: q.sent[0]!.uuid }));
-    await new Promise((r) => setTimeout(r, 10));
+    await q.settled();
     // The turn is over and the steer's never starts, so this Stop has no cancelled result.
     q.interrupt.mockImplementationOnce(async () => undefined);
     await agents.interrupt(open, thread.id);
@@ -734,49 +773,37 @@ describe("agents", () => {
   });
 
   it("keeps a queued message when the session dies during a steer's wait", async () => {
-    await agents.close();
-    agents = createAgents({
-      store: {} as Store,
-      previews,
-      source,
-      query: sdk.query,
-      claudePath: async () => "/bin/claude",
-      idleMs: 50,
-      steerGraceMs: 20,
-    });
+    fakeClock();
+    await restartWith({ steerGraceMs: 20 });
     const thread = await newThread("first");
     const q = sdk.queries[0]!;
     await agents.send(open, thread.id, turn("steer"), "steer");
     await agents.send(open, thread.id, turn("later"), "queue");
     q.emit(result());
-    await new Promise((r) => setTimeout(r, 5));
+    await q.settled();
     q.close();
-    await vi.waitFor(async () => expect((await meta(thread.id)).running).toBe(false));
-    await new Promise((r) => setTimeout(r, 40));
+    await until(async () => !(await meta(thread.id)).running);
+    // The steer's wait died with the session: it doesn't send "later" into it afterwards.
+    await vi.advanceTimersByTimeAsync(20);
+    await written(thread.id);
     const after = await meta(thread.id);
     expect(after.queued.map((m) => m.text)).toEqual(["later"]);
     expect(after.running).toBe(false);
   });
 
   it("closes an idle session whose next message was refused", async () => {
-    await agents.close();
-    agents = createAgents({
-      store: {} as Store,
-      previews,
-      source,
-      query: sdk.query,
-      claudePath: async () => "/bin/claude",
-      idleMs: 100,
-    });
+    fakeClock();
     const thread = await newThread("first");
     const q = sdk.queries[0]!;
     q.emit(result());
-    await vi.waitFor(async () => expect((await meta(thread.id)).running).toBe(false));
+    await q.settled();
     q.setModel.mockRejectedValueOnce(new Error("no such model"));
     await expect(
       agents.send(open, thread.id, turn("again", { model: "nope" }), "steer"),
     ).rejects.toThrow("no such model");
-    await vi.waitFor(() => expect(q.closed).toBe(true), { timeout: 1000 });
+    expect(q.closed).toBe(false);
+    await vi.advanceTimersByTimeAsync(IDLE_MS);
+    await until(() => q.closed);
   });
 
   it("closes a new session whose first message couldn't be built", async () => {
@@ -788,15 +815,22 @@ describe("agents", () => {
         throw new Error("the design's files are gone");
       },
     };
+    fakeClock();
     await expect(agents.send(broken, thread.id, t, "steer")).rejects.toThrow("files are gone");
-    await vi.waitFor(() => expect(sdk.queries[0]!.closed).toBe(true), { timeout: 1000 });
+    expect(sdk.queries[0]!.closed).toBe(false);
+    await vi.advanceTimersByTimeAsync(IDLE_MS);
+    await until(() => sdk.queries[0]!.closed);
   });
 
   it("closes an idle session and resumes it on the next message", async () => {
+    fakeClock();
     const thread = await newThread("first");
     const q = sdk.queries[0]!;
     q.emit(result({ session_id: "s9" }));
-    await vi.waitFor(() => expect(q.closed).toBe(true));
+    await q.settled();
+    expect(q.closed).toBe(false);
+    await vi.advanceTimersByTimeAsync(IDLE_MS);
+    await until(() => q.closed);
     await agents.send(open, thread.id, turn("again", { effort: "high" }), "steer");
     const next = sdk.queries[1]!;
     expect(next.options.resume).toBe("s9");
@@ -805,20 +839,16 @@ describe("agents", () => {
   });
 
   it("starts one session when two messages arrive while Claude Code is being found", async () => {
-    await agents.close();
-    agents = createAgents({
-      store: {} as Store,
-      previews,
-      source,
-      query: sdk.query,
-      claudePath: () => new Promise((r) => setTimeout(() => r("/bin/claude"), 20)),
-      idleMs: 50,
-    });
+    let found!: (bin: string) => void;
+    await restartWith({ claudePath: () => new Promise((r) => (found = r)) });
     const thread = await startThread(open, {}, turn("first"));
-    await Promise.all([
+    const sending = Promise.all([
       agents.send(open, thread.id, turn("first"), "steer"),
       agents.send(open, thread.id, turn("second"), "steer"),
     ]);
+    await vi.waitFor(() => expect(found).toBeDefined());
+    found("/bin/claude");
+    await sending;
     expect(sdk.queries).toHaveLength(1);
     await vi.waitFor(() => expect(sdk.queries[0]!.sent.map(textOf)).toEqual(["first", "second"]));
   });
@@ -849,7 +879,6 @@ describe("agents", () => {
     await read;
     armed = false;
     const sending = agents.send(open, thread.id, turn("second"), "queue");
-    await new Promise((r) => setTimeout(r, 10));
     gate();
     await sending;
     await vi.waitFor(() => expect(q.sent.map(textOf)).toEqual(["first", "second"]));
@@ -857,17 +886,9 @@ describe("agents", () => {
   });
 
   it("holds a file's lock from a write's PreToolUse hook to its PostToolUse hook", async () => {
-    await agents.close();
+    fakeClock();
     const locks = createFileLocks();
-    agents = createAgents({
-      store: {} as Store,
-      previews,
-      source,
-      query: sdk.query,
-      claudePath: async () => "/bin/claude",
-      locks,
-      writeLockMs: 200,
-    });
+    await restartWith({ locks, writeLockMs: 200 });
     await newThread("write a board");
     const hooks = sdk.queries[0]!.options.hooks!;
     const call = (event: "PreToolUse" | "PostToolUse", id: string, file: string) =>
@@ -883,14 +904,14 @@ describe("agents", () => {
         { signal: new AbortController().signal },
       );
     const file = path.join(root, ".finite/boards/c1/A.tsx");
-    /** Tries the lock for 20ms; `got` turns true whenever it's taken. */
+    /** Tries the lock; `got` turns true whenever it's taken. */
     const isFree = async () => {
       const state = { got: false, taking: Promise.resolve() };
       state.taking = locks.acquire([file]).then((release) => {
         state.got = true;
         release();
       });
-      await new Promise((r) => setTimeout(r, 20));
+      await flush();
       return state;
     };
 
@@ -904,7 +925,7 @@ describe("agents", () => {
     // A write Claude Code never reports back on lets go after writeLockMs.
     await call("PreToolUse", "t2", file);
     expect((await isFree()).got).toBe(false);
-    await new Promise((r) => setTimeout(r, 200));
+    await vi.advanceTimersByTimeAsync(200);
     expect((await isFree()).got).toBe(true);
 
     // A denied write takes no lock.
@@ -947,24 +968,44 @@ describe("agents", () => {
     await paused;
     let stopped = false;
     const stopping = agents.stopDesign("d1").then(() => (stopped = true));
-    await new Promise((r) => setTimeout(r, 10));
-    expect(q.closed).toBe(true);
+    await vi.waitFor(() => expect(q.closed).toBe(true));
     gate();
-    await vi.waitFor(() => expect(stopped).toBe(true), { timeout: 500 });
     await stopping;
+    expect(stopped).toBe(true);
+  });
+
+  it("waits for a result it is still recording before it closes", async () => {
+    let gate!: () => void;
+    let appending!: () => void;
+    const paused = new Promise<void>((r) => (appending = r));
+    const slow: OpenDesign = {
+      ...open,
+      async appendEvent(threadId, event) {
+        if (event.type === "result") {
+          appending();
+          await new Promise<void>((r) => (gate = r));
+        }
+        return open.appendEvent(threadId, event);
+      },
+    };
+    const t = turn("first");
+    const thread = await startThread(open, {}, t);
+    await agents.send(slow, thread.id, t, "steer");
+    sdk.queries[0]!.emit(result());
+    await paused;
+    let closed = false;
+    const closing = agents.close().then(() => (closed = true));
+    await flush();
+    expect(closed).toBe(false);
+    gate();
+    await closing;
+    // The design's folder can go now: nothing writes to it any more.
+    expect((await open.history(thread.id)).map((e) => e.type)).toEqual(["user", "result"]);
   });
 
   it("stops a session that was starting when the design's removal began", async () => {
-    await agents.close();
     let found!: (bin: string) => void;
-    agents = createAgents({
-      store: {} as Store,
-      previews,
-      source,
-      query: sdk.query,
-      claudePath: () => new Promise((r) => (found = r)),
-      idleMs: 50,
-    });
+    await restartWith({ claudePath: () => new Promise((r) => (found = r)) });
     const thread = await startThread(open, {}, turn("first"));
     const sending = agents.send(open, thread.id, turn("first"), "steer");
     await vi.waitFor(() => expect(found).toBeDefined());
@@ -975,7 +1016,7 @@ describe("agents", () => {
     await expect(agents.send(open, other.id, turn("late"), "steer")).rejects.toThrow(
       /being removed/,
     );
-    await new Promise((r) => setTimeout(r, 10));
+    await flush();
     expect(stopped).toBe(false);
     found("/bin/claude");
     await sending;
@@ -992,16 +1033,8 @@ describe("agents", () => {
   });
 
   it("locks a write through a symlink under the real file's lock", async () => {
-    await agents.close();
     const locks = createFileLocks();
-    agents = createAgents({
-      store: {} as Store,
-      previews,
-      source,
-      query: sdk.query,
-      claudePath: async () => "/bin/claude",
-      locks,
-    });
+    await restartWith({ locks });
     await mkdir(path.join(root, ".finite/real"), { recursive: true });
     await writeFile(path.join(root, ".finite/real/A.tsx"), "x");
     await symlink(path.join(root, ".finite/real"), path.join(root, ".finite/alias"));
@@ -1022,24 +1055,15 @@ describe("agents", () => {
       got = true;
       release();
     });
-    await new Promise((r) => setTimeout(r, 20));
+    await flush();
     expect(got).toBe(false);
     await agents.close();
     await vi.waitFor(() => expect(got).toBe(true));
   });
 
   it("lets go of a lock a write's hook was still waiting for when the session shut", async () => {
-    await agents.close();
     const locks = createFileLocks();
-    agents = createAgents({
-      store: {} as Store,
-      previews,
-      source,
-      query: sdk.query,
-      claudePath: async () => "/bin/claude",
-      locks,
-      writeLockMs: 60_000,
-    });
+    await restartWith({ locks, writeLockMs: 60_000 });
     await newThread("write");
     const file = path.join(root, ".finite/boards/c1/A.tsx");
     const editor = await locks.acquire([file]);
@@ -1062,7 +1086,7 @@ describe("agents", () => {
       got = true;
       release();
     });
-    await vi.waitFor(() => expect(got).toBe(true), { timeout: 200 });
+    await vi.waitFor(() => expect(got).toBe(true));
   });
 
   it("revives a snoozed or settled thread when messaged", async () => {
@@ -1342,16 +1366,8 @@ describe("agents", () => {
   });
 
   it("revokes move_to_prod when a steer cuts the turn, and still settles if its turn never starts", async () => {
-    await agents.close();
-    agents = createAgents({
-      store: {} as Store,
-      previews,
-      source,
-      query: sdk.query,
-      claudePath: async () => "/bin/claude",
-      idleMs: 50,
-      steerGraceMs: 150,
-    });
+    fakeClock();
+    await restartWith({ steerGraceMs: 150 });
     const canvas = await open.createCanvas({ kind: "prototype", name: "P" }, person);
     await open.patchCanvas(
       canvas.id,
@@ -1383,10 +1399,11 @@ describe("agents", () => {
 
     await agents.send(open, thread.id, turn("also do this"), "steer");
     q.emit(result());
-    await new Promise((r) => setTimeout(r, 20));
+    await q.settled();
     expect((await meta(thread.id)).running).toBe(true);
     expect((await canUse("Edit", write, opts))?.behavior).toBe("deny");
-    await vi.waitFor(async () => expect((await meta(thread.id)).settledAt).toBeGreaterThan(0));
+    await vi.advanceTimersByTimeAsync(150);
+    await until(async () => ((await meta(thread.id)).settledAt ?? 0) > 0);
   });
 
   it("revokes a move_to_prod that lands while Stop winds the turn down", async () => {
@@ -1431,15 +1448,6 @@ describe("agents", () => {
 
     /** Stops the first turn, with its cancelled result still unread, and sends a second. */
     async function stoppedThenSent() {
-      // The 50 ms idle timer could close the session between Stop and the send on a slow machine.
-      await agents.close();
-      agents = createAgents({
-        store: {} as Store,
-        previews,
-        source,
-        query: sdk.query,
-        claudePath: async () => "/bin/claude",
-      });
       const canvas = await open.createCanvas({ kind: "prototype", name: "P" }, person);
       await open.patchCanvas(
         canvas.id,
@@ -1478,7 +1486,7 @@ describe("agents", () => {
       expect(await edit()).toBe("allow");
 
       q.emit(cancelled(q.sent[0]!));
-      await new Promise((r) => setTimeout(r, 20));
+      await q.settled();
       expect(await edit()).toBe("allow");
 
       q.emit(moveToProdCall("toolu_second"));
@@ -1548,7 +1556,6 @@ describe("setup threads", () => {
       source: {} as SourceEditor,
       query: sdk.query,
       claudePath: async () => "/bin/claude",
-      idleMs: 50,
     });
     return agents;
   }
