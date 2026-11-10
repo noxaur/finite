@@ -208,7 +208,7 @@ export function Composer({
           <div {...stylex.props(styles.chips)}>
             {selection.map((s) => (
               <span key={`${s.frameId}:${s.loc}:${s.index}`} {...stylex.props(styles.chip)}>
-                <Icon name={s.loc === undefined ? "artboard" : "cursor"} size={12} />
+                <Icon name={s.loc === undefined ? "frame" : "cursor"} size={12} />
                 <span {...stylex.props(styles.chipText)}>
                   {s.name || (s.loc === undefined ? "this frame" : "this element")}
                 </span>

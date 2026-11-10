@@ -8,8 +8,6 @@ export interface Place {
   readonly views: Readonly<Record<string, View>>;
 }
 
-const key = (designId: string) => `finite.place.${designId}`;
-
 /** A saved place, or `null` when `raw` isn't one (missing, or from an older shape). */
 export function parsePlace(raw: string | null): Place | null {
   if (!raw) return null;
@@ -39,25 +37,3 @@ function parseView(value: unknown): View | null {
 }
 
 const isFiniteNumber = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n);
-
-/**
- * Where this browser last was in `designId`, so a reload or a later visit
- * opens on the same page at the same pixel offset and zoom, and going back
- * to another page shows it as it was left. Local storage
- * can be blocked (private windows), so that reads as no place.
- */
-export function loadPlace(designId: string): Place | null {
-  try {
-    return parsePlace(localStorage.getItem(key(designId)));
-  } catch {
-    return null;
-  }
-}
-
-export function savePlace(designId: string, place: Place) {
-  try {
-    localStorage.setItem(key(designId), JSON.stringify(place));
-  } catch {
-    // Storage is full or blocked: the next visit frames the artboards instead.
-  }
-}

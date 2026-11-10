@@ -530,25 +530,6 @@ export function Labeled({
   );
 }
 
-/** A caption over each half of a two-field row, as the row's column heads. */
-export function Heads({
-  captions,
-  children,
-}: {
-  captions: readonly [string, string];
-  children: ReactNode;
-}) {
-  return (
-    <div {...stylex.props(styles.heads)}>
-      <div {...stylex.props(styles.pair, styles.inset)}>
-        <span {...stylex.props(styles.caption)}>{captions[0]}</span>
-        <span {...stylex.props(styles.caption)}>{captions[1]}</span>
-      </div>
-      {children}
-    </div>
-  );
-}
-
 /** Actions a field keeps out of sight until the pointer is over it or focus is inside it. */
 export function Reveal({
   pinned = false,
@@ -1146,45 +1127,6 @@ export function Segments<T extends string>({
   );
 }
 
-/**
- * A point on a box as a 3×3 grid of dots, like a transform's origin or a
- * gradient's center. `cell` is the one that's on, or `null` when the point
- * is off the grid; clicking a dot picks it.
- */
-export function PointGrid({
-  label,
-  cell,
-  onPick,
-}: {
-  label: string;
-  cell: { x: number; y: number } | null;
-  onPick: (x: number, y: number) => void;
-}) {
-  return (
-    <div role="group" aria-label={label} {...stylex.props(styles.pointGrid)}>
-      {[0, 1, 2].flatMap((y) =>
-        [0, 1, 2].map((x) => {
-          const on = cell?.x === x && cell.y === y;
-          const name = `${["Top", "Middle", "Bottom"][y]} ${["left", "center", "right"][x]}`;
-          return (
-            <button
-              key={`${x}${y}`}
-              type="button"
-              aria-pressed={on}
-              aria-label={name}
-              title={name}
-              onClick={() => !on && onPick(x, y)}
-              {...stylex.props(stylex.defaultMarker(), styles.pointCell, on && raised.control)}
-            >
-              <span {...stylex.props(styles.pointDot, on && styles.pointDotOn)} />
-            </button>
-          );
-        }),
-      )}
-    </div>
-  );
-}
-
 /** One of X, Y, W and H: typed, stepped or scrubbed, shown on the canvas as it changes. */
 export function GeometryField({
   field,
@@ -1354,29 +1296,6 @@ export function MixedRow({ what, onRemove }: { what: string; onRemove: () => voi
         <RowName>Mixed</RowName>
       </RowBody>
     </Row>
-  );
-}
-
-/** The eye on a list's row: hides the entry without losing it, or shows it again. */
-export function EyeButton({ hidden, onClick }: { hidden: boolean; onClick: () => void }) {
-  const title = hidden ? "Show" : "Hide";
-  return (
-    <button
-      type="button"
-      title={title}
-      aria-label={title}
-      aria-pressed={hidden}
-      onClick={onClick}
-      {...stylex.props(
-        styles.fieldButton,
-        styles.eye,
-        raised.ghost,
-        styles.ghostFaint,
-        hidden && styles.eyeOff,
-      )}
-    >
-      <Icon name={hidden ? "eyeOff" : "eye"} size={15} />
-    </button>
   );
 }
 
@@ -1609,7 +1528,6 @@ const styles = stylex.create({
   },
   labeledBody: { display: "flex", flexDirection: "column", gap: space.sm, minWidth: 0 },
   apart: { marginTop: space.sm },
-  heads: { display: "flex", flexDirection: "column", gap: space.xs, minWidth: 0 },
   caption: {
     color: colors.muted,
     fontFamily: fonts.sans,
@@ -1927,9 +1845,6 @@ const styles = stylex.create({
       backgroundColor: colors.brand,
     },
   },
-  /** At the start of a row's body, 3px in from its edge like the accessories at its end. */
-  eye: { marginLeft: -3 },
-  eyeOff: { color: { default: colors.muted, ":hover": colors.text } },
   expandOpen: { rotate: "180deg", color: colors.text },
   rowBody: { cursor: "default", userSelect: "none" },
   rowBodyOpen: {
@@ -1966,40 +1881,6 @@ const styles = stylex.create({
   alignRow: { display: "grid", gridTemplateColumns: "84px 1fr", gap: space.sm },
   /** A strip at a field's height: the segments fill it, with no padding. */
   segments: { flexGrow: 1 },
-  pointGrid: {
-    flexShrink: 0,
-    display: "grid",
-    gridTemplateColumns: "repeat(3, 1fr)",
-    gridTemplateRows: "repeat(3, 1fr)",
-    width: 57,
-    height: 57,
-    padding: space.xs,
-    // The items inside sit 3px in, at 3px radius, so the corners stay concentric.
-    borderRadius: radii.md,
-    backgroundColor: colors.sunk,
-    boxShadow: shadows.field,
-  },
-  pointCell: {
-    display: "grid",
-    placeItems: "center",
-    padding: 0,
-    borderWidth: 0,
-    borderRadius: radii.xs,
-    backgroundColor: "transparent",
-    cursor: "var(--cursor-pointer, pointer)",
-  },
-  pointDot: {
-    width: 3,
-    height: 3,
-    borderRadius: "50%",
-    // The dot under the pointer darkens, so hover never looks like the raised cell that's picked.
-    backgroundColor: { default: colors.faint, [stylex.when.ancestor(":hover")]: colors.text },
-  },
-  pointDotOn: {
-    width: 6,
-    height: 6,
-    backgroundColor: colors.text,
-  },
   popover: {
     position: "fixed",
     zIndex: 50,

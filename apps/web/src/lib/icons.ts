@@ -35,7 +35,7 @@ export type IconName =
   | "close"
   | "wifi"
   | "search"
-  | "artboard"
+  | "frame"
   | "text"
   | "box"
   | "column"
@@ -191,7 +191,7 @@ const SHAPES: Record<IconName, string | ((s: number) => string)> = {
   wifi: path("M8.6 13.4a4.8 4.8 0 0 1 6.8 0M5.2 10a9.6 9.6 0 0 1 13.6 0") + dot(12, 16.8, 1.3),
   search: circle(10.4, 10.4, 6.4) + path("M15.2 15.2 20 20"),
   // A frame: two crossing pairs of lines.
-  artboard: path("M8.8 4v16M15.2 4v16M4 8.8h16M4 15.2h16"),
+  frame: path("M8.8 4v16M15.2 4v16M4 8.8h16M4 15.2h16"),
   text: path("M5.6 7.2V5.6h12.8v1.6M12 5.6v12.8"),
   box: square,
   // Two bars stacked, two side by side, and four cells: the layout kinds next to `box`.

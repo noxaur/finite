@@ -13,7 +13,7 @@ export type Reading =
   | { readonly kind: "value"; readonly raw: string; readonly token: string | null }
   /** Nobody sets it; the browser draws `raw` (from classes, `<style>` blocks or defaults). */
   | { readonly kind: "computed"; readonly raw: string }
-  /** Nobody sets it, and the browser can't say: a script artboard, or a hidden one. */
+  /** Nobody sets it, and the browser can't say: a script frame, or a hidden one. */
   | { readonly kind: "unset" }
   /** The nodes disagree. Typing a value sets it on all of them. */
   | { readonly kind: "mixed" };

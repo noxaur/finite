@@ -38,7 +38,7 @@ export const colors = stylex.defineVars({
   surface: { default: slate[0], [DARK]: slate[800] },
   /** Pressed controls, the current row, and fields. */
   sunk: { default: slate[100], [DARK]: slate[900] },
-  /** Behind artboards on the canvas. */
+  /** Behind frames on the canvas. */
   canvas: { default: slate[100], [DARK]: "#121416" },
   /** Deliberately softer than white or black: a faintly cool off-white in dark mode, a charcoal in light. */
   text: { default: "#2a2f32", [DARK]: "#d8dbdc" },
@@ -66,14 +66,14 @@ export const colors = stylex.defineVars({
   brand: { default: cyan.deep, [DARK]: cyan.top },
   brandText: { default: cyan.deep, [DARK]: cyan.top },
   brandWash: { default: "#e0ecef", [DARK]: "#29383e" },
-  /** Lines drawn over artboard content, on a `halo`, so they read on any artboard in either theme. */
+  /** Lines drawn over frame content, on a `halo`, so they read on any frame in either theme. */
   ink: slate[900],
   halo: slate[0],
   /** The outline on the selection and the node under the pointer, and the selection's corner marks. */
   hover: "#3a9fb0",
   ok: { default: "#15803d", [DARK]: "#4ade80" },
   danger: { default: "#b8341f", [DARK]: "#f0806c" },
-  /** The Inspect tool's drawing and card, over artboards in either theme. Equals `MEASURE_PURPLE`. */
+  /** The Inspect tool's drawing and card, over frames in either theme. Equals `MEASURE_PURPLE`. */
   measure: "#8b3ff0",
   /** Claude's asterisk mark, next to the model's name in the composer. */
   claude: "#d97757",

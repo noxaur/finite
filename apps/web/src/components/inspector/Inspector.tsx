@@ -170,7 +170,7 @@ export function Inspector({
   const header = (title: string, kind?: string) => (
     <header {...stylex.props(styles.top)}>
       <span {...stylex.props(styles.topIcon)}>
-        <Icon name={kind === "Frame" ? "artboard" : "box"} size={15} />
+        <Icon name={kind === "Frame" ? "frame" : "box"} size={15} />
       </span>
       <span {...stylex.props(styles.topName)}>{title}</span>
       {kind && <span {...stylex.props(styles.tag)}>{kind}</span>}

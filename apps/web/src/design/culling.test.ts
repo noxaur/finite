@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { ArtboardIndex, Culler, overlaps, pageBox, visibleBounds } from "./culling";
+import { FrameIndex, Culler, overlaps, pageBox, visibleBounds } from "./culling";
 
 const box = (x: number, y: number, width = 100, height = 100) => ({ x, y, width, height });
 
@@ -23,9 +23,9 @@ describe("overlaps", () => {
   });
 });
 
-describe("ArtboardIndex", () => {
-  it("finds the artboards that overlap an area, and no others", () => {
-    const index = new ArtboardIndex();
+describe("FrameIndex", () => {
+  it("finds the frames that overlap an area, and no others", () => {
+    const index = new FrameIndex();
     index.set("a", box(0, 0));
     index.set("b", box(5000, 0));
     index.set("c", box(0, 9000, 100, 3000));
@@ -35,14 +35,14 @@ describe("ArtboardIndex", () => {
     expect(index.query(box(2000, 2000, 500, 500))).toEqual(new Set());
   });
 
-  it("finds an artboard spanning several cells from any of them", () => {
-    const index = new ArtboardIndex();
+  it("finds a frame spanning several cells from any of them", () => {
+    const index = new FrameIndex();
     index.set("wide", box(0, 0, 10_000, 100));
     expect(index.query(box(9000, 0, 10, 10))).toEqual(new Set(["wide"]));
   });
 
-  it("moves and removes artboards", () => {
-    const index = new ArtboardIndex();
+  it("moves and removes frames", () => {
+    const index = new FrameIndex();
     index.set("a", box(0, 0));
     index.set("a", box(8000, 8000));
     expect(index.query(box(0, 0, 50, 50))).toEqual(new Set());
@@ -53,14 +53,14 @@ describe("ArtboardIndex", () => {
   });
 
   it("handles negative coordinates", () => {
-    const index = new ArtboardIndex();
+    const index = new FrameIndex();
     index.set("a", box(-3000, -3000));
     expect(index.query(box(-3050, -3050, 100, 100))).toEqual(new Set(["a"]));
     expect(index.query(box(0, 0, 100, 100))).toEqual(new Set());
   });
 
   it("answers a query over thousands of cells without walking them", () => {
-    const index = new ArtboardIndex();
+    const index = new FrameIndex();
     for (let i = 0; i < 240; i++) index.set(`b${i}`, box(i * 900, 0, 800, 1000));
     // Zoomed far out: 4 million canvas pixels wide is about 2,000 cells across.
     const found = index.query(box(-1_000_000, -1_000_000, 4_000_000, 4_000_000));
@@ -94,7 +94,7 @@ function setup(sizes: Record<string, { width: number; height: number } | null>) 
 const view = box(0, 0, 1000, 1000);
 
 describe("Culler", () => {
-  it("hides artboards outside the area once they're measured, and not before", () => {
+  it("hides frames outside the area once they're measured, and not before", () => {
     const t = setup({ near: { width: 500, height: 500 }, far: { width: 500, height: 500 } });
     t.culler.add("near", 0, 0);
     t.culler.add("far", 9000, 0);
@@ -130,7 +130,7 @@ describe("Culler", () => {
     expect(t.culled.size).toBe(0);
   });
 
-  it("keeps the measured size of a hidden artboard", () => {
+  it("keeps the measured size of a hidden frame", () => {
     const t = setup({ far: { width: 600, height: 900 } });
     t.culler.add("far", 9000, 100);
     t.culler.setArea(view);
@@ -139,7 +139,7 @@ describe("Culler", () => {
     expect(t.culler.box("far")).toEqual({ x: 9000, y: 100, width: 600, height: 900 });
   });
 
-  it("measures an artboard again when it's edited while hidden, once it's shown", () => {
+  it("measures a frame again when it's edited while hidden, once it's shown", () => {
     const t = setup({ far: { width: 600, height: 900 } });
     t.culler.add("far", 9000, 0);
     t.culler.setArea(view);
@@ -156,7 +156,7 @@ describe("Culler", () => {
     expect(t.culler.size("far")?.height).toBe(1500);
   });
 
-  it("hides what a taller artboard no longer fits after it grows (auto height)", () => {
+  it("hides what a taller frame no longer fits after it grows (auto height)", () => {
     const t = setup({ a: { width: 500, height: 400 }, b: { width: 500, height: 400 } });
     t.culler.add("a", 0, 0);
     t.culler.add("b", 0, 1100);
@@ -175,7 +175,7 @@ describe("Culler", () => {
     expect(t.culled.has("a")).toBe(false);
   });
 
-  it("shows an artboard that was measured small and then grows into the view", () => {
+  it("shows a frame that was measured small and then grows into the view", () => {
     const t = setup({ a: { width: 500, height: 100 } });
     t.culler.add("a", 0, 0);
     t.culler.setArea(box(0, 500, 1000, 1000));
@@ -187,7 +187,7 @@ describe("Culler", () => {
     expect(t.culled.has("a")).toBe(false);
   });
 
-  it("moves a hidden artboard: its box follows, and it shows if it lands in view", () => {
+  it("moves a hidden frame: its box follows, and it shows if it lands in view", () => {
     const t = setup({ a: { width: 500, height: 500 } });
     t.culler.add("a", 9000, 0);
     t.culler.setArea(view);
@@ -199,7 +199,7 @@ describe("Culler", () => {
     expect(t.culled.has("a")).toBe(false);
   });
 
-  it("forgets artboards that leave, as when the page changes", () => {
+  it("forgets frames that leave, as when the page changes", () => {
     const t = setup({ a: { width: 500, height: 500 }, b: { width: 500, height: 500 } });
     t.culler.add("a", 0, 0);
     t.culler.setArea(view);
@@ -214,7 +214,7 @@ describe("Culler", () => {
     expect(t.culler.isCulled("b")).toBe(false);
   });
 
-  it("keeps an artboard shown while it has no layout", () => {
+  it("keeps a frame shown while it has no layout", () => {
     const t = setup({ a: null });
     t.culler.add("a", 9000, 0);
     t.culler.setArea(view);
@@ -224,7 +224,7 @@ describe("Culler", () => {
 });
 
 describe("pageBox", () => {
-  it("maps a hidden artboard's box to the page, not to the origin", () => {
+  it("maps a hidden frame's box to the page, not to the origin", () => {
     // 2x zoom, panned by (10, 20) on a viewport that starts at (5, 5).
     const toPage = (x: number, y: number) => ({ x: 5 + 10 + x * 2, y: 5 + 20 + y * 2 });
     const rect = pageBox(box(1000, 500, 300, 200), toPage);

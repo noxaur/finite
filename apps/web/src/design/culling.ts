@@ -1,7 +1,7 @@
 import type { View } from "./camera";
 import type { Bounds } from "./types";
 
-/** Side of one cell in the artboard index, in canvas pixels. */
+/** Side of one cell in the frame index, in canvas pixels. */
 const CELL = 2048;
 
 /** A query covering more cells than this scans every box instead of walking the cells. */
@@ -28,14 +28,14 @@ export function visibleBounds(view: View, width: number, height: number, margin 
 }
 
 /**
- * Where each artboard sits on the canvas, in a grid of cells, so finding
+ * Where each frame sits on the canvas, in a grid of cells, so finding
  * the ones in an area reads only the cells it covers instead of every box.
  */
-export class ArtboardIndex {
+export class FrameIndex {
   private readonly boxes = new Map<string, Bounds>();
   private readonly cells = new Map<string, Set<string>>();
 
-  /** Adds or moves an artboard. */
+  /** Adds or moves a frame. */
   set(id: string, box: Bounds) {
     this.delete(id);
     this.boxes.set(id, box);
@@ -66,7 +66,7 @@ export class ArtboardIndex {
     this.cells.clear();
   }
 
-  /** Ids of the artboards whose box overlaps `area`. */
+  /** Ids of the frames whose box overlaps `area`. */
   query(area: Bounds): Set<string> {
     const found = new Set<string>();
     if (cellCount(area) > MAX_CELLS) {
@@ -105,7 +105,7 @@ function* cellsOf(box: Bounds): Generator<string> {
   for (let cx = x0; cx <= x1; cx++) for (let cy = y0; cy <= y1; cy++) yield `${cx},${cy}`;
 }
 
-/** Where a hidden artboard would be on the page, given a canvas-to-page mapping. */
+/** Where a hidden frame would be on the page, given a canvas-to-page mapping. */
 export function pageBox(
   box: Bounds,
   toPage: (x: number, y: number) => { x: number; y: number },
@@ -115,11 +115,11 @@ export function pageBox(
   return { x: a.x, y: a.y, width: b.x - a.x, height: b.y - a.y };
 }
 
-/** What the culler asks of whoever draws the artboards. */
+/** What the culler asks of whoever draws the frames. */
 export interface CullHost {
-  /** The laid-out size of a shown artboard, or `null` when it has no layout yet. */
+  /** The laid-out size of a shown frame, or `null` when it has no layout yet. */
   measure(id: string): { width: number; height: number } | null;
-  /** Hides or shows an artboard. */
+  /** Hides or shows a frame. */
   setCulled(id: string, culled: boolean): void;
 }
 
@@ -134,19 +134,19 @@ interface Entry {
 }
 
 /**
- * Decides which artboards to hide. It knows each artboard's position and
- * its last measured size, keeps them in an `ArtboardIndex`, and on each
+ * Decides which frames to hide. It knows each frame's position and
+ * its last measured size, keeps them in an `FrameIndex`, and on each
  * pass hides the ones outside the area in view. Passes are batched to one
  * per frame (`schedule`).
  *
- * An artboard is measured while shown and keeps that size while hidden,
+ * A frame is measured while shown and keeps that size while hidden,
  * so its box is still known. One that has never been measured stays shown
  * until a pass measures it, and one whose size may have changed (`touch`)
  * is measured again before a pass reads it.
  */
 export class Culler {
   private readonly boards = new Map<string, Entry>();
-  private readonly index = new ArtboardIndex();
+  private readonly index = new FrameIndex();
   private area: Bounds | null = null;
   private pending = false;
   private disposed = false;
@@ -160,7 +160,7 @@ export class Culler {
     this.disposed = true;
   }
 
-  /** Starts tracking an artboard. It stays shown until measured. */
+  /** Starts tracking a frame. It stays shown until measured. */
   add(id: string, x: number, y: number) {
     this.boards.set(id, { x, y, dirty: true, culled: false });
     this.request();
@@ -176,7 +176,7 @@ export class Culler {
     this.index.clear();
   }
 
-  /** An artboard moved on the canvas. */
+  /** A frame moved on the canvas. */
   move(id: string, x: number, y: number) {
     const entry = this.boards.get(id);
     if (!entry) return;
@@ -186,7 +186,7 @@ export class Culler {
     this.request();
   }
 
-  /** An artboard's size may have changed, by an edit or by content loading. */
+  /** A frame's size may have changed, by an edit or by content loading. */
   touch(id: string) {
     const entry = this.boards.get(id);
     if (!entry) return;
@@ -204,12 +204,12 @@ export class Culler {
     return this.boards.get(id)?.culled ?? false;
   }
 
-  /** The artboard's last measured size, or `undefined` before it has one. */
+  /** The frame's last measured size, or `undefined` before it has one. */
   size(id: string): { width: number; height: number } | undefined {
     return this.boards.get(id)?.size;
   }
 
-  /** The artboard's box on the canvas from its last measured size. */
+  /** The frame's box on the canvas from its last measured size. */
   box(id: string): Bounds | undefined {
     return this.index.get(id);
   }
@@ -224,14 +224,14 @@ export class Culler {
     });
   }
 
-  /** Measures what needs it, then hides and shows artboards to match the area. */
+  /** Measures what needs it, then hides and shows frames to match the area. */
   flush() {
     const area = this.area;
     if (!area) {
       for (const [id, entry] of this.boards) if (entry.culled) this.setCulled(id, entry, false);
       return;
     }
-    // Measure every artboard before touching any, so layout is flushed once.
+    // Measure every frame before touching any, so layout is flushed once.
     for (const [id, entry] of this.boards) {
       if (!entry.culled && entry.dirty) this.measure(id, entry);
     }

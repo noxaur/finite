@@ -53,7 +53,7 @@ export function LayoutSection({
   const flex = layout === "row" || layout === "column";
   const wrap = read("flex-wrap");
   const wraps = rawOf(wrap)?.startsWith("wrap") ?? false;
-  // An artboard is a frame on the canvas, with nothing around it to keep a margin from.
+  // A top-level frame sits on the canvas, with nothing around it to keep a margin from.
   const board = scope.targets.every((t) => t.parent === null);
   const sizing = useSizeOptions(scope);
   const [eachPadding, setEachPadding] = useState(() => uneven(scope, "padding"));

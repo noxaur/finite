@@ -64,7 +64,7 @@ export function useSizeOptions(scope: Scope): {
   const limited = LIMITS.some(([prop]) => owns(scope, prop));
   const [limits, setLimits] = useState(limited);
   const open = limits || limited;
-  // An artboard's size is its frame, and it has no parent to hug or fill.
+  // A top-level frame's size is its own, and it has no parent to hug or fill.
   const contexts = scope.targets.map((t) => (t.parent === null ? null : contextOf(scope, t)));
   const sized = contexts.every((c) => c !== null);
   const modeOf = (axis: Axis): SizeMode | null => {

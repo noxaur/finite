@@ -122,7 +122,7 @@ export function LayersTree({ canvas }: { canvas: Canvas | null | undefined }) {
               </span>
             </button>
             <span {...stylex.props(styles.icon, on && styles.iconOn)}>
-              <Icon name={row.item.loc === undefined ? "artboard" : "box"} size={15} />
+              <Icon name={row.item.loc === undefined ? "frame" : "box"} size={15} />
             </span>
             <span {...stylex.props(styles.name)}>{row.name}</span>
           </li>
