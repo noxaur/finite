@@ -85,7 +85,7 @@ Do not commit implementation plans, research notes, or agent scratch files. Keep
 
 ## Checks
 
-- Each worktree with its install takes about 1.2 GB. When you run executors in parallel, check `df -h /` first and run at most about five. A full disk stops every agent with `SQLITE_FULL`.
+- Each worktree with its install takes about 1.2 GB. When you run executors in parallel, check `df -h /` first and run at most about five. A full disk stops every agent with `SQLITE_FULL`. `node scripts/worktrees.mjs` lists the worktrees whose work has landed, and `--prune` removes them.
 - Run `vp install` after you pull.
 - `vp run ready` runs everything CI runs before the end-to-end test: `vp check`, every test and every build. It must pass.
 - `vp check --fix` formats and lints.
