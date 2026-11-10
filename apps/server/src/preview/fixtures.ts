@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import type { Previews } from "@finite/protocol";
 import { getChromePath } from "chrome-launcher";
 import puppeteer, { type Browser, TimeoutError } from "puppeteer-core";
+import { describe, test } from "vite-plus/test";
 
 /** Previews with a page open on every design a test starts, so none goes on the idle timer. */
 export function viewed(previews: Previews): Previews {
@@ -28,6 +29,25 @@ export const chromePath = (() => {
     return undefined;
   }
 })();
+
+/** CI's Ubuntu runners block the user namespaces Chrome's sandbox needs. */
+export const chromeArgs: string[] = process.env.CI ? ["--no-sandbox"] : [];
+
+/**
+ * A `describe` for tests that drive Chrome. Without Chrome it skips on a machine of its own, and
+ * fails on CI (`CI` set), where a skip would pass the browser tests without running them.
+ */
+export function describeChrome(name: string, body: () => void) {
+  if (chromePath) return describe(name, body);
+  if (!process.env.CI) return describe.skip(name, body);
+  return describe(name, () => {
+    test("needs Chrome", () => {
+      throw new Error(
+        `${name}: no Chrome found, and CI is set, so these tests can't be skipped. Install Chrome on the runner, or point CHROME_PATH at it.`,
+      );
+    });
+  });
+}
 
 /** A launch that takes longer than this fails the test. */
 const LAUNCH_LIMIT_MS = 30_000;
@@ -146,8 +166,7 @@ export async function launchChrome(): Promise<Browser> {
         executablePath: chromePath!,
         headless: true,
         timeout: LAUNCH_WATCH_MS,
-        // CI's Ubuntu runners block the user namespaces Chrome's sandbox needs.
-        args: process.env.CI ? ["--no-sandbox"] : [],
+        args: chromeArgs,
       }),
       timedOut,
     ]);
@@ -181,6 +200,30 @@ export async function launchChrome(): Promise<Browser> {
   throw new Error(message);
 }
 
+let shared: Promise<Browser> | undefined;
+
+/**
+ * Starts the file's Chrome without waiting for it, so its first launch, the slowest one, runs
+ * beside the fixture installs instead of after them. A failure surfaces in `sharedChrome`.
+ */
+export function warmChrome() {
+  if (!chromePath || shared) return;
+  shared = launchChrome();
+  shared.catch(() => {});
+}
+
+/** The one Chrome a test file drives, launched on first use. Close it with `closeChrome`. */
+export function sharedChrome(): Promise<Browser> {
+  warmChrome();
+  return shared ?? Promise.reject(new Error("no Chrome found"));
+}
+
+export async function closeChrome() {
+  const browser = await shared?.catch(() => undefined);
+  shared = undefined;
+  await browser?.close();
+}
+
 const FIXTURES = fileURLToPath(new URL("../../fixtures/", import.meta.url));
 
 /**
@@ -209,5 +252,6 @@ export async function prepareFixture(name: string, options: { install?: boolean 
       { cwd: root, timeout: 180_000 },
     );
   }
-  return { root, remove: () => fs.rmSync(root, { recursive: true, force: true }) };
+  // Deleting a node_modules takes seconds, so callers delete their copies side by side.
+  return { root, remove: () => fs.promises.rm(root, { recursive: true, force: true }) };
 }

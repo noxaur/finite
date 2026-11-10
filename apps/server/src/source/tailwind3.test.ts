@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vite-plus/test";
 import { editClasses } from "./tailwind.ts";
 import { configTheme, tailwind3Config, v3Theme } from "./tailwind3.ts";
 
@@ -248,6 +248,13 @@ export default {
   it("falls back to an empty theme when the config throws", async () => {
     const broken = path.join(root, "tailwind.config.cjs");
     fs.writeFileSync(broken, `throw new Error("nope");\n`);
-    expect(await configTheme(root, broken)).toEqual({});
+    // The expected failure is logged for people; keep it out of the test output.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(await configTheme(root, broken)).toEqual({});
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("failed"), "Error: nope");
+    } finally {
+      warn.mockRestore();
+    }
   }, 30_000);
 });

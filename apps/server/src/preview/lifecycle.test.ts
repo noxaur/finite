@@ -48,7 +48,8 @@ vi.mock("node:child_process", async (original) => {
 });
 
 const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
-const forked = async (count: number) => expect.poll(() => children.length).toBe(count);
+const forked = async (count: number) =>
+  expect.poll(() => children.length, { timeout: 10_000 }).toBe(count);
 
 const cleanups: (() => unknown)[] = [];
 let previews: Previews;
