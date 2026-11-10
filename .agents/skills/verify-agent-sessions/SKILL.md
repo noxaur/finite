@@ -11,32 +11,30 @@ description: TLA+ model of an agent thread's Claude Code session. Use when a cha
 
 1. Open the coverage table. If the diff touches nothing in it, you're done.
 2. Read the changed code against the action named in the table. Mirror each behaviour change in `model/AgentSession.tla`, keeping one action per step: cut at every point where the CLI, the consume loop or snooze/settle can act. Done when every changed line maps to an action or to "Left out".
-3. Run `.agents/skills/verify-agent-sessions/check.sh` from the repo root. It takes about 80 seconds. Exit 0 means every row matched. Exit 2 means TLC couldn't run or the model has an error: read the kept `.out` file.
-4. For each `MISMATCH`, read the result with `/statechart`, using a config of the row's variant plus that rule, and `model/view.ts`. Work in a scratch folder.
+3. Run `.agents/skills/verify-agent-sessions/check.sh` from the repo root. It took 196 seconds on a busy Mac (load average 30 to 100). Exit 0 means every row matched. Exit 2 means TLC couldn't run or the model has an error: read the kept `.out` file.
+4. For each `MISMATCH`, read the counterexample in the kept `.out` file: TLC lists each state from the start to the broken rule.
    - `expected holds, got breaks`: the path is a new way to break the rule. Replay it step by step against `apps/server/src/agent/agent.test.ts`'s fake SDK. If it reproduces, it's a real bug. If it doesn't, the model is wrong: fix the model.
    - `expected breaks, got holds` on a `current*` row: your change fixed that finding. Flip the row to `holds`, remove the finding below, and keep the code path true in the model.
-5. When the check matches and the model describes the code, set **Last synced** to the new commit. Moving it is a claim that you read the coverage table's code at that commit.
-
-To catch up after changes that skipped this, use `/maintain-formal-verification-skill`.
+5. When the check matches and the model describes the code, confirm every row of the coverage table against the code.
 
 ## Rules
 
 A rule is checked only while no lock section is running or waiting, except where noted.
 
-| Rule                             | In plain words                                                                                                                                            | Now   |
-| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- |
-| `ShownRunningHasATurn`           | A thread shown running has a session with a turn in it.                                                                                                   | holds |
-| `TurnInFlightIsShown`            | A turn Claude Code is working on is shown running.                                                                                                        | holds |
-| `NoQueuedMessageLost`            | A message taken off the queue reaches a session.                                                                                                          | holds |
-| `QueueOnlyWaitsAfterStopOrCrash` | A queued message waits only because you pressed Stop or the session crashed. The chips at `Composer.tsx:199` keep it visible and sendable in those cases. | holds |
-| `StopNeverSendsTheQueue`         | Stop never sends the next queued message.                                                                                                                 | holds |
-| `StopFlagEndsWithItsTurn`        | What Stop recorded for a turn ends with that turn; the next turn is unaffected.                                                                           | holds |
-| `ProdGrantEndsWithItsTurn`       | A `move_to_prod` grant applies to the turn that asked for it.                                                                                             | holds |
-| `StoppedResultLeavesLaterGrant`  | A stopped turn's late result doesn't take a later turn's `move_to_prod` grant.                                                                            | holds |
-| `ReplacedSetupIsRemoved`         | A setup design that `finish_setup` replaced is removed when its session goes.                                                                             | holds |
-| `EveryLiveHasATurnOrIdleTimer`   | A session in `lives` has a turn or an idle timer.                                                                                                         | holds |
-| `OneSessionPerThread`            | A thread has at most one Claude Code process.                                                                                                             | holds |
-| `MessageRevivesThread`           | A delivered message clears snooze and settle.                                                                                                             | holds |
+| Rule                             | In plain words                                                                                                                                                       | Now   |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- |
+| `ShownRunningHasATurn`           | A thread shown running has a session with a turn in it.                                                                                                              | holds |
+| `TurnInFlightIsShown`            | A turn Claude Code is working on is shown running.                                                                                                                   | holds |
+| `NoQueuedMessageLost`            | A message taken off the queue reaches a session.                                                                                                                     | holds |
+| `QueueOnlyWaitsAfterStopOrCrash` | A queued message waits only because you pressed Stop or the session crashed. The chips (`QueuedChip` in `Composer.tsx`) keep it visible and sendable in those cases. | holds |
+| `StopNeverSendsTheQueue`         | Stop never sends the next queued message.                                                                                                                            | holds |
+| `StopFlagEndsWithItsTurn`        | What Stop recorded for a turn ends with that turn; the next turn is unaffected.                                                                                      | holds |
+| `ProdGrantEndsWithItsTurn`       | A `move_to_prod` grant applies to the turn that asked for it.                                                                                                        | holds |
+| `StoppedResultLeavesLaterGrant`  | A stopped turn's late result doesn't take a later turn's `move_to_prod` grant.                                                                                       | holds |
+| `ReplacedSetupIsRemoved`         | A setup design that `finish_setup` replaced is removed when its session goes.                                                                                        | holds |
+| `EveryLiveHasATurnOrIdleTimer`   | A session in `lives` has a turn or an idle timer.                                                                                                                    | holds |
+| `OneSessionPerThread`            | A thread has at most one Claude Code process.                                                                                                                        | holds |
+| `MessageRevivesThread`           | A delivered message clears snooze and settle.                                                                                                                        | holds |
 
 ## Findings at the last sync
 
@@ -60,11 +58,9 @@ The `current` row covers 3 sends, 1 Stop and 1 crash. `current-four-sends` cover
 
 Timing assumptions: a steer's turn starts well inside the 3 s grace (measured 37 ms), and a crash doesn't land on the 10-minute idle timer.
 
-Left out: `editQueued` (inside the lock, only removes or rewrites), `writing` file locks, `sessionId` and resume, spawned child threads, `stopDesign` (ends in the design's removal), `awaitingSince`, `settledAt` (`settle`, `granted`), event mapping and which errors are suppressed, a deliver that rejects while taking a message off the queue, a store write that fails after deliver marks running, a `move_to_prod` with no call id (any stopped result revokes it, which fails safe), a grant that lands after its own turn's result was handled, and a finished or steered result revoking a later turn's grant (`StoppedResultLeavesLaterGrant` covers stopped results only). A server restart appears only in `fixed`: `store/open.ts:124` repairs `running` before anything reads it.
+Left out: `editQueued` (inside the lock, only removes or rewrites), `writing` file locks, `sessionId` and resume, spawned child threads, `stopDesign` (ends in the design's removal), `awaitingSince`, `settledAt` (`settle`, `granted`), event mapping and which errors are suppressed, a deliver that rejects while taking a message off the queue, a store write that fails after deliver marks running, a `move_to_prod` with no call id (any stopped result revokes it, which fails safe), a grant that lands after its own turn's result was handled, and a finished or steered result revoking a later turn's grant (`StoppedResultLeavesLaterGrant` covers stopped results only). A server restart appears only in `fixed`: `openDesign` in `store/open.ts` repairs `running` before anything reads it.
 
 ## Coverage
-
-**Last synced:** `d30a9cd8229bbd1aaa14a0a6fa10d74b9bbb34e8`
 
 | File                                   | Function                                             | Backs                                                                    |
 | -------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------ |

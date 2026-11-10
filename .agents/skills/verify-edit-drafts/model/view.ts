@@ -1,4 +1,4 @@
-// /statechart view for EditDrafts.tla. Pair it with chart-inspector.cfg or chart-composer.cfg.
+// The wording of EditDrafts.tla's states for a chart. Pair it with chart-inspector.cfg or chart-composer.cfg. check.sh doesn't read it.
 type V = Record<string, any>;
 
 const inspectorState = ({ insp: i }: V) => {

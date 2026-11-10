@@ -1,4 +1,4 @@
-// The words on the statechart: what the person sees in the text and on the canvas.
+// The wording of the chart: what the person sees in the text and on the canvas. check.sh doesn't read it.
 const size = (s: unknown) => Object.keys((s ?? {}) as object).length;
 const waiting = (v: any) =>
   size(v.preLock) > 0 || size(v.queue.a) > 0 || size(v.queue.b) > 0 || size(v.replies) > 0;

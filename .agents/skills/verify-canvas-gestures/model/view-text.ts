@@ -1,4 +1,4 @@
-// How /statechart words the "You edit text on the canvas" chart (config: chart-text.cfg).
+// The wording of the "You edit text on the canvas" chart (config: chart-text.cfg). check.sh doesn't read it.
 export const title = "You edit text on the canvas";
 
 export const state = (v: any) => {

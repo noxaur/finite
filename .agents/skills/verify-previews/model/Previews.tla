@@ -58,12 +58,12 @@ Settle(x) ==
     IF x.service = "up" /\ ~x.runHolds /\ ~x.restartHolds /\ x.preparing = {}
     THEN [x EXCEPT !.service = "none"] ELSE x
 
-\* preview/index.ts:407 stopRun, up to its first await.
+\* preview/index.ts stopRun, up to its first await.
 StopSync(x) == Settle([x EXCEPT
     !.status = "none", !.idleTimer = FALSE, !.restarting = FALSE, !.runHolds = FALSE,
     !.child = "none", !.dying = x.dying + IF x.child = "alive" THEN 1 ELSE 0])
 
-\* preview/index.ts:163 start. It overwrites runs[id] without stopping what was there.
+\* preview/index.ts start. It overwrites runs[id] without stopping what was there.
 Start(x) ==
     LET id == x.runId + 1
         y == [x EXCEPT !.runId = id, !.runHolds = FALSE,
@@ -83,13 +83,13 @@ CallerIn(x, c) == CASE c = "page" -> x.page [] c = "agent" -> x.agent [] OTHER -
 \* What the caller does once ensure() has returned. `ToolFinishes` is when it settles.
 After(x, c) == SetCaller(x, c, IF c = "page" /\ ~FixKeepAlive THEN "idle" ELSE "using")
 
-\* hub.release, and the finally in preview/index.ts:440 ensure: a run nobody watches gets the timer.
+\* hub.release, and the finally in preview/index.ts ensure: a run nobody watches gets the timer.
 ArmIfUnwatched(x) ==
     IF ~x.viewer /\ x.status # "none" THEN [x EXCEPT !.idleTimer = TRUE] ELSE x
 
 SomeoneStopping(x) == \E c \in Callers : CallerIn(x, c) = "stopping"
 
-\* preview/index.ts:440 ensure and :420 up, up to its await. With no child to wait for, the await
+\* preview/index.ts ensure and up, up to its await. With no child to wait for, the await
 \* is a microtask, so the start is the same step. Callers during a replacement share it.
 Ensure(x, c) ==
     LET y == CancelIdle(x)
@@ -101,7 +101,7 @@ Ensure(x, c) ==
 
 \* --- A person opens and leaves the design -----------------------------------------------------
 
-\* handlers.ts:71 subscribe with store/index.ts:148 startInstall. A failed job a late chunk marked
+\* handlers.ts subscribe with store/index.ts startInstall. A failed job a late chunk marked
 \* "running" is handed back as if it were still going, and its `done` has already rejected.
 Subscribe ==
     /\ Life /\ ~s.viewer /\ ~s.removed /\ s.visits < MaxVisits
@@ -114,27 +114,27 @@ Subscribe ==
             /\ s' = [x EXCEPT !.page = "afterInstall", !.install = "running", !.finished = FALSE,
                               !.outcome = "none", !.kept = TRUE, !.retries = s.retries + 1]
 
-\* hub.ts:118 unsubscribe, hub.ts:122 release, preview/index.ts:476 idle. idle() is a no-op with
+\* hub.ts unsubscribe, hub.ts release, preview/index.ts idle. idle() is a no-op with
 \* no run, so a viewer who leaves while nothing runs leaves no record of it.
 Unsubscribe ==
     /\ Life /\ s.viewer
     /\ s' = [s EXCEPT !.viewer = FALSE, !.idleTimer = s.status # "none" \/ s.idleTimer]
 
-\* preview/index.ts:141, the timer's callback.
+\* preview/index.ts startIdle, the timer's callback.
 IdleTimerFires ==
     /\ Life /\ s.idleTimer
     /\ s' = StopSync(s)
 
-\* handlers.ts:49 design.remove, mcp/tools.ts:279, agent/index.ts:596 removeSetup, and
-\* preview/index.ts:467 remove: stops, and refuses later ensures.
+\* handlers.ts design.remove, mcp/tools.ts remove, agent/index.ts removeSetup, and
+\* preview/index.ts remove: stops, and refuses later ensures.
 RemoveDesign ==
     /\ Life /\ ~s.removed /\ s.removes < Removes
     /\ s' = [StopSync(s) EXCEPT !.removed = TRUE, !.removes = s.removes + 1]
 
 \* --- The dependency install (store/install.ts) ------------------------------------------------
 
-\* install.ts:65 finish, on the child's `exit`. Success also runs install.ts's job.done.then
-\* (store/index.ts:160), which forgets the job.
+\* install.ts finish, on the child's `exit`. Success also runs install.ts's job.done.then
+\* (store/index.ts startInstall), which forgets the job.
 InstallSucceeds ==
     /\ Life /\ s.install = "running" /\ ~s.finished
     /\ s' = [s EXCEPT !.install = "done", !.finished = TRUE, !.outcome = "ok",
@@ -144,13 +144,13 @@ InstallFails ==
     /\ Life /\ s.install = "running" /\ ~s.finished
     /\ s' = [s EXCEPT !.install = "error", !.finished = TRUE, !.outcome = "failed"]
 
-\* install.ts:57 append. Node can deliver a chunk after `exit`; append drops it once `finished`.
+\* install.ts append. Node can deliver a chunk after `exit`; append drops it once `finished`.
 LateOutput ==
     /\ Life /\ s.finished /\ s.chunks < LateChunks
     /\ s' = [s EXCEPT !.chunks = s.chunks + 1,
                       !.install = IF GuardLateChunk THEN s.install ELSE "running"]
 
-\* handlers.ts:77-78, the .then after install.done.
+\* handlers.ts subscribe, the .then after install.done.
 InstallDoneEnsures ==
     /\ Life /\ s.page = "afterInstall" /\ s.outcome = "ok"
     /\ IF FixRemove /\ s.removed
@@ -163,7 +163,7 @@ InstallFailEndsWait ==
 
 \* --- Agents and MCP use the preview without being viewers ---------------------------------------
 
-\* agent/tools.ts:291,511,537,555, agent/index.ts:616 finish_setup and mcp/tools.ts:193 ensure. The
+\* agent/tools.ts's ensure calls, agent/index.ts finishSetup and mcp/tools.ts previewUp. The
 \* model starts tools only once the dependencies are in; mcp/tools.ts refuses before that, and a dev
 \* server has nothing to run.
 ToolEnsures(c) ==
@@ -175,14 +175,14 @@ ToolEnsures(c) ==
 
 \* The caller's ensure has settled: every caller's run goes on the timer if nobody watches it.
 \* The code arms it in ensure's finally; a tool still using the run counts as not Settled, so the
-\* rule can't tell that from arming here, when the tool's result is back (mcp/tools.ts:206).
+\* rule can't tell that from arming here, when the tool's result is back (mcp/tools.ts withPreview).
 ToolFinishes(c) ==
     /\ Life /\ CallerIn(s, c) = "using"
     /\ s.status \in {"ready", "error", "needs-setup", "none"}
     /\ LET x == SetCaller(s, c, "idle")
        IN s' = IF c = "mcp" \/ FixKeepAlive THEN ArmIfUnwatched(x) ELSE x
 
-\* preview/index.ts:430-433, after `stopRun`. The callers that joined take the run the first one
+\* preview/index.ts up, after `stopRun`. The callers that joined take the run the first one
 \* started.
 EnsureResumes(c) ==
     /\ Life /\ CallerIn(s, c) = "stopping" /\ s.dying = 0
@@ -193,12 +193,12 @@ EnsureResumes(c) ==
 
 \* --- The run and its child (preview/index.ts) ---------------------------------------------------
 
-\* preview/index.ts:190-199, detection ends.
+\* preview/index.ts start, detection ends.
 DetectionEnds ==
     /\ Life /\ s.status = "detecting"
     /\ s' = [s EXCEPT !.status = "needs-setup"]
 
-\* preview/index.ts:234-239. A stale run lets go and forks nothing (line 235).
+\* preview/index.ts start, once workspaces.prepare is done. A stale run lets go and forks nothing.
 PrepareSucceeds(id) ==
     /\ Life /\ id \in s.preparing
     /\ LET x == [s EXCEPT !.preparing = s.preparing \ {id}, !.service = "up", !.restartHolds = FALSE]
@@ -209,7 +209,7 @@ PrepareSucceeds(id) ==
           THEN s' = Settle(x)
           ELSE s' = [x EXCEPT !.orphans = s.orphans + 1]
 
-\* preview/index.ts:241-248, setup or a service failed.
+\* preview/index.ts start, when workspaces.prepare fails: setup or a service failed.
 PrepareFails(id) ==
     /\ Life /\ id \in s.preparing /\ s.faults < Faults
     /\ LET x == Settle([s EXCEPT !.preparing = s.preparing \ {id}, !.restartHolds = FALSE,
@@ -217,13 +217,13 @@ PrepareFails(id) ==
        IN s' = IF id = s.runId /\ s.status = "starting"
                THEN [x EXCEPT !.status = "error"] ELSE x
 
-\* preview/index.ts:300-305, the child's "ready" message.
+\* preview/index.ts startHost, the child's "ready" message.
 HostReady ==
     /\ Life /\ s.status = "starting" /\ s.child = "alive"
     /\ s' = [s EXCEPT !.status = "ready"]
 
-\* preview/index.ts:313 `exit` and :286 fail. A host that reports `error` exits straight after
-\* (vite-host.mjs:60), so that message is this step too.
+\* preview/index.ts startHost's `exit` handler and its fail. A host that reports `error` exits straight after
+\* (vite-host.mjs), so that message is this step too.
 ChildCrashes ==
     /\ Life /\ s.child = "alive" /\ s.faults < Faults
     /\ IF ObserveChildExit
@@ -231,12 +231,12 @@ ChildCrashes ==
                                   !.faults = s.faults + 1])
        ELSE s' = [s EXCEPT !.child = "none", !.faults = s.faults + 1]
 
-\* preview/index.ts:399-402: a child that was told to stop has exited.
+\* preview/index.ts stopChild: a child that was told to stop has exited.
 StoppedChildExits ==
     /\ Life /\ s.dying > 0
     /\ s' = [s EXCEPT !.dying = s.dying - 1]
 
-\* workspace.ts:155-161 tells each holder; preview/index.ts:222-229 is the holder. It stops the
+\* workspace.ts tells each holder when a service exits; preview/index.ts start's onExit is the holder. It stops the
 \* dev server too.
 ServiceExits ==
     /\ Life /\ s.service = "up" /\ s.status \in {"starting", "ready"} /\ s.faults < Faults
@@ -247,14 +247,14 @@ ServiceExits ==
                THEN [x EXCEPT !.child = "none", !.dying = s.dying + 1]
                ELSE x
 
-\* preview/index.ts:353 then restart at :362, up to its await.
+\* preview/index.ts reload then restart, up to its await.
 FiniteJsonChanges ==
     /\ Life /\ s.kind = "workspace" /\ s.status = "ready" /\ s.edits < ConfigEdits
     /\ s' = [StopSync([s EXCEPT !.restartHolds = s.runHolds, !.runHolds = FALSE,
                                 !.edits = s.edits + 1, !.restartIdle = s.idleTimer])
              EXCEPT !.restarting = TRUE]
 
-\* preview/index.ts:367-371, after `await stopped`.
+\* preview/index.ts restart, after `await stopped`.
 RestartResumes ==
     /\ Life /\ s.restarting /\ s.dying = 0
     /\ LET x == [s EXCEPT !.restarting = FALSE]
@@ -262,7 +262,7 @@ RestartResumes ==
           THEN s' = Settle([x EXCEPT !.restartHolds = FALSE])
           ELSE s' = Start(x)
 
-\* --- Next.js frame registry (packages/vite-plugin/src/next/index.ts:343-354) --------------------
+\* --- Next.js frame registry (packages/vite-plugin/src/next/index.ts handle) --------------------
 
 \* A request for a file not yet on the list adds it and waits for the compile; one for a file still
 \* compiling waits on that same `compiling` entry (ShareRegistryWait). Without it, it went straight to
@@ -279,7 +279,7 @@ NextRecompiles ==
     /\ s.kind = "next" /\ s.registered /\ ~s.compiled
     /\ s' = [s EXCEPT !.compiled = TRUE]
 
-\* next/index.ts:390 untilRegistered's poll stops getting 404.
+\* next/index.ts untilRegistered's poll stops getting 404.
 FrameWaitEnds(r) ==
     /\ s.kind = "next" /\ s.req[r] = "waiting" /\ s.compiled
     /\ s' = [s EXCEPT !.req[r] = "ok"]

@@ -13,13 +13,13 @@ description: TLA+ model of the page's connection to the Finite server. Use when 
 .agents/skills/verify-client-sync/check.sh
 ```
 
-It takes about 40 seconds and needs Java and TLC 2.19, at `$HOME/.local/share/tlaplus/tla2tools.jar` or wherever `TLA2TOOLS` points. Each row of `model/expected.tsv` is one TLC run of one rule on one variant.
+It took 268 seconds on a busy Mac (load average 25 to 45). It needs Java and TLC 2.19, at `$HOME/.local/share/tlaplus/tla2tools.jar` or wherever `TLA2TOOLS` points. Each row of `model/expected.tsv` is one TLC run of one rule on one variant.
 
 - Exit 0: every rule matches the record, including the known bugs.
 - Exit 1: a `MISMATCH` row names the rule and the file with TLC's trace.
 - Exit 2: TLC couldn't finish, usually a model error or a deadlock. Read the kept output.
 
-Read every result with `/statechart`: it turns a violation into its shortest path in plain words and draws the states when the rules hold. `model/view.ts` is its view for the flow "Your connection drops while you work", and `model/chart.cfg` is the config for it: the request alone with small budgets, to fit the chart limit.
+Read a violation in the kept `.out` file: TLC lists each state from the start to the broken rule. `model/chart.cfg` is the request alone with small budgets, and `model/view.ts` words its states, for drawing the flow "Your connection drops while you work". `check.sh` doesn't use either.
 
 ## Rules
 
@@ -39,10 +39,10 @@ Read every result with `/statechart`: it turns a violation into its shortest pat
 
 ## Does your change touch this?
 
-Compare with the sync commit:
+Check whether your diff touches these files:
 
 ```bash
-git diff 4025ebd6712ebb76e092381adc0457c218cd56de -- apps/web/src/client/finite.ts apps/server/src/hub.ts apps/server/src/replies.ts apps/server/src/handlers.ts
+git diff --stat $(git merge-base HEAD main) -- apps/web/src/client/finite.ts apps/server/src/hub.ts apps/server/src/replies.ts apps/server/src/handlers.ts
 ```
 
 Changes in `handlers.ts` matter only inside `hello` (its `memory`), `subscribe` and `unsubscribe`. An empty or unrelated diff needs no model change, so run the check only if you edited the model.
@@ -51,17 +51,15 @@ Changes in `handlers.ts` matter only inside `hello` (its `memory`), `subscribe` 
 
 1. Find the actions the change affects in the coverage table. An action is one synchronous run: a new `await` or socket callback splits it into two.
 2. Edit the action in `ClientSync.tla` so it says what the code now says, before you look at any rule.
-3. Run the check. For a mismatch, read the trace with `/statechart`, then replay it step by step on the real client, in `finite.test.ts` with its `FakeSocket`.
+3. Run the check. For a mismatch, read the trace in the kept `.out` file, then replay it step by step on the real client, in `finite.test.ts` with its `FakeSocket`.
    - The replay reproduces it: the code has a bug. Report it, or fix it and flip the row.
    - The replay doesn't reproduce it: the model is wrong. Fix the action to match the code.
 4. For an intended behaviour change, update the rule and its plain-words row together. Every rule keeps a row that shows it failing: a `fixed` variant for today's bugs, or a broken variant.
-5. Move `Last synced` forward only after you've confirmed every row of the coverage table against the new commit. `/maintain-formal-verification-skill` brings the model back in line after changes that skipped this.
+5. Confirm every row of the coverage table against the code before you finish.
 
 Keep a rule's meaning when it goes red. Weakening a rule to pass hides the bug it found.
 
 ## Coverage
-
-Last synced: `4025ebd6712ebb76e092381adc0457c218cd56de`
 
 | File                            | Function                          | Actions                                                                 | Rules                                                             |
 | ------------------------------- | --------------------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------- |
