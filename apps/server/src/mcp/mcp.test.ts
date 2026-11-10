@@ -237,6 +237,8 @@ describe("/mcp sessions", () => {
       ["comments", "designs", "edit", "measure", "read", "render", "undo"].sort(),
     );
     expect(client.getInstructions()).toContain("seven tools");
+    // Claude Code drops whatever comes after the first 4,096 characters.
+    expect(client.getInstructions()!.length).toBeLessThanOrEqual(4096);
   });
 });
 

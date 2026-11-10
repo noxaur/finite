@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Actor, Canvas, CanvasPatch, DesignChange, Frame } from "@finite/protocol";
+import type { Actor, Canvas, CanvasPatch, DesignChange, Frame, OpenDesign } from "@finite/protocol";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 import { BRAND_BOARD, brandBoard, ensureBrandBoard } from "./brand.ts";
 import { detectProject } from "./detect.ts";
@@ -27,6 +27,28 @@ function newStore(dataDir: string): FileStore {
   const store = createStore({ dataDir });
   cleanup.push(() => store.close());
   return store;
+}
+
+/**
+ * Writes a file the way a git pull does and returns the change the design reports for it. On macOS
+ * fs.watch returns before its FSEvents stream is live, drops every write made until then and gives
+ * no sign when it is, so a busy machine can lose the first write. The same text is written again
+ * until the design reports one (reading it a second time changes nothing).
+ */
+async function pull(open: OpenDesign, file: string, value: object): Promise<DesignChange> {
+  let seen: DesignChange | undefined;
+  const reported = new Promise<DesignChange>((resolve) => {
+    const off = open.on((change) => {
+      seen = change;
+      off();
+      resolve(change);
+    });
+  });
+  while (!seen) {
+    await fs.writeFile(file, JSON.stringify(value));
+    await Promise.race([reported, new Promise((resolve) => setTimeout(resolve, 250))]);
+  }
+  return reported;
 }
 
 /** A project folder with this package.json and these files. */
@@ -774,30 +796,19 @@ describe("canvases", () => {
   it("passes on edits made outside Finite, like a git pull", async () => {
     const { root, open } = await connected();
     const [routes] = (await open.canvases()).filter((c) => c.name === "Routes");
-    const seen = new Promise<DesignChange>((resolve) => open.on(resolve));
     const file = path.join(root, ".finite/canvases", `${routes!.id}.json`);
-    // On macOS fs.watch starts its FSEvents stream asynchronously and drops writes made before it
-    // is live, which a busy machine stretches past the first write. Write until the watcher sees one.
-    let pulling = fs.writeFile(file, JSON.stringify({ ...routes, name: "Pages" }));
-    await pulling;
-    const again = setInterval(() => {
-      pulling = fs.writeFile(file, JSON.stringify({ ...routes, name: "Pages" }));
-    }, 250);
-    cleanup.push(async () => {
-      clearInterval(again);
-      await pulling;
+    expect(await pull(open, file, { ...routes, name: "Pages" })).toMatchObject({
+      type: "canvas",
+      canvas: { id: routes!.id, name: "Pages" },
     });
-    expect(await seen).toMatchObject({ type: "canvas", canvas: { id: routes!.id, name: "Pages" } });
     expect((await open.canvases()).find((c) => c.id === routes!.id)?.name).toBe("Pages");
   });
 
   it("lists a page a git pull adds by when it was made, not when it arrived", async () => {
     const { root, open } = await connected();
     const [routes] = await open.canvases();
-    const seen = new Promise<DesignChange>((resolve) => open.on(resolve));
     const pulled: Canvas = { ...routes!, id: "pulled", name: "Pulled", createdAt: 0, frames: [] };
-    await fs.writeFile(path.join(root, ".finite/canvases/pulled.json"), JSON.stringify(pulled));
-    await seen;
+    await pull(open, path.join(root, ".finite/canvases/pulled.json"), pulled);
     expect((await open.canvases()).map((c) => c.name)).toEqual([
       "Pulled",
       "Routes",

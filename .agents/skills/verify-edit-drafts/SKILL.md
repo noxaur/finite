@@ -9,17 +9,17 @@ description: TLA+ model of half-finished work in Finite's web UI. Use when a cha
 
 ## Check a change
 
-1. Run `git diff --name-only 4025ebd6712ebb76e092381adc0457c218cd56de -- apps/web/src apps/server/src/agent/index.ts`. If nothing in the coverage table appears, you're done.
+1. Run `git diff --name-only $(git merge-base HEAD main) -- apps/web/src apps/server/src/agent/index.ts`. If nothing in the coverage table appears, you're done.
 2. Read the changed code against the actions the table names. Each action is one synchronous stretch of code, split at every `await`.
 3. Make the model say what the code now does: edit that action, or add a change name to `Changes` in `model/current.cfg` when the code now matches a variant.
-4. Run `.agents/skills/verify-edit-drafts/check.sh`. It takes about a minute. Exit 0 means every row of `model/expected.tsv` matched. Exit 1 prints `MISMATCH` rows and the folder holding TLC's output. Exit 2 means TLC couldn't run.
-5. Read every result with `/statechart`, using `model/view.ts` and `model/chart-inspector.cfg` or `model/chart-composer.cfg`. It gives the shortest path to a broken rule in plain words, and a chart when the rules hold.
+4. Run `.agents/skills/verify-edit-drafts/check.sh`. It took 119 seconds on a busy Mac (load average 36). Exit 0 means every row of `model/expected.tsv` matched. Exit 1 prints `MISMATCH` rows and the folder holding TLC's output. Exit 2 means TLC couldn't run.
+5. Read every counterexample in the kept `.out` file. It lists each state from the start to the broken rule. `model/chart-inspector.cfg`, `model/chart-composer.cfg` and `model/view.ts` are small configs and wording for drawing a flow; `check.sh` doesn't use them.
 
 ## Read a mismatch
 
 - `current RULE expected holds, got breaks`: the change broke a promise. Replay the shortest path against the real code, one step per action. If it happens, it's a real bug. Fix the code.
 - `current RULE expected breaks, got holds`: a recorded bug is gone. Confirm the fix in the code, change that row to `holds`, delete the finding below, and add a variant that removes the fix so the rule can still fail.
-- The path needs a step the code can't take (an order the browser never produces, an `await` that isn't there): the model is wrong. Fix the action and say which line proves it.
+- The path needs a step the code can't take (an order the browser never produces, an `await` that isn't there): the model is wrong. Fix the action and say which code proves it.
 - `fixed` or a broken-variant row mismatching means the variant no longer does what its name says. Fix the variant. Never drop a rule or a row to get a pass.
 
 ## Rules
@@ -56,11 +56,9 @@ None open. Every rule holds on `current`; the regression tests are `editDrafts.t
 
 Two messages, two presses of Send now, two uploads, two comment drafts, one DraftField, one scrub label. The areas don't interact, so each is explored alone.
 
-Left out: a reply that's lost after the server applied the request (`verify-client-sync`), the agent's own turn lifecycle (`verify-agent-sessions`), editing a queued chip's text, the comment box's own text (Comments.tsx:254 keeps what's typed during a Post), a Send now whose requeue also fails (the words are lost then), removing a chip mid-upload, the system folder picker, and the inspector rebuilding its editor on a selection change. A pass covers these orders of these steps, and says nothing about rendering or real network timing.
+Left out: a reply that's lost after the server applied the request (`verify-client-sync`), the agent's own turn lifecycle (`verify-agent-sessions`), editing a queued chip's text, the comment box's own text (Comments.tsx Composer's `submit` keeps what's typed during a Post), a Send now whose requeue also fails (the words are lost then), removing a chip mid-upload, the system folder picker, and the inspector rebuilding its editor on a selection change. A pass covers these orders of these steps, and says nothing about rendering or real network timing.
 
 ## Coverage
-
-Last synced: 4025ebd6712ebb76e092381adc0457c218cd56de. Move this forward only after confirming the model describes the code at the new commit.
 
 | File                                               | Function                                           | Actions                                                                     | Rules                                                                                                        |
 | -------------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
@@ -77,5 +75,3 @@ Last synced: 4025ebd6712ebb76e092381adc0457c218cd56de. Move this forward only af
 | `apps/web/src/canvas/tools/comment.ts`             | draft placement                                    | `YouPlaceACommentDraft`                                                     | `NewerDraftSurvives`                                                                                         |
 | `apps/web/src/canvas/editor.ts`                    | `cancelCommentDraft`                               | `ThePostIsAnswered`, `YouCancelTheDraft`                                    | `NewerDraftSurvives`                                                                                         |
 | `apps/web/src/components/CommandMenu.tsx`          | `finish`, `back`, `go`                             | menu actions                                                                | menu rules                                                                                                   |
-
-To bring the model back in line after changes that skipped this check, use `/maintain-formal-verification-skill`.
