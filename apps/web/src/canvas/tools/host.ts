@@ -188,11 +188,3 @@ export interface ToolHost {
   fitAll(): void;
   fitSelection(): void;
 }
-
-/** A `down` for a tool whose work hasn't landed; unreachable while the tool is hidden. */
-export const notBuilt =
-  (what: string) =>
-  (host: ToolHost): "pass" => {
-    host.say(`${what} isn't built yet.`);
-    return "pass";
-  };

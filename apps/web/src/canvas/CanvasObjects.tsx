@@ -393,7 +393,7 @@ const styles = stylex.create({
     pointerEvents: "auto",
   },
   titleSelected: { color: colors.hover },
-  // Over a frame, so it needs a face to read on any artboard.
+  // Over a frame, so it needs a face to read on any frame.
   sliceTitle: { backgroundColor: colors.hover, color: colors.halo },
   rename: {
     borderWidth: 1,

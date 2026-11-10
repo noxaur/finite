@@ -24,7 +24,7 @@ export interface Scope {
   /** The browser's styles on any node, like a target's parent, where they can be read. */
   readonly computedOf: (id: string) => CSSStyleDeclaration | null;
   readonly tokens: TokenTable;
-  /** The mode the first target's artboard renders in, to resolve tokens. */
+  /** The mode the first target's frame renders in, to resolve tokens. */
   readonly mode: string;
   readonly editor: Editor;
   /** The edits that set `styles` on every target, each into the shorthand it already uses. */
@@ -85,7 +85,7 @@ export const removal = (reading: Reading, none: string): string | null =>
 export const owns = (scope: Scope, prop: string) =>
   scope.targets.some((t) => t.styles[prop] !== undefined);
 
-/** A token's value in the artboard's mode. */
+/** A token's value in the frame's mode. */
 export const resolve = (scope: Scope, name: string) => resolveToken(scope.tokens, name, scope.mode);
 
 /** A color as the swatch draws it, its token resolved. */
@@ -97,7 +97,7 @@ export function swatchOf(scope: Scope, color: string): string | undefined {
 
 export type TokenKind = "color" | "length" | "shadow" | "font" | "family";
 
-/** Tokens whose value in the artboard's mode fits `kind`, as [name, value]. */
+/** Tokens whose value in the frame's mode fits `kind`, as [name, value]. */
 export function matchingTokens(scope: Scope, kind: TokenKind): Array<[string, string]> {
   const length = (v: string) => /^-?\d*\.?\d+(px|r?em|%)?$/.test(v.trim());
   const fits = (v: string) => {

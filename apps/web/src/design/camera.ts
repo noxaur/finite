@@ -1,7 +1,7 @@
 import type { Bounds } from "./types";
 import { visibleBounds } from "./culling";
 
-/** The parts of a wheel event the camera reads. Sandboxed artboards forward these. */
+/** The parts of a wheel event the camera reads. Sandboxed frames forward these. */
 export type WheelInput = Pick<
   WheelEvent,
   "deltaX" | "deltaY" | "deltaMode" | "ctrlKey" | "metaKey" | "shiftKey" | "clientX" | "clientY"
@@ -250,7 +250,7 @@ export class Camera {
     this.world.style.transform = `translate(${x}px, ${y}px) scale(${zoom})`;
     this.world.style.setProperty("--inv-zoom", String(1 / zoom));
     // While the view moves, the world is a compositor layer, so each frame
-    // moves the pixels it already drew instead of redrawing every artboard
+    // moves the pixels it already drew instead of redrawing every frame
     // (heavy SVG filters made that lag). Once it settles, the layer goes and
     // the browser redraws it sharp at the new zoom.
     this.world.style.willChange = "transform";

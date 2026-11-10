@@ -226,7 +226,7 @@ export function CommandMenu({ onClose }: { onClose: () => void }) {
               .map((d) => ({
                 key: d.id,
                 group: "Designs",
-                icon: d.origin === "connected" ? "folder" : "artboard",
+                icon: d.origin === "connected" ? "folder" : "frame",
                 lead: <DesignIcon design={d} size={15} />,
                 label: d.name,
                 note: d.origin === "connected" ? d.root : undefined,

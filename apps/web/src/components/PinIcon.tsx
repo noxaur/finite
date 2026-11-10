@@ -6,7 +6,7 @@ import { PIN_PATH } from "../lib/cursors";
 /** `note` is an open comment for people only, which no agent acts on. */
 export type PinState = "waiting" | "working" | "replied" | "resolved" | "note" | "draft";
 
-// A pin sits on the artboard, whichever theme the app is in, so these two stay the same in both.
+// A pin sits on the frame, whichever theme the app is in, so these two stay the same in both.
 const BLUE = "#2563eb";
 const GREEN = "#15803d";
 
@@ -42,7 +42,7 @@ export function PinFilters({ boiling }: { boiling: boolean }) {
 }
 
 /**
- * A comment pin: a rounded speech pin on a halo, so it reads on any artboard.
+ * A comment pin: a rounded speech pin on a halo, so it reads on any frame.
  * Its tail tip is the bottom-left corner. A selected pin also has a ring
  * outside the halo, in the pin's own color.
  */
