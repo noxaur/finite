@@ -9,16 +9,16 @@ description: TLA+ model of per-person undo and redo. Use when a change touches a
 
 ## Run it after a change
 
-1. **Does the change touch covered code?** Run `git diff --stat 4025ebd6712ebb76e092381adc0457c218cd56de -- <files in the coverage table>`. Done when you know which functions changed. If none, the check has nothing to say.
-2. **Mirror the change in the model.** Each action in `model/UndoHistory.tla` cites its `file:line`. Edit the action, or flip a constant in `model/current.cfg` when one already describes the change. An action is one step between `await`s; split it if the code gained an `await`. Done when every changed line maps to an action, or you've written why it doesn't affect any.
-3. **Run `.agents/skills/verify-undo-history/check.sh`.** About 75 seconds. Exit 0: every row matches. Exit 1: a row differs and the line names it. Exit 2: TLC couldn't run.
-4. **Read each mismatch with `/statechart`.** Give it `model/UndoHistory.tla`, a config with the rule as an `INVARIANT`, and `model/view.ts`. `UNDO_CHART=text` with `model/chart-text.cfg`, or `UNDO_CHART=frame` with `model/chart-frame.cfg`, draws the whole flow. Write the output outside the repo.
+1. **Does the change touch covered code?** Run `git diff --stat $(git merge-base HEAD main) -- <files in the coverage table>`. Done when you know which functions changed. If none, the check has nothing to say.
+2. **Mirror the change in the model.** Each action in `model/UndoHistory.tla` cites the function it mirrors. Edit the action, or flip a constant in `model/current.cfg` when one already describes the change. An action is one step between `await`s; split it if the code gained an `await`. Done when every changed function maps to an action, or you've written why it doesn't affect any.
+3. **Run `.agents/skills/verify-undo-history/check.sh`.** It took 50 seconds on a busy Mac (load average 45). Exit 0: every row matches. Exit 1: a row differs and the line names it. Exit 2: TLC couldn't run.
+4. **Read each mismatch in the kept `.out` file.** TLC lists each state from the start to the broken rule. `model/chart-text.cfg`, `model/chart-frame.cfg` and `model/view.ts` are small configs and wording for drawing the whole flow; `check.sh` doesn't use them.
 5. **Decide what the mismatch means.** Replay the path against the real code, one step per action, with the real `createHistory`, `createUndoOrder` or `open.undoCanvas` and a held promise where the path needs one request to wait.
    - The replay shows the bad result: it's a real bug. Report the path in the code's words.
    - The replay doesn't: the model is wrong. Fix the action to match the code.
    - The change was meant to fix a recorded finding: flip that `current` row to `holds`.
    - The behaviour change is intended and a rule no longer applies: change the rule and say so to the person.
-6. **Move the sync commit.** Once the model describes the code at the new commit, update `Last synced` below. Move it only after that check. For drift you didn't introduce, use `/maintain-formal-verification-skill`.
+6. **Confirm the coverage table.** Check every row against the code before you finish.
 
 ## Rules
 
@@ -50,15 +50,13 @@ Two files with one span each, one canvas with one frame property, TLC 2.19. Some
 
 - Text-level matching: `swap` also finds a moved span, and identical text written by two people looks unchanged. Each span's value here names the edit that wrote it.
 - Patches spanning several files, where locks are taken in sorted order.
-- A page reload, which empties the page's order on purpose; ⌘Z then falls back to source undo (`editor.ts:896`).
+- A page reload, which empties the page's order on purpose; ⌘Z then falls back to source undo (`editor.ts undo`).
 - A lost connection, where the page can't tell whether the server ran the step.
 - Requests from anywhere but one page: an agent over `/mcp`, or the same person in a second tab, doesn't go through `inTurn`.
 - The depth limits: the page keeps 200 steps, each server stack 100, so past 100 edits the page can offer steps the server has dropped.
 - Canvas patch kinds beyond moving a frame, someone else's redo, and someone else's canvas undo.
 
 ## Coverage
-
-Last synced: `4025ebd6712ebb76e092381adc0457c218cd56de`
 
 | File                                | Function                                    | Actions                                                     | Rules                                                                |
 | ----------------------------------- | ------------------------------------------- | ----------------------------------------------------------- | -------------------------------------------------------------------- |

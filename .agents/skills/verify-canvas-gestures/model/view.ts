@@ -1,4 +1,4 @@
-// How /statechart words the "You draw or drag on the canvas" chart (config: chart-draw.cfg).
+// The wording of the "You draw or drag on the canvas" chart (config: chart-draw.cfg). check.sh doesn't read it.
 const presses = [1, 2];
 
 export const title = "You draw or drag on the canvas";

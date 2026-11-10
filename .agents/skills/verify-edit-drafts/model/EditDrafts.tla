@@ -82,7 +82,7 @@ Init ==
 
 (* ---- Inspector field and scrub label: inspector/styleEditor.ts, DraftField.tsx ---- *)
 
-\* DraftField.tsx:67 onFocus, a new typing session.
+\* DraftField.tsx useDraftField's onFocus, a new typing session.
 YouFocusTheField ==
   /\ area = "inspector" /\ ~insp.focus /\ insp.scrub = "none" /\ insp.typed = "none"
   /\ insp' = [insp EXCEPT !.focus = TRUE, !.sent = "nothing", !.sends = 0, !.lost = FALSE]
@@ -90,7 +90,7 @@ YouFocusTheField ==
 
 CanType == insp.focus /\ (insp.scrub = "none" \/ Has("field-keeps-focus"))
 
-\* DraftField.tsx:41 show(): begin() on the first keystroke, then preview. styleEditor.ts:109,118.
+\* DraftField.tsx useDraftField's show(): begin() on the first keystroke, then preview. styleEditor.ts begin, preview.
 Type(kind) ==
   LET starting == ~insp.handle
       live == starting \/ insp.open = "field"
@@ -105,8 +105,8 @@ Type(kind) ==
 YouTypeAWholeValue == area = "inspector" /\ CanType /\ Type("whole") /\ OnlyInsp
 YouTypeAPartialValue == area = "inspector" /\ CanType /\ Type("partial") /\ OnlyInsp
 
-\* DraftField.tsx:177 onPointerDown runs editor.drive; styleEditor.ts:140 finishOpen runs the field's
-\* onLost (styleEditor.ts:101, DraftField.tsx:44), which is finish(true), then commits what's left.
+\* DraftField.tsx ScrubLabel's onPointerDown runs editor.drive; styleEditor.ts drive calls finishOpen, which runs the field's
+\* onLost (styleEditor.ts finishOpen, DraftField.tsx useDraftField's show), which is finish(true), then commits what's left.
 \* The browser moves focus later, on mousedown, so the field is still open here.
 YouPressAScrubLabel ==
   /\ area = "inspector" /\ insp.scrub = "none"
@@ -127,27 +127,27 @@ YouPressAScrubLabel ==
 \* The browser moves focus on mousedown, right after pointerdown and before any later pointer event.
 FocusSettled == ~insp.focus \/ Has("field-keeps-focus")
 
-\* styleEditor.ts:155 onMove.
+\* styleEditor.ts drive's onMove.
 YouDragTheScrub ==
   /\ area = "inspector" /\ insp.scrub \in {"pressed", "moving"} /\ FocusSettled
   /\ insp' = [insp EXCEPT !.scrub = "moving", !.preview = "scrub"]
   /\ OnlyInsp
 
-\* styleEditor.ts:147 stop(true).
+\* styleEditor.ts drive's stop(true).
 YouReleaseTheScrub ==
   /\ area = "inspector" /\ insp.scrub # "none" /\ FocusSettled
   /\ insp' = [insp EXCEPT !.scrub = "none",
                           !.preview = IF insp.scrub = "moving" THEN "landing" ELSE @]
   /\ OnlyInsp
 
-\* styleEditor.ts:147 stop(false), Escape or pointercancel.
+\* styleEditor.ts drive's stop(false), Escape or pointercancel.
 YouEscapeTheScrub ==
   /\ area = "inspector" /\ insp.scrub # "none" /\ FocusSettled
   /\ insp' = [insp EXCEPT !.scrub = "none",
                           !.preview = IF insp.scrub = "moving" THEN "none" ELSE @]
   /\ OnlyInsp
 
-\* DraftField.tsx:48 finish(true), from onBlur, Enter or unmounting (:61). styleEditor.ts:124 draft.commit:
+\* DraftField.tsx useDraftField's finish(true), from onBlur, Enter or unmounting. styleEditor.ts begin's commit:
 \* `live()` makes a stale handle do nothing.
 LeaveAndKeep ==
   LET expected == IF insp.typed = "partial" THEN "final" ELSE "whole"
@@ -173,7 +173,7 @@ YouLeaveTheField ==
   /\ area = "inspector" /\ insp.focus /\ insp.scrub = "none"
   /\ LeaveAndKeep /\ OnlyInsp
 
-\* DraftField.tsx:48 finish(false). styleEditor.ts:131 cancel clears the preview.
+\* DraftField.tsx useDraftField's finish(false). styleEditor.ts begin's cancel clears the preview.
 YouEscapeTheField ==
   /\ area = "inspector" /\ insp.focus /\ insp.scrub = "none"
   /\ LET live == insp.handle /\ insp.open = "field"
@@ -190,33 +190,33 @@ TheEditLands ==
   /\ insp' = [insp EXCEPT !.preview = "none"]
   /\ OnlyInsp
 
-(* ---- Token colour picker: TokensPanel.tsx TokenSwatch, ColorPicker.tsx ---- *)
+(* ---- Token colour picker: TokensPanel.tsx ColorSwatch, ColorPicker.tsx ---- *)
 
-\* TokensPanel.tsx:222.
+\* TokensPanel.tsx ColorSwatch's button onClick.
 YouOpenTheTokenPicker ==
   /\ area = "token" /\ token.phase = "closed"
   /\ token' = [token EXCEPT !.phase = "open", !.touched = FALSE]
   /\ OnlyToken
 
-\* ColorPicker.tsx:107 show(): a drag, a held arrow key, or a typed hex. edit.preview sets `picked`.
+\* ColorPicker.tsx show(): a drag, a held arrow key, or a typed hex. edit.preview sets `picked`.
 YouChangeTheColor ==
   /\ area = "token" /\ token.phase = "open"
   /\ token' = [token EXCEPT !.gesture = TRUE, !.picked = "pick", !.touched = TRUE]
   /\ OnlyToken
 
-\* ColorPicker.tsx:117 finish(), edit.commit.
+\* ColorPicker.tsx finish(), edit.commit.
 YouFinishTheChange ==
   /\ area = "token" /\ token.phase = "open" /\ token.gesture
   /\ token' = [token EXCEPT !.gesture = FALSE, !.kept = token.picked]
   /\ OnlyToken
 
-\* ColorPicker.tsx:122 cancel(), edit.cancel.
+\* ColorPicker.tsx cancel(), edit.cancel.
 YouEscapeTheChange ==
   /\ area = "token" /\ token.phase = "open" /\ token.gesture
   /\ token' = [token EXCEPT !.gesture = FALSE, !.picked = token.kept]
   /\ OnlyToken
 
-\* TokensPanel.tsx:207 close(), reached by the swatch or by pressing outside (ColorPicker.tsx:176).
+\* TokensPanel.tsx ColorSwatch's close(), reached by the swatch or by pressing outside (ColorPicker.tsx's `away` listener).
 \* The capture listener runs before the browser blurs the hex field.
 YouCloseThePicker ==
   /\ area = "token" /\ token.phase = "open"
@@ -227,7 +227,7 @@ YouCloseThePicker ==
           !.rewrote = @ \/ (saves /\ token.color = "newer" /\ ~token.touched)]
   /\ OnlyToken
 
-\* ColorPicker.tsx:142 the unmount effect runs finish(); edit.commit stops at `closed`, TokensPanel.tsx:239.
+\* ColorPicker.tsx's unmount effect runs finish(); edit.commit stops at `closed`, TokensPanel.tsx ColorSwatch.
 TheClosedPickerUnmounts ==
   /\ area = "token" /\ token.phase = "closing"
   /\ token' = [token EXCEPT
@@ -259,13 +259,13 @@ YouKeepTypingDuringTheSend ==
   /\ send' = [send EXCEPT !.text = "m2", !.used = @ \union {"m2"}]
   /\ OnlySend
 
-\* Composer.tsx:133 upload adds a chip while the send is under way.
+\* Composer.tsx upload() adds a chip while the send is under way.
 YouAttachDuringTheSend ==
   /\ area = "composer" /\ send.flight # "none" /\ ~send.attached
   /\ send' = [send EXCEPT !.attached = TRUE]
   /\ OnlySend
 
-\* Composer.tsx:152 send(), lib/composer.ts:7 sendModeFor. Alt picks the other mode while running.
+\* Composer.tsx send(), lib/composer.ts sendModeFor. Alt picks the other mode while running.
 Press(mode) ==
   /\ send.text # ""
   /\ send.flight = "none" \/ (Has("no-send-guard") /\ ~send.doubled)   \* the variant gets one extra press, to stay finite
@@ -281,7 +281,7 @@ YouQueueForTheNextTurn ==
 
 Deliver(s, m) == [s.delivered EXCEPT ![m] = @ + 1]
 
-\* apps/server/src/agent/index.ts:707 sendNow, serial per thread.
+\* apps/server/src/agent/index.ts sendNow, serial per thread.
 TheServerQueuesIt ==
   /\ area = "composer" /\ send.flight = "pending" /\ send.running /\ send.mode = "queue"
   /\ send' = [send EXCEPT !.flight = "answered", !.queued = Append(@, send.flightText)]
@@ -293,9 +293,9 @@ TheServerDeliversIt ==
                           !.delivered = Deliver(send, send.flightText)]
   /\ OnlySend
 
-\* Composer.tsx:168 takes the sent text out of the box after the await: all of it if nothing was typed
-\* (send-keeps-new-text), and only the sent part when more came after it (send-strips-sent). :169
-\* clears the files that were sent, and a file attached since stays (send-clears-only-sent).
+\* Composer.tsx send() takes the sent text out of the box after the await: all of it if nothing was typed
+\* (send-keeps-new-text), and only the sent part when more came after it (send-strips-sent).
+\* It also clears the files that were sent, and a file attached since stays (send-clears-only-sent).
 TheSendIsAnswered ==
   /\ area = "composer" /\ send.flight = "answered"
   /\ LET newer == send.text # send.flightText
@@ -307,13 +307,13 @@ TheSendIsAnswered ==
                              !.attached = FALSE]
   /\ OnlySend
 
-\* Composer.tsx:173 the catch keeps the text and shows a toast.
+\* Composer.tsx send()'s catch keeps the text and shows a toast.
 TheSendFails ==
   /\ area = "composer" /\ send.flight = "pending"
   /\ send' = [send EXCEPT !.flight = "none"]
   /\ OnlySend
 
-\* apps/server/src/agent/index.ts:551 finishTurn pops the queue's head and delivers it.
+\* apps/server/src/agent/index.ts finishTurn pops the queue's head and delivers it.
 TheTurnEndsAndTakesTheQueue ==
   /\ area = "composer" /\ send.running /\ send.queued # <<>>
   /\ send' = [send EXCEPT !.queued = Tail(@), !.delivered = Deliver(send, Head(send.queued))]
@@ -324,13 +324,13 @@ TheTurnEnds ==
   /\ send' = [send EXCEPT !.running = FALSE]
   /\ OnlySend
 
-\* apps/server/src/agent/index.ts:771 interrupt; the queue stays.
+\* apps/server/src/agent/index.ts interrupt; the queue stays.
 YouPressStop ==
   /\ area = "composer" /\ send.running
   /\ send' = [send EXCEPT !.running = FALSE]
   /\ OnlySend
 
-\* Composer.tsx:415 onClick, `await edit(null)`. The button has no in-flight guard.
+\* Composer.tsx QueuedChip's Send now onClick, `await edit(null)`. The button has no in-flight guard.
 YouPressSendNow(r) ==
   /\ area = "composer" /\ send.chip[r] = "idle" /\ send.queued # <<>>
   /\ send' = [send EXCEPT !.chip[r] = "dequeuing", !.chipMsg[r] = Head(send.queued)]
@@ -339,7 +339,7 @@ YouPressSendNow(r) ==
 InQueue(m) == \E i \in 1..Len(send.queued) : send.queued[i] = m
 Without(q, m) == SelectSeq(q, LAMBDA x : x # m)
 
-\* apps/server/src/agent/index.ts:797 editQueued refuses an id that's gone.
+\* apps/server/src/agent/index.ts editQueued refuses an id that's gone.
 TheServerAnswersTheDequeue(r) ==
   /\ area = "composer" /\ send.chip[r] = "dequeuing"
   /\ LET m == send.chipMsg[r]
@@ -353,7 +353,7 @@ TheDequeueIsLost(r) ==
   /\ send' = [send EXCEPT !.chip[r] = "refused"]
   /\ OnlySend
 
-\* Composer.tsx:416 returns when edit's .catch(fail) took a refusal (dequeue-failure-stops), else :430 thread.send runs.
+\* Composer.tsx QueuedChip's Send now returns when edit's .catch(fail) took a refusal (dequeue-failure-stops), else its thread.send runs.
 TheChipGoesOnToSend(r) ==
   /\ area = "composer" /\ send.chip[r] \in {"dequeued", "refused"}
   /\ send' = [send EXCEPT !.chip[r] =
@@ -366,7 +366,7 @@ TheServerSteersItIn(r) ==
                           !.delivered = Deliver(send, send.chipMsg[r])]
   /\ OnlySend
 
-\* Composer.tsx:430 the steer is refused or lost, after the message left the queue. The catch sends it
+\* Composer.tsx QueuedChip's Send now: the steer is refused or lost, after the message left the queue. The catch sends it
 \* again in queue mode (requeue-on-failure); without that it's gone.
 TheSteerFails(r) ==
   /\ area = "composer" /\ send.chip[r] = "steering"
@@ -374,7 +374,7 @@ TheSteerFails(r) ==
                           !.vanished = @ \/ ~Has("requeue-on-failure")]
   /\ OnlySend
 
-\* apps/server/src/agent/index.ts:711 sendNow in queue mode: queue it while the turn runs, else start it.
+\* apps/server/src/agent/index.ts sendNow in queue mode: queue it while the turn runs, else start it.
 TheServerRequeuesIt(r) ==
   /\ area = "composer" /\ send.chip[r] = "requeueing"
   /\ send' = IF send.running
@@ -383,15 +383,15 @@ TheServerRequeuesIt(r) ==
                          !.delivered = Deliver(send, send.chipMsg[r])]
   /\ OnlySend
 
-(* ---- Attachments: Composer.tsx:130 upload ---- *)
+(* ---- Attachments: Composer.tsx upload ---- *)
 
-\* Composer.tsx:133 adds { id, name, path: null }. Two drops of same-named files overlap.
+\* Composer.tsx upload() adds { id, name, path: null }. Two drops of same-named files overlap.
 YouDropAFile(u) ==
   /\ area = "upload" /\ upload.net[u] = "idle"
   /\ upload' = [upload EXCEPT !.chip[u] = "uploading", !.net[u] = "flying"]
   /\ OnlyUpload
 
-\* Composer.tsx:144 fills the chip with that id.
+\* Composer.tsx upload() fills the chip with that id.
 TheUploadLands(u) ==
   /\ area = "upload" /\ upload.net[u] = "flying"
   /\ upload' = [chip |-> [v \in Uploads |->
@@ -401,7 +401,7 @@ TheUploadLands(u) ==
                 net |-> [upload.net EXCEPT ![u] = "over"]]
   /\ OnlyUpload
 
-\* Composer.tsx:146 removes the chip with that id.
+\* Composer.tsx upload() removes the chip with that id.
 TheUploadFails(u) ==
   /\ area = "upload" /\ upload.net[u] = "flying"
   /\ upload' = [chip |-> [v \in Uploads |->
@@ -410,15 +410,15 @@ TheUploadFails(u) ==
                 net |-> [upload.net EXCEPT ![u] = "over"]]
   /\ OnlyUpload
 
-(* ---- Comment draft: Comments.tsx, canvas/tools/comment.ts:47, canvas/editor.ts:343 ---- *)
+(* ---- Comment draft: Comments.tsx, canvas/tools/comment.ts placeComment, canvas/editor.ts cancelCommentDraft ---- *)
 
-\* canvas/tools/comment.ts:47, a click with the Comment tool.
+\* canvas/tools/comment.ts placeComment, a click with the Comment tool.
 YouPlaceACommentDraft(d) ==
   /\ area = "comment" /\ d \notin comment.used
   /\ comment' = [comment EXCEPT !.draft = d, !.used = @ \union {d}]
   /\ OnlyComment
 
-\* Comments.tsx:249 submit; `sending` is the guard.
+\* Comments.tsx Composer's submit; `sending` is the guard.
 YouPressPost ==
   /\ area = "comment" /\ comment.draft # "none"
   /\ comment.flight = "none" \/ (Has("no-post-guard") /\ comment.posts[comment.draft] < 2)
@@ -430,7 +430,7 @@ TheServerAddsTheComment ==
   /\ comment' = [comment EXCEPT !.flight = "answered", !.posts[comment.flightOf] = @ + 1]
   /\ OnlyComment
 
-\* Comments.tsx:162 cancelCommentDraft(draft) leaves a newer draft open (draft-guard).
+\* Comments.tsx CommentLayer calls cancelCommentDraft(draft), which leaves a newer draft open (draft-guard).
 ThePostIsAnswered ==
   /\ area = "comment" /\ comment.flight = "answered"
   /\ LET newer == comment.draft \notin {"none", comment.flightOf}
@@ -452,13 +452,13 @@ YouCancelTheDraft ==
 
 (* ---- Command menu: CommandMenu.tsx ---- *)
 
-\* CommandMenu.tsx:103 go().
+\* CommandMenu.tsx go().
 YouPickConnect ==
   /\ area = "menu" /\ ~menu.closed /\ menu.step = "root"
   /\ menu' = [menu EXCEPT !.step = "connect", !.error = FALSE]
   /\ OnlyMenu
 
-\* CommandMenu.tsx:120 finish(): `busy` is the guard, then it awaits work().
+\* CommandMenu.tsx finish(): `busy` is the guard, then it awaits work().
 YouConfirmTheFolder ==
   /\ area = "menu" /\ ~menu.closed /\ menu.step = "connect"
   /\ ~menu.busy \/ Has("no-busy-guard")
@@ -466,7 +466,7 @@ YouConfirmTheFolder ==
   /\ menu' = [menu EXCEPT !.busy = TRUE, !.works = @ + 1, !.backed = FALSE, !.error = FALSE]
   /\ OnlyMenu
 
-\* CommandMenu.tsx:328 back(), or a press on the scrim (:391); cancel() (:115) drops the work in flight
+\* CommandMenu.tsx back(), or a press on the scrim; cancel() drops the work in flight
 \* (menu-cancels).
 YouGoBack ==
   /\ area = "menu" /\ ~menu.closed
@@ -480,13 +480,13 @@ YouGoBack ==
           !.works = IF cancels THEN 0 ELSE @]
   /\ OnlyMenu
 
-\* CommandMenu.tsx:128 router.push, then onClose, unless the work was cancelled.
+\* CommandMenu.tsx finish(): router.push, then onClose, unless the work was cancelled.
 TheWorkFinishes ==
   /\ area = "menu" /\ menu.works > 0
   /\ menu' = [menu EXCEPT !.works = @ - 1, !.closed = TRUE, !.strayed = @ \/ menu.backed]
   /\ OnlyMenu
 
-\* CommandMenu.tsx:133 the catch writes the error onto whatever step is showing.
+\* CommandMenu.tsx finish(): the catch writes the error onto whatever step is showing.
 TheWorkFails ==
   /\ area = "menu" /\ menu.works > 0
   /\ menu' = [menu EXCEPT !.works = @ - 1, !.busy = FALSE, !.backed = FALSE,

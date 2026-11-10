@@ -20,16 +20,16 @@ description: TLA+ model of how the Electron app supervises its Node server and q
 
 ## Check a change
 
-1. Run `git diff <Last synced> -- apps/desktop/src/main.ts apps/desktop/src/restarts.ts`. Empty means the verification still describes the code. Stop here.
-2. Find each changed line in the coverage table below. For a line outside the table that adds an `await`, an event listener, a `spawn`, or a write to `server` or `quitting`, add an action for it.
+1. Check whether your diff touches `apps/desktop/src/main.ts` or `apps/desktop/src/restarts.ts`. If it touches neither, stop here.
+2. Find each changed function in the coverage table below. For a line outside the table that adds an `await`, an event listener, a `spawn`, or a write to `server` or `quitting`, add an action for it.
 3. Change the model to match the code. A guard from the variant table is one constant in `model/current.cfg`. Anything else is an edit to the action, keeping one action per synchronous run of JavaScript, split at each `await`.
-4. Run `.agents/skills/verify-desktop-shell/check.sh`. It takes about 15 seconds and needs TLC 2.19 at `~/.local/share/tlaplus/tla2tools.jar`, or `TLA2TOOLS` pointing to the jar, and Java 11 or later.
+4. Run `.agents/skills/verify-desktop-shell/check.sh`. It took 51 seconds on a busy Mac (load average 30 to 60) and needs TLC 2.19 at `~/.local/share/tlaplus/tla2tools.jar`, or `TLA2TOOLS` pointing to the jar, and Java 11 or later.
 5. Read the result. Exit 0 means every rule matches its record. Exit 1 prints a `MISMATCH` row. Exit 2 means TLC couldn't run the model.
-6. For a mismatch or a new rule, read the model with `/statechart`, using `model/chart.cfg` and `model/view.ts`. Its report tells each violation as the shortest path in plain words.
+6. For a mismatch, read the counterexample TLC wrote to the kept `.out` file. It lists each state from the start to the broken rule.
 7. Decide what the path is:
    - **A real bug:** every step exists in the code and is one synchronous run of it. Replay it as a test in `apps/desktop/src/main.test.ts`, which fakes Electron, `child_process` and the port probe around the real `main.ts`, and report it.
-   - **A modeling error:** a step fuses two runs across an `await`, or allows something the code can't do. Fix the action, and check `file:line` in its comment.
-8. Move `Last synced` forward only after you confirm the model describes the code at the new commit. `/maintain-formal-verification-skill` covers catching up after changes that skipped this.
+   - **A modeling error:** a step fuses two runs across an `await`, or allows something the code can't do. Fix the action, and check the code it names in its comment.
+8. Confirm every row of the coverage table against the code before you finish.
 
 Keep the rule and its `expected.tsv` row as they are unless the promise itself changed on purpose. An edit that only makes a row pass hides the bug.
 
@@ -37,25 +37,23 @@ Keep the rule and its `expected.tsv` row as they are unless the promise itself c
 
 Each constant in the `.cfg` files toggles one piece of code. `current.cfg` is the code as it stands, with both fixes on.
 
-| Constant                  | Code                                                                    | Variant that flips it      |
-| ------------------------- | ----------------------------------------------------------------------- | -------------------------- |
-| `HandleSpawnError`        | `child.on("error")`, `main.ts:143`; TRUE is the code, FALSE removes it  | `fixed`, `fix-spawn-error` |
-| `GateSpawnOnQuit`         | `if (quitting) throw`, `main.ts:98`; TRUE is the code, FALSE removes it | `fixed`, `fix-quit-gate`   |
-| `LimitRestarts`           | `recent.length < MAX_STOPS`, `restarts.ts:16`                           | `no-limit`                 |
-| `IgnoreExitWhileQuitting` | `if (quitting) return`, `main.ts:128`                                   | `no-quit-guard`            |
-| `WaitForServerOnQuit`     | `event.preventDefault()`, `main.ts:291`                                 | `no-wait`                  |
+| Constant                  | Code                                                                       | Variant that flips it      |
+| ------------------------- | -------------------------------------------------------------------------- | -------------------------- |
+| `HandleSpawnError`        | `child.on("error")` in `spawnServer`; TRUE is the code, FALSE removes it   | `fixed`, `fix-spawn-error` |
+| `GateSpawnOnQuit`         | `if (quitting) throw` in `startServer`; TRUE is the code, FALSE removes it | `fixed`, `fix-quit-gate`   |
+| `LimitRestarts`           | `recent.length < MAX_STOPS` in `afterStop`                                 | `no-limit`                 |
+| `IgnoreExitWhileQuitting` | `if (quitting) return` in `stopped`                                        | `no-quit-guard`            |
+| `WaitForServerOnQuit`     | `event.preventDefault()` in `before-quit`                                  | `no-wait`                  |
 
 ## Coverage
 
-Last synced: `4025ebd6712ebb76e092381adc0457c218cd56de`
-
-| File                              | Function                               | Actions                                    | Rules                                                          |
-| --------------------------------- | -------------------------------------- | ------------------------------------------ | -------------------------------------------------------------- |
-| `apps/desktop/src/main.ts:95`     | `startServer`                          | `ProbeFinishes`, `HealthAnswers`           | `QuitLeavesNoServer`                                           |
-| `apps/desktop/src/main.ts:110`    | `spawnServer`, stop and error handlers | `Spawn`, `OnStop`, `ServerCrashes`         | all                                                            |
-| `apps/desktop/src/main.ts:276`    | `whenReady` chain's `catch`            | `HealthTimesOut`                           | `QuitFinishes`                                                 |
-| `apps/desktop/src/main.ts:287`    | `before-quit`                          | `BeforeQuit`, `YouQuit`, `ServerObeysQuit` | `QuitFinishes`, `QuitLeavesNoServer`, `NoRestartWhileQuitting` |
-| `apps/desktop/src/restarts.ts:11` | `afterStop`                            | `OnStop`, `AMinutePasses`                  | `NoRestartPastTheLimit`                                        |
+| File                           | Function                               | Actions                                    | Rules                                                          |
+| ------------------------------ | -------------------------------------- | ------------------------------------------ | -------------------------------------------------------------- |
+| `apps/desktop/src/main.ts`     | `startServer`                          | `ProbeFinishes`, `HealthAnswers`           | `QuitLeavesNoServer`                                           |
+| `apps/desktop/src/main.ts`     | `spawnServer`, stop and error handlers | `Spawn`, `OnStop`, `ServerCrashes`         | all                                                            |
+| `apps/desktop/src/main.ts`     | `whenReady` chain's `catch`            | `HealthTimesOut`                           | `QuitFinishes`                                                 |
+| `apps/desktop/src/main.ts`     | `before-quit`                          | `BeforeQuit`, `YouQuit`, `ServerObeysQuit` | `QuitFinishes`, `QuitLeavesNoServer`, `NoRestartWhileQuitting` |
+| `apps/desktop/src/restarts.ts` | `afterStop`                            | `OnStop`, `AMinutePasses`                  | `NoRestartPastTheLimit`                                        |
 
 ## Bounds and assumptions
 

@@ -11,11 +11,11 @@ The model describes the code by hand, so it can't see your diff. You carry the c
 
 ## Check a change
 
-1. Run `git diff 4025ebd6712ebb76e092381adc0457c218cd56de --stat -- <the files in Coverage>`, using the sha in "Last synced". No changes to those files means the verification still applies: stop here.
+1. Run `git diff --stat $(git merge-base HEAD main) -- <the files in Coverage>`. No changes to those files means the verification still applies: stop here.
 2. For each changed function, read the action named in Coverage and decide whether it still describes the code. Each action is one stretch of code with no `await` inside it, so a new `await` splits an action, and a moved check changes what an action guards.
 3. Edit `model/Previews.tla` until it describes the new code. Run a config with a constant only when the change matches that variant.
-4. Run `.agents/skills/verify-previews/check.sh`. It takes about a minute and needs Java and TLC 2.19 at `~/.local/share/tlaplus/tla2tools.jar` (or `TLA2TOOLS`).
-5. Read every `MISMATCH`, and read the trace with `/statechart`, using `model/view.ts` as its view and `model/chart.cfg` as its config. Work in a scratch folder outside the repo.
+4. Run `.agents/skills/verify-previews/check.sh`. It took 80 seconds on a busy Mac (load average 59) and needs Java and TLC 2.19 at `~/.local/share/tlaplus/tla2tools.jar` (or `TLA2TOOLS`).
+5. Read every `MISMATCH`, and read the trace in the kept `.out` file: it lists each state from the start to the broken rule.
 
    | Result                       | Meaning                                              | What you do                                                                                                                            |
    | ---------------------------- | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
@@ -23,9 +23,7 @@ The model describes the code by hand, so it can't see your diff. You carry the c
    | `expected breaks, got holds` | A finding got fixed, or the edit removed the path    | Check the fix closes the path in the code, then flip the row to `holds`                                                                |
    | `error`                      | TLC couldn't run: a parse error, or a bad constant   | Read the `.out` file it names                                                                                                          |
 
-6. When the verification describes the code at your commit, set "Last synced" to that commit and update Coverage. A rule stays as written: change a rule only when the product's promise changes, and say so in the PR.
-
-`/maintain-formal-verification-skill` brings this back in line after changes that skipped these steps.
+6. When the verification describes your code, update Coverage. A rule stays as written: change a rule only when the product's promise changes, and say so in the PR.
 
 ## Rules
 
@@ -53,8 +51,6 @@ Each run covers one design and one viewer, with at most 2 visits, 1 agent tool c
 - Left out: a second viewer (`hub.release` only asks whether anyone is subscribed), services shared between designs, a service's `spec` changing, a partial `node_modules` after a failed install, `untilRegistered`'s 10 s deadline, `finish_setup` converting a setup design, `routes` refresh, and agent tools on a design whose dependencies aren't in.
 
 ## Coverage
-
-Last synced: 4025ebd6712ebb76e092381adc0457c218cd56de
 
 | File                                                               | Function                                                     | Actions and rules                                                             |
 | ------------------------------------------------------------------ | ------------------------------------------------------------ | ----------------------------------------------------------------------------- |

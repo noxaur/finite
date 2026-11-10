@@ -7,12 +7,12 @@ EXTENDS Integers, Sequences, FiniteSets
 
 CONSTANTS
   YouEdits, YouMoves, OtherEdits_, OtherMoves_, OtherRemoves,
-  FileLock,             \* files.ts:createLocks is first come, first served per file
-  SwapChecks,           \* history.ts:swap refuses when the patch's text is gone
-  DropsRefused,         \* history.ts:step and open.ts:undoCanvas pop before applying
-  ClientForgetsRefused, \* undoOrder.ts:forget, the page takes a refused step back off its order
-  OneRequestAtATime,    \* undoOrder.ts:inTurn, a page's undo, redo and edit requests run one after another
-  CanvasChecksAfter     \* open.ts:apply, a canvas undo refuses when the value isn't the one it wrote
+  FileLock,             \* files.ts createLocks is first come, first served per file
+  SwapChecks,           \* history.ts swap refuses when the patch's text is gone
+  DropsRefused,         \* history.ts step and open.ts undoCanvas pop before applying
+  ClientForgetsRefused, \* undoOrder.ts forget, the page takes a refused step back off its order
+  OneRequestAtATime,    \* undoOrder.ts inTurn, a page's undo, redo and edit requests run one after another
+  CanvasChecksAfter     \* open.ts apply, a canvas undo refuses when the value isn't the one it wrote
 
 VARIABLES
   file, preLock, queue, srcUndo, srcRedo,       \* source
@@ -63,9 +63,9 @@ Init ==
   /\ outOfOrder = FALSE /\ wiped = FALSE /\ canvasWiped = FALSE
   /\ refused = {} /\ tookOlder = FALSE
 
-\* ---- Source requests: source/index.ts:apply ----
+\* ---- Source requests: source/index.ts edit ----
 
-\* source/index.ts:238-262. The request has arrived; theme, CSS-module and variable-sheet reads are awaited before the lock.
+\* source/index.ts edit. The request has arrived; theme, CSS-module and variable-sheet reads are awaited before the lock.
 YouStartEdit ==
   /\ editsMade < YouEdits
   /\ MayRequest
@@ -75,7 +75,7 @@ YouStartEdit ==
                  movesMade, otherEdits, otherMoves, removals, outOfOrder, wiped, canvasWiped,
                  refused, tookOlder>>
 
-\* source/index.ts:265 transact, files.ts:lockOne takes its place in the file's line synchronously.
+\* source/index.ts transact, files.ts lockOne takes its place in the file's line synchronously.
 EditReachesLock ==
   \E id \in preLock :
     /\ preLock' = preLock \ {id}
@@ -86,7 +86,7 @@ EditReachesLock ==
 
 Turn(f) == IF FileLock THEN (IF queue[f] = <<>> THEN {} ELSE {1}) ELSE 1..Len(queue[f])
 
-\* source/index.ts:165-189 then :290. No macrotask separates the last write from history.push, and
+\* source/index.ts transact, then edit's history.push. No macrotask separates the last write from history.push, and
 \* the lock excludes other writers, so the whole locked section plus the push is one step.
 EditLands ==
   \E f \in Files, i \in 1..2 :
@@ -96,15 +96,15 @@ EditLands ==
          /\ file' = [file EXCEPT ![f] = id]
          /\ srcUndo' = [srcUndo EXCEPT !["you"] =
               Append(@, [id |-> id, f |-> f, before |-> file[f], after |-> id, gen |-> 0])]
-         /\ srcRedo' = [srcRedo EXCEPT !["you"] = <<>>]   \* history.ts:push
+         /\ srcRedo' = [srcRedo EXCEPT !["you"] = <<>>]   \* history.ts push
          /\ queue' = [queue EXCEPT ![f] = RemoveAt(@, i)]
          /\ replies' = Append(replies, "S")
     /\ UNCHANGED <<preLock, frame, canUndo, canRedo, done, undone, editsMade, movesMade, otherEdits,
                    otherMoves, removals, outOfOrder, wiped, canvasWiped, refused, tookOlder>>
 
-\* ---- Source undo and redo: history.ts:step, source/index.ts:step ----
+\* ---- Source undo and redo: history.ts step, source/index.ts step ----
 
-\* history.ts:89-90 pops synchronously; run -> transact -> lockOne joins the file's line in the same tick.
+\* history.ts step pops synchronously; run -> transact -> lockOne joins the file's line in the same tick.
 SourcePress(dir) ==
   LET st == IF dir = "undo" THEN srcUndo["you"] ELSE srcRedo["you"] IN
   IF st = <<>> THEN UNCHANGED <<queue, srcUndo, srcRedo>>
@@ -120,7 +120,7 @@ To(e, dir) == IF dir = "undo" THEN e.before ELSE e.after
 Fits(f, e, dir) == ~SwapChecks \/ file[f] = From(e, dir)
 Overwrites(v, who) == Author(v) \notin {who, "nobody"}
 
-\* source/index.ts:454-475 then history.ts:92, one step for the same reason as EditLands.
+\* source/index.ts step (its transact), then history.ts step's push, one step for the same reason as EditLands.
 StepLands ==
   \E f \in Files, i \in 1..2 :
     /\ i \in Turn(f)
@@ -139,7 +139,7 @@ StepLands ==
     /\ UNCHANGED <<preLock, frame, canUndo, canRedo, done, undone, replies, editsMade, movesMade,
                    otherEdits, otherMoves, removals, canvasWiped, refused, tookOlder>>
 
-\* history.ts:stepPatches throws Refused "stale"; history.ts:91 never pushes, so the entry is gone.
+\* history.ts stepPatches throws Refused "stale"; history.ts step never pushes, so the entry is gone.
 StepRefused ==
   \E f \in Files, i \in 1..2 :
     /\ i \in Turn(f)
@@ -160,13 +160,13 @@ StepRefused ==
     /\ UNCHANGED <<file, preLock, frame, canUndo, canRedo, replies, editsMade, movesMade, otherEdits,
                    otherMoves, removals, wiped, canvasWiped, tookOlder>>
 
-\* ---- Canvas undo and redo: store/open.ts:undoCanvas, inside serial run ----
+\* ---- Canvas undo and redo: store/open.ts undoCanvas, inside serial run ----
 
 CanvasStack(dir) == IF dir = "undo" THEN canUndo["you"] ELSE canRedo["you"]
 CanvasFits(s) == frame.exists /\ (~CanvasChecksAfter \/ frame.x = s.after)
 
-\* open.ts:267-291. `run` is first come, first served per design, so a canvas request is one step.
-\* canvas.ts:inversePatch records the old value, canvas.ts:overwritten what it should find there.
+\* open.ts undoCanvas. `run` is first come, first served per design, so a canvas request is one step.
+\* canvas.ts inversePatch records the old value, canvas.ts overwritten what it should find there.
 CanvasPress(dir) ==
   IF CanvasStack(dir) = <<>> THEN UNCHANGED <<frame, canUndo, canRedo, canvasWiped, refused>>
   ELSE LET s == Last(CanvasStack(dir))
@@ -180,15 +180,15 @@ CanvasPress(dir) ==
                        /\ canRedo' = [canRedo EXCEPT !["you"] = Append(@, inverse)]
                   ELSE /\ canRedo' = [canRedo EXCEPT !["you"] = Pop(@)]
                        /\ canUndo' = [canUndo EXCEPT !["you"] = Append(@, inverse)]
-          ELSE /\ refused' = refused \cup {s.id}   \* open.ts:272 popped it; nothing pushes it back
+          ELSE /\ refused' = refused \cup {s.id}   \* open.ts undoCanvas popped it; nothing pushes it back
                /\ UNCHANGED <<frame, canvasWiped>>
                /\ IF dir = "undo"
                   THEN canUndo' = [canUndo EXCEPT !["you"] = Pop(@)] /\ UNCHANGED canRedo
                   ELSE canRedo' = [canRedo EXCEPT !["you"] = Pop(@)] /\ UNCHANGED canUndo
 
-\* ---- The page's order: undoOrder.ts, editor.ts:891-916 ----
+\* ---- The page's order: undoOrder.ts, editor.ts undo ----
 
-KindOf(s) == IF s = <<>> THEN "S" ELSE Last(s)   \* editor.ts:896, `?? {kind: "source"}`
+KindOf(s) == IF s = <<>> THEN "S" ELSE Last(s)   \* editor.ts undo, `?? {kind: "source"}`
 
 \* The fix variant only: a canvas step the server will refuse never reaches the other side.
 ForgetsNow(dir, k) ==
@@ -197,7 +197,7 @@ ForgetsNow(dir, k) ==
   /\ CanvasStack(dir) # <<>>
   /\ ~CanvasFits(Last(CanvasStack(dir)))
 
-\* undoOrder.ts:undo moves the step before editor.ts:899 sends the request. One WebSocket keeps
+\* undoOrder.ts undo moves the step before editor.ts undo sends the request. One WebSocket keeps
 \* one person's requests in order, so the key press and the server's pop are one step.
 PressStep(dir) ==
   LET from == IF dir = "undo" THEN done ELSE undone
@@ -227,7 +227,7 @@ YouPressRedo ==
   /\ UNCHANGED tookOlder
   /\ PressStep("redo")
 
-\* editor.ts:1060 and :1108 call did only after the reply, inside inTurn.
+\* editor.ts edit and patch call did only after the reply, inside inTurn.
 ReplyArrives ==
   /\ replies # <<>>
   /\ done' = Append(done, Head(replies))
@@ -237,7 +237,7 @@ ReplyArrives ==
                  movesMade, otherEdits, otherMoves, removals, outOfOrder, wiped, canvasWiped,
                  refused, tookOlder>>
 
-\* open.ts:patchCanvas, one step inside `run`.
+\* open.ts patchCanvas, one step inside `run`.
 YouMoveFrame ==
   /\ movesMade < YouMoves
   /\ MayRequest
