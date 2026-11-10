@@ -169,10 +169,13 @@ describeChrome("bridge in Chrome on Next.js", () => {
         "app/_components/Counter.tsx:8:4",
       );
 
-      // Edit only after React hydrated the page, or the new HTML fails hydration.
+      // Edit only after React hydrated the page, or the new HTML fails hydration. webpack
+      // compiles the client chunks on this first request, which takes seconds on a busy runner.
       await expect
-        .poll(() =>
-          frame.$eval("h1", (h) => Object.keys(h).some((key) => key.startsWith("__reactFiber$"))),
+        .poll(
+          () =>
+            frame.$eval("h1", (h) => Object.keys(h).some((key) => key.startsWith("__reactFiber$"))),
+          { timeout: 15_000 },
         )
         .toBe(true);
       const updates = () =>
