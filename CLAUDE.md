@@ -1,3 +1,5 @@
+@AGENTS.md
+
 <!--VITE PLUS START-->
 
 # Using Vite+, the Unified Toolchain for the Web

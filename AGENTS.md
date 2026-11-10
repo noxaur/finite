@@ -27,8 +27,8 @@ The most common defect in this repo is a feature that works on the path you test
 - **Agent and person.** Agents work through threads and canvas tools, people through the page, so a feature needs both halves. A new thing a person can do usually needs a tool or an instruction so an agent can do it too (`apps/server/src/agent/tools.ts`, `instructions.ts`), and what an agent makes must show in the page without a reload.
 - **Both tabs.** The Design tab (pages, layers, tokens, inspector) and the Prototypes tab (thread list, composer, prototype canvases) share the canvas. A canvas change must work on a page and on a prototype, where hand edits outside `.finite/` are refused with `outside-prototype`.
 - **Connected and blank designs.** A blank design starts from `apps/server/scaffold`; a connected one is whatever the person has. Test both. A connected root is the person's own code: Finite never deletes it.
-- **The four router adapters.** Routes come from TanStack Router's route tree, React Router's framework-mode `routes.ts`, a scan of React Router's data and declarative modes (`packages/vite-plugin/src/routes.ts`), or a scan of Next.js's `app/` and `pages/` folders (`packages/vite-plugin/src/next/routes.ts`). The fixtures `rr-spa`, `rr-framework`, `tanstack`, `next-app` and `next-pages` in `apps/server/fixtures` cover each. Next.js runs on Turbopack, or webpack for a project that needs it, and `next-webpack` (App Router, a `webpack()` config, `next dev --webpack`) covers webpack.
-- **Every styling convention.** A hand edit has a Tailwind, a CSS-modules, a StyleX and an inline path (`apps/server/src/source/`). CSS modules come as `.css`, `.scss` and `.less` (`.sass` is refused), so check each dialect. Change one path and check the others, and the `unsupported-style` refusal. The `sass`, `stylex` and `stylex-framework` fixtures cover the newer paths.
+- **The four router adapters.** Routes come from TanStack Router's route tree, React Router's framework-mode `routes.ts`, a scan of React Router's data and declarative modes (`packages/vite-plugin/src/routes.ts`), or a scan of Next.js's `app/` and `pages/` folders (`packages/vite-plugin/src/next/routes.ts`). The fixtures `rr-spa`, `rr-framework`, `tanstack`, `next-app` and `next-pages` in `apps/server/fixtures` cover each, and `monorepo` covers a `finite.json` workspace with a service. Next.js runs on Turbopack, or webpack for a project that needs it, and `next-webpack` (App Router, a `webpack()` config, `next dev --webpack`) covers webpack.
+- **Every styling convention.** A hand edit has a Tailwind (v4, and v3 through `tailwind.config.*`), a CSS-modules, a StyleX and an inline path (`apps/server/src/source/`). CSS modules come as `.css`, `.scss` and `.less` (`.sass` is refused), so check each dialect. Change one path and check the others, and the `unsupported-style` refusal. The `sass`, `stylex`, `stylex-framework` and `next-tailwind3` fixtures cover the newer paths.
 - **Undo and concurrent edits.** Undo is per actor and works by span patches. Check undo, redo, and an edit by someone else in the same file in between.
 - **Reverse states.** If you added a way in, add the way out and the way to see it. Remove needs restore, resolve needs reopen, snooze and settle need a way to wake. A one-way door is a bug.
 - **The protocol.** A new request or event goes in `packages/protocol/src/wire.ts`, a handler in `apps/server/src/handlers.ts`, and the client side in `apps/web/src/client/finite.ts`.
@@ -43,11 +43,11 @@ Read `docs/how-finite-works.md` before you change the server, the plugin or the 
 - `packages/protocol/`: the contract. `model.ts` (designs, canvases, threads, settings, refusal codes), `wire.ts` (every `/api/ws` request and event), `bridge.ts` (page and frame), `tools.ts` (canvas and `/mcp` tool inputs), `server.ts` (the server modules' interfaces).
 - `packages/vite-plugin/`: `@finite/vite-plugin`. `stamp.ts` (JSX locs and revs), `routes.ts` (the Vite router adapters), `frame.ts` (file frames), `html.ts` (bridge injection into server-rendered HTML, and streamed into Next's), `tailwind.ts` (`@source` for `.finite/`), `client/bridge.ts` (the frame's half of the bridge), `next/` (Next.js: `adapter.ts` sets the config through `NEXT_ADAPTER_PATH`, `loader.ts` stamps JSX in Turbopack and webpack, `index.ts` writes `.finite/runtime/` and the frame mount and fronts Next's requests, `routes.ts` scans `app/` and `pages/`).
 - `apps/server/`: the Node server, run from TypeScript source with Node 22's type stripping, so only erasable TS and `.ts` extensions in relative imports.
-  - `main.ts`, `config.ts` (every `FINITE_*` variable), `app.ts`, `hub.ts`, `handlers.ts`, `http.ts` (attachments, the export zip, static files), `guard.ts` (Host and Origin checks).
-  - `store/`: the registry, settings, `.finite/` files, project detection (`detect.ts`), installs and the Routes page (`routes.ts`).
+  - `main.ts`, `config.ts` (the `FINITE_*` settings a person sets; `FINITE_PREVIEW` and `FINITE_NEXT` are hand-offs to the preview children, `FINITE_REAL_AGENT` and `FINITE_CHROME` are for tests), `app.ts`, `hub.ts`, `handlers.ts`, `http.ts` (attachments, the export zip, static files), `guard.ts` (Host and Origin checks), `replies.ts` (answers kept so a client can safely ask again), `repos.ts` (cloning and GitHub search through `gh`).
+  - `store/`: the registry, settings, `.finite/` files, project detection (`detect.ts`), installs, the Routes page (`routes.ts`), canvas patches and their inverses (`canvas.ts`, `sections.ts`), the Brand page (`brand.ts`) and the app icon (`appIcon.ts`).
   - `preview/`: the dev servers; `vite-host.mjs` and `next-host.mjs` are the children.
-  - `source/`: `rewrite.ts` (the edit kinds), `tailwind.ts`, `css.ts`, `stylex.ts`, `tokens.ts`, `history.ts` (undo), `imports.ts` and `components.ts` (copying and detaching files).
-  - `mcp/`: the seven tools external agents use at `/mcp`. `index.ts` (Streamable HTTP and sessions), `tools.ts` (`designs`, `read`, `edit`, `render`, `measure`, `comments`, `undo`), `instructions.ts`.
+  - `source/`: `rewrite.ts` (the edit kinds), `jsx.ts` (finding elements), `insert.ts` and `wrap.ts` (new, wrapped and unwrapped elements), `inline.ts` (rich text), `tailwind.ts`, `tailwind3.ts`, `css.ts`, `stylex.ts`, `tokens.ts`, `boardFile.ts` (files drawn on empty canvas), `sliceExport.ts`, `history.ts` (undo), `imports.ts` and `components.ts` (copying and detaching files).
+  - `mcp/`: the seven tools external agents use at `/mcp`. `index.ts` (Streamable HTTP and sessions), `tools.ts` (`designs`, `read`, `edit`, `render`, `measure`, `comments`, `undo`), `instructions.ts` (Claude Code keeps only the first 4,096 characters of it).
   - `agent/`: `index.ts` (sessions, steer and queue), `policy.ts` (the fence), `tools.ts` (canvas tools, and `canvasOps`, which `/mcp` shares), `instructions.ts` (the system prompt addition; keep it under 2,500 characters), `events.ts`, `status.ts`, `screenshot.ts`.
   - `scaffold/` (the blank design) and `fixtures/` (test apps).
 - `apps/web/`: the Next.js static export, styled with StyleX. `src/client/finite.ts` (the socket and live state), `src/canvas/` (camera world, frames, editor, bridge, selection), `src/components/` (design list, design screen, sidebars, thread list, composer, ✱ menu, comments, settings, `inspector/`), `src/design/editing/` (control values to CSS), `src/styles/tokens.stylex.ts` (the theme tokens).
@@ -71,7 +71,7 @@ Examples: session-recovery, fix-scroll-state, regenerate-sdk.
 
 ## Pull requests
 
-Never make a PR unless you've been asked to.
+Never make a PR unless you've been asked to. "yolo" or "full send" asks for the whole thread: implement, get it reviewed, open the PR, watch it and merge it, for every follow-up in that thread too.
 
 Write conventional commit titles in plain English. `feat(source): keep arbitrary Tailwind values`. Start the body by explaining the problem with 1-2 concise sentences. Under this add any media like screenshots (via `--attach`, never commit assets), benchmark results in a grid and or etc. Under `## changes` list what changes you've made in an ul, continue with a short section on how you verified. Omit things such as linter and style-check. Then watch the PR until it has been merged. Address conflicts, and comments. Verify each reported bug or review issue before you fix it. Fix only a bug that you verified.
 
@@ -85,6 +85,7 @@ Do not commit implementation plans, research notes, or agent scratch files. Keep
 
 ## Checks
 
+- Each worktree with its install takes about 1.2 GB. When you run executors in parallel, check `df -h /` first and run at most about five. A full disk stops every agent with `SQLITE_FULL`.
 - Run `vp install` after you pull.
 - `vp run ready` runs everything CI runs before the end-to-end test: `vp check`, every test and every build. It must pass.
 - `vp check --fix` formats and lints.
@@ -94,10 +95,19 @@ Do not commit implementation plans, research notes, or agent scratch files. Keep
 
 Run `vp test` in a package, or `vp run test` for all of them. Server tests sit beside the code (`*.test.ts`). Tests that need a real project copy a fixture to a temp folder and install it (`apps/server/src/preview/fixtures.ts`). The plugin's golden files are in `packages/vite-plugin/src/__golden__/`. Tests that need the real `claude` run only with `FINITE_REAL_AGENT=1`. `vp run e2e` checks a person's core flow in headless Chrome. To see a change in the real app, use the `finite-headless` skill; to prove it with evidence, `verify-finite`. Tests and manual runs use port 0 or 4300 and up: the user's own Finite may hold 4100 and 5310.
 
+Keep tests fast, tight and meaningful:
+
+- Test the real implementation. Do not copy its logic into the test.
+- A regression test must fail without the fix. Run it once against the old code to see that.
+- Wait for the event or condition, or use fake timers. Never sleep a fixed time or assert on wall-clock time.
+- A flaky test is a bug. Find the race; do not raise its timeout or add a retry.
+- Share an installed fixture, a started dev server or a Chrome per file when tests only read from it.
+- Do not add a test that proves what another test already proves.
+
 ## Skills
 
 Project skills live in `.agents/skills/`, where Codex, Cursor and opencode find them. `.claude/skills` is a symlink to it for Claude Code. Add a new skill to `.agents/skills/`.
 
 - `finite-headless`: run a private Finite (server, web app, Chrome) and drive it from the shell.
 - `verify-finite`: prove a feature works in the real app, with evidence in `.verify/<run>/`.
-- Test actual implementation, do not duplicate logic into tests.
+- `verify-agent-sessions`, `verify-canvas-gestures`, `verify-client-sync`, `verify-desktop-shell`, `verify-edit-drafts`, `verify-frame-bridge`, `verify-previews`, `verify-undo-history`: TLA+ models of one subsystem each. Each skill's description names the files it covers. When your change touches them, run its `check.sh` and update the model if behaviour changed.
